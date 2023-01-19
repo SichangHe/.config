@@ -7,6 +7,7 @@ return function(use)
         'git',
         'ts',
         'lsp',
+        'adapter',
         'complete',
     }) do
         U.use(v)(use)
