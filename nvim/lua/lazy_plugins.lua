@@ -6,6 +6,20 @@ return function(use)
     }
 
     use {
+        'saecki/crates.nvim',
+        event = { 'BufRead Cargo.toml' },
+        requires = { 'nvim-lua/plenary.nvim' },
+        config = function()
+            require('crates').setup {}
+            require('cmp').setup.buffer {
+                sources = {
+                    { name = 'crates' },
+                },
+            }
+        end,
+    }
+
+    use {
         'ibhagwan/fzf-lua',
         event = 'CmdLineEnter',
         requires = { 'nvim-tree/nvim-web-devicons' },
