@@ -18,13 +18,17 @@ return function(use)
                 elixirls = {},
                 jsonls = {},
                 julials = {},
-                sumneko_lua = {},
                 pyright = {},
                 solargraph = {},
                 tsserver = {},
             }
             local ensure = U.tbl_keys(servers)
-            table.insert(ensure, 'rust_analyzer')
+            for _, v in ipairs({
+                'rust_analyzer',
+                'sumneko_lua',
+            }) do
+                table.insert(ensure, v)
+            end
             local capabilities = require('cmp_nvim_lsp')
                 .default_capabilities(U.lsp.protocol.make_client_capabilities())
             require('mason-lspconfig').setup {

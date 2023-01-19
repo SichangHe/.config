@@ -27,6 +27,15 @@ return function(use)
     }
 
     use {
+        'nvim-tree/nvim-web-devicons',
+        config = function()
+            require('nvim-web-devicons').setup {
+                default = true
+            }
+        end,
+    }
+
+    use {
         'preservim/vim-markdown',
         config = function()
             U.g.vim_markdown_folding_disabled = true

@@ -31,16 +31,6 @@ return function(use)
     }
 
     use {
-        'nvim-tree/nvim-web-devicons',
-        event = 'CmdLineEnter',
-        config = function()
-            require('nvim-web-devicons').setup {
-                default = true
-            }
-        end,
-    }
-
-    use {
         'machakann/vim-swap',
         event = 'InsertEnter',
     }
