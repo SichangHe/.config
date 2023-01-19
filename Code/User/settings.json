@@ -1,0 +1,480 @@
+{
+    "ActiveFileInStatusBar.fullpath": false,
+    "blockman.n04Sub04RightSideBaseOfBlocks": "Rightmost Edge Of Viewport",
+    "blockman.n21BorderRadius": 0,
+    "breadcrumbs.enabled": false,
+    // C/C++
+    "C_Cpp.clang_format_path": "/opt/homebrew/opt/llvm/bin/clang-format",
+    "C_Cpp.clang_format_style": "{BasedOnStyle: WebKit, BreakBeforeBraces: Custom }",
+    "C_Cpp.default.cppStandard": "c++20",
+    "C_Cpp.default.cStandard": "c17",
+    "C_Cpp.debugShortcut": true,
+    "C_Cpp.inlayHints.autoDeclarationTypes.enabled": true,
+    "C_Cpp.inlayHints.parameterNames.enabled": true,
+    "C_Cpp.inlayHints.referenceOperator.enabled": true,
+    "C_Cpp.vcFormat.wrap.preserveBlocks": "never",
+    "C_Cpp.vcFormat.space.withinSquareBrackets": true,
+    "clang-tidy.compilerArgs": [
+        "-std=c++20",
+    ],
+    "clang-tidy.fixOnSave": true,
+    // cSpell
+    "cSpell.userWords": [
+        "Abelian",
+        "actix",
+        "Alacritty",
+        "antiderivative",
+        "arctan",
+        "autoboxing",
+        "Bendixson",
+        "Bendixson's",
+        "biconditional",
+        "Bigr",
+        "bijective",
+        "binormal",
+        "bivariate",
+        "bmatrix",
+        "Cacher",
+        "cheatsheet",
+        "Chebyshev",
+        "chrono",
+        "clippy",
+        "coalbedo",
+        "codomain",
+        "Communitative",
+        "COMPSCI",
+        "dedup",
+        "Deque",
+        "displaystyle",
+        "downarrow",
+        "dukekunshan",
+        "eigen",
+        "Elisp",
+        "Extremum",
+        "FOSS",
+        "Frobenius",
+        "geckodriver",
+        "Grobman",
+        "Hammerspoon",
+        "heapify",
+        "Heiles",
+        "Henon",
+        "hhmmss",
+        "hhmmssxxx",
+        "hrefs",
+        "inequation",
+        "infimum",
+        "infty",
+        "injective",
+        "Inkscape",
+        "invertibility",
+        "Jaccard",
+        "Jiang",
+        "jieba",
+        "Karush",
+        "katex",
+        "Kunshan",
+        "LDLT",
+        "Leftarrow",
+        "Leftrightarrow",
+        "linearization",
+        "linearize",
+        "Lipschitz",
+        "lockdown",
+        "longleftrightarrow",
+        "longrightarrow",
+        "longwave",
+        "Lyapunov",
+        "Lyapunov's",
+        "Maclaurin",
+        "mapsto",
+        "marp",
+        "mathbb",
+        "mathbf",
+        "mathcal",
+        "Mathematica",
+        "mathjax",
+        "mathrm",
+        "mathscr",
+        "matplotlib",
+        "mdbook",
+        "meilisearch",
+        "Millis",
+        "ndarray",
+        "Neovide",
+        "Neovim",
+        "Neumann",
+        "njit",
+        "nolog",
+        "nonnegativity",
+        "numba",
+        "numpy",
+        "openconnect",
+        "orthogonalization",
+        "orthogonalize",
+        "overdamped",
+        "overfitting",
+        "overrightarrow",
+        "Pacman",
+        "pagebreak",
+        "pagerank",
+        "Pandoc",
+        "pbcopy",
+        "pmatrix",
+        "polytope",
+        "Ponens",
+        "posteriori",
+        "preimage",
+        "println",
+        "printpdf",
+        "pseudocode",
+        "pycache",
+        "pyfunction",
+        "Pylance",
+        "pymodule",
+        "pyplot",
+        "Raphson",
+        "rcases",
+        "reqwest",
+        "Ricatti",
+        "Riesz",
+        "Rightarrow",
+        "rlang",
+        "Rolle",
+        "rubocop",
+        "scipy",
+        "scrapy",
+        "Seidel",
+        "semidefinite",
+        "Sichang",
+        "Sīchàng",
+        "sichanghe",
+        "SIGTERM",
+        "solargraph",
+        "stackrel",
+        "Steinitz",
+        "struct",
+        "submultiplicative",
+        "subseteq",
+        "Sucklessfy",
+        "supremum",
+        "surjective",
+        "Tabnine",
+        "tailwindcss",
+        "textblob",
+        "tlmgr",
+        "Tollendo",
+        "Tollens",
+        "Traceback",
+        "transversality",
+        "uncountably",
+        "unshift",
+        "varepsilon",
+        "vmatrix",
+        "waitlist",
+        "WLOG",
+        "Wronskian"
+    ],
+    // deno
+    "deno.enable": true,
+    // editor
+    "editor.acceptSuggestionOnEnter": "off",
+    "editor.accessibilitySupport": "off",
+    "editor.bracketPairColorization.enabled": true,
+    "editor.cursorBlinking": "expand",
+    "editor.cursorSurroundingLines": 3,
+    "editor.fontFamily": "JetBrainsMono Nerd Font",
+    "editor.fontLigatures": true,
+    "editor.fontSize": 14.5,
+    "editor.formatOnSave": true,
+    "editor.glyphMargin": false,
+    "editor.hover.delay": 0,
+    "editor.inlayHints.enabled": "onUnlessPressed",
+    "editor.inlayHints.fontFamily": "JetBrains Mono NL Thin Italic",
+    "editor.inlayHints.fontSize": 12,
+    "editor.lineDecorationsWidth": 0,
+    "editor.lineNumbers": "relative",
+    "editor.minimap.enabled": false,
+    "editor.rulers": [
+        80
+    ],
+    "editor.snippetSuggestions": "top",
+    "editor.suggestFontSize": 12,
+    "editor.suggestSelection": "first",
+    "editor.unicodeHighlight.ambiguousCharacters": false,
+    "editor.unicodeHighlight.invisibleCharacters": false,
+    "emmet.includeLanguages": {
+        "html.erb": "html",
+        "erb": "html"
+    },
+    // errorLens
+    "errorLens.enabledDiagnosticLevels": [
+        "error",
+        "warning"
+    ],
+    "errorLens.messageBackgroundMode": "none",
+    // files
+    "files.autoSaveDelay": 800,
+    "files.associations": {
+        "*.erb": "erb"
+    },
+    "files.autoSave": "afterDelay",
+    "files.exclude": {
+        "**/.classpath": true,
+        "**/.factorypath": true,
+        "**/.git": false,
+        "**/.project": true,
+        "**/.settings": true
+    },
+    "files.saveConflictResolution": "overwriteFileOnDisk",
+    "files.watcherExclude": {
+        "**/.git": true,
+        "**.pdf": true,
+        "**.docx": true,
+        "**.png": true,
+        "**.jpg": true,
+        "**.log": true,
+        "**/__pycache__": true
+    },
+    // git/gitlens
+    "git.autofetch": true,
+    "git.enableSmartCommit": true,
+    "gitlens.codeLens.authors.enabled": false,
+    "gitlens.codeLens.recentChange.enabled": false,
+    "gitlens.defaultDateFormat": "YYYY.MM.DD",
+    "gitlens.defaultDateShortFormat": "MM.DD",
+    "gitlens.hovers.currentLine.over": "line",
+    "gitlens.hovers.enabled": false,
+    "gitlens.statusBar.enabled": false,
+    // go
+    "go.autocompleteUnimportedPackages": true,
+    "go.survey.prompt": false,
+    "go.useCodeSnippetsOnFunctionSuggest": true,
+    "go.useLanguageServer": false,
+    "grammarly.autoActivate": false,
+    "headwind.classRegex": {
+        "erb": "\\bclass\\s*[=:]\\s*[\\\"\\']([\\._a-zA-Z0-9\\s\\-\\:\\/]+)[\\\"\\']",
+    },
+    // java/julia
+    "java.format.settings.url": "/Users/sichanghe/Documents/Java files/newLineBrace.xml",
+    "java.help.firstView": "gettingStarted",
+    "julia.enableTelemetry": false,
+    "julia.executablePath": "/Applications/Julia-1.7.app/Contents/Resources/julia/bin/julia",
+    "julia.NumThreads": 8,
+    "julia.symbolCacheDownload": true,
+    // latex
+    "latex-workshop.bibtex-format.sort.enabled": true,
+    "latex-workshop.bibtex-format.trailingComma": true,
+    "latex-workshop.latex.autoBuild.run": "onSave",
+    "latex-workshop.latex.build.forceRecipeUsage": false,
+    "latex-workshop.view.pdf.viewer": "external",
+    "ligaturesLimited.selectionMode": "selection",
+    "liveServer.settings.donotVerifyTags": true,
+    "Lua.telemetry.enable": false,
+    // markdown
+    "markdown.extension.list.indentationSize": "inherit",
+    "markdown.extension.orderedList.autoRenumber": false,
+    "markdown.extension.orderedList.marker": "one",
+    "markdown.preview.breaks": true,
+    "markdown.preview.fontSize": 24,
+    "markdown-preview-enhanced.breakOnSingleNewLine": false,
+    "markdown-preview-enhanced.enableScriptExecution": true,
+    "markdown-preview-enhanced.previewTheme": "github-light.css",
+    "markdown-preview-enhanced.liveUpdate": false,
+    "markdown-preview-enhanced.singlePreview": false,
+    // markdownlint
+    "markdownlint.config": {
+        "default": true,
+        "single-title": false,
+        "heading-style": {
+            "style": "atx"
+        },
+        "ul-style": {
+            "style": "dash"
+        },
+        "ul-indent": {
+            "indent": 4
+        },
+        "line-length": true,
+        "ol-prefix": {
+            "style": "one"
+        },
+        "no-inline-html": false,
+        "hr-style": {
+            "style": "---"
+        },
+        "fenced-code-language": false,
+        "blanks-around-headings": true,
+        "code-block-style": {
+            "style": "fenced"
+        },
+        "code-fence-style": {
+            "style": "backtick"
+        },
+        "emphasis-style": {
+            "style": "asterisk"
+        },
+        "strong-style": {
+            "style": "asterisk"
+        }
+    },
+    "markdownlint.run": "onSave",
+    // markdownShortcuts
+    "markdownShortcuts.icons.bold": false,
+    "markdownShortcuts.icons.bullets": false,
+    "markdownShortcuts.icons.strikethrough": false,
+    "markdownShortcuts.icons.italic": false,
+    // prettier
+    "prettier.tabWidth": 4,
+    // python
+    "python.analysis.completeFunctionParens": true,
+    "python.analysis.diagnosticMode": "workspace",
+    "python.analysis.inlayHints.functionReturnTypes": true,
+    "python.analysis.inlayHints.variableTypes": true,
+    "python.analysis.typeCheckingMode": "basic",
+    "python.formatting.blackPath": "/opt/homebrew/bin/black",
+    "python.formatting.provider": "black",
+    "python.languageServer": "Pylance",
+    "python.linting.mypyArgs": [
+        "--follow-imports=silent",
+        "--ignore-missing-imports",
+        "--show-column-numbers",
+        "--no-pretty",
+        "--allow-redefinition"
+    ],
+    "redhat.telemetry.enabled": false,
+    "remote.SSH.remotePlatform": {
+        "10.200.20.211": "linux",
+        "10.200.14.153": "linux"
+    },
+    "remote.SSH.useLocalServer": false,
+    // ruby
+    "ruby.codeCompletion": "rcodetools",
+    "ruby.intellisense": "rubyLocate",
+    "ruby.useLanguageServer": true,
+    // rust-analyzer
+    "rust-analyzer.cargo.allFeatures": true,
+    "rust-analyzer.checkOnSave.command": "clippy",
+    "rust-analyzer.inlayHints.bindingModeHints.enable": true,
+    "rust-analyzer.inlayHints.closureReturnTypeHints.enable": true,
+    "rust-analyzer.inlayHints.lifetimeElisionHints": "skip_trivial",
+    "rust-analyzer.inlayHints.lifetimeElisionHints.enable": "always",
+    "rust-analyzer.inlayHints.maxLength": 5,
+    "rust-analyzer.typing.autoClosingAngleBrackets.enable": true,
+    "search.exclude": {
+        "**/.git": true,
+        "**.pdf": true,
+        "**.docx": true,
+        "**.png": true,
+        "**.jpg": true,
+        "**/__pycache__": true
+    },
+    "search.seedWithNearestWord": true,
+    "security.workspace.trust.untrustedFiles": "open",
+    // solargraph
+    "solargraph.commandPath": "/Users/sichanghe/.gem/ruby/3.1.0/bin/solargraph",
+    "solargraph.diagnostics": true,
+    "solargraph.formatting": true,
+    // tabnine
+    "tabnine.disableLineRegex": [
+        "→",
+        "⇒",
+        "⇔",
+        "∞",
+        "∀",
+        "\\lim",
+        "\\sum",
+        "∃",
+        "\\in",
+        "\\frac",
+        "\\displaystyle",
+        "∫"
+    ],
+    "tabnine.experimentalAutoImports": true,
+    // terminal
+    "terminal.explorerKind": "external",
+    "terminal.external.osxExec": "kitty.app",
+    "terminal.integrated.commandsToSkipShell": [
+        "language-julia.interrupt"
+    ],
+    "terminal.integrated.cursorBlinking": true,
+    "terminal.integrated.cursorStyle": "line",
+    "terminal.integrated.defaultProfile.linux": "fish",
+    "terminal.integrated.defaultProfile.osx": "fish",
+    "terminal.integrated.env.osx": {},
+    "terminal.integrated.fontFamily": "JetBrains Mono",
+    "terminal.integrated.fontSize": 16,
+    "terminal.integrated.inheritEnv": false,
+    "vscode_custom_css.imports": [
+        "file:///Users/sichanghe/.config/Code/User/custom.css"
+    ],
+    "vscode_custom_css.statusbar": false,
+    // vscode-neovim
+    "vscode-neovim.mouseSelectionStartVisualMode": true,
+    "vscode-neovim.neovimExecutablePaths.darwin": "/opt/homebrew/bin/nvim",
+    "vsintellicode.modify.editor.suggestSelection": "automaticallyOverrodeDefaultValue",
+    // window
+    "window.title": "${dirty}${activeEditorLong} ㅤ ㅤ ${rootName}",
+    "window.zoomLevel": 3,
+    // workbench
+    "workbench.activityBar.visible": false,
+    "workbench.colorCustomizations": {
+        "editorBracketHighlight.foreground1": "#000000",
+        "editorBracketHighlight.foreground2": "#004F27",
+        "editorBracketHighlight.foreground3": "#4E0143",
+        "editorBracketHighlight.foreground4": "#001B62",
+        "editorBracketHighlight.foreground5": "#6E0000",
+        "editorBracketHighlight.foreground6": "#777777",
+    },
+    "workbench.colorTheme": "Atom One Light",
+    "workbench.iconTheme": "material-icon-theme",
+    "workbench.layoutControl.enabled": false,
+    "workbench.panel.defaultLocation": "right",
+    "workbench.preferredDarkColorTheme": "Atom One Light",
+    "workbench.preferredHighContrastColorTheme": "Atom One Light",
+    "workbench.preferredHighContrastLightColorTheme": "Atom One Light",
+    "workbench.preferredLightColorTheme": "Atom One Light",
+    "workbench.startupEditor": "none",
+    "workbench.statusBar.visible": false,
+    // language
+    "[c]": {
+        "editor.defaultFormatter": "ms-vscode.cpptools"
+    },
+    "[css]": {
+        "editor.defaultFormatter": "vscode.css-language-features"
+    },
+    "[html]": {
+        "editor.defaultFormatter": "esbenp.prettier-vscode"
+    },
+    "[javascript]": {
+        "editor.defaultFormatter": "esbenp.prettier-vscode"
+    },
+    "[jsonc]": {
+        "editor.defaultFormatter": "vscode.json-language-features"
+    },
+    "[json]": {
+        "editor.defaultFormatter": "vscode.json-language-features"
+    },
+    "[markdown]": {
+        "editor.quickSuggestions": {
+            "comments": "on",
+            "strings": "on",
+            "other": "on"
+        },
+        "editor.defaultFormatter": "DavidAnson.vscode-markdownlint"
+    },
+    "[python]": {
+        "editor.defaultFormatter": "ms-python.python",
+        "editor.formatOnType": true
+    },
+    "[ruby]": {
+        "editor.defaultFormatter": "castwide.solargraph"
+    },
+    "[rust]": {
+        "editor.defaultFormatter": "rust-lang.rust-analyzer"
+    },
+    "[fish]": {
+        "editor.defaultFormatter": "zgm.vscode-fish"
+    },
+    "clang-tidy.executable": "/opt/homebrew/opt/llvm/bin/clang-tidy",
+}

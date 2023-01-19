@@ -1,0 +1,122 @@
+{
+	"3th header": {
+		"prefix": "h3",
+		"body": "### $0"
+	},
+	"4th header": {
+		"prefix": "h4",
+		"body": "#### $0"
+	},
+	"5th header": {
+		"prefix": "h5",
+		"body": "##### $0"
+	},
+	"6th header": {
+		"prefix": "h6",
+		"body": "###### $0"
+	},
+	"java code": {
+		"prefix": "java",
+		"body": [
+			"```java",
+			"$1",
+			"```",
+			"$0"
+		],
+		"description": "create java code block"
+	},
+	"rust code": {
+		"prefix": "rust",
+		"body": [
+			"```rust",
+			"$0",
+			"```"
+		],
+		"description": "create rust code block"
+	},
+	"python code": {
+		"prefix": "py",
+		"body": [
+			"```python",
+			"$0",
+			"```"
+		],
+		"description": "create python code block"
+	},
+	"shell script": {
+		"prefix": "sh",
+		"body": [
+			"```shell",
+			"$0",
+			"```"
+		],
+		"description": "create shell script code block"
+	},
+	"add math subscript": {
+		"prefix": "sub",
+		"body": "_{$0}",
+		"description": "add `_{}`"
+	},
+	"create bmatrix": {
+		"prefix": "bmt",
+		"body": [
+			"\\begin{bmatrix}",
+			"    $0",
+			"\\end{bmatrix}"
+		],
+		"description": "create a bmatrix"
+	},
+	"left and right parenthesis": {
+		"prefix": "leftp",
+		"body": [
+			"\\left(",
+			"    $0",
+			"\\right)"
+		],
+		"description": "create left right parenthesis pair"
+	},
+	"left and right brackets": {
+		"prefix": "leftk",
+		"body": [
+			"\\left[",
+			"    $0",
+			"\\right]"
+		],
+		"description": "create left right brackets pair"
+	},
+	"left and right braces": {
+		"prefix": "leftc",
+		"body": [
+			"\\left\\{",
+			"    $0",
+			"\\right\\\\}"
+		],
+		"description": "create left right braces pair"
+	},
+	"fraction": {
+		"prefix": "frac",
+		"body": "\\frac{$0}{}",
+		"description": "create a fraction"
+	},
+	"braces": {
+		"prefix": "brace",
+		"body": [
+			"\\{",
+			"    $0",
+			"\\\\}"
+		],
+		"description": "a pair of braces"
+	},
+	"single tick": {
+		"prefix": "'",
+		"body": "’"
+	},
+	"rank": {
+		"prefix": "rank",
+		"body": "\\text{rank}($0)"
+	},
+	"nullity": {
+		"prefix": "nullity",
+		"body": "\\text{nullity}($0)"
+	}
+}

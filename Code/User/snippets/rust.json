@@ -1,0 +1,15 @@
+{
+	"println!": {
+		"prefix": "print",
+		"body": [
+			"println!(\"$1{}\",$2);"
+		],
+		"description": "println! macro"
+	},
+	"String::new": {
+		"prefix": "strnew",
+		"body": [
+			"String::new(\"$1\");"
+		]
+	}
+}

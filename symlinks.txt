@@ -1,0 +1,18 @@
+ln -s ~/.config/curlrc ~/.curlrc
+ln -s ~/.config/markdownlintrc.jsonc ~/.markdownlintr
+ln -s ~/.config/SpaceVim.d/ ~/.SpaceVim.d
+ln -s ~/.config/Code ~/.vscode
+ln -s ~/.config/Code ~/.vscode-oss
+ln -s ~/.config/Code ~/.vscode-insider
+ln -s ~/.config/mume ~/.local/state/mume
+ln -s ~/.config/clang-format.yml ~/.clang-format
+
+# macOS
+ln -s ~/.config/Code ~/Library/Application\ Support/VSCodium
+ln -s ~/.config/Code ~/Library/Application\ Support/Code
+ln -s ~/.config/Code ~/Library/Application\ Support/Code\ -\ Insiders
+ln -s ~/.config/Rime ~/Library/Rime
+
+# linux
+ln -s ~/.config/Code ~/.local/share/code-server
+sudo ln -s ~/.config/Code/extensions /usr/lib/code/extensions

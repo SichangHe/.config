@@ -1,0 +1,68 @@
+#!/usr/bin/env sh
+
+# the scripting-addition must be loaded manually if
+# you are running yabai on macOS Big Sur. Uncomment
+# the following line to have the injection performed
+# when the config is executed during startup.
+#
+# for this to work you must configure sudo such that
+# it will be able to run the command without password
+#
+# see this wiki page for information:
+#  - https://github.com/koekeishiya/yabai/wiki/Installing-yabai-(latest-release)
+#
+
+sudo /opt/homebrew/bin/yabai --load-sa
+yabai -m signal --add event=dock_did_restart action="sudo /opt/homebrew/bin/yabai --load-sa"
+
+# global settings
+## mouse and focus
+yabai -m config mouse_follows_focus          on
+yabai -m config focus_follows_mouse          off
+
+## window placement
+yabai -m config window_placement             second_child
+yabai -m config window_topmost               off
+yabai -m config window_shadow                off
+
+## opacity
+yabai -m config window_opacity               off
+yabai -m config window_opacity_duration      0.0
+yabai -m config active_window_opacity        1.0
+yabai -m config normal_window_opacity        0.90
+
+## window border
+yabai -m config window_border                on
+yabai -m config window_border_width          1
+yabai -m config active_window_border_color   0xfff5050d
+yabai -m config normal_window_border_color   0xff0752ba
+yabai -m config insert_feedback_color        0x80d75f5f
+yabai -m config window_border_hidpi          off
+yabai -m config window_border_blur           off
+yabai -m config window_border_radius         0
+
+## split policy
+yabai -m config split_ratio                  0.50
+yabai -m config auto_balance                 off
+
+## mouse
+#yabai -m config mouse_modifier               ctrl
+yabai -m config mouse_action1                move
+yabai -m config mouse_action2                resize
+yabai -m config mouse_drop_action            swap
+
+# general space settings
+yabai -m config layout                       float
+yabai -m config top_padding                  0
+yabai -m config bottom_padding               0
+yabai -m config left_padding                 0
+yabai -m config right_padding                0
+yabai -m config window_gap                   0
+
+# app-specific
+yabai -m rule --add label="System Preferences" app="^System Preferences$" manage=off
+yabai -m rule --add label="About This Mac" app="System Information" manage=off
+yabai -m rule --add label="WeChat" app="^WeChat$" manage=off
+
+
+echo "yabai configuration loaded.."

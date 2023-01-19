@@ -1,0 +1,47 @@
+{
+	"fori+": {
+		"prefix": "forii",
+		"body": [
+			"for (int $i = $min; $i < $max; $i++)",
+			"{",
+			"    $0",
+			"}"
+		],
+		"description": "increasing for loop"
+	},
+	"fori-": {
+		"prefix": "forid",
+		"body": [
+			"for (int $i = $max; $i >= $min; $i--)",
+			"{",
+			"    $0",
+			"}"
+		],
+		"description": "decreasing for loop"
+	},
+	"println": {
+		"prefix": "sopl",
+		"body": "System.out.println($0);",
+		"description": "println"
+	},
+	"print": {
+		"prefix": "sop",
+		"body": "System.out.print($0);",
+		"description": "print"
+	},
+	"printf": {
+		"prefix": "sopf",
+		"body": "System.out.printf($1,$0);",
+		"description": "printf"
+	},
+	"main": {
+		"prefix": "psvm",
+		"body": [
+			"public static void main(String[] args)",
+			"{",
+			"    $0",
+			"}"
+		],
+		"description": "main method"
+	}
+}

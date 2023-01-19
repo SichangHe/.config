@@ -1,0 +1,29 @@
+Cache/
+CachedData/
+CachedExtensionVSIXs/
+CachedExtensions/
+Code Cache/
+Cookies
+Cookies-journal
+GPUCache/
+Local Storage/
+Network Persistent State
+Preferences
+QuotaManager
+QuotaManager-journal
+Service Worker/
+Session Storage/
+TransportSecurity
+code.lock
+databases/
+logs/
+machineid
+coder-logs/
+heartbeat
+extensions/
+Backups/
+CachedConfigurations/
+/*.json
+IndexedDB/
+.com.microsoft.VSCodeInsiders.HVIsIN
+Crashpad/

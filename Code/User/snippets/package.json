@@ -1,0 +1,49 @@
+{
+    "name": "vscode-snippets",
+    "contributes": {
+        "snippets": [
+            {
+                "language": [
+                    "all"
+                ],
+                "path": "./global.json.code-snippets"
+            },
+            {
+                "language": [
+                    "c"
+                ],
+                "path": "./c.json"
+            },
+            {
+                "language": [
+                    "cpp"
+                ],
+                "path": "./cpp.json"
+            },
+            {
+                "language": [
+                    "java"
+                ],
+                "path": "./java.json"
+            },
+            {
+                "language": [
+                    "latex"
+                ],
+                "path": "./latex.json"
+            },
+            {
+                "language": [
+                    "markdown"
+                ],
+                "path": "./markdown.json"
+            },
+            {
+                "language": [
+                    "rust"
+                ],
+                "path": "./rust.json"
+            }
+        ]
+    }
+}

@@ -1,0 +1,48 @@
+{
+	"add math subscript": {
+		"prefix": "sub",
+		"body": "_{$1}$2",
+		"description": "add `_{}`"
+	},
+	"create bmatrix": {
+		"prefix": "bmt",
+		"body": [
+			"\\begin{bmatrix}",
+			"    $1",
+			"\\end{bmatrix}$0"
+		],
+		"description": "create a bmatrix"
+	},
+	"left and right parenthesis": {
+		"prefix": "leftp",
+		"body": [
+			"\\left(",
+			"    $1",
+			"\\right)$0"
+		],
+		"description": "create left right parenthesis pair"
+	},
+	"left and right brackets": {
+		"prefix": "leftk",
+		"body": [
+			"\\left[",
+			"    $1",
+			"\\right]$0"
+		],
+		"description": "create left right brackets pair"
+	},
+	"left and right braces": {
+		"prefix": "leftc",
+		"body": [
+			"\\left\\{",
+			"    $1",
+			"\\right\\}$0"
+		],
+		"description": "create left right braces pair"
+	},
+	"fraction": {
+		"prefix": "frac",
+		"body": "\\frac{$1}{$2}$0",
+		"description": "create a fraction"
+	}
+}

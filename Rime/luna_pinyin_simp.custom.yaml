@@ -1,0 +1,12 @@
+patch:
+  # Fuzzy typing.
+  speller/algebra:
+    - erase/^xx$/
+    - derive/ing$/in/
+    - derive/in$/ing/
+
+    # 模糊音定義先於簡拼定義，方可令簡拼支持以上模糊音
+    - abbrev/^([a-z]).+$/$1/ # 簡拼（首字母）
+    - abbrev/^([zcs]h).+$/$1/ # 簡拼（zh, ch, sh）
+
+  "switches/@0/reset": 1 # Default to English.
