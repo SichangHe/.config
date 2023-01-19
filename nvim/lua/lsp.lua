@@ -20,12 +20,13 @@ return function(use)
                 julials = {},
                 pyright = {},
                 solargraph = {},
+                sumneko_lua = {},
                 tsserver = {},
             }
             local ensure = U.tbl_keys(servers)
             for _, v in ipairs({
+                -- Other servers configured with extensions.
                 'rust_analyzer',
-                'sumneko_lua',
             }) do
                 table.insert(ensure, v)
             end
@@ -36,10 +37,12 @@ return function(use)
             }
             require('mason-lspconfig').setup_handlers {
                 function(name)
-                    require('lspconfig')[name].setup {
-                        capabilities = capabilities,
-                        settings = servers[name],
-                    }
+                    if servers[name] then
+                        require('lspconfig')[name].setup {
+                            capabilities = capabilities,
+                            settings = servers[name],
+                        }
+                    end
                 end
             }
         end,

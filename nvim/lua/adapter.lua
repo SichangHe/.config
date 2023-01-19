@@ -7,7 +7,8 @@ return function(use)
         },
         config = function()
             require("mason-nvim-dap").setup({
-                ensure_installed = { 'codelldb', 'debugpy' }
+                automatic_setup = true,
+                ensure_installed = { 'codelldb', 'python', 'node2' },
             })
         end
     }

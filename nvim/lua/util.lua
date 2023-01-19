@@ -17,5 +17,8 @@ M.use = function(module)
 end
 
 M.conf_loc = M.fn.expand('~/.config/nvim/')
+M.w = function()
+    U.cmd [[:w]]
+end
 
 return M
