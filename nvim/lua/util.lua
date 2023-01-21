@@ -16,6 +16,9 @@ M.use = function(module)
     return require(module)
 end
 
+M.break_undo = function()
+    U.cmd [[let &undolevels = &undolevels]]
+end
 M.conf_loc = M.fn.expand('~/.config/nvim/')
 M.w = function()
     U.cmd [[:w]]

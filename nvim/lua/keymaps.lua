@@ -31,6 +31,7 @@ function M.set()
     l('f', ':FzfLua blines<CR>')
     l('ff', ':FzfLua grep<CR>')
     l('j', ':FzfLua jumps<CR>')
+    l('dv', ':Diffview')
     l('co', function()
         return ':!co . && co --goto %:' .. current_line() .. '<CR>'
     end, { expr = true })

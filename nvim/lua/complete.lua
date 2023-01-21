@@ -1,3 +1,5 @@
+U = require('util')
+
 return function(use)
     use {
         'tzachar/cmp-tabnine',
@@ -23,6 +25,7 @@ return function(use)
                 mapping = cmp.mapping.preset.insert {
                     ['<Tab>'] = cmp.mapping(function(fallback)
                         if cmp.visible() then
+                            U.break_undo()
                             cmp.confirm {
                                 behavior = cmp.ConfirmBehavior.Replace,
                                 select = true,
