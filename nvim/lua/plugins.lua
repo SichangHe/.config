@@ -31,6 +31,10 @@ return function(packer_use)
     end
 
     use {
+        'RRethy/vim-illuminate',
+    }
+
+    use {
         'iamcco/markdown-preview.nvim',
         ft = 'markdown',
         run = 'cd app && yarn',
