@@ -61,6 +61,7 @@ return function(use)
 
     use {
         "folke/trouble.nvim",
+        event = 'CmdLineEnter',
         requires = "nvim-tree/nvim-web-devicons",
         config = function()
             require("trouble").setup {

@@ -1,6 +1,23 @@
 U = require('util')
 
-return function(use)
+return function(packer_use)
+    packer_use {
+        'lewis6991/impatient.nvim',
+        config = function()
+            require('impatient')
+        end,
+    }
+
+    local function use(package)
+        local requires = package.requires
+        if requires == nil then requires = {}
+        elseif type(requires) == 'string' then requires = { requires }
+        end
+        table.insert(requires, 'lewis6991/impatient.nvim')
+        package.requires = requires
+        packer_use(package)
+    end
+
     for _, v in ipairs({
         'appear',
         'lazy_plugins',
@@ -15,6 +32,7 @@ return function(use)
 
     use {
         'iamcco/markdown-preview.nvim',
+        ft = 'markdown',
         run = 'cd app && yarn',
         config = function()
             U.g.mkdp_auto_close = false
@@ -29,6 +47,7 @@ return function(use)
 
     use {
         'nvim-tree/nvim-web-devicons',
+        event = 'CmdLineEnter',
         config = function()
             require('nvim-web-devicons').setup {
                 default = true
@@ -38,6 +57,7 @@ return function(use)
 
     use {
         'preservim/vim-markdown',
+        ft = 'markdown',
         config = function()
             U.g.vim_markdown_folding_disabled = true
         end,

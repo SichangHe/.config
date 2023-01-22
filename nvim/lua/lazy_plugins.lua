@@ -1,14 +1,14 @@
 return function(use)
     use {
         'numToStr/Comment.nvim',
-        event = 'CmdLineEnter',
+        event = 'VimEnter',
         config = function() require('Comment').setup {} end,
     }
 
     use {
         'saecki/crates.nvim',
         event = { 'BufRead Cargo.toml' },
-        requires = { 'nvim-lua/plenary.nvim' },
+        requires = { 'hrsh7th/nvim-cmp', 'nvim-lua/plenary.nvim' },
         config = function()
             require('crates').setup {}
             require('cmp').setup.buffer {

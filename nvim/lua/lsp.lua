@@ -10,6 +10,7 @@ return function(use)
         'williamboman/mason-lspconfig.nvim',
         requires = {
             'williamboman/mason.nvim',
+            'neovim/nvim-lspconfig',
             'hrsh7th/cmp-nvim-lsp',
         },
         config = function()
@@ -84,15 +85,8 @@ return function(use)
     }
 
     use {
-        'neovim/nvim-lspconfig',
-        requires = {
-            'williamboman/mason-lspconfig.nvim',
-            'folke/neodev.nvim',
-        },
-    }
-
-    use {
         'simrat39/rust-tools.nvim',
+        ft = { 'rust' },
         requires = { 'neovim/nvim-lspconfig', 'mfussenegger/nvim-dap' },
         config = function()
             require('rust-tools').setup {
