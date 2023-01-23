@@ -53,6 +53,9 @@ return function(use)
                     rainbowcol4 = { fg = 'DarkBlue' },
                     rainbowcol5 = { fg = 'DarkRed' },
                     rainbowcol6 = { fg = 'DarkGray' },
+                    IlluminatedWordText = { bg = '#e6e6e6' },
+                    IlluminatedWordRead = { bg = '#e6e6e6' },
+                    IlluminatedWordWrite = { bg = '#e6e6e6' },
                 },
             }
             onedark.load()
