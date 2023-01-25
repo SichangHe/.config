@@ -2,7 +2,11 @@ return function(use)
     use {
         'nvim-treesitter/nvim-treesitter',
         run = ':TSUpdate',
-        requires = { 'windwp/nvim-ts-autotag', 'mrjones2014/nvim-ts-rainbow' },
+        requires = {
+            'RRethy/nvim-treesitter-endwise',
+            'windwp/nvim-ts-autotag',
+            'mrjones2014/nvim-ts-rainbow',
+        },
         config = function()
             require('nvim-treesitter.configs').setup {
                 highlight = {
@@ -39,12 +43,11 @@ return function(use)
                 autotag = {
                     enable = true,
                 },
+                endwise = {
+                    enable = true,
+                },
             }
         end,
-    }
-
-    use {
-        'windwp/nvim-ts-autotag',
     }
 
     use {
