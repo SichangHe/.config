@@ -51,7 +51,6 @@ return function(use)
         'petertriho/nvim-scrollbar',
         config = function()
             require('scrollbar').setup()
-            require('scrollbar.handlers.search').setup()
         end,
     }
 

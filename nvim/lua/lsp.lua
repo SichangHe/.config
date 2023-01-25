@@ -1,5 +1,21 @@
 return function(use)
     use {
+        'mhanberg/elixir.nvim',
+        ft = { 'elixir' },
+        requires = { 'williamboman/mason-lspconfig.nvim' },
+        config = function()
+            local ex = require('elixir')
+            ex.setup {
+                cmd = 'elixir-ls',
+                settings = ex.settings {
+                    enableTestLenses = true,
+                    suggestSpecs = true,
+                },
+            }
+        end
+    }
+
+    use {
         'williamboman/mason.nvim',
         config = function()
             require('mason').setup {}
@@ -16,7 +32,6 @@ return function(use)
         config = function()
             local servers = {
                 clangd = {},
-                elixirls = {},
                 jsonls = {},
                 julials = {},
                 pyright = {},
@@ -27,6 +42,7 @@ return function(use)
             local ensure = U.tbl_keys(servers)
             for _, v in ipairs({
                 -- Other servers configured with extensions.
+                'elixirls',
                 'rust_analyzer',
             }) do
                 table.insert(ensure, v)

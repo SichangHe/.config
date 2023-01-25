@@ -32,6 +32,7 @@ function M.set()
     l('ff', ':FzfLua grep<CR>')
     l('j', ':FzfLua jumps<CR>')
     l('dv', ':Diffview')
+    l('rt', U.lsp.codelens.run)
     l('co', function()
         return ':!co . && co --goto %:' .. current_line() .. '<CR>'
     end, { expr = true })
