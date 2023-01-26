@@ -105,7 +105,19 @@ return function(use)
         ft = { 'rust' },
         requires = { 'neovim/nvim-lspconfig', 'mfussenegger/nvim-dap' },
         config = function()
-            require('rust-tools').setup {
+            local rt = require('rust-tools')
+            rt.setup {
+                dap = {
+                    adapter = {
+                        type = "server",
+                        port = "${port}",
+                        host = "127.0.0.1",
+                        executable = {
+                            command = 'codelldb',
+                            args = { "--port", "${port}" },
+                        },
+                    },
+                },
                 server = {
                     settings = {
                         ['rust-analyzer'] = {
@@ -113,6 +125,17 @@ return function(use)
                                 command = 'clippy',
                             },
                         },
+                    },
+                    on_attach = function(_, buf_n)
+                        U.key('n', 'K', rt.hover_actions.hover_actions, {
+                            buffer = buf_n,
+                        })
+                    end
+                },
+                tools = {
+                    hover_actions = {
+                        border = 'none',
+                        auto_focus = true,
                     },
                 },
             }
