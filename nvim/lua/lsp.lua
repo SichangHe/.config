@@ -24,6 +24,7 @@ return function(use)
 
     use {
         'williamboman/mason-lspconfig.nvim',
+        event = 'VimEnter',
         requires = {
             'williamboman/mason.nvim',
             'neovim/nvim-lspconfig',
@@ -67,6 +68,7 @@ return function(use)
 
     use {
         'jay-babu/mason-null-ls.nvim',
+        event = 'VimEnter',
         requires = { 'williamboman/mason.nvim', 'jose-elias-alvarez/null-ls.nvim' },
         config = function()
             require('mason-null-ls').setup({
@@ -84,6 +86,7 @@ return function(use)
 
     use {
         'jose-elias-alvarez/null-ls.nvim',
+        event = 'VimEnter',
         requires = { 'nvim-lua/plenary.nvim' },
         config = function()
             local null_ls = require('null-ls')

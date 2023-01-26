@@ -33,6 +33,7 @@ function M.set()
     l('j', ':FzfLua jumps<CR>')
     l('dv', ':Diffview')
     l('rt', U.lsp.codelens.run)
+    l('db', ":lua require('dapui').toggle()")
     l('co', function()
         return ':!co . && co --goto %:' .. current_line() .. '<CR>'
     end, { expr = true })

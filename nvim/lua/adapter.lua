@@ -1,6 +1,7 @@
 return function(use)
     use {
         'jayp0521/mason-nvim-dap.nvim',
+        event = 'VimEnter',
         requires = {
             'williamboman/mason.nvim',
             'mfussenegger/nvim-dap',
