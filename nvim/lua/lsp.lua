@@ -33,6 +33,8 @@ return function(use)
         config = function()
             local servers = {
                 clangd = {},
+                emmet_ls = {},
+                html = {},
                 jsonls = {},
                 julials = {},
                 pyright = {},
