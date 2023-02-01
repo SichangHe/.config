@@ -33,6 +33,7 @@ return function(use)
         config = function()
             local servers = {
                 clangd = {},
+                cssls = {},
                 emmet_ls = {},
                 html = {},
                 jsonls = {},
@@ -74,7 +75,12 @@ return function(use)
         requires = { 'williamboman/mason.nvim', 'jose-elias-alvarez/null-ls.nvim' },
         config = function()
             require('mason-null-ls').setup({
-                ensure_installed = { 'black', 'isort', 'markdownlint' },
+                ensure_installed = {
+                    'black',
+                    'isort',
+                    'markdownlint',
+                    'prettierd',
+                },
             })
         end,
     }
@@ -94,6 +100,10 @@ return function(use)
             local null_ls = require('null-ls')
             null_ls.setup {
                 sources = {
+                    -- prettier
+                    null_ls.builtins.formatting.prettierd.with {
+                        filetypes = { "css", "scss", "less", "json", "jsonc" },
+                    },
                     -- isort && black
                     null_ls.builtins.formatting.isort,
                     null_ls.builtins.formatting.black,

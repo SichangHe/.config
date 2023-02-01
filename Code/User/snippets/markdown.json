@@ -29,6 +29,15 @@
 		"body": "_{$0}",
 		"description": "add `_{}`"
 	},
+    "create begin block": {
+        "prefix": "begin",
+        "body": [
+            "\\begin{$1}",
+            "    $0",
+            "\\end{$1}"
+        ],
+        "description": "create begin and end block"
+    },
 	"create bmatrix": {
 		"prefix": "bmt",
 		"body": [
