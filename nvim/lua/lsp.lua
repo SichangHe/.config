@@ -16,6 +16,30 @@ return function(use)
     }
 
     use {
+        'glepnir/lspsaga.nvim',
+        event = 'VimEnter',
+        requires = { 'nvim-tree/nvim-web-devicons' },
+        config = function()
+            require('lspsaga').setup {
+                code_action = {
+                    keys = {
+                        quit = { 'q', '<Esc>' },
+                    },
+                },
+                lightbulb = {
+                    enable = false,
+                },
+                symbol_in_winbar = {
+                    enable = false,
+                },
+                ui = {
+                    border = 'none',
+                },
+            }
+        end,
+    }
+
+    use {
         'williamboman/mason.nvim',
         config = function()
             require('mason').setup {}
