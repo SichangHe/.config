@@ -21,13 +21,9 @@ return function(use)
         requires = { 'nvim-tree/nvim-web-devicons' },
         config = function()
             require('lspsaga').setup {
-                code_action = {
-                    keys = {
-                        quit = { 'q', '<Esc>' },
-                    },
-                },
                 lightbulb = {
-                    enable = false,
+                    enable_in_insert = false,
+                    virtual_text = false,
                 },
                 symbol_in_winbar = {
                     enable = false,
