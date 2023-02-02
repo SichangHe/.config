@@ -25,6 +25,7 @@ return function(use)
                     'bash',
                     'c',
                     'fish',
+                    'heex',
                     'javascript',
                     'jsonc',
                     'julia',

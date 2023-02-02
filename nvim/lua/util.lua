@@ -17,11 +17,11 @@ M.use = function(module)
 end
 
 M.break_undo = function()
-    U.cmd [[let &undolevels = &undolevels]]
+    M.cmd [[let &undolevels = &undolevels]]
 end
 M.conf_loc = M.fn.expand('~/.config/nvim/')
 M.w = function()
-    U.cmd [[:w]]
+    M.cmd [[:wa]]
 end
 
 return M

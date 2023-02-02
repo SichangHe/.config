@@ -38,7 +38,11 @@ return function(use)
                 top_down = false,
                 stages = 'static',
             }
-            require('noice').setup {}
+            require('noice').setup {
+                presets = {
+                    long_message_to_split = true,
+                },
+            }
         end,
     }
 
