@@ -1,21 +1,5 @@
 return function(use)
     use {
-        'mhanberg/elixir.nvim',
-        ft = { 'elixir' },
-        requires = { 'williamboman/mason-lspconfig.nvim' },
-        config = function()
-            local ex = require('elixir')
-            ex.setup {
-                cmd = 'elixir-ls',
-                settings = ex.settings {
-                    enableTestLenses = true,
-                    suggestSpecs = true,
-                },
-            }
-        end
-    }
-
-    use {
         'glepnir/lspsaga.nvim',
         event = 'VimEnter',
         requires = { 'nvim-tree/nvim-web-devicons' },
@@ -54,6 +38,7 @@ return function(use)
             local servers = {
                 clangd = {},
                 cssls = {},
+                elixirls = {},
                 emmet_ls = {},
                 html = {},
                 jsonls = {},
@@ -66,7 +51,6 @@ return function(use)
             local ensure = U.tbl_keys(servers)
             for _, v in ipairs({
                 -- Other servers configured with extensions.
-                'elixirls',
                 'rust_analyzer',
             }) do
                 table.insert(ensure, v)
