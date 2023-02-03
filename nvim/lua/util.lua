@@ -21,7 +21,7 @@ M.break_undo = function()
 end
 M.conf_loc = M.fn.expand('~/.config/nvim/')
 M.w = function()
-    M.cmd [[:wa]]
+    M.cmd [[w]]
 end
 
 return M

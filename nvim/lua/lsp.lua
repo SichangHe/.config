@@ -20,6 +20,15 @@ return function(use)
     }
 
     use {
+        'ray-x/lsp_signature.nvim',
+        event = 'VimEnter',
+        requires = { 'neovim/nvim-lspconfig' },
+        config = function()
+            require('lsp_signature').setup {}
+        end,
+    }
+
+    use {
         'williamboman/mason.nvim',
         config = function()
             require('mason').setup {}
