@@ -29,15 +29,15 @@
 		"body": "_{$0}",
 		"description": "add `_{}`"
 	},
-    "create begin block": {
-        "prefix": "begin",
-        "body": [
-            "\\begin{$1}",
-            "    $0",
-            "\\end{$1}"
-        ],
-        "description": "create begin and end block"
-    },
+	"create begin block": {
+		"prefix": "begin",
+		"body": [
+			"\\begin{$1}",
+			"    $0",
+			"\\end{$1}"
+		],
+		"description": "create begin and end block"
+	},
 	"create bmatrix": {
 		"prefix": "bmt",
 		"body": [
@@ -105,6 +105,10 @@
 		"prefix": "nullity",
 		"body": "\\text{nullity}($0)"
 	},
+	"capitalized log": {
+		"prefix": "Log",
+		"body": "\\text{Log }"
+	},
 	"1 to n": {
 		"prefix": "oneton",
 		"body": "$1_1,\\cdots,$1_n$0"
@@ -112,6 +116,14 @@
 	"1 to m": {
 		"prefix": "onetom",
 		"body": "$1_1,\\cdots,$1_m$0"
+	},
+	"6 points": {
+		"prefix": "6pt",
+		"body": "[6pt]"
+	},
+	"12 points": {
+		"prefix": "12pt",
+		"body": "[12pt]"
 	},
 	"norm with double bar": {
 		"prefix": "norm",

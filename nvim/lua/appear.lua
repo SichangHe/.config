@@ -62,6 +62,11 @@ return function(use)
                     IlluminatedWordText = { bg = '#e6e6e6' },
                     IlluminatedWordRead = { bg = '#e6e6e6' },
                     IlluminatedWordWrite = { bg = '#e6e6e6' },
+                    -- Spell highlight only add underlines.
+                    SpellBad = { fg = 'unset', bg = 'unset' },
+                    SpellCap = { fg = 'unset', bg = 'unset' },
+                    SpellRare = { fg = 'unset', bg = 'unset' },
+                    SpellLocal = { fg = 'unset', bg = 'unset' },
                 },
             }
             onedark.load()
