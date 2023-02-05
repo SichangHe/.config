@@ -32,6 +32,7 @@ return function(use)
                     'latex',
                     'lua',
                     'markdown',
+                    'markdown_inline',
                     'python',
                     'ruby',
                     'rust',

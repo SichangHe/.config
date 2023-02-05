@@ -42,6 +42,9 @@ return function(use)
                 presets = {
                     long_message_to_split = true,
                 },
+                lsp = {
+                    signature = { enabled = false },
+                },
             }
         end,
     }
