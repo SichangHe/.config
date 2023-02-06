@@ -1,6 +1,6 @@
 # focus window
-hyper - j : lua ~/.config/helper.lua/yabai.lua last
-hyper - k : lua ~/.config/helper.lua/yabai.lua next
+hyper - j : luajit ~/.config/helper.lua/yabai.lua last
+hyper - k : luajit ~/.config/helper.lua/yabai.lua next
 hyper - h : yabai -m window --focus recent
 
 # focus display

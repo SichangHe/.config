@@ -24,7 +24,7 @@ function get_next()
 end
 
 function cycle()
-    ids = Command.run("yabai -m query --windows --space mouse | jq '.[].id'")
+    ids = Command.run("yabai -m query --windows --space | jq '.[].id'")
     id = tonumber(Command.run("yabai -m query --windows --window | jq '.id'"))
 
     id_list = {}
@@ -38,13 +38,13 @@ function cycle()
 end
 
 function info()
-    apps = Command.run("yabai -m query --windows --space mouse | jq '.[].app'")
+    apps = Command.run("yabai -m query --windows --space | jq '.[].app'")
     app_str = ''
     for app in string.gmatch(apps, "\"%w+[%s\"]") do
         app_str = app_str .. string.match(app, "%w+") .. ' '
     end
-    space_id = Command.run("yabai -m query --spaces --space mouse | jq '.index'", "*l")
-    window_num = Command.run("yabai -m query --windows --space mouse | jq '.[].title' | wc -l", "*l")
+    space_id = Command.run("yabai -m query --spaces --space | jq '.index'", "*l")
+    window_num = Command.run("yabai -m query --windows --space | jq '.[].title' | wc -l", "*l")
     return Noti.display(app_str, 'Space ' .. space_id, window_num .. ' windows')
 end
 
