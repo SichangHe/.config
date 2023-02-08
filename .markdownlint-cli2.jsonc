@@ -36,7 +36,7 @@
     },
     "markdownItPlugins": [
         [
-            "@iktakahiro/markdown-it-katex"
+            "markdown-it-texmath"
         ]
     ]
 }
