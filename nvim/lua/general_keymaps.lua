@@ -2,6 +2,7 @@ U = require('util')
 local M = {}
 local n = function(...) U.key('n', ...) end
 local v = function(...) U.key('v', ...) end
+local i = function(...) U.key('i', ...) end
 local s = function(left, right)
     if right == nil then right = left end
     v('<Space>' .. left, 'c' .. left .. '<C-r>*' .. right .. '<Esc>')
@@ -10,6 +11,9 @@ end
 function M.set()
     n('<Space>n', ':noh<CR>')
     n('<Space>x', ':bd<CR>')
+    n('<Tab>', '>>')
+    n('<S-Tab>', '<<')
+    i('<C-z>', '<C-o>u')
     s('(', ')')
     s('[', ']')
     s('{', '}')

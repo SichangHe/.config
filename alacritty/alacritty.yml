@@ -877,6 +877,7 @@ key_bindings:
   - { key: Q,              mods: Command,                    action: ReceiveChar           }
   - { key: W,              mods: Command,                    action: ReceiveChar           }
   - { key: N,              mods: Command,                    action: CreateNewWindow       }
+  - { key: Z,              mods: Command,                    chars: "\x1a"                 } # ^Z
   #- { key: F,              mods: Command|Control,            action: ToggleFullscreen      }
   #- { key: F,              mods: Command, mode: ~Search,     action: SearchForward         }
   #- { key: B,              mods: Command, mode: ~Search,     action: SearchBackward        }

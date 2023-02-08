@@ -74,6 +74,24 @@
 		],
 		"description": "create left right braces pair"
 	},
+	"left and right angled brackets": {
+		"prefix": "lefta",
+		"body": [
+			"\\left\\langle",
+			"    $0",
+			"\\right\\rangle"
+		],
+		"description": "create left right braces pair"
+	},
+	"left and right vertical bars": {
+		"prefix": "leftv",
+		"body": [
+			"\\left|",
+			"    $0",
+			"\\right|"
+		],
+		"description": "create left right braces pair"
+	},
 	"big parenthesis": {
 		"prefix": "Bigrp",
 		"body": [

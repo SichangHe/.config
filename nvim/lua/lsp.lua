@@ -121,7 +121,13 @@ return function(use)
                     null_ls.builtins.formatting.isort,
                     null_ls.builtins.formatting.black,
                     -- markdownlint
-                    null_ls.builtins.diagnostics.markdownlint,
+                    null_ls.builtins.diagnostics.markdownlint_cli2.with {
+                        command = 'markdownlint-cli2-config',
+                        args = {
+                            U.fn.expand('~/.config/.markdownlint-cli2.jsonc'),
+                            '$FILENAME'
+                        },
+                    },
                     null_ls.builtins.formatting.markdownlint,
                 },
             }
