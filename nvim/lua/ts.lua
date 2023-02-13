@@ -24,6 +24,8 @@ return function(use)
                 ensure_installed = {
                     'bash',
                     'c',
+                    'elixir',
+                    'erlang',
                     'fish',
                     'heex',
                     'javascript',

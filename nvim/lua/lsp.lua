@@ -115,7 +115,7 @@ return function(use)
                 sources = {
                     -- prettier
                     null_ls.builtins.formatting.prettierd.with {
-                        filetypes = { "css", "scss", "less", "json", "jsonc" },
+                        filetypes = { "css", "scss", "less", "js", "json", "jsonc" },
                     },
                     -- isort && black
                     null_ls.builtins.formatting.isort,
