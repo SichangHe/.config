@@ -7,8 +7,8 @@ koekeishiya/formulae/yabai
 libpq
 llvm
 luarocks
+markdownlint-cli2
 neovim
-node
 pandoc
 pkg-config
 python@3.10

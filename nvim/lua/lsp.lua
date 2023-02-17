@@ -55,6 +55,7 @@ return function(use)
                 pyright = {},
                 solargraph = {},
                 sumneko_lua = {},
+                svelte = {},
                 tsserver = {},
             }
             local ensure = U.tbl_keys(servers)
@@ -115,7 +116,15 @@ return function(use)
                 sources = {
                     -- prettier
                     null_ls.builtins.formatting.prettierd.with {
-                        filetypes = { "css", "scss", "less", "js", "json", "jsonc" },
+                        filetypes = {
+                            "css",
+                            "scss",
+                            "svelte",
+                            "less",
+                            "js",
+                            "json",
+                            "jsonc",
+                        },
                     },
                     -- isort && black
                     null_ls.builtins.formatting.isort,

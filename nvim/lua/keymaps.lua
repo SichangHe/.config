@@ -34,6 +34,7 @@ function M.set()
     l('dv', ':Diffview')
     l('rt', U.lsp.codelens.run)
     l('db', ":lua require('dapui').toggle()<CR>")
+    l('ld', ':Lspsaga show_cursor_diagnostics<CR>')
     l('co', function()
         return ':!co . && co --goto %:' .. current_line() .. '<CR>'
     end, { expr = true })
