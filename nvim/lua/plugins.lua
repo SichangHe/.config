@@ -10,8 +10,10 @@ return function(packer_use)
 
     local function use(package)
         local requires = package.requires
-        if requires == nil then requires = {}
-        elseif type(requires) == 'string' then requires = { requires }
+        if requires == nil then
+            requires = {}
+        elseif type(requires) == 'string' then
+            requires = { requires }
         end
         table.insert(requires, 'lewis6991/impatient.nvim')
         package.requires = requires
@@ -32,6 +34,21 @@ return function(packer_use)
 
     use {
         'RRethy/vim-illuminate',
+        config = function()
+            require('illuminate').configure {
+                providers = {
+                    'lsp',
+                    'treesitter',
+                },
+                filetype_overrides = {
+                    markdown = {
+                        providers = {
+                            'regex',
+                        }
+                    }
+                },
+            }
+        end
     }
 
     use {
