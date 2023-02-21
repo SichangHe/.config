@@ -70,6 +70,8 @@ return function(use)
                     SpellCap = { fg = 'unset', bg = 'unset' },
                     SpellRare = { fg = 'unset', bg = 'unset' },
                     SpellLocal = { fg = 'unset', bg = 'unset' },
+                    -- Fix indent highlight.
+                    IndentBlanklineContextChar = { fg = '#e0e0e0' },
                 },
             }
             onedark.load()

@@ -52,9 +52,9 @@ return function(use)
                 html = {},
                 jsonls = {},
                 julials = {},
+                lua_ls = {},
                 pyright = {},
                 solargraph = {},
-                sumneko_lua = {},
                 svelte = {},
                 tsserver = {},
             }
