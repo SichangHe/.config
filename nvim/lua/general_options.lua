@@ -12,6 +12,7 @@ function M.set()
     set.timeoutlen = 300
     set.undofile = true
     set.virtualedit = 'block'
+    vim.o.background = 'light'
 end
 
 return M

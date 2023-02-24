@@ -7,7 +7,7 @@ end
 source ~/.config/fish/path.fish
 
 # proxy
-source ~/.config/fish/proxy.fish
+# source ~/.config/fish/proxy.fish
 
 #! kernel specific {
 

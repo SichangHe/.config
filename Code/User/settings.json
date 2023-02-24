@@ -406,10 +406,6 @@
     "terminal.integrated.fontFamily": "JetBrains Mono",
     "terminal.integrated.fontSize": 16,
     "terminal.integrated.inheritEnv": false,
-    "vscode_custom_css.imports": [
-        "file:///Users/sichanghe/.config/Code/User/custom.css"
-    ],
-    "vscode_custom_css.statusbar": false,
     // vscode-neovim
     "vscode-neovim.mouseSelectionStartVisualMode": true,
     "vscode-neovim.neovimExecutablePaths.darwin": "/opt/homebrew/bin/nvim",
@@ -436,7 +432,6 @@
     "workbench.preferredHighContrastLightColorTheme": "Atom One Light",
     "workbench.preferredLightColorTheme": "Atom One Light",
     "workbench.startupEditor": "none",
-    "workbench.statusBar.visible": false,
     // language
     "[c]": {
         "editor.defaultFormatter": "ms-vscode.cpptools"
