@@ -94,7 +94,7 @@ shift + alt - y : yabai -m space --mirror y-axis
 hyper - space : yabai -m window --toggle float && osascript -e 'display notification "toggle window float" with title "yabai"'
 
 # Show desktop index
-hyper - i : lua ~/.config/helper.lua/yabai.lua info
+hyper - i : luajit ~/.config/helper.lua/yabai.lua info
 # Restart Yabai
 hyper - y : brew services restart yabai && sudo yabai --load-sa && osascript -e 'display notification "restart yabai" with title "yabai"'
 hyper - u : brew services restart skhd && sudo yabai --load-sa && osascript -e 'display notification "restart skhd" with title "skhd"'
