@@ -1,8 +1,8 @@
-return function(use)
-    use {
+return {
+    {
         'nvim-treesitter/nvim-treesitter',
-        run = ':TSUpdate',
-        requires = {
+        build = ':TSUpdate',
+        dependencies = {
             'RRethy/nvim-treesitter-endwise',
             'windwp/nvim-ts-autotag',
             'mrjones2014/nvim-ts-rainbow',
@@ -45,6 +45,7 @@ return function(use)
                     'ruby',
                     'rust',
                     'typescript',
+                    'vim',
                 },
                 auto_install = true,
                 rainbow = {
@@ -61,14 +62,7 @@ return function(use)
                 },
             }
         end,
-    }
+    },
 
-    use {
-        'petertriho/nvim-scrollbar',
-        config = function()
-            require('scrollbar').setup()
-        end,
-    }
-
-    use { 'mrjones2014/nvim-ts-rainbow' }
-end
+    { 'mrjones2014/nvim-ts-rainbow' },
+}

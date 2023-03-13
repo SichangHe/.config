@@ -1,22 +1,20 @@
-return function(use)
-    use {
+return {
+    {
         'sindrets/diffview.nvim',
         event = 'CmdLineEnter',
-        requires = {
+        dependencies = {
             'nvim-tree/nvim-web-devicons',
             'nvim-lua/plenary.nvim',
         },
-    }
+    },
 
-    use {
+    {
         'lewis6991/gitsigns.nvim',
-        config = function()
-            require('gitsigns').setup()
-        end,
-    }
+        config = true,
+    },
 
-    use {
+    {
         'tpope/vim-fugitive',
         event = 'CmdLineEnter',
-    }
-end
+    },
+}

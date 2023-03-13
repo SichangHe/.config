@@ -1,44 +1,38 @@
-return function(use)
-    use {
+return {
+    {
         'glepnir/lspsaga.nvim',
-        event = 'VimEnter',
-        requires = { 'nvim-tree/nvim-web-devicons' },
-        config = function()
-            require('lspsaga').setup {
-                lightbulb = {
-                    enable_in_insert = false,
-                    virtual_text = false,
-                },
-                symbol_in_winbar = {
-                    enable = false,
-                },
-                ui = {
-                    border = 'none',
-                },
-            }
-        end,
-    }
+        event = 'VeryLazy',
+        dependencies = { 'nvim-tree/nvim-web-devicons' },
+        opts = {
+            lightbulb = {
+                enable_in_insert = false,
+                virtual_text = false,
+            },
+            symbol_in_winbar = {
+                enable = false,
+            },
+            ui = {
+                border = 'none',
+            },
+        },
+    },
 
-    use {
+    {
         'ray-x/lsp_signature.nvim',
-        event = 'VimEnter',
-        requires = { 'neovim/nvim-lspconfig' },
-        config = function()
-            require('lsp_signature').setup {}
-        end,
-    }
+        event = 'VeryLazy',
+        dependencies = { 'neovim/nvim-lspconfig' },
+        config = true,
+    },
 
-    use {
+    {
         'williamboman/mason.nvim',
-        config = function()
-            require('mason').setup {}
-        end,
-    }
+        config = true,
+    },
 
-    use {
+    {
         'williamboman/mason-lspconfig.nvim',
-        event = 'VimEnter',
-        requires = {
+        event = 'VeryLazy',
+        dependencies = {
             'williamboman/mason.nvim',
             'neovim/nvim-lspconfig',
             'hrsh7th/cmp-nvim-lsp',
@@ -81,35 +75,31 @@ return function(use)
                 end
             }
         end,
-    }
+    },
 
-    use {
+    {
         'jay-babu/mason-null-ls.nvim',
-        event = 'VimEnter',
-        requires = { 'williamboman/mason.nvim', 'jose-elias-alvarez/null-ls.nvim' },
-        config = function()
-            require('mason-null-ls').setup({
-                ensure_installed = {
-                    'black',
-                    'isort',
-                    'markdownlint',
-                    'prettierd',
-                },
-            })
-        end,
-    }
+        event = 'VeryLazy',
+        dependencies = { 'williamboman/mason.nvim', 'jose-elias-alvarez/null-ls.nvim' },
+        opts = {
+            ensure_installed = {
+                'black',
+                'isort',
+                'markdownlint',
+                'prettierd',
+            },
+        },
+    },
 
-    use {
+    {
         'folke/neodev.nvim',
-        config = function()
-            require('neodev').setup {}
-        end,
-    }
+        config = true,
+    },
 
-    use {
+    {
         'jose-elias-alvarez/null-ls.nvim',
-        event = 'VimEnter',
-        requires = { 'nvim-lua/plenary.nvim' },
+        event = 'VeryLazy',
+        dependencies = { 'nvim-lua/plenary.nvim' },
         config = function()
             local null_ls = require('null-ls')
             null_ls.setup {
@@ -141,12 +131,12 @@ return function(use)
                 },
             }
         end,
-    }
+    },
 
-    use {
+    {
         'simrat39/rust-tools.nvim',
         ft = { 'rust' },
-        requires = { 'neovim/nvim-lspconfig', 'mfussenegger/nvim-dap' },
+        dependencies = { 'neovim/nvim-lspconfig', 'mfussenegger/nvim-dap' },
         config = function()
             local rt = require('rust-tools')
             rt.setup {
@@ -183,5 +173,5 @@ return function(use)
                 },
             }
         end,
-    }
-end
+    },
+}

@@ -1,20 +1,16 @@
 U = require('util')
-local cmd = U.cmd
-local fn = U.fn
--- Install packer
-local install_path = fn.stdpath('data') .. '/site/pack/packer/start/packer.nvim'
-local is_bootstrap = fn.empty(U.fn.glob(install_path)) == 1
-if is_bootstrap then
-    print('Bootstrapping.')
-    fn.execute('!git clone https://github.com/wbthomason/packer.nvim ' .. install_path)
-    cmd [[packadd packer.nvim]]
+
+local lazypath = U.fn.stdpath('data') .. '/lazy/lazy.nvim'
+if not U.fs_stat(lazypath) then
+    U.fn.system({
+        'git',
+        'clone',
+        '--filter=blob:none',
+        'https://github.com/folke/lazy.nvim.git',
+        '--branch=stable',
+        lazypath,
+    })
 end
+U.rtp:prepend(lazypath)
 
-local packer = require('packer')
-
-if is_bootstrap then
-    packer.sync()
-    print('Please wait and then restart.')
-end
-
-return packer
+return require('lazy')

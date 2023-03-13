@@ -1,22 +1,20 @@
-return function(use)
-    use {
+return {
+    {
         'jayp0521/mason-nvim-dap.nvim',
-        event = 'VimEnter',
-        requires = {
+        event = 'VeryLazy',
+        dependencies = {
             'williamboman/mason.nvim',
             'mfussenegger/nvim-dap',
         },
-        config = function()
-            require('mason-nvim-dap').setup({
-                automatic_setup = true,
-                ensure_installed = { 'lldb-vscode', 'python' },
-            })
-        end,
-    }
+        opts = {
+            automatic_setup = true,
+            ensure_installed = { 'lldb-vscode', 'python' },
+        },
+    },
 
-    use {
+    {
         'mfussenegger/nvim-dap',
-        event = 'VimEnter',
+        event = 'VeryLazy',
         config = function()
             local dap = require('dap')
 
@@ -41,14 +39,12 @@ return function(use)
                 },
             }
         end
-    }
+    },
 
-    use {
+    {
         'rcarriga/nvim-dap-ui',
-        event = 'VimEnter',
-        requires = { 'mfussenegger/nvim-dap' },
-        config = function()
-            require('dapui').setup {}
-        end,
-    }
-end
+        event = 'VeryLazy',
+        dependencies = { 'mfussenegger/nvim-dap' },
+        config = true,
+    },
+}

@@ -1,35 +1,31 @@
-return function(use)
-    use {
+return {
+    {
         'lukas-reineke/indent-blankline.nvim',
-        config = function()
-            require('indent_blankline').setup {
-                show_current_context = true,
-            }
-        end,
-    }
+        opts = {
+            show_current_context = true,
+        },
+    },
 
-    use {
+    {
         'nvim-lualine/lualine.nvim',
-        config = function()
-            require('lualine').setup {
-                options = {
-                    theme = 'onelight',
-                },
-                sections = {
-                    lualine_a = { 'mode' },
-                    lualine_b = { { 'filename', path = 1 } },
-                    lualine_c = { 'diagnostics' },
-                    lualine_x = { 'filetype' },
-                    lualine_y = { 'progress', 'location', 'diff' },
-                    lualine_z = { 'branch' },
-                },
-            }
-        end,
-    }
+        opts = {
+            options = {
+                theme = 'onelight',
+            },
+            sections = {
+                lualine_a = { 'mode' },
+                lualine_b = { { 'filename', path = 1 } },
+                lualine_c = { 'diagnostics' },
+                lualine_x = { 'filetype' },
+                lualine_y = { 'progress', 'location', 'diff' },
+                lualine_z = { 'branch' },
+            },
+        },
+    },
 
-    use {
+    {
         'folke/noice.nvim',
-        requires = {
+        dependencies = {
             'rcarriga/nvim-notify',
             'MunifTanjim/nui.nvim',
         },
@@ -47,9 +43,9 @@ return function(use)
                 },
             }
         end,
-    }
+    },
 
-    use {
+    {
         'navarasu/onedark.nvim',
         config = function()
             local onedark = require('onedark')
@@ -76,17 +72,20 @@ return function(use)
             }
             onedark.load()
         end,
-    }
+    },
 
-    use {
+    {
+        'petertriho/nvim-scrollbar',
+        config = true,
+    },
+
+    {
         "folke/trouble.nvim",
         event = 'CmdLineEnter',
-        requires = "nvim-tree/nvim-web-devicons",
-        config = function()
-            require("trouble").setup {
-                position = 'right',
-                autoclose = true,
-            }
-        end,
-    }
-end
+        dependencies = "nvim-tree/nvim-web-devicons",
+        opts = {
+            position = 'right',
+            autoclose = true,
+        },
+    },
+}

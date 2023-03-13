@@ -1,15 +1,15 @@
 U = require('util')
 
-return function(use)
-    use {
+return {
+    {
         'tzachar/cmp-tabnine',
-        run = './install.sh',
-        requires = 'hrsh7th/nvim-cmp',
-    }
+        build = './install.sh',
+        dependencies = 'hrsh7th/nvim-cmp',
+    },
 
-    use {
+    {
         'hrsh7th/nvim-cmp',
-        requires = { 'hrsh7th/cmp-nvim-lsp', 'L3MON4D3/LuaSnip', 'saadparwaiz1/cmp_luasnip' },
+        dependencies = { 'hrsh7th/cmp-nvim-lsp', 'L3MON4D3/LuaSnip', 'saadparwaiz1/cmp_luasnip' },
         config = function()
             local cmp = require('cmp')
             local snip = require('luasnip')
@@ -62,4 +62,4 @@ return function(use)
             }
         end,
     }
-end
+}

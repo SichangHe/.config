@@ -14,12 +14,12 @@ function AllConfig()
     else
         Options = use('options')
         Keymaps = use('keymaps')
-        Packer = use('package_manager')
+        Lazy = use('package_manager')
         Au = use('autocmd')
 
         Options.set()
         Keymaps.set()
-        Packer.startup(use('plugins'))
+        Lazy.setup('plugins')
         Au.set()
     end
 end

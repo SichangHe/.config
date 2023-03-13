@@ -1,14 +1,14 @@
-return function(use)
-    use {
+return {
+    {
         'numToStr/Comment.nvim',
-        event = 'VimEnter',
-        config = function() require('Comment').setup {} end,
-    }
+        event = 'VeryLazy',
+        config = true,
+    },
 
-    use {
+    {
         'saecki/crates.nvim',
         event = { 'BufRead Cargo.toml' },
-        requires = { 'hrsh7th/nvim-cmp', 'nvim-lua/plenary.nvim' },
+        dependencies = { 'hrsh7th/nvim-cmp', 'nvim-lua/plenary.nvim' },
         config = function()
             require('crates').setup {}
             require('cmp').setup.buffer {
@@ -17,35 +17,33 @@ return function(use)
                 },
             }
         end,
-    }
+    },
 
-    use {
+    {
         'ibhagwan/fzf-lua',
         event = 'CmdLineEnter',
-        requires = { 'nvim-tree/nvim-web-devicons' },
-        config = function()
-            require('fzf-lua').setup {
-                fullscreen = true,
-                previewers = {
-                    builtin = {
-                        extensions = {
-                            ["png"] = { "viu" },
-                            ["jpg"] = { "viu" },
-                        },
+        dependencies = { 'nvim-tree/nvim-web-devicons' },
+        opts = {
+            fullscreen = true,
+            previewers = {
+                builtin = {
+                    extensions = {
+                        ["png"] = { "viu" },
+                        ["jpg"] = { "viu" },
                     },
                 },
-            }
-        end,
-    }
+            },
+        },
+    },
 
-    use {
+    {
         'windwp/nvim-autopairs',
         event = 'InsertEnter',
-        config = function() require('nvim-autopairs').setup {} end,
-    }
+        config = true,
+    },
 
-    use {
+    {
         'machakann/vim-swap',
         event = 'InsertEnter',
-    }
-end
+    },
+}

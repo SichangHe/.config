@@ -6,9 +6,11 @@ end
 M.buf = vim.lsp.buf
 M.cmd = vim.cmd
 M.fn = vim.fn
+M.fs_stat = vim.loop.fs_stat
 M.g = vim.g
 M.lsp = vim.lsp
 M.key = vim.keymap.set
+M.rtp = vim.opt.rtp
 M.set = vim.opt
 M.tbl_keys = vim.tbl_keys
 M.use = function(module)
