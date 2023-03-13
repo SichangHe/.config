@@ -328,6 +328,8 @@
     // prettier
     "prettier.tabWidth": 4,
     // python
+    "python.analysis.autoImportCompletions": true,
+    "python.analysis.autoImportUserSymbols": true,
     "python.analysis.completeFunctionParens": true,
     "python.analysis.diagnosticMode": "workspace",
     "python.analysis.inlayHints.functionReturnTypes": true,
@@ -406,6 +408,7 @@
     "terminal.integrated.fontFamily": "JetBrains Mono",
     "terminal.integrated.fontSize": 16,
     "terminal.integrated.inheritEnv": false,
+    "update.showReleaseNotes": false,
     // vscode-neovim
     "vscode-neovim.mouseSelectionStartVisualMode": true,
     "vscode-neovim.neovimExecutablePaths.darwin": "/opt/homebrew/bin/nvim",
