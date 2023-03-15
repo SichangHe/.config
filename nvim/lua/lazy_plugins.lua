@@ -37,6 +37,15 @@ return {
     },
 
     {
+        'ziontee113/icon-picker.nvim',
+        event = 'InsertEnter',
+        dependencies = { 'stevearc/dressing.nvim' },
+        opts = {
+            disable_legacy_commands = true,
+        },
+    },
+
+    {
         'windwp/nvim-autopairs',
         event = 'InsertEnter',
         config = true,
