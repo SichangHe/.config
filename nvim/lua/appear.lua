@@ -80,6 +80,21 @@ return {
     },
 
     {
+        'folke/todo-comments.nvim',
+        dependencies = { 'nvim-lua/plenary.nvim' },
+        opts = {
+            keywords = {
+                FIX = {
+                    alt = { 'Fix me', 'fix me' },
+                },
+                TODO = {
+                    alt = { 'todo', 'Todo' },
+                },
+            },
+        },
+    },
+
+    {
         "folke/trouble.nvim",
         event = 'CmdLineEnter',
         dependencies = "nvim-tree/nvim-web-devicons",
