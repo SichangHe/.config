@@ -32,6 +32,7 @@ function M.set()
     l('f', ':FzfLua blines<CR>')
     l('ff', ':FzfLua grep<CR>')
     l('j', ':FzfLua jumps<CR>')
+    l('l', ':lua ')
     l('dv', ':Diffview')
     l('rt', U.lsp.codelens.run)
     l('db', ":lua require('dapui').toggle()<CR>")
@@ -39,7 +40,7 @@ function M.set()
     l('co', function()
         return ':!co . && co --goto %:' .. current_line() .. '<CR>'
     end, { expr = true })
-    l('rrrr', ':lua AllConfig()<CR>:PackerCompile<CR>')
+    l('rrrr', ':lua AllConfig()<CR>')
 end
 
 return M

@@ -75,11 +75,6 @@ return {
     },
 
     {
-        'petertriho/nvim-scrollbar',
-        config = true,
-    },
-
-    {
         'folke/todo-comments.nvim',
         dependencies = { 'nvim-lua/plenary.nvim' },
         opts = {
