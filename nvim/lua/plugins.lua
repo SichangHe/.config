@@ -56,4 +56,11 @@ return {
             U.g.vim_markdown_folding_disabled = true
         end,
     },
+
+    {
+        'lervag/vimtex',
+        config = function()
+            U.g.vimtex_view_method = 'skim'
+        end,
+    },
 }

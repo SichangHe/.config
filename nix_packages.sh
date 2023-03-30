@@ -25,6 +25,7 @@ nix-env -ibA nixpkgs.meilisearch
 nix-env -ibA nixpkgs.mpv
 nix-env -ibA nixpkgs.ncdu
 nix-env -ibA nixpkgs.neofetch
+nix-env -ibA nixpkgs.onefetch
 nix-env -ibA nixpkgs.openconnect
 nix-env -ibA nixpkgs.perl
 nix-env -ibA nixpkgs.qpdf

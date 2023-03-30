@@ -104,6 +104,9 @@ return {
             local null_ls = require('null-ls')
             null_ls.setup {
                 sources = {
+                    -- LaTeX
+                    null_ls.builtins.formatting.bibclean,
+                    null_ls.builtins.formatting.latexindent,
                     -- prettier
                     null_ls.builtins.formatting.prettierd.with {
                         filetypes = {
