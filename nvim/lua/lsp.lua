@@ -50,6 +50,8 @@ return {
                 pyright = {},
                 solargraph = {},
                 svelte = {},
+                tailwindcss = {},
+                taplo = {},
                 tsserver = {},
             }
             local ensure = U.tbl_keys(servers)
