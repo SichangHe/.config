@@ -1,3 +1,5 @@
+U = require('util')
+U.g.neo_tree_remove_legacy_commands = true
 return {
     {
         'lukas-reineke/indent-blankline.nvim',
@@ -21,6 +23,17 @@ return {
                 lualine_z = { 'branch' },
             },
         },
+
+    },
+
+    {
+        'nvim-neo-tree/neo-tree.nvim',
+        dependencies = {
+            'MunifTanjim/nui.nvim',
+            'nvim-tree/nvim-web-devicons',
+            'nvim-lua/plenary.nvim',
+        },
+        event = 'CmdLineEnter',
     },
 
     {
@@ -90,9 +103,9 @@ return {
     },
 
     {
-        "folke/trouble.nvim",
+        'folke/trouble.nvim',
         event = 'CmdLineEnter',
-        dependencies = "nvim-tree/nvim-web-devicons",
+        dependencies = 'nvim-tree/nvim-web-devicons',
         opts = {
             position = 'right',
             autoclose = true,
