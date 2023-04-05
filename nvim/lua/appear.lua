@@ -34,6 +34,18 @@ return {
             'nvim-lua/plenary.nvim',
         },
         event = 'CmdLineEnter',
+        config = {
+            sort_case_insensitive = true,
+            window = {
+                position = 'right',
+                width = 80,
+            },
+            filesystem = {
+                follow_current_file = true,
+                hijack_netrw_behavior = 'open_current',
+                use_libuv_file_watcher = true,
+            },
+        },
     },
 
     {
