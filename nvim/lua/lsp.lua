@@ -47,6 +47,24 @@ return {
                 jsonls = {},
                 julials = {},
                 lua_ls = {},
+                pylsp = {
+                    pylsp = {
+                        plugins = {
+                            flake8 = {
+                                enabled = true,
+                            },
+                            jedi_hover = {
+                                enabled = false,
+                            },
+                            pycodestyle = {
+                                maxLineLength = 88,
+                            },
+                            pylint = {
+                                enabled = true,
+                            },
+                        },
+                    },
+                },
                 pyright = {},
                 solargraph = {},
                 svelte = {},
