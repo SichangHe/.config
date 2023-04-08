@@ -41,15 +41,14 @@ function M.set()
         return ':!co . && co --goto %:' .. current_line() .. '<CR>'
     end, { expr = true })
     l('vvvv', function()
-        if U.set.scrollbind:get() then
-            -- Toggle off.
-            return ':q<CR>:set noscrollbind<CR>'
-        end
-        local line = current_line() -- Remember current line.
-        return 'gg:set scrollbind<CR><C-w>v' -- Go to top, bind, split.
-            .. ':set noscrollbind<CR><C-f>2<C-e>' -- Unbind, down 1 page.
-            .. ':set scrollbind<CR><C-w>h' -- Bind, switch to left split.
-            .. line .. 'gg<C-w>l' -- Back to previous line, switch right.
+        return (U.set.scrollbind:get() and
+            -- Toggle off: close split, unbind, enable relative line number.
+            ':q<CR>:set noscrollbind<CR>:set relativenumber<CR>' or
+            (':set norelativenumber<CR>' -- Disable relative line number.
+            .. 'gg:set scrollbind<CR><C-w>v' -- Go to top, bind, split.
+            .. ':set noscrollbind<CR><C-f>' -- Unbind, down 1 page.
+            .. ':set scrollbind<CR>')) -- Bind.
+            .. current_line() .. 'gg' -- Back to previous line.
     end, {
         expr = true,
         desc = 'Toggle two column view.'
