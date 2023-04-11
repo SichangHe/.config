@@ -5,15 +5,14 @@ fish
 koekeishiya/formulae/skhd
 koekeishiya/formulae/yabai
 libpq
+librsvg
 markdownlint-cli2
 neovim
 pandoc
 python@3.10
-six
+python@3.8
 spim
-tcl-tk
 telnet
 wasmer
 watchexec
 yarn
-z3
