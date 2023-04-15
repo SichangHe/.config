@@ -59,9 +59,6 @@ return {
                             pycodestyle = {
                                 maxLineLength = 88,
                             },
-                            pylint = {
-                                enabled = true,
-                            },
                         },
                     },
                 },
