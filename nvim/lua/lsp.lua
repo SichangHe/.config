@@ -48,6 +48,7 @@ return {
                 julials = {},
                 lua_ls = {},
                 pylsp = {
+                    autostart = false,
                     pylsp = {
                         plugins = {
                             flake8 = {
@@ -85,6 +86,7 @@ return {
                 function(name)
                     if servers[name] then
                         require('lspconfig')[name].setup {
+                            autostart = servers[name].autostart,
                             capabilities = capabilities,
                             settings = servers[name],
                         }
@@ -147,7 +149,13 @@ return {
                             '$FILENAME'
                         },
                     },
-                    null_ls.builtins.formatting.markdownlint,
+                    null_ls.builtins.formatting.markdownlint.with {
+                        command = 'markdownlint-cli2-config',
+                        args = {
+                            U.fn.expand('~/.config/fix.markdownlint-cli2.jsonc'),
+                            '$FILENAME'
+                        },
+                    },
                 },
             }
         end,
