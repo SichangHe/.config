@@ -14,6 +14,7 @@ nix-env -ibA nixpkgs.deno
 nix-env -ibA nixpkgs.docker
 nix-env -ibA nixpkgs.dprint
 nix-env -ibA nixpkgs.du-dust
+nix-env -ibA nixpkgs.exa
 nix-env -ibA nixpkgs.exercism
 nix-env -ibA nixpkgs.fd
 nix-env -ibA nixpkgs.fzf
@@ -24,6 +25,7 @@ nix-env -ibA nixpkgs.just
 nix-env -ibA nixpkgs.lynx
 nix-env -ibA nixpkgs.meilisearch
 nix-env -ibA nixpkgs.mpv
+nix-env -ibA nixpkgs.neovim
 nix-env -ibA nixpkgs.ncdu
 nix-env -ibA nixpkgs.neofetch
 nix-env -ibA nixpkgs.onefetch
