@@ -1,11 +1,15 @@
 add_newline = false
 format = "$character "
-right_format = "$directory$git_branch$git_commit$git_state$git_metrics$git_status$hg_branch$cmd_duration"
+right_format = "$hostname$directory$git_branch$git_commit$git_state$git_metrics$git_status$hg_branch$cmd_duration"
 
 [character]
 error_symbol = "[❯](red)"
 success_symbol = "[❯](green)"
 format = "$symbol"
+
+[hostname]
+ssh_only = true
+format = '[$hostname](bold red) '
 
 [directory]
 truncation_length = 5
