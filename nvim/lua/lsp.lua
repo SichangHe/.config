@@ -39,6 +39,7 @@ return {
         },
         config = function()
             local servers = {
+                bashls = {},
                 clangd = {},
                 cssls = {},
                 elixirls = {},

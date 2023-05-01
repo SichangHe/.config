@@ -281,7 +281,6 @@
     "markdown-preview-enhanced.breakOnSingleNewLine": false,
     "markdown-preview-enhanced.enableScriptExecution": true,
     "markdown-preview-enhanced.previewTheme": "github-light.css",
-    "markdown-preview-enhanced.liveUpdate": false,
     "markdown-preview-enhanced.singlePreview": false,
     // markdownlint
     "markdownlint.config": {

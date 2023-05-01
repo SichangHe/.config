@@ -1,8 +1,8 @@
 bibclean
+chiselstrike/tap/turso
 elixir-ls
 exa
 fish
-koekeishiya/formulae/skhd
 koekeishiya/formulae/yabai
 libpq
 librsvg
