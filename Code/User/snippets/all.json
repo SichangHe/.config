@@ -1,0 +1,63 @@
+{
+	"name": {
+		"prefix": "steven",
+		"body": "Steven Hé (Sīchàng)",
+		"description": "snippet for name"
+	},
+	"double right arrow": {
+		"prefix": "Rarrow",
+		"body": "⇒"
+	},
+	"right arrow": {
+		"prefix": "rarrow",
+		"body": "→"
+	},
+	"left right arrow": {
+		"prefix": "lrarrow",
+		"body": "↔"
+	},
+	"double left right arrow": {
+		"prefix": "LRarrow",
+		"body": "⇔"
+	},
+	"for all": {
+		"prefix": "forall",
+		"body": "∀"
+	},
+	"there exists": {
+		"prefix": "exists",
+		"body": "∃"
+	},
+	"times": {
+		"prefix": "times",
+		"body": "×"
+	},
+	"is subset of": {
+		"prefix": "subseteq",
+		"body": "⊆"
+	},
+	"empty set": {
+		"prefix": "empty",
+		"body": "∅"
+	},
+	"sim": {
+		"prefix": "sim",
+		"body": "∼"
+	},
+	"infinity": {
+		"prefix": "infty",
+		"body": "∞"
+	},
+	"quotes": {
+		"prefix": "quote",
+		"body": "“$0”"
+	},
+	"enter": {
+		"prefix": "enter",
+		"body": "⏎"
+	},
+	"alpha": {
+		"prefix": "alpha",
+		"body": "α"
+	}
+}
