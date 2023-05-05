@@ -382,7 +382,7 @@
                         "manipulators": [
                             {
                                 "from": {
-                                    "key_code": "q",
+                                    "key_code": "w",
                                     "modifiers": {
                                         "mandatory": [
                                             "shift",
