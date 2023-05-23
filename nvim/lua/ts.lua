@@ -9,8 +9,8 @@ return {
         },
         config = function()
             local function disable(lang, bufnr)
-                -- Prevent stuck by single line huge file.
-                return U.api.nvim_buf_line_count(bufnr) < 2
+                -- Prevent stuck by large file or single line huge file.
+                return U.b.large_buf or U.api.nvim_buf_line_count(bufnr) < 2
             end
             require('nvim-treesitter.configs').setup {
                 highlight = {

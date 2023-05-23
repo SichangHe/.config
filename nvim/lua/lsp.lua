@@ -83,14 +83,23 @@ return {
             require('mason-lspconfig').setup {
                 ensure_installed = ensure,
             }
+            local lspconfig = require('lspconfig')
             require('mason-lspconfig').setup_handlers {
                 function(name)
                     if servers[name] then
-                        require('lspconfig')[name].setup {
+                        local conf = lspconfig[name]
+                        conf.setup {
                             autostart = servers[name].autostart,
                             capabilities = capabilities,
                             settings = servers[name],
                         }
+                        -- Disable LSP on large buffer.
+                        local try_add = conf.manager.try_add
+                        conf.manager.try_add = function(bufnr)
+                            if not U.b.large_buf then
+                                return try_add(bufnr)
+                            end
+                        end
                     end
                 end
             }
@@ -146,14 +155,14 @@ return {
                     null_ls.builtins.diagnostics.markdownlint_cli2.with {
                         command = 'markdownlint-cli2-config',
                         args = {
-                            U.fn.expand('~/.config/.markdownlint-cli2.jsonc'),
+                            U.expand('~/.config/.markdownlint-cli2.jsonc'),
                             '$FILENAME'
                         },
                     },
                     null_ls.builtins.formatting.markdownlint.with {
                         command = 'markdownlint-cli2-config',
                         args = {
-                            U.fn.expand('~/.config/fix.markdownlint-cli2.jsonc'),
+                            U.expand('~/.config/fix.markdownlint-cli2.jsonc'),
                             '$FILENAME'
                         },
                     },

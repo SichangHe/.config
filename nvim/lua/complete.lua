@@ -20,7 +20,7 @@ return {
             local snip = require('luasnip')
             require("luasnip.loaders.from_vscode").lazy_load {}
             require("luasnip.loaders.from_vscode").lazy_load {
-                paths = { U.fn.expand('~/.config/Code/User/snippets') },
+                paths = { U.expand('~/.config/Code/User/snippets') },
             }
             cmp.setup {
                 snippet = {

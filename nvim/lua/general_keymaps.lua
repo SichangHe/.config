@@ -31,6 +31,7 @@ function M.set()
     s('$$')
     s('*')
     s('**')
+    s([[r#"]], [["#]])
 end
 
 return M
