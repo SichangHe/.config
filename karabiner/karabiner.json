@@ -1184,13 +1184,54 @@
                         ]
                     },
                     {
+                        "description": "hyper' + / -> focus Help menu",
+                        "manipulators": [
+                            {
+                                "from": {
+                                    "key_code": "slash",
+                                    "modifiers": {
+                                        "mandatory": [
+                                            "right_command",
+                                            "right_control",
+                                            "right_option"
+                                        ]
+                                    }
+                                },
+                                "to": [
+                                    {
+                                        "key_code": "f2",
+                                        "modifiers": [
+                                            "right_control"
+                                        ]
+                                    },
+                                    {
+                                        "key_code": "h"
+                                    },
+                                    {
+                                        "key_code": "e"
+                                    },
+                                    {
+                                        "key_code": "l"
+                                    },
+                                    {
+                                        "key_code": "p"
+                                    },
+                                    {
+                                        "key_code": "return_or_enter"
+                                    }
+                                ],
+                                "type": "basic"
+                            }
+                        ]
+                    },
+                    {
                         "description": "Number pad 1",
                         "manipulators": [
                             {
                                 "description": "fn + u = 1",
                                 "from": {
                                     "key_code": "u",
-                                        "modifiers": {
+                                    "modifiers": {
                                         "mandatory": "fn"
                                     }
                                 },
