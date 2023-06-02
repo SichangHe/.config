@@ -55,3 +55,6 @@ set -gx FZF_DEFAULT_COMMAND 'fd -H --strip-cwd-prefix -E ".git"'
 if type -q sccache
     set -gx RUSTC_WRAPPER sccache
 end
+
+# Cargo use Git CLI.
+set -gx CARGO_NET_GIT_FETCH_WITH_CLI true

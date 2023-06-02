@@ -8,9 +8,33 @@ return {
     },
 
     {
+        'zbirenbaum/copilot.lua',
+        config = {
+            panel = {
+                enabled = false,
+            },
+            suggestion = {
+                enabled = false,
+            },
+            filetypes = {
+                yaml = true,
+                markdown = true,
+            },
+        },
+        event = 'VeryLazy',
+    },
+
+    {
+        'zbirenbaum/copilot-cmp',
+        config = true,
+        event = 'VeryLazy',
+    },
+
+    {
         'hrsh7th/nvim-cmp',
         dependencies = {
             'saadparwaiz1/cmp_luasnip',
+            'zbirenbaum/copilot-cmp',
             'hrsh7th/cmp-nvim-lsp',
             'rafamadriz/friendly-snippets',
             'L3MON4D3/LuaSnip',
@@ -60,6 +84,7 @@ return {
                     end, { 'i', 's' }),
                 },
                 sources = {
+                    { name = 'copilot' },
                     { name = 'nvim_lsp' },
                     { name = 'luasnip' },
                     { name = 'buffer' },
