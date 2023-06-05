@@ -83,9 +83,9 @@ return {
                     rainbowcol4 = { fg = 'DarkBlue' },
                     rainbowcol5 = { fg = 'DarkRed' },
                     rainbowcol6 = { fg = 'DarkGray' },
-                    IlluminatedWordText = { bg = '#fff0fb' },
-                    IlluminatedWordRead = { bg = '#fff0fb' },
-                    IlluminatedWordWrite = { bg = '#fff0fb' },
+                    IlluminatedWordText = { bg = '#f6d5f5' },
+                    IlluminatedWordRead = { bg = '#f6d5f5' },
+                    IlluminatedWordWrite = { bg = '#f6d5f5' },
                     -- Spell highlight only add underlines.
                     SpellBad = { fg = 'unset', bg = 'unset' },
                     SpellCap = { fg = 'unset', bg = 'unset' },

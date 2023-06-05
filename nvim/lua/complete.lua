@@ -84,10 +84,10 @@ return {
                     end, { 'i', 's' }),
                 },
                 sources = {
-                    { name = 'copilot' },
                     { name = 'nvim_lsp' },
                     { name = 'luasnip' },
                     { name = 'buffer' },
+                    { name = 'copilot' },
                     { name = 'cmp_tabnine' },
                 },
             }

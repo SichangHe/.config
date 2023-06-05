@@ -23,7 +23,7 @@ end
 alias gt='git status --short --branch'
 alias ga='git add . && gt'
 alias gc='git commit -am '
-alias gs='git remote | xargs -P0 -L1 git push && git pull'
+alias gs='git remote | xargs -P0 -L1 git push && git pull --recurse-submodules'
 
 # exa
 if type -q exa
