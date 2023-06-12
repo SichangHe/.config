@@ -250,7 +250,7 @@
                                 },
                                 "to": [
                                     {
-                                        "shell_command": "/opt/homebrew/bin/luajit ~/.config/helper.lua/yabai.lua last"
+                                        "shell_command": "~/.cargo/bin/yabaiswitch last"
                                     }
                                 ],
                                 "type": "basic"
@@ -273,7 +273,7 @@
                                 },
                                 "to": [
                                     {
-                                        "shell_command": "/opt/homebrew/bin/luajit ~/.config/helper.lua/yabai.lua next"
+                                        "shell_command": "~/.cargo/bin/yabaiswitch next"
                                     }
                                 ],
                                 "type": "basic"
@@ -1153,7 +1153,7 @@
                                 },
                                 "to": [
                                     {
-                                        "shell_command": "/opt/homebrew/bin/luajit ~/.config/helper.lua/yabai.lua info"
+                                        "shell_command": "~/.cargo/bin/yabaiswitch info"
                                     }
                                 ],
                                 "type": "basic"
