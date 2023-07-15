@@ -1,6 +1,5 @@
 ln -s ~/.config/curlrc ~/.curlrc
 ln -s ~/.config/markdownlintrc.jsonc ~/.markdownlintr
-ln -s ~/.config/SpaceVim.d/ ~/.SpaceVim.d
 ln -s ~/.config/Code ~/.vscode
 ln -s ~/.config/Code ~/.vscode-oss
 ln -s ~/.config/Code ~/.vscode-insider
@@ -12,6 +11,7 @@ ln -s ~/.config/Code ~/Library/Application\ Support/VSCodium
 ln -s ~/.config/Code ~/Library/Application\ Support/Code
 ln -s ~/.config/Code ~/Library/Application\ Support/Code\ -\ Insiders
 ln -s ~/.config/Rime ~/Library/Rime
+ln -s ~/.config/Xcode ~/Library/Developer/Xcode
 
 # linux
 ln -s ~/.config/Code ~/.local/share/code-server
