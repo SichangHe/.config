@@ -5,7 +5,7 @@ patch:
   ascii_composer/switch_key:
     Shift_L: noop
     Shift_R: noop
+    Control_L: commit_code
   key_binder/bindings:
-    - {accept: "Control+space", toggle: ascii_mode, when: always}
     - {accept: "Control+j", send: Page_Down, when: has_menu}
     - {accept: "Control+k", send: Page_Up, when: has_menu}
