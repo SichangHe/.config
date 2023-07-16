@@ -175,6 +175,7 @@
         "WLOG",
         "Wronskian"
     ],
+    "debug.internalConsoleOptions": "openOnSessionStart",
     // deno
     "deno.enable": true,
     // editor
@@ -415,8 +416,6 @@
     // window
     "window.title": "${dirty}${activeEditorLong} ㅤ ㅤ ${rootName}",
     "window.zoomLevel": 3,
-    // workbench
-    "workbench.activityBar.visible": false,
     "workbench.colorCustomizations": {
         "editorBracketHighlight.foreground1": "#000000",
         "editorBracketHighlight.foreground2": "#004F27",
@@ -440,6 +439,10 @@
     },
     "[css]": {
         "editor.defaultFormatter": "vscode.css-language-features"
+    },
+    "[dart]": {
+        "editor.selectionHighlight": false,
+        "editor.suggestSelection": "first",
     },
     "[html]": {
         "editor.defaultFormatter": "esbenp.prettier-vscode"

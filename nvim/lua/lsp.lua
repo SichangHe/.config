@@ -1,5 +1,12 @@
 return {
     {
+        'akinsho/flutter-tools.nvim',
+        ft = { 'dart' },
+        dependencies = { 'stevearc/dressing.nvim', 'nvim-lua/plenary.nvim' },
+        config = true,
+    },
+
+    {
         'glepnir/lspsaga.nvim',
         event = 'VeryLazy',
         dependencies = { 'nvim-tree/nvim-web-devicons' },

@@ -9,6 +9,7 @@
   "crates.nvim": { "branch": "main", "commit": "3648f8787656d7572740560331553abdaa8cb982" },
   "diffview.nvim": { "branch": "main", "commit": "86bf6182e2ea767c21711de8a3c396d9b635d970" },
   "dressing.nvim": { "branch": "master", "commit": "f19cbd56f7f8cad212c58a7285d09c5d9c273896" },
+  "flutter-tools.nvim": { "branch": "main", "commit": "7850a771c4e773dc49d63081f508d004b416c13e" },
   "friendly-snippets": { "branch": "main", "commit": "0dd6114bea08276d9111d58c5dce5e256bbc8921" },
   "fzf-lua": { "branch": "main", "commit": "0f953fd7a35d22e1409d5ce77bbacef9cf07e2cb" },
   "gitsigns.nvim": { "branch": "main", "commit": "f868d82a36f7f7f5e110eb0a9659993984f59875" },
