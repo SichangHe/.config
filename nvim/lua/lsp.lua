@@ -110,6 +110,11 @@ return {
                     end
                 end
             }
+            -- Other LSPs.
+            lspconfig["sourcekit"].setup {
+                capabilities = capabilities,
+                settings = {},
+            }
         end,
     },
 
