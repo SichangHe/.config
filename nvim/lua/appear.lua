@@ -123,4 +123,9 @@ return {
             autoclose = true,
         },
     },
+
+    {
+        'powerman/vim-plugin-AnsiEsc',
+        event = 'VeryLazy',
+    },
 }
