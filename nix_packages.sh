@@ -32,6 +32,7 @@ nix-env -ibA nixpkgs.neofetch
 nix-env -ibA nixpkgs.onefetch
 nix-env -ibA nixpkgs.openconnect
 nix-env -ibA nixpkgs.perl
+nix-env -ibA nixpkgs.protobuf
 nix-env -ibA nixpkgs.qpdf
 nix-env -ibA nixpkgs.R
 nix-env -ibA nixpkgs.ripgrep

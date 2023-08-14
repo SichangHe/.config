@@ -478,4 +478,5 @@
         "editor.defaultFormatter": "zgm.vscode-fish"
     },
     "clang-tidy.executable": "/opt/homebrew/opt/llvm/bin/clang-tidy",
+    "workbench.activityBar.visible": false,
 }

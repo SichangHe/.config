@@ -105,7 +105,7 @@ return {
         opts = {
             keywords = {
                 FIX = {
-                    alt = { 'Fix me', 'fix me' },
+                    alt = { 'FIXME', 'Fix me', 'fix me' },
                 },
                 TODO = {
                     alt = { 'todo', 'Todo' },
