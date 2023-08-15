@@ -11,7 +11,6 @@ nix-env -ibA nixpkgs.cmake
 nix-env -ibA nixpkgs.coreutils
 nix-env -ibA nixpkgs.delta
 nix-env -ibA nixpkgs.deno
-nix-env -ibA nixpkgs.docker
 nix-env -ibA nixpkgs.dprint
 nix-env -ibA nixpkgs.du-dust
 nix-env -ibA nixpkgs.exa
@@ -37,6 +36,7 @@ nix-env -ibA nixpkgs.qpdf
 nix-env -ibA nixpkgs.R
 nix-env -ibA nixpkgs.ripgrep
 nix-env -ibA nixpkgs.ruby
+nix-env -ibA nixpkgs.rubyPackages.cocoapods
 nix-env -ibA nixpkgs.rust-analyzer
 nix-env -ibA nixpkgs.sccache
 nix-env -ibA nixpkgs.sd
