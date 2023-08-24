@@ -54,20 +54,23 @@ return {
                 html = {},
                 jsonls = {},
                 julials = {},
-                lua_ls = {},
+                lua_ls = {
+                    Lua = {
+                        workspace = {
+                            checkThirdParty = false,
+                        },
+                    },
+                },
                 pylsp = {
                     pylsp = {
                         configurationSources = { 'mypy', 'ruff' },
                         plugins = {
-                            autopep8 = { enabled = false},
+                            autopep8 = { enabled = false },
                             black = { enabled = true },
                             isort = { enabled = true },
                             jedi_completion = {
                                 eager = true,
                                 fuzzy = true,
-                            },
-                            jedi_hover = {
-                                enabled = false,
                             },
                             mccabe = { enabled = false },
                             mypy = {
