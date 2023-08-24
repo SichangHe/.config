@@ -1,6 +1,8 @@
 U = require('util')
 local util = vim.lsp.util
 
+local ___ = '─────────────────────────────────────────────────────────────────────────────'
+
 -- Copied from
 -- <https://github.com/lewis6991/hover.nvim/issues/34#issuecomment-1625662866>
 -- and
@@ -25,19 +27,22 @@ local LSPWithDiagSource = {
                     end
                     local new = util.convert_input_to_markdown_lines(contents)
                     new = util.trim_empty_lines(new or {})
-                    print(lines)
-                    print(new)
+                    if not vim.tbl_isempty(lines) and not vim.tbl_isempty(new) then
+                        table.insert(lines, ___)
+                    end
                     lines = U.fn.extend(lines, new)
                 end
             end
 
             local _, row = unpack(vim.fn.getpos('.'))
-            row = row - 1
-            local lineDiag = vim.diagnostic.get(0, { lnum = row })
+            local lineDiag = vim.diagnostic.get(0, { lnum = row - 1 })
             if #lineDiag > 0 then
+                if not vim.tbl_isempty(lines) then
+                    table.insert(lines, ___)
+                end
                 for _, d in pairs(lineDiag) do
                     if d.message then
-                        table.insert(lines, string.format('[%s] - %s', d.source, d.message))
+                        table.insert(lines, string.format('*%s* %s', d.source, d.message))
                     end
                 end
             end
@@ -47,9 +52,9 @@ local LSPWithDiagSource = {
 
             if not vim.tbl_isempty(lines) then
                 done({ lines = lines, filetype = kind })
-                return
+            else
+                done()
             end
-            done()
         end)
     end,
 }
