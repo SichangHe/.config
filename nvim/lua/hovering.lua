@@ -1,4 +1,5 @@
 U = require('util')
+local util = vim.lsp.util
 
 -- Copied from
 -- <https://github.com/lewis6991/hover.nvim/issues/34#issuecomment-1625662866>
@@ -11,8 +12,6 @@ local LSPWithDiagSource = {
         return true
     end,
     execute = function(done)
-        local util = vim.lsp.util
-
         local params = util.make_position_params()
         local lines = {}
         vim.lsp.buf_request_all(0, 'textDocument/hover', params, function(responses)
@@ -20,8 +19,10 @@ local LSPWithDiagSource = {
             for _, response in pairs(responses) do
                 if response.result and response.result.contents then
                     lang = response.result.contents.language or 'markdown'
-                    lines = util.convert_input_to_markdown_lines(response.result.contents or
-                        { kind = 'markdown', value = '' })
+                    lines = util.convert_input_to_markdown_lines(
+                        response.result.contents or { kind = 'markdown', value = '' },
+                        lines or {}
+                    )
                     lines = util.trim_empty_lines(lines or {})
                 end
             end
@@ -45,7 +46,7 @@ local LSPWithDiagSource = {
             end
 
             if not vim.tbl_isempty(lines) then
-                done({ lines = lines, filetype = 'markdown' })
+                done({ lines = lines, filetype = lang })
                 return
             end
             done()
