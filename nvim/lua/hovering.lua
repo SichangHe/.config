@@ -13,31 +13,31 @@ local LSPWithDiagSource = {
     end,
     execute = function(done)
         local params = util.make_position_params()
-        local lines = {}
         vim.lsp.buf_request_all(0, 'textDocument/hover', params, function(responses)
-            local lang = 'markdown'
+            local kind = 'markdown'
+            local lines = {}
             for _, response in pairs(responses) do
-                if response.result and response.result.contents then
-                    lang = response.result.contents.language or 'markdown'
-                    lines = util.convert_input_to_markdown_lines(
-                        response.result.contents or { kind = 'markdown', value = '' },
-                        lines or {}
-                    )
-                    lines = util.trim_empty_lines(lines or {})
+                local result = response.result
+                if result and result.contents and result.contents.value then
+                    local contents = result.contents
+                    if contents.kind and result.contents.kind ~= 'markdown' then
+                        kind = contents.kind
+                    end
+                    local new = util.convert_input_to_markdown_lines(contents)
+                    new = util.trim_empty_lines(new or {})
+                    print(lines)
+                    print(new)
+                    lines = U.fn.extend(lines, new)
                 end
             end
 
-            local unused
             local _, row = unpack(vim.fn.getpos('.'))
             row = row - 1
             local lineDiag = vim.diagnostic.get(0, { lnum = row })
             if #lineDiag > 0 then
                 for _, d in pairs(lineDiag) do
                     if d.message then
-                        lines = util.trim_empty_lines(util.convert_input_to_markdown_lines({
-                            language = lang,
-                            value = string.format('[%s] - %s', d.source, d.message),
-                        }, lines or {}))
+                        table.insert(lines, string.format('[%s] - %s', d.source, d.message))
                     end
                 end
             end
@@ -46,7 +46,7 @@ local LSPWithDiagSource = {
             end
 
             if not vim.tbl_isempty(lines) then
-                done({ lines = lines, filetype = lang })
+                done({ lines = lines, filetype = kind })
                 return
             end
             done()
