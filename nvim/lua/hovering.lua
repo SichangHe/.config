@@ -1,7 +1,7 @@
 U = require('util')
 local util = vim.lsp.util
 
-local ___ = '─────────────────────────────────────────────────────────────────────────────'
+local ___ = '\n─────────────────────────────────────────────────────────────────────────────\n'
 
 -- Copied from
 -- <https://github.com/lewis6991/hover.nvim/issues/34#issuecomment-1625662866>
@@ -16,42 +16,31 @@ local LSPWithDiagSource = {
     execute = function(done)
         local params = util.make_position_params()
         vim.lsp.buf_request_all(0, 'textDocument/hover', params, function(responses)
-            local kind = 'markdown'
-            local lines = {}
+            local value = ''
             for _, response in pairs(responses) do
                 local result = response.result
                 if result and result.contents and result.contents.value then
-                    local contents = result.contents
-                    if contents.kind and result.contents.kind ~= 'markdown' then
-                        kind = contents.kind
+                    if value ~= '' then
+                        value = value .. ___
                     end
-                    local new = util.convert_input_to_markdown_lines(contents)
-                    new = util.trim_empty_lines(new or {})
-                    if not vim.tbl_isempty(lines) and not vim.tbl_isempty(new) then
-                        table.insert(lines, ___)
-                    end
-                    lines = U.fn.extend(lines, new)
+                    value = value .. result.contents.value
                 end
             end
 
             local _, row = unpack(vim.fn.getpos('.'))
             local lineDiag = vim.diagnostic.get(0, { lnum = row - 1 })
-            if #lineDiag > 0 then
-                if not vim.tbl_isempty(lines) then
-                    table.insert(lines, ___)
-                end
-                for _, d in pairs(lineDiag) do
-                    if d.message then
-                        table.insert(lines, string.format('*%s* %s', d.source, d.message))
+            for _, d in pairs(lineDiag) do
+                if d.message then
+                    if value ~= '' then
+                        value = value .. ___
                     end
+                    value = value .. string.format('*%s* %s', d.source, d.message)
                 end
             end
-            for _, l in pairs(lines) do
-                l = l:gsub('\r', '')
-            end
+            value = value:gsub('\r', '')
 
-            if not vim.tbl_isempty(lines) then
-                done({ lines = lines, filetype = kind })
+            if value ~= '' then
+                done({ lines = vim.split(value, '\n', true), filetype = 'markdown' })
             else
                 done()
             end
