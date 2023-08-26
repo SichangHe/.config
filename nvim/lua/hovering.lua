@@ -8,7 +8,7 @@ local ___ = '\n─────────────────────�
 -- and
 -- <https://github.com/WillEhrendreich/nvimconfig/blob/c7d8aed0291ee74887dd3a4ea512398a406b82a6/lua/plugins/hover.lua>.
 local LSPWithDiagSource = {
-    name = 'LSPWithDiag',
+    name = 'LSP',
     priority = 1000,
     enabled = function()
         return true

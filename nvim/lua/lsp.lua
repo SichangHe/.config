@@ -66,8 +66,6 @@ return {
                         configurationSources = { 'mypy', 'ruff' },
                         plugins = {
                             autopep8 = { enabled = false },
-                            black = { enabled = true },
-                            isort = { enabled = true },
                             jedi_completion = {
                                 eager = true,
                                 fuzzy = true,
@@ -80,6 +78,7 @@ return {
                             pycodestyle = { enabled = false },
                             pyflakes = { enabled = false },
                             ruff = { enabled = true },
+                            yapf = { enabled = false },
                         },
                     },
                 },
@@ -172,6 +171,8 @@ return {
                             "jsonc",
                         },
                     },
+                    null_ls.builtins.formatting.isort,
+                    null_ls.builtins.formatting.black,
                     -- markdownlint
                     null_ls.builtins.diagnostics.markdownlint_cli2.with {
                         command = 'markdownlint-cli2-config',
