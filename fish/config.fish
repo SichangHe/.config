@@ -64,3 +64,6 @@ end
 
 # Cargo use Git CLI.
 set -gx CARGO_NET_GIT_FETCH_WITH_CLI true
+
+# Bloody Pip global install.
+set -gx PIP_BREAK_SYSTEM_PACKAGES 1

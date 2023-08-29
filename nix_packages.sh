@@ -20,6 +20,8 @@ nix-env -ibA nixpkgs.neofetch
 nix-env -ibA nixpkgs.neovim
 nix-env -ibA nixpkgs.nodejs
 nix-env -ibA nixpkgs.onefetch
+nix-env -ibA nixpkgs.python3
+nix-env -ibA nixpkgs.python3Packages.pip
 nix-env -ibA nixpkgs.ripgrep
 nix-env -ibA nixpkgs.sccache
 nix-env -ibA nixpkgs.sd
