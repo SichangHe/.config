@@ -18,6 +18,7 @@ nix-env -ibA nixpkgs.mpv
 nix-env -ibA nixpkgs.ncdu
 nix-env -ibA nixpkgs.neofetch
 nix-env -ibA nixpkgs.neovim
+nix-env -ibA nixpkgs.nodejs
 nix-env -ibA nixpkgs.onefetch
 nix-env -ibA nixpkgs.ripgrep
 nix-env -ibA nixpkgs.sccache
@@ -42,6 +43,7 @@ nix-env -ibA nixpkgs.speedtest-cli
 nix-env -ibA nixpkgs.tmux
 nix-env -ibA nixpkgs.tokei
 nix-env -ibA nixpkgs.unpaper
+nix-env -ibA nixpkgs.unzip
 nix-env -ibA nixpkgs.xdg-ninja
 
 else if [ $UNAME = Linux ] # Linux
