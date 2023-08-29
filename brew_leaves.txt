@@ -1,3 +1,5 @@
+bgpdump
+bgpq3
 bibclean
 chiselstrike/tap/turso
 elixir-ls
@@ -12,7 +14,7 @@ pandoc
 python@3.10
 python@3.11
 python@3.8
-spim
+swiftformat
 telnet
 wasmer
 watchexec
