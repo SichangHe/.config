@@ -23,6 +23,7 @@ nix-env -ibA nixpkgs.mpv
 nix-env -ibA nixpkgs.ncdu
 nix-env -ibA nixpkgs.neofetch
 nix-env -ibA nixpkgs.neovim
+nix-env -ibA nixpkgs.nodejs
 nix-env -ibA nixpkgs.onefetch
 nix-env -ibA nixpkgs.pkg-config
 nix-env -ibA nixpkgs.poppler_utils # for pdfimages
@@ -37,5 +38,6 @@ nix-env -ibA nixpkgs.tealdeer
 nix-env -ibA nixpkgs.tmux
 nix-env -ibA nixpkgs.tokei
 nix-env -ibA nixpkgs.unpaper
+nix-env -ibA nixpkgs.unzip
 nix-env -ibA nixpkgs.xdg-ninja
 nix-env -ibA nixpkgs.zoxide
