@@ -15,6 +15,7 @@ function M.set()
     n('gy', U.buf.type_definition)
     n('gr', U.buf.references)
     n('K', U.buf.hover)
+    n('z=', ':FzfLua spell_suggest<CR>')
     n('<F2>', U.buf.rename)
     l('w', '<C-W>')
     l('s', function()
@@ -43,13 +44,13 @@ function M.set()
     end, { expr = true })
     l('vvvv', function()
         return (U.set.scrollbind:get() and
-            -- Toggle off: close split, unbind, enable relative line number.
-            ':q<CR>:set noscrollbind<CR>:set relativenumber<CR>' or
-            (':set norelativenumber<CR>' -- Disable relative line number.
-            .. 'gg:set scrollbind<CR><C-w>v' -- Go to top, bind, split.
-            .. ':set noscrollbind<CR><C-f>' -- Unbind, down 1 page.
-            .. ':set scrollbind<CR>')) -- Bind.
-            .. current_line() .. 'gg' -- Back to previous line.
+                -- Toggle off: close split, unbind, enable relative line number.
+                ':q<CR>:set noscrollbind<CR>:set relativenumber<CR>' or
+                (':set norelativenumber<CR>'     -- Disable relative line number.
+                    .. 'gg:set scrollbind<CR><C-w>v' -- Go to top, bind, split.
+                    .. ':set noscrollbind<CR><C-f>' -- Unbind, down 1 page.
+                    .. ':set scrollbind<CR>'))   -- Bind.
+            .. current_line() .. 'gg'            -- Back to previous line.
     end, {
         expr = true,
         desc = 'Toggle two column view.'
