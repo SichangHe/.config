@@ -88,6 +88,7 @@ return {
                 tailwindcss = {},
                 taplo = {},
                 tsserver = {},
+                vale_ls = {},
             }
             local ensure = U.tbl_keys(servers)
             for _, v in ipairs({
