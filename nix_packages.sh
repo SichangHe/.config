@@ -22,6 +22,7 @@ nix-env -ibA nixpkgs.ncdu
 nix-env -ibA nixpkgs.neofetch
 nix-env -ibA nixpkgs.neovim
 nix-env -ibA nixpkgs.onefetch
+nix-env -ibA nixpkgs.pkg-config
 nix-env -ibA nixpkgs.poppler_utils # for pdfimages
 nix-env -ibA nixpkgs.protobuf
 nix-env -ibA nixpkgs.qpdf
