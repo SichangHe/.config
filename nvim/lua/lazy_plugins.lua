@@ -24,7 +24,11 @@ return {
         event = 'CmdLineEnter',
         dependencies = { 'nvim-tree/nvim-web-devicons' },
         opts = {
-            fullscreen = true,
+            winopts = {
+                border = 'none',
+                height = 1,
+                width = 1,
+            },
             previewers = {
                 builtin = {
                     extensions = {
