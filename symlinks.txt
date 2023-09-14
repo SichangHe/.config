@@ -6,6 +6,7 @@ ln -s ~/.config/Code ~/.vscode-insider
 ln -s ~/.config/mume ~/.local/state/mume
 ln -s ~/.config/clang-format.yml ~/.clang-format
 ln -s ~/.config/.vale.ini ~/.vale.ini
+ln -s ~/.config/.latexmkrc ~/.latexmkrc
 
 # macOS
 ln -s ~/.config/Code ~/Library/Application\ Support/VSCodium
