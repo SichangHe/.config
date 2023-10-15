@@ -16,6 +16,8 @@ function M.set()
     }
     set.mouse = 'a'
     set.relativenumber = true
+    set.numberwidth = 1
+    set.signcolumn = 'number'
     set.scrolloff = 3
     set.shiftwidth = 4
     set.spell = true

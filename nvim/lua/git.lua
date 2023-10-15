@@ -10,7 +10,10 @@ return {
 
     {
         'lewis6991/gitsigns.nvim',
-        config = true,
+        config = {
+            signcolumn = false,
+            numhl = true,
+        },
     },
 
     {
