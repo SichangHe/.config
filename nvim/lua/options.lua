@@ -15,7 +15,6 @@ function M.set()
         trail = '·',
     }
     set.mouse = 'a'
-    set.number = true
     set.relativenumber = true
     set.scrolloff = 3
     set.shiftwidth = 4
