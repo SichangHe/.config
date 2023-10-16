@@ -9,7 +9,6 @@ nix-env -ibA nixpkgs.cmake
 nix-env -ibA nixpkgs.delta
 nix-env -ibA nixpkgs.du-dust
 nix-env -ibA nixpkgs.eza
-nix-env -ibA nixpkgs.exercism
 nix-env -ibA nixpkgs.fd
 nix-env -ibA nixpkgs.fzf
 nix-env -ibA nixpkgs.git-lfs
@@ -26,7 +25,5 @@ nix-env -ibA nixpkgs.ripgrep
 nix-env -ibA nixpkgs.sccache
 nix-env -ibA nixpkgs.sd
 nix-env -ibA nixpkgs.starship
-nix-env -ibA nixpkgs.tealdeer
-nix-env -ibA nixpkgs.tmux
 nix-env -ibA nixpkgs.unzip
 nix-env -ibA nixpkgs.zoxide
