@@ -3,8 +3,14 @@ U.g.neo_tree_remove_legacy_commands = true
 return {
     {
         'lukas-reineke/indent-blankline.nvim',
+        main = 'ibl',
         opts = {
-            show_current_context = true,
+            indent = {
+                char = '▏',
+            },
+            scope = {
+                show_exact_scope = true,
+            },
         },
     },
 

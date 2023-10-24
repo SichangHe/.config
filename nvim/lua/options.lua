@@ -11,7 +11,6 @@ function M.set()
     set.list = true
     set.listchars = {
         tab = '- ',
-        multispace = '┊   ',
         trail = '·',
     }
     set.mouse = 'a'
