@@ -27,8 +27,6 @@ nix-env -ibA nixpkgs.poppler_utils # for pdfimages
 nix-env -ibA nixpkgs.protobuf
 nix-env -ibA nixpkgs.qpdf
 nix-env -ibA nixpkgs.ripgrep
-nix-env -ibA nixpkgs.ruby
-nix-env -ibA nixpkgs.rubyPackages.cocoapods
 nix-env -ibA nixpkgs.sccache
 nix-env -ibA nixpkgs.sd
 nix-env -ibA nixpkgs.speedtest-cli
