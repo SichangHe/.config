@@ -4,6 +4,7 @@ nix-env -ibA nixpkgs.btop
 nix-env -ibA nixpkgs.cargo-cache
 nix-env -ibA nixpkgs.cargo-expand
 nix-env -ibA nixpkgs.cargo-nextest
+nix-env -ibA nixpkgs.cargo-release
 nix-env -ibA nixpkgs.cargo-update
 nix-env -ibA nixpkgs.cmake
 nix-env -ibA nixpkgs.coreutils
