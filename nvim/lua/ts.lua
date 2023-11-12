@@ -12,10 +12,15 @@ return {
                 -- Prevent stuck by large file or single line huge file.
                 return U.b.large_buf or U.api.nvim_buf_line_count(bufnr) < 2
             end
+            local disable_lang = {
+                latex = true, -- Using VimTex instead.
+            }
             require('nvim-treesitter.configs').setup {
                 highlight = {
                     enable = true,
-                    disable = disable,
+                    disable = function(lang, bufnr)
+                        return disable_lang[lang] or disable(lang, bufnr)
+                    end,
                 },
                 incremental_selection = {
                     enable = true,
