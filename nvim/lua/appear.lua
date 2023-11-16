@@ -99,6 +99,8 @@ return {
                     SpellLocal = { fg = 'unset', bg = 'unset' },
                     -- Fix indent highlight.
                     IblScope = { fg = '#e0e0e0' },
+                    -- VimTex conceal.
+                    Conceal = { fg = '#333436' }
                 },
             }
             onedark.load()
@@ -135,4 +137,3 @@ return {
         event = 'VeryLazy',
     },
 }
-

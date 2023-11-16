@@ -91,6 +91,15 @@ return {
                     { name = 'cmp_tabnine' },
                 },
             }
+            cmp.setup.filetype("tex", {
+                sources = {
+                    { name = 'vimtex' },
+                    { name = 'luasnip' },
+                    { name = 'buffer' },
+                    { name = 'copilot' },
+                    { name = 'cmp_tabnine' },
+                },
+            })
         end,
     }
 }
