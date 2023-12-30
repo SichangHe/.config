@@ -20,6 +20,12 @@ return {
                     'treesitter',
                 },
                 filetype_overrides = {
+                    latex = {
+                        providers = {
+                            'treesitter',
+                            'regex',
+                        }
+                    },
                     markdown = {
                         providers = {
                             'regex',

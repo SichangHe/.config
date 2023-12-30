@@ -1,3 +1,4 @@
+nix-env -ibA nixpkgs.aria
 nix-env -ibA nixpkgs.asciinema
 nix-env -ibA nixpkgs.bat
 nix-env -ibA nixpkgs.btop

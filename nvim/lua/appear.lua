@@ -44,7 +44,7 @@ return {
             sort_case_insensitive = true,
             window = {
                 position = 'right',
-                width = 80,
+                width = 40,
             },
             filesystem = {
                 follow_current_file = true,
