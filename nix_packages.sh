@@ -12,7 +12,7 @@ nix-env -ibA nixpkgs.coreutils
 nix-env -ibA nixpkgs.delta
 nix-env -ibA nixpkgs.deno
 nix-env -ibA nixpkgs.du-dust
-nix-env -ibA nixpkgs.exa
+nix-env -ibA nixpkgs.eza
 nix-env -ibA nixpkgs.exercism
 nix-env -ibA nixpkgs.fd
 nix-env -ibA nixpkgs.fzf

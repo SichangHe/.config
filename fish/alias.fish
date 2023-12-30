@@ -29,18 +29,18 @@ else
     git push
 end && git pull'
 
-# exa
-if type -q exa
-    alias l='exa --icons'
-    alias la='exa -a --icons'
-    alias ll='exa -lh --git --icons'
-    alias lla='exa -lah --git --icons'
-    alias lt='exa -T --icons'
-    alias llt='exa -lTh --git --icons'
-    alias lat='exa -ahT --icons'
-    alias llat='exa -lahT --git --icons'
-    alias ld='exa -D --icons'
-    alias lad='exa -aD --icons'
-    alias lld='exa -lhD --git --icons'
-    alias llad='exa -lahD --git --icons'
+# eza
+if type -q eza
+    alias l='eza --icons'
+    alias la='eza -a --icons'
+    alias ll='eza -lh --git --icons'
+    alias lla='eza -lah --git --icons'
+    alias lt='eza -T --icons'
+    alias llt='eza -lTh --git --icons'
+    alias lat='eza -ahT --icons'
+    alias llat='eza -lahT --git --icons'
+    alias ld='eza -D --icons'
+    alias lad='eza -aD --icons'
+    alias lld='eza -lhD --git --icons'
+    alias llad='eza -lahD --git --icons'
 end
