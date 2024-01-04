@@ -1,21 +1,4 @@
-**.DS_Store
-**history.txt
-**.log
-**.xml
-exercism/
-mume/
-configstore/
-install-id
-SnapGene.ini
-libvirt/
-memos.json
-grammarly-languageserver/
-neofetch/
-wireshark/
-github-copilot/
-flutter/
-
-# from Arch KDE {
+# Arch KDE
 DisplayCAL/
 KDE/
 Kvantum/
@@ -87,5 +70,102 @@ trashrc
 user-dirs.dirs
 user-dirs.locale
 xsettingsd/
-# }
 
+# Artifacts
+**.dart_tool/
+**.flutter*
+**.ipynb_checkpoints/
+**.pyc
+**__pycache__/
+**build/
+
+# Auxiliary files
+**.bak
+**.tmp
+
+# Databases
+**.db*
+**.sqlite*
+
+# Documents
+**.csv
+**.doc*
+**.pdf
+**.ppt*
+**.txt
+**.vsd*
+**.xls*
+
+# File managers
+**.DS_Store
+**.Trash*
+**.directory
+**esktop.ini
+
+# Images
+**.3dm
+**.apng
+**.bmp
+**.dib
+**.gif
+**.hdp
+**.ico
+**.j2k
+**.jfi
+**.jfif
+**.jif
+**.jp2
+**.jpe
+**.jpeg
+**.jpf
+**.jpg
+**.jpm
+**.jpx
+**.jxr
+**.max
+**.mj2
+**.mng
+**.pdf
+**.png
+**.raw
+**.svg
+**.svgz
+**.tif
+**.tiff
+**.wdp
+**.webp
+**.xbm
+
+# LaTeX
+**(busy)
+**.aux
+**.bbl
+**.bcf
+**.blg
+**.dvi
+**.fdb_latexmk
+**.fls
+**.gz
+**.log
+**.out
+**.pdf
+**.synctex.gz
+**.xcp
+**.xdv
+**.xml
+**blx.bib
+**comment.cut
+
+# Specific
+SnapGene.ini
+configstore/
+exercism/
+flutter/
+github-copilot/
+grammarly-languageserver/
+install-id
+libvirt/
+memos.json
+mume/
+neofetch/
+wireshark/

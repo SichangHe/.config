@@ -34,6 +34,7 @@ nix-env -ibA nixpkgs.sd
 nix-env -ibA nixpkgs.speedtest-cli
 nix-env -ibA nixpkgs.starship
 nix-env -ibA nixpkgs.tealdeer
+nix-env -ibA nixpkgs.thefuck
 nix-env -ibA nixpkgs.tmux
 nix-env -ibA nixpkgs.tokei
 nix-env -ibA nixpkgs.unpaper
