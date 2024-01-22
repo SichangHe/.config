@@ -16,6 +16,7 @@ QuotaManager-journal
 Service Worker/
 Session Storage/
 TransportSecurity
+Trust*
 code.lock
 databases/
 logs/

@@ -176,16 +176,19 @@ return {
                     null_ls.builtins.formatting.black,
                     -- markdownlint
                     null_ls.builtins.diagnostics.markdownlint_cli2.with {
-                        command = 'markdownlint-cli2-config',
+                        command = 'markdownlint-cli2',
                         args = {
+                            '--config',
                             U.expand('~/.config/.markdownlint-cli2.jsonc'),
                             '$FILENAME'
                         },
                     },
                     null_ls.builtins.formatting.markdownlint.with {
-                        command = 'markdownlint-cli2-config',
+                        command = 'markdownlint-cli2',
                         args = {
-                            U.expand('~/.config/fix.markdownlint-cli2.jsonc'),
+                            '--config',
+                            U.expand('~/.config/.markdownlint-cli2.jsonc'),
+                            '--fix',
                             '$FILENAME'
                         },
                     },

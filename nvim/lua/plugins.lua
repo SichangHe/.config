@@ -66,6 +66,7 @@ return {
 
     {
         'lervag/vimtex',
+        -- Help article: <https://www.ejmastnak.com/tutorials/vim-latex/pdf-reader/#refocus-nvim-macos-inverse>.
         config = function()
             U.g.vimtex_view_method = 'skim'
         end,
