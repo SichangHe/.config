@@ -13,7 +13,7 @@ local LSPWithDiagSource = {
     enabled = function()
         return true
     end,
-    execute = function(done)
+    execute = function(opts, done)
         local params = util.make_position_params()
         vim.lsp.buf_request_all(0, 'textDocument/hover', params, function(responses)
             local value = ''
