@@ -1176,7 +1176,7 @@
                                 },
                                 "to": [
                                     {
-                                        "shell_command": "/opt/homebrew/bin/brew services restart yabai && sudo /opt/homebrew/bin/yabai --load-sa && osascript -e 'display notification \"restart yabai\" with title \"yabai\"'"
+                                        "shell_command": "/opt/homebrew/bin/yabai --restart-service && sudo /opt/homebrew/bin/yabai --load-sa && osascript -e 'display notification \"restart yabai\" with title \"yabai\"'"
                                     }
                                 ],
                                 "type": "basic"
