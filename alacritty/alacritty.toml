@@ -1,0 +1,132 @@
+[colors.cursor]
+cursor = "#526eff"
+text = "CellBackground"
+
+[colors.normal]
+black = "#696c77"
+blue = "#4078f2"
+cyan = "#0184bc"
+green = "#50a14f"
+magenta = "#a626a4"
+red = "#e45649"
+white = "#a0a1a7"
+yellow = "#c18401"
+
+[colors.primary]
+background = "#fafafa"
+foreground = "#383a42"
+
+[colors.selection]
+background = "#e5e5e6"
+text = "CellForeground"
+
+[cursor]
+blink_interval = 500
+blink_timeout = 15
+vi_mode_style = "Block"
+
+[cursor.style]
+blinking = "On"
+shape = "Beam"
+
+[font]
+size = 26.0
+
+[font.normal]
+family = "JetBrainsMono Nerd Font Mono"
+
+[font.offset]
+x = 0
+y = -6
+
+[[keyboard.bindings]]
+chars = "\u0001"
+key = "Left"
+mode = "~Alt"
+mods = "Command"
+
+[[keyboard.bindings]]
+chars = "\u0005"
+key = "Right"
+mode = "~Alt"
+mods = "Command"
+
+[[keyboard.bindings]]
+chars = "\u001B[13;5u"
+key = "Return"
+mode = "~Alt"
+mods = "Control"
+
+[[keyboard.bindings]]
+chars = "\u001B[13;2u"
+key = "Return"
+mode = "~Alt"
+mods = "Shift"
+
+[[keyboard.bindings]]
+chars = "\u001B[13;2u"
+key = "Return"
+mode = "~Alt"
+mods = "Shift"
+
+[[keyboard.bindings]]
+chars = "\u001B[9;5u"
+key = "Tab"
+mode = "~Alt"
+mods = "Control"
+
+[[keyboard.bindings]]
+chars = "\u001B[9;6u"
+key = "Tab"
+mode = "~Alt"
+mods = "Shift|Control"
+
+[[keyboard.bindings]]
+chars = "\u001B[73;5u"
+key = "I"
+mode = "~Alt"
+mods = "Control"
+
+[[keyboard.bindings]]
+action = "ToggleViMode"
+key = "M"
+mode = "~Search"
+mods = "Command"
+
+[[keyboard.bindings]]
+action = "ToggleViMode"
+key = "M"
+mode = "~Search"
+mods = "Control"
+
+[[keyboard.bindings]]
+action = "ReceiveChar"
+key = "M"
+mods = "Command"
+
+[[keyboard.bindings]]
+action = "ReceiveChar"
+key = "Q"
+mods = "Command"
+
+[[keyboard.bindings]]
+action = "ReceiveChar"
+key = "W"
+mods = "Command"
+
+[[keyboard.bindings]]
+action = "CreateNewWindow"
+key = "N"
+mods = "Command"
+
+[[keyboard.bindings]]
+chars = "\u001A"
+key = "Z"
+mods = "Command"
+
+[scrolling]
+history = 20000
+
+[window]
+decorations = "none"
+startup_mode = "Maximized"
