@@ -12,8 +12,8 @@ source ~/.config/fish/path.fish
 # source ~/.config/fish/proxy.fish
 
 #! kernel specific {
-
-if [ (uname) = Darwin ] #! Darwin {{
+set UNAME (uname)
+if [ $UNAME = Darwin ] #! Darwin {{
     # path
     source ~/.config/fish/Darwin/path.fish
 
@@ -23,12 +23,9 @@ if [ (uname) = Darwin ] #! Darwin {{
     # proxy
     source ~/.config/fish/Darwin/proxy.fish
     #! }}
-
-else if [ (uname) = Linux ] #! Linux {{
+else if [ $UNAME = Linux ] #! Linux {{
     # path
     source ~/.config/fish/Linux/path.fish
-    # for nix
-    set -ge LD_LIBRARY_PATH
     # Bloody Pip global install.
     set -gx PIP_BREAK_SYSTEM_PACKAGES 1
     #! }}
