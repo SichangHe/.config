@@ -14,8 +14,6 @@ function M.set()
     n('<Tab>', '>>')
     n('<S-Tab>', '<<')
     n('x', [["_x]])
-    n('s', [["_s]])
-    v('s', [["_s]])
     n('c', [["_c]])
     i('<C-z>', '<C-o>u')
     i('<M-BS>', '<Esc>bce') -- Alt + Backspace delete back one word.
