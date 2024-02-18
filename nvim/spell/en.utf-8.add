@@ -125,3 +125,8 @@ Kubernetes
 cepstra
 autoscaling
 rollout
+backpointer
+trie
+Levenshtein
+Tokio
+HealthKit
