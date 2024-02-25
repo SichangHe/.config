@@ -130,3 +130,8 @@ trie
 Levenshtein
 Tokio
 HealthKit
+Serverless
+serverless
+Redis
+SQLite
+ONNX

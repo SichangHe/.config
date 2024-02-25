@@ -74,9 +74,10 @@ return {
 
     {
         'lervag/vimtex',
-        -- Help article: <https://www.ejmastnak.com/tutorials/vim-latex/pdf-reader/#refocus-nvim-macos-inverse>.
+        -- Old: Help article: <https://www.ejmastnak.com/tutorials/vim-latex/pdf-reader/#refocus-nvim-macos-inverse>.
+        -- Sioyek documentation: <https://sioyek-documentation.readthedocs.io/en/latest/usage.html#synctex>.
         config = function()
-            U.g.vimtex_view_method = 'skim'
+            U.g.vimtex_view_method = 'sioyek'
         end,
     },
 }

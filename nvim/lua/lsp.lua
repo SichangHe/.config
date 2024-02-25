@@ -1,3 +1,5 @@
+U = require('util')
+
 return {
     {
         'akinsho/flutter-tools.nvim',
@@ -159,7 +161,13 @@ return {
                 sources = {
                     -- LaTeX
                     null_ls.builtins.formatting.bibclean,
-                    null_ls.builtins.formatting.latexindent,
+                    null_ls.builtins.formatting.latexindent.with {
+                        args = {
+                            '-l',
+                            U.expand('~/.config/latexindent_config.yaml'),
+                            '-'
+                        },
+                    },
                     -- prettier
                     null_ls.builtins.formatting.prettierd.with {
                         filetypes = {
