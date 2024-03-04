@@ -135,3 +135,5 @@ serverless
 Redis
 SQLite
 ONNX
+perceptron
+MNIST

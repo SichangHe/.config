@@ -30,3 +30,6 @@ CachedConfigurations/
 IndexedDB/
 .com.microsoft.VSCodeInsiders.HVIsIN
 Crashpad/
+Shared Dictionary/
+WebStorage/
+SharedStorage

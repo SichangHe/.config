@@ -142,6 +142,7 @@ return {
                 'isort',
                 'markdownlint',
                 'prettierd',
+                'shfmt',
             },
         },
     },
@@ -159,6 +160,10 @@ return {
             local null_ls = require('null-ls')
             null_ls.setup {
                 sources = {
+                    -- Bash
+                    null_ls.builtins.formatting.shfmt.with {
+                        args = { "-filename", "$FILENAME", "-i", "4", "-bn", "-ci", "-sr" }
+                    },
                     -- LaTeX
                     null_ls.builtins.formatting.bibclean,
                     null_ls.builtins.formatting.latexindent.with {
