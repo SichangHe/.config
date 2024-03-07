@@ -100,7 +100,9 @@ return {
                     -- Fix indent highlight.
                     IblScope = { fg = '#e0e0e0' },
                     -- VimTex conceal.
-                    Conceal = { fg = '#333436' }
+                    Conceal = { fg = '#333436' },
+                    -- No highlighting changed lines.
+                    DiffChange = { bg = 'cleared' },
                 },
             }
             onedark.load()
