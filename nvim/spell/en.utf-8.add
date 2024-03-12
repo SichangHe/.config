@@ -138,3 +138,7 @@ ONNX
 perceptron
 MNIST
 deduplicated
+WebAssembly
+WASM
+JS
+interop

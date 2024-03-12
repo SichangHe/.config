@@ -9,6 +9,24 @@ return {
     },
 
     {
+        'ray-x/go.nvim',
+        dependencies = {
+            'ray-x/guihua.lua',
+            'neovim/nvim-lspconfig',
+            'nvim-treesitter/nvim-treesitter',
+        },
+        config = function()
+            require('go').setup {
+                lsp_cfg = false,
+            }
+
+            local gopls_cfg = require('go.lsp').config()
+            require('lspconfig').gopls.setup(gopls_cfg)
+        end,
+        build = ':lua require("go.install").update_all_sync()'
+    },
+
+    {
         'glepnir/lspsaga.nvim',
         event = 'VeryLazy',
         dependencies = { 'nvim-tree/nvim-web-devicons' },
