@@ -17,11 +17,8 @@ return {
         },
         config = function()
             require('go').setup {
-                lsp_cfg = false,
+                lsp_cfg = true,
             }
-
-            local gopls_cfg = require('go.lsp').config()
-            require('lspconfig').gopls.setup(gopls_cfg)
         end,
         build = ':lua require("go.install").update_all_sync()'
     },
