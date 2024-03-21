@@ -17,6 +17,7 @@ function M.set()
     n('c', [["_c]])
     i('<C-z>', '<C-o>u')
     i('<M-BS>', '<Esc>bce') -- Alt + Backspace delete back one word.
+    i('<C-L>', '<C-G>u<Esc>[s1z=`]a<C-G>u') -- Fix last typo.
     s('(', ')')
     s('[', ']')
     s('{', '}')

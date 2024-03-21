@@ -1,0 +1,8 @@
+{
+    "workspace": {
+        "checkThirdParty": false,
+        "ignoreDir": [
+            "Code/"
+        ],
+    },
+}
