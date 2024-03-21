@@ -26,6 +26,7 @@ nix-env -ibA nixpkgs.sd
 nix-env -ibA nixpkgs.starship
 nix-env -ibA nixpkgs.tealdeer
 nix-env -ibA nixpkgs.thefuck
+nix-env -ibA nixpkgs.vale
 nix-env -ibA nixpkgs.zoxide
 
 set UNAME (uname)
