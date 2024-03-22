@@ -1,5 +1,7 @@
 U = require('util')
 
+-- U.lsp.set_log_level('debug') -- debug LSP
+
 return {
     {
         'akinsho/flutter-tools.nvim',
@@ -196,8 +198,6 @@ return {
                             "svelte",
                             "less",
                             "js",
-                            "json",
-                            "jsonc",
                         },
                     },
                     null_ls.builtins.formatting.isort,
