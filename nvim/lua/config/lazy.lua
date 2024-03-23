@@ -16,6 +16,7 @@ require("lazy").setup({
             import = "lazyvim.plugins"
         },
         { import = 'lazyvim.plugins.extras.editor.leap' },
+        { import = 'lazyvim.plugins.extras.lang.rust' },
         { import = 'lazyvim.plugins.extras.lsp.none-ls' },
         { import = "plugins" },
     },
