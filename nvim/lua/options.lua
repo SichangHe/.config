@@ -16,7 +16,7 @@ function M.set()
     set.mouse = 'a'
     set.relativenumber = true
     set.numberwidth = 1
-    set.signcolumn = 'number'
+    set.signcolumn = 'no'
     set.scrolloff = 3
     set.shiftwidth = 4
     set.spell = true
@@ -25,6 +25,9 @@ function M.set()
     set.colorcolumn = "80"
     set.updatetime = 200
     set.guicursor = 'n-v-c-sm:block,i-ci-ve:ver25,r-cr-o:hor20,n-i:blinkon500blinkoff50'
+    set.cursorline = false
+
+    U.g.autoformat = false
 end
 
 return M

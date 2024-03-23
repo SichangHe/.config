@@ -4,14 +4,16 @@ return {
     {
         'lukas-reineke/indent-blankline.nvim',
         main = 'ibl',
-        opts = {
-            indent = {
-                char = '▏',
-            },
-            scope = {
-                show_exact_scope = true,
-            },
-        },
+        opts = function()
+            return {
+                indent = {
+                    char = '▏',
+                },
+                scope = {
+                    show_exact_scope = true,
+                },
+            }
+        end,
     },
 
     {
@@ -47,7 +49,7 @@ return {
                 width = 40,
             },
             filesystem = {
-                follow_current_file = true,
+                follow_current_file = { enabled = true },
                 hijack_netrw_behavior = 'open_current',
                 use_libuv_file_watcher = true,
             },

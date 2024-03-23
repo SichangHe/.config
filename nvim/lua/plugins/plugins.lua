@@ -1,15 +1,6 @@
 U = require('util')
 
 return {
-    { import = 'appear' },
-    { import = 'complete' },
-    { import = 'git' },
-    { import = 'ts' },
-    { import = 'lsp' },
-    { import = 'hovering' },
-    { import = 'adapter' },
-    { import = 'lazy_plugins' },
-
     {
         'ggandor/leap.nvim',
         dependencies = { 'tpope/vim-repeat' },

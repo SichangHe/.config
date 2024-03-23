@@ -12,14 +12,14 @@ function AllConfig()
     if vscode_exists then
         -- Running inside vscode
     else
+        use('config.lazy')
+
         Options = use('options')
         Keymaps = use('keymaps')
-        Lazy = use('package_manager')
         Au = use('autocmd')
 
         Options.set()
         Keymaps.set()
-        Lazy.setup('plugins')
         Au.set()
     end
 end
