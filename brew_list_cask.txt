@@ -22,6 +22,7 @@ imageoptim
 julia
 karabiner-elements
 keycastr
+mactex-no-gui
 master-pdf-editor
 microsoft-edge
 monitorcontrol
