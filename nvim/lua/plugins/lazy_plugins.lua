@@ -20,32 +20,25 @@ return {
     },
 
     {
-        'ibhagwan/fzf-lua',
-        event = 'CmdLineEnter',
-        dependencies = { 'nvim-tree/nvim-web-devicons' },
-        opts = {
-            winopts = {
-                border = 'none',
-                height = 1,
-                width = 1,
-            },
-            previewers = {
-                builtin = {
-                    extensions = {
-                        ["png"] = { "viu" },
-                        ["jpg"] = { "viu" },
-                    },
-                },
-            },
-        },
-    },
-
-    {
         'ziontee113/icon-picker.nvim',
         event = 'InsertEnter',
         dependencies = { 'stevearc/dressing.nvim' },
         opts = {
             disable_legacy_commands = true,
+        },
+    },
+
+    {
+        'nvim-telescope/telescope.nvim',
+        opts = {
+            defaults = {
+                border = false,
+                layout_config = {
+                    height = 0.99,
+                    width = 0.99,
+                }
+                ,
+            },
         },
     },
 

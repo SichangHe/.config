@@ -124,6 +124,12 @@ chars = "\u001A"
 key = "Z"
 mods = "Command"
 
+# Command + S → Control + S
+[[keyboard.bindings]]
+chars = "\u0013"
+key = "S"
+mods = "Command"
+
 [scrolling]
 history = 20000
 
