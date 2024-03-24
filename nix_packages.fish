@@ -41,6 +41,7 @@ nix-env -ibA nixpkgs.poppler_utils # for pdfimages
 nix-env -ibA nixpkgs.protobuf
 nix-env -ibA nixpkgs.qpdf
 nix-env -ibA nixpkgs.speedtest-cli
+nix-env -ibA nixpkgs.texliveFull
 nix-env -ibA nixpkgs.tmux
 nix-env -ibA nixpkgs.tokei
 nix-env -ibA nixpkgs.unpaper

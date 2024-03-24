@@ -1,7 +1,6 @@
 alacritty
 android-platform-tools
 android-studio
-basictex
 betterdisplay
 blackhole-64ch
 blender
@@ -26,6 +25,7 @@ keycastr
 master-pdf-editor
 microsoft-edge
 monitorcontrol
+obsidian
 onlyoffice
 orion
 racket
@@ -40,4 +40,5 @@ visual-studio-code
 vlc
 wireshark
 xquartz
+zed
 zoom

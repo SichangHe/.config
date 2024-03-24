@@ -26,6 +26,7 @@ function M.set()
     set.updatetime = 200
     set.guicursor = 'n-v-c-sm:block,i-ci-ve:ver25,r-cr-o:hor20,n-i:blinkon500blinkoff50'
     set.cursorline = false
+    set.wrap = true
 end
 
 return M

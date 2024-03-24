@@ -25,6 +25,7 @@ M.fs_stat = vim.loop.fs_stat
 M.g = vim.g
 M.lsp = vim.lsp
 M.key = vim.keymap.set
+M.del_key = vim.keymap.del
 M.rtp = vim.opt.rtp
 M.set = vim.opt
 M.set_buf = vim.opt
