@@ -29,6 +29,14 @@ return {
     },
 
     {
+        'mikesmithgh/kitty-scrollback.nvim',
+        cmd = { 'KittyScrollbackGenerateKittens', 'KittyScrollbackCheckHealth' },
+        event = { 'User KittyScrollbackLaunch' },
+        config = true,
+        build = ':KittyScrollbackGenerateKittens',
+    },
+
+    {
         'nvim-telescope/telescope.nvim',
         opts = {
             defaults = {
