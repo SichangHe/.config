@@ -1,5 +1,6 @@
 U = require('util')
 local vscode_exists = U.fn.exists('g:vscode') == 1
+local loaded = false
 
 function AllConfig()
     U = U.use('util')
@@ -12,16 +13,16 @@ function AllConfig()
     if vscode_exists then
         -- Running inside vscode
     else
-        use('config.lazy')
-
-        Options = use('options')
-        Keymaps = use('keymaps')
-        Au = use('autocmd')
-
-        Options.set()
-        Keymaps.set()
-        Au.set()
+        if loaded then
+            use('config.autocmds')
+            use('config.keymaps')
+            use('config.options')
+        else
+            use('config.lazy')
+        end
     end
+
+    loaded = true
 end
 
 AllConfig()
