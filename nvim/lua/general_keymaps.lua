@@ -10,7 +10,6 @@ end
 
 function M.set()
     n('<Space>n', ':noh<CR>')
-    n('<Space>x', ':bd<CR>')
     n('<Tab>', '>>')
     n('<S-Tab>', '<<')
     n('x', [["_x]])
