@@ -44,3 +44,8 @@ if type -q eza
     alias lld='eza -lhD --git --icons'
     alias llad='eza -lahD --git --icons'
 end
+
+# Kitty
+if [ $TERM = "xterm-kitty" ]
+    alias ssh='kitten ssh'
+end
