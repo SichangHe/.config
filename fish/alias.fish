@@ -2,9 +2,9 @@ alias c=clear
 alias e=exit
 alias rsy='rsync --recursive --inplace --times --compress --exclude "**.DS_STORE" -hP'
 
-# Code - Insiders
-if type -q code-insiders
-    alias co=code-insiders
+# VS Code
+if type -q code
+    alias co=code
 end
 
 # Python3
