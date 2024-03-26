@@ -1,3 +1,5 @@
+U = require('util')
+
 return {
     {
         'numToStr/Comment.nvim',
@@ -37,6 +39,22 @@ return {
     },
 
     {
+        'Wansmer/sibling-swap.nvim',
+        dependencies = { 'nvim-treesitter/nvim-treesitter' },
+        event = { 'InsertEnter' },
+        config = function()
+            local swap = require('sibling-swap')
+            swap.setup {
+                use_default_keymaps = false,
+            }
+            U.key('i', '<C-,>', swap.swap_with_left)
+            U.key('i', '<C-.>', swap.swap_with_right)
+            U.key('i', '<C-S-,>', swap.swap_with_left_opp)
+            U.key('i', '<C-S-.>', swap.swap_with_right_opp)
+        end,
+    },
+
+    {
         'nvim-telescope/telescope.nvim',
         opts = {
             defaults = {
@@ -54,10 +72,5 @@ return {
         'altermo/ultimate-autopair.nvim',
         event = { 'InsertEnter', 'CmdlineEnter' },
         config = true,
-    },
-
-    {
-        'machakann/vim-swap',
-        event = 'InsertEnter',
     },
 }
