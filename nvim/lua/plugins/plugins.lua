@@ -2,37 +2,27 @@ U = require('util')
 
 return {
     {
-        'ggandor/leap.nvim',
-        dependencies = { 'tpope/vim-repeat' },
-        config = function()
-            require('leap').create_default_mappings()
-        end,
-    },
-
-    {
         'RRethy/vim-illuminate',
         event = 'VeryLazy',
-        config = function()
-            require('illuminate').configure {
-                providers = {
-                    'lsp',
-                    'treesitter',
-                },
-                filetype_overrides = {
-                    latex = {
-                        providers = {
-                            'treesitter',
-                            'regex',
-                        }
-                    },
-                    markdown = {
-                        providers = {
-                            'regex',
-                        }
+        opts = {
+            providers = {
+                'lsp',
+                'treesitter',
+            },
+            filetype_overrides = {
+                latex = {
+                    providers = {
+                        'treesitter',
+                        'regex',
                     }
                 },
-            }
-        end,
+                markdown = {
+                    providers = {
+                        'regex',
+                    }
+                }
+            },
+        },
     },
 
     {

@@ -42,7 +42,7 @@ return {
             'nvim-lua/plenary.nvim',
         },
         event = 'CmdLineEnter',
-        config = {
+        opts = {
             sort_case_insensitive = true,
             window = {
                 position = 'right',

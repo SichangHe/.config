@@ -8,20 +8,6 @@ return {
     },
 
     {
-        'saecki/crates.nvim',
-        event = { 'BufRead Cargo.toml' },
-        dependencies = { 'hrsh7th/nvim-cmp', 'nvim-lua/plenary.nvim' },
-        config = function()
-            require('crates').setup {}
-            require('cmp').setup.buffer {
-                sources = {
-                    { name = 'crates' },
-                },
-            }
-        end,
-    },
-
-    {
         'ziontee113/icon-picker.nvim',
         event = 'InsertEnter',
         dependencies = { 'stevearc/dressing.nvim' },

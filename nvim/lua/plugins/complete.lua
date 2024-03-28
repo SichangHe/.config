@@ -9,7 +9,7 @@ return {
 
     {
         'zbirenbaum/copilot.lua',
-        config = {
+        opts = {
             panel = {
                 enabled = false,
             },
