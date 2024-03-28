@@ -22,7 +22,7 @@ end
 # Git
 alias gt='git status --short --branch'
 alias ga='git add . && gt'
-alias gc='git commit -am '
+alias gc='git commit -a'
 alias gs='if [ (git rev-parse --abbrev-ref HEAD) = main ]
     git remote | xargs -P0 -L1 git push
 else

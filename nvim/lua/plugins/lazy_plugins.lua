@@ -49,8 +49,8 @@ return {
             }
             U.key('i', '<C-,>', swap.swap_with_left)
             U.key('i', '<C-.>', swap.swap_with_right)
-            U.key('i', '<C-S-,>', swap.swap_with_left_opp)
-            U.key('i', '<C-S-.>', swap.swap_with_right_opp)
+            U.key('i', '<C-S-,>', swap.swap_with_left_with_opp)
+            U.key('i', '<C-S-.>', swap.swap_with_right_with_opp)
         end,
     },
 

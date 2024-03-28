@@ -36,6 +36,7 @@ nix-env -ibA nixpkgs.cargo-release
 nix-env -ibA nixpkgs.coreutils
 nix-env -ibA nixpkgs.exercism
 nix-env -ibA nixpkgs.go
+nix-env -ibA nixpkgs.gnused
 nix-env -ibA nixpkgs.pkg-config
 nix-env -ibA nixpkgs.poppler_utils # for pdfimages
 nix-env -ibA nixpkgs.protobuf
