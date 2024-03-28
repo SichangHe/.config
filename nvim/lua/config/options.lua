@@ -13,6 +13,7 @@ set.listchars = {
 }
 set.mouse = 'a'
 set.number = false
+set.pumheight = 0
 set.relativenumber = true
 set.numberwidth = 1
 set.signcolumn = 'no'

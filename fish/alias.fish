@@ -47,5 +47,6 @@ end
 
 # Kitty
 if [ $TERM = "xterm-kitty" ]
+    alias icat='kitten icat'
     alias ssh='kitten ssh'
 end
