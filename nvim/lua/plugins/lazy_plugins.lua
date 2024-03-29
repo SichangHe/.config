@@ -48,8 +48,15 @@ return {
                 layout_config = {
                     height = 0.99,
                     width = 0.99,
-                }
-                ,
+                },
+                mappings = {
+                    n = {
+                        ['<C-x>'] = require('telescope.actions').delete_buffer
+                    },
+                    i = {
+                        ['<C-x>'] = require('telescope.actions').delete_buffer
+                    },
+                },
             },
         },
     },
