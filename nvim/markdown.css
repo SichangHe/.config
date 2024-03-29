@@ -592,9 +592,11 @@ main {
     min-width: 50vw;
 }
 
-section.markdown-body {
-    margin: 32px;
-    margin-bottom: 50vh;
+@media screen {
+    section.markdown-body {
+        margin: 32px;
+        margin-bottom: 10vh;
+    }
 }
 
 a.anchor svg {
@@ -604,4 +606,9 @@ a.anchor svg {
 }
 a.anchor svg:hover {
     opacity: 1;
+}
+
+/* Fix printing and email trailing page. */
+html, body, #__next, main {
+    min-height: unset;
 }
