@@ -62,6 +62,21 @@ return {
     },
 
     {
+        'SichangHe/nvim-telescope--telescope-media-files.nvim',
+        branch = 'kitty-workaround',
+        config = function()
+            LazyVim.on_load('telescope.nvim', function()
+                local telescope = require('telescope')
+                telescope.load_extension('media_files')
+                U.key('n', '<Space>fm',
+                    telescope.extensions.media_files.media_files,
+                    { desc = 'Find Image and Other Media Files' }
+                )
+            end)
+        end,
+    },
+
+    {
         'altermo/ultimate-autopair.nvim',
         event = { 'InsertEnter', 'CmdlineEnter' },
         config = true,

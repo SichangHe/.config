@@ -33,10 +33,12 @@ set UNAME (uname)
 if [ $UNAME = Darwin ] # Darwin
 nix-env -ibA nixpkgs.asciinema
 nix-env -ibA nixpkgs.cargo-release
+nix-env -ibA nixpkgs.chafa
 nix-env -ibA nixpkgs.coreutils
 nix-env -ibA nixpkgs.exercism
 nix-env -ibA nixpkgs.go
 nix-env -ibA nixpkgs.gnused
+nix-env -ibA nixpkgs.imagemagick
 nix-env -ibA nixpkgs.pkg-config
 nix-env -ibA nixpkgs.poppler_utils # for pdfimages
 nix-env -ibA nixpkgs.protobuf
