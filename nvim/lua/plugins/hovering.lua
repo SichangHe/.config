@@ -50,6 +50,7 @@ local LSPWithDiagSource = {
 
 return {
     'lewis6991/hover.nvim',
+    event = 'VeryLazy',
     config = function()
         local hover = require('hover')
         hover.setup {
@@ -65,7 +66,8 @@ return {
             preview_window = false,
             title = true,
         }
-        U.key('n', 'K', hover.hover, { desc = 'hover.nvim' })
-        U.key('n', 'gK', hover.hover_select, { desc = 'hover.nvim select' })
+        local keys = require("lazyvim.plugins.lsp.keymaps").get()
+        keys[#keys + 1] = { 'K', hover.hover, { desc = 'hover.nvim' } }
+        keys[#keys + 1] = { 'gK', hover.hover_select, { desc = 'hover.nvim select' } }
     end,
 }
