@@ -26,11 +26,12 @@ if [ $UNAME = Darwin ] #! Darwin {{
 else if [ $UNAME = Linux ] #! Linux {{
     # path
     source ~/.config/fish/Linux/path.fish
-    # Bloody Pip global install.
-    set -gx PIP_BREAK_SYSTEM_PACKAGES 1
     #! }}
 end
 #! }
+
+# Bloody Pip global install.
+set -gx PIP_BREAK_SYSTEM_PACKAGES 1
 
 # alias
 source ~/.config/fish/alias.fish

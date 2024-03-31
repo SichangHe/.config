@@ -17,11 +17,11 @@ return {
             'neovim/nvim-lspconfig',
             'nvim-treesitter/nvim-treesitter',
         },
-        config = function()
-            require('go').setup {
-                lsp_cfg = true,
-            }
-        end,
+        event = { "CmdlineEnter" },
+        ft = { "go", 'gomod' },
+        opts = {
+            lsp_cfg = true,
+        },
         build = ':lua require("go.install").update_all_sync()'
     },
 
@@ -45,9 +45,9 @@ return {
 
     {
         'ray-x/lsp_signature.nvim',
-        event = 'VeryLazy',
+        event = 'InsertEnter',
         dependencies = { 'neovim/nvim-lspconfig' },
-        config = true,
+        opts = {},
     },
 
     {
@@ -166,7 +166,7 @@ return {
 
     {
         'folke/neodev.nvim',
-        config = true,
+        lazy = true,
     },
 
     {

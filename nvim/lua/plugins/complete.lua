@@ -4,11 +4,12 @@ return {
     {
         'tzachar/cmp-tabnine',
         build = './install.sh',
-        dependencies = 'hrsh7th/nvim-cmp',
+        lazy = true,
     },
 
     {
         'zbirenbaum/copilot.lua',
+        cmd = 'Copilot',
         opts = {
             panel = {
                 enabled = false,
@@ -17,17 +18,16 @@ return {
                 enabled = false,
             },
             filetypes = {
-                yaml = true,
-                markdown = true,
+                ["*"] = true,
             },
         },
-        event = 'VeryLazy',
     },
 
     {
         'zbirenbaum/copilot-cmp',
+        dependencies = 'zbirenbaum/copilot.lua',
         config = true,
-        event = 'VeryLazy',
+        lazy = true,
     },
 
     {
@@ -35,6 +35,7 @@ return {
         dependencies = {
             'saadparwaiz1/cmp_luasnip',
             'zbirenbaum/copilot-cmp',
+            'tzachar/cmp-tabnine',
             'hrsh7th/cmp-nvim-lsp',
             'rafamadriz/friendly-snippets',
             'L3MON4D3/LuaSnip',

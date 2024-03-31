@@ -42,6 +42,7 @@ return {
 
     {
         'nvim-telescope/telescope.nvim',
+        dependencies = { 'SichangHe/nvim-telescope--telescope-media-files.nvim' },
         opts = {
             defaults = {
                 border = false,
@@ -74,6 +75,7 @@ return {
                 )
             end)
         end,
+        lazy = true,
     },
 
     {
