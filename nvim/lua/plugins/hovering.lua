@@ -67,7 +67,7 @@ return {
             title = true,
         }
         local keys = require("lazyvim.plugins.lsp.keymaps").get()
-        keys[#keys + 1] = { 'K', hover.hover, { desc = 'hover.nvim' } }
-        keys[#keys + 1] = { 'gK', hover.hover_select, { desc = 'hover.nvim select' } }
+        keys[#keys + 1] = { '<Space>K', hover.hover, { desc = 'hover.nvim' } }
+        keys[#keys + 1] = { '<Space>gK', hover.hover_select, { desc = 'hover.nvim select' } }
     end,
 }

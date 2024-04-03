@@ -81,6 +81,19 @@ return {
     {
         'altermo/ultimate-autopair.nvim',
         event = { 'InsertEnter', 'CmdlineEnter' },
-        config = true,
+        -- <https://github.com/altermo/ultimate-autopair.nvim/blob/v0.6/Q%26A.md>
+        opts = {
+            extensions = {
+                filetype = {
+                    nft = { 'javascript' }, --Disable because broken.
+                },
+                cond = {
+                    ---Disable in replace mode.
+                    cond = function(fn)
+                        return fn.get_mode() ~= 'R'
+                    end
+                }
+            },
+        },
     },
 }
