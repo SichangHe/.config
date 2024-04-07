@@ -2,21 +2,8 @@ U = require('util')
 
 return {
     {
-        'tzachar/cmp-tabnine',
-        build = './install.sh',
-        lazy = true,
-    },
-
-    {
         'zbirenbaum/copilot.lua',
-        cmd = 'Copilot',
         opts = {
-            panel = {
-                enabled = false,
-            },
-            suggestion = {
-                enabled = false,
-            },
             filetypes = {
                 ["*"] = true,
             },
@@ -24,17 +11,9 @@ return {
     },
 
     {
-        'zbirenbaum/copilot-cmp',
-        dependencies = 'zbirenbaum/copilot.lua',
-        config = true,
-        lazy = true,
-    },
-
-    {
         'hrsh7th/nvim-cmp',
         dependencies = {
             'saadparwaiz1/cmp_luasnip',
-            'zbirenbaum/copilot-cmp',
             'tzachar/cmp-tabnine',
             'hrsh7th/cmp-nvim-lsp',
             'rafamadriz/friendly-snippets',
@@ -60,6 +39,7 @@ return {
                 { name = 'luasnip' },
                 { name = 'buffer' },
                 { name = 'copilot' },
+                { name = 'codeium' },
                 { name = 'cmp_tabnine' },
             })
             opts.mapping = cmp.mapping.preset.insert {
