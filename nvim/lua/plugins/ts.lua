@@ -5,7 +5,7 @@ return {
         dependencies = {
             'RRethy/nvim-treesitter-endwise',
             'windwp/nvim-ts-autotag',
-            'mrjones2014/nvim-ts-rainbow',
+            'hiphish/rainbow-delimiters.nvim',
         },
         config = function()
             local function disable(lang, bufnr)
@@ -53,10 +53,6 @@ return {
                     'vim',
                 },
                 auto_install = true,
-                rainbow = {
-                    enable = true,
-                    disable = disable,
-                },
                 autotag = {
                     enable = true,
                     disable = disable,
@@ -67,5 +63,25 @@ return {
                 },
             }
         end,
+    },
+
+    {
+        'hiphish/rainbow-delimiters.nvim',
+        config = function()
+            require('rainbow-delimiters.setup').setup {
+                strategy = {
+                    latex = nil,
+                },
+                highlight = {
+                    'rainbowcol1',
+                    'rainbowcol2',
+                    'rainbowcol3',
+                    'rainbowcol4',
+                    'rainbowcol5',
+                    'rainbowcol6',
+                },
+            }
+        end,
+        lazy = true,
     },
 }
