@@ -11,16 +11,17 @@ require("lazy").setup({
         {
             "LazyVim/LazyVim",
             opts = {
-                colorscheme = 'onedark',
+                colorscheme = "onedark",
             },
-            import = "lazyvim.plugins"
+            import = "lazyvim.plugins",
         },
         { import = "lazyvim.plugins.extras.coding.codeium" },
         { import = "lazyvim.plugins.extras.coding.copilot" },
         { import = "lazyvim.plugins.extras.coding.tabnine" },
         { import = 'lazyvim.plugins.extras.editor.leap' },
+        { import = 'lazyvim.plugins.extras.lang.markdown' },
         { import = 'lazyvim.plugins.extras.lang.rust' },
-        { import = 'lazyvim.plugins.extras.lsp.none-ls' },
+        { import = "lazyvim.plugins.extras.util.dot" },
         { import = "plugins" },
     },
 })

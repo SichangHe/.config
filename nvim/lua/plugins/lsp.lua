@@ -1,8 +1,36 @@
-U = require('util')
+U = require("util")
 
 -- U.lsp.set_log_level('debug') -- debug LSP
 
 return {
+    {
+        'stevearc/conform.nvim',
+        opts = {
+            formatters = {
+                latexindent = {
+                    prepend_args = {
+                        '-l',
+                        U.expand('~/.config/latexindent_config.yaml'),
+                    },
+                },
+                shfmt = {
+                    prepend_args = { '-i', '4', '-bn', '-ci', '-sr' },
+                },
+            },
+            formatters_by_ft = {
+                bib = { 'bibtex-tidy' },
+                markdown = { 'markdownlint' },
+                python = { 'isort', 'black' },
+                lua = {},
+                sh = { 'isort', 'black' },
+                tex = { 'latexindent' },
+                -- Prettierd
+                handlebars = { 'prettierd' },
+                yaml = { 'prettierd' },
+            },
+        },
+    },
+
     {
         'akinsho/flutter-tools.nvim',
         ft = { 'dart' },
@@ -22,7 +50,7 @@ return {
         opts = {
             lsp_cfg = true,
         },
-        build = ':lua require("go.install").update_all_sync()'
+        build = ':lua require("go.install").update_all_sync()',
     },
 
     {
@@ -52,7 +80,26 @@ return {
 
     {
         'williamboman/mason.nvim',
-        config = true,
+        opts = function(_, opts)
+            for _, program in ipairs({
+                'bibtex-tidy',
+                'black',
+                'isort',
+                'prettierd',
+            }) do
+                table.insert(opts.ensure_installed, program)
+            end
+
+            -- Override and not to install with Mason.
+            local to_remove = {
+                stylua = true,
+            }
+            for index, program in ipairs(opts.ensure_installed) do
+                if to_remove[program] then
+                    table.remove(opts.ensure_installed, index)
+                end
+            end
+        end,
     },
 
     {
@@ -112,7 +159,6 @@ return {
             local ensure = U.tbl_keys(servers)
             for _, v in ipairs({
                 -- Other servers configured with extensions.
-                'rust_analyzer',
             }) do
                 table.insert(ensure, v)
             end
@@ -150,79 +196,8 @@ return {
     },
 
     {
-        'jay-babu/mason-null-ls.nvim',
-        event = 'VeryLazy',
-        dependencies = { 'williamboman/mason.nvim', 'nvimtools/none-ls.nvim' },
-        opts = {
-            ensure_installed = {
-                'black',
-                'isort',
-                'markdownlint',
-                'prettierd',
-                'shfmt',
-            },
-        },
-    },
-
-    {
         'folke/neodev.nvim',
         lazy = true,
-    },
-
-    {
-        'nvimtools/none-ls.nvim',
-        event = 'VeryLazy',
-        dependencies = { 'nvim-lua/plenary.nvim', 'nvimtools/none-ls-extras.nvim', },
-        config = function()
-            local null_ls = require('null-ls')
-            null_ls.setup {
-                sources = {
-                    -- Bash
-                    null_ls.builtins.formatting.shfmt.with {
-                        args = { "-filename", "$FILENAME", "-i", "4", "-bn", "-ci", "-sr" }
-                    },
-                    -- LaTeX
-                    null_ls.builtins.formatting.bibclean,
-                    require('none-ls.formatting.latexindent').with {
-                        args = {
-                            '-l',
-                            U.expand('~/.config/latexindent_config.yaml'),
-                            '-'
-                        },
-                    },
-                    -- prettier
-                    null_ls.builtins.formatting.prettierd.with {
-                        filetypes = {
-                            "css",
-                            "scss",
-                            "svelte",
-                            "less",
-                            "js",
-                        },
-                    },
-                    null_ls.builtins.formatting.isort,
-                    null_ls.builtins.formatting.black,
-                    -- markdownlint
-                    null_ls.builtins.diagnostics.markdownlint_cli2.with {
-                        command = 'markdownlint-cli2',
-                        args = {
-                            '--config',
-                            U.expand('~/.config/.markdownlint-cli2.jsonc'),
-                            '$FILENAME'
-                        },
-                    },
-                    null_ls.builtins.formatting.markdownlint.with {
-                        command = 'markdownlint-cli2',
-                        args = {
-                            '--config',
-                            U.expand('~/.config/.markdownlint-cli2.jsonc'),
-                            '--fix',
-                            '$FILENAME'
-                        },
-                    },
-                },
-            }
-        end,
     },
 
     {
