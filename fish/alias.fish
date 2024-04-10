@@ -31,22 +31,22 @@ end && git pull'
 
 # eza
 if type -q eza
-    alias l='eza --icons'
-    alias la='eza -a --icons'
-    alias ll='eza -lh --git --icons'
-    alias lla='eza -lah --git --icons'
-    alias lt='eza -T --icons'
-    alias llt='eza -lTh --git --icons'
-    alias lat='eza -ahT --icons'
-    alias llat='eza -lahT --git --icons'
-    alias ld='eza -D --icons'
-    alias lad='eza -aD --icons'
-    alias lld='eza -lhD --git --icons'
-    alias llad='eza -lahD --git --icons'
+    alias l='eza --icons --color always'
+    alias la='l -a'
+    alias ll='l -lh --git'
+    alias lla='ll -a'
+    alias lt='l -T'
+    alias llt='ll -T'
+    alias lat='llt -a'
+    alias llat='lla -T'
+    alias ld='l -D'
+    alias lad='ld -a'
+    alias lld='ll -D'
+    alias llad='lld -a'
 end
 
 # Kitty
-if [ $TERM = "xterm-kitty" ]
+if [ $TERM = xterm-kitty ]
     alias icat='kitten icat'
     alias ssh='kitten ssh'
 end
