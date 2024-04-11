@@ -112,6 +112,11 @@ return {
         },
         config = function()
             local servers = {
+                basedpyright = {
+                    basedpyright = {
+                        typeCheckingMode = 'standard',
+                    },
+                },
                 bashls = {},
                 clangd = {},
                 cssls = {},
@@ -148,7 +153,6 @@ return {
                         },
                     },
                 },
-                pyright = {},
                 solargraph = {},
                 svelte = {},
                 tailwindcss = {},
