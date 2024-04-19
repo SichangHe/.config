@@ -22,7 +22,7 @@ return {
                 markdown = { 'markdownlint' },
                 python = { 'isort', 'black' },
                 lua = {},
-                sh = { 'isort', 'black' },
+                sh = { 'shfmt' },
                 tex = { 'latexindent' },
                 -- Prettierd
                 handlebars = { 'prettierd' },
