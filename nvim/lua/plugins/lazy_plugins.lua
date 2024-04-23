@@ -15,6 +15,11 @@ return {
             disable_legacy_commands = true,
         },
     },
+    {
+        'adelarsq/image_preview.nvim',
+        event = 'VeryLazy',
+        config = true,
+    },
 
     {
         'mikesmithgh/kitty-scrollback.nvim',

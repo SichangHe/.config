@@ -2,5 +2,5 @@ patch:
   style/font_point: 32
 
   # Disable in certain Apps.
-  app_options/com.runningwithcrayons.Alfred:
-    ascii_mode: true
+  # app_options/com.runningwithcrayons.Alfred:
+  #   ascii_mode: true

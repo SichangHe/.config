@@ -47,11 +47,23 @@ return {
             window = {
                 position = 'right',
                 width = 40,
+                mappings = {
+                    ["<Space>p"] = "image_preview",
+                },
             },
             filesystem = {
                 follow_current_file = { enabled = true },
                 hijack_netrw_behavior = 'open_current',
                 use_libuv_file_watcher = true,
+                commands = {
+                    image_preview = function(state)
+                        local node = state.tree:get_node()
+                        if node.type == "file" then
+                            require("image_preview").PreviewImage(node.path)
+                        end
+                    end,
+
+                },
             },
         },
     },
