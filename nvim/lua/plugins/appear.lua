@@ -3,14 +3,21 @@ U.g.neo_tree_remove_legacy_commands = true
 return {
     {
         'lukas-reineke/indent-blankline.nvim',
-        main = 'ibl',
-        opts = function()
-            return {
+        config = function()
+            local highlight = {
+                "CursorColumn",
+                "Whitespace",
+            }
+            require("ibl").setup {
                 indent = {
+                    highlight = highlight,
                     char = '▏',
                 },
                 scope = {
                     show_exact_scope = true,
+                },
+                whitespace = {
+                    highlight = highlight,
                 },
             }
         end,
@@ -112,7 +119,10 @@ return {
                     SpellRare = { fg = 'unset', bg = 'unset' },
                     SpellLocal = { fg = 'unset', bg = 'unset' },
                     -- Fix indent highlight.
-                    IblScope = { fg = '#e0e0e0' },
+                    CursorColumn = { fg = '#f0f0f0' },
+                    IblIdent = { fg = '#f0f0f0' },
+                    IblScope = { fg = '#a0a1a7' },
+                    Whitespace = { fg = '#f0f0f0' },
                     -- VimTex conceal.
                     Conceal = { fg = '#333436' },
                     -- No highlighting changed lines.
