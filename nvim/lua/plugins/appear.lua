@@ -5,8 +5,8 @@ return {
         'lukas-reineke/indent-blankline.nvim',
         config = function()
             local highlight = {
-                "CursorColumn",
-                "Whitespace",
+                "IblIndentEven",
+                "IblIndentOdd",
             }
             require("ibl").setup {
                 indent = {
@@ -81,6 +81,7 @@ return {
             'MunifTanjim/nui.nvim',
         },
         config = function()
+            ---@diagnostic disable-next-line: missing-fields
             require('notify').setup {
                 top_down = false,
                 stages = 'static',
@@ -124,10 +125,10 @@ return {
                     SpellRare = { fg = 'unset', bg = 'unset' },
                     SpellLocal = { fg = 'unset', bg = 'unset' },
                     -- Fix indent highlight.
-                    CursorColumn = { fg = '#f0f0f0' },
+                    IblIndentEven = { fg = '#f0f0f0', bg = '#f0f0f0' },
+                    IblIndentOdd = { fg = '#f0f0f0' },
                     IblIdent = { fg = '#f0f0f0' },
                     IblScope = { fg = '#a0a1a7' },
-                    Whitespace = { fg = '#f0f0f0' },
                     -- VimTex conceal.
                     Conceal = { fg = '#333436' },
                     -- No highlighting changed lines.

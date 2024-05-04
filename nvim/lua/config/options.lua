@@ -8,8 +8,8 @@ set.expandtab = true
 set.fixendofline = false
 set.list = true
 set.listchars = {
-    tab = '- ',
-    trail = '·',
+    tab = '⇥ ',
+    trail = '␣',
 }
 set.mouse = 'a'
 set.number = false

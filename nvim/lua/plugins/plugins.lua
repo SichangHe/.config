@@ -50,6 +50,7 @@ return {
         ft = 'markdown',
         config = function()
             U.g.vim_markdown_folding_disabled = true
+            U.g.vim_markdown_math = true
         end,
     },
 
