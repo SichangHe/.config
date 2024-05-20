@@ -58,7 +58,6 @@ function M.set_macos_option_keys()
         { '0', 'º' },
         { '-', '–' },
         { '=', '≠' },
-        { '_', '—' },
         { '+', '±' },
         { 'q', 'œ' },
         { 'w', '∑' },
@@ -105,6 +104,7 @@ function M.set_macos_option_keys()
     for _, pair in ipairs(option_map) do
         i('<M-' .. pair[1] .. '>', pair[2])
     end
+    i('<M-S-->', '—') -- This one has to be separate.
 end
 
 return M

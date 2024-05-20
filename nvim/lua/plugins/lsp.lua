@@ -20,7 +20,7 @@ return {
             formatters_by_ft = {
                 bib = { 'bibtex-tidy' },
                 markdown = { 'markdownlint' },
-                python = { 'isort', 'black' },
+                python = { 'ruff_format' },
                 lua = {},
                 sh = { 'shfmt' },
                 tex = { 'latexindent' },
@@ -83,9 +83,8 @@ return {
         opts = function(_, opts)
             for _, program in ipairs({
                 'bibtex-tidy',
-                'black',
-                'isort',
                 'prettierd',
+                'ruff',
             }) do
                 table.insert(opts.ensure_installed, program)
             end
