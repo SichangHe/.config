@@ -54,6 +54,12 @@ return {
     },
 
     {
+        'ionide/Ionide-vim',
+        dependencies = { 'neovim/nvim-lspconfig' },
+        event = 'VeryLazy',
+    },
+
+    {
         'glepnir/lspsaga.nvim',
         event = 'VeryLazy',
         dependencies = { 'nvim-tree/nvim-web-devicons' },

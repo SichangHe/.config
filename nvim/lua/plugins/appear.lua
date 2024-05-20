@@ -116,9 +116,9 @@ return {
                     rainbowcol4 = { fg = 'DarkBlue' },
                     rainbowcol5 = { fg = 'DarkRed' },
                     rainbowcol6 = { fg = 'DarkGray' },
-                    IlluminatedWordText = { bg = '#f6d5f5' },
-                    IlluminatedWordRead = { bg = '#f6d5f5' },
-                    IlluminatedWordWrite = { bg = '#f6d5f5' },
+                    LspReferenceText = { bg = '#f6d5f5' },
+                    LspReferenceRead = { bg = '#f6d5f5' },
+                    LspReferenceWrite = { bg = '#f6d5f5' },
                     -- Spell highlight only add underlines.
                     SpellBad = { fg = 'unset', bg = 'unset' },
                     SpellCap = { fg = 'unset', bg = 'unset' },

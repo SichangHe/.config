@@ -13,7 +13,6 @@ U.auto_call({ 'BufReadPre', 'FileReadPre' }, function()
     if size > one_meg or size == -2 then
         U.b.large_buf = true
         U.cmd('syntax off')
-        U.cmd_if_exists('IlluminatePauseBuf')     -- disable vim-illuminate
         U.cmd_if_exists('IndentBlanklineDisable') -- disable indent-blankline.nvim
         U.set_buf.wrap = false
         U.set_buf.foldmethod = 'manual'

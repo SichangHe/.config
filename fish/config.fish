@@ -75,3 +75,6 @@ end
 
 # Cargo use Git CLI.
 set -gx CARGO_NET_GIT_FETCH_WITH_CLI true
+
+# Fuck Microsoft .NET telemetry.
+set -gx DOTNET_CLI_TELEMETRY_OPTOUT true

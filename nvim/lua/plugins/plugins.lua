@@ -2,30 +2,6 @@ U = require('util')
 
 return {
     {
-        'RRethy/vim-illuminate',
-        event = 'VeryLazy',
-        opts = {
-            providers = {
-                'lsp',
-                'treesitter',
-            },
-            filetype_overrides = {
-                latex = {
-                    providers = {
-                        'treesitter',
-                        'regex',
-                    }
-                },
-                markdown = {
-                    providers = {
-                        'regex',
-                    }
-                }
-            },
-        },
-    },
-
-    {
         'iamcco/markdown-preview.nvim',
         ft = 'markdown',
         build = U.fn["mkdp#util#install"],
