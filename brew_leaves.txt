@@ -6,9 +6,11 @@ cocoapods
 elixir-ls
 fish
 gleam
+gnu-sed
 libpq
 librsvg
 libssh2
+libtermkey
 lzfse
 markdownlint-cli2
 modularml/packages/modular

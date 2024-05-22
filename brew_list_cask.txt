@@ -8,7 +8,7 @@ brave-browser
 copilot-for-xcode
 db-browser-for-sqlite
 docker
-dotnet
+dotnet-sdk
 epub-to-pdf
 firefox
 flutter
@@ -16,12 +16,14 @@ font-jetbrains-mono-nerd-font
 font-noto-color-emoji
 gimp
 google-chrome
+google-drive
 hammerspoon
 handbrake
 imageoptim
 julia
 karabiner-elements
 keycastr
+kitty
 mactex-no-gui
 master-pdf-editor
 microsoft-edge
