@@ -7,6 +7,9 @@ return {
         'stevearc/conform.nvim',
         opts = {
             formatters = {
+                fmtm = {
+                    command = "fmtm",
+                },
                 latexindent = {
                     prepend_args = {
                         '-l',
@@ -19,7 +22,7 @@ return {
             },
             formatters_by_ft = {
                 bib = { 'bibtex-tidy' },
-                markdown = { 'markdownlint' },
+                markdown = { "fmtm", 'markdownlint' },
                 python = { 'ruff_format' },
                 lua = {},
                 sh = { 'shfmt' },
