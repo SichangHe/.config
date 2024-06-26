@@ -2,6 +2,57 @@ U = require("util")
 
 -- U.lsp.set_log_level('debug') -- debug LSP
 
+local function mdbook_ls_setup(capabilities)
+    local lspconfig = require('lspconfig')
+    local function execute_command_with_params(params)
+        local clients = lspconfig.util.get_lsp_clients {
+            bufnr = vim.api.nvim_get_current_buf(),
+            name = 'mdbook_ls',
+        }
+        for _, client in ipairs(clients) do
+            client.request('workspace/executeCommand', params, nil, 0)
+        end
+    end
+    local function open_preview()
+        local params = {
+            command = 'open_preview',
+            arguments = { vim.uri_from_bufnr(0), true },
+        }
+        execute_command_with_params(params)
+    end
+    local function stop_preview()
+        local params = {
+            command = 'stop_preview',
+            arguments = {},
+        }
+        execute_command_with_params(params)
+    end
+
+    require('lspconfig.configs')['mdbook_ls'] = {
+        default_config = {
+            cmd = { 'mdbook-ls' },
+            filetypes = { 'markdown' },
+            root_dir = lspconfig.util.root_pattern('book.toml'),
+        },
+        commands = {
+            MDBookLSOpenPreview = {
+                open_preview,
+                description = 'Open MDBook-LS preview',
+            },
+            MDBookLSStopPreview = {
+                stop_preview,
+                description = 'Stop MDBook-LS preview',
+            },
+        },
+        docs = {
+            description = [[TODO]],
+        },
+    }
+    lspconfig['mdbook_ls'].setup {
+        capabilities = capabilities,
+    }
+end
+
 return {
     {
         'stevearc/conform.nvim',
@@ -204,7 +255,10 @@ return {
                 capabilities = capabilities,
                 settings = {},
             }
+
+            mdbook_ls_setup(capabilities)
         end,
+
     },
 
     {
