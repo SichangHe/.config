@@ -16,7 +16,7 @@ local function mdbook_ls_setup(capabilities)
     local function open_preview()
         local params = {
             command = 'open_preview',
-            arguments = { vim.uri_from_bufnr(0), true },
+            arguments = { "127.0.0.1:33000", vim.api.nvim_buf_get_name(0) },
         }
         execute_command_with_params(params)
     end
@@ -37,15 +37,15 @@ local function mdbook_ls_setup(capabilities)
         commands = {
             MDBookLSOpenPreview = {
                 open_preview,
-                description = 'Open MDBook-LS preview',
+                description = 'Open mdBook-LS preview',
             },
             MDBookLSStopPreview = {
                 stop_preview,
-                description = 'Stop MDBook-LS preview',
+                description = 'Stop mdBook-LS preview',
             },
         },
         docs = {
-            description = [[TODO]],
+            description = [[The mdBook Language Server for previewing mdBook projects live.]],
         },
     }
     lspconfig['mdbook_ls'].setup {
