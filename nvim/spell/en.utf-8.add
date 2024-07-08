@@ -163,5 +163,4 @@ whitelist
 RPSLyzer
 Godbolt
 timestamp
-let/!
-path/!
+async

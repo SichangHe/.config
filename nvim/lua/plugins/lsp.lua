@@ -75,7 +75,7 @@ return {
                 bib = { 'bibtex-tidy' },
                 markdown = { "fmtm", 'markdownlint' },
                 python = { 'ruff_format' },
-                lua = {},
+                lua = { 'lua_ls' },
                 sh = { 'shfmt' },
                 tex = { 'latexindent' },
                 -- Prettierd
@@ -136,6 +136,17 @@ return {
         event = 'InsertEnter',
         dependencies = { 'neovim/nvim-lspconfig' },
         opts = {},
+    },
+
+    {
+        'neovim/nvim-lspconfig',
+        opts = {
+            setup = {
+                rust_analyzer = function() -- Prevent double setup.
+                    return true
+                end,
+            },
+        },
     },
 
     {
@@ -255,6 +266,10 @@ return {
                 capabilities = capabilities,
                 settings = {},
             }
+            lspconfig["gleam"].setup {
+                capabilities = capabilities,
+                settings = {},
+            }
 
             mdbook_ls_setup(capabilities)
         end,
@@ -262,19 +277,16 @@ return {
     },
 
     {
-        'folke/neodev.nvim',
-        lazy = true,
-    },
-
-    {
         'mrcjkb/rustaceanvim',
-        opts = {
-            tools = {
-                hover_actions = {
-                    border = 'none',
-                    auto_focus = true,
+        opts = function(_, opts)
+            vim.tbl_extend('force', opts, {
+                tools = {
+                    hover_actions = {
+                        border = 'none',
+                        auto_focus = true,
+                    },
                 },
-            },
-        }
+            })
+        end
     },
 }
