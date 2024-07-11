@@ -53,6 +53,23 @@ local function mdbook_ls_setup(capabilities)
     }
 end
 
+local function natural_syntax_ls_setup(capabilities)
+    local lspconfig = require('lspconfig')
+    require('lspconfig.configs')['natural_syntax_ls'] = {
+        default_config = {
+            cmd = { 'natural-syntax-ls' },
+            filetypes = { 'text' },
+            single_file_support = true,
+        },
+        docs = {
+            description = [[The Natural Syntax Language Server for highlighting parts of speech.]],
+        },
+    }
+    lspconfig['natural_syntax_ls'].setup {
+        capabilities = capabilities,
+    }
+end
+
 return {
     {
         'stevearc/conform.nvim',
@@ -272,6 +289,7 @@ return {
             }
 
             mdbook_ls_setup(capabilities)
+            natural_syntax_ls_setup(capabilities)
         end,
 
     },
