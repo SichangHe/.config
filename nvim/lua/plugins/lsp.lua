@@ -66,7 +66,16 @@ local function natural_syntax_ls_setup(capabilities)
         },
     }
     lspconfig['natural_syntax_ls'].setup {
-        capabilities = capabilities,
+        capabilities,
+        init_options = {
+            token_map_update = {
+                CC = vim.NIL,
+                DT = vim.NIL,
+                IN = vim.NIL,
+                PDT = vim.NIL,
+                TO = vim.NIL,
+            },
+        },
     }
 end
 
