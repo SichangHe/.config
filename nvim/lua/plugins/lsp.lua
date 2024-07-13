@@ -106,7 +106,6 @@ return {
             formatters_by_ft = {
                 bib = { 'bibtex-tidy' },
                 markdown = { 'markdownlint-cli2', "fmtm" },
-                python = { 'ruff_format' },
                 lua = { 'lua_ls' },
                 sh = { 'shfmt' },
                 tex = { 'latexindent' },
@@ -174,6 +173,9 @@ return {
         'neovim/nvim-lspconfig',
         opts = {
             setup = {
+                pyright = function() -- Disable Pyright.
+                    return true
+                end,
                 rust_analyzer = function() -- Prevent double setup.
                     return true
                 end,
@@ -236,13 +238,16 @@ return {
                 },
                 pylsp = {
                     pylsp = {
-                        configurationSources = { 'mypy', 'ruff' },
+                        configurationSources = { 'mypy' },
                         plugins = {
                             autopep8 = { enabled = false },
                             jedi_completion = {
                                 eager = true,
                                 fuzzy = true,
                             },
+                            -- Use BasedPyright.
+                            jedi_definition = { enabled = false },
+                            jedi_references = { enabled = false },
                             mccabe = { enabled = false },
                             mypy = {
                                 enabled = true,
@@ -250,7 +255,6 @@ return {
                             },
                             pycodestyle = { enabled = false },
                             pyflakes = { enabled = false },
-                            ruff = { enabled = true },
                             yapf = { enabled = false },
                         },
                     },
@@ -294,13 +298,14 @@ return {
                 end
             }
             -- Other LSPs.
-            lspconfig["sourcekit"].setup {
+            lspconfig.gleam.setup {
                 capabilities = capabilities,
-                settings = {},
             }
-            lspconfig["gleam"].setup {
+            lspconfig.sourcekit.setup {
                 capabilities = capabilities,
-                settings = {},
+            }
+            lspconfig.ruff.setup {
+                capabilities = capabilities,
             }
 
             mdbook_ls_setup(capabilities)
