@@ -93,13 +93,19 @@ return {
                         U.expand('~/.config/latexindent_config.yaml'),
                     },
                 },
+                markdownlint_cli2 = {
+                    prepend_args = {
+                        '--config',
+                        U.expand('~/.config/.markdownlint-cli2.jsonc'),
+                    },
+                },
                 shfmt = {
                     prepend_args = { '-i', '4', '-bn', '-ci', '-sr' },
                 },
             },
             formatters_by_ft = {
                 bib = { 'bibtex-tidy' },
-                markdown = { "fmtm", 'markdownlint' },
+                markdown = { 'markdownlint-cli2', "fmtm" },
                 python = { 'ruff_format' },
                 lua = { 'lua_ls' },
                 sh = { 'shfmt' },
