@@ -180,9 +180,6 @@ return {
                 },
             },
             setup = {
-                pyright = function() -- Disable Pyright.
-                    return true
-                end,
                 rust_analyzer = function() -- Prevent double setup.
                     return true
                 end,

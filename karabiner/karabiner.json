@@ -350,7 +350,30 @@
                         ]
                     },
                     {
-                        "description": "shift + alt + q -> yabai move window to prev space",
+                        "description": "hyper' + , -> yabai focus display 3",
+                        "manipulators": [
+                            {
+                                "from": {
+                                    "key_code": "comma",
+                                    "modifiers": {
+                                        "mandatory": [
+                                            "right_command",
+                                            "right_control",
+                                            "right_option"
+                                        ]
+                                    }
+                                },
+                                "to": [
+                                    {
+                                        "shell_command": "/opt/homebrew/bin/yabai -m display 3 --focus 3"
+                                    }
+                                ],
+                                "type": "basic"
+                            }
+                        ]
+                    },
+                    {
+                        "description": "hyper + q -> yabai move window to prev space",
                         "manipulators": [
                             {
                                 "from": {
@@ -358,7 +381,9 @@
                                     "modifiers": {
                                         "mandatory": [
                                             "shift",
-                                            "option"
+                                            "right_command",
+                                            "right_control",
+                                            "right_option"
                                         ]
                                     }
                                 },
@@ -372,7 +397,7 @@
                         ]
                     },
                     {
-                        "description": "shift + alt + w -> yabai move window to next space",
+                        "description": "hyper + w -> yabai move window to next space",
                         "manipulators": [
                             {
                                 "from": {
@@ -380,7 +405,9 @@
                                     "modifiers": {
                                         "mandatory": [
                                             "shift",
-                                            "option"
+                                            "right_command",
+                                            "right_control",
+                                            "right_option"
                                         ]
                                     }
                                 },
@@ -394,7 +421,7 @@
                         ]
                     },
                     {
-                        "description": "shift + alt + 1 -> yabai move window to space 1",
+                        "description": "hyper + 1 -> yabai move window to space 1",
                         "manipulators": [
                             {
                                 "from": {
@@ -402,7 +429,9 @@
                                     "modifiers": {
                                         "mandatory": [
                                             "shift",
-                                            "option"
+                                            "right_command",
+                                            "right_control",
+                                            "right_option"
                                         ]
                                     }
                                 },
@@ -416,7 +445,7 @@
                         ]
                     },
                     {
-                        "description": "shift + alt + 2 -> yabai move window to space 2",
+                        "description": "hyper + 2 -> yabai move window to space 2",
                         "manipulators": [
                             {
                                 "from": {
@@ -424,7 +453,9 @@
                                     "modifiers": {
                                         "mandatory": [
                                             "shift",
-                                            "option"
+                                            "right_command",
+                                            "right_control",
+                                            "right_option"
                                         ]
                                     }
                                 },
@@ -438,7 +469,7 @@
                         ]
                     },
                     {
-                        "description": "shift + alt + 3 -> yabai move window to space 3",
+                        "description": "hyper + 3 -> yabai move window to space 3",
                         "manipulators": [
                             {
                                 "from": {
@@ -446,7 +477,9 @@
                                     "modifiers": {
                                         "mandatory": [
                                             "shift",
-                                            "option"
+                                            "right_command",
+                                            "right_control",
+                                            "right_option"
                                         ]
                                     }
                                 },
@@ -460,7 +493,7 @@
                         ]
                     },
                     {
-                        "description": "shift + alt + 4 -> yabai move window to space 4",
+                        "description": "hyper + 4 -> yabai move window to space 4",
                         "manipulators": [
                             {
                                 "from": {
@@ -468,7 +501,9 @@
                                     "modifiers": {
                                         "mandatory": [
                                             "shift",
-                                            "option"
+                                            "right_command",
+                                            "right_control",
+                                            "right_option"
                                         ]
                                     }
                                 },
@@ -482,7 +517,7 @@
                         ]
                     },
                     {
-                        "description": "shift + alt + 5 -> yabai move window to space 5",
+                        "description": "hyper + 5 -> yabai move window to space 5",
                         "manipulators": [
                             {
                                 "from": {
@@ -490,7 +525,9 @@
                                     "modifiers": {
                                         "mandatory": [
                                             "shift",
-                                            "option"
+                                            "right_command",
+                                            "right_control",
+                                            "right_option"
                                         ]
                                     }
                                 },
@@ -504,7 +541,7 @@
                         ]
                     },
                     {
-                        "description": "shift + alt + 6 -> yabai move window to space 6",
+                        "description": "hyper + 6 -> yabai move window to space 6",
                         "manipulators": [
                             {
                                 "from": {
@@ -512,7 +549,9 @@
                                     "modifiers": {
                                         "mandatory": [
                                             "shift",
-                                            "option"
+                                            "right_command",
+                                            "right_control",
+                                            "right_option"
                                         ]
                                     }
                                 },
@@ -526,7 +565,7 @@
                         ]
                     },
                     {
-                        "description": "shift + alt + 7 -> yabai move window to space 7",
+                        "description": "hyper + 7 -> yabai move window to space 7",
                         "manipulators": [
                             {
                                 "from": {
@@ -534,7 +573,9 @@
                                     "modifiers": {
                                         "mandatory": [
                                             "shift",
-                                            "option"
+                                            "right_command",
+                                            "right_control",
+                                            "right_option"
                                         ]
                                     }
                                 },
@@ -548,7 +589,7 @@
                         ]
                     },
                     {
-                        "description": "shift + alt + 8 -> yabai move window to space 8",
+                        "description": "hyper + 8 -> yabai move window to space 8",
                         "manipulators": [
                             {
                                 "from": {
@@ -556,7 +597,9 @@
                                     "modifiers": {
                                         "mandatory": [
                                             "shift",
-                                            "option"
+                                            "right_command",
+                                            "right_control",
+                                            "right_option"
                                         ]
                                     }
                                 },
@@ -570,7 +613,7 @@
                         ]
                     },
                     {
-                        "description": "shift + alt + 9 -> yabai move window to space 9",
+                        "description": "hyper + 9 -> yabai move window to space 9",
                         "manipulators": [
                             {
                                 "from": {
@@ -578,7 +621,9 @@
                                     "modifiers": {
                                         "mandatory": [
                                             "shift",
-                                            "option"
+                                            "right_command",
+                                            "right_control",
+                                            "right_option"
                                         ]
                                     }
                                 },
@@ -592,7 +637,7 @@
                         ]
                     },
                     {
-                        "description": "shift + alt + 0 -> yabai move window to space 10",
+                        "description": "hyper + 0 -> yabai move window to space 10",
                         "manipulators": [
                             {
                                 "from": {
@@ -600,7 +645,9 @@
                                     "modifiers": {
                                         "mandatory": [
                                             "shift",
-                                            "option"
+                                            "right_command",
+                                            "right_control",
+                                            "right_option"
                                         ]
                                     }
                                 },
@@ -614,7 +661,55 @@
                         ]
                     },
                     {
-                        "description": "shift + alt + n -> yabai move window to display 1",
+                        "description": "hyper + - -> yabai move window to space 11",
+                        "manipulators": [
+                            {
+                                "from": {
+                                    "key_code": "hyphen",
+                                    "modifiers": {
+                                        "mandatory": [
+                                            "shift",
+                                            "right_command",
+                                            "right_control",
+                                            "right_option"
+                                        ]
+                                    }
+                                },
+                                "to": [
+                                    {
+                                        "shell_command": "/opt/homebrew/bin/yabai -m window --space 11 && /opt/homebrew/bin/yabai -m space --focus 11"
+                                    }
+                                ],
+                                "type": "basic"
+                            }
+                        ]
+                    },
+                    {
+                        "description": "hyper + = -> yabai move window to space 12",
+                        "manipulators": [
+                            {
+                                "from": {
+                                    "key_code": "equal_sign",
+                                    "modifiers": {
+                                        "mandatory": [
+                                            "shift",
+                                            "right_command",
+                                            "right_control",
+                                            "right_option"
+                                        ]
+                                    }
+                                },
+                                "to": [
+                                    {
+                                        "shell_command": "/opt/homebrew/bin/yabai -m window --space 12 && /opt/homebrew/bin/yabai -m space --focus 12"
+                                    }
+                                ],
+                                "type": "basic"
+                            }
+                        ]
+                    },
+                    {
+                        "description": "hyper + n -> yabai move window to display 1",
                         "manipulators": [
                             {
                                 "from": {
@@ -622,7 +717,9 @@
                                     "modifiers": {
                                         "mandatory": [
                                             "shift",
-                                            "option"
+                                            "right_command",
+                                            "right_control",
+                                            "right_option"
                                         ]
                                     }
                                 },
@@ -636,7 +733,7 @@
                         ]
                     },
                     {
-                        "description": "shift + alt + m -> yabai move window to display 2",
+                        "description": "hyper + m -> yabai move window to display 2",
                         "manipulators": [
                             {
                                 "from": {
@@ -644,13 +741,39 @@
                                     "modifiers": {
                                         "mandatory": [
                                             "shift",
-                                            "option"
+                                            "right_command",
+                                            "right_control",
+                                            "right_option"
                                         ]
                                     }
                                 },
                                 "to": [
                                     {
                                         "shell_command": "/opt/homebrew/bin/yabai -m window --display 2 && /opt/homebrew/bin/yabai -m display 2 --focus 2"
+                                    }
+                                ],
+                                "type": "basic"
+                            }
+                        ]
+                    },
+                    {
+                        "description": "hyper + , -> yabai move window to display 3",
+                        "manipulators": [
+                            {
+                                "from": {
+                                    "key_code": "comma",
+                                    "modifiers": {
+                                        "mandatory": [
+                                            "shift",
+                                            "right_command",
+                                            "right_control",
+                                            "right_option"
+                                        ]
+                                    }
+                                },
+                                "to": [
+                                    {
+                                        "shell_command": "/opt/homebrew/bin/yabai -m window --display 3 && /opt/homebrew/bin/yabai -m display 3 --focus 3"
                                     }
                                 ],
                                 "type": "basic"
@@ -934,6 +1057,52 @@
                         ]
                     },
                     {
+                        "description": "hyper' + - -> yabai focus space 11",
+                        "manipulators": [
+                            {
+                                "from": {
+                                    "key_code": "hyphen",
+                                    "modifiers": {
+                                        "mandatory": [
+                                            "right_command",
+                                            "right_control",
+                                            "right_option"
+                                        ]
+                                    }
+                                },
+                                "to": [
+                                    {
+                                        "shell_command": "/opt/homebrew/bin/yabai -m space --focus 11"
+                                    }
+                                ],
+                                "type": "basic"
+                            }
+                        ]
+                    },
+                    {
+                        "description": "hyper' + = -> yabai focus space 12",
+                        "manipulators": [
+                            {
+                                "from": {
+                                    "key_code": "equal_sign",
+                                    "modifiers": {
+                                        "mandatory": [
+                                            "right_command",
+                                            "right_control",
+                                            "right_option"
+                                        ]
+                                    }
+                                },
+                                "to": [
+                                    {
+                                        "shell_command": "/opt/homebrew/bin/yabai -m space --focus 12"
+                                    }
+                                ],
+                                "type": "basic"
+                            }
+                        ]
+                    },
+                    {
                         "description": "hyper' + a -> yabai layout bsp",
                         "manipulators": [
                             {
@@ -1003,7 +1172,7 @@
                         ]
                     },
                     {
-                        "description": "shift + alt + f -> yabai toggle mouse follow",
+                        "description": "hyper + f -> yabai toggle mouse follow",
                         "manipulators": [
                             {
                                 "from": {
@@ -1011,7 +1180,9 @@
                                     "modifiers": {
                                         "mandatory": [
                                             "shift",
-                                            "option"
+                                            "right_command",
+                                            "right_control",
+                                            "right_option"
                                         ]
                                     }
                                 },
@@ -1071,7 +1242,7 @@
                         ]
                     },
                     {
-                        "description": "shift + alt + x -> yabai mirror on X-axis",
+                        "description": "hyper + x -> yabai mirror on X-axis",
                         "manipulators": [
                             {
                                 "from": {
@@ -1079,7 +1250,9 @@
                                     "modifiers": {
                                         "mandatory": [
                                             "shift",
-                                            "option"
+                                            "right_command",
+                                            "right_control",
+                                            "right_option"
                                         ]
                                     }
                                 },
@@ -1093,7 +1266,7 @@
                         ]
                     },
                     {
-                        "description": "shift + alt + y -> yabai mirror on Y-axis",
+                        "description": "hyper + y -> yabai mirror on Y-axis",
                         "manipulators": [
                             {
                                 "from": {
@@ -1101,7 +1274,9 @@
                                     "modifiers": {
                                         "mandatory": [
                                             "shift",
-                                            "option"
+                                            "right_command",
+                                            "right_control",
+                                            "right_option"
                                         ]
                                     }
                                 },
