@@ -308,9 +308,33 @@ return {
             lspconfig.sourcekit.setup {
                 capabilities = capabilities,
             }
+
             lspconfig.ruff.setup {
                 capabilities = capabilities,
             }
+            -- Ruff automatic import organization.
+            LazyVim.format.register({
+                name = "ruff.organize_imports",
+                priority = 50,   -- Smaller than Conform's 100.
+                primary = false, -- Conform is primary.
+                format = function(bufnr)
+                    for _, client in pairs(vim.lsp.get_clients({ bufnr })) do
+                        if client.name == 'ruff' then
+                            vim.lsp.buf.code_action({
+                                context = {
+                                    only = { 'source.organizeImports' },
+                                    diagnostics = {},
+                                },
+                                apply = true,
+                            })
+                            break
+                        end
+                    end
+                end,
+                sources = function(_)
+                    return { 'ruff.organize_imports' } -- Dummy name.
+                end,
+            })
 
             mdbook_ls_setup(capabilities)
             natural_syntax_ls_setup(capabilities)
