@@ -172,6 +172,13 @@ return {
     {
         'neovim/nvim-lspconfig',
         opts = {
+            ---@type vim.diagnostic.Opts
+            diagnostics = {
+                virtual_text = {
+                    spacing = 1,
+                    source = false,
+                },
+            },
             setup = {
                 pyright = function() -- Disable Pyright.
                     return true
