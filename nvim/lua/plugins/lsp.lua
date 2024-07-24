@@ -79,6 +79,11 @@ local function natural_syntax_ls_setup(capabilities)
     }
 end
 
+local markdownlint_cli2_args = {
+    '--config',
+    U.expand('~/.config/.markdownlint-cli2.jsonc'),
+}
+
 return {
     {
         'stevearc/conform.nvim',
@@ -94,10 +99,7 @@ return {
                     },
                 },
                 markdownlint_cli2 = {
-                    prepend_args = {
-                        '--config',
-                        U.expand('~/.config/.markdownlint-cli2.jsonc'),
-                    },
+                    prepend_args = markdownlint_cli2_args,
                 },
                 shfmt = {
                     prepend_args = { '-i', '4', '-bn', '-ci', '-sr' },
@@ -183,6 +185,9 @@ return {
                 rust_analyzer = function() -- Prevent double setup.
                     return true
                 end,
+                pyright = function() -- Disable Pyright.
+                    return true
+                end,
             },
         },
     },
@@ -222,7 +227,7 @@ return {
             local servers = {
                 basedpyright = {
                     basedpyright = {
-                        typeCheckingMode = 'standard',
+                        typeCheckingMode = 'basic',
                     },
                 },
                 bashls = {},
@@ -269,6 +274,7 @@ return {
                 taplo = {},
                 tsserver = {},
                 vale_ls = {},
+                zls = {},
             }
             local ensure = U.tbl_keys(servers)
             for _, v in ipairs({
@@ -340,6 +346,14 @@ return {
             natural_syntax_ls_setup(capabilities)
         end,
 
+    },
+
+    {
+        'mfussenegger/nvim-lint',
+        opts = function(_, _)
+            local markdownlint_cli2 = require('lint').linters['markdownlint-cli2']
+            markdownlint_cli2.args = markdownlint_cli2_args
+        end,
     },
 
     {
