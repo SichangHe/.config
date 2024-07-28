@@ -22,19 +22,15 @@ M.current_buf_path = function() return M.api.nvim_buf_get_name(0) end
 ---Extend left tables with right tables recursively.
 ---@param ... table Two or more tables
 M.deep_extend      = function(...)
-    vim.tbl_deep_extend('force', ...)
+    return vim.tbl_deep_extend('force', ...)
 end
 M.fn               = vim.fn
 M.expand           = M.fn.expand
-M.fs_stat          = vim.loop.fs_stat
 M.g                = vim.g
-M.lsp              = vim.lsp
 M.key              = vim.keymap.set
 M.del_key          = vim.keymap.del
-M.rtp              = vim.opt.rtp
 M.set              = vim.opt
-M.set_buf          = vim.opt
-M.tbl_keys         = vim.tbl_keys
+M.set_buf          = vim.opt_local
 M.use              = function(module)
     package.loaded[module] = nil
     return require(module)

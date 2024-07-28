@@ -22,7 +22,26 @@ local servers = {
     jsonls = {},
     julials = {},
     ltex = {
-        autostart = false,
+        autostart = false, -- LTeX is too heavy for regular use.
+        settings = {
+            ltex = {
+                dictionary = {
+                    ['en-US'] = {}, -- Initialized below.
+                },
+            },
+        },
+        on_init = function(client, bufnr)
+            _ = bufnr
+            local spell_file_name = U.conf_loc .. 'spell/en.utf-8.add'
+            local spell_file = io.open(spell_file_name, 'r')
+            if spell_file then
+                local dict = client.config.settings.ltex.dictionary['en-US']
+                for line in spell_file:lines() do
+                    table.insert(dict, line)
+                end
+                spell_file:close()
+            end
+        end,
     },
     mdbook_ls = {},
     natural_syntax_ls = {
@@ -255,14 +274,14 @@ return {
         opts = function(_, opts)
             register_mdbook_ls()
             register_natural_syntax_ls()
-            opts.diagnostics = vim.tbl_deep_extend('force', opts.diagnostics, {
+            opts.diagnostics = U.deep_extend(opts.diagnostics, {
                 virtual_text = {
                     spacing = 1,
                     source = false,
                 },
             })
-            opts.servers = vim.tbl_deep_extend('force', opts.servers, servers)
-            opts.setup = vim.tbl_deep_extend('force', opts.setup, {
+            opts.servers = U.deep_extend(opts.servers, servers)
+            opts.setup = U.deep_extend(opts.setup, {
                 rust_analyzer = function() -- Prevent double setup.
                     return true
                 end,
