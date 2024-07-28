@@ -2,7 +2,102 @@ U = require("util")
 
 -- U.lsp.set_log_level('debug') -- debug LSP
 
-local function mdbook_ls_setup(capabilities)
+local servers = {
+    basedpyright = {
+        settings = {
+            basedpyright = {
+                typeCheckingMode = 'basic',
+            },
+        },
+    },
+    bashls = {},
+    clangd = {},
+    cssls = {},
+    elixirls = {},
+    emmet_ls = {},
+    gleam = {
+        mason = false,
+    },
+    html = {},
+    jsonls = {},
+    julials = {},
+    ltex = {
+        autostart = false,
+    },
+    mdbook_ls = {},
+    natural_syntax_ls = {
+        init_options = {
+            token_map_update = {
+                CC = vim.NIL,
+                DT = vim.NIL,
+                IN = vim.NIL,
+                PDT = vim.NIL,
+                TO = vim.NIL,
+            },
+        },
+    },
+    pylsp = {
+        settings = {
+            pylsp = {
+                configurationSources = { 'mypy' },
+                plugins = {
+                    autopep8 = { enabled = false },
+                    jedi_completion = {
+                        eager = true,
+                        fuzzy = true,
+                    },
+                    -- Use BasedPyright.
+                    jedi_definition = { enabled = false },
+                    jedi_references = { enabled = false },
+                    mccabe = { enabled = false },
+                    mypy = {
+                        enabled = true,
+                        report_progress = true,
+                    },
+                    pycodestyle = { enabled = false },
+                    pyflakes = { enabled = false },
+                    yapf = { enabled = false },
+                },
+            },
+        },
+    },
+    ruff = {
+        on_attach = function(client, bufnr_attached)
+            _ = client
+            -- Ruff automatic import organization.
+            LazyVim.format.register({
+                name = "ruff.organize_imports",
+                priority = 50,   -- Smaller than Conform's 100.
+                primary = false, -- Conform is primary.
+                format = function(bufnr)
+                    if bufnr == bufnr_attached then
+                        vim.lsp.buf.code_action({
+                            context = {
+                                only = { 'source.organizeImports' },
+                                diagnostics = {},
+                            },
+                            apply = true,
+                        })
+                    end
+                end,
+                sources = function(_)
+                    return { 'ruff.organize_imports' } -- Dummy name.
+                end,
+            })
+        end,
+    },
+    solargraph = {},
+    sourcekit = {
+        mason = false,
+    },
+    svelte = {},
+    tailwindcss = {},
+    taplo = {},
+    tsserver = {},
+    zls = {},
+}
+
+local function register_mdbook_ls()
     local lspconfig = require('lspconfig')
     local function execute_command_with_params(params)
         local clients = lspconfig.util.get_lsp_clients {
@@ -28,7 +123,7 @@ local function mdbook_ls_setup(capabilities)
         execute_command_with_params(params)
     end
 
-    require('lspconfig.configs')['mdbook_ls'] = {
+    require('lspconfig.configs').mdbook_ls = {
         default_config = {
             cmd = { 'mdbook-ls' },
             filetypes = { 'markdown' },
@@ -48,14 +143,10 @@ local function mdbook_ls_setup(capabilities)
             description = [[The mdBook Language Server for previewing mdBook projects live.]],
         },
     }
-    lspconfig['mdbook_ls'].setup {
-        capabilities = capabilities,
-    }
 end
 
-local function natural_syntax_ls_setup(capabilities)
-    local lspconfig = require('lspconfig')
-    require('lspconfig.configs')['natural_syntax_ls'] = {
+local function register_natural_syntax_ls()
+    require('lspconfig.configs').natural_syntax_ls = {
         default_config = {
             cmd = { 'natural-syntax-ls' },
             filetypes = { 'text' },
@@ -63,18 +154,6 @@ local function natural_syntax_ls_setup(capabilities)
         },
         docs = {
             description = [[The Natural Syntax Language Server for highlighting parts of speech.]],
-        },
-    }
-    lspconfig['natural_syntax_ls'].setup {
-        capabilities,
-        init_options = {
-            token_map_update = {
-                CC = vim.NIL,
-                DT = vim.NIL,
-                IN = vim.NIL,
-                PDT = vim.NIL,
-                TO = vim.NIL,
-            },
         },
     }
 end
@@ -173,36 +252,41 @@ return {
 
     {
         'neovim/nvim-lspconfig',
-        opts = {
-            ---@type vim.diagnostic.Opts
-            diagnostics = {
+        opts = function(_, opts)
+            register_mdbook_ls()
+            register_natural_syntax_ls()
+            opts.diagnostics = vim.tbl_deep_extend('force', opts.diagnostics, {
                 virtual_text = {
                     spacing = 1,
                     source = false,
                 },
-            },
-            setup = {
+            })
+            opts.servers = vim.tbl_deep_extend('force', opts.servers, servers)
+            opts.setup = vim.tbl_deep_extend('force', opts.setup, {
                 rust_analyzer = function() -- Prevent double setup.
                     return true
                 end,
                 pyright = function() -- Disable Pyright.
                     return true
                 end,
-            },
-        },
+            })
+            for _, conf in pairs(require('lspconfig.configs')) do
+                -- Disable LSP on large buffer.
+                if conf.manager ~= nil and conf.manager.try_add ~= nil then
+                    local try_add = conf.manager.try_add
+                    conf.manager.try_add = function(bufnr)
+                        if not U.b.large_buf then
+                            return try_add(bufnr)
+                        end
+                    end
+                end
+            end
+        end,
     },
 
     {
         'williamboman/mason.nvim',
         opts = function(_, opts)
-            for _, program in ipairs({
-                'bibtex-tidy',
-                'prettierd',
-                'ruff',
-            }) do
-                table.insert(opts.ensure_installed, program)
-            end
-
             -- Override and not to install with Mason.
             local to_remove = {
                 stylua = true,
@@ -212,140 +296,12 @@ return {
                     table.remove(opts.ensure_installed, index)
                 end
             end
-        end,
-    },
-
-    {
-        'williamboman/mason-lspconfig.nvim',
-        event = 'VeryLazy',
-        dependencies = {
-            'williamboman/mason.nvim',
-            'neovim/nvim-lspconfig',
-            'hrsh7th/cmp-nvim-lsp',
-        },
-        config = function()
-            local servers = {
-                basedpyright = {
-                    basedpyright = {
-                        typeCheckingMode = 'basic',
-                    },
-                },
-                bashls = {},
-                clangd = {},
-                cssls = {},
-                elixirls = {},
-                emmet_ls = {},
-                html = {},
-                jsonls = {},
-                julials = {},
-                lua_ls = {
-                    Lua = {
-                        workspace = {
-                            checkThirdParty = false,
-                        },
-                    },
-                },
-                pylsp = {
-                    pylsp = {
-                        configurationSources = { 'mypy' },
-                        plugins = {
-                            autopep8 = { enabled = false },
-                            jedi_completion = {
-                                eager = true,
-                                fuzzy = true,
-                            },
-                            -- Use BasedPyright.
-                            jedi_definition = { enabled = false },
-                            jedi_references = { enabled = false },
-                            mccabe = { enabled = false },
-                            mypy = {
-                                enabled = true,
-                                report_progress = true,
-                            },
-                            pycodestyle = { enabled = false },
-                            pyflakes = { enabled = false },
-                            yapf = { enabled = false },
-                        },
-                    },
-                },
-                solargraph = {},
-                svelte = {},
-                tailwindcss = {},
-                taplo = {},
-                tsserver = {},
-                vale_ls = {},
-                zls = {},
-            }
-            local ensure = U.tbl_keys(servers)
-            for _, v in ipairs({
-                -- Other servers configured with extensions.
-            }) do
-                table.insert(ensure, v)
-            end
-            local capabilities = require('cmp_nvim_lsp')
-                .default_capabilities(U.lsp.protocol.make_client_capabilities())
-            require('mason-lspconfig').setup {
-                ensure_installed = ensure,
-            }
-            local lspconfig = require('lspconfig')
-            require('mason-lspconfig').setup_handlers {
-                function(name)
-                    if servers[name] then
-                        local conf = lspconfig[name]
-                        conf.setup {
-                            autostart = servers[name].autostart,
-                            capabilities = capabilities,
-                            settings = servers[name],
-                        }
-                        -- Disable LSP on large buffer.
-                        local try_add = conf.manager.try_add
-                        conf.manager.try_add = function(bufnr)
-                            if not U.b.large_buf then
-                                return try_add(bufnr)
-                            end
-                        end
-                    end
-                end
-            }
-            -- Other LSPs.
-            lspconfig.gleam.setup {
-                capabilities = capabilities,
-            }
-            lspconfig.sourcekit.setup {
-                capabilities = capabilities,
-            }
-
-            lspconfig.ruff.setup {
-                capabilities = capabilities,
-            }
-            -- Ruff automatic import organization.
-            LazyVim.format.register({
-                name = "ruff.organize_imports",
-                priority = 50,   -- Smaller than Conform's 100.
-                primary = false, -- Conform is primary.
-                format = function(bufnr)
-                    for _, client in pairs(vim.lsp.get_clients({ bufnr })) do
-                        if client.name == 'ruff' then
-                            vim.lsp.buf.code_action({
-                                context = {
-                                    only = { 'source.organizeImports' },
-                                    diagnostics = {},
-                                },
-                                apply = true,
-                            })
-                            break
-                        end
-                    end
-                end,
-                sources = function(_)
-                    return { 'ruff.organize_imports' } -- Dummy name.
-                end,
+            -- Install these in addition.
+            vim.list_extend(opts, {
+                'bibtex-tidy',
+                'prettierd',
             })
-
-            mdbook_ls_setup(capabilities)
-            natural_syntax_ls_setup(capabilities)
         end,
-
     },
 
     {

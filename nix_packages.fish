@@ -31,27 +31,29 @@ nix-env -ibA nixpkgs.zoxide
 
 set UNAME (uname)
 if [ $UNAME = Darwin ] # Darwin
-nix-env -ibA nixpkgs.asciinema
-nix-env -ibA nixpkgs.cargo-release
-nix-env -ibA nixpkgs.chafa
-nix-env -ibA nixpkgs.coreutils
-nix-env -ibA nixpkgs.exercism
-nix-env -ibA nixpkgs.go
-nix-env -ibA nixpkgs.gnused
-nix-env -ibA nixpkgs.imagemagick
-nix-env -ibA nixpkgs.pkg-config
-nix-env -ibA nixpkgs.poppler_utils # for pdfimages
-nix-env -ibA nixpkgs.protobuf
-nix-env -ibA nixpkgs.qpdf
-nix-env -ibA nixpkgs.speedtest-cli
-nix-env -ibA nixpkgs.tmux
-nix-env -ibA nixpkgs.tokei
-nix-env -ibA nixpkgs.unpaper
-nix-env -ibA nixpkgs.unzip
-nix-env -ibA nixpkgs.xdg-ninja
+    nix-env -ibA nixpkgs.asciinema
+    nix-env -ibA nixpkgs.cargo-release
+    nix-env -ibA nixpkgs.chafa
+    nix-env -ibA nixpkgs.coreutils
+    nix-env -ibA nixpkgs.exercism
+    nix-env -ibA nixpkgs.go
+    nix-env -ibA nixpkgs.gnused
+    nix-env -ibA nixpkgs.imagemagick
+    nix-env -ibA nixpkgs.pkg-config
+    nix-env -ibA nixpkgs.poppler_utils # for pdfimages
+    nix-env -ibA nixpkgs.protobuf
+    nix-env -ibA nixpkgs.qpdf
+    nix-env -ibA nixpkgs.quarto
+    nix-env -ibA nixpkgs.speedtest-cli
+    nix-env -ibA nixpkgs.tectonic
+    nix-env -ibA nixpkgs.tmux
+    nix-env -ibA nixpkgs.tokei
+    nix-env -ibA nixpkgs.unpaper
+    nix-env -ibA nixpkgs.unzip
+    nix-env -ibA nixpkgs.xdg-ninja
 
 else if [ $UNAME = Linux ] # Linux
-nix-env -ibA nixpkgs.nodejs
-nix-env -ibA nixpkgs.unzip
+    nix-env -ibA nixpkgs.nodejs
+    nix-env -ibA nixpkgs.unzip
 
 end

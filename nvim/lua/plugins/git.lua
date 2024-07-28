@@ -15,9 +15,4 @@ return {
             numhl = true,
         },
     },
-
-    {
-        'tpope/vim-fugitive',
-        event = 'CmdLineEnter',
-    },
 }
