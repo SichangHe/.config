@@ -2,6 +2,11 @@ U = require('util')
 U.g.neo_tree_remove_legacy_commands = true
 return {
     {
+        'rickhowe/diffchar.vim',
+        lazy = false,
+    },
+
+    {
         'lukas-reineke/indent-blankline.nvim',
         config = function()
             local highlight = {

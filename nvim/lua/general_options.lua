@@ -11,6 +11,7 @@ function M.set()
     set.timeoutlen = 300
     set.undofile = true
     set.virtualedit = 'block'
+    set.diffopt:append('linematch:128')
     vim.o.background = 'light'
 end
 
