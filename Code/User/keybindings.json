@@ -140,18 +140,6 @@
         "when": "suggestWidgetMultipleSuggestions && suggestWidgetVisible && textInputFocus"
     },
     {
-        "command": "vscode-neovim.compositeEscape1",
-        "key": "k",
-        "when": "neovim.mode == insert && editorTextFocus",
-        "args": "k"
-    },
-    {
-        "command": "vscode-neovim.compositeEscape2",
-        "key": "j",
-        "when": "neovim.mode == insert && editorTextFocus",
-        "args": "j"
-    },
-    {
         "key": "alt+cmd+b",
         "command": "workbench.action.toggleActivityBarVisibility",
     },

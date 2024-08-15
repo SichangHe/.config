@@ -427,7 +427,6 @@
     "workbench.colorTheme": "Atom One Light",
     "workbench.iconTheme": "material-icon-theme",
     "workbench.layoutControl.enabled": false,
-    "workbench.panel.defaultLocation": "right",
     "workbench.preferredDarkColorTheme": "Atom One Light",
     "workbench.preferredHighContrastColorTheme": "Atom One Light",
     "workbench.preferredHighContrastLightColorTheme": "Atom One Light",
@@ -478,9 +477,11 @@
         "editor.defaultFormatter": "zgm.vscode-fish"
     },
     "clang-tidy.executable": "/opt/homebrew/opt/llvm/bin/clang-tidy",
-    "workbench.activityBar.location": "hidden",
     "extensions.experimental.affinity": {
         "asvetliakov.vscode-neovim": 1
     },
     "extensions.ignoreRecommendations": true,
+    "gitlens.currentLine.enabled": false,
+    "gitlens.codeLens.enabled": false,
+    "workbench.activityBar.location": "hidden",
 }
