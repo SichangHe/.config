@@ -17,6 +17,7 @@ require("lazy").setup({
         },
         { import = "lazyvim.plugins.extras.coding.codeium" },
         { import = "lazyvim.plugins.extras.coding.copilot" },
+        { import = "lazyvim.plugins.extras.coding.copilot-chat" },
         { import = "lazyvim.plugins.extras.coding.tabnine" },
         { import = 'lazyvim.plugins.extras.editor.leap' },
         { import = "lazyvim.plugins.extras.lang.git" },

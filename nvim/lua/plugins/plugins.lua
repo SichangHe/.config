@@ -2,6 +2,14 @@ U = require('util')
 
 return {
     {
+        'CopilotC-Nvim/CopilotChat.nvim',
+        opts = {
+            context = 'buffer',
+            model = nil
+        },
+    },
+
+    {
         'iamcco/markdown-preview.nvim',
         ft = 'markdown',
         build = U.fn["mkdp#util#install"],
