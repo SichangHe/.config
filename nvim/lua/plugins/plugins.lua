@@ -44,6 +44,17 @@ return {
         -- Sioyek documentation: <https://sioyek-documentation.readthedocs.io/en/latest/usage.html#synctex>.
         init = function()
             U.g.vimtex_view_method = 'sioyek'
+            U.g.vimtex_compiler_method = 'tectonic'
+            U.g.vimtex_compiler_method = 'generic'
+            U.g.vimtex_compiler_generic = {
+                -- Well, it always returns 0 (succeeds)…
+                command = [[watchexec -e tex -e bib "
+                    echo vimtex_compiler_callback_compiling &&
+                    tectonic main.tex -Z continue-on-errors --keep-intermediates --synctex --keep-logs &&
+                    echo vimtex_compiler_callback_success ||
+                    echo vimtex_compiler_callback_failure
+                "]],
+            }
         end,
         -- VimTeX cannot be lazy-loaded: <https://github.com/lervag/vimtex?tab=readme-ov-file#installation>
         lazy = false,
