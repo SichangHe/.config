@@ -136,8 +136,6 @@ return {
                     IblScope = { fg = '#a0a1a7' },
                     -- VimTex conceal.
                     Conceal = { fg = '#333436' },
-                    -- No highlighting changed lines.
-                    DiffChange = { bg = 'cleared' },
                 },
             }
             onedark.load()
