@@ -45,6 +45,7 @@ local servers = {
     },
     mdbook_ls = {},
     natural_syntax_ls = {
+        autostart = false,
         init_options = {
             token_map_update = {
                 CC = vim.NIL,
@@ -167,8 +168,10 @@ end
 local function register_natural_syntax_ls()
     require('lspconfig.configs').natural_syntax_ls = {
         default_config = {
-            cmd = { 'natural-syntax-ls' },
-            filetypes = { 'text' },
+            cmd = {
+                U.fn.expand('~/.config/helper.sh/natural-syntax-ls.sh'),
+            },
+            filetypes = { 'tex', 'markdown', 'text' },
             single_file_support = true,
         },
         docs = {
