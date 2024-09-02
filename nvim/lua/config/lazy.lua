@@ -20,6 +20,7 @@ require("lazy").setup({
         { import = "lazyvim.plugins.extras.coding.copilot-chat" },
         { import = "lazyvim.plugins.extras.coding.tabnine" },
         { import = 'lazyvim.plugins.extras.editor.leap' },
+        { import = "lazyvim.plugins.extras.lang.clangd" },
         { import = "lazyvim.plugins.extras.lang.git" },
         { import = 'lazyvim.plugins.extras.lang.markdown' },
         { import = 'lazyvim.plugins.extras.lang.rust' },
