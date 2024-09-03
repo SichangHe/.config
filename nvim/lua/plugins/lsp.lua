@@ -48,11 +48,8 @@ local servers = {
         autostart = false,
         init_options = {
             token_map_update = {
-                CC = vim.NIL,
-                DT = vim.NIL,
-                IN = vim.NIL,
-                PDT = vim.NIL,
-                TO = vim.NIL,
+                NN = vim.NIL,
+                NNS = vim.NIL,
             },
         },
     },
