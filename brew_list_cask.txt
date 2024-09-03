@@ -5,7 +5,6 @@ betterdisplay
 blackhole-64ch
 blender
 brave-browser
-copilot-for-xcode
 db-browser-for-sqlite
 docker
 dotnet-sdk
@@ -24,10 +23,10 @@ julia
 karabiner-elements
 keycastr
 kitty
+livebook
 mactex-no-gui
 master-pdf-editor
 microsoft-edge
-monitorcontrol
 obsidian
 onlyoffice
 orion
@@ -35,12 +34,12 @@ racket
 skim
 stats
 swiftformat-for-xcode
-tencent-meeting
 tigervnc-viewer
 utm
-vimr
 visual-studio-code
 vlc
+wechat
+whatsapp
 wireshark
 xquartz
 zed
