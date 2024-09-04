@@ -11,7 +11,7 @@
         "ul-indent": {
             "indent": 4
         },
-        "line-length": true,
+        "line-length": false,
         "ol-prefix": {
             "style": "one"
         },
