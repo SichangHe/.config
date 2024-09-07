@@ -206,6 +206,7 @@ return {
             formatters_by_ft = {
                 bib = { 'bibtex-tidy' },
                 markdown = { 'markdownlint-cli2', "fmtm" },
+                python = { 'ruff_format' },
                 lua = { 'lua_ls' },
                 sh = { 'shfmt' },
                 tex = { 'latexindent' },

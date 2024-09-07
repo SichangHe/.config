@@ -7,6 +7,14 @@ return {
     },
 
     {
+        'JellyApple102/easyread.nvim',
+        opts = {
+            hlgroupOptions = { bold = true },
+            fileTypes = { 'markdown', 'tex', 'text' },
+        },
+    },
+
+    {
         'lukas-reineke/indent-blankline.nvim',
         config = function()
             local highlight = {
