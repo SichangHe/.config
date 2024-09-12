@@ -10,7 +10,7 @@ return {
         'JellyApple102/easyread.nvim',
         opts = {
             hlgroupOptions = { bold = true },
-            fileTypes = { 'markdown', 'tex', 'text' },
+            fileTypes = { 'markdown', 'quarto', 'tex', 'text' },
         },
     },
 

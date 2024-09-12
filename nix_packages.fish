@@ -42,6 +42,7 @@ if [ $UNAME = Darwin ] # Darwin
     nix-env -ibA nixpkgs.pkg-config
     nix-env -ibA nixpkgs.poppler_utils # for pdfimages
     nix-env -ibA nixpkgs.protobuf
+    nix-env -ibA nixpkgs.python312Packages.pylatexenc
     nix-env -ibA nixpkgs.qpdf
     nix-env -ibA nixpkgs.quarto
     nix-env -ibA nixpkgs.speedtest-cli

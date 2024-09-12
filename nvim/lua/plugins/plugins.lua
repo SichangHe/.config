@@ -30,12 +30,11 @@ return {
     },
 
     {
-        'preservim/vim-markdown',
-        ft = 'markdown',
-        config = function()
-            U.g.vim_markdown_folding_disabled = true
-            U.g.vim_markdown_math = true
-        end,
+        'quarto-dev/quarto-nvim',
+        dependencies = {
+            'jmbuhr/otter.nvim',
+            'nvim-treesitter/nvim-treesitter',
+        },
     },
 
     {

@@ -207,6 +207,7 @@ return {
                 bib = { 'bibtex-tidy' },
                 markdown = { 'markdownlint-cli2', "fmtm" },
                 python = { 'ruff_format' },
+                quarto = { 'markdownlint-cli2', "fmtm" },
                 lua = { 'lua_ls' },
                 sh = { 'shfmt' },
                 tex = { 'latexindent' },

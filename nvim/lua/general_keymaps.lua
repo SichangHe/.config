@@ -5,7 +5,9 @@ local v = function(...) U.key('v', ...) end
 local i = function(...) U.key('i', ...) end
 local s = function(left, right)
     if right == nil then right = left end
-    v('<Space>' .. left, 'c' .. left .. '<C-r>*' .. right .. '<Esc>')
+    v('<Space>' .. left,
+        '<Esc>`>a' .. right .. '<Esc>`<i' .. left .. '<Esc>'
+    )
 end
 
 function M.set()
