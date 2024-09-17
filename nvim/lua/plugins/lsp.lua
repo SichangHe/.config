@@ -110,7 +110,6 @@ local servers = {
     svelte = {},
     tailwindcss = {},
     taplo = {},
-    tsserver = {},
     zls = {},
 }
 
@@ -208,6 +207,7 @@ return {
                 markdown = { 'markdownlint-cli2', "fmtm" },
                 python = { 'ruff_format' },
                 quarto = { 'markdownlint-cli2', "fmtm" },
+                javascript = { 'prettierd' },
                 lua = { 'lua_ls' },
                 sh = { 'shfmt' },
                 tex = { 'latexindent' },
