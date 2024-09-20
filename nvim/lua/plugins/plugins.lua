@@ -10,6 +10,11 @@ return {
     },
 
     {
+        'ryleelyman/latex.nvim',
+        opts = {},
+    },
+
+    {
         'iamcco/markdown-preview.nvim',
         ft = 'markdown',
         build = U.fn["mkdp#util#install"],
@@ -34,6 +39,21 @@ return {
         dependencies = {
             'jmbuhr/otter.nvim',
             'nvim-treesitter/nvim-treesitter',
+        },
+    },
+
+    {
+        'MeanderingProgrammer/markdown.nvim',
+        opts = {
+            latex = {
+                enabled = false,
+            },
+            win_options = {
+                conceallevel = {
+                    -- To fix overriding latex.nvim conceal.
+                    rendered = vim.api.nvim_get_option_value('conceallevel', {}),
+                },
+            },
         },
     },
 
