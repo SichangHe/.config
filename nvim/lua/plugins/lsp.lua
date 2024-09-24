@@ -186,6 +186,21 @@ return {
         'stevearc/conform.nvim',
         opts = {
             formatters = {
+                ['bibtex-tidy'] = {
+                    prepend_args = {
+                        '--curly',
+                        '--numeric',
+                        '--months',
+                        '--tab',
+                        '--no-align',
+                        '--blank-lines',
+                        '--sort=special,year,month,key',
+                        '--drop-all-caps',
+                        '--no-escape',
+                        '--sort-fields',
+                        '--trailing-commas',
+                    },
+                },
                 fmtm = {
                     command = "fmtm",
                 },

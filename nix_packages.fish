@@ -26,6 +26,7 @@ nix-env -ibA nixpkgs.sd
 nix-env -ibA nixpkgs.starship
 nix-env -ibA nixpkgs.tealdeer
 nix-env -ibA nixpkgs.thefuck
+nix-env -ibA nixpkgs.unzip
 nix-env -ibA nixpkgs.vale
 nix-env -ibA nixpkgs.zoxide
 
@@ -50,11 +51,6 @@ if [ $UNAME = Darwin ] # Darwin
     nix-env -ibA nixpkgs.tmux
     nix-env -ibA nixpkgs.tokei
     nix-env -ibA nixpkgs.unpaper
-    nix-env -ibA nixpkgs.unzip
     nix-env -ibA nixpkgs.xdg-ninja
-
-else if [ $UNAME = Linux ] # Linux
-    nix-env -ibA nixpkgs.nodejs
-    nix-env -ibA nixpkgs.unzip
 
 end
