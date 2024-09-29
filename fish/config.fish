@@ -5,9 +5,6 @@ else if test -e "$HOME/.nix-profile/etc/profile.d/nix.fish"
     source "$HOME/.nix-profile/etc/profile.d/nix.fish"
 end
 
-# path
-source ~/.config/fish/path.fish
-
 # proxy
 # source ~/.config/fish/proxy.fish
 
@@ -29,6 +26,9 @@ else if [ $UNAME = Linux ] #! Linux {{
     #! }}
 end
 #! }
+
+# path
+source ~/.config/fish/path.fish
 
 # Bloody Pip global install.
 set -gx PIP_BREAK_SYSTEM_PACKAGES 1
