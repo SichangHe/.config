@@ -1,18 +1,18 @@
 return {
-    {
-        'sindrets/diffview.nvim',
-        event = 'CmdLineEnter',
-        dependencies = {
-            'nvim-tree/nvim-web-devicons',
-            'nvim-lua/plenary.nvim',
-        },
-    },
+	{
+		"sindrets/diffview.nvim",
+		event = "CmdLineEnter",
+		dependencies = {
+			"nvim-tree/nvim-web-devicons",
+			"nvim-lua/plenary.nvim",
+		},
+	},
 
-    {
-        'lewis6991/gitsigns.nvim',
-        opts = {
-            signcolumn = false,
-            numhl = true,
-        },
-    },
+	{
+		"lewis6991/gitsigns.nvim",
+		opts = {
+			signcolumn = false,
+			numhl = true,
+		},
+	},
 }

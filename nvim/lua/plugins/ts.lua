@@ -1,87 +1,87 @@
 return {
-    {
-        'nvim-treesitter/nvim-treesitter',
-        build = ':TSUpdate',
-        dependencies = {
-            'RRethy/nvim-treesitter-endwise',
-            'windwp/nvim-ts-autotag',
-            'hiphish/rainbow-delimiters.nvim',
-        },
-        config = function()
-            local function disable(lang, bufnr)
-                -- Prevent stuck by large file or single line huge file.
-                return U.b.large_buf or U.api.nvim_buf_line_count(bufnr) < 2
-            end
-            local disable_lang = {
-                latex = true, -- Using VimTex instead.
-            }
-            require('nvim-treesitter.configs').setup {
-                highlight = {
-                    enable = true,
-                    disable = function(lang, bufnr)
-                        return disable_lang[lang] or disable(lang, bufnr)
-                    end,
-                },
-                incremental_selection = {
-                    enable = true,
-                    disable = disable,
-                    keymaps = {
-                        init_selection = 'gnn',
-                        node_incremental = 'grn',
-                        scope_incremental = 'grc',
-                        node_decremental = 'grm',
-                    },
-                },
-                ensure_installed = {
-                    'bash',
-                    'c',
-                    'elixir',
-                    'erlang',
-                    'fish',
-                    'heex',
-                    'javascript',
-                    'jsonc',
-                    'julia',
-                    'latex',
-                    'lua',
-                    'markdown',
-                    'markdown_inline',
-                    'python',
-                    'ruby',
-                    'rust',
-                    'typescript',
-                    'vim',
-                },
-                auto_install = true,
-                autotag = {
-                    enable = true,
-                    disable = disable,
-                },
-                endwise = {
-                    enable = true,
-                    disable = disable,
-                },
-            }
-        end,
-    },
+	{
+		"nvim-treesitter/nvim-treesitter",
+		build = ":TSUpdate",
+		dependencies = {
+			"RRethy/nvim-treesitter-endwise",
+			"windwp/nvim-ts-autotag",
+			"hiphish/rainbow-delimiters.nvim",
+		},
+		config = function()
+			local function disable(lang, bufnr)
+				-- Prevent stuck by large file or single line huge file.
+				return U.b.large_buf or U.api.nvim_buf_line_count(bufnr) < 2
+			end
+			local disable_lang = {
+				latex = true, -- Using VimTex instead.
+			}
+			require("nvim-treesitter.configs").setup({
+				highlight = {
+					enable = true,
+					disable = function(lang, bufnr)
+						return disable_lang[lang] or disable(lang, bufnr)
+					end,
+				},
+				incremental_selection = {
+					enable = true,
+					disable = disable,
+					keymaps = {
+						init_selection = "gnn",
+						node_incremental = "grn",
+						scope_incremental = "grc",
+						node_decremental = "grm",
+					},
+				},
+				ensure_installed = {
+					"bash",
+					"c",
+					"elixir",
+					"erlang",
+					"fish",
+					"heex",
+					"javascript",
+					"jsonc",
+					"julia",
+					"latex",
+					"lua",
+					"markdown",
+					"markdown_inline",
+					"python",
+					"ruby",
+					"rust",
+					"typescript",
+					"vim",
+				},
+				auto_install = true,
+				autotag = {
+					enable = true,
+					disable = disable,
+				},
+				endwise = {
+					enable = true,
+					disable = disable,
+				},
+			})
+		end,
+	},
 
-    {
-        'hiphish/rainbow-delimiters.nvim',
-        config = function()
-            require('rainbow-delimiters.setup').setup {
-                strategy = {
-                    latex = nil,
-                },
-                highlight = {
-                    'rainbowcol1',
-                    'rainbowcol2',
-                    'rainbowcol3',
-                    'rainbowcol4',
-                    'rainbowcol5',
-                    'rainbowcol6',
-                },
-            }
-        end,
-        lazy = true,
-    },
+	{
+		"hiphish/rainbow-delimiters.nvim",
+		config = function()
+			require("rainbow-delimiters.setup").setup({
+				strategy = {
+					latex = nil,
+				},
+				highlight = {
+					"rainbowcol1",
+					"rainbowcol2",
+					"rainbowcol3",
+					"rainbowcol4",
+					"rainbowcol5",
+					"rainbowcol6",
+				},
+			})
+		end,
+		lazy = true,
+	},
 }
