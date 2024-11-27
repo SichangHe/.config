@@ -483,5 +483,4 @@
     "extensions.ignoreRecommendations": true,
     "gitlens.currentLine.enabled": false,
     "gitlens.codeLens.enabled": false,
-    "workbench.activityBar.location": "hidden",
 }
