@@ -231,6 +231,7 @@ return {
 			},
 			formatters_by_ft = {
 				bib = { "bibtex-tidy" },
+                css = { "prettierd" },
 				markdown = { "fmtm" },
 				python = { "ruff_format" },
 				quarto = { "markdownlint-cli2", "fmtm" },

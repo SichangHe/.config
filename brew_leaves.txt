@@ -13,7 +13,7 @@ neovim
 pandoc
 portaudio
 ruby
-sichanghe/yabai5/yabai
+koekeishiya/formulae/yabai
 swiftformat
 tectonic
 telnet
