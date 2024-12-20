@@ -8,7 +8,6 @@ brave-browser
 db-browser-for-sqlite
 docker
 dotnet-sdk
-epub-to-pdf
 firefox
 flutter
 font-jetbrains-mono-nerd-font
@@ -26,11 +25,11 @@ kitty
 livebook
 mactex-no-gui
 master-pdf-editor
+meetingbar
 microsoft-edge
 obsidian
 onlyoffice
 orion
-racket
 skim
 stats
 swiftformat-for-xcode
@@ -40,7 +39,6 @@ visual-studio-code
 vlc
 wechat
 whatsapp
-wireshark
 xquartz
 zed
 zoom

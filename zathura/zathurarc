@@ -1,0 +1,26 @@
+# Navigation mappings
+map } navigate next
+map { navigate previous
+map <C-d> scroll half-down
+map <C-u> scroll half-up
+map <C-f> scroll full-down
+map <C-b> scroll full-up
+
+map <C-r> redo
+map u undo
+map = zoom in
+
+# Visual settings
+set font "monospace 26"
+set statusbar-font "monospace 26"
+set notification-font "monospace 26"
+set inputbar-font "monospace 26"
+
+# Pre-rendering and performance
+set render-loading true
+set adjust-open "best-fit"
+
+# Touchpad and interface behavior
+set smooth-scroll true
+set window-title-basename true
+set selection-clipboard clipboard

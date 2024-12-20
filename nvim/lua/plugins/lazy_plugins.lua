@@ -46,46 +46,6 @@ return {
 	},
 
 	{
-		"nvim-telescope/telescope.nvim",
-		dependencies = { "SichangHe/nvim-telescope--telescope-media-files.nvim" },
-		opts = {
-			defaults = {
-				border = false,
-				layout_config = {
-					height = 0.99,
-					width = 0.99,
-				},
-				mappings = {
-					n = {
-						["<C-x>"] = require("telescope.actions").delete_buffer,
-					},
-					i = {
-						["<C-x>"] = require("telescope.actions").delete_buffer,
-					},
-				},
-			},
-		},
-	},
-
-	{
-		"SichangHe/nvim-telescope--telescope-media-files.nvim",
-		branch = "kitty-workaround",
-		config = function()
-			LazyVim.on_load("telescope.nvim", function()
-				local telescope = require("telescope")
-				telescope.load_extension("media_files")
-				U.key(
-					"n",
-					"<Space>fm",
-					telescope.extensions.media_files.media_files,
-					{ desc = "Find Image and Other Media Files" }
-				)
-			end)
-		end,
-		lazy = true,
-	},
-
-	{
 		"altermo/ultimate-autopair.nvim",
 		event = { "InsertEnter", "CmdlineEnter" },
 		-- <https://github.com/altermo/ultimate-autopair.nvim/blob/v0.6/Q%26A.md>

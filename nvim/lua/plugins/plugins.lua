@@ -9,6 +9,16 @@ return {
 	},
 
 	{
+		"ibhagwan/fzf-lua",
+		opts = {
+			winopts = {
+				fullscreen = true,
+				border = false,
+			},
+		},
+	},
+
+	{
 		"ryleelyman/latex.nvim",
 		opts = {},
 	},
@@ -16,7 +26,7 @@ return {
 	{
 		"iamcco/markdown-preview.nvim",
 		ft = "markdown",
-		build = U.fn["mkdp#util#install"],
+		build = "cd app && yarn install",
 		config = function()
 			U.g.mkdp_auto_close = false
 			U.g.mkdp_preview_options = {
@@ -39,6 +49,7 @@ return {
 			"jmbuhr/otter.nvim",
 			"nvim-treesitter/nvim-treesitter",
 		},
+		ft = { "quarto" },
 	},
 
 	{
@@ -54,6 +65,7 @@ return {
 				},
 			},
 		},
+		ft = { "markdown", "quarto" },
 	},
 
 	{

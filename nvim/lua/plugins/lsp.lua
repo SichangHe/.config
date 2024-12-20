@@ -231,7 +231,7 @@ return {
 			},
 			formatters_by_ft = {
 				bib = { "bibtex-tidy" },
-                css = { "prettierd" },
+				css = { "prettierd" },
 				markdown = { "fmtm" },
 				python = { "ruff_format" },
 				quarto = { "markdownlint-cli2", "fmtm" },
@@ -259,7 +259,6 @@ return {
 			"neovim/nvim-lspconfig",
 			"nvim-treesitter/nvim-treesitter",
 		},
-		event = { "CmdlineEnter" },
 		ft = { "go", "gomod" },
 		opts = {
 			lsp_cfg = true,
@@ -270,7 +269,7 @@ return {
 	{
 		"ionide/Ionide-vim",
 		dependencies = { "neovim/nvim-lspconfig" },
-		event = "VeryLazy",
+		ft = { "fsharp" },
 	},
 
 	{
@@ -357,20 +356,6 @@ return {
 		opts = function(_, _)
 			local markdownlint_cli2 = require("lint").linters["markdownlint-cli2"]
 			markdownlint_cli2.args = markdownlint_cli2_args
-		end,
-	},
-
-	{
-		"mrcjkb/rustaceanvim",
-		opts = function(_, opts)
-			vim.tbl_extend("force", opts, {
-				tools = {
-					hover_actions = {
-						border = "none",
-						auto_focus = true,
-					},
-				},
-			})
 		end,
 	},
 }
