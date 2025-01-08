@@ -52,5 +52,5 @@ if [ $UNAME = Darwin ] # Darwin
     nix-env -ibA nixpkgs.tokei
     nix-env -ibA nixpkgs.unpaper
     nix-env -ibA nixpkgs.xdg-ninja
-
+    nix-env -ibA nixpkgs.yt-dlp
 end

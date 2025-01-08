@@ -14,6 +14,9 @@ return {
 			winopts = {
 				fullscreen = true,
 				border = false,
+				preview = {
+					delay = 10,
+				},
 			},
 		},
 	},

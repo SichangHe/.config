@@ -65,17 +65,13 @@ return {
 	},
 
 	{
-		"linux-cultist/venv-selector.nvim",
-		branch = "regexp", -- Use this branch for the new version
+		"neolooong/whichpy.nvim",
 		opts = {
-			settings = {
-				options = {
-					notify_user_on_venv_activation = true,
-				},
+			update_path_env = true,
+			picket = {
+				name = "fzf-lua",
 			},
 		},
-		cmd = "VenvSelect",
 		ft = "python",
-		keys = { { "<leader>cv", "<cmd>:VenvSelect<cr>", desc = "Select VirtualEnv", ft = "python" } },
 	},
 }
