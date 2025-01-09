@@ -64,7 +64,7 @@ return {
 			win_options = {
 				conceallevel = {
 					-- To fix overriding latex.nvim conceal.
-					rendered = vim.api.nvim_get_option_value("conceallevel", {}),
+					rendered = 2,
 				},
 			},
 		},
