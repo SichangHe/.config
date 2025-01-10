@@ -291,13 +291,6 @@ return {
 	},
 
 	{
-		"ray-x/lsp_signature.nvim",
-		event = "InsertEnter",
-		dependencies = { "neovim/nvim-lspconfig" },
-		opts = {},
-	},
-
-	{
 		"neovim/nvim-lspconfig",
 		opts = function(_, opts)
 			register_mdbook_ls()

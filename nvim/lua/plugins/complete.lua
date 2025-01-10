@@ -14,6 +14,7 @@ return {
 				"codeium",
 				"tabnine",
 			})
+			opts.signature = { enabled = true }
 			-- Disable LazyVim <C-k> in insert mode.
 			local keys = require("lazyvim.plugins.lsp.keymaps").get()
 			keys[#keys + 1] = { "<C-k>", mode = { "i", "s" }, false }
