@@ -89,4 +89,20 @@ return {
 		-- VimTeX cannot be lazy-loaded: <https://github.com/lervag/vimtex?tab=readme-ov-file#installation>
 		lazy = false,
 	},
+
+	{
+		"ojroques/nvim-osc52",
+		opts = function()
+			require("osc52").setup({
+				tmux_passthrough = true,
+			})
+
+			-- Similar to <https://github.com/ojroques/nvim-osc52/tree/04cfaba1865ae5c53b6f887c3ca7304973824fb2?tab=readme-ov-file#advanced-usage>.
+			vim.api.nvim_create_autocmd("TextYankPost", {
+				callback = function()
+					require("osc52").copy_register("")
+				end,
+			})
+		end,
+	},
 }
