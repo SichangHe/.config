@@ -4,16 +4,7 @@ return {
 	{
 		"saghen/blink.cmp",
 		opts = function(_, opts)
-			opts.sources.default = table.insert(opts.sources.default, 1, {
-				"crates",
-				"lsp",
-				"vimtex",
-				"snippets",
-				"buffer",
-				"copilot",
-				"codeium",
-				"tabnine",
-			})
+			-- TODO: { "crates", "vimtex" } sources
 			opts.signature = { enabled = true }
 			-- Disable LazyVim <C-k> in insert mode.
 			local keys = require("lazyvim.plugins.lsp.keymaps").get()
