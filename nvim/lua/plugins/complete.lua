@@ -39,6 +39,7 @@ return {
 						return true
 					end,
 				},
+				["<Enter>"] = { "fallback" }, -- Disable <Enter>.
 			})
 		end,
 	},
