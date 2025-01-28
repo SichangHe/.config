@@ -1,6 +1,6 @@
 alias c=clear
 alias e=exit
-alias rsy='rsync --recursive --inplace --times --compress --exclude "**.DS_STORE" -hP'
+alias rsy='rsync --recursive --inplace --times --compress -hP'
 
 # VS Code
 if type -q code

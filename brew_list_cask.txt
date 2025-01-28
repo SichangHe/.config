@@ -1,6 +1,8 @@
 alacritty
 android-platform-tools
 android-studio
+appcleaner
+baidunetdisk
 betterdisplay
 blackhole-64ch
 blender
@@ -11,12 +13,12 @@ dotnet-sdk
 firefox
 flutter
 font-jetbrains-mono-nerd-font
-font-noto-color-emoji
 gimp
 google-chrome
 google-drive
 hammerspoon
 handbrake
+ibkr
 imageoptim
 julia
 karabiner-elements
@@ -34,6 +36,7 @@ skim
 stats
 swiftformat-for-xcode
 tigervnc-viewer
+tor-browser
 utm
 visual-studio-code
 vlc

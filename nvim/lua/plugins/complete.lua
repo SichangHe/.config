@@ -40,6 +40,14 @@ return {
 					end,
 				},
 				["<Enter>"] = { "fallback" }, -- Disable <Enter>.
+				["<C-Space>"] = {
+					function(cmp)
+						cmp.show({
+							--- Only show LSP suggestions.
+							providers = { "lsp" },
+						})
+					end,
+				},
 			})
 		end,
 	},

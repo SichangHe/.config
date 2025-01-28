@@ -14,7 +14,7 @@ markdownlint-cli2
 neovim
 pandoc
 portaudio
-ruby
+sevenzip
 swiftformat
 tectonic
 telnet
