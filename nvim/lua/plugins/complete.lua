@@ -26,7 +26,7 @@ return {
 						if not cmp.is_visible() then
 							cmp.show()
 						end
-						cmp.select_next()
+						cmp.select_next({ auto_insert = false })
 						return true
 					end,
 				},
@@ -35,7 +35,7 @@ return {
 						if not cmp.is_visible() then
 							cmp.show()
 						end
-						cmp.select_prev()
+						cmp.select_prev({ auto_insert = false })
 						return true
 					end,
 				},
