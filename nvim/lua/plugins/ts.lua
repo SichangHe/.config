@@ -8,10 +8,6 @@ return {
 			"hiphish/rainbow-delimiters.nvim",
 		},
 		config = function()
-			local function disable(lang, bufnr)
-				-- Prevent stuck by large file or single line huge file.
-				return U.b.large_buf or U.api.nvim_buf_line_count(bufnr) < 2
-			end
 			local disable_lang = {
 				latex = true, -- Using VimTex instead.
 			}
@@ -19,12 +15,12 @@ return {
 				highlight = {
 					enable = true,
 					disable = function(lang, bufnr)
-						return disable_lang[lang] or disable(lang, bufnr)
+                        _ = bufnr
+						return disable_lang[lang]
 					end,
 				},
 				incremental_selection = {
 					enable = true,
-					disable = disable,
 					keymaps = {
 						init_selection = "gnn",
 						node_incremental = "grn",
@@ -55,11 +51,9 @@ return {
 				auto_install = true,
 				autotag = {
 					enable = true,
-					disable = disable,
 				},
 				endwise = {
 					enable = true,
-					disable = disable,
 				},
 			})
 		end,

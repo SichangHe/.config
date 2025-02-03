@@ -72,6 +72,14 @@ return {
 	},
 
 	{
+		"folke/snacks.nvim",
+		opts = {
+			bigfile = { enabled = true },
+			quickfile = { enabled = true },
+		},
+	},
+
+	{
 		"lervag/vimtex",
 		-- Old: Help article: <https://www.ejmastnak.com/tutorials/vim-latex/pdf-reader/#refocus-nvim-macos-inverse>.
 		-- Sioyek documentation: <https://sioyek-documentation.readthedocs.io/en/latest/usage.html#synctex>.

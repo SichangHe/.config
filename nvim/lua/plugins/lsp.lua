@@ -310,17 +310,6 @@ return {
 					return true
 				end,
 			})
-			for _, conf in pairs(require("lspconfig.configs")) do
-				-- Disable LSP on large buffer.
-				if conf.manager ~= nil and conf.manager.try_add ~= nil then
-					local try_add = conf.manager.try_add
-					conf.manager.try_add = function(bufnr)
-						if not U.b.large_buf then
-							return try_add(bufnr)
-						end
-					end
-				end
-			end
 		end,
 	},
 
