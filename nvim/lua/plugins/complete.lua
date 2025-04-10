@@ -43,8 +43,8 @@ return {
 				["<C-Space>"] = {
 					function(cmp)
 						cmp.show({
-							--- Only show LSP suggestions.
-							providers = { "lsp" },
+							--- Show LSP suggestions, etc., not AI.
+							providers = { "lsp", "buffer", "snippets", "path" },
 						})
 					end,
 				},
