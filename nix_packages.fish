@@ -14,6 +14,7 @@ nix-env -ibA nixpkgs.fd
 nix-env -ibA nixpkgs.fzf
 nix-env -ibA nixpkgs.git-lfs
 nix-env -ibA nixpkgs.jq
+nix-env -ibA nixpkgs.moar
 nix-env -ibA nixpkgs.mpv
 nix-env -ibA nixpkgs.ncdu
 nix-env -ibA nixpkgs.neofetch

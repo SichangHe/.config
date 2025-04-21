@@ -81,3 +81,7 @@ set -gx DOTNET_CLI_TELEMETRY_OPTOUT true
 
 # Less no animation
 set -gx LESS -XF
+
+if type -q moar
+    set -gx PAGER moar
+end
