@@ -62,8 +62,9 @@ end
 # default editor
 set -gx EDITOR nvim
 
-# white theme for bat
+# white theme for bat and moar
 set -gx BAT_THEME GitHub
+set -gx MOAR --style=github
 
 # fzf use fd
 set -gx FZF_DEFAULT_COMMAND 'fd -H --strip-cwd-prefix -E ".git"'
