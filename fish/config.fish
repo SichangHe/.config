@@ -74,6 +74,9 @@ if type -q sccache
     set -gx RUSTC_WRAPPER sccache
 end
 
+# Rustc target native cpu.
+set -gx RUSTFLAGS "$RUSTFLAGS -C target-cpu=native"
+
 # Cargo use Git CLI.
 set -gx CARGO_NET_GIT_FETCH_WITH_CLI true
 
