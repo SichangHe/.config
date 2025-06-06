@@ -54,12 +54,17 @@
         },
         {
             "complex_modifications": {
+                "parameters": {
+                    "basic.to_delayed_action_delay_milliseconds": 500,
+                    "basic.to_if_alone_timeout_milliseconds": 150,
+                    "basic.to_if_held_down_threshold_milliseconds": 30
+                },
                 "rules": [
                     {
-                        "description": "CapsLock to Hyper'",
+                        "description": "CapsLock/' to right_control (which does not exist on Mac keyboards), right_control + letters → symbols & controls & numbers.",
                         "manipulators": [
                             {
-                                "description": "capslock = esc(click) | hyper'(hold)",
+                                "description": "capslock = esc(click) | right_control (hold, supports all modifiers)",
                                 "from": {
                                     "key_code": "caps_lock",
                                     "modifiers": {
@@ -70,11 +75,7 @@
                                 },
                                 "to": [
                                     {
-                                        "key_code": "right_control",
-                                        "modifiers": [
-                                            "right_command",
-                                            "right_option"
-                                        ]
+                                        "key_code": "right_control"
                                     }
                                 ],
                                 "to_if_alone": [
@@ -83,22 +84,660 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper' + j -> yabai last",
-                        "manipulators": [
+                            },
                             {
+                                "description": "' = ' | right_control (hold, only supports option)",
+                                "from": {
+                                    "key_code": "quote",
+                                    "modifiers": {
+                                        "optional": [
+                                            "option"
+                                        ]
+                                    }
+                                },
+                                "to": [
+                                    {
+                                        "key_code": "right_control"
+                                    }
+                                ],
+                                "to_if_alone": [
+                                    {
+                                        "key_code": "quote"
+                                    }
+                                ],
+                                "type": "basic"
+                            },
+                            {
+                                "type": "basic",
+                                "from": {
+                                    "key_code": "q",
+                                    "modifiers": {
+                                        "mandatory": [
+                                            "right_control"
+                                        ]
+                                    }
+                                },
+                                "to": [
+                                    {
+                                        "key_code": "grave_accent_and_tilde",
+                                        "modifiers": [
+                                            "left_shift"
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "description": "right_control + w -> -",
+                                "from": {
+                                    "key_code": "w",
+                                    "modifiers": {
+                                        "mandatory": [
+                                            "right_control"
+                                        ],
+                                        "optional": [
+                                            "option"
+                                        ]
+                                    }
+                                },
+                                "to": [
+                                    {
+                                        "key_code": "hyphen"
+                                    }
+                                ],
+                                "type": "basic"
+                            },
+                            {
+                                "description": "right_control + e -> _",
+                                "from": {
+                                    "key_code": "e",
+                                    "modifiers": {
+                                        "mandatory": [
+                                            "right_control"
+                                        ],
+                                        "optional": [
+                                            "option"
+                                        ]
+                                    }
+                                },
+                                "to": [
+                                    {
+                                        "key_code": "hyphen",
+                                        "modifiers": [
+                                            "left_shift"
+                                        ]
+                                    }
+                                ],
+                                "type": "basic"
+                            },
+                            {
+                                "description": "right_control + r -> =",
+                                "from": {
+                                    "key_code": "r",
+                                    "modifiers": {
+                                        "mandatory": [
+                                            "right_control"
+                                        ]
+                                    }
+                                },
+                                "to": [
+                                    {
+                                        "key_code": "equal_sign"
+                                    }
+                                ],
+                                "type": "basic"
+                            },
+                            {
+                                "description": "right_control + t -> +",
+                                "from": {
+                                    "key_code": "t",
+                                    "modifiers": {
+                                        "mandatory": [
+                                            "right_control"
+                                        ]
+                                    }
+                                },
+                                "to": [
+                                    {
+                                        "key_code": "equal_sign",
+                                        "modifiers": [
+                                            "left_shift"
+                                        ]
+                                    }
+                                ],
+                                "type": "basic"
+                            },
+                            {
+                                "description": "right_control + y -> ]",
+                                "from": {
+                                    "key_code": "y",
+                                    "modifiers": {
+                                        "mandatory": [
+                                            "right_control"
+                                        ]
+                                    }
+                                },
+                                "to": [
+                                    {
+                                        "key_code": "close_bracket"
+                                    }
+                                ],
+                                "type": "basic"
+                            },
+                            {
+                                "description": "right_control + u -> [",
+                                "from": {
+                                    "key_code": "u",
+                                    "modifiers": {
+                                        "mandatory": [
+                                            "right_control"
+                                        ]
+                                    }
+                                },
+                                "to": [
+                                    {
+                                        "key_code": "open_bracket"
+                                    }
+                                ],
+                                "type": "basic"
+                            },
+                            {
+                                "description": "right_control + i -> backspace",
+                                "from": {
+                                    "key_code": "i",
+                                    "modifiers": {
+                                        "mandatory": [
+                                            "right_control"
+                                        ],
+                                        "optional": [
+                                            "any"
+                                        ]
+                                    }
+                                },
+                                "to": [
+                                    {
+                                        "key_code": "delete_or_backspace"
+                                    }
+                                ],
+                                "type": "basic"
+                            },
+                            {
+                                "description": "right_control + o -> {",
+                                "from": {
+                                    "key_code": "o",
+                                    "modifiers": {
+                                        "mandatory": [
+                                            "right_control"
+                                        ]
+                                    }
+                                },
+                                "to": [
+                                    {
+                                        "key_code": "open_bracket",
+                                        "modifiers": [
+                                            "left_shift"
+                                        ]
+                                    }
+                                ],
+                                "type": "basic"
+                            },
+                            {
+                                "description": "right_control + p -> }",
+                                "from": {
+                                    "key_code": "p",
+                                    "modifiers": {
+                                        "mandatory": [
+                                            "right_control"
+                                        ]
+                                    }
+                                },
+                                "to": [
+                                    {
+                                        "key_code": "close_bracket",
+                                        "modifiers": [
+                                            "left_shift"
+                                        ]
+                                    }
+                                ],
+                                "type": "basic"
+                            },
+                            {
+                                "description": "right_control + [ -> \\",
+                                "from": {
+                                    "key_code": "open_bracket",
+                                    "modifiers": {
+                                        "mandatory": [
+                                            "right_control"
+                                        ]
+                                    }
+                                },
+                                "to": [
+                                    {
+                                        "key_code": "backslash"
+                                    }
+                                ],
+                                "type": "basic"
+                            },
+                            {
+                                "description": "right_control + ] -> |",
+                                "from": {
+                                    "key_code": "close_bracket",
+                                    "modifiers": {
+                                        "mandatory": [
+                                            "right_control"
+                                        ]
+                                    }
+                                },
+                                "to": [
+                                    {
+                                        "key_code": "backslash",
+                                        "modifiers": [
+                                            "left_shift"
+                                        ]
+                                    }
+                                ],
+                                "type": "basic"
+                            },
+                            {
+                                "type": "basic",
+                                "from": {
+                                    "key_code": "a",
+                                    "modifiers": {
+                                        "mandatory": [
+                                            "right_control"
+                                        ]
+                                    }
+                                },
+                                "to": [
+                                    {
+                                        "key_code": "grave_accent_and_tilde"
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "basic",
+                                "from": {
+                                    "key_code": "s",
+                                    "modifiers": {
+                                        "mandatory": [
+                                            "right_control"
+                                        ]
+                                    }
+                                },
+                                "to": [
+                                    {
+                                        "key_code": "1",
+                                        "modifiers": [
+                                            "left_shift"
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "basic",
+                                "from": {
+                                    "key_code": "d",
+                                    "modifiers": {
+                                        "mandatory": [
+                                            "right_control"
+                                        ]
+                                    }
+                                },
+                                "to": [
+                                    {
+                                        "key_code": "2",
+                                        "modifiers": [
+                                            "left_shift"
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "basic",
+                                "from": {
+                                    "key_code": "f",
+                                    "modifiers": {
+                                        "mandatory": [
+                                            "right_control"
+                                        ]
+                                    }
+                                },
+                                "to": [
+                                    {
+                                        "key_code": "3",
+                                        "modifiers": [
+                                            "left_shift"
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "basic",
+                                "from": {
+                                    "key_code": "g",
+                                    "modifiers": {
+                                        "mandatory": [
+                                            "right_control"
+                                        ]
+                                    }
+                                },
+                                "to": [
+                                    {
+                                        "key_code": "4",
+                                        "modifiers": [
+                                            "left_shift"
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "basic",
+                                "from": {
+                                    "key_code": "h",
+                                    "modifiers": {
+                                        "mandatory": [
+                                            "right_control"
+                                        ]
+                                    }
+                                },
+                                "to": [
+                                    {
+                                        "key_code": "5",
+                                        "modifiers": [
+                                            "left_shift"
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "basic",
+                                "from": {
+                                    "key_code": "h",
+                                    "modifiers": {
+                                        "mandatory": [
+                                            "right_control"
+                                        ]
+                                    }
+                                },
+                                "to": [
+                                    {
+                                        "key_code": "5",
+                                        "modifiers": [
+                                            "left_shift"
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "basic",
                                 "from": {
                                     "key_code": "j",
                                     "modifiers": {
                                         "mandatory": [
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
+                                            "right_control"
                                         ]
                                     }
+                                },
+                                "to": [
+                                    {
+                                        "key_code": "6",
+                                        "modifiers": [
+                                            "left_shift"
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "basic",
+                                "from": {
+                                    "key_code": "k",
+                                    "modifiers": {
+                                        "mandatory": [
+                                            "right_control"
+                                        ]
+                                    }
+                                },
+                                "to": [
+                                    {
+                                        "key_code": "7",
+                                        "modifiers": [
+                                            "left_shift"
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "basic",
+                                "from": {
+                                    "key_code": "l",
+                                    "modifiers": {
+                                        "mandatory": [
+                                            "right_control"
+                                        ]
+                                    }
+                                },
+                                "to": [
+                                    {
+                                        "key_code": "8",
+                                        "modifiers": [
+                                            "left_shift"
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "basic",
+                                "from": {
+                                    "key_code": "semicolon",
+                                    "modifiers": {
+                                        "mandatory": [
+                                            "right_control"
+                                        ]
+                                    }
+                                },
+                                "to": [
+                                    {
+                                        "key_code": "9",
+                                        "modifiers": [
+                                            "left_shift"
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "basic",
+                                "from": {
+                                    "key_code": "quote",
+                                    "modifiers": {
+                                        "mandatory": [
+                                            "right_control"
+                                        ]
+                                    }
+                                },
+                                "to": [
+                                    {
+                                        "key_code": "0",
+                                        "modifiers": [
+                                            "left_shift"
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "basic",
+                                "from": {
+                                    "key_code": "z",
+                                    "modifiers": {
+                                        "mandatory": [
+                                            "right_control"
+                                        ]
+                                    }
+                                },
+                                "to": [
+                                    {
+                                        "key_code": "1"
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "basic",
+                                "from": {
+                                    "key_code": "x",
+                                    "modifiers": {
+                                        "mandatory": [
+                                            "right_control"
+                                        ]
+                                    }
+                                },
+                                "to": [
+                                    {
+                                        "key_code": "2"
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "basic",
+                                "from": {
+                                    "key_code": "c",
+                                    "modifiers": {
+                                        "mandatory": [
+                                            "right_control"
+                                        ]
+                                    }
+                                },
+                                "to": [
+                                    {
+                                        "key_code": "3"
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "basic",
+                                "from": {
+                                    "key_code": "v",
+                                    "modifiers": {
+                                        "mandatory": [
+                                            "right_control"
+                                        ]
+                                    }
+                                },
+                                "to": [
+                                    {
+                                        "key_code": "4"
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "basic",
+                                "from": {
+                                    "key_code": "b",
+                                    "modifiers": {
+                                        "mandatory": [
+                                            "right_control"
+                                        ]
+                                    }
+                                },
+                                "to": [
+                                    {
+                                        "key_code": "5"
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "basic",
+                                "from": {
+                                    "key_code": "n",
+                                    "modifiers": {
+                                        "mandatory": [
+                                            "right_control"
+                                        ]
+                                    }
+                                },
+                                "to": [
+                                    {
+                                        "key_code": "6"
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "basic",
+                                "from": {
+                                    "key_code": "m",
+                                    "modifiers": {
+                                        "mandatory": [
+                                            "right_control"
+                                        ]
+                                    }
+                                },
+                                "to": [
+                                    {
+                                        "key_code": "7"
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "basic",
+                                "from": {
+                                    "key_code": "comma",
+                                    "modifiers": {
+                                        "mandatory": [
+                                            "right_control"
+                                        ]
+                                    }
+                                },
+                                "to": [
+                                    {
+                                        "key_code": "8"
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "basic",
+                                "from": {
+                                    "key_code": "period",
+                                    "modifiers": {
+                                        "mandatory": [
+                                            "right_control"
+                                        ]
+                                    }
+                                },
+                                "to": [
+                                    {
+                                        "key_code": "9"
+                                    }
+                                ]
+                            },
+                            {
+                                "type": "basic",
+                                "from": {
+                                    "key_code": "slash",
+                                    "modifiers": {
+                                        "mandatory": [
+                                            "right_control"
+                                        ]
+                                    }
+                                },
+                                "to": [
+                                    {
+                                        "key_code": "0"
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        "description": "shift then letters → yabai & system controls",
+                        "manipulators": [
+                            {
+                                "description": "shift then j -> yabai last",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
+                                    }
+                                ],
+                                "from": {
+                                    "key_code": "j"
                                 },
                                 "to": [
                                     {
@@ -106,22 +745,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper' + k -> yabai next",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "k",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then k -> yabai next",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "k"
                                 },
                                 "to": [
                                     {
@@ -129,22 +764,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper' + h -> yabai recent",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "h",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then h -> yabai recent",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "h"
                                 },
                                 "to": [
                                     {
@@ -152,22 +783,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper' + n -> yabai focus display 1",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "n",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then n -> yabai focus display 1",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "n"
                                 },
                                 "to": [
                                     {
@@ -175,22 +802,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper' + m -> yabai focus display 2",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "m",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then m -> yabai focus display 2",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "m"
                                 },
                                 "to": [
                                     {
@@ -198,22 +821,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper' + , -> yabai focus display 3",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "comma",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then , -> yabai focus display 3",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "comma"
                                 },
                                 "to": [
                                     {
@@ -221,23 +840,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper + q -> yabai move window to prev space",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "q",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "shift",
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then shift then q -> yabai move window to prev space",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped2",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "q"
                                 },
                                 "to": [
                                     {
@@ -245,23 +859,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper + w -> yabai move window to next space",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "w",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "shift",
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then shift then w -> yabai move window to next space",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped2",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "w"
                                 },
                                 "to": [
                                     {
@@ -269,23 +878,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper + 1 -> yabai move window to space 1",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "1",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "shift",
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then shift then 1 -> yabai move window to space 1",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped2",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "1"
                                 },
                                 "to": [
                                     {
@@ -293,23 +897,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper + 2 -> yabai move window to space 2",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "2",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "shift",
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then shift then 2 -> yabai move window to space 2",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped2",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "2"
                                 },
                                 "to": [
                                     {
@@ -317,23 +916,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper + 3 -> yabai move window to space 3",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "3",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "shift",
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then shift then 3 -> yabai move window to space 3",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped2",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "3"
                                 },
                                 "to": [
                                     {
@@ -341,23 +935,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper + 4 -> yabai move window to space 4",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "4",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "shift",
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then shift then 4 -> yabai move window to space 4",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped2",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "4"
                                 },
                                 "to": [
                                     {
@@ -365,23 +954,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper + 5 -> yabai move window to space 5",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "5",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "shift",
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then shift then 5 -> yabai move window to space 5",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped2",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "5"
                                 },
                                 "to": [
                                     {
@@ -389,23 +973,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper + 6 -> yabai move window to space 6",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "6",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "shift",
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then shift then 6 -> yabai move window to space 6",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped2",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "6"
                                 },
                                 "to": [
                                     {
@@ -413,23 +992,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper + 7 -> yabai move window to space 7",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "7",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "shift",
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then shift then 7 -> yabai move window to space 7",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped2",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "7"
                                 },
                                 "to": [
                                     {
@@ -437,23 +1011,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper + 8 -> yabai move window to space 8",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "8",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "shift",
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then shift then 8 -> yabai move window to space 8",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped2",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "8"
                                 },
                                 "to": [
                                     {
@@ -461,23 +1030,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper + 9 -> yabai move window to space 9",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "9",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "shift",
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then shift then 9 -> yabai move window to space 9",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped2",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "9"
                                 },
                                 "to": [
                                     {
@@ -485,23 +1049,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper + 0 -> yabai move window to space 10",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "0",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "shift",
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then shift then 0 -> yabai move window to space 10",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped2",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "0"
                                 },
                                 "to": [
                                     {
@@ -509,23 +1068,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper + - -> yabai move window to space 11",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "hyphen",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "shift",
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then shift then - -> yabai move window to space 11",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped2",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "hyphen"
                                 },
                                 "to": [
                                     {
@@ -533,23 +1087,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper + = -> yabai move window to space 12",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "equal_sign",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "shift",
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then shift then = -> yabai move window to space 12",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped2",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "equal_sign"
                                 },
                                 "to": [
                                     {
@@ -557,23 +1106,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper + n -> yabai move window to display 1",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "n",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "shift",
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then shift then n -> yabai move window to display 1",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped2",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "n"
                                 },
                                 "to": [
                                     {
@@ -581,23 +1125,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper + m -> yabai move window to display 2",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "m",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "shift",
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then shift then m -> yabai move window to display 2",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped2",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "m"
                                 },
                                 "to": [
                                     {
@@ -605,23 +1144,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper + , -> yabai move window to display 3",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "comma",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "shift",
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then shift then , -> yabai move window to display 3",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped2",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "comma"
                                 },
                                 "to": [
                                     {
@@ -629,22 +1163,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper' + q -> yabai focus prev space",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "q",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then q -> yabai focus prev space",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "q"
                                 },
                                 "to": [
                                     {
@@ -652,22 +1182,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper' + w -> yabai focus next space",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "w",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then w -> yabai focus next space",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "w"
                                 },
                                 "to": [
                                     {
@@ -675,22 +1201,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper' + 1 -> yabai focus space 1",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "1",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then 1 -> yabai focus space 1",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "1"
                                 },
                                 "to": [
                                     {
@@ -698,22 +1220,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper' + 2 -> yabai focus space 2",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "2",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then 2 -> yabai focus space 2",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "2"
                                 },
                                 "to": [
                                     {
@@ -721,22 +1239,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper' + 3 -> yabai focus space 3",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "3",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then 3 -> yabai focus space 3",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "3"
                                 },
                                 "to": [
                                     {
@@ -744,22 +1258,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper' + 4 -> yabai focus space 4",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "4",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then 4 -> yabai focus space 4",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "4"
                                 },
                                 "to": [
                                     {
@@ -767,22 +1277,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper' + 5 -> yabai focus space 5",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "5",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then 5 -> yabai focus space 5",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "5"
                                 },
                                 "to": [
                                     {
@@ -790,22 +1296,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper' + 6 -> yabai focus space 6",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "6",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then 6 -> yabai focus space 6",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "6"
                                 },
                                 "to": [
                                     {
@@ -813,22 +1315,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper' + 7 -> yabai focus space 7",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "7",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then 7 -> yabai focus space 7",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "7"
                                 },
                                 "to": [
                                     {
@@ -836,22 +1334,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper' + 8 -> yabai focus space 8",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "8",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then 8 -> yabai focus space 8",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "8"
                                 },
                                 "to": [
                                     {
@@ -859,22 +1353,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper' + 9 -> yabai focus space 9",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "9",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then 9 -> yabai focus space 9",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "9"
                                 },
                                 "to": [
                                     {
@@ -882,22 +1372,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper' + 0 -> yabai focus space 10",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "0",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then 0 -> yabai focus space 10",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "0"
                                 },
                                 "to": [
                                     {
@@ -905,22 +1391,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper' + - -> yabai focus space 11",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "hyphen",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then - -> yabai focus space 11",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "hyphen"
                                 },
                                 "to": [
                                     {
@@ -928,22 +1410,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper' + = -> yabai focus space 12",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "equal_sign",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then = -> yabai focus space 12",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "equal_sign"
                                 },
                                 "to": [
                                     {
@@ -951,22 +1429,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper' + a -> yabai layout bsp",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "a",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then a -> yabai layout bsp",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "a"
                                 },
                                 "to": [
                                     {
@@ -974,22 +1448,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper' + s -> yabai layout stack",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "s",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then s -> yabai layout stack",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "s"
                                 },
                                 "to": [
                                     {
@@ -997,22 +1467,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper' + d -> yabai layout float",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "d",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then d -> yabai layout float",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "d"
                                 },
                                 "to": [
                                     {
@@ -1020,23 +1486,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper + f -> yabai toggle mouse follow",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "f",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "shift",
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then shift then f -> yabai toggle mouse follow",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped2",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "f"
                                 },
                                 "to": [
                                     {
@@ -1044,22 +1505,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper' + e -> yabai equalize window sizes",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "e",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then e -> yabai equalize window sizes",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "e"
                                 },
                                 "to": [
                                     {
@@ -1067,22 +1524,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper' + r -> yabai rotate clockwise",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "r",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then r -> yabai rotate clockwise",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "r"
                                 },
                                 "to": [
                                     {
@@ -1090,23 +1543,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper + x -> yabai mirror on X-axis",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "x",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "shift",
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then shift then x -> yabai mirror on X-axis",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped2",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "x"
                                 },
                                 "to": [
                                     {
@@ -1114,23 +1562,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper + y -> yabai mirror on Y-axis",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "y",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "shift",
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then shift then y -> yabai mirror on Y-axis",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped2",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "y"
                                 },
                                 "to": [
                                     {
@@ -1138,22 +1581,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper' + space -> yabai toggle window float",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "spacebar",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then space -> yabai toggle window float",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "spacebar"
                                 },
                                 "to": [
                                     {
@@ -1161,22 +1600,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper' + i -> yabai info",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "i",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then i -> yabai info",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "i"
                                 },
                                 "to": [
                                     {
@@ -1184,22 +1619,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper' + y -> restart yabai",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "y",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then y -> restart yabai",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "y"
                                 },
                                 "to": [
                                     {
@@ -1207,22 +1638,18 @@
                                     }
                                 ],
                                 "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "hyper' + / -> focus Help menu",
-                        "manipulators": [
+                            },
                             {
-                                "from": {
-                                    "key_code": "slash",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "right_command",
-                                            "right_control",
-                                            "right_option"
-                                        ]
+                                "description": "shift then / -> focus Help menu",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
                                     }
+                                ],
+                                "from": {
+                                    "key_code": "slash"
                                 },
                                 "to": [
                                     {
@@ -1252,182 +1679,250 @@
                         ]
                     },
                     {
-                        "description": "Number pad 1",
+                        "description": "shift as leader key (has to be put after the led keys' configurations)",
                         "manipulators": [
                             {
-                                "description": "fn + u = 1",
-                                "from": {
-                                    "key_code": "u",
-                                    "modifiers": {
-                                        "mandatory": "fn"
-                                    }
-                                },
-                                "to": [
+                                "type": "basic",
+                                "conditions": [
                                     {
-                                        "key_code": "1"
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
                                     }
                                 ],
-                                "type": "basic"
+                                "from": {
+                                    "key_code": "left_shift"
+                                },
+                                "to_if_held_down": [
+                                    {
+                                        "key_code": "left_shift"
+                                    }
+                                ],
+                                "to_if_alone": [
+                                    {
+                                        "set_variable": {
+                                            "name": "shift_tapped2",
+                                            "value": 1
+                                        }
+                                    },
+                                    {
+                                        "key_code": "left_shift"
+                                    }
+                                ],
+                                "to_delayed_action": {
+                                    "to_if_invoked": [
+                                        {
+                                            "set_variable": {
+                                                "name": "shift_tapped2",
+                                                "value": 0
+                                            }
+                                        }
+                                    ],
+                                    "to_if_canceled": [
+                                        {
+                                            "set_variable": {
+                                                "name": "shift_tapped2",
+                                                "value": 0
+                                            }
+                                        }
+                                    ]
+                                }
+                            },
+                            {
+                                "type": "basic",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
+                                    }
+                                ],
+                                "from": {
+                                    "key_code": "right_shift"
+                                },
+                                "to_if_held_down": [
+                                    {
+                                        "key_code": "right_shift"
+                                    }
+                                ],
+                                "to_if_alone": [
+                                    {
+                                        "set_variable": {
+                                            "name": "shift_tapped2",
+                                            "value": 1
+                                        }
+                                    },
+                                    {
+                                        "key_code": "right_shift"
+                                    }
+                                ],
+                                "to_delayed_action": {
+                                    "to_if_invoked": [
+                                        {
+                                            "set_variable": {
+                                                "name": "shift_tapped2",
+                                                "value": 0
+                                            }
+                                        }
+                                    ],
+                                    "to_if_canceled": [
+                                        {
+                                            "set_variable": {
+                                                "name": "shift_tapped2",
+                                                "value": 0
+                                            }
+                                        }
+                                    ]
+                                }
+                            },
+                            {
+                                "type": "basic",
+                                "from": {
+                                    "key_code": "left_shift"
+                                },
+                                "to_if_held_down": [
+                                    {
+                                        "key_code": "left_shift"
+                                    }
+                                ],
+                                "to_if_alone": [
+                                    {
+                                        "set_variable": {
+                                            "name": "shift_tapped",
+                                            "value": 1
+                                        }
+                                    },
+                                    {
+                                        "key_code": "left_shift"
+                                    }
+                                ],
+                                "to_delayed_action": {
+                                    "to_if_invoked": [
+                                        {
+                                            "set_variable": {
+                                                "name": "shift_tapped",
+                                                "value": 0
+                                            }
+                                        }
+                                    ],
+                                    "to_if_canceled": [
+                                        {
+                                            "set_variable": {
+                                                "name": "shift_tapped",
+                                                "value": 0
+                                            }
+                                        }
+                                    ]
+                                }
+                            },
+                            {
+                                "type": "basic",
+                                "from": {
+                                    "key_code": "right_shift"
+                                },
+                                "to_if_held_down": [
+                                    {
+                                        "key_code": "right_shift"
+                                    }
+                                ],
+                                "to_if_alone": [
+                                    {
+                                        "set_variable": {
+                                            "name": "shift_tapped",
+                                            "value": 1
+                                        }
+                                    },
+                                    {
+                                        "key_code": "right_shift"
+                                    }
+                                ],
+                                "to_delayed_action": {
+                                    "to_if_invoked": [
+                                        {
+                                            "set_variable": {
+                                                "name": "shift_tapped",
+                                                "value": 0
+                                            }
+                                        }
+                                    ],
+                                    "to_if_canceled": [
+                                        {
+                                            "set_variable": {
+                                                "name": "shift_tapped",
+                                                "value": 0
+                                            }
+                                        }
+                                    ]
+                                }
                             }
                         ]
                     },
                     {
-                        "description": "Number pad 2",
+                        "description": "fn + hjkl -> arrrow keys",
                         "manipulators": [
                             {
-                                "description": "fn + i = 2",
+                                "type": "basic",
                                 "from": {
-                                    "key_code": "i",
+                                    "key_code": "h",
                                     "modifiers": {
-                                        "mandatory": "fn"
+                                        "mandatory": [
+                                            "fn"
+                                        ]
                                     }
                                 },
                                 "to": [
                                     {
-                                        "key_code": "2"
+                                        "key_code": "left_arrow"
                                     }
-                                ],
-                                "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "Number pad 3",
-                        "manipulators": [
+                                ]
+                            },
                             {
-                                "description": "fn + o = 3",
-                                "from": {
-                                    "key_code": "o",
-                                    "modifiers": {
-                                        "mandatory": "fn"
-                                    }
-                                },
-                                "to": [
-                                    {
-                                        "key_code": "3"
-                                    }
-                                ],
-                                "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "Number pad 4",
-                        "manipulators": [
-                            {
-                                "description": "fn + j = 4",
+                                "type": "basic",
                                 "from": {
                                     "key_code": "j",
                                     "modifiers": {
-                                        "mandatory": "fn"
+                                        "mandatory": [
+                                            "fn"
+                                        ]
                                     }
                                 },
                                 "to": [
                                     {
-                                        "key_code": "4"
+                                        "key_code": "down_arrow"
                                     }
-                                ],
-                                "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "Number pad 5",
-                        "manipulators": [
+                                ]
+                            },
                             {
-                                "description": "fn + k = 5",
+                                "type": "basic",
                                 "from": {
                                     "key_code": "k",
                                     "modifiers": {
-                                        "mandatory": "fn"
+                                        "mandatory": [
+                                            "fn"
+                                        ]
                                     }
                                 },
                                 "to": [
                                     {
-                                        "key_code": "5"
+                                        "key_code": "up_arrow"
                                     }
-                                ],
-                                "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "Number pad 6",
-                        "manipulators": [
+                                ]
+                            },
                             {
-                                "description": "fn + l = 6",
+                                "type": "basic",
                                 "from": {
                                     "key_code": "l",
                                     "modifiers": {
-                                        "mandatory": "fn"
+                                        "mandatory": [
+                                            "fn"
+                                        ]
                                     }
                                 },
                                 "to": [
                                     {
-                                        "key_code": "6"
+                                        "key_code": "right_arrow"
                                     }
-                                ],
-                                "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "Number pad 7",
-                        "manipulators": [
-                            {
-                                "description": "fn + n = 7",
-                                "from": {
-                                    "key_code": "n",
-                                    "modifiers": {
-                                        "mandatory": "fn"
-                                    }
-                                },
-                                "to": [
-                                    {
-                                        "key_code": "7"
-                                    }
-                                ],
-                                "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "Number pad 8",
-                        "manipulators": [
-                            {
-                                "description": "fn + m = 8",
-                                "from": {
-                                    "key_code": "m",
-                                    "modifiers": {
-                                        "mandatory": "fn"
-                                    }
-                                },
-                                "to": [
-                                    {
-                                        "key_code": "8"
-                                    }
-                                ],
-                                "type": "basic"
-                            }
-                        ]
-                    },
-                    {
-                        "description": "Number pad 9",
-                        "manipulators": [
-                            {
-                                "description": "fn + , = 9",
-                                "from": {
-                                    "key_code": "comma",
-                                    "modifiers": {
-                                        "mandatory": "fn"
-                                    }
-                                },
-                                "to": [
-                                    {
-                                        "key_code": "9"
-                                    }
-                                ],
-                                "type": "basic"
+                                ]
                             }
                         ]
                     }
