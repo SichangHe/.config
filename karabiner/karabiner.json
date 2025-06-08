@@ -207,7 +207,7 @@
                                 "type": "basic"
                             },
                             {
-                                "description": "right_control + y -> ]",
+                                "description": "right_control + y -> |",
                                 "from": {
                                     "key_code": "y",
                                     "modifiers": {
@@ -218,7 +218,10 @@
                                 },
                                 "to": [
                                     {
-                                        "key_code": "close_bracket"
+                                        "key_code": "backslash",
+                                        "modifiers": [
+                                            "left_shift"
+                                        ]
                                     }
                                 ],
                                 "type": "basic"
@@ -241,21 +244,18 @@
                                 "type": "basic"
                             },
                             {
-                                "description": "right_control + i -> backspace",
+                                "description": "right_control + i -> ]",
                                 "from": {
                                     "key_code": "i",
                                     "modifiers": {
                                         "mandatory": [
                                             "right_control"
-                                        ],
-                                        "optional": [
-                                            "any"
                                         ]
                                     }
                                 },
                                 "to": [
                                     {
-                                        "key_code": "delete_or_backspace"
+                                        "key_code": "close_bracket"
                                     }
                                 ],
                                 "type": "basic"
@@ -313,26 +313,6 @@
                                 "to": [
                                     {
                                         "key_code": "backslash"
-                                    }
-                                ],
-                                "type": "basic"
-                            },
-                            {
-                                "description": "right_control + ] -> |",
-                                "from": {
-                                    "key_code": "close_bracket",
-                                    "modifiers": {
-                                        "mandatory": [
-                                            "right_control"
-                                        ]
-                                    }
-                                },
-                                "to": [
-                                    {
-                                        "key_code": "backslash",
-                                        "modifiers": [
-                                            "left_shift"
-                                        ]
                                     }
                                 ],
                                 "type": "basic"
@@ -721,6 +701,26 @@
                                         "key_code": "0"
                                     }
                                 ]
+                            },
+                            {
+                                "description": "right_control + space -> backspace",
+                                "from": {
+                                    "key_code": "spacebar",
+                                    "modifiers": {
+                                        "mandatory": [
+                                            "right_control"
+                                        ],
+                                        "optional": [
+                                            "any"
+                                        ]
+                                    }
+                                },
+                                "to": [
+                                    {
+                                        "key_code": "delete_or_backspace"
+                                    }
+                                ],
+                                "type": "basic"
                             }
                         ]
                     },
