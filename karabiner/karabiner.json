@@ -301,9 +301,9 @@
                                 "type": "basic"
                             },
                             {
-                                "description": "right_control + [ -> \\",
+                                "description": "right_control + enter -> \\",
                                 "from": {
-                                    "key_code": "open_bracket",
+                                    "key_code": "return_or_enter",
                                     "modifiers": {
                                         "mandatory": [
                                             "right_control"
