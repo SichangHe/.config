@@ -728,6 +728,296 @@
                         "description": "shift then letters → yabai & system controls",
                         "manipulators": [
                             {
+                                "description": "shift then q -> yabai focus space 1",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
+                                    }
+                                ],
+                                "from": {
+                                    "key_code": "q"
+                                },
+                                "to": [
+                                    {
+                                        "shell_command": "/usr/local/bin/yabai -m space --focus 1"
+                                    }
+                                ],
+                                "type": "basic"
+                            },
+                            {
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
+                                    }
+                                ],
+                                "from": {
+                                    "key_code": "w"
+                                },
+                                "to": [
+                                    {
+                                        "shell_command": "/usr/local/bin/yabai -m space --focus 2"
+                                    }
+                                ],
+                                "type": "basic"
+                            },
+                            {
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
+                                    }
+                                ],
+                                "from": {
+                                    "key_code": "e"
+                                },
+                                "to": [
+                                    {
+                                        "shell_command": "/usr/local/bin/yabai -m space --focus 3"
+                                    }
+                                ],
+                                "type": "basic"
+                            },
+                            {
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
+                                    }
+                                ],
+                                "from": {
+                                    "key_code": "r"
+                                },
+                                "to": [
+                                    {
+                                        "shell_command": "/usr/local/bin/yabai -m space --focus 4"
+                                    }
+                                ],
+                                "type": "basic"
+                            },
+                            {
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
+                                    }
+                                ],
+                                "from": {
+                                    "key_code": "t"
+                                },
+                                "to": [
+                                    {
+                                        "shell_command": "/usr/local/bin/yabai -m space --focus 5"
+                                    }
+                                ],
+                                "type": "basic"
+                            },
+                            {
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
+                                    }
+                                ],
+                                "from": {
+                                    "key_code": "y"
+                                },
+                                "to": [
+                                    {
+                                        "shell_command": "/usr/local/bin/yabai -m space --focus 6"
+                                    }
+                                ],
+                                "type": "basic"
+                            },
+                            {
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
+                                    }
+                                ],
+                                "from": {
+                                    "key_code": "u"
+                                },
+                                "to": [
+                                    {
+                                        "shell_command": "/usr/local/bin/yabai -m space --focus 7"
+                                    }
+                                ],
+                                "type": "basic"
+                            },
+                            {
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
+                                    }
+                                ],
+                                "from": {
+                                    "key_code": "i"
+                                },
+                                "to": [
+                                    {
+                                        "shell_command": "/usr/local/bin/yabai -m space --focus 8"
+                                    }
+                                ],
+                                "type": "basic"
+                            },
+                            {
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
+                                    }
+                                ],
+                                "from": {
+                                    "key_code": "o"
+                                },
+                                "to": [
+                                    {
+                                        "shell_command": "/usr/local/bin/yabai -m space --focus 9"
+                                    }
+                                ],
+                                "type": "basic"
+                            },
+                            {
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
+                                    }
+                                ],
+                                "from": {
+                                    "key_code": "p"
+                                },
+                                "to": [
+                                    {
+                                        "shell_command": "/usr/local/bin/yabai -m space --focus 10"
+                                    }
+                                ],
+                                "type": "basic"
+                            },
+                            {
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
+                                    }
+                                ],
+                                "from": {
+                                    "key_code": "a"
+                                },
+                                "to": [
+                                    {
+                                        "shell_command": "/usr/local/bin/yabai -m space --focus 11"
+                                    }
+                                ],
+                                "type": "basic"
+                            },
+                            {
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
+                                    }
+                                ],
+                                "from": {
+                                    "key_code": "s"
+                                },
+                                "to": [
+                                    {
+                                        "shell_command": "/usr/local/bin/yabai -m space --focus 12"
+                                    }
+                                ],
+                                "type": "basic"
+                            },
+                            {
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
+                                    }
+                                ],
+                                "from": {
+                                    "key_code": "d"
+                                },
+                                "to": [
+                                    {
+                                        "shell_command": "/usr/local/bin/yabai -m space --focus 13"
+                                    }
+                                ],
+                                "type": "basic"
+                            },
+                            {
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
+                                    }
+                                ],
+                                "from": {
+                                    "key_code": "f"
+                                },
+                                "to": [
+                                    {
+                                        "shell_command": "/usr/local/bin/yabai -m space --focus 14"
+                                    }
+                                ],
+                                "type": "basic"
+                            },
+                            {
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
+                                    }
+                                ],
+                                "from": {
+                                    "key_code": "g"
+                                },
+                                "to": [
+                                    {
+                                        "shell_command": "/usr/local/bin/yabai -m space --focus 15"
+                                    }
+                                ],
+                                "type": "basic"
+                            },
+                            {
+                                "description": "shift then h -> yabai focus prev space",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
+                                    }
+                                ],
+                                "from": {
+                                    "key_code": "h"
+                                },
+                                "to": [
+                                    {
+                                        "shell_command": "/usr/local/bin/yabai -m space --focus prev"
+                                    }
+                                ],
+                                "type": "basic"
+                            },
+                            {
                                 "description": "shift then j -> yabai last",
                                 "conditions": [
                                     {
@@ -766,7 +1056,7 @@
                                 "type": "basic"
                             },
                             {
-                                "description": "shift then h -> yabai recent",
+                                "description": "shift then l -> yabai focus next space",
                                 "conditions": [
                                     {
                                         "type": "variable_if",
@@ -775,11 +1065,144 @@
                                     }
                                 ],
                                 "from": {
-                                    "key_code": "h"
+                                    "key_code": "l"
+                                },
+                                "to": [
+                                    {
+                                        "shell_command": "/usr/local/bin/yabai -m space --focus next"
+                                    }
+                                ],
+                                "type": "basic"
+                            },
+                            {
+                                "description": "shift then ; -> yabai recent",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
+                                    }
+                                ],
+                                "from": {
+                                    "key_code": "semicolon"
                                 },
                                 "to": [
                                     {
                                         "shell_command": "/usr/local/bin/yabai -m window --focus recent"
+                                    }
+                                ],
+                                "type": "basic"
+                            },
+                            {
+                                "description": "shift then ' -> restart yabai",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
+                                    }
+                                ],
+                                "from": {
+                                    "key_code": "quote"
+                                },
+                                "to": [
+                                    {
+                                        "shell_command": "/usr/local/bin/yabai --restart-service && sudo /usr/local/bin/yabai --load-sa && osascript -e 'display notification \"restart yabai\" with title \"yabai\"'"
+                                    }
+                                ],
+                                "type": "basic"
+                            },
+                            {
+                                "description": "shift then z -> yabai rotate clockwise",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
+                                    }
+                                ],
+                                "from": {
+                                    "key_code": "z"
+                                },
+                                "to": [
+                                    {
+                                        "shell_command": "/usr/local/bin/yabai -m space --rotate 270"
+                                    }
+                                ],
+                                "type": "basic"
+                            },
+                            {
+                                "description": "shift then x -> yabai equalize window sizes",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
+                                    }
+                                ],
+                                "from": {
+                                    "key_code": "x"
+                                },
+                                "to": [
+                                    {
+                                        "shell_command": "/usr/local/bin/yabai -m space --balance"
+                                    }
+                                ],
+                                "type": "basic"
+                            },
+                            {
+                                "description": "shift then c -> yabai layout bsp",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
+                                    }
+                                ],
+                                "from": {
+                                    "key_code": "c"
+                                },
+                                "to": [
+                                    {
+                                        "shell_command": "/usr/local/bin/yabai -m config --space mouse layout bsp"
+                                    }
+                                ],
+                                "type": "basic"
+                            },
+                            {
+                                "description": "shift then v -> yabai layout stack",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
+                                    }
+                                ],
+                                "from": {
+                                    "key_code": "v"
+                                },
+                                "to": [
+                                    {
+                                        "shell_command": "/usr/local/bin/yabai -m config --space mouse layout stack"
+                                    }
+                                ],
+                                "type": "basic"
+                            },
+                            {
+                                "description": "shift then b -> yabai layout float",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
+                                    }
+                                ],
+                                "from": {
+                                    "key_code": "b"
+                                },
+                                "to": [
+                                    {
+                                        "shell_command": "/usr/local/bin/yabai -m config --space mouse layout float"
                                     }
                                 ],
                                 "type": "basic"
@@ -842,7 +1265,26 @@
                                 "type": "basic"
                             },
                             {
-                                "description": "shift then shift then q -> yabai move window to prev space",
+                                "description": "shift then . -> yabai info",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped",
+                                        "value": 1
+                                    }
+                                ],
+                                "from": {
+                                    "key_code": "period"
+                                },
+                                "to": [
+                                    {
+                                        "shell_command": "~/.cargo/bin/yabaiswitch info"
+                                    }
+                                ],
+                                "type": "basic"
+                            },
+                            {
+                                "description": "shift then shift then q -> yabai move window to space 1",
                                 "conditions": [
                                     {
                                         "type": "variable_if",
@@ -855,13 +1297,12 @@
                                 },
                                 "to": [
                                     {
-                                        "shell_command": "/usr/local/bin/yabai -m window --space prev && /usr/local/bin/yabai -m space --focus prev"
+                                        "shell_command": "/usr/local/bin/yabai -m window --space 1 && /usr/local/bin/yabai -m space --focus 1"
                                     }
                                 ],
                                 "type": "basic"
                             },
                             {
-                                "description": "shift then shift then w -> yabai move window to next space",
                                 "conditions": [
                                     {
                                         "type": "variable_if",
@@ -874,51 +1315,12 @@
                                 },
                                 "to": [
                                     {
-                                        "shell_command": "/usr/local/bin/yabai -m window --space next && /usr/local/bin/yabai -m space --focus next"
-                                    }
-                                ],
-                                "type": "basic"
-                            },
-                            {
-                                "description": "shift then shift then 1 -> yabai move window to space 1",
-                                "conditions": [
-                                    {
-                                        "type": "variable_if",
-                                        "name": "shift_tapped2",
-                                        "value": 1
-                                    }
-                                ],
-                                "from": {
-                                    "key_code": "1"
-                                },
-                                "to": [
-                                    {
-                                        "shell_command": "/usr/local/bin/yabai -m window --space 1 && /usr/local/bin/yabai -m space --focus 1"
-                                    }
-                                ],
-                                "type": "basic"
-                            },
-                            {
-                                "description": "shift then shift then 2 -> yabai move window to space 2",
-                                "conditions": [
-                                    {
-                                        "type": "variable_if",
-                                        "name": "shift_tapped2",
-                                        "value": 1
-                                    }
-                                ],
-                                "from": {
-                                    "key_code": "2"
-                                },
-                                "to": [
-                                    {
                                         "shell_command": "/usr/local/bin/yabai -m window --space 2 && /usr/local/bin/yabai -m space --focus 2"
                                     }
                                 ],
                                 "type": "basic"
                             },
                             {
-                                "description": "shift then shift then 3 -> yabai move window to space 3",
                                 "conditions": [
                                     {
                                         "type": "variable_if",
@@ -927,7 +1329,7 @@
                                     }
                                 ],
                                 "from": {
-                                    "key_code": "3"
+                                    "key_code": "e"
                                 },
                                 "to": [
                                     {
@@ -937,7 +1339,6 @@
                                 "type": "basic"
                             },
                             {
-                                "description": "shift then shift then 4 -> yabai move window to space 4",
                                 "conditions": [
                                     {
                                         "type": "variable_if",
@@ -946,7 +1347,7 @@
                                     }
                                 ],
                                 "from": {
-                                    "key_code": "4"
+                                    "key_code": "r"
                                 },
                                 "to": [
                                     {
@@ -956,7 +1357,6 @@
                                 "type": "basic"
                             },
                             {
-                                "description": "shift then shift then 5 -> yabai move window to space 5",
                                 "conditions": [
                                     {
                                         "type": "variable_if",
@@ -965,7 +1365,7 @@
                                     }
                                 ],
                                 "from": {
-                                    "key_code": "5"
+                                    "key_code": "t"
                                 },
                                 "to": [
                                     {
@@ -975,7 +1375,6 @@
                                 "type": "basic"
                             },
                             {
-                                "description": "shift then shift then 6 -> yabai move window to space 6",
                                 "conditions": [
                                     {
                                         "type": "variable_if",
@@ -984,7 +1383,7 @@
                                     }
                                 ],
                                 "from": {
-                                    "key_code": "6"
+                                    "key_code": "y"
                                 },
                                 "to": [
                                     {
@@ -994,7 +1393,6 @@
                                 "type": "basic"
                             },
                             {
-                                "description": "shift then shift then 7 -> yabai move window to space 7",
                                 "conditions": [
                                     {
                                         "type": "variable_if",
@@ -1003,7 +1401,7 @@
                                     }
                                 ],
                                 "from": {
-                                    "key_code": "7"
+                                    "key_code": "u"
                                 },
                                 "to": [
                                     {
@@ -1013,7 +1411,6 @@
                                 "type": "basic"
                             },
                             {
-                                "description": "shift then shift then 8 -> yabai move window to space 8",
                                 "conditions": [
                                     {
                                         "type": "variable_if",
@@ -1022,7 +1419,7 @@
                                     }
                                 ],
                                 "from": {
-                                    "key_code": "8"
+                                    "key_code": "i"
                                 },
                                 "to": [
                                     {
@@ -1032,7 +1429,6 @@
                                 "type": "basic"
                             },
                             {
-                                "description": "shift then shift then 9 -> yabai move window to space 9",
                                 "conditions": [
                                     {
                                         "type": "variable_if",
@@ -1041,7 +1437,7 @@
                                     }
                                 ],
                                 "from": {
-                                    "key_code": "9"
+                                    "key_code": "o"
                                 },
                                 "to": [
                                     {
@@ -1051,7 +1447,6 @@
                                 "type": "basic"
                             },
                             {
-                                "description": "shift then shift then 0 -> yabai move window to space 10",
                                 "conditions": [
                                     {
                                         "type": "variable_if",
@@ -1060,7 +1455,7 @@
                                     }
                                 ],
                                 "from": {
-                                    "key_code": "0"
+                                    "key_code": "p"
                                 },
                                 "to": [
                                     {
@@ -1070,7 +1465,6 @@
                                 "type": "basic"
                             },
                             {
-                                "description": "shift then shift then - -> yabai move window to space 11",
                                 "conditions": [
                                     {
                                         "type": "variable_if",
@@ -1079,7 +1473,7 @@
                                     }
                                 ],
                                 "from": {
-                                    "key_code": "hyphen"
+                                    "key_code": "a"
                                 },
                                 "to": [
                                     {
@@ -1089,7 +1483,6 @@
                                 "type": "basic"
                             },
                             {
-                                "description": "shift then shift then = -> yabai move window to space 12",
                                 "conditions": [
                                     {
                                         "type": "variable_if",
@@ -1098,11 +1491,128 @@
                                     }
                                 ],
                                 "from": {
-                                    "key_code": "equal_sign"
+                                    "key_code": "s"
                                 },
                                 "to": [
                                     {
                                         "shell_command": "/usr/local/bin/yabai -m window --space 12 && /usr/local/bin/yabai -m space --focus 12"
+                                    }
+                                ],
+                                "type": "basic"
+                            },
+                            {
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped2",
+                                        "value": 1
+                                    }
+                                ],
+                                "from": {
+                                    "key_code": "d"
+                                },
+                                "to": [
+                                    {
+                                        "shell_command": "/usr/local/bin/yabai -m window --space 13 && /usr/local/bin/yabai -m space --focus 13"
+                                    }
+                                ],
+                                "type": "basic"
+                            },
+                            {
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped2",
+                                        "value": 1
+                                    }
+                                ],
+                                "from": {
+                                    "key_code": "f"
+                                },
+                                "to": [
+                                    {
+                                        "shell_command": "/usr/local/bin/yabai -m window --space 14 && /usr/local/bin/yabai -m space --focus 14"
+                                    }
+                                ],
+                                "type": "basic"
+                            },
+                            {
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped2",
+                                        "value": 1
+                                    }
+                                ],
+                                "from": {
+                                    "key_code": "g"
+                                },
+                                "to": [
+                                    {
+                                        "shell_command": "/usr/local/bin/yabai -m window --space 15 && /usr/local/bin/yabai -m space --focus 15"
+                                    }
+                                ],
+                                "type": "basic"
+                            },
+                            {
+                                "description": "shift then shift then h -> yabai move window to prev space",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped2",
+                                        "value": 1
+                                    }
+                                ],
+                                "from": {
+                                    "key_code": "h"
+                                },
+                                "to": [
+                                    {
+                                        "shell_command": "/usr/local/bin/yabai -m window --space prev && /usr/local/bin/yabai -m space --focus prev"
+                                    }
+                                ],
+                                "type": "basic"
+                            },
+                            {
+                                "description": "shift then shift then j -> yabai toggle mouse follow",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped2",
+                                        "value": 1
+                                    }
+                                ],
+                                "from": {
+                                    "key_code": "j"
+                                },
+                                "to": [
+                                    {
+                                        "set_variable": {
+                                            "name": "shift_tapped2",
+                                            "value": 0
+                                        }
+                                    },
+                                    {
+                                        "shell_command": "if [[ $(/usr/local/bin/yabai -m config mouse_follows_focus) == \"off\" ]]; then /usr/local/bin/yabai -m config mouse_follows_focus on && osascript -e 'display notification \"mouse follows focus: ON\" with title \"/usr/local/bin/yabai\"'; else /usr/local/bin/yabai -m config mouse_follows_focus off && osascript -e 'display notification \"mouse follows focus: OFF\" with title \"/usr/local/bin/yabai\"'; fi"
+                                    }
+                                ],
+                                "type": "basic"
+                            },
+                            {
+                                "description": "shift then shift then l -> yabai move window to next space",
+                                "conditions": [
+                                    {
+                                        "type": "variable_if",
+                                        "name": "shift_tapped2",
+                                        "value": 1
+                                    }
+                                ],
+                                "from": {
+                                    "key_code": "l"
+                                },
+                                "to": [
+                                    {
+                                        "shell_command": "/usr/local/bin/yabai -m window --space next && /usr/local/bin/yabai -m space --focus next"
                                     }
                                 ],
                                 "type": "basic"
@@ -1165,386 +1675,6 @@
                                 "type": "basic"
                             },
                             {
-                                "description": "shift then q -> yabai focus prev space",
-                                "conditions": [
-                                    {
-                                        "type": "variable_if",
-                                        "name": "shift_tapped",
-                                        "value": 1
-                                    }
-                                ],
-                                "from": {
-                                    "key_code": "q"
-                                },
-                                "to": [
-                                    {
-                                        "shell_command": "/usr/local/bin/yabai -m space --focus prev"
-                                    }
-                                ],
-                                "type": "basic"
-                            },
-                            {
-                                "description": "shift then w -> yabai focus next space",
-                                "conditions": [
-                                    {
-                                        "type": "variable_if",
-                                        "name": "shift_tapped",
-                                        "value": 1
-                                    }
-                                ],
-                                "from": {
-                                    "key_code": "w"
-                                },
-                                "to": [
-                                    {
-                                        "shell_command": "/usr/local/bin/yabai -m space --focus next"
-                                    }
-                                ],
-                                "type": "basic"
-                            },
-                            {
-                                "description": "shift then 1 -> yabai focus space 1",
-                                "conditions": [
-                                    {
-                                        "type": "variable_if",
-                                        "name": "shift_tapped",
-                                        "value": 1
-                                    }
-                                ],
-                                "from": {
-                                    "key_code": "1"
-                                },
-                                "to": [
-                                    {
-                                        "shell_command": "/usr/local/bin/yabai -m space --focus 1"
-                                    }
-                                ],
-                                "type": "basic"
-                            },
-                            {
-                                "description": "shift then 2 -> yabai focus space 2",
-                                "conditions": [
-                                    {
-                                        "type": "variable_if",
-                                        "name": "shift_tapped",
-                                        "value": 1
-                                    }
-                                ],
-                                "from": {
-                                    "key_code": "2"
-                                },
-                                "to": [
-                                    {
-                                        "shell_command": "/usr/local/bin/yabai -m space --focus 2"
-                                    }
-                                ],
-                                "type": "basic"
-                            },
-                            {
-                                "description": "shift then 3 -> yabai focus space 3",
-                                "conditions": [
-                                    {
-                                        "type": "variable_if",
-                                        "name": "shift_tapped",
-                                        "value": 1
-                                    }
-                                ],
-                                "from": {
-                                    "key_code": "3"
-                                },
-                                "to": [
-                                    {
-                                        "shell_command": "/usr/local/bin/yabai -m space --focus 3"
-                                    }
-                                ],
-                                "type": "basic"
-                            },
-                            {
-                                "description": "shift then 4 -> yabai focus space 4",
-                                "conditions": [
-                                    {
-                                        "type": "variable_if",
-                                        "name": "shift_tapped",
-                                        "value": 1
-                                    }
-                                ],
-                                "from": {
-                                    "key_code": "4"
-                                },
-                                "to": [
-                                    {
-                                        "shell_command": "/usr/local/bin/yabai -m space --focus 4"
-                                    }
-                                ],
-                                "type": "basic"
-                            },
-                            {
-                                "description": "shift then 5 -> yabai focus space 5",
-                                "conditions": [
-                                    {
-                                        "type": "variable_if",
-                                        "name": "shift_tapped",
-                                        "value": 1
-                                    }
-                                ],
-                                "from": {
-                                    "key_code": "5"
-                                },
-                                "to": [
-                                    {
-                                        "shell_command": "/usr/local/bin/yabai -m space --focus 5"
-                                    }
-                                ],
-                                "type": "basic"
-                            },
-                            {
-                                "description": "shift then 6 -> yabai focus space 6",
-                                "conditions": [
-                                    {
-                                        "type": "variable_if",
-                                        "name": "shift_tapped",
-                                        "value": 1
-                                    }
-                                ],
-                                "from": {
-                                    "key_code": "6"
-                                },
-                                "to": [
-                                    {
-                                        "shell_command": "/usr/local/bin/yabai -m space --focus 6"
-                                    }
-                                ],
-                                "type": "basic"
-                            },
-                            {
-                                "description": "shift then 7 -> yabai focus space 7",
-                                "conditions": [
-                                    {
-                                        "type": "variable_if",
-                                        "name": "shift_tapped",
-                                        "value": 1
-                                    }
-                                ],
-                                "from": {
-                                    "key_code": "7"
-                                },
-                                "to": [
-                                    {
-                                        "shell_command": "/usr/local/bin/yabai -m space --focus 7"
-                                    }
-                                ],
-                                "type": "basic"
-                            },
-                            {
-                                "description": "shift then 8 -> yabai focus space 8",
-                                "conditions": [
-                                    {
-                                        "type": "variable_if",
-                                        "name": "shift_tapped",
-                                        "value": 1
-                                    }
-                                ],
-                                "from": {
-                                    "key_code": "8"
-                                },
-                                "to": [
-                                    {
-                                        "shell_command": "/usr/local/bin/yabai -m space --focus 8"
-                                    }
-                                ],
-                                "type": "basic"
-                            },
-                            {
-                                "description": "shift then 9 -> yabai focus space 9",
-                                "conditions": [
-                                    {
-                                        "type": "variable_if",
-                                        "name": "shift_tapped",
-                                        "value": 1
-                                    }
-                                ],
-                                "from": {
-                                    "key_code": "9"
-                                },
-                                "to": [
-                                    {
-                                        "shell_command": "/usr/local/bin/yabai -m space --focus 9"
-                                    }
-                                ],
-                                "type": "basic"
-                            },
-                            {
-                                "description": "shift then 0 -> yabai focus space 10",
-                                "conditions": [
-                                    {
-                                        "type": "variable_if",
-                                        "name": "shift_tapped",
-                                        "value": 1
-                                    }
-                                ],
-                                "from": {
-                                    "key_code": "0"
-                                },
-                                "to": [
-                                    {
-                                        "shell_command": "/usr/local/bin/yabai -m space --focus 10"
-                                    }
-                                ],
-                                "type": "basic"
-                            },
-                            {
-                                "description": "shift then - -> yabai focus space 11",
-                                "conditions": [
-                                    {
-                                        "type": "variable_if",
-                                        "name": "shift_tapped",
-                                        "value": 1
-                                    }
-                                ],
-                                "from": {
-                                    "key_code": "hyphen"
-                                },
-                                "to": [
-                                    {
-                                        "shell_command": "/usr/local/bin/yabai -m space --focus 11"
-                                    }
-                                ],
-                                "type": "basic"
-                            },
-                            {
-                                "description": "shift then = -> yabai focus space 12",
-                                "conditions": [
-                                    {
-                                        "type": "variable_if",
-                                        "name": "shift_tapped",
-                                        "value": 1
-                                    }
-                                ],
-                                "from": {
-                                    "key_code": "equal_sign"
-                                },
-                                "to": [
-                                    {
-                                        "shell_command": "/usr/local/bin/yabai -m space --focus 12"
-                                    }
-                                ],
-                                "type": "basic"
-                            },
-                            {
-                                "description": "shift then a -> yabai layout bsp",
-                                "conditions": [
-                                    {
-                                        "type": "variable_if",
-                                        "name": "shift_tapped",
-                                        "value": 1
-                                    }
-                                ],
-                                "from": {
-                                    "key_code": "a"
-                                },
-                                "to": [
-                                    {
-                                        "shell_command": "/usr/local/bin/yabai -m config --space mouse layout bsp"
-                                    }
-                                ],
-                                "type": "basic"
-                            },
-                            {
-                                "description": "shift then s -> yabai layout stack",
-                                "conditions": [
-                                    {
-                                        "type": "variable_if",
-                                        "name": "shift_tapped",
-                                        "value": 1
-                                    }
-                                ],
-                                "from": {
-                                    "key_code": "s"
-                                },
-                                "to": [
-                                    {
-                                        "shell_command": "/usr/local/bin/yabai -m config --space mouse layout stack"
-                                    }
-                                ],
-                                "type": "basic"
-                            },
-                            {
-                                "description": "shift then d -> yabai layout float",
-                                "conditions": [
-                                    {
-                                        "type": "variable_if",
-                                        "name": "shift_tapped",
-                                        "value": 1
-                                    }
-                                ],
-                                "from": {
-                                    "key_code": "d"
-                                },
-                                "to": [
-                                    {
-                                        "shell_command": "/usr/local/bin/yabai -m config --space mouse layout float"
-                                    }
-                                ],
-                                "type": "basic"
-                            },
-                            {
-                                "description": "shift then shift then f -> yabai toggle mouse follow",
-                                "conditions": [
-                                    {
-                                        "type": "variable_if",
-                                        "name": "shift_tapped2",
-                                        "value": 1
-                                    }
-                                ],
-                                "from": {
-                                    "key_code": "f"
-                                },
-                                "to": [
-                                    {
-                                        "shell_command": "if [[ $(/usr/local/bin/yabai -m config mouse_follows_focus) == \"off\" ]]; then /usr/local/bin/yabai -m config mouse_follows_focus on && osascript -e 'display notification \"mouse follows focus: ON\" with title \"/usr/local/bin/yabai\"'; else /usr/local/bin/yabai -m config mouse_follows_focus off && osascript -e 'display notification \"mouse follows focus: OFF\" with title \"/usr/local/bin/yabai\"'; fi"
-                                    }
-                                ],
-                                "type": "basic"
-                            },
-                            {
-                                "description": "shift then e -> yabai equalize window sizes",
-                                "conditions": [
-                                    {
-                                        "type": "variable_if",
-                                        "name": "shift_tapped",
-                                        "value": 1
-                                    }
-                                ],
-                                "from": {
-                                    "key_code": "e"
-                                },
-                                "to": [
-                                    {
-                                        "shell_command": "/usr/local/bin/yabai -m space --balance"
-                                    }
-                                ],
-                                "type": "basic"
-                            },
-                            {
-                                "description": "shift then r -> yabai rotate clockwise",
-                                "conditions": [
-                                    {
-                                        "type": "variable_if",
-                                        "name": "shift_tapped",
-                                        "value": 1
-                                    }
-                                ],
-                                "from": {
-                                    "key_code": "r"
-                                },
-                                "to": [
-                                    {
-                                        "shell_command": "/usr/local/bin/yabai -m space --rotate 270"
-                                    }
-                                ],
-                                "type": "basic"
-                            },
-                            {
                                 "description": "shift then shift then x -> yabai mirror on X-axis",
                                 "conditions": [
                                     {
@@ -1597,44 +1727,6 @@
                                 "to": [
                                     {
                                         "shell_command": "/usr/local/bin/yabai -m window --toggle float && osascript -e 'display notification \"toggle window float\" with title \"yabai\"'"
-                                    }
-                                ],
-                                "type": "basic"
-                            },
-                            {
-                                "description": "shift then i -> yabai info",
-                                "conditions": [
-                                    {
-                                        "type": "variable_if",
-                                        "name": "shift_tapped",
-                                        "value": 1
-                                    }
-                                ],
-                                "from": {
-                                    "key_code": "i"
-                                },
-                                "to": [
-                                    {
-                                        "shell_command": "~/.cargo/bin/yabaiswitch info"
-                                    }
-                                ],
-                                "type": "basic"
-                            },
-                            {
-                                "description": "shift then y -> restart yabai",
-                                "conditions": [
-                                    {
-                                        "type": "variable_if",
-                                        "name": "shift_tapped",
-                                        "value": 1
-                                    }
-                                ],
-                                "from": {
-                                    "key_code": "y"
-                                },
-                                "to": [
-                                    {
-                                        "shell_command": "/usr/local/bin/yabai --restart-service && sudo /usr/local/bin/yabai --load-sa && osascript -e 'display notification \"restart yabai\" with title \"yabai\"'"
                                     }
                                 ],
                                 "type": "basic"
