@@ -1,4 +1,20 @@
-# Arch KDE
+# Artifacts
+**.dart_tool/
+**.flutter*
+**.ipynb_checkpoints/
+**.pyc
+**__pycache__/
+**build/
+
+# Auxiliary files
+**.bak
+**.tmp
+
+# Databases
+**.db*
+**.sqlite*
+
+# Desktop
 DisplayCAL/
 KDE/
 Kvantum/
@@ -10,11 +26,16 @@ arkrc
 baloofileinformationrc
 baloofilerc
 bluedevilglobalrc
+borg/security/
+chrome-remote-desktop/
+chromium/
 dconf/
 discoverrc
 dolphinrc
 emaildefaults
+evolution/
 filelightrc
+gnome*
 go/
 google-chrome/
 gtk-2.0/
@@ -23,6 +44,8 @@ gtk-4.0/
 gtkrc
 gtkrc-2.0
 gwenviewrc
+htop/
+ibus/
 kactivitymanagerdrc
 katemetainfos
 katerc
@@ -51,6 +74,8 @@ libaccounts-glib/
 lightlyrc
 menus/
 mimeapps.list
+nautilus/
+obs-studio/
 okularpartrc
 okularrc
 plasma-localerc
@@ -70,22 +95,6 @@ trashrc
 user-dirs.dirs
 user-dirs.locale
 xsettingsd/
-
-# Artifacts
-**.dart_tool/
-**.flutter*
-**.ipynb_checkpoints/
-**.pyc
-**__pycache__/
-**build/
-
-# Auxiliary files
-**.bak
-**.tmp
-
-# Databases
-**.db*
-**.sqlite*
 
 # Documents
 **.csv
@@ -168,4 +177,5 @@ libvirt/
 memos.json
 mume/
 neofetch/
+uv/*.json
 wireshark/
