@@ -43,28 +43,6 @@ local servers = {
 			end
 		end,
 	},
-	mdbook_ls = {},
-	natural_syntax_ls = {
-		autostart = false,
-		init_options = {
-			token_map_update = {
-				CC = { type = "comment" },
-				DT = { type = "comment" },
-				IN = { type = "comment" },
-				PDT = { type = "comment" },
-				TO = { type = "comment" },
-				UH = { type = "comment" },
-				NN = vim.NIL,
-				NNS = vim.NIL,
-				VB = vim.NIL,
-				VBD = vim.NIL,
-				VBG = vim.NIL,
-				VBN = vim.NIL,
-				VBP = vim.NIL,
-				VBZ = vim.NIL,
-			},
-		},
-	},
 	pylsp = {
 		settings = {
 			pylsp = {
@@ -126,14 +104,13 @@ local servers = {
 }
 
 local function register_mdbook_ls()
-	local lspconfig = require("lspconfig")
 	local function execute_command_with_params(params)
-		local clients = lspconfig.util.get_lsp_clients({
+		local clients = vim.lsp.get_clients({
 			bufnr = vim.api.nvim_get_current_buf(),
 			name = "mdbook_ls",
 		})
 		for _, client in ipairs(clients) do
-			client.request("workspace/executeCommand", params, nil, 0)
+			client:request("workspace/executeCommand", params, nil, 0)
 		end
 	end
 	local function open_preview()
@@ -151,39 +128,48 @@ local function register_mdbook_ls()
 		execute_command_with_params(params)
 	end
 
-	require("lspconfig.configs").mdbook_ls = {
-		default_config = {
-			cmd = { "mdbook-ls" },
-			filetypes = { "markdown" },
-			root_dir = lspconfig.util.root_pattern("book.toml"),
-		},
-		commands = {
-			MDBookLSOpenPreview = {
-				open_preview,
-				description = "Open mdBook-LS preview",
-			},
-			MDBookLSStopPreview = {
-				stop_preview,
-				description = "Stop mdBook-LS preview",
-			},
-		},
+	vim.lsp.config.mdbook_ls = {
+		cmd = { "mdbook-ls" },
+		filetypes = { "markdown" },
+		root_markers = { "book.toml" },
 		docs = {
 			description = [[The mdBook Language Server for previewing mdBook projects live.]],
 		},
 	}
+
+	vim.api.nvim_create_user_command("MDBookLSOpenPreview", open_preview, {
+		desc = "Open mdBook-LS preview",
+	})
+
+	vim.api.nvim_create_user_command("MDBookLSStopPreview", stop_preview, {
+		desc = "Stop mdBook-LS preview",
+	})
 end
 
 local function register_natural_syntax_ls()
-	require("lspconfig.configs").natural_syntax_ls = {
-		default_config = {
-			cmd = {
-				U.fn.expand("~/.config/helper.sh/natural-syntax-ls.sh"),
-			},
-			filetypes = { "tex", "markdown", "text" },
-			single_file_support = true,
+	vim.lsp.config.natural_syntax_ls = {
+		cmd = {
+			U.fn.expand("~/.config/helper.sh/natural-syntax-ls.sh"),
 		},
-		docs = {
-			description = [[The Natural Syntax Language Server for highlighting parts of speech.]],
+		filetypes = { "tex", "markdown", "text" },
+		single_file_support = true,
+		init_options = {
+			token_map_update = {
+				CC = { type = "comment" },
+				DT = { type = "comment" },
+				IN = { type = "comment" },
+				PDT = { type = "comment" },
+				TO = { type = "comment" },
+				UH = { type = "comment" },
+				NN = vim.NIL,
+				NNS = vim.NIL,
+				VB = vim.NIL,
+				VBD = vim.NIL,
+				VBG = vim.NIL,
+				VBN = vim.NIL,
+				VBP = vim.NIL,
+				VBZ = vim.NIL,
+			},
 		},
 	}
 end

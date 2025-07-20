@@ -27,3 +27,5 @@
 	rebase = true
 [submodule]
 	recurse = true
+[lfs]
+	locksverify = false
