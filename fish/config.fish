@@ -97,3 +97,7 @@ end
 if type -q uvx
     uvx --generate-shell-completion fish | source
 end
+
+if type -q zellij
+    zellij setup --generate-completion fish | source
+end

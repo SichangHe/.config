@@ -202,10 +202,15 @@ return {
 				fmtm = {
 					command = "fmtm",
 				},
+				fmtt_latex = {
+					command = "fmtt",
+					args = { "-l" },
+				},
 				latexindent = {
 					prepend_args = {
 						"-l",
 						U.expand("~/.config/latexindent_config.yaml"),
+						"-m",
 					},
 				},
 				markdownlint_cli2 = {
@@ -223,7 +228,7 @@ return {
 				quarto = { "markdownlint-cli2", "fmtm" },
 				javascript = { "prettierd" },
 				sh = { "shfmt" },
-				tex = { "latexindent" },
+				tex = { "fmtt_latex", "latexindent", "fmtt_latex" },
 				-- Prettierd
 				handlebars = { "prettierd" },
 				yaml = { "prettierd" },
