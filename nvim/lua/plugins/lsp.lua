@@ -43,6 +43,7 @@ local servers = {
 			end
 		end,
 	},
+	postgres_lsp = {},
 	pylsp = {
 		settings = {
 			pylsp = {
@@ -97,6 +98,7 @@ local servers = {
 	sourcekit = {
 		mason = false,
 	},
+    sqruff = {},
 	svelte = {},
 	tailwindcss = {},
 	taplo = {},
