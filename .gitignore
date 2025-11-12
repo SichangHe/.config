@@ -72,12 +72,14 @@ kwinrulesrc
 kxkbrc
 libaccounts-glib/
 lightlyrc
+lxsession/
 menus/
 mimeapps.list
 nautilus/
 obs-studio/
 okularpartrc
 okularrc
+pcmanfm/
 plasma-localerc
 plasma-org.kde.plasma.desktop-appletsrc
 plasmanotifyrc
@@ -177,5 +179,7 @@ libvirt/
 memos.json
 mume/
 neofetch/
+pgcli/history
+pgcli/log
 uv/*.json
 wireshark/
