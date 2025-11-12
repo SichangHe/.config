@@ -1,4 +1,6 @@
 U = require("util")
+local fn = U.fn
+local yank = U.yank
 local M = {}
 local n = function(...)
 	U.key("n", ...)
@@ -16,12 +18,29 @@ local s = function(left, right)
 	v("<Space>" .. left, "<Esc>`>a" .. right .. "<Esc>`<i" .. left .. "<Esc>")
 end
 
+local function line_range()
+	local cur_line = vim.api.nvim_win_get_cursor(0)[1]
+	local v_line = vim.fn.getpos("v")[2]
+	local start_line = math.min(cur_line, v_line)
+	local end_line = math.max(cur_line, v_line)
+	return start_line .. "-" .. end_line
+end
+
 function M.set()
 	n("<Space>n", ":noh<CR>")
 	n("<Tab>", ">>")
 	n("<S-Tab>", "<<")
 	n("x", [["_x]])
 	n("c", [["_c]])
+	n("<Space>yf", function()
+		yank(fn.expand("%"))
+	end, { desc = "Yank file path" })
+	v("<Space>yr", function()
+		yank(line_range())
+	end, { desc = "Yank line range" })
+	v("<Space>yl", function()
+		yank(fn.expand("%") .. ":" .. line_range())
+	end, { desc = "Yank location: file name + line range" })
 	i("<C-z>", "<C-o>u")
 	i("<M-BS>", "<Esc>bce") -- Alt + Backspace delete back one word.
 	i("<C-L>", "<C-G>u<Esc>[s1z=`]a<C-G>u") -- Fix last typo.

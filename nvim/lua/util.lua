@@ -45,5 +45,9 @@ M.conf_loc = M.expand("~/.config/nvim/")
 M.w = function()
 	M.cmd([[w]])
 end
+M.yank = function(text)
+	vim.notify("Copied: " .. text)
+	M.fn.setreg("+", text)
+end
 
 return M
