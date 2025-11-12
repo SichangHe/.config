@@ -1,3 +1,4 @@
+# NOTE: If this file contains error, it silently fails to load.
 patch:
   menu/page_size: 10
 

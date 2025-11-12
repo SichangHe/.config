@@ -42,6 +42,9 @@ l("db", ":lua require('dapui').toggle()<CR>")
 l("co", function()
 	return ":!co . && co --goto %:" .. current_line() .. "<CR>"
 end, { expr = true, desc = "Open in vscode" })
+l("cu", function()
+	return ":!cursor . && cursor --goto %:" .. current_line() .. "<CR>"
+end, { expr = true, desc = "Open in Cursor" })
 l("vvvv", function()
 	return (
 		U.set.scrollbind:get()

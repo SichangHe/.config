@@ -44,31 +44,6 @@ local servers = {
 		end,
 	},
 	postgres_lsp = {},
-	pylsp = {
-		settings = {
-			pylsp = {
-				configurationSources = { "mypy" },
-				plugins = {
-					autopep8 = { enabled = false },
-					jedi_completion = {
-						eager = true,
-						fuzzy = true,
-					},
-					-- Use BasedPyright.
-					jedi_definition = { enabled = false },
-					jedi_references = { enabled = false },
-					mccabe = { enabled = false },
-					mypy = {
-						enabled = true,
-						report_progress = true,
-					},
-					pycodestyle = { enabled = false },
-					pyflakes = { enabled = false },
-					yapf = { enabled = false },
-				},
-			},
-		},
-	},
 	ruff = {
 		on_attach = function(client, bufnr_attached)
 			_ = client
@@ -98,11 +73,16 @@ local servers = {
 	sourcekit = {
 		mason = false,
 	},
-    sqruff = {},
 	svelte = {},
 	tailwindcss = {},
 	taplo = {},
 	zls = {},
+}
+
+local ls2enable = {
+    "postgres_lsp",
+    -- "pyrefly",
+	"sqruff",
 }
 
 local function register_mdbook_ls()
@@ -288,6 +268,9 @@ return {
 		opts = function(_, opts)
 			register_mdbook_ls()
 			register_natural_syntax_ls()
+            for _, server in ipairs(ls2enable) do
+                vim.lsp.enable(server)
+            end
 			opts.diagnostics = U.deep_extend(opts.diagnostics, {
 				virtual_text = {
 					spacing = 1,
