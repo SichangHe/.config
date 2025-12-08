@@ -22,7 +22,8 @@ return {
 	},
 
 	{
-		"ryleelyman/latex.nvim",
+		"SichangHe/robbielyman--latex.nvim",
+		branch = "fix-get-node-range-null",
 		opts = {},
 	},
 
