@@ -29,3 +29,5 @@
 	recurse = true
 [lfs]
 	locksverify = false
+[credential]
+	helper = store
