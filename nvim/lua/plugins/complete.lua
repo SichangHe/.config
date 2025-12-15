@@ -6,9 +6,6 @@ return {
 		opts = function(_, opts)
 			-- TODO: { "crates", "vimtex" } sources
 			opts.signature = { enabled = true }
-			-- Disable LazyVim <C-k> in insert mode.
-			local keys = require("lazyvim.plugins.lsp.keymaps").get()
-			keys[#keys + 1] = { "<C-k>", mode = { "i", "s" }, false }
 			opts.keymap = U.deep_extend(opts.keymap, {
 				["<Tab>"] = {
 					function(cmp)
@@ -50,6 +47,10 @@ return {
 				},
 			})
 		end,
+		keys = {
+			-- Disable LazyVim <C-k> in insert mode.
+			{ "<C-k>", mode = { "i", "s" }, false },
+		},
 	},
 
 	{

@@ -77,11 +77,16 @@ local servers = {
 	tailwindcss = {},
 	taplo = {},
 	zls = {},
+	["*"] = {
+		keys = {
+			{ "<Space>K", require("hover").open, { desc = "hover.nvim" } },
+			{ "<Space>gK", require("hover").enter, { desc = "hover.nvim select" } },
+		},
+	},
 }
 
 local ls2enable = {
-    "postgres_lsp",
-    -- "pyrefly",
+	"postgres_lsp",
 	"sqruff",
 }
 
@@ -268,9 +273,9 @@ return {
 		opts = function(_, opts)
 			register_mdbook_ls()
 			register_natural_syntax_ls()
-            for _, server in ipairs(ls2enable) do
-                vim.lsp.enable(server)
-            end
+			for _, server in ipairs(ls2enable) do
+				vim.lsp.enable(server)
+			end
 			opts.diagnostics = U.deep_extend(opts.diagnostics, {
 				virtual_text = {
 					spacing = 1,
@@ -282,15 +287,12 @@ return {
 				rust_analyzer = function() -- Prevent double setup.
 					return true
 				end,
-				pyright = function() -- Disable Pyright.
-					return true
-				end,
 			})
 		end,
 	},
 
 	{
-		"williamboman/mason.nvim",
+		"mason-org/mason.nvim",
 		opts = function(_, opts)
 			-- Override and not to install with Mason.
 			local to_remove = {

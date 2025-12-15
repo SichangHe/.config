@@ -1,3 +1,7 @@
+local disable_lang = {
+	latex = true, -- Using VimTex instead.
+}
+
 return {
 	{
 		"nvim-treesitter/nvim-treesitter",
@@ -7,56 +11,31 @@ return {
 			"windwp/nvim-ts-autotag",
 			"hiphish/rainbow-delimiters.nvim",
 		},
-		config = function()
-			local disable_lang = {
-				latex = true, -- Using VimTex instead.
-			}
-			require("nvim-treesitter.configs").setup({
-				highlight = {
-					enable = true,
-					disable = function(lang, bufnr)
-                        _ = bufnr
-						return disable_lang[lang]
-					end,
+		opts = {
+			highlight = {
+				enable = true,
+				disable = function(lang, bufnr)
+					_ = bufnr
+					return disable_lang[lang]
+				end,
+			},
+			incremental_selection = {
+				enable = true,
+				keymaps = {
+					init_selection = "gnn",
+					node_incremental = "grn",
+					scope_incremental = "grc",
+					node_decremental = "grm",
 				},
-				incremental_selection = {
-					enable = true,
-					keymaps = {
-						init_selection = "gnn",
-						node_incremental = "grn",
-						scope_incremental = "grc",
-						node_decremental = "grm",
-					},
-				},
-				ensure_installed = {
-					"bash",
-					"c",
-					"elixir",
-					"erlang",
-					"fish",
-					"heex",
-					"javascript",
-					"jsonc",
-					"julia",
-					"latex",
-					"lua",
-					"markdown",
-					"markdown_inline",
-					"python",
-					"ruby",
-					"rust",
-					"typescript",
-					"vim",
-				},
-				auto_install = true,
-				autotag = {
-					enable = true,
-				},
-				endwise = {
-					enable = true,
-				},
-			})
-		end,
+			},
+			auto_install = true,
+			autotag = {
+				enable = true,
+			},
+			endwise = {
+				enable = true,
+			},
+		},
 	},
 
 	{

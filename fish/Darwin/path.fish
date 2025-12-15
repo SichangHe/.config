@@ -8,3 +8,6 @@ set -gx PNPM_HOME "$HOME/Library/pnpm"
 
 # Sioyek
 set -gx PATH /Applications/sioyek.app/Contents/MacOS/ $PATH
+
+# Antigravity
+set -gx PATH "$HOME/.antigravity/antigravity/bin" $PATH

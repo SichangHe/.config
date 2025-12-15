@@ -1,8 +1,8 @@
 return {
 	{ "akinsho/bufferline.nvim", enabled = false },
-	{ "echasnovski/mini.comment", enabled = false },
-	{ "echasnovski/mini.indentscope", enabled = false },
-	{ "echasnovski/mini.pairs", enabled = false },
+	{ "nvim-mini/mini.comment", enabled = false },
+	{ "nvim-mini/mini.indentscope", enabled = false },
+	{ "nvim-mini/mini.pairs", enabled = false },
 	{ "folke/neoconf.nvim", enabled = false },
 	{ "catppuccin/nvim", enabled = false },
 	{ "folke/persistence.nvim", enabled = false },

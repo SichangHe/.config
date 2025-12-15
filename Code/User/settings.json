@@ -348,7 +348,8 @@
     "redhat.telemetry.enabled": false,
     "remote.SSH.remotePlatform": {
         "10.200.20.211": "linux",
-        "10.200.14.153": "linux"
+        "10.200.14.153": "linux",
+        "exxactagent": "linux"
     },
     "remote.SSH.useLocalServer": false,
     // ruby
@@ -483,4 +484,13 @@
     "extensions.ignoreRecommendations": true,
     "gitlens.currentLine.enabled": false,
     "gitlens.codeLens.enabled": false,
+    "github.copilot.nextEditSuggestions.enabled": true,
+    "chat.mcp.gallery.enabled": true,
+    "chat.agent.maxRequests": 500,
+    "chat.tools.terminal.autoApprove": {
+        "sudo": false,
+        "rm": true,
+        "/.*/": true,
+    },
+    "chat.agent.thinkingStyle": "collapsedPreview",
 }

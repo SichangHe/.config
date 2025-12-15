@@ -1,7 +1,4 @@
-globalStorage
-sync
-workspaceStorage
-sync.lock
-syncLocalSettings.json
-History
-.migrated-default-profile
+*
+.*
+!.gitignore
+!settings.json

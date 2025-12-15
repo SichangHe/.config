@@ -4,6 +4,7 @@ if test -e '/nix/var/nix/profiles/default/etc/profile.d/nix-daemon.fish'
 else if test -e "$HOME/.nix-profile/etc/profile.d/nix.fish"
     source "$HOME/.nix-profile/etc/profile.d/nix.fish"
 end
+set -gx NIXPKGS_ALLOW_UNFREE 1
 
 # proxy
 # source ~/.config/fish/proxy.fish

@@ -21,11 +21,12 @@ return {
 		},
 	},
 
-	{
+    -- NOTE: broken after treesitter update
+	--[[ {
 		"SichangHe/robbielyman--latex.nvim",
 		branch = "fix-get-node-range-null",
 		opts = {},
-	},
+	}, ]]
 
 	{
 		"iamcco/markdown-preview.nvim",
