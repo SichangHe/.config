@@ -77,12 +77,6 @@ local servers = {
 	tailwindcss = {},
 	taplo = {},
 	zls = {},
-	["*"] = {
-		keys = {
-			{ "<Space>K", require("hover").open, { desc = "hover.nvim" } },
-			{ "<Space>gK", require("hover").enter, { desc = "hover.nvim select" } },
-		},
-	},
 }
 
 local ls2enable = {
@@ -270,6 +264,7 @@ return {
 
 	{
 		"neovim/nvim-lspconfig",
+		lazy = false,
 		opts = function(_, opts)
 			register_mdbook_ls()
 			register_natural_syntax_ls()
@@ -282,6 +277,9 @@ return {
 					source = false,
 				},
 			})
+			local all_servers = opts.servers["*"].keys
+			table.insert(all_servers, { "<Space>K", require("hover").open, { desc = "hover.nvim" } })
+			table.insert(all_servers, { "<Space>gK", require("hover").enter, { desc = "hover.nvim select" } })
 			opts.servers = U.deep_extend(opts.servers, servers)
 			opts.setup = U.deep_extend(opts.setup, {
 				rust_analyzer = function() -- Prevent double setup.

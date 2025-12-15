@@ -349,7 +349,8 @@
     "remote.SSH.remotePlatform": {
         "10.200.20.211": "linux",
         "10.200.14.153": "linux",
-        "exxactagent": "linux"
+        "exxactagent": "linux",
+        "exxact": "linux"
     },
     "remote.SSH.useLocalServer": false,
     // ruby

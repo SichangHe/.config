@@ -94,6 +94,7 @@ return {
 
 	{
 		"ojroques/nvim-osc52",
+        event = "BufReadPost",
 		opts = function()
 			require("osc52").setup({
 				tmux_passthrough = true,

@@ -7,6 +7,7 @@
     "lazyvim.plugins.extras.coding.luasnip",
     "lazyvim.plugins.extras.editor.leap",
     "lazyvim.plugins.extras.lang.clangd",
+    "lazyvim.plugins.extras.lang.git",
     "lazyvim.plugins.extras.lang.rust",
     "lazyvim.plugins.extras.lang.toml",
     "lazyvim.plugins.extras.ui.indent-blankline"
