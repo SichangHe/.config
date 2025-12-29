@@ -491,7 +491,11 @@
     "chat.tools.terminal.autoApprove": {
         "sudo": false,
         "rm": true,
+        "echo": true,
         "/.*/": true,
     },
     "chat.agent.thinkingStyle": "collapsedPreview",
+    "chat.tools.urls.autoApprove": {
+        "https://docs.rs": true
+    },
 }
