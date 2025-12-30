@@ -21,12 +21,31 @@ local servers = {
 	html = {},
 	jsonls = {},
 	julials = {},
-
 	postgres_lsp = {},
-	ruff = {
-		on_attach = function(client, bufnr_attached)
-			_ = client
-			-- Ruff automatic import organization.
+	ruff = {},
+	solargraph = {},
+	sourcekit = {
+		mason = false,
+	},
+	svelte = {},
+	tailwindcss = {},
+	taplo = {},
+	zls = {},
+}
+
+vim.api.nvim_create_autocmd("LspAttach", {
+	callback = function(args)
+		local client = vim.lsp.get_client_by_id(args.data.client_id)
+		local bufnr_attached = args.buf
+		-- hover.nvim keymaps for all LSP buffers
+		vim.keymap.set("n", "<Space>K", function()
+			require("hover").open()
+		end, { buffer = bufnr_attached, desc = "hover.nvim" })
+		vim.keymap.set("n", "<Space>gK", function()
+			require("hover").enter()
+		end, { buffer = bufnr_attached, desc = "hover.nvim select" })
+		-- Ruff organize imports
+		if client and client.name == "ruff" then
 			LazyVim.format.register({
 				name = "ruff.organize_imports",
 				priority = 50, -- Smaller than Conform's 100.
@@ -46,22 +65,9 @@ local servers = {
 					return { "ruff.organize_imports" } -- Dummy name.
 				end,
 			})
-		end,
-	},
-	solargraph = {},
-	sourcekit = {
-		mason = false,
-	},
-	svelte = {},
-	tailwindcss = {},
-	taplo = {},
-	zls = {},
-}
-
-local ls2enable = {
-	"postgres_lsp",
-	"sqruff",
-}
+		end
+	end,
+})
 
 local function register_mdbook_ls()
 	local function execute_command_with_params(params)
@@ -88,14 +94,13 @@ local function register_mdbook_ls()
 		execute_command_with_params(params)
 	end
 
-	vim.lsp.config.mdbook_ls = {
+	vim.lsp.config("mdbook_ls", {
 		cmd = { "mdbook-ls" },
 		filetypes = { "markdown" },
-		root_markers = { "book.toml" },
-		docs = {
-			description = [[The mdBook Language Server for previewing mdBook projects live.]],
-		},
-	}
+		root_dir = function(fname)
+			return vim.fs.root(fname, "book.toml")
+		end,
+	})
 
 	vim.api.nvim_create_user_command("MDBookLSOpenPreview", open_preview, {
 		desc = "Open mdBook-LS preview",
@@ -107,10 +112,8 @@ local function register_mdbook_ls()
 end
 
 local function register_natural_syntax_ls()
-	vim.lsp.config.natural_syntax_ls = {
-		cmd = {
-			U.fn.expand("~/.config/helper.sh/natural-syntax-ls.sh"),
-		},
+	vim.lsp.config("natural_syntax_ls", {
+		cmd = { U.fn.expand("~/.config/helper.sh/natural-syntax-ls.sh") },
 		filetypes = { "tex", "markdown", "text" },
 		single_file_support = true,
 		init_options = {
@@ -131,7 +134,32 @@ local function register_natural_syntax_ls()
 				VBZ = vim.NIL,
 			},
 		},
-	}
+	})
+end
+
+local function register_ltex_ls()
+	vim.lsp.config("ltex", {
+		settings = {
+			ltex = {
+				dictionary = {
+					["en-US"] = {}, -- Initialized below.
+				},
+			},
+		},
+		on_init = function(client, bufnr)
+			_ = bufnr
+			local spell_file_name = U.conf_loc .. "spell/en.utf-8.add"
+			local spell_file = io.open(spell_file_name, "r")
+			if spell_file then
+				local dict = client.config.settings.ltex.dictionary["en-US"]
+				for line in spell_file:lines() do
+					table.insert(dict, line)
+				end
+				spell_file:close()
+			end
+		end,
+	})
+	-- LTeX is too heavy for regular use.
 end
 
 local markdownlint_cli2_args = {
@@ -247,46 +275,20 @@ return {
 		opts = function(_, opts)
 			register_mdbook_ls()
 			register_natural_syntax_ls()
-			for _, server in ipairs(ls2enable) do
-				vim.lsp.enable(server)
-			end
+			vim.lsp.enable("sqruff", true)
 			opts.diagnostics = U.deep_extend(opts.diagnostics, {
 				virtual_text = {
 					spacing = 1,
 					source = false,
 				},
 			})
-			local all_servers = opts.servers["*"].keys
-			table.insert(all_servers, { "<Space>K", require("hover").open, { desc = "hover.nvim" } })
-			table.insert(all_servers, { "<Space>gK", require("hover").enter, { desc = "hover.nvim select" } })
 			opts.servers = U.deep_extend(opts.servers, servers)
 			opts.setup = U.deep_extend(opts.setup, {
 				rust_analyzer = function() -- Prevent double setup.
 					return true
 				end,
 			})
-			vim.lsp.config("ltex", {
-				settings = {
-					ltex = {
-						dictionary = {
-							["en-US"] = {}, -- Initialized below.
-						},
-					},
-				},
-				on_init = function(client, bufnr)
-					_ = bufnr
-					local spell_file_name = U.conf_loc .. "spell/en.utf-8.add"
-					local spell_file = io.open(spell_file_name, "r")
-					if spell_file then
-						local dict = client.config.settings.ltex.dictionary["en-US"]
-						for line in spell_file:lines() do
-							table.insert(dict, line)
-						end
-						spell_file:close()
-					end
-				end,
-			})
-			vim.lsp.enable("ltex", false) -- LTeX is too heavy for regular use.
+			register_ltex_ls()
 		end,
 	},
 
