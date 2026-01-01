@@ -1,6 +1,6 @@
 U = require("util")
 
--- U.lsp.set_log_level('debug') -- debug LSP
+-- vim.lsp.set_log_level('debug') -- debug LSP
 
 local servers = {
 	basedpyright = {
@@ -137,6 +137,13 @@ local function register_natural_syntax_ls()
 	})
 end
 
+local function register_assumls()
+	vim.lsp.config("assumls", {
+		cmd = { "assumls", "lsp" },
+	})
+	vim.lsp.enable("assumls", true)
+end
+
 local markdownlint_cli2_args = {
 	"--config",
 	U.expand("~/.config/.markdownlint-cli2.jsonc"),
@@ -250,6 +257,7 @@ return {
 		opts = function(_, opts)
 			register_mdbook_ls()
 			register_natural_syntax_ls()
+			register_assumls()
 			vim.lsp.enable("sqruff", true)
 			opts.diagnostics = U.deep_extend(opts.diagnostics, {
 				virtual_text = {
