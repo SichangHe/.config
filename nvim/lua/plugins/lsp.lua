@@ -21,28 +21,6 @@ local servers = {
 	html = {},
 	jsonls = {},
 	julials = {},
-	ltex = {
-		autostart = false,
-		settings = {
-			ltex = {
-				dictionary = {
-					["en-US"] = {}, -- Initialized below.
-				},
-			},
-		},
-		on_init = function(client, bufnr)
-			_ = bufnr
-			local spell_file_name = U.conf_loc .. "spell/en.utf-8.add"
-			local spell_file = io.open(spell_file_name, "r")
-			if spell_file then
-				local dict = client.config.settings.ltex.dictionary["en-US"]
-				for line in spell_file:lines() do
-					table.insert(dict, line)
-				end
-				spell_file:close()
-			end
-		end,
-	},
 	postgres_lsp = {},
 	ruff = {},
 	solargraph = {},
@@ -303,7 +281,6 @@ return {
 			-- Install these in addition.
 			vim.list_extend(opts, {
 				"bibtex-tidy",
-				"ltex",
 				"prettierd",
 			})
 		end,
