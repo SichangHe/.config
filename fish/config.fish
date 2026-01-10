@@ -57,7 +57,7 @@ set -gx EDITOR nvim
 
 # white theme for bat and moar
 set -gx BAT_THEME GitHub
-set -gx MOAR --style=github
+set -gx MOOR --style=github
 
 # fzf use fd
 set -gx FZF_DEFAULT_COMMAND 'fd -H --strip-cwd-prefix -E ".git"'
@@ -79,8 +79,8 @@ set -gx DOTNET_CLI_TELEMETRY_OPTOUT true
 # Less no animation
 set -gx LESS -XF
 
-if type -q moar
-    set -gx PAGER moar
+if type -q moor
+    set -gx PAGER moor
 end
 
 # uv

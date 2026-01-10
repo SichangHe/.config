@@ -1,0 +1,6 @@
+default_profile = "init"
+
+[profiles.init]
+adapter = "sqlite"
+theme = "catppuccin-latte"
+limit = 10000
