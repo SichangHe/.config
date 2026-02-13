@@ -1,45 +1,49 @@
 {
   "$schema": "https://raw.githubusercontent.com/code-yeongyu/oh-my-opencode/master/assets/oh-my-opencode.schema.json",
+  "google_auth": false,
   "agents": {
     "sisyphus": {
-      "model": "google/antigravity-claude-opus-4-5-thinking",
-      "variant": "max"
+      "model": "github-copilot/gpt-5.2-codex",
+      "variant": "xhigh"
     },
     "hephaestus": {
-      "model": "github-copilot/gpt-5.2-codex"
+      "model": "github-copilot/gpt-5.2-codex",
+      "variant": "xhigh"
     },
     "oracle": {
       "model": "github-copilot/gpt-5.2",
+      "variant": "xhigh",
       "mode": "all"
     },
     "librarian": {
-      "model": "google/antigravity-claude-sonnet-4-5",
+      "model": "github-copilot/gpt-5.2-codex",
       "mode": "all"
     },
     "explore": {
-      "model": "github-copilot/gpt-5-mini",
+      "model": "github-copilot/gpt-5.2-codex",
       "mode": "all"
     },
     "multimodal-looker": {
-      "model": "google/antigravity-gemini-3-flash",
+      "model": "google/antigravity-gemini-3-pro",
       "mode": "all"
     },
     "prometheus": {
-      "model": "google/antigravity-claude-opus-4-5-thinking",
-      "variant": "max"
+      "model": "github-copilot/gpt-5.2-codex",
+      "variant": "xhigh"
     },
     "metis": {
-      "model": "google/antigravity-claude-opus-4-5-thinking",
-      "variant": "max",
+      "model": "github-copilot/gpt-5.2-codex",
+      "variant": "xhigh",
       "mode": "all"
     },
     "momus": {
       "model": "github-copilot/gpt-5.2",
-      "variant": "max",
+      "variant": "xhigh",
       "mode": "all"
     },
     "atlas": {
-      "model": "google/antigravity-claude-sonnet-4-5"
+      "model": "github-copilot/gpt-5.2-codex",
+      "variant": "medium"
     }
   },
   "sisyphus_agent": {
@@ -57,22 +61,26 @@
       "variant": "xhigh"
     },
     "deep": {
-      "model": "github-copilot/gpt-5.2-codex"
+      "model": "github-copilot/gpt-5.2-codex",
+      "variant": "xhigh"
     },
     "artistry": {
       "model": "google/antigravity-gemini-3-pro"
     },
     "quick": {
-      "model": "github-copilot/claude-haiku-4.5"
+      "model": "github-copilot/gpt-5.2-codex",
+      "variant": "low"
     },
     "unspecified-low": {
-      "model": "google/antigravity-claude-sonnet-4-5"
+      "model": "github-copilot/gpt-5.2-codex",
+      "variant": "low"
     },
     "unspecified-high": {
-      "model": "google/antigravity-claude-sonnet-4-5"
+      "model": "github-copilot/gpt-5.2-codex",
+      "variant": "xhigh"
     },
     "writing": {
-      "model": "google/antigravity-gemini-3-flash"
+      "model": "google/antigravity-gemini-3-pro"
     }
   }
 }
