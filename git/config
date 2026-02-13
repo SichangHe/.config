@@ -31,3 +31,5 @@
 	locksverify = false
 [credential]
 	helper = store
+[safe]
+	directory = *
