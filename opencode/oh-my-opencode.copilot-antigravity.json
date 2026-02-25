@@ -1,0 +1,83 @@
+{
+  "$schema": "https://raw.githubusercontent.com/code-yeongyu/oh-my-opencode/master/assets/oh-my-opencode.schema.json",
+  "agents": {
+    "sisyphus": {
+      "model": "google/antigravity-claude-opus-4-6-thinking",
+      "variant": "max",
+      "prompt_append": "After implementing non-trivial code changes, you MUST call the `reviewer` subagent via task() with the diff and relevant files before responding. Do NOT tell the reviewer exactly what you implemented, ask it to infer it and see if it matches you goal. If the reviewer reports reasonable issues, fix them and re-run the reviewer. You may ignore nitpicks as you see fit. Do not call the reviewer if you made no or trivial edits."
+    },
+    "hephaestus": {
+      "model": "github-copilot/gpt-5.2-codex",
+      "variant": "high"
+    },
+    "oracle": {
+      "model": "github-copilot/gpt-5.2",
+      "variant": "xhigh",
+      "mode": "all"
+    },
+    "librarian": {
+      "model": "google/antigravity-claude-sonnet-4-5",
+      "mode": "all"
+    },
+    "explore": {
+      "model": "github-copilot/gpt-5.2-codex",
+      "mode": "all"
+    },
+    "multimodal-looker": {
+      "model": "google/antigravity-gemini-3-pro",
+      "mode": "all"
+    },
+    "prometheus": {
+      "model": "google/antigravity-claude-opus-4-6-thinking",
+      "variant": "max"
+    },
+    "metis": {
+      "model": "google/antigravity-claude-opus-4-6-thinking",
+      "variant": "max",
+      "mode": "all"
+    },
+    "momus": {
+      "model": "github-copilot/gpt-5.2",
+      "variant": "max",
+      "mode": "all"
+    },
+    "atlas": {
+      "model": "google/antigravity-claude-sonnet-4-5"
+    }
+  },
+  "sisyphus_agent": {
+    "disabled": false,
+    "default_builder_enabled": true,
+    "planner_enabled": true,
+    "replace_plan": false
+  },
+  "categories": {
+    "visual-engineering": {
+      "model": "google/antigravity-gemini-3-pro"
+    },
+    "ultrabrain": {
+      "model": "github-copilot/gpt-5.2-codex",
+      "variant": "xhigh"
+    },
+    "deep": {
+      "model": "github-copilot/gpt-5.2-codex",
+      "variant": "xhigh"
+    },
+    "artistry": {
+      "model": "google/antigravity-gemini-3-pro"
+    },
+    "quick": {
+      "model": "github-copilot/gpt-5.2-codex",
+      "variant": "low"
+    },
+    "unspecified-low": {
+      "model": "google/antigravity-claude-sonnet-4-5"
+    },
+    "unspecified-high": {
+      "model": "google/antigravity-claude-sonnet-4-5"
+    },
+    "writing": {
+      "model": "google/antigravity-gemini-3-pro"
+    }
+  }
+}
