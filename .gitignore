@@ -183,3 +183,4 @@ pgcli/history
 pgcli/log
 uv/*.json
 wireshark/
+fish/completions/bun.fish

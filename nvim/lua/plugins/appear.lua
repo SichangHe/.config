@@ -4,6 +4,9 @@ return {
 	{
 		"rickhowe/diffchar.vim",
 		lazy = false,
+        config = function()
+            U.g.DiffDelPosVisible = 1
+        end
 	},
 
 	{

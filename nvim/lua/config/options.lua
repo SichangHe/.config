@@ -17,6 +17,7 @@ set.pumheight = 0
 set.relativenumber = true
 set.numberwidth = 1
 set.signcolumn = "no"
+set.statuscolumn = ""
 set.scrolloff = 3
 set.shiftwidth = 4
 set.spell = true
