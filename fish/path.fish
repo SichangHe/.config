@@ -9,3 +9,6 @@ set -gx PATH ~/.opencode/bin $PATH # OpenCode
 # Ruby gems
 set -gx GEM_HOME ~/gems
 set -gx PATH $GEM_HOME/bin $PATH
+# Bun
+set -gx BUN_INSTALL "$HOME/.bun"
+set -gx PATH "$BUN_INSTALL/bin $PATH"
