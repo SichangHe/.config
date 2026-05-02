@@ -11,7 +11,7 @@
       "variant": "high"
     },
     "oracle": {
-      "model": "github-copilot/gpt-5.2",
+      "model": "github-copilot/gpt-5.2-codex",
       "variant": "xhigh",
       "mode": "all"
     },
@@ -37,12 +37,16 @@
       "mode": "all"
     },
     "momus": {
-      "model": "github-copilot/gpt-5.2",
+      "model": "github-copilot/gpt-5.2-codex",
       "variant": "max",
       "mode": "all"
     },
     "atlas": {
       "model": "google/antigravity-claude-sonnet-4-5"
+    },
+    "reviewer": {
+      "model": "github-copilot/gpt-5.2-codex",
+      "variant": "xhigh"
     }
   },
   "sisyphus_agent": {

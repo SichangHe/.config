@@ -2,14 +2,14 @@
   "$schema": "https://raw.githubusercontent.com/code-yeongyu/oh-my-opencode/master/assets/oh-my-opencode.schema.json",
   "agents": {
     "sisyphus": {
-      "model": "amazon-bedrock/moonshotai.kimi-k2.5",
+      "model": "amazon-bedrock/anthropic.claude-sonnet-4-6",
       "variant": "high",
-      "prompt_append": "When calling subagents, You MUST choose which agent to use instead of calling yourself. After implementing non-trivial code changes, you MUST call the `reviewer` subagent via task() with the diff and relevant files before responding. Do NOT tell the reviewer exactly what you implemented, ask it to infer it and see if it matches you goal. If the reviewer reports reasonable issues, fix them and re-run the reviewer. You may ignore nitpicks as you see fit. Do not call the reviewer if you made no or trivial edits. You MUST ALWAYS think in {think}{/think} blocks before answering."
+      "prompt_append": "When calling subagents, You MUST choose which agent to use instead of calling yourself. After implementing non-trivial code changes, you MUST call the `reviewer` subagent via task() with the diff and relevant files before responding. Do NOT tell the reviewer exactly what you implemented, ask it to infer it and see if it matches you goal. If the reviewer reports reasonable issues, fix them and re-run the reviewer. You may ignore nitpicks as you see fit. Do not call the reviewer if you made no or trivial edits."
     },
     "hephaestus": {
-      "model": "amazon-bedrock/moonshotai.kimi-k2.5",
+      "model": "amazon-bedrock/anthropic.claude-sonnet-4-6",
       "variant": "high",
-      "prompt_append": "When calling subagents, You MUST choose which agent to use instead of calling yourself. After implementing non-trivial code changes, you MUST call the `reviewer` subagent via task() with the diff and relevant files before responding. Do NOT tell the reviewer exactly what you implemented, ask it to infer it and see if it matches you goal. If the reviewer reports reasonable issues, fix them and re-run the reviewer. You may ignore nitpicks as you see fit. Do not call the reviewer if you made no or trivial edits. You MUST ALWAYS think in {think}{/think} blocks before answering."
+      "prompt_append": "When calling subagents, You MUST choose which agent to use instead of calling yourself. After implementing non-trivial code changes, you MUST call the `reviewer` subagent via task() with the diff and relevant files before responding. Do NOT tell the reviewer exactly what you implemented, ask it to infer it and see if it matches you goal. If the reviewer reports reasonable issues, fix them and re-run the reviewer. You may ignore nitpicks as you see fit. Do not call the reviewer if you made no or trivial edits."
     },
     "oracle": {
       "model": "amazon-bedrock/moonshotai.kimi-k2.5",
@@ -29,10 +29,10 @@
     "multimodal-looker": {
       "model": "amazon-bedrock/moonshotai.kimi-k2.5",
       "mode": "all",
-      "prompt_append": "When calling subagents, You MUST choose which agent to use instead of calling yourself. After implementing non-trivial code changes, you MUST call the `reviewer` subagent via task() with the diff and relevant files before responding. Do NOT tell the reviewer exactly what you implemented, ask it to infer it and see if it matches you goal. If the reviewer reports reasonable issues, fix them and re-run the reviewer. You may ignore nitpicks as you see fit. Do not call the reviewer if you made no or trivial edits. You MUST ALWAYS think in {think}{/think} blocks before answering."
+      "prompt_append": "When calling subagents, You MUST choose which agent to use instead of calling yourself. After implementing non-trivial code changes, you MUST call the `reviewer` subagent via task() with the diff and relevant files before responding. Do NOT tell the reviewer exactly what you implemented, ask it to infer it and see if it matches you goal. If the reviewer reports reasonable issues, fix them and re-run the reviewer. You may ignore nitpicks as you see fit. Do not call the reviewer if you made no or trivial edits."
     },
     "prometheus": {
-      "model": "amazon-bedrock/moonshotai.kimi-k2.5",
+      "model": "amazon-bedrock/anthropic.claude-sonnet-4-6",
       "variant": "max",
       "prompt_append": "You MUST ALWAYS think in {think}{/think} blocks before answering."
     },
@@ -51,7 +51,7 @@
       "prompt_append": "You MUST ALWAYS think in {think}{/think} blocks before answering."
     },
     "reviewer": {
-      "model": "amazon-bedrock/moonshotai.kimi-k2.5",
+      "model": "amazon-bedrock/anthropic.claude-sonnet-4-6",
       "variant": "high",
       "prompt_append": "You MUST ALWAYS think in {think}{/think} blocks before answering."
     }
@@ -68,14 +68,12 @@
       "prompt_append": "You MUST ALWAYS think in {think}{/think} blocks before answering."
     },
     "ultrabrain": {
-      "model": "amazon-bedrock/moonshotai.kimi-k2.5",
-      "variant": "max",
-      "prompt_append": "You MUST ALWAYS think in {think}{/think} blocks before answering."
+      "model": "amazon-bedrock/anthropic.claude-sonnet-4-6",
+      "variant": "max"
     },
     "deep": {
-      "model": "amazon-bedrock/moonshotai.kimi-k2.5",
-      "variant": "max",
-      "prompt_append": "You MUST ALWAYS think in {think}{/think} blocks before answering."
+      "model": "amazon-bedrock/anthropic.claude-sonnet-4-6",
+      "variant": "max"
     },
     "artistry": {
       "model": "amazon-bedrock/moonshotai.kimi-k2.5",
@@ -90,9 +88,8 @@
       "prompt_append": "You MUST ALWAYS think in {think}{/think} blocks before answering."
     },
     "unspecified-high": {
-      "model": "amazon-bedrock/moonshotai.kimi-k2.5",
-      "variant": "high",
-      "prompt_append": "You MUST ALWAYS think in {think}{/think} blocks before answering."
+      "model": "amazon-bedrock/anthropic.claude-sonnet-4-6",
+      "variant": "high"
     },
     "writing": {
       "model": "amazon-bedrock/moonshotai.kimi-k2.5",

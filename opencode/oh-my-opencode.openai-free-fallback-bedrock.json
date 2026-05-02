@@ -7,52 +7,40 @@
       "variant": "xhigh",
       "fallback_models": [
         "github-copilot/gpt-5.4",
+        "amazon-bedrock/anthropic.claude-sonnet-4-6",
         "opencode/minimax-m2.5-free",
         "openrouter/openai/gpt-oss-120b:free",
         "openrouter/qwen/qwen3-next-80b-a3b-instruct:free"
       ],
-      "prompt_append": "After implementing non-trivial code changes, you MUST call the `reviewer` subagent via task() with the diff and relevant files before responding. Do NOT tell the reviewer exactly what you implemented, ask it to infer it and see if it matches you goal. If the reviewer reports reasonable issues, fix them and re-run the reviewer. You may ignore nitpicks as you see fit. Do not call the reviewer if you made no or trivial edits."
+      "prompt_append": "When calling subagents, You MUST choose which agent to use instead of calling yourself. After implementing non-trivial code changes, you MUST call the `reviewer` subagent via task() with the diff and relevant files before responding. Do NOT tell the reviewer exactly what you implemented, ask it to infer it and see if it matches you goal. If the reviewer reports reasonable issues, fix them and re-run the reviewer. You may ignore nitpicks as you see fit. Do not call the reviewer if you made no or trivial edits."
     },
     "hephaestus": {
       "fallback_models": [
         "github-copilot/gpt-5.4",
+        "amazon-bedrock/anthropic.claude-sonnet-4-6",
         "opencode/minimax-m2.5-free",
         "openrouter/openai/gpt-oss-120b:free",
         "openrouter/qwen/qwen3-next-80b-a3b-instruct:free"
       ],
       "variant": "xhigh",
       "model": "openai/gpt-5.4",
-      "prompt_append": "After implementing non-trivial code changes, you MUST call the `reviewer` subagent via task() with the diff and relevant files before responding. Do NOT tell the reviewer exactly what you implemented, ask it to infer it and see if it matches you goal. If the reviewer reports reasonable issues, fix them and re-run the reviewer. You may ignore nitpicks as you see fit. Do not call the reviewer if you made no or trivial edits."
+      "prompt_append": "When calling subagents, You MUST choose which agent to use instead of calling yourself. After implementing non-trivial code changes, you MUST call the `reviewer` subagent via task() with the diff and relevant files before responding. Do NOT tell the reviewer exactly what you implemented, ask it to infer it and see if it matches you goal. If the reviewer reports reasonable issues, fix them and re-run the reviewer. You may ignore nitpicks as you see fit. Do not call the reviewer if you made no or trivial edits."
     },
     "oracle": {
-      "fallback_models": [
-        "github-copilot/gpt-5.4",
-        "opencode/minimax-m2.5-free",
-        "openrouter/openai/gpt-oss-120b:free",
-        "openrouter/qwen/qwen3-next-80b-a3b-instruct:free"
-      ],
-      "model": "openai/gpt-5.4",
-      "mode": "all"
+      "model": "amazon-bedrock/zai.glm-4.7"
     },
     "librarian": {
-      "fallback_models": [
-        "github-copilot/gpt-5.4",
-        "opencode/minimax-m2.5-free",
-        "openrouter/openai/gpt-oss-120b:free",
-        "openrouter/qwen/qwen3-next-80b-a3b-instruct:free"
-      ],
-      "model": "openai/gpt-5.4",
-      "mode": "all"
+      "model": "amazon-bedrock/zai.glm-4.7"
     },
     "explore": {
       "fallback_models": [
         "github-copilot/gpt-5.4",
+        "amazon-bedrock/anthropic.claude-sonnet-4-6",
         "opencode/minimax-m2.5-free",
         "openrouter/openai/gpt-oss-120b:free",
         "openrouter/qwen/qwen3-next-80b-a3b-instruct:free"
       ],
-      "model": "openai/gpt-5.4",
-      "mode": "all"
+      "model": "openai/gpt-5.4"
     },
     "multimodal-looker": {
       "fallback_models": [
@@ -65,46 +53,28 @@
     "prometheus": {
       "fallback_models": [
         "github-copilot/gpt-5.4",
+        "amazon-bedrock/anthropic.claude-sonnet-4-6",
         "opencode/minimax-m2.5-free",
         "openrouter/openai/gpt-oss-120b:free",
         "openrouter/qwen/qwen3-next-80b-a3b-instruct:free"
       ],
       "variant": "xhigh",
-      "model": "openai/gpt-5.4"
+      "model": "openai/gpt-5.4",
+      "prompt_append": "When calling subagents, You MUST choose which agent to use instead of calling yourself. After implementing non-trivial code changes, you MUST call the `reviewer` subagent via task() with the diff and relevant files before responding. Do NOT tell the reviewer exactly what you implemented, ask it to infer it and see if it matches you goal. If the reviewer reports reasonable issues, fix them and re-run the reviewer. You may ignore nitpicks as you see fit. Do not call the reviewer if you made no or trivial edits."
     },
     "metis": {
-      "fallback_models": [
-        "github-copilot/gpt-5.4",
-        "opencode/minimax-m2.5-free",
-        "openrouter/openai/gpt-oss-120b:free",
-        "openrouter/qwen/qwen3-next-80b-a3b-instruct:free"
-      ],
-      "model": "openai/gpt-5.4",
-      "mode": "all"
+      "model": "amazon-bedrock/zai.glm-4.7"
     },
     "momus": {
-      "fallback_models": [
-        "github-copilot/gpt-5.4",
-        "opencode/minimax-m2.5-free",
-        "openrouter/openai/gpt-oss-120b:free",
-        "openrouter/qwen/qwen3-next-80b-a3b-instruct:free"
-      ],
-      "model": "openai/gpt-5.4",
-      "mode": "all"
+      "model": "amazon-bedrock/zai.glm-4.7"
     },
     "atlas": {
-      "fallback_models": [
-        "github-copilot/gpt-5.4",
-        "opencode/minimax-m2.5-free",
-        "openrouter/openai/gpt-oss-120b:free",
-        "openrouter/qwen/qwen3-next-80b-a3b-instruct:free"
-      ],
-      "model": "openai/gpt-5.4",
-      "variant": "low"
+      "model": "amazon-bedrock/zai.glm-4.7"
     },
     "reviewer": {
       "fallback_models": [
         "github-copilot/gpt-5.4",
+        "amazon-bedrock/anthropic.claude-sonnet-4-6",
         "opencode/minimax-m2.5-free",
         "openrouter/openai/gpt-oss-120b:free",
         "openrouter/qwen/qwen3-next-80b-a3b-instruct:free"
@@ -121,11 +91,12 @@
   },
   "categories": {
     "visual-engineering": {
-      "model": "opencode/minimax-m2.5-free"
+      "model": "amazon-bedrock/zai.glm-4.7"
     },
     "ultrabrain": {
       "fallback_models": [
         "github-copilot/gpt-5.4",
+        "amazon-bedrock/anthropic.claude-sonnet-4-6",
         "opencode/minimax-m2.5-free",
         "openrouter/openai/gpt-oss-120b:free",
         "openrouter/qwen/qwen3-next-80b-a3b-instruct:free"
@@ -136,6 +107,7 @@
     "deep": {
       "fallback_models": [
         "github-copilot/gpt-5.4",
+        "amazon-bedrock/anthropic.claude-sonnet-4-6",
         "opencode/minimax-m2.5-free",
         "openrouter/openai/gpt-oss-120b:free",
         "openrouter/qwen/qwen3-next-80b-a3b-instruct:free"
@@ -146,6 +118,7 @@
     "artistry": {
       "fallback_models": [
         "github-copilot/gpt-5.4",
+        "amazon-bedrock/anthropic.claude-sonnet-4-6",
         "opencode/minimax-m2.5-free",
         "openrouter/openai/gpt-oss-120b:free",
         "openrouter/qwen/qwen3-next-80b-a3b-instruct:free"
@@ -154,27 +127,30 @@
     },
     "quick": {
       "fallback_models": [
-        "github-copilot/gpt-5.4",
         "opencode/minimax-m2.5-free",
+        "openai/gpt-5.4",
+        "github-copilot/gpt-5.4",
         "openrouter/openai/gpt-oss-120b:free",
         "openrouter/qwen/qwen3-next-80b-a3b-instruct:free"
       ],
       "variant": "low",
-      "model": "openai/gpt-5.4"
+      "model": "amazon-bedrock/zai.glm-4.7"
     },
     "unspecified-low": {
       "fallback_models": [
-        "github-copilot/gpt-5.4",
         "opencode/minimax-m2.5-free",
+        "openai/gpt-5.4",
+        "github-copilot/gpt-5.4",
         "openrouter/openai/gpt-oss-120b:free",
         "openrouter/qwen/qwen3-next-80b-a3b-instruct:free"
       ],
       "variant": "low",
-      "model": "openai/gpt-5.4"
+      "model": "amazon-bedrock/zai.glm-4.7"
     },
     "unspecified-high": {
       "fallback_models": [
         "github-copilot/gpt-5.4",
+        "amazon-bedrock/anthropic.claude-sonnet-4-6",
         "opencode/minimax-m2.5-free",
         "openrouter/openai/gpt-oss-120b:free",
         "openrouter/qwen/qwen3-next-80b-a3b-instruct:free"
@@ -185,6 +161,7 @@
     "writing": {
       "fallback_models": [
         "github-copilot/gpt-5.4",
+        "amazon-bedrock/anthropic.claude-sonnet-4-6",
         "opencode/minimax-m2.5-free",
         "openrouter/openai/gpt-oss-120b:free",
         "openrouter/qwen/qwen3-next-80b-a3b-instruct:free"
@@ -193,12 +170,5 @@
       "model": "openai/gpt-5.4"
     }
   },
-  "runtime_fallback": {
-    "enabled": true,
-    "timeout_seconds": 30,
-    "retry_on_errors": [400, 429, 503, 529],
-    "max_fallback_attempts": 8,
-    "cooldown_seconds": 0,
-    "notify_on_fallback": true
-  }
+  "runtime_fallback": false
 }

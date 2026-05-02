@@ -18,15 +18,15 @@
       "mode": "all"
     },
     "librarian": {
-      "model": "github-copilot/gpt-5.2-codex",
+      "model": "opencode/minimax-m2.5-free",
       "mode": "all"
     },
     "explore": {
-      "model": "github-copilot/gpt-5.2-codex",
+      "model": "opencode/minimax-m2.5-free",
       "mode": "all"
     },
     "multimodal-looker": {
-      "model": "google/antigravity-gemini-3-pro",
+      "model": "opencode/minimax-m2.5-free",
       "mode": "all"
     },
     "prometheus": {
@@ -34,20 +34,20 @@
       "variant": "xhigh"
     },
     "metis": {
-      "model": "github-copilot/gpt-5.2-codex",
+      "model": "opencode/minimax-m2.5-free",
       "variant": "high",
       "mode": "all"
     },
     "momus": {
-      "model": "github-copilot/gpt-5.2-codex",
+      "model": "opencode/minimax-m2.5-free",
       "variant": "xhigh",
       "mode": "all"
     },
     "atlas": {
-      "model": "google/antigravity-gemini-3-pro"
+      "model": "opencode/minimax-m2.5-free"
     },
     "reviewer": {
-      "model": "google/antigravity-gemini-3-pro",
+      "model": "github-copilot/gpt-5.2-codex",
       "variant": "high"
     }
   },
@@ -59,7 +59,7 @@
   },
   "categories": {
     "visual-engineering": {
-      "model": "google/antigravity-gemini-3-pro"
+      "model": "opencode/minimax-m2.5-free"
     },
     "ultrabrain": {
       "model": "github-copilot/gpt-5.2-codex",
@@ -70,20 +70,21 @@
       "variant": "xhigh"
     },
     "artistry": {
-      "model": "google/antigravity-gemini-3-pro"
+      "model": "opencode/minimax-m2.5-free"
     },
     "quick": {
-      "model": "google/antigravity-gemini-3-flash"
+      "model": "opencode/minimax-m2.5-free"
     },
     "unspecified-low": {
-      "model": "google/antigravity-gemini-3-pro"
+      "model": "opencode/minimax-m2.5-free"
     },
     "unspecified-high": {
       "model": "github-copilot/gpt-5.2-codex",
-      "variant": "xhigh"
+      "variant": "high"
     },
     "writing": {
-      "model": "google/antigravity-gemini-3-pro"
+      "model": "openai/gpt-5.3-codex",
+      "variant": "low"
     }
   }
 }

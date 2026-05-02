@@ -184,3 +184,11 @@ pgcli/log
 uv/*.json
 wireshark/
 fish/completions/bun.fish
+browseruse/
+gh/
+cursor/
+himalaya/
+**/package-lock.json
+systemd/
+.env
+google-chrome-for-testing/

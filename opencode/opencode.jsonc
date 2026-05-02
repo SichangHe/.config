@@ -1,8 +1,9 @@
 {
   "$schema": "https://opencode.ai/config.json",
+  "formatter": false,
   "plugin": [
     "opencode-antigravity-auth@latest",
-    "oh-my-opencode@latest"
+    "@slkiser/opencode-quota",
   ],
   "provider": {
     "google": {
@@ -156,6 +157,11 @@
       "command": [
         "basedpyright"
       ]
+    }
+  },
+  "experimental": {
+    "quotaToast": {
+      "enabledProviders": ["copilot", "openai"]
     }
   }
 }

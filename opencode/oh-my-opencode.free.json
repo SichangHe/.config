@@ -3,44 +3,50 @@
   "google_auth": false,
   "agents": {
     "sisyphus": {
-      "model": "opencode/glm-5-free",
-      "prompt_append": "After implementing non-trivial code changes, you MUST call the `reviewer` subagent via task() with the diff and relevant files before responding. Do NOT tell the reviewer exactly what you implemented, ask it to infer it and see if it matches you goal. If the reviewer reports reasonable issues, fix them and re-run the reviewer. You may ignore nitpicks as you see fit. Do not call the reviewer if you made no or trivial edits."
+      "model": "openrouter/qwen/qwen3.6-plus:free",
+      "variant": "high",
+      "prompt_append": "When calling subagents, You MUST choose which agent to use instead of calling yourself. After implementing non-trivial code changes, you MUST call the `reviewer` subagent via task() with the diff and relevant files before responding. Do NOT tell the reviewer exactly what you implemented, ask it to infer it and see if it matches you goal. If the reviewer reports reasonable issues, fix them and re-run the reviewer. You may ignore nitpicks as you see fit. Do not call the reviewer if you made no or trivial edits."
     },
     "hephaestus": {
-      "model": "opencode/glm-5-free"
+      "model": "openrouter/qwen/qwen3.6-plus:free",
+      "variant": "high",
+      "prompt_append": "When calling subagents, You MUST choose which agent to use instead of calling yourself. After implementing non-trivial code changes, you MUST call the `reviewer` subagent via task() with the diff and relevant files before responding. Do NOT tell the reviewer exactly what you implemented, ask it to infer it and see if it matches you goal. If the reviewer reports reasonable issues, fix them and re-run the reviewer. You may ignore nitpicks as you see fit. Do not call the reviewer if you made no or trivial edits."
     },
     "oracle": {
-      "model": "opencode/glm-5-free",
+      "model": "opencode/qwen3.6-plus-free",
+      "variant": "high",
       "mode": "all"
     },
     "librarian": {
-      "model": "opencode/glm-5-free",
+      "model": "opencode/minimax-m2.5-free",
       "mode": "all"
     },
     "explore": {
-      "model": "openrouter/openai/gpt-oss-120b:free",
+      "model": "opencode/minimax-m2.5-free",
       "mode": "all"
     },
     "multimodal-looker": {
-      "model": "opencode/glm-5-free",
+      "model": "opencode/minimax-m2.5-free",
       "mode": "all"
     },
     "prometheus": {
-      "model": "opencode/glm-5-free"
+      "model": "opencode/qwen3.6-plus-free",
+      "variant": "high"
     },
     "metis": {
-      "model": "opencode/glm-5-free",
+      "model": "opencode/minimax-m2.5-free",
       "mode": "all"
     },
     "momus": {
-      "model": "opencode/glm-5-free",
+      "model": "opencode/minimax-m2.5-free",
       "mode": "all"
     },
     "atlas": {
-      "model": "openrouter/openai/gpt-oss-120b:free"
+      "model": "opencode/minimax-m2.5-free"
     },
     "reviewer": {
-      "model": "openrouter/openai/gpt-oss-120b:free"
+      "model": "opencode/qwen3.6-plus-free",
+      "variant": "high"
     }
   },
   "sisyphus_agent": {
@@ -51,28 +57,34 @@
   },
   "categories": {
     "visual-engineering": {
-      "model": "opencode/glm-5-free"
+      "model": "opencode/qwen3.6-plus-free",
+      "variant": "low"
     },
     "ultrabrain": {
-      "model": "opencode/glm-5-free"
+      "model": "opencode/qwen3.6-plus-free",
+      "variant": "low"
     },
     "deep": {
-      "model": "opencode/glm-5-free"
+      "model": "opencode/qwen3.6-plus-free",
+      "variant": "low"
     },
     "artistry": {
-      "model": "opencode/glm-5-free"
+      "model": "opencode/qwen3.6-plus-free",
+      "variant": "low"
     },
     "quick": {
-      "model": "openrouter/openai/gpt-oss-120b:free"
+      "model": "opencode/minimax-m2.5-free"
     },
     "unspecified-low": {
-      "model": "openrouter/openai/gpt-oss-120b:free"
+      "model": "opencode/minimax-m2.5-free"
     },
     "unspecified-high": {
-      "model": "opencode/glm-5-free"
+      "model": "opencode/qwen3.6-plus-free",
+      "variant": "high"
     },
     "writing": {
-      "model": "opencode/glm-5-free"
+      "model": "opencode/qwen3.6-plus-free",
+      "variant": "low"
     }
   }
 }
