@@ -18,15 +18,15 @@
       "mode": "all"
     },
     "librarian": {
-      "model": "opencode/minimax-m2.5-free",
+      "model": "cursor-acp/composer-2",
       "mode": "all"
     },
     "explore": {
-      "model": "opencode/minimax-m2.5-free",
+      "model": "cursor-acp/composer-2",
       "mode": "all"
     },
     "multimodal-looker": {
-      "model": "opencode/minimax-m2.5-free",
+      "model": "cursor-acp/composer-2",
       "mode": "all"
     },
     "prometheus": {
@@ -34,15 +34,15 @@
       "variant": "high"
     },
     "metis": {
-      "model": "opencode/minimax-m2.5-free",
+      "model": "cursor-acp/composer-2",
       "mode": "all"
     },
     "momus": {
-      "model": "opencode/minimax-m2.5-free",
+      "model": "cursor-acp/composer-2",
       "mode": "all"
     },
     "atlas": {
-      "model": "opencode/minimax-m2.5-free"
+      "model": "cursor-acp/composer-2"
     },
     "reviewer": {
       "model": "opencode/qwen3.6-plus-free",
@@ -73,10 +73,10 @@
       "variant": "low"
     },
     "quick": {
-      "model": "opencode/minimax-m2.5-free"
+      "model": "cursor-acp/composer-2"
     },
     "unspecified-low": {
-      "model": "opencode/minimax-m2.5-free"
+      "model": "cursor-acp/composer-2"
     },
     "unspecified-high": {
       "model": "opencode/qwen3.6-plus-free",

@@ -18,15 +18,15 @@
       "mode": "all"
     },
     "librarian": {
-      "model": "opencode/minimax-m2.5-free",
+      "model": "cursor-acp/composer-2",
       "mode": "all"
     },
     "explore": {
-      "model": "opencode/minimax-m2.5-free",
+      "model": "cursor-acp/composer-2",
       "mode": "all"
     },
     "multimodal-looker": {
-      "model": "opencode/minimax-m2.5-free",
+      "model": "cursor-acp/composer-2",
       "mode": "all"
     },
     "prometheus": {
@@ -34,17 +34,17 @@
       "variant": "xhigh"
     },
     "metis": {
-      "model": "opencode/minimax-m2.5-free",
+      "model": "cursor-acp/composer-2",
       "variant": "high",
       "mode": "all"
     },
     "momus": {
-      "model": "opencode/minimax-m2.5-free",
+      "model": "cursor-acp/composer-2",
       "variant": "xhigh",
       "mode": "all"
     },
     "atlas": {
-      "model": "opencode/minimax-m2.5-free"
+      "model": "cursor-acp/composer-2"
     },
     "reviewer": {
       "model": "github-copilot/gpt-5.2-codex",
@@ -59,7 +59,7 @@
   },
   "categories": {
     "visual-engineering": {
-      "model": "opencode/minimax-m2.5-free"
+      "model": "cursor-acp/composer-2"
     },
     "ultrabrain": {
       "model": "github-copilot/gpt-5.2-codex",
@@ -70,13 +70,13 @@
       "variant": "xhigh"
     },
     "artistry": {
-      "model": "opencode/minimax-m2.5-free"
+      "model": "cursor-acp/composer-2"
     },
     "quick": {
-      "model": "opencode/minimax-m2.5-free"
+      "model": "cursor-acp/composer-2"
     },
     "unspecified-low": {
-      "model": "opencode/minimax-m2.5-free"
+      "model": "cursor-acp/composer-2"
     },
     "unspecified-high": {
       "model": "github-copilot/gpt-5.2-codex",
