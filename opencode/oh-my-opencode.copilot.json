@@ -5,12 +5,12 @@
     "sisyphus": {
       "model": "github-copilot/gpt-5.2-codex",
       "variant": "high",
-      "prompt_append": "When calling subagents, You MUST choose which agent to use instead of calling yourself. After implementing non-trivial code changes, you MUST call the `reviewer` subagent via task() with the diff and relevant files before responding. Do NOT tell the reviewer exactly what you implemented, ask it to infer it and see if it matches you goal. If the reviewer reports reasonable issues, fix them and re-run the reviewer. You may ignore nitpicks as you see fit. Do not call the reviewer if you made no or trivial edits."
+      "prompt_append": "When calling subagents, You MUST choose which agent to use instead of calling yourself. Discuss all key decision/analysis with the most intelligent subagent. Let low-tier subagents do the bulk of the work. After implementing non-trivial code changes, you MUST call the `reviewer` subagent via task() with the diff and relevant files before responding. Do NOT tell the reviewer exactly what you implemented, ask it to infer it and see if it matches you goal. If the reviewer reports reasonable issues, fix them and re-run the reviewer. You may ignore nitpicks as you see fit. Do not call the reviewer if you made no or trivial edits."
     },
     "hephaestus": {
       "model": "github-copilot/gpt-5.2-codex",
       "variant": "high",
-      "prompt_append": "When calling subagents, You MUST choose which agent to use instead of calling yourself. After implementing non-trivial code changes, you MUST call the `reviewer` subagent via task() with the diff and relevant files before responding. Do NOT tell the reviewer exactly what you implemented, ask it to infer it and see if it matches you goal. If the reviewer reports reasonable issues, fix them and re-run the reviewer. You may ignore nitpicks as you see fit. Do not call the reviewer if you made no or trivial edits."
+      "prompt_append": "When calling subagents, You MUST choose which agent to use instead of calling yourself. Discuss all key decision/analysis with the most intelligent subagent. Let low-tier subagents do the bulk of the work. After implementing non-trivial code changes, you MUST call the `reviewer` subagent via task() with the diff and relevant files before responding. Do NOT tell the reviewer exactly what you implemented, ask it to infer it and see if it matches you goal. If the reviewer reports reasonable issues, fix them and re-run the reviewer. You may ignore nitpicks as you see fit. Do not call the reviewer if you made no or trivial edits."
     },
     "oracle": {
       "model": "github-copilot/gpt-5.2-codex",

@@ -3,18 +3,18 @@
   "google_auth": false,
   "agents": {
     "sisyphus": {
-      "model": "github-copilot/gpt-5.2-codex",
+      "model": "openrouter/xiaomi/mimo-v2.5-pro",
       "variant": "high",
       "prompt_append": "When calling subagents, You MUST choose which agent to use instead of calling yourself. Discuss all key decision/analysis with the most intelligent subagent. Let low-tier subagents do the bulk of the work. After implementing non-trivial code changes, you MUST call the `reviewer` subagent via task() with the diff and relevant files before responding. Do NOT tell the reviewer exactly what you implemented, ask it to infer it and see if it matches you goal. If the reviewer reports reasonable issues, fix them and re-run the reviewer. You may ignore nitpicks as you see fit. Do not call the reviewer if you made no or trivial edits."
     },
     "hephaestus": {
-      "model": "github-copilot/gpt-5.2-codex",
-      "variant": "high",
+      "model": "openrouter/xiaomi/mimo-v2.5-pro",
+      "variant": "medium",
       "prompt_append": "When calling subagents, You MUST choose which agent to use instead of calling yourself. Discuss all key decision/analysis with the most intelligent subagent. Let low-tier subagents do the bulk of the work. After implementing non-trivial code changes, you MUST call the `reviewer` subagent via task() with the diff and relevant files before responding. Do NOT tell the reviewer exactly what you implemented, ask it to infer it and see if it matches you goal. If the reviewer reports reasonable issues, fix them and re-run the reviewer. You may ignore nitpicks as you see fit. Do not call the reviewer if you made no or trivial edits."
     },
     "oracle": {
-      "model": "github-copilot/gpt-5.2-codex",
-      "variant": "xhigh",
+      "model": "openrouter/xiaomi/mimo-v2.5-pro",
+      "variant": "high",
       "mode": "all"
     },
     "librarian": {
@@ -30,17 +30,15 @@
       "mode": "all"
     },
     "prometheus": {
-      "model": "github-copilot/gpt-5.2-codex",
-      "variant": "xhigh"
+      "model": "openrouter/xiaomi/mimo-v2.5-pro",
+      "variant": "high"
     },
     "metis": {
       "model": "cursor-acp/composer-2",
-      "variant": "high",
       "mode": "all"
     },
     "momus": {
       "model": "cursor-acp/composer-2",
-      "variant": "xhigh",
       "mode": "all"
     },
     "atlas": {
@@ -48,7 +46,7 @@
     },
     "reviewer": {
       "model": "github-copilot/gpt-5.2-codex",
-      "variant": "high"
+      "variant": "xhigh"
     }
   },
   "sisyphus_agent": {
@@ -59,18 +57,20 @@
   },
   "categories": {
     "visual-engineering": {
-      "model": "cursor-acp/composer-2"
+      "model": "openai/gpt-5.5",
+      "variant": "low"
     },
     "ultrabrain": {
-      "model": "github-copilot/gpt-5.2-codex",
+      "model": "openai/gpt-5.5",
       "variant": "xhigh"
     },
     "deep": {
-      "model": "github-copilot/gpt-5.2-codex",
-      "variant": "xhigh"
+      "model": "openai/gpt-5.5",
+      "variant": "high"
     },
     "artistry": {
-      "model": "cursor-acp/composer-2"
+      "model": "openai/gpt-5.5",
+      "variant": "low"
     },
     "quick": {
       "model": "cursor-acp/composer-2"
@@ -79,12 +79,12 @@
       "model": "cursor-acp/composer-2"
     },
     "unspecified-high": {
-      "model": "github-copilot/gpt-5.2-codex",
+      "model": "openai/gpt-5.5",
       "variant": "high"
     },
     "writing": {
-      "model": "openai/gpt-5.3-codex",
-      "variant": "low"
+      "model": "openai/gpt-5.5",
+      "variant": "medium"
     }
   }
 }
