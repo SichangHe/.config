@@ -7,7 +7,7 @@
       "variant": "medium",
       "fallback_models": [
         "github-copilot/gpt-5.4",
-        "cursor-acp/composer-2",
+        "cursor-acp/composer-2.5",
         "openrouter/openai/gpt-oss-120b:free",
         "openrouter/qwen/qwen3-next-80b-a3b-instruct:free"
       ],
@@ -16,7 +16,7 @@
     "hephaestus": {
       "fallback_models": [
         "github-copilot/gpt-5.4",
-        "cursor-acp/composer-2",
+        "cursor-acp/composer-2.5",
         "openrouter/openai/gpt-oss-120b:free",
         "openrouter/qwen/qwen3-next-80b-a3b-instruct:free"
       ],
@@ -27,7 +27,7 @@
     "oracle": {
       "fallback_models": [
         "github-copilot/gpt-5.4",
-        "cursor-acp/composer-2",
+        "cursor-acp/composer-2.5",
         "openrouter/openai/gpt-oss-120b:free",
         "openrouter/qwen/qwen3-next-80b-a3b-instruct:free"
       ],
@@ -37,7 +37,7 @@
     "librarian": {
       "fallback_models": [
         "github-copilot/gpt-5.4",
-        "cursor-acp/composer-2",
+        "cursor-acp/composer-2.5",
         "openrouter/openai/gpt-oss-120b:free",
         "openrouter/qwen/qwen3-next-80b-a3b-instruct:free"
       ],
@@ -47,7 +47,7 @@
     "explore": {
       "fallback_models": [
         "github-copilot/gpt-5.4",
-        "cursor-acp/composer-2",
+        "cursor-acp/composer-2.5",
         "openrouter/openai/gpt-oss-120b:free",
         "openrouter/qwen/qwen3-next-80b-a3b-instruct:free"
       ],
@@ -59,13 +59,13 @@
         "openrouter/openai/gpt-oss-120b:free",
         "openrouter/qwen/qwen3-next-80b-a3b-instruct:free"
       ],
-      "model": "cursor-acp/composer-2",
+      "model": "cursor-acp/composer-2.5",
       "mode": "all"
     },
     "prometheus": {
       "fallback_models": [
         "github-copilot/gpt-5.4",
-        "cursor-acp/composer-2",
+        "cursor-acp/composer-2.5",
         "openrouter/openai/gpt-oss-120b:free",
         "openrouter/qwen/qwen3-next-80b-a3b-instruct:free"
       ],
@@ -75,7 +75,7 @@
     "metis": {
       "fallback_models": [
         "github-copilot/gpt-5.4",
-        "cursor-acp/composer-2",
+        "cursor-acp/composer-2.5",
         "openrouter/openai/gpt-oss-120b:free",
         "openrouter/qwen/qwen3-next-80b-a3b-instruct:free"
       ],
@@ -85,7 +85,7 @@
     "momus": {
       "fallback_models": [
         "github-copilot/gpt-5.4",
-        "cursor-acp/composer-2",
+        "cursor-acp/composer-2.5",
         "openrouter/openai/gpt-oss-120b:free",
         "openrouter/qwen/qwen3-next-80b-a3b-instruct:free"
       ],
@@ -95,7 +95,7 @@
     "atlas": {
       "fallback_models": [
         "github-copilot/gpt-5.4",
-        "cursor-acp/composer-2",
+        "cursor-acp/composer-2.5",
         "openrouter/openai/gpt-oss-120b:free",
         "openrouter/qwen/qwen3-next-80b-a3b-instruct:free"
       ],
@@ -105,7 +105,7 @@
     "reviewer": {
       "fallback_models": [
         "github-copilot/gpt-5.4",
-        "cursor-acp/composer-2",
+        "cursor-acp/composer-2.5",
         "openrouter/openai/gpt-oss-120b:free",
         "openrouter/qwen/qwen3-next-80b-a3b-instruct:free"
       ],
@@ -121,12 +121,12 @@
   },
   "categories": {
     "visual-engineering": {
-      "model": "cursor-acp/composer-2"
+      "model": "cursor-acp/composer-2.5"
     },
     "ultrabrain": {
       "fallback_models": [
         "github-copilot/gpt-5.4",
-        "cursor-acp/composer-2",
+        "cursor-acp/composer-2.5",
         "openrouter/openai/gpt-oss-120b:free",
         "openrouter/qwen/qwen3-next-80b-a3b-instruct:free"
       ],
@@ -136,7 +136,7 @@
     "deep": {
       "fallback_models": [
         "github-copilot/gpt-5.4",
-        "cursor-acp/composer-2",
+        "cursor-acp/composer-2.5",
         "openrouter/openai/gpt-oss-120b:free",
         "openrouter/qwen/qwen3-next-80b-a3b-instruct:free"
       ],
@@ -146,7 +146,7 @@
     "artistry": {
       "fallback_models": [
         "github-copilot/gpt-5.4",
-        "cursor-acp/composer-2",
+        "cursor-acp/composer-2.5",
         "openrouter/openai/gpt-oss-120b:free",
         "openrouter/qwen/qwen3-next-80b-a3b-instruct:free"
       ],
@@ -155,7 +155,7 @@
     "quick": {
       "fallback_models": [
         "github-copilot/gpt-5.4",
-        "cursor-acp/composer-2",
+        "cursor-acp/composer-2.5",
         "openrouter/openai/gpt-oss-120b:free",
         "openrouter/qwen/qwen3-next-80b-a3b-instruct:free"
       ],
@@ -165,7 +165,7 @@
     "unspecified-low": {
       "fallback_models": [
         "github-copilot/gpt-5.4",
-        "cursor-acp/composer-2",
+        "cursor-acp/composer-2.5",
         "openrouter/openai/gpt-oss-120b:free",
         "openrouter/qwen/qwen3-next-80b-a3b-instruct:free"
       ],
@@ -175,7 +175,7 @@
     "unspecified-high": {
       "fallback_models": [
         "github-copilot/gpt-5.4",
-        "cursor-acp/composer-2",
+        "cursor-acp/composer-2.5",
         "openrouter/openai/gpt-oss-120b:free",
         "openrouter/qwen/qwen3-next-80b-a3b-instruct:free"
       ],
@@ -185,7 +185,7 @@
     "writing": {
       "fallback_models": [
         "github-copilot/gpt-5.4",
-        "cursor-acp/composer-2",
+        "cursor-acp/composer-2.5",
         "openrouter/openai/gpt-oss-120b:free",
         "openrouter/qwen/qwen3-next-80b-a3b-instruct:free"
       ],

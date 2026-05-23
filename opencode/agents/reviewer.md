@@ -1,8 +1,8 @@
 ---
 description: "Read-only reviewer. Critique rewritten code without editing."
 mode: subagent
-model: github-copilot/gpt-5.2-codex
-variant: high
+model: openai/gpt-5.5
+variant: xhigh
 temperature: 0.1
 tools:
   write: false

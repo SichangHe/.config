@@ -18,15 +18,15 @@
       "mode": "all"
     },
     "librarian": {
-      "model": "cursor-acp/composer-2",
+      "model": "cursor-acp/composer-2.5",
       "mode": "all"
     },
     "explore": {
-      "model": "cursor-acp/composer-2",
+      "model": "cursor-acp/composer-2.5",
       "mode": "all"
     },
     "multimodal-looker": {
-      "model": "cursor-acp/composer-2",
+      "model": "cursor-acp/composer-2.5",
       "mode": "all"
     },
     "prometheus": {
@@ -34,15 +34,15 @@
       "variant": "high"
     },
     "metis": {
-      "model": "cursor-acp/composer-2",
+      "model": "cursor-acp/composer-2.5",
       "mode": "all"
     },
     "momus": {
-      "model": "cursor-acp/composer-2",
+      "model": "cursor-acp/composer-2.5",
       "mode": "all"
     },
     "atlas": {
-      "model": "cursor-acp/composer-2"
+      "model": "cursor-acp/composer-2.5"
     },
     "reviewer": {
       "model": "github-copilot/gpt-5.2-codex",
@@ -73,10 +73,10 @@
       "variant": "low"
     },
     "quick": {
-      "model": "cursor-acp/composer-2"
+      "model": "cursor-acp/composer-2.5"
     },
     "unspecified-low": {
-      "model": "cursor-acp/composer-2"
+      "model": "cursor-acp/composer-2.5"
     },
     "unspecified-high": {
       "model": "openai/gpt-5.5",

@@ -1,7 +1,9 @@
 {
   "$schema": "https://opencode.ai/config.json",
   "plugin": [
-    "cursor-acp"
+    "file:///ssd1/sichangheagent/opencode_partial_compact/dist/index.js",
+    "opencode-antigravity-auth@latest",
+    "@slkiser/opencode-quota"
   ],
   "provider": {
     "cursor-acp": {
@@ -14,10 +16,10 @@
         "auto": {
           "name": "Auto"
         },
-        "composer-2-fast": {
+        "composer-2.5-fast": {
           "name": "Composer 2 Fast"
         },
-        "composer-2": {
+        "composer-2.5": {
           "name": "Composer 2"
         },
         "composer-1.5": {
@@ -111,7 +113,11 @@
           "name": "Codex 5.1 Max Extra High Fast"
         },
         "gpt-5.5-medium": {
-          "name": "GPT-5.5 1M"
+          "name": "GPT-5.5 1M",
+          "limit": {
+            "context": 400000,
+            "output": 128000
+          }
         },
         "claude-opus-4-7-thinking-high": {
           "name": "Opus 4.7 1M High Thinking"
@@ -129,10 +135,18 @@
           "name": "Opus 4.6 1M Thinking Fast"
         },
         "gpt-5.5-high": {
-          "name": "GPT-5.5 1M High"
+          "name": "GPT-5.5 1M High",
+          "limit": {
+            "context": 400000,
+            "output": 128000
+          }
         },
         "gpt-5.5-extra-high": {
-          "name": "GPT-5.5 1M Extra High"
+          "name": "GPT-5.5 1M Extra High",
+          "limit": {
+            "context": 400000,
+            "output": 128000
+          }
         },
         "claude-4.6-sonnet-medium": {
           "name": "Sonnet 4.6 1M"
@@ -303,25 +317,53 @@
           "name": "Grok 4.3 1M"
         },
         "gpt-5.5-high-fast": {
-          "name": "GPT-5.5 High Fast"
+          "name": "GPT-5.5 High Fast",
+          "limit": {
+            "context": 400000,
+            "output": 128000
+          }
         },
         "gpt-5.5-none": {
-          "name": "GPT-5.5 1M None"
+          "name": "GPT-5.5 1M None",
+          "limit": {
+            "context": 400000,
+            "output": 128000
+          }
         },
         "gpt-5.5-none-fast": {
-          "name": "GPT-5.5 None Fast"
+          "name": "GPT-5.5 None Fast",
+          "limit": {
+            "context": 400000,
+            "output": 128000
+          }
         },
         "gpt-5.5-low": {
-          "name": "GPT-5.5 1M Low"
+          "name": "GPT-5.5 1M Low",
+          "limit": {
+            "context": 400000,
+            "output": 128000
+          }
         },
         "gpt-5.5-low-fast": {
-          "name": "GPT-5.5 Low Fast"
+          "name": "GPT-5.5 Low Fast",
+          "limit": {
+            "context": 400000,
+            "output": 128000
+          }
         },
         "gpt-5.5-medium-fast": {
-          "name": "GPT-5.5 Fast"
+          "name": "GPT-5.5 Fast",
+          "limit": {
+            "context": 400000,
+            "output": 128000
+          }
         },
         "gpt-5.5-extra-high-fast": {
-          "name": "GPT-5.5 Extra High Fast"
+          "name": "GPT-5.5 Extra High Fast",
+          "limit": {
+            "context": 400000,
+            "output": 128000
+          }
         },
         "claude-opus-4-7-low-fast": {
           "name": "Opus 4.7 1M Low Fast"
@@ -352,8 +394,227 @@
         },
         "claude-opus-4-7-thinking-max-fast": {
           "name": "Opus 4.7 1M Max Thinking Fast"
+        },
+        "composer-2.5.5": {
+          "name": "Composer 2.5"
+        },
+        "composer-2.5.5-fast": {
+          "name": "Composer 2.5 Fast"
+        },
+        "gemini-3.5-flash": {
+          "name": "Gemini 3.5 Flash"
+        },
+        "grok-build-0.1": {
+          "name": "Grok Build 0.1 1M"
+        },
+        "composer-2-fast": {
+          "name": "Composer 2 Fast"
+        },
+        "composer-2": {
+          "name": "Composer 2"
         }
       }
+    },
+    "google": {
+      "name": "Google",
+      "models": {
+        "antigravity-gemini-3-pro": {
+          "name": "Gemini 3 Pro (Antigravity)",
+          "limit": {
+            "context": 1048576,
+            "output": 65535
+          },
+          "modalities": {
+            "input": [
+              "text",
+              "image",
+              "pdf"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "variants": {
+            "low": {
+              "thinkingLevel": "low"
+            },
+            "high": {
+              "thinkingLevel": "high"
+            }
+          }
+        },
+        "antigravity-gemini-3-flash": {
+          "name": "Gemini 3 Flash (Antigravity)",
+          "limit": {
+            "context": 1048576,
+            "output": 65536
+          },
+          "modalities": {
+            "input": [
+              "text",
+              "image",
+              "pdf"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "variants": {
+            "minimal": {
+              "thinkingLevel": "minimal"
+            },
+            "low": {
+              "thinkingLevel": "low"
+            },
+            "medium": {
+              "thinkingLevel": "medium"
+            },
+            "high": {
+              "thinkingLevel": "high"
+            }
+          }
+        },
+        "antigravity-claude-sonnet-4-5": {
+          "name": "Claude Sonnet 4.5 (Antigravity)",
+          "limit": {
+            "context": 200000,
+            "output": 64000
+          },
+          "modalities": {
+            "input": [
+              "text",
+              "image",
+              "pdf"
+            ],
+            "output": [
+              "text"
+            ]
+          }
+        },
+        "antigravity-claude-sonnet-4-5-thinking": {
+          "name": "Claude Sonnet 4.5 Thinking (Antigravity)",
+          "limit": {
+            "context": 200000,
+            "output": 64000
+          },
+          "modalities": {
+            "input": [
+              "text",
+              "image",
+              "pdf"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "variants": {
+            "low": {
+              "thinkingConfig": {
+                "thinkingBudget": 8192
+              }
+            },
+            "max": {
+              "thinkingConfig": {
+                "thinkingBudget": 32768
+              }
+            }
+          }
+        },
+        "antigravity-claude-opus-4-5-thinking": {
+          "name": "Claude Opus 4.5 Thinking (Antigravity)",
+          "limit": {
+            "context": 200000,
+            "output": 64000
+          },
+          "modalities": {
+            "input": [
+              "text",
+              "image",
+              "pdf"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "variants": {
+            "low": {
+              "thinkingConfig": {
+                "thinkingBudget": 8192
+              }
+            },
+            "max": {
+              "thinkingConfig": {
+                "thinkingBudget": 32768
+              }
+            }
+          }
+        },
+        "antigravity-claude-opus-4-6-thinking": {
+          "name": "Claude Opus 4.6 Thinking (Antigravity)",
+          "limit": {
+            "context": 200000,
+            "output": 64000
+          },
+          "modalities": {
+            "input": [
+              "text",
+              "image",
+              "pdf"
+            ],
+            "output": [
+              "text"
+            ]
+          },
+          "variants": {
+            "low": {
+              "thinkingConfig": {
+                "thinkingBudget": 8192
+              }
+            },
+            "max": {
+              "thinkingConfig": {
+                "thinkingBudget": 32768
+              }
+            }
+          }
+        }
+      }
+    },
+    "openai": {
+      "models": {
+        "gpt-5.5": {
+          "name": "GPT-5.5",
+          "limit": {
+            "context": 400000,
+            "output": 128000
+          }
+        },
+        "gpt-5.5-fast": {
+          "name": "GPT-5.5 Fast",
+          "limit": {
+            "context": 400000,
+            "output": 128000
+          }
+        },
+        "gpt-5.5-pro": {
+          "name": "GPT-5.5 Pro",
+          "limit": {
+            "context": 400000,
+            "output": 128000
+          }
+        }
+      }
+    }
+  },
+  "compaction": {
+    "auto": false
+  },
+  "formatter": false,
+  "lsp": {
+    "pyright": {
+      "command": [
+        "basedpyright"
+      ]
     }
   }
 }

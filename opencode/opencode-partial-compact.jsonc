@@ -1,0 +1,7 @@
+{
+  "enabled": true,
+  "max_summary_chars": 2000,
+  "reminder_enabled": true,
+  "debug_log_path": "/tmp/pc-smoke.log",
+  "reminder_interval_tokens": 16000
+}
