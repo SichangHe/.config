@@ -17,10 +17,14 @@ from email.message import Message
 from email.parser import BytesParser
 from pathlib import Path
 
+
+def default_state_dir() -> Path:
+    return Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "omo-manager"
+
 DEFAULT_ROOT = Path(os.environ.get("OMO_WORK_LOGS_ROOT", Path.home() / "work_logs"))
 DEFAULT_MANAGER_URL = os.environ.get("OMO_MANAGER_URL", "http://127.0.0.1:18790")
-DEFAULT_MAIL_DIR = Path(os.environ.get("OMO_MANAGER_MAIL_DIR", "/tmp/omo-manager-mail"))
-CONFIG_PATH = Path.home() / ".config/himalaya/config.toml"
+DEFAULT_MAIL_DIR = Path(os.environ.get("OMO_MANAGER_MAIL_DIR", default_state_dir() / "mail"))
+CONFIG_PATH = Path(os.environ.get("OMO_EMAIL_CONFIG_PATH", Path.home() / ".config/himalaya/config.toml"))
 SUBJECT_PREFIX = "Re: [omo_manager]"
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -123,7 +127,12 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> None:
         if not subject.startswith(SUBJECT_PREFIX) or not from_self(sender, args.self_email):
             continue
         txt_path = args.mail_dir / f"{uid}.txt"
-        txt_path.write_text(f"From: {sender}\nSubject: {subject}\nDate: {msg.get('Date', '')}\nUID: {uid}\n\n{message_text(msg)}", encoding="utf-8")
+        args.mail_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        args.mail_dir.chmod(0o700)
+        body = f"From: {sender}\nSubject: {subject}\nDate: {msg.get('Date', '')}\nUID: {uid}\n\n{message_text(msg)}"
+        fd = os.open(txt_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(body)
         line_no = append_pending(args.root, txt_path)
         subprocess.run([str(Path.home() / ".config/omo_manager/omo_push_to_manager.py"), f"email: file=work_manager.md line={line_no} txt={txt_path}", "--manager-url", args.manager_url, "--root", str(args.root), "--submit"], check=False)
 

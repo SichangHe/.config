@@ -11,9 +11,13 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+
+def default_state_dir() -> Path:
+    return Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "omo-manager"
+
 DEFAULT_ROOT = Path(os.environ.get("OMO_WORK_LOGS_ROOT", Path.home() / "work_logs"))
 DEFAULT_MANAGER_URL = os.environ.get("OMO_MANAGER_URL", "")
-DEFAULT_STATE = Path(os.environ.get("OMO_MANAGER_PENDING_SEEN", "/tmp/omo-manager-pending-seen.tsv"))
+DEFAULT_STATE = Path(os.environ.get("OMO_MANAGER_PENDING_SEEN", default_state_dir() / "pending-seen.tsv"))
 PENDING_MARKERS = {"(pending)"}
 IGNORE_PARTS = {".git", ".venv", "__pycache__"}
 FENCE_PREFIXES = ("```", "~~~")
@@ -82,9 +86,12 @@ def load_seen(path: Path) -> dict[str, float]:
 
 
 def save_seen(path: Path, seen: dict[str, float]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.parent.chmod(0o700)
     body = "".join(f"{timestamp_s}\t{key}\n" for key, timestamp_s in sorted(seen.items()))
-    _ = path.write_text(body, encoding="utf-8")
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(body)
 
 
 def is_ignored(path: Path) -> bool:
