@@ -192,3 +192,6 @@ himalaya/
 systemd/
 .env
 google-chrome-for-testing/
+/browser-use-opencode/
+opencode/tui.json
+omo_manager/local.env
