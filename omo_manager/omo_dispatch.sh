@@ -6,7 +6,7 @@ if [ -f "$local_env" ]; then
   source "$local_env"
 fi
 root="${OMO_WORK_LOGS_ROOT:-$HOME/work_logs}"
-base_url=""
+base_url="${OMO_MANAGER_URL:-}"
 directory="$root"
 target=""
 file=""
@@ -37,8 +37,8 @@ done
 if [ -z "$file" ] || [ -z "$start" ] || [ -z "$end" ]; then usage >&2; exit 2; fi
 case "$start$end" in (*[!0-9]*) echo "start/end must be positive integers" >&2; exit 2 ;; esac
 if [ "$start" -lt 1 ] || [ "$end" -lt "$start" ]; then echo "invalid line range" >&2; exit 2; fi
-root_real=$(realpath "$root")
-path_real=$(realpath -m "$root_real/$file")
+root_real=$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve())' "$root")
+path_real=$(python3 -c 'from pathlib import Path; import sys; print((Path(sys.argv[1]) / sys.argv[2]).resolve(strict=False))' "$root_real" "$file")
 case "$path_real" in "$root_real"/*) ;; *) echo "file escapes root" >&2; exit 2 ;; esac
 if [ ! -f "$path_real" ]; then echo "file not found: $file" >&2; exit 2; fi
 body=$(sed -n "${start},${end}p" "$path_real")

@@ -25,8 +25,8 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 if [ -z "$task_file" ] || [ -z "$status" ] || [ -z "$message_file" ]; then usage >&2; exit 2; fi
-root_real=$(realpath "$root")
-path_real=$(realpath -m "$root_real/$task_file")
+root_real=$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve())' "$root")
+path_real=$(python3 -c 'from pathlib import Path; import sys; print((Path(sys.argv[1]) / sys.argv[2]).resolve(strict=False))' "$root_real" "$task_file")
 case "$path_real" in "$root_real"/*) ;; *) echo "task file escapes root" >&2; exit 2 ;; esac
 if [ ! -f "$message_file" ]; then echo "message file not found" >&2; exit 2; fi
 mkdir -p "$(dirname "$path_real")"

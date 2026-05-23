@@ -8,9 +8,13 @@ if [ -f "$local_env" ]; then
 fi
 root="${OMO_WORK_LOGS_ROOT:-$HOME/work_logs}"
 manager_url="${OMO_MANAGER_URL:-http://127.0.0.1:18790}"
-state_dir="${OMO_MANAGER_STATE_DIR:-/tmp/omo-manager}"
-pending_seen="${OMO_MANAGER_PENDING_SEEN:-/tmp/omo-manager-pending-seen.tsv}"
-mkdir -p "$state_dir"
+state_base="${XDG_STATE_HOME:-$HOME/.local/state}/omo-manager"
+state_dir="${OMO_MANAGER_STATE_DIR:-$state_base}"
+pending_seen="${OMO_MANAGER_PENDING_SEEN:-$state_dir/pending-seen.tsv}"
+email_enable="${OMO_MANAGER_ENABLE_EMAIL_WATCHER:-auto}"
+email_config="${OMO_EMAIL_CONFIG_PATH:-$HOME/.config/himalaya/config.toml}"
+mkdir -p -m 700 "$state_dir"
+chmod 700 "$state_dir"
 python3 - "$manager_url" <<'PY'
 from __future__ import annotations
 import json
@@ -49,8 +53,21 @@ pkill -f "email_idle_watcher.py .*--root ${root}" >/dev/null 2>&1 || true
 rm -f "$pending_seen"
 nohup python3 "$HOME/.config/omo_manager/omo_pending_watch.py" --root "$root" --manager-url "$manager_url" >"$state_dir/pending-watch.log" 2>&1 &
 echo "started pending watcher pid=$! log=$state_dir/pending-watch.log"
-nohup python3 "$HOME/.config/omo_manager/email_idle_watcher.py" --root "$root" --manager-url "$manager_url" >"$state_dir/email-watch.log" 2>&1 &
-echo "started email watcher pid=$! log=$state_dir/email-watch.log"
+start_email=0
+case "$email_enable" in
+  1|true|yes) start_email=1 ;;
+  0|false|no) start_email=0 ;;
+  auto) [ -f "$email_config" ] && start_email=1 || start_email=0 ;;
+  *) echo "OMO_MANAGER_ENABLE_EMAIL_WATCHER must be auto, true, or false" >&2; exit 2 ;;
+esac
+if [ "$start_email" -eq 1 ]; then
+  nohup python3 "$HOME/.config/omo_manager/email_idle_watcher.py" --root "$root" --manager-url "$manager_url" >"$state_dir/email-watch.log" 2>&1 &
+  echo "started email watcher pid=$! log=$state_dir/email-watch.log"
+else
+  echo "skipped email watcher; set OMO_MANAGER_ENABLE_EMAIL_WATCHER=true and OMO_EMAIL_CONFIG_PATH to enable"
+fi
 sleep 0.2
 pgrep -f "omo_pending_watch.py .*--root ${root}" >/dev/null || { echo "pending watcher failed to stay running; see $state_dir/pending-watch.log" >&2; exit 1; }
-pgrep -f "email_idle_watcher.py .*--root ${root}" >/dev/null || { echo "email watcher failed to stay running; see $state_dir/email-watch.log" >&2; exit 1; }
+if [ "$start_email" -eq 1 ]; then
+  pgrep -f "email_idle_watcher.py .*--root ${root}" >/dev/null || { echo "email watcher failed to stay running; see $state_dir/email-watch.log" >&2; exit 1; }
+fi
