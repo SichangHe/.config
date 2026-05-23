@@ -69,5 +69,12 @@ fi
 sleep 0.2
 pgrep -f "omo_pending_watch.py .*--root ${root}" >/dev/null || { echo "pending watcher failed to stay running; see $state_dir/pending-watch.log" >&2; exit 1; }
 if [ "$start_email" -eq 1 ]; then
-  pgrep -f "email_idle_watcher.py .*--root ${root}" >/dev/null || { echo "email watcher failed to stay running; see $state_dir/email-watch.log" >&2; exit 1; }
+  if ! pgrep -f "email_idle_watcher.py .*--root ${root}" >/dev/null; then
+    if [ "$email_enable" = "auto" ]; then
+      echo "email watcher did not stay running in auto mode; continuing without it; see $state_dir/email-watch.log" >&2
+    else
+      echo "email watcher failed to stay running; see $state_dir/email-watch.log" >&2
+      exit 1
+    fi
+  fi
 fi
