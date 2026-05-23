@@ -1,0 +1,18 @@
+{
+  "browser_profile": {
+    "opencode-system-chrome-cdp": {
+      "id": "opencode-system-chrome-cdp",
+      "default": true,
+      "headless": false,
+      "cdp_url": "http://127.0.0.1:9279",
+      "downloads_path": "/absolute/path/to/browser-use-opencode/downloads",
+      "keep_alive": true,
+      "window_size": {
+        "width": 1920,
+        "height": 1080
+      }
+    }
+  },
+  "llm": {},
+  "agent": {}
+}
