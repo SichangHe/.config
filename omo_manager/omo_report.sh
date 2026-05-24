@@ -43,8 +43,6 @@ start_line=$(( $(wc -l <"$path_real") + 2 ))
   printf 'OPENCODE: %s\n' "${OPENCODE:-}"
   printf 'TMUX: %s\n' "${TMUX:-}"
   printf 'tmux-info: %s\n' "$tmux_info"
-  printf 'message-file: %s\n\n' "$message_file"
-  cat "$message_file"
-  printf '\n'
+  printf 'message-file: %s\n' "$message_file"
 } >>"$path_real"
 ~/.config/omo_manager/omo_push_to_manager.py "report: file=${task_file} line=${start_line} agent=${agent} status=${status}" --manager-url "$manager_url" --root "$root" --submit

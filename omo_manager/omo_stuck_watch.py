@@ -86,9 +86,9 @@ def record_completion(args: Args) -> None:
     write_json_private(args.durations, data)
 
 
-def tmux_running(target: str) -> bool:
+def tmux_command(target: str) -> str:
     out = subprocess.run(["tmux", "display-message", "-p", "-t", target, "#{pane_current_command}"], capture_output=True, text=True, timeout=5, check=False)
-    return out.returncode == 0 and out.stdout.strip() in RUNNING_COMMANDS
+    return out.stdout.strip() if out.returncode == 0 else ""
 
 
 def learned_threshold(task_file: str, durations: object, factor: float, minimum_s: float) -> float:
@@ -126,11 +126,17 @@ def check(args: Args) -> int:
         if not isinstance(item, dict):
             continue
         target = str(item.get("tmux_target", ""))
-        if not target or not tmux_running(target):
+        if not target:
             continue
         task_file = str(item.get("task_file", ""))
         started_at_s = float(item.get("started_at_s", args.now_s))
         elapsed_s = max(0.0, args.now_s - started_at_s)
+        command = tmux_command(target)
+        if command not in RUNNING_COMMANDS:
+            hint = latest_turn_hint(str(item.get("session_id", "")))
+            shown_command = command or "unavailable"
+            print(f"maybe-complete-silent: task={task_file} target={target} command={shown_command} elapsed_s={elapsed_s:.0f} hint={hint}")
+            continue
         threshold_s = learned_threshold(task_file, durations, args.stale_factor, args.min_stale_s)
         state = "ok" if elapsed_s < threshold_s else "maybe-stuck"
         hint = latest_turn_hint(str(item.get("session_id", ""))) if state == "maybe-stuck" else "not-checked"

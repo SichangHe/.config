@@ -19,7 +19,6 @@ DEFAULT_ROOT = Path(os.environ.get("OMO_WORK_LOGS_ROOT", Path.home() / "work_log
 DEFAULT_MANAGER_URL = os.environ.get("OMO_MANAGER_URL", "")
 DEFAULT_STATE = Path(os.environ.get("OMO_MANAGER_PENDING_SEEN", default_state_dir() / "pending-seen.tsv"))
 PENDING_MARKERS = {"(pending)"}
-FOR_MANAGER_PREFIX = "(for manager:"
 IGNORE_PARTS = {".git", ".venv", "__pycache__"}
 FENCE_PREFIXES = ("```", "~~~")
 
@@ -29,7 +28,6 @@ class Marker:
     file: Path
     line: int
     digest: str
-    kind: str
 
 
 @dataclass(frozen=True)
@@ -152,22 +150,17 @@ def find_markers(root: Path, files: list[Path]) -> list[Marker]:
                 continue
             if in_fence:
                 continue
-            kind = ""
-            if stripped in PENDING_MARKERS:
-                kind = "pending"
-            elif stripped.startswith(FOR_MANAGER_PREFIX) and stripped.endswith(")"):
-                kind = "for-manager"
-            if not kind:
+            if stripped not in PENDING_MARKERS:
                 continue
             rel = path.relative_to(root)
             next_line = lines[idx] if idx < len(lines) else ""
-            digest = hashlib.sha256(f"{kind}:{rel}:{idx}:{stripped}:{next_line}".encode("utf-8")).hexdigest()[:16]
-            markers.append(Marker(file=rel, line=idx, digest=digest, kind=kind))
+            digest = hashlib.sha256(f"{rel}:{idx}:{next_line}".encode("utf-8")).hexdigest()[:16]
+            markers.append(Marker(file=rel, line=idx, digest=digest))
     return markers
 
 
 def push_ref(args: Args, marker: Marker) -> int:
-    text = f"{marker.kind}: file={marker.file} line={marker.line}"
+    text = f"pending: file={marker.file} line={marker.line}"
     if args.dry_run:
         print(text)
         return 0

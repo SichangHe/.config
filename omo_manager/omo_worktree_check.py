@@ -57,7 +57,7 @@ def has_pending_marker(path: Path) -> bool:
                 continue
             if in_fence:
                 continue
-            if stripped == "(pending)" or stripped.startswith("(for manager:"):
+            if stripped == "(pending)":
                 return True
         return False
     except OSError:
