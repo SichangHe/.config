@@ -116,7 +116,8 @@
           "name": "GPT-5.5 1M",
           "limit": {
             "context": 400000,
-            "output": 128000
+            "output": 128000,
+            "input": 400000
           }
         },
         "claude-opus-4-7-thinking-high": {
@@ -138,14 +139,16 @@
           "name": "GPT-5.5 1M High",
           "limit": {
             "context": 400000,
-            "output": 128000
+            "output": 128000,
+            "input": 400000
           }
         },
         "gpt-5.5-extra-high": {
           "name": "GPT-5.5 1M Extra High",
           "limit": {
             "context": 400000,
-            "output": 128000
+            "output": 128000,
+            "input": 400000
           }
         },
         "claude-4.6-sonnet-medium": {
@@ -320,49 +323,56 @@
           "name": "GPT-5.5 High Fast",
           "limit": {
             "context": 400000,
-            "output": 128000
+            "output": 128000,
+            "input": 400000
           }
         },
         "gpt-5.5-none": {
           "name": "GPT-5.5 1M None",
           "limit": {
             "context": 400000,
-            "output": 128000
+            "output": 128000,
+            "input": 400000
           }
         },
         "gpt-5.5-none-fast": {
           "name": "GPT-5.5 None Fast",
           "limit": {
             "context": 400000,
-            "output": 128000
+            "output": 128000,
+            "input": 400000
           }
         },
         "gpt-5.5-low": {
           "name": "GPT-5.5 1M Low",
           "limit": {
             "context": 400000,
-            "output": 128000
+            "output": 128000,
+            "input": 400000
           }
         },
         "gpt-5.5-low-fast": {
           "name": "GPT-5.5 Low Fast",
           "limit": {
             "context": 400000,
-            "output": 128000
+            "output": 128000,
+            "input": 400000
           }
         },
         "gpt-5.5-medium-fast": {
           "name": "GPT-5.5 Fast",
           "limit": {
             "context": 400000,
-            "output": 128000
+            "output": 128000,
+            "input": 400000
           }
         },
         "gpt-5.5-extra-high-fast": {
           "name": "GPT-5.5 Extra High Fast",
           "limit": {
             "context": 400000,
-            "output": 128000
+            "output": 128000,
+            "input": 400000
           }
         },
         "claude-opus-4-7-low-fast": {
@@ -586,21 +596,24 @@
           "name": "GPT-5.5",
           "limit": {
             "context": 400000,
-            "output": 128000
+            "output": 128000,
+            "input": 400000
           }
         },
         "gpt-5.5-fast": {
           "name": "GPT-5.5 Fast",
           "limit": {
             "context": 400000,
-            "output": 128000
+            "output": 128000,
+            "input": 400000
           }
         },
         "gpt-5.5-pro": {
           "name": "GPT-5.5 Pro",
           "limit": {
             "context": 400000,
-            "output": 128000
+            "output": 128000,
+            "input": 400000
           }
         }
       }
