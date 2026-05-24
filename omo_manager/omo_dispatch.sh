@@ -43,13 +43,7 @@ case "$path_real" in "$root_real"/*) ;; *) echo "file escapes root" >&2; exit 2 
 if [ ! -f "$path_real" ]; then echo "file not found: $file" >&2; exit 2; fi
 body=$(sed -n "${start},${end}p" "$path_real")
 if [ -z "$body" ]; then echo "empty dispatch block" >&2; exit 2; fi
-prompt=$(cat <<EOF
-Source: ${file}:${start}-${end}
-Target: ${target:-unspecified}
-
-${body}
-EOF
-)
+prompt="$body"
 prompt_file=$(mktemp /tmp/omo-dispatch-prompt.XXXXXX)
 chmod 600 "$prompt_file"
 printf '%s' "$prompt" >"$prompt_file"
