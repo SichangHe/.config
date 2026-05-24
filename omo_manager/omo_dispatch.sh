@@ -43,11 +43,38 @@ case "$path_real" in "$root_real"/*) ;; *) echo "file escapes root" >&2; exit 2 
 if [ ! -f "$path_real" ]; then echo "file not found: $file" >&2; exit 2; fi
 body=$(sed -n "${start},${end}p" "$path_real")
 if [ -z "$body" ]; then echo "empty dispatch block" >&2; exit 2; fi
-prompt="$body"
+manager_line_pattern='^\s*(?:>\s*)*(?:(?:[-*+]\s+(?:\[[ xX]\]\s+)?)|(?:[0-9]+[.)]\s+))*\(for manager:'
+manager_lines=$(printf '%s\n' "$body" | python3 -c 'import re, sys; pat = re.compile(sys.argv[1], re.I); sys.stdout.write("\n".join(line for line in sys.stdin.read().splitlines() if pat.match(line)))' "$manager_line_pattern")
+prompt=$(printf '%s\n' "$body" | python3 -c 'import re, sys; pat = re.compile(sys.argv[1], re.I); sys.stdout.write("\n".join(line for line in sys.stdin.read().splitlines() if not pat.match(line)))' "$manager_line_pattern")
+if [ -z "$prompt" ]; then echo "empty dispatch prompt after removing manager-only lines" >&2; exit 2; fi
+report_request=$(printf '%s\n' "$manager_lines" | python3 -c 'import re, sys
+lines = sys.stdin.read().splitlines()
+manager_prefix = re.compile(sys.argv[1], re.I)
+negated_instruction = re.compile(r"\b(?:do\s+not|don.t|no|without)\b[^.;,\n]{0,60}\b(?:ask|tell|instruct|have|ensure|make\s+sure|direct)?\b[^.;,\n]{0,40}\b(?:reports?|omo_report(?:\.sh)?)\b", re.I)
+direct = re.compile(r"\b(?:omo_report(?:\.sh)?|report\s+(?:back\s+)?to\s+(?:you|the\s+manager|manager))\b", re.I)
+ask = re.compile(r"\b(?:tell|ask|instruct|have|ensure|make\s+sure|direct)\b.{0,80}\b(?:agent|them|it|they)\b.{0,80}\breports?\b.{0,80}\b(?:back|to\s+(?:you|the\s+manager|manager)|questions|blockers|status|completion)\b", re.I)
+found = False
+for line in lines:
+    content = manager_prefix.sub("", line, count=1).rstrip(") ")
+    if not negated_instruction.search(content) and (direct.search(content) or ask.search(content)):
+        found = True
+        break
+sys.stdout.write("1" if found else "")' "$manager_line_pattern")
+if [ -n "$report_request" ]; then
+  report_task=$(python3 -c 'import shlex, sys; print(shlex.quote(sys.argv[1]))' "$file")
+  report_instruction="Report questions, blockers, status, and completion to the manager via \`~/.config/omo_manager/omo_report.sh --task-file ${report_task} --status STATUS --message-file MESSAGE_FILE --agent agent-name\`, replacing STATUS with blocked, in-progress, or done and MESSAGE_FILE with a unique temp file such as \`\$(mktemp /tmp/omo-report.XXXXXX)\`. Put details in the message file; email the human only if manager is unreachable or explicitly necessary."
+  prompt=$(printf '%s\n\n%s' "$prompt" "$report_instruction")
+fi
 prompt_file=$(mktemp /tmp/omo-dispatch-prompt.XXXXXX)
 chmod 600 "$prompt_file"
 printf '%s' "$prompt" >"$prompt_file"
-cleanup() { rm -f "$prompt_file" "${tmux_tmp:-}"; }
+keep_prompt_file=0
+cleanup() {
+  if [ "$keep_prompt_file" -eq 0 ]; then
+    rm -f "$prompt_file"
+  fi
+  rm -f "${tmux_instr_file:-}"
+}
 trap cleanup EXIT
 dispatch_done=0
 if [ -n "$base_url" ]; then
@@ -78,11 +105,12 @@ PY
   fi
 fi
 if [ "$dispatch_done" -eq 0 ] && [ "$tmux_fallback" -eq 1 ]; then
-  tmux_tmp=$(mktemp /tmp/omo-dispatch.XXXXXX)
-  chmod 600 "$tmux_tmp"
-  cp "$prompt_file" "$tmux_tmp"
-  tmux load-buffer "$tmux_tmp"
+  tmux_instr_file=$(mktemp /tmp/omo-dispatch-tmux-instruction.XXXXXX)
+  chmod 600 "$tmux_instr_file"
+  printf 'Read the dispatch prompt from %s and follow it exactly.\n' "$prompt_file" >"$tmux_instr_file"
+  tmux load-buffer "$tmux_instr_file"
   tmux paste-buffer -t "$tmux_target"
+  keep_prompt_file=1
   if [ "$submit" -eq 1 ]; then
     tmux send-keys -t "$tmux_target" Enter
   fi
