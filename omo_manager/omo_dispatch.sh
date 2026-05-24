@@ -6,7 +6,7 @@ if [ -f "$local_env" ]; then
   source "$local_env"
 fi
 root="${OMO_WORK_LOGS_ROOT:-$HOME/work_logs}"
-base_url="${OMO_MANAGER_URL:-}"
+base_url=""
 directory="$root"
 target=""
 file=""
@@ -50,24 +50,25 @@ Target: ${target:-unspecified}
 ${body}
 EOF
 )
+prompt_file=$(mktemp /tmp/omo-dispatch-prompt.XXXXXX)
+chmod 600 "$prompt_file"
+printf '%s' "$prompt" >"$prompt_file"
+cleanup() { rm -f "$prompt_file" "${tmux_tmp:-}"; }
+trap cleanup EXIT
 dispatch_done=0
-if [ "$tmux_fallback" -eq 1 ]; then
-  tmp=$(mktemp /tmp/omo-dispatch.XXXXXX)
-  printf '%s' "$prompt" >"$tmp"
-  tmux load-buffer "$tmp"
-  tmux paste-buffer -t "$tmux_target"
-  tmux send-keys -t "$tmux_target" Enter
-  rm -f "$tmp"
-  dispatch_done=1
-elif [ -n "$base_url" ]; then
-  if python3 - "$base_url" "$directory" "$submit" "$prompt" <<'PY'
+if [ -n "$base_url" ]; then
+  if python3 - "$base_url" "$directory" "$submit" "$prompt_file" <<'PY'
 from __future__ import annotations
 import json
 import sys
 import urllib.parse
 import urllib.request
-base_url, directory, submit, prompt = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+base_url, directory, submit, prompt_file = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+prompt = open(prompt_file, encoding="utf-8").read()
 query = urllib.parse.urlencode({"directory": directory})
+with urllib.request.urlopen(f"{base_url}/global/health", timeout=5) as resp:
+    if resp.status >= 400:
+        raise RuntimeError(f"target OpenCode TUI lacks /global/health: HTTP {resp.status}")
 def post(route: str, payload: object) -> None:
     req = urllib.request.Request(f"{base_url}{route}?{query}", data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"}, method="POST")
     with urllib.request.urlopen(req, timeout=10) as resp:
@@ -82,8 +83,20 @@ PY
     exit 1
   fi
 fi
+if [ "$dispatch_done" -eq 0 ] && [ "$tmux_fallback" -eq 1 ]; then
+  tmux_tmp=$(mktemp /tmp/omo-dispatch.XXXXXX)
+  chmod 600 "$tmux_tmp"
+  cp "$prompt_file" "$tmux_tmp"
+  tmux load-buffer "$tmux_tmp"
+  tmux paste-buffer -t "$tmux_target"
+  if [ "$submit" -eq 1 ]; then
+    tmux send-keys -t "$tmux_target" Enter
+  fi
+  tmux delete-buffer >/dev/null 2>&1 || true
+  dispatch_done=1
+fi
 if [ "$dispatch_done" -eq 0 ]; then
-  echo "no OpenCode --base-url supplied; tmux fallback is explicit only" >&2
+  echo "no target OpenCode --base-url supplied; tmux fallback is explicit only" >&2
   exit 2
 fi
 stamp=$(date '+%Y-%m-%d %H:%M:%S')

@@ -11,6 +11,10 @@ manager_url="${OMO_MANAGER_URL:-http://127.0.0.1:18790}"
 state_base="${XDG_STATE_HOME:-$HOME/.local/state}/omo-manager"
 state_dir="${OMO_MANAGER_STATE_DIR:-$state_base}"
 pending_seen="${OMO_MANAGER_PENDING_SEEN:-$state_dir/pending-seen.tsv}"
+if [ "$pending_seen" = "/tmp/omo-manager-pending-seen.tsv" ]; then
+  pending_seen="$state_dir/pending-seen.tsv"
+fi
+export OMO_MANAGER_PENDING_SEEN="$pending_seen"
 email_enable="${OMO_MANAGER_ENABLE_EMAIL_WATCHER:-auto}"
 email_config="${OMO_EMAIL_CONFIG_PATH:-$HOME/.config/himalaya/config.toml}"
 mkdir -p -m 700 "$state_dir"
@@ -51,7 +55,7 @@ echo "manager_url=$manager_url"
 pkill -f "omo_pending_watch.py .*--root ${root}" >/dev/null 2>&1 || true
 pkill -f "email_idle_watcher.py .*--root ${root}" >/dev/null 2>&1 || true
 rm -f "$pending_seen"
-nohup python3 "$HOME/.config/omo_manager/omo_pending_watch.py" --root "$root" --manager-url "$manager_url" >"$state_dir/pending-watch.log" 2>&1 &
+nohup python3 "$HOME/.config/omo_manager/omo_pending_watch.py" --root "$root" --manager-url "$manager_url" --state "$pending_seen" >"$state_dir/pending-watch.log" 2>&1 &
 echo "started pending watcher pid=$! log=$state_dir/pending-watch.log"
 start_email=0
 case "$email_enable" in
