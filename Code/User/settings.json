@@ -496,6 +496,20 @@
     },
     "chat.agent.thinkingStyle": "collapsedPreview",
     "chat.tools.urls.autoApprove": {
-        "https://docs.rs": true
+        "https://docs.rs": true,
+        "https://opentelemetry.io": {
+            "approveRequest": false,
+            "approveResponse": true
+        },
+        "https://github.com": {
+            "approveRequest": false,
+            "approveResponse": true
+        },
+        "https://opentelemetry-python.readthedocs.io": {
+            "approveRequest": false,
+            "approveResponse": true
+        },
+        "https://registry.opendata.aws": true
     },
+    "chat.viewSessions.orientation": "stacked",
 }
