@@ -62,7 +62,7 @@ for line in lines:
 sys.stdout.write("1" if found else "")' "$manager_line_pattern")
 if [ -n "$report_request" ]; then
   report_task=$(python3 -c 'import shlex, sys; print(shlex.quote(sys.argv[1]))' "$file")
-  report_instruction="Report questions, blockers, status, and completion to the manager via \`~/.config/omo_manager/omo_report.sh --task-file ${report_task} --status STATUS --message-file MESSAGE_FILE --agent agent-name\`, replacing STATUS with blocked, in-progress, or done and MESSAGE_FILE with a unique temp file such as \`\$(mktemp /tmp/omo-report.XXXXXX)\`. Put details in the message file; email the human only if manager is unreachable or explicitly necessary."
+  report_instruction="Report status/blockers/done via \`~/.config/omo_manager/omo_report.sh --task-file ${report_task} --status STATUS --message-file MESSAGE_FILE --agent agent-name\`; STATUS=blocked|in-progress|done, MESSAGE_FILE=\`\$(mktemp /tmp/omo-report.XXXXXX)\`. Email human only if manager unreachable/explicit. Verification: aggregate only—command names + pass/fail/failures, no test counts or verbose passing logs. Prefer \`~/.config/omo_manager/omo_quiet_checks.sh -- \"COMMAND\" [-- \"COMMAND\" ...]\`; if the same repeated command set is used, create/run a tiny-output \`*_quiet_check.*\` wrapper and report only that aggregate output."
   prompt=$(printf '%s\n\n%s' "$prompt" "$report_instruction")
 fi
 prompt_file=$(mktemp /tmp/omo-dispatch-prompt.XXXXXX)
