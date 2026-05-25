@@ -19,6 +19,7 @@ if [ -z "$subject" ] || [ -z "$message_file" ]; then usage >&2; exit 2; fi
 subject_lc=$(printf '%s' "$subject" | tr '[:upper:]' '[:lower:]')
 case "$subject_lc" in
   "re: [omo_manager]"*) echo "subject must not start with Re: [omo_manager]" >&2; exit 2 ;;
+  "[omo]"*|"re: [omo]"*) echo "manager email subject must use [omo_manager]; [omo] is reserved for direct regular-agent email" >&2; exit 2 ;;
   "[omo_manager]"*) ;;
   *) subject="[omo_manager] ${subject}" ;;
 esac

@@ -152,8 +152,10 @@ def find_markers(root: Path, files: list[Path]) -> list[Marker]:
                 continue
             if stripped not in PENDING_MARKERS:
                 continue
+            next_line = lines[idx].strip() if idx < len(lines) else ""
+            if next_line.startswith("[source: email "):
+                continue
             rel = path.relative_to(root)
-            next_line = lines[idx] if idx < len(lines) else ""
             digest = hashlib.sha256(f"{rel}:{idx}:{next_line}".encode("utf-8")).hexdigest()[:16]
             markers.append(Marker(file=rel, line=idx, digest=digest))
     return markers
