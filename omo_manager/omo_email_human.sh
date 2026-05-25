@@ -34,4 +34,19 @@ trap cleanup EXIT
   cat "$message_file"
 } >"$body_file"
 "$email_helper" "$subject" "$(cat "$body_file")" >/dev/null
+state_dir="${OMO_MANAGER_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/omo-manager}"
+log_file="$state_dir/human-email-sent.tsv"
+{
+  mkdir -p "$state_dir" && chmod 700 "$state_dir" 2>/dev/null || true
+  python3 - "$log_file" "$subject" <<'PY'
+from __future__ import annotations
+from datetime import datetime
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+subject = sys.argv[2].replace("\t", " ").replace("\n", " ")
+with path.open("a", encoding="utf-8") as handle:
+    handle.write(f"{datetime.now().astimezone().isoformat(timespec='seconds')}\t{subject}\n")
+PY
+} >/dev/null 2>&1 || true
 printf 'Emailed the human\n'
