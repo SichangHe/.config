@@ -211,14 +211,19 @@ def save_processed_uids(path: Path, uids: set[str]) -> None:
         handle.write(body)
 
 
+def email_source_lines(root: Path, txt_path: Path) -> tuple[str, str]:
+    ref = source_ref(root, txt_path)
+    return f"(from email {ref})", f"[source: email {ref}]"
+
+
 def existing_source_line(root: Path, txt_path: Path) -> int | None:
     manager_file = root / "work_manager.md"
     if not manager_file.exists():
         return None
-    source_line = f"[source: email {source_ref(root, txt_path)}]"
+    source_lines = set(email_source_lines(root, txt_path))
     lines = manager_file.read_text(encoding="utf-8").splitlines()
     for idx, line in enumerate(lines):
-        if line.strip() == source_line:
+        if line.strip() in source_lines:
             return idx + 1
     return None
 
@@ -229,8 +234,9 @@ def existing_source_pending_line(root: Path, txt_path: Path) -> int | None:
         return None
     manager_file = root / "work_manager.md"
     lines = manager_file.read_text(encoding="utf-8").splitlines()
-    if lines[source_line - 2].strip() == "(pending)":
-        return source_line - 1
+    for pending_idx in range(max(0, source_line - 4), source_line - 1):
+        if lines[pending_idx].strip() == "(pending)":
+            return pending_idx + 1
     return None
 
 
@@ -241,7 +247,8 @@ def append_pending(root: Path, txt_path: Path) -> int:
     manager_file = root / "work_manager.md"
     lines = manager_file.read_text(encoding="utf-8").splitlines() if manager_file.exists() else []
     line_no = len(lines) + 1
-    block = ["", "(pending)", f"[source: email {source_ref(root, txt_path)}]", "[summary: human reply to manager]"]
+    from_line, legacy_source_line = email_source_lines(root, txt_path)
+    block = ["", "(pending)", from_line, legacy_source_line, "[summary: human reply to manager]"]
     manager_file.write_text("\n".join(lines + block) + "\n", encoding="utf-8")
     return line_no + 1
 
@@ -251,7 +258,8 @@ def append_recovery_record(root: Path, txt_path: Path, summary: str) -> int:
     lines = manager_file.read_text(encoding="utf-8").splitlines() if manager_file.exists() else []
     line_no = len(lines) + 1
     stamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
-    block = ["", f"(manager recovery email: {stamp})", f"[source: email {source_ref(root, txt_path)}]", f"[summary: {summary}]"]
+    from_line, legacy_source_line = email_source_lines(root, txt_path)
+    block = ["", f"(manager recovery email: {stamp})", from_line, legacy_source_line, f"[summary: {summary}]"]
     manager_file.write_text("\n".join(lines + block) + "\n", encoding="utf-8")
     return line_no + 1
 
@@ -265,11 +273,6 @@ def write_mail(args: Args, uid: str, msg: Message, sender: str, subject: str) ->
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write(body)
     return txt_path
-
-
-def push_email_ref(args: Args, line_no: int, txt_path: Path) -> bool:
-    result = subprocess.run([str(Path.home() / ".config/omo_manager/omo_push_to_manager.py"), f"email: file=work_manager.md line={line_no} txt={source_ref(args.root, txt_path)}", "--manager-url", args.manager_url, "--root", str(args.root), "--submit"], check=False)
-    return result.returncode in {0, 2}
 
 
 def email_human(args: Args, subject: str, body: str) -> None:
@@ -381,10 +384,9 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> None:
         expected_txt_path = args.mail_dir / f"{uid}.txt"
         existing_pending_line = existing_source_pending_line(args.root, expected_txt_path)
         if existing_pending_line is not None:
-            if push_email_ref(args, existing_pending_line, expected_txt_path):
-                processed_uids.add(uid)
-                processed_changed = True
-                mark_seen(client, uid)
+            processed_uids.add(uid)
+            processed_changed = True
+            mark_seen(client, uid)
             continue
         if existing_source_line(args.root, expected_txt_path) is not None:
             processed_uids.add(uid)
@@ -409,10 +411,10 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> None:
             processed_changed = True
             mark_seen(client, uid)
         else:
-            if push_email_ref(args, append_pending(args.root, txt_path), txt_path):
-                processed_uids.add(uid)
-                processed_changed = True
-                mark_seen(client, uid)
+            append_pending(args.root, txt_path)
+            processed_uids.add(uid)
+            processed_changed = True
+            mark_seen(client, uid)
     if processed_changed:
         save_processed_uids(processed_path, processed_uids)
 
