@@ -418,6 +418,12 @@ if ! wait_health; then
 fi
 log "manager healthy at $base_url"
 
+# Release the restart lock before spawning long-lived watcher processes. Without
+# this, nohup children inherit fd 9 and hold the lock forever, causing later
+# legitimate restart attempts and dry-run tests to fail as "already running".
+flock -u 9 || true
+exec 9>&-
+
 if [ "$refresh_watchers" -eq 1 ]; then
   if ! OMO_MANAGER_LOCAL_ENV=/dev/null OMO_MANAGER_URL="$base_url" OMO_WORK_LOGS_ROOT="$root" OMO_MANAGER_STATE_DIR="$state_dir" \
     "$HOME/.config/omo_manager/omo_manager_setup_watchers.sh" | tee -a "$restart_log"; then

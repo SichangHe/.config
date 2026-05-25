@@ -31,6 +31,8 @@ fi
 export OMO_MANAGER_PENDING_SEEN="$pending_seen"
 email_enable="${OMO_MANAGER_ENABLE_EMAIL_WATCHER:-auto}"
 email_config="${OMO_EMAIL_CONFIG_PATH:-$HOME/.config/himalaya/config.toml}"
+mail_dir="${OMO_MANAGER_MAIL_DIR:-$root/manager_mail}"
+export OMO_MANAGER_MAIL_DIR="$mail_dir"
 mkdir -p -m 700 "$state_dir"
 chmod 700 "$state_dir"
 python3 - "$manager_url" <<'PY'
@@ -79,8 +81,10 @@ case "$email_enable" in
   *) echo "OMO_MANAGER_ENABLE_EMAIL_WATCHER must be auto, true, or false" >&2; exit 2 ;;
 esac
 if [ "$start_email" -eq 1 ]; then
-  nohup python3 "$HOME/.config/omo_manager/email_idle_watcher.py" --root "$root" --manager-url "$manager_url" >"$state_dir/email-watch.log" 2>&1 &
-  echo "started email watcher pid=$! log=$state_dir/email-watch.log"
+  mkdir -p -m 700 "$mail_dir"
+  chmod 700 "$mail_dir"
+  nohup python3 "$HOME/.config/omo_manager/email_idle_watcher.py" --root "$root" --manager-url "$manager_url" --mail-dir "$mail_dir" --state-dir "$state_dir" >"$state_dir/email-watch.log" 2>&1 &
+  echo "started email watcher pid=$! log=$state_dir/email-watch.log mail_dir=$mail_dir"
 else
   echo "skipped email watcher; set OMO_MANAGER_ENABLE_EMAIL_WATCHER=true and OMO_EMAIL_CONFIG_PATH to enable"
 fi
