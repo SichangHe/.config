@@ -33,23 +33,19 @@ case "$path_real" in "$root_real"/*) ;; *) echo "task file escapes root" >&2; ex
 if [ ! -f "$message_file" ]; then echo "message file not found" >&2; exit 2; fi
 mkdir -p "$(dirname "$path_real")"
 stamp=$(date '+%Y-%m-%d %H:%M')
-tmux_info="unavailable"
-if [ -n "${TMUX:-}" ] && command -v tmux >/dev/null 2>&1; then
-  tmux_info=$(tmux display-message -p 'session=#{session_name} window=#{window_index} pane=#{pane_index} pane_id=#{pane_id} cwd=#{pane_current_path}' 2>/dev/null || printf unavailable)
-fi
 source_line="(from agent ${agent} via omo_report.sh status=${status})"
 lock_path="${path_real}.omo_report.lock"
 exec 9>"$lock_path"
 flock 9
 if [ ! -f "$path_real" ]; then : >"$path_real"; fi
-python3 - "$path_real" "$message_file" "$source_line" "$stamp" "$agent" "$status" "$PWD" "${OPENCODE:-}" "${TMUX:-}" "$tmux_info" <<'PY'
+python3 - "$path_real" "$message_file" "$source_line" "$stamp" "$agent" "$status" <<'PY'
 from __future__ import annotations
 import hashlib
 import sys
 from pathlib import Path
 path = Path(sys.argv[1])
 message_path = Path(sys.argv[2])
-source_line, stamp, agent, status, pwd, opencode, tmux, tmux_info = sys.argv[3:11]
+source_line, stamp, agent, status = sys.argv[3:7]
 message_bytes = message_path.read_bytes()
 message_hash = hashlib.sha256(message_bytes).hexdigest()
 hash_line = f"[message-sha256: {message_hash}]"
@@ -70,10 +66,6 @@ block = [
     "(pending)",
     source_line,
     f"(report manager {stamp} agent={agent} status={status})",
-    f"PWD: {pwd}",
-    f"OPENCODE: {opencode}",
-    f"TMUX: {tmux}",
-    f"tmux-info: {tmux_info}",
     hash_line,
     f"message-file: {message_path}",
     "message:",

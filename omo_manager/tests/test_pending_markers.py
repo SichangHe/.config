@@ -98,6 +98,9 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual(1, text.count("(from agent agent-4002 via omo_report.sh status=done)"))
             self.assertIn("[message-sha256: ", text)
             self.assertIn("message:\n> done\n", text)
+            self.assertNotIn("PWD:", text)
+            self.assertNotIn("OPENCODE:", text)
+            self.assertNotIn("TMUX:", text)
             markers = find_markers(root, [task])
             self.assertEqual(1, len(markers))
 
