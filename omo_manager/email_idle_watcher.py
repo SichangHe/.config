@@ -247,8 +247,8 @@ def append_pending(root: Path, txt_path: Path) -> int:
     manager_file = root / "work_manager.md"
     lines = manager_file.read_text(encoding="utf-8").splitlines() if manager_file.exists() else []
     line_no = len(lines) + 1
-    from_line, legacy_source_line = email_source_lines(root, txt_path)
-    block = ["", "(pending)", from_line, legacy_source_line, "[summary: human reply to manager]"]
+    from_line, _legacy_source_line = email_source_lines(root, txt_path)
+    block = ["", "(pending)", from_line]
     manager_file.write_text("\n".join(lines + block) + "\n", encoding="utf-8")
     return line_no + 1
 
@@ -264,11 +264,11 @@ def append_recovery_record(root: Path, txt_path: Path, summary: str) -> int:
     return line_no + 1
 
 
-def write_mail(args: Args, uid: str, msg: Message, sender: str, subject: str) -> Path:
+def write_mail(args: Args, uid: str, msg: Message, _sender: str, subject: str) -> Path:
     args.mail_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     args.mail_dir.chmod(0o700)
     txt_path = args.mail_dir / f"{uid}.txt"
-    body = f"From: {sender}\nSubject: {subject}\nDate: {msg.get('Date', '')}\nUID: {uid}\n\n{message_text(msg)}"
+    body = f"Subject: {subject}\n\n{message_text(msg)}"
     fd = os.open(txt_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write(body)

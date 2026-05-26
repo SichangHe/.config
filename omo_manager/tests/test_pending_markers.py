@@ -16,7 +16,7 @@ from omo_manager.omo_pending_watch import Args, find_markers
 
 
 class PendingMarkerTests(unittest.TestCase):
-    def test_email_pending_block_has_new_and_legacy_markers_and_is_not_generic_pending(self) -> None:
+    def test_email_pending_block_has_single_source_marker_and_is_not_generic_pending(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             mail = root / "manager_mail" / "4002.txt"
@@ -26,9 +26,29 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual(line, existing_source_pending_line(root, mail))
             text = (root / "work_manager.md").read_text(encoding="utf-8")
             self.assertIn("(from email manager_mail/4002.txt)", text)
-            self.assertIn("[source: email manager_mail/4002.txt]", text)
+            self.assertNotIn("[source: email manager_mail/4002.txt]", text)
+            self.assertNotIn("[summary: human reply to manager]", text)
             markers = find_markers(root, [root / "work_manager.md"])
             self.assertEqual(1, len(markers))
+
+    def test_write_mail_omits_redundant_self_headers(self) -> None:
+        from email.message import EmailMessage
+        from omo_manager.email_idle_watcher import Args as EmailArgs, write_mail
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            msg = EmailMessage()
+            msg["From"] = "Steven Sīchàng Hé <stevensichanghe@gmail.com>"
+            msg["Subject"] = "Re: [omo_manager] Update"
+            msg["Date"] = "Mon, 25 May 2026 15:09:06 -0700"
+            msg.set_content("body\n")
+            args = EmailArgs(root, "http://127.0.0.1:18790", root / "manager_mail", root / "state", True, "self@example.test", 900, Path("/bin/false"))
+            path = write_mail(args, "4146", msg, str(msg["From"]), str(msg["Subject"]))
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("Subject: Re: [omo_manager] Update\n", text)
+            self.assertNotIn("From:", text)
+            self.assertNotIn("Date:", text)
+            self.assertNotIn("UID:", text)
 
     def test_legacy_email_source_block_is_delivered_by_pending_watch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

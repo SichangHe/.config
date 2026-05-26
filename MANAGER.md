@@ -7,8 +7,6 @@ Pending message blocks use this forward format:
 ```md
 (pending)
 (from email manager_mail/UID.txt)
-[source: email manager_mail/UID.txt]
-[summary: human reply to manager]
 ```
 
 ```md
@@ -19,6 +17,8 @@ Pending message blocks use this forward format:
 message:
 > report body copied from MESSAGE_FILE
 ```
+
+The legacy `[source: email manager_mail/UID.txt]` line remains valid for old blocks and duplicate detection, but new email pending blocks should use only the parenthesized source marker.
 
 The parenthesized `(from ...)` line is the human-readable source marker. The legacy `[source: email ...]` line remains valid and must stay supported for historical email blocks and duplicate-UID mitigation. Helpers may add extra metadata lines after the source marker, but must not weaken sender checks, recovery-email checks, or duplicate/idempotency protections. Direct manager pushes are reserved for concrete reliability exceptions where Markdown plus watcher cannot work; document the exact exception before using one. Agent report helpers should not append a second unresolved pending block with the same agent, status, and message hash.
 
