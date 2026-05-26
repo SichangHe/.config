@@ -29,10 +29,7 @@ if [ ! -x "$email_helper" ]; then echo "email helper not executable: $email_help
 body_file=$(mktemp /tmp/omo-human-email.XXXXXX)
 cleanup() { rm -f "$body_file"; }
 trap cleanup EXIT
-{
-  printf 'PWD: %s\n\n' "$PWD"
-  cat "$message_file"
-} >"$body_file"
+cat "$message_file" >"$body_file"
 "$email_helper" "$subject" "$(cat "$body_file")" >/dev/null
 state_dir="${OMO_MANAGER_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/omo-manager}"
 log_file="$state_dir/human-email-sent.tsv"
