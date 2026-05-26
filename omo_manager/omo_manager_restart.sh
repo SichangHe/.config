@@ -291,14 +291,9 @@ import urllib.parse
 
 base_url = sys.argv[1].rstrip("/")
 root = sys.argv[2]
-prompt = """Follow MANAGER.md. This manager TUI was restarted by `~/.config/omo_manager/omo_manager_restart.sh`.
-
-Immediately run:
-1. `~/.config/getagentsmd`
-2. `~/.config/omo_manager/omo_manager_setup_watchers.sh`
-3. `~/.config/omo_manager/omo_pending_watch.py --once --dry-run`
-
-Then inspect current pending/report/email refs and continue manager duties. If this restart was caused by context exhaustion or compaction being off, avoid continuing the old stuck session; use this fresh session and keep watcher state pointed here."""
+prompt = """Follow MANAGER.md. Restarted by `omo_manager_restart.sh`.
+Run: `~/.config/getagentsmd`; `~/.config/omo_manager/omo_manager_setup_watchers.sh`; `~/.config/omo_manager/omo_pending_watch.py --once --dry-run`.
+Continue current pending/report/email refs. If old session was stuck/context-full, stay in this fresh session."""
 parsed = urllib.parse.urlparse(base_url)
 assert parsed.hostname is not None and parsed.port is not None
 query = urllib.parse.urlencode({"directory": root})
