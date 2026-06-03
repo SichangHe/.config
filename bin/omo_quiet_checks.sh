@@ -1,3 +1,1 @@
-#!/bin/sh
-root=$(CDPATH= cd -- "$(dirname -- "$0")/../omo_manager" && pwd) || exit 1
-exec sh "$root/omo_quiet_checks.sh" "$@"
+../omo_manager/omo_quiet_checks.sh

@@ -61,6 +61,8 @@ def parse_args(argv: list[str]) -> Args:
         parser.error("pane selection is no longer supported; pane 0 is implied.")
     if parsed.workdir is not None and not parsed.tmux_session:
         parser.error("--workdir requires --tmux-session.")
+    if parsed.tool != "codex":
+        parser.error("only --tool codex is supported.")
     return Args(parsed.root.resolve(), parsed.task_file, parsed.tmux_session, parsed.tmux_window, parsed.tool, parsed.workdir, parsed.window_name, parsed.prompt_file, parsed.no_link, parsed.dry_run)
 
 
@@ -90,9 +92,6 @@ def new_window(args: Args) -> str:
         return target(args)
     name = args.window_name or Path(args.task_file).stem
     command = ["tmux", "new-window", "-P", "-F", "#{session_name}:#{window_index}", "-t", args.tmux_session, "-n", name, "-c", str(args.workdir), codex_cmd()]
-    if args.dry_run:
-        print(" ".join(shlex.quote(part) for part in command))
-        return f"{args.tmux_session}:DRYRUN"
     out = subprocess.run(command, capture_output=True, text=True, timeout=10, check=True)
     return out.stdout.strip()
 
@@ -141,9 +140,30 @@ def link_todo(args: Args, tmux_target: str) -> None:
     _ = todo.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def dry_run(args: Args) -> None:
+    tmux_target = f"{args.tmux_session}:DRYRUN" if args.workdir is not None else target(args)
+    path = task_path(args.root, args.task_file)
+    print(f"task_file: {path}")
+    if not args.no_link:
+        print(f"todo_line: {todo_line(args, tmux_target)}")
+    if args.workdir is not None:
+        name = args.window_name or Path(args.task_file).stem
+        command = ["tmux", "new-window", "-P", "-F", "#{session_name}:#{window_index}", "-t", args.tmux_session, "-n", name, "-c", str(args.workdir), codex_cmd()]
+        print("tmux: " + " ".join(shlex.quote(part) for part in command))
+
+
+def validate_inputs(args: Args) -> None:
+    if args.prompt_file is not None and not args.prompt_file.is_file():
+        raise ValueError(f"prompt file not found: {args.prompt_file}")
+
+
 def main(argv: list[str]) -> int:
     try:
         args = parse_args(argv)
+        validate_inputs(args)
+        if args.dry_run:
+            dry_run(args)
+            return 0
         tmux_target = new_window(args)
         path = ensure_task_file(args, tmux_target)
         if not args.no_link:

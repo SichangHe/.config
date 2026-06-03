@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 PATH="$HOME/.config/bin:$PATH"
+case "${1:-}" in
+  -h|--help)
+    cat <<'EOF'
+Usage: omo_manager_setup_watchers.sh
+Start or refresh manager pending and email watchers.
+EOF
+    exit 0
+    ;;
+esac
 env_manager_url="${OMO_MANAGER_URL+x}${OMO_MANAGER_URL-}"
 env_manager_target="${OMO_MANAGER_TMUX_TARGET+x}${OMO_MANAGER_TMUX_TARGET-}"
 env_root="${OMO_WORK_LOGS_ROOT+x}${OMO_WORK_LOGS_ROOT-}"

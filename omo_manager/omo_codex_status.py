@@ -21,6 +21,12 @@ class Args:
 
 
 @dataclass(frozen=True)
+class Block:
+    lines: list[str]
+    has_footer: bool
+
+
+@dataclass(frozen=True)
 class Report:
     status: str
     lines: list[str]
@@ -51,40 +57,41 @@ def tail(target: str, n_lines: int) -> list[str]:
     return lines
 
 
-def last_output(lines: list[str]) -> list[str]:
-    end = len(lines)
-    for idx in range(len(lines) - 1, -1, -1):
-        if WORKED_RE.match(lines[idx]):
-            end = idx
-            break
+def current_block(lines: list[str]) -> Block:
+    body = lines[:-1] if lines and CODEX_RE.search(lines[-1]) is not None else lines[:]
     start = 0
-    for idx in range(end - 1, -1, -1):
-        if SEP_RE.match(lines[idx]):
+    for idx in range(len(body) - 1, -1, -1):
+        if SEP_RE.match(body[idx]):
             start = idx + 1
             break
-    out = [line.rstrip() for line in lines[start:end]]
-    while out and not out[0]:
-        del out[0]
-    while out and not out[-1]:
-        out.pop()
-    return out
+    block = [line.rstrip() for line in body[start:]]
+    has_footer = bool(block and WORKED_RE.match(block[-1]))
+    if has_footer:
+        block.pop()
+    while block and not block[0]:
+        del block[0]
+    while block and not block[-1]:
+        block.pop()
+    return Block(block, has_footer)
 
 
-def status(lines: list[str], output: list[str]) -> str:
+def last_output(lines: list[str]) -> list[str]:
+    return current_block(lines).lines
+
+
+def status(lines: list[str], block: Block) -> str:
     if not lines or CODEX_RE.search(lines[-1]) is None:
         return "not_codex"
-    text = "\n".join(output or lines[-20:])
+    text = "\n".join(block.lines or lines[-20:])
     if ERROR_RE.search(text) is not None:
         return "error"
-    if any(WORKED_RE.match(line) for line in lines):
-        return "ready"
-    return "running"
+    return "ready" if block.has_footer else "running"
 
 
 def inspect(args: Args) -> Report:
     lines = tail(args.target, args.n_lines)
-    output = last_output(lines)
-    return Report(status(lines, output), output)
+    block = current_block(lines)
+    return Report(status(lines, block), block.lines)
 
 
 def main(argv: list[str]) -> int:
