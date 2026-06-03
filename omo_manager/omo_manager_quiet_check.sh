@@ -3,7 +3,7 @@ set -euo pipefail
 
 cd "${OMO_MANAGER_CONFIG_ROOT:-$HOME/.config}"
 
-~/.config/omo_manager/omo_quiet_checks.sh \
+omo_quiet_checks.sh \
   -- "bash -n omo_manager/omo_quiet_checks.sh omo_manager/omo_manager_quiet_check.sh omo_manager/omo_dispatch.sh omo_manager/omo_report.sh" \
   -- "python3 -m unittest discover omo_manager/tests" \
   -- "python3 - <<'PY'

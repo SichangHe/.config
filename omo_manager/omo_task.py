@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""Create a markdown task file and link it into `TODO.md`."""
+"""Create/link a markdown task and optionally start a Codex tmux window."""
 from __future__ import annotations
 
 import argparse
 import os
+import shlex
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-
 DEFAULT_ROOT = Path(os.environ.get("OMO_WORK_LOGS_ROOT", Path.home() / "work_logs"))
+CODEX_CMD = "bunx @openai/codex --dangerously-bypass-approvals-and-sandbox"
 
 
 @dataclass(frozen=True)
@@ -17,20 +19,26 @@ class Args:
     root: Path
     task_file: str
     tmux_session: str
-    pane: str
+    tmux_window: str
     tool: str
+    workdir: Path | None
+    window_name: str
     prompt_file: Path | None
     no_link: bool
+    dry_run: bool
 
 
 class ParsedArgs(argparse.Namespace):
     root: Path = DEFAULT_ROOT
     task_file: str = ""
     tmux_session: str = ""
-    pane: str = ""
-    tool: str = "opencode"
+    tmux_window: str = ""
+    tool: str = "codex"
+    workdir: Path | None = None
+    window_name: str = ""
     prompt_file: Path | None = None
     no_link: bool = False
+    dry_run: bool = False
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -38,16 +46,22 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     _ = parser.add_argument("--task-file", required=True)
     _ = parser.add_argument("--tmux-session", default="")
-    _ = parser.add_argument("--pane", default="")
-    _ = parser.add_argument("--tool", default="opencode")
+    _ = parser.add_argument("--tmux-window", default="")
+    _ = parser.add_argument("--pane", default="", help=argparse.SUPPRESS)
+    _ = parser.add_argument("--tool", default="codex")
+    _ = parser.add_argument("--workdir", type=Path)
+    _ = parser.add_argument("--window-name", default="")
     _ = parser.add_argument("--prompt-file", type=Path)
     _ = parser.add_argument("--no-link", action="store_true")
+    _ = parser.add_argument("--dry-run", action="store_true")
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     if not parsed.task_file.endswith(".md"):
         parser.error("--task-file must end with `.md`.")
-    if parsed.pane and not parsed.tmux_session:
-        parser.error("--pane requires --tmux-session.")
-    return Args(parsed.root.resolve(), parsed.task_file, parsed.tmux_session, parsed.pane, parsed.tool, parsed.prompt_file, parsed.no_link)
+    if parsed.pane:
+        parser.error("pane selection is no longer supported; pane 0 is implied.")
+    if parsed.workdir is not None and not parsed.tmux_session:
+        parser.error("--workdir requires --tmux-session.")
+    return Args(parsed.root.resolve(), parsed.task_file, parsed.tmux_session, parsed.tmux_window, parsed.tool, parsed.workdir, parsed.window_name, parsed.prompt_file, parsed.no_link, parsed.dry_run)
 
 
 def task_path(root: Path, task_file: str) -> Path:
@@ -57,17 +71,38 @@ def task_path(root: Path, task_file: str) -> Path:
     return path
 
 
-def header(args: Args) -> str:
-    parts = [part for part in (args.tmux_session, args.pane, args.tool if args.tmux_session else "") if part]
-    return " ".join(parts)
+def target(args: Args) -> str:
+    if args.tmux_session and args.tmux_window:
+        return f"{args.tmux_session}:{args.tmux_window}"
+    return args.tmux_session
 
 
-def ensure_task_file(args: Args) -> Path:
+def header(tmux_target: str, tool: str) -> str:
+    return f"runat: {tmux_target} {tool}" if tmux_target else ""
+
+
+def codex_cmd() -> str:
+    return CODEX_CMD
+
+
+def new_window(args: Args) -> str:
+    if args.workdir is None:
+        return target(args)
+    name = args.window_name or Path(args.task_file).stem
+    command = ["tmux", "new-window", "-P", "-F", "#{session_name}:#{window_index}", "-t", args.tmux_session, "-n", name, "-c", str(args.workdir), codex_cmd()]
+    if args.dry_run:
+        print(" ".join(shlex.quote(part) for part in command))
+        return f"{args.tmux_session}:DRYRUN"
+    out = subprocess.run(command, capture_output=True, text=True, timeout=10, check=True)
+    return out.stdout.strip()
+
+
+def ensure_task_file(args: Args, tmux_target: str) -> Path:
     path = task_path(args.root, args.task_file)
     path.parent.mkdir(parents=True, exist_ok=True)
     chunks: list[str] = []
     if not path.exists():
-        first = header(args)
+        first = header(tmux_target, args.tool)
         if first:
             chunks.append(f"{first}\n\n")
     if args.prompt_file is not None:
@@ -81,18 +116,16 @@ def ensure_task_file(args: Args) -> Path:
     return path
 
 
-def todo_line(args: Args) -> str:
+def todo_line(args: Args, tmux_target: str) -> str:
     parts = [args.task_file]
-    if args.tmux_session:
-        parts.append(args.tmux_session)
-    if args.pane:
-        parts.append(args.pane)
+    if tmux_target:
+        parts.append(tmux_target)
     return " ".join(parts)
 
 
-def link_todo(args: Args) -> None:
+def link_todo(args: Args, tmux_target: str) -> None:
     todo = args.root / "TODO.md"
-    line = todo_line(args)
+    line = todo_line(args, tmux_target)
     lines = todo.read_text(encoding="utf-8").splitlines() if todo.exists() else ["current:", ""]
     if any(existing.split(maxsplit=1)[0] == args.task_file for existing in lines if existing.strip()):
         return
@@ -111,10 +144,13 @@ def link_todo(args: Args) -> None:
 def main(argv: list[str]) -> int:
     try:
         args = parse_args(argv)
-        path = ensure_task_file(args)
+        tmux_target = new_window(args)
+        path = ensure_task_file(args, tmux_target)
         if not args.no_link:
-            link_todo(args)
+            link_todo(args, tmux_target)
         print(path)
+        if tmux_target:
+            print(tmux_target)
     except Exception as exc:
         print(f"omo_task: {exc}", file=sys.stderr)
         return 1

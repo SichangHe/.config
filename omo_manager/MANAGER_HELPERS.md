@@ -6,10 +6,31 @@
 
 `omo_pending_watch.py` remains conservative: it scans Markdown for literal `(pending)` markers outside fenced code. Email-created, agent-created, and manual pending blocks all flow through the same watcher path.
 
-`omo_digest_queue.py` is the durable non-urgent digest path. `submit` appends `(digest-item)` blocks to `MANAGER_DIGEST_QUEUE.md`; these are intentionally not `(pending)` blocks, so `omo_pending_watch.py` does not duplicate immediate notifications. `deliver-once` checks afternoon/evening time, recent `manager_mail` inbound timestamps, recent manager outbound timestamps from `$OMO_MANAGER_STATE_DIR/human-email-sent.tsv`, and prior digest sent markers before calling `omo_email_human.sh`.
+`omo_digest_queue.py` is the durable non-urgent digest path. `submit` appends digest items to the configured queue file. `deliver-once` sends queued items immediately when requested; idle timing and recent-contact checks belong to a separate watcher.
 
-`omo_quiet_checks.sh` is the low-token aggregate test/check runner. Agents should run required verification as `~/.config/omo_manager/omo_quiet_checks.sh -- "COMMAND" [-- "COMMAND" ...]` when practical. On success it prints only `checks: pass` and the command names; on failure it prints `checks: fail`, the executed command list with the failed exit status, and a bounded failure-output tail capped by the helper. Manager-facing reports must not include counts of passed tests or verbose successful test logs; include only aggregate pass/fail, command names, and failures/blockers.
+`omo_quiet_checks.sh` is the low-token aggregate test/check runner. Agents should run required verification as `omo_quiet_checks.sh -- "COMMAND" [-- "COMMAND" ...]` when practical. On success it prints only `checks: pass` and the command names; on failure it prints `checks: fail`, the executed command list with the failed exit status, and a bounded failure-output tail capped by the helper. Manager-facing reports must not include counts of passed tests or verbose successful test logs; include only aggregate pass/fail, command names, and failures/blockers.
 
 For any repeatedly called command set, add a dedicated tiny-output script wrapper (for example `omo_manager_quiet_check.sh` or `*_quiet_check.py`) instead of asking agents to paste the full command list repeatedly. The wrapper may call `omo_quiet_checks.sh` internally or implement the same contract directly: successful output is suppressed, failures include only the failed command/check name and bounded failure details capped by the helper, and reports to humans include no test-success details or counts. `omo_manager_quiet_check.sh` is the aggregate validation entrypoint for this manager-helper workflow.
 
-`opencode_auth_switch.py` is the human-gated live switch helper. It is dry-run by default and requires both `--execute` and `--human-authorized-switch` before touching live `auth.json`. It writes a private rollback backup, preserves the matching current snapshot when possible, atomically copies the exact candidate to live auth, optionally runs the existing isolated smoke validation, and restores the rollback backup if validation fails. It reports only filenames/status metadata, never credential contents.
+`omo_tmux_send.py` is the safe tmux paste primitive. Use it instead of asking agents to hand-escape arbitrary prompt text for `tmux send-keys`:
+
+```sh
+printf '%s\n' 'literal text with $HOME, `backticks`, quotes, and C-c' \
+  | omo_tmux_send.py --target cfg:1.0 --enter
+
+omo_tmux_send.py --target cfg:1.0 --message-file /tmp/instruction.md --enter
+```
+
+It reads stdin or `--message-file`, writes the payload to a private `0600` temp file, loads that file into a tmux buffer, pastes the buffer to the target, and only uses `send-keys` for the optional final Enter. `omo_dispatch.sh --tmux-target TARGET` uses this helper for normal prompt dispatch.
+
+Dispatch rule: send prompts through the visible tmux pane and verify with manager-owned status helpers when needed. Tmux delivery is the common path; helper internals must not make manager docs depend on tool-specific transport details.
+
+Listener/supervisor architecture note: do not merge `email_idle_watcher.py` and `omo_pending_watch.py` into one large listener as a first step. Email IDLE is an ingress adapter that writes `manager_mail/UID.txt` plus a Markdown `(pending)` block; `omo_pending_watch.py` is the single delivery path from Markdown to the manager. A robust next step is a small process supervisor/event loop that starts and health-checks watchers and owns restart/backoff/logging.
+
+`omo_task.py` creates/links task files and can start a Codex worker in a new tmux window with `bunx @openai/codex --dangerously-bypass-approvals-and-sandbox`. It records `runat: SESSION:WINDOW codex`; pane 0 is implied.
+
+`omo_codex_status.py` reads a tmux window tail and reports `not_codex`, `running`, `error`, or `ready` plus the current response tail. It detects the Codex TUI by `  gpt-` on the last visible line and extracts output between the last separator and `─ Worked for ... ─`.
+
+`omo_stuck_watch.py` reads registered agent panes, calls the status helper, and stores tail hashes so repeated runs can tell whether visible output changed. It does not learn timing thresholds.
+
+`omo_agent_status.py` summarizes active tasks from `TODO.md`/tracker plus tmux status helper results. It reports `not_codex`, `running`, `error`, or `ready`; completed registry rows are stale bookkeeping and can be pruned with `--prune-completed`.

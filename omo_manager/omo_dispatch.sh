@@ -1,22 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
+PATH="$HOME/.config/bin:$PATH"
 local_env="${OMO_MANAGER_LOCAL_ENV:-$HOME/.config/omo_manager/local.env}"
 if [ -f "$local_env" ]; then
   # shellcheck disable=SC1090
   source "$local_env"
 fi
 root="${OMO_WORK_LOGS_ROOT:-$HOME/work_logs}"
-base_url=""
-directory="$root"
 target=""
 file=""
 start=""
 end=""
 submit=1
-tmux_fallback=0
+tmux_target=""
 usage() {
   cat <<'EOF'
-Usage: omo_dispatch.sh --file FILE --start N --end N [--target NAME] [--base-url URL] [--directory DIR] [--no-submit] [--tmux-fallback SESSION:WINDOW.PANE]
+Usage: omo_dispatch.sh --file FILE --start N --end N [--target NAME] [--tmux-target SESSION:WINDOW] [--no-submit]
+
+Dispatch prompts through the visible tmux target with safe buffer paste.
 EOF
 }
 while [ "$#" -gt 0 ]; do
@@ -26,10 +27,8 @@ while [ "$#" -gt 0 ]; do
     --start) start="$2"; shift 2 ;;
     --end) end="$2"; shift 2 ;;
     --target) target="$2"; shift 2 ;;
-    --base-url) base_url="${2%/}"; shift 2 ;;
-    --directory) directory="$2"; shift 2 ;;
     --no-submit) submit=0; shift ;;
-    --tmux-fallback) tmux_target="$2"; tmux_fallback=1; shift 2 ;;
+    --tmux-target|--tmux-fallback) tmux_target="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -62,7 +61,7 @@ for line in lines:
 sys.stdout.write("1" if found else "")' "$manager_line_pattern")
 if [ -n "$report_request" ]; then
   report_task=$(python3 -c 'import shlex, sys; print(shlex.quote(sys.argv[1]))' "$file")
-  report_instruction="Report status/blockers/done via \`~/.config/omo_manager/omo_report.sh --task-file ${report_task} --status STATUS --message-file MESSAGE_FILE --agent agent-name\`; STATUS=blocked|in-progress|done, MESSAGE_FILE=\`\$(mktemp /tmp/omo-report.XXXXXX)\`. Email human only if manager unreachable/explicit. Verification: aggregate only—command names + pass/fail/failures, no test counts or verbose passing logs. Prefer \`~/.config/omo_manager/omo_quiet_checks.sh -- \"COMMAND\" [-- \"COMMAND\" ...]\`; if the same repeated command set is used, create/run a tiny-output \`*_quiet_check.*\` wrapper and report only that aggregate output."
+  report_instruction="Report status/blockers/done via \`omo_report.sh --task-file ${report_task} --status STATUS --message-file MESSAGE_FILE --agent agent-name\`; STATUS=blocked|in-progress|done, MESSAGE_FILE=\`\$(mktemp /tmp/omo-report.XXXXXX)\`. Email human only if manager unreachable/explicit, using \`email_me.py\`. Verification: aggregate only—command names + pass/fail/failures, no test counts or verbose passing logs. Prefer \`omo_quiet_checks.sh -- \"COMMAND\" [-- \"COMMAND\" ...]\`; if the same repeated command set is used, create/run a tiny-output \`*_quiet_check.*\` wrapper and report only that aggregate output."
   prompt=$(printf '%s\n\n%s' "$prompt" "$report_instruction")
 fi
 prompt_file=$(mktemp /tmp/omo-dispatch-prompt.XXXXXX)
@@ -77,48 +76,20 @@ cleanup() {
 }
 trap cleanup EXIT
 dispatch_done=0
-if [ -n "$base_url" ]; then
-  if python3 - "$base_url" "$directory" "$submit" "$prompt_file" <<'PY'
-from __future__ import annotations
-import json
-import sys
-import urllib.parse
-import urllib.request
-base_url, directory, submit, prompt_file = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
-prompt = open(prompt_file, encoding="utf-8").read()
-query = urllib.parse.urlencode({"directory": directory})
-with urllib.request.urlopen(f"{base_url}/global/health", timeout=5) as resp:
-    if resp.status >= 400:
-        raise RuntimeError(f"target OpenCode TUI lacks /global/health: HTTP {resp.status}")
-def post(route: str, payload: object) -> None:
-    req = urllib.request.Request(f"{base_url}{route}?{query}", data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"}, method="POST")
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        resp.read()
-post("/tui/append-prompt", {"text": prompt})
-if submit == "1":
-    post("/tui/submit-prompt", {})
-PY
-  then
-    dispatch_done=1
-  elif [ "$tmux_fallback" -eq 0 ]; then
-    exit 1
-  fi
-fi
-if [ "$dispatch_done" -eq 0 ] && [ "$tmux_fallback" -eq 1 ]; then
+if [ "$dispatch_done" -eq 0 ] && [ -n "$tmux_target" ]; then
   tmux_instr_file=$(mktemp /tmp/omo-dispatch-tmux-instruction.XXXXXX)
   chmod 600 "$tmux_instr_file"
   printf 'Read the dispatch prompt from %s and follow it exactly.\n' "$prompt_file" >"$tmux_instr_file"
-  tmux load-buffer "$tmux_instr_file"
-  tmux paste-buffer -t "$tmux_target"
+  tmux_send_args=("omo_tmux_send.py" --target "$tmux_target" --message-file "$tmux_instr_file")
   keep_prompt_file=1
   if [ "$submit" -eq 1 ]; then
-    tmux send-keys -t "$tmux_target" Enter
+    tmux_send_args+=(--enter)
   fi
-  tmux delete-buffer >/dev/null 2>&1 || true
+  "${tmux_send_args[@]}"
   dispatch_done=1
 fi
 if [ "$dispatch_done" -eq 0 ]; then
-  echo "no target OpenCode --base-url supplied; tmux fallback is explicit only" >&2
+  echo "no tmux target supplied" >&2
   exit 2
 fi
 stamp=$(date '+%Y-%m-%d %H:%M:%S')

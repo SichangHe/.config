@@ -123,10 +123,9 @@ class DigestQueueTests(unittest.TestCase):
             self.assertIn("status: queued", text)
             self.assertNotIn("status: sent", text)
 
-    def test_root_sets_default_mail_dir_for_cli_delivery_gate(self) -> None:
+    def test_cli_delivery_ignores_idle_gate_flags(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            state = root / "state"
             submit = subprocess.run(
                 [
                     str(Path.home() / ".config/omo_manager/omo_digest_queue.py"),
@@ -155,8 +154,10 @@ class DigestQueueTests(unittest.TestCase):
                     "--root",
                     str(root),
                     "deliver-once",
-                    "--state-dir",
-                    str(state),
+                    "--mail-dir",
+                    str(mail_dir),
+                    "--min-human-inbound-idle-min",
+                    "90",
                     "--dry-run",
                     "--now",
                     "2026-05-25T15:00:00-07:00",
@@ -167,9 +168,10 @@ class DigestQueueTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(0, delivery.returncode, delivery.stderr)
-            self.assertIn("recent-human-inbound", delivery.stdout)
+            self.assertIn("Queued item", delivery.stdout)
+            self.assertNotIn("recent-human-inbound", delivery.stdout)
 
-    def test_rejects_unsafe_id_now_without_dry_run_and_nonpositive_max_items(self) -> None:
+    def test_rejects_unsafe_id_and_nonpositive_max_items(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             bad_id = subprocess.run(
@@ -194,22 +196,6 @@ class DigestQueueTests(unittest.TestCase):
             )
             self.assertEqual(2, bad_id.returncode)
             self.assertIn("id must match", bad_id.stderr)
-            forced_send = subprocess.run(
-                [
-                    str(Path.home() / ".config/omo_manager/omo_digest_queue.py"),
-                    "--root",
-                    str(root),
-                    "deliver-once",
-                    "--now",
-                    "2026-05-25T15:00:00-07:00",
-                ],
-                text=True,
-                capture_output=True,
-                timeout=10,
-                check=False,
-            )
-            self.assertEqual(2, forced_send.returncode)
-            self.assertIn("--now is only allowed with --dry-run", forced_send.stderr)
             bad_max = subprocess.run(
                 [
                     str(Path.home() / ".config/omo_manager/omo_digest_queue.py"),

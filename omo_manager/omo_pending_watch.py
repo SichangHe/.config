@@ -17,6 +17,7 @@ def default_state_dir() -> Path:
 
 DEFAULT_ROOT = Path(os.environ.get("OMO_WORK_LOGS_ROOT", Path.home() / "work_logs"))
 DEFAULT_MANAGER_URL = os.environ.get("OMO_MANAGER_URL", "")
+DEFAULT_MANAGER_TARGET = os.environ.get("OMO_MANAGER_TMUX_TARGET", "")
 DEFAULT_STATE = Path(os.environ.get("OMO_MANAGER_PENDING_SEEN", default_state_dir() / "pending-seen.tsv"))
 PENDING_MARKERS = {"(pending)"}
 IGNORE_PARTS = {".git", ".venv", "__pycache__"}
@@ -39,6 +40,7 @@ class Args:
     full_scan_interval_s: float
     once: bool
     dry_run: bool
+    manager_target: str = ""
 
 
 @dataclass
@@ -49,6 +51,7 @@ class FileState:
 class ParsedArgs(argparse.Namespace):
     root: Path = DEFAULT_ROOT
     manager_url: str = DEFAULT_MANAGER_URL
+    manager_target: str = DEFAULT_MANAGER_TARGET
     state: Path = DEFAULT_STATE
     interval_s: float = 2.0
     full_scan_interval_s: float = 300.0
@@ -60,13 +63,14 @@ def parse_args(argv: list[str]) -> Args:
     parser = argparse.ArgumentParser(description=__doc__)
     _ = parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     _ = parser.add_argument("--manager-url", default=DEFAULT_MANAGER_URL)
+    _ = parser.add_argument("--manager-target", default=DEFAULT_MANAGER_TARGET)
     _ = parser.add_argument("--state", type=Path, default=DEFAULT_STATE)
     _ = parser.add_argument("--interval-s", type=float, default=2.0)
     _ = parser.add_argument("--full-scan-interval-s", type=float, default=300.0)
     _ = parser.add_argument("--once", action="store_true")
     _ = parser.add_argument("--dry-run", action="store_true")
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
-    return Args(parsed.root.resolve(), parsed.manager_url.rstrip("/"), parsed.state, parsed.interval_s, parsed.full_scan_interval_s, parsed.once, parsed.dry_run)
+    return Args(parsed.root.resolve(), parsed.manager_url.rstrip("/"), parsed.state, parsed.interval_s, parsed.full_scan_interval_s, parsed.once, parsed.dry_run, parsed.manager_target)
 
 
 def load_seen(path: Path) -> dict[str, float]:
@@ -164,10 +168,15 @@ def push_ref(args: Args, marker: Marker) -> int:
     if args.dry_run:
         print(text)
         return 0
-    if not args.manager_url:
-        print("omo_pending_watch: --manager-url is required outside --dry-run", file=sys.stderr)
+    if not args.manager_url and not args.manager_target:
+        print("omo_pending_watch: --manager-target or --manager-url is required outside --dry-run", file=sys.stderr)
         return 1
-    return subprocess.run([str(Path.home() / ".config/omo_manager/omo_push_to_manager.py"), text, "--manager-url", args.manager_url, "--root", str(args.root), "--submit"], check=False).returncode
+    command = ["omo_push_to_manager.py", text, "--root", str(args.root), "--submit"]
+    if args.manager_target:
+        command.extend(["--manager-target", args.manager_target])
+    if args.manager_url:
+        command.extend(["--manager-url", args.manager_url])
+    return subprocess.run(command, check=False).returncode
 
 
 def expire_seen(seen: dict[str, float], now_s: float) -> dict[str, float]:

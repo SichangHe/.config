@@ -293,27 +293,18 @@ def command_submit(args: argparse.Namespace) -> int:
 
 def command_deliver(args: argparse.Namespace) -> int:
     path = queue_path(args.root, args.queue_file)
-    if args.now and not args.dry_run:
-        print("--now is only allowed with --dry-run", file=sys.stderr)
-        return 2
     if args.max_items < 1:
         print("--max-items must be >= 1", file=sys.stderr)
         return 2
-    current_time = parse_iso(args.now) if args.now else now_local()
-    if current_time is None:
-        print("invalid --now timestamp", file=sys.stderr)
-        return 2
-    mail_dir = args.mail_dir if args.mail_dir is not None else args.root / "manager_mail"
     path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path(path).open("w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         ensure_header(path)
         items = parse_items(read_text(path))
-        decision = decide_delivery(mail_dir, args.state_dir, items, current_time, args.min_human_inbound_idle_min, args.min_manager_outbound_idle_min, args.min_delivery_gap_min)
-        if not decision.eligible:
-            print("not eligible: " + ", ".join(decision.reasons))
-            return 0
         queued = [item for item in items if item.status == "queued"][: args.max_items]
+        if not queued:
+            print("not eligible: no-queued-items")
+            return 0
         body = render_digest(queued)
         if args.dry_run:
             print(body, end="")
@@ -349,16 +340,16 @@ def build_parser() -> argparse.ArgumentParser:
     submit.add_argument("--summary-file")
     submit.add_argument("--id", default="")
     deliver = sub.add_parser("deliver-once")
-    deliver.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR)
-    deliver.add_argument("--mail-dir", type=Path, default=Path(DEFAULT_MAIL_DIR) if DEFAULT_MAIL_DIR else None)
+    deliver.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR, help=argparse.SUPPRESS)
+    deliver.add_argument("--mail-dir", type=Path, default=Path(DEFAULT_MAIL_DIR) if DEFAULT_MAIL_DIR else None, help=argparse.SUPPRESS)
     deliver.add_argument("--send-helper", type=Path, default=DEFAULT_SEND_HELPER)
     deliver.add_argument("--subject", default="[omo_manager] Non-urgent news digest")
     deliver.add_argument("--max-items", type=int, default=5)
-    deliver.add_argument("--min-human-inbound-idle-min", type=int, default=90)
-    deliver.add_argument("--min-manager-outbound-idle-min", type=int, default=120)
-    deliver.add_argument("--min-delivery-gap-min", type=int, default=240)
+    deliver.add_argument("--min-human-inbound-idle-min", type=int, default=90, help=argparse.SUPPRESS)
+    deliver.add_argument("--min-manager-outbound-idle-min", type=int, default=120, help=argparse.SUPPRESS)
+    deliver.add_argument("--min-delivery-gap-min", type=int, default=240, help=argparse.SUPPRESS)
     deliver.add_argument("--dry-run", action="store_true")
-    deliver.add_argument("--now", default="", help="ISO timestamp override for deterministic checks.")
+    deliver.add_argument("--now", default="", help=argparse.SUPPRESS)
     return parser
 
 

@@ -26,12 +26,62 @@ esac
 if [ ! -f "$message_file" ]; then echo "message file not found" >&2; exit 2; fi
 email_helper="$HOME/.config/helper.sh/email_me.py"
 if [ ! -x "$email_helper" ]; then echo "email helper not executable: $email_helper" >&2; exit 2; fi
+state_dir="${OMO_MANAGER_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/omo-manager}"
+dedupe_s="${OMO_MANAGER_EMAIL_DEDUPE_S:-300}"
+dedupe_result=$(
+  { python3 - "$state_dir" "$subject" "$message_file" "$dedupe_s" <<'PY'
+from __future__ import annotations
+from pathlib import Path
+import fcntl
+import hashlib
+import os
+import sys
+import time
+
+state_dir = Path(sys.argv[1])
+subject = sys.argv[2].replace("\t", " ").replace("\n", " ")
+message_file = Path(sys.argv[3])
+dedupe_s = int(sys.argv[4])
+state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+state_dir.chmod(0o700)
+dedupe_file = state_dir / "human-email-dedupe.tsv"
+lock_file = state_dir / "human-email-dedupe.lock"
+body = message_file.read_bytes()
+digest = hashlib.sha256(subject.encode() + b"\0" + body).hexdigest()
+now_s = int(time.time())
+fd = os.open(lock_file, os.O_RDWR | os.O_CREAT, 0o600)
+with os.fdopen(fd, "r+", encoding="utf-8") as lock:
+    fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+    rows: list[tuple[int, str, str]] = []
+    try:
+        for line in dedupe_file.read_text(encoding="utf-8").splitlines():
+            raw_s, old_digest, old_subject = line.split("\t", 2)
+            sent_s = int(raw_s)
+            if now_s - sent_s <= max(dedupe_s, 0):
+                rows.append((sent_s, old_digest, old_subject))
+    except OSError:
+        pass
+    if any(old_digest == digest for _, old_digest, _ in rows):
+        print("duplicate")
+    else:
+        rows.append((now_s, digest, subject))
+        tmp = dedupe_file.with_name(f".{dedupe_file.name}.tmp")
+        tmp.write_text("".join(f"{sent_s}\t{old_digest}\t{old_subject}\n" for sent_s, old_digest, old_subject in rows), encoding="utf-8")
+        tmp.chmod(0o600)
+        tmp.replace(dedupe_file)
+        print("send")
+PY
+  } || printf send
+)
+if [ "$dedupe_result" = "duplicate" ]; then
+  printf 'Skipped duplicate human email\n'
+  exit 0
+fi
 body_file=$(mktemp /tmp/omo-human-email.XXXXXX)
 cleanup() { rm -f "$body_file"; }
 trap cleanup EXIT
 cat "$message_file" >"$body_file"
 "$email_helper" "$subject" "$(cat "$body_file")" >/dev/null
-state_dir="${OMO_MANAGER_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/omo-manager}"
 log_file="$state_dir/human-email-sent.tsv"
 {
   mkdir -p "$state_dir" && chmod 700 "$state_dir" 2>/dev/null || true
