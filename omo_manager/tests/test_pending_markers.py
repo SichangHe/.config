@@ -31,6 +31,33 @@ class PendingMarkerTests(unittest.TestCase):
             markers = find_markers(root, [root / "work_manager.md"])
             self.assertEqual(1, len(markers))
 
+    def test_email_pending_block_uses_configured_active_log(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            active_log = root / "work_manager_20260527.md"
+            mail = root / "manager_mail" / "4333.txt"
+            mail.parent.mkdir()
+            _ = mail.write_text("body\n", encoding="utf-8")
+            line = append_pending(root, mail, active_log)
+            self.assertEqual(line, existing_source_pending_line(root, mail, active_log))
+            self.assertFalse((root / "work_manager.md").exists())
+            text = active_log.read_text(encoding="utf-8")
+            self.assertIn("(from email manager_mail/4333.txt)", text)
+            markers = find_markers(root, [active_log])
+            self.assertEqual(1, len(markers))
+
+    def test_email_watcher_idle_wait_is_configurable(self) -> None:
+        from omo_manager.email_idle_watcher import parse_args
+
+        args = parse_args(["--root", "/tmp/root", "--idle-wait-s", "7.5", "--once"])
+        self.assertEqual(7.5, args.idle_wait_s)
+
+    def test_email_watcher_manager_file_is_configurable(self) -> None:
+        from omo_manager.email_idle_watcher import parse_args
+
+        args = parse_args(["--root", "/tmp/root", "--manager-file", "work_manager_20260527.md", "--once"])
+        self.assertEqual(Path("/tmp/root/work_manager_20260527.md"), args.manager_file)
+
     def test_write_mail_omits_redundant_self_headers(self) -> None:
         from email.message import EmailMessage
         from omo_manager.email_idle_watcher import Args as EmailArgs, write_mail
@@ -42,7 +69,7 @@ class PendingMarkerTests(unittest.TestCase):
             msg["Subject"] = "Re: [omo_manager] Update"
             msg["Date"] = "Mon, 25 May 2026 15:09:06 -0700"
             msg.set_content("body\n")
-            args = EmailArgs(root, "http://127.0.0.1:18790", root / "manager_mail", root / "state", True, "self@example.test", 900, Path("/bin/false"))
+            args = EmailArgs(root, "http://127.0.0.1:18790", root / "manager_mail", root / "state", root / "work_manager.md", True, "self@example.test", 900, Path("/bin/false"))
             path = write_mail(args, "4146", msg, str(msg["From"]), str(msg["Subject"]))
             text = path.read_text(encoding="utf-8")
             self.assertIn("Subject: Re: [omo_manager] Update\n", text)
@@ -162,6 +189,46 @@ class PendingMarkerTests(unittest.TestCase):
 
             with redirect_stdout(StringIO()):
                 self.assertTrue(scan_once(args, seen, [path]))
+
+    def test_omo_email_human_skips_duplicate_subject_body(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            helper_dir = home / ".config" / "helper.sh"
+            helper_dir.mkdir(parents=True)
+            helper = helper_dir / "email_me.py"
+            sent_log = Path(tmp) / "sent.log"
+            _ = helper.write_text(
+                "#!/usr/bin/env python3\n"
+                "from pathlib import Path\n"
+                "import os\n"
+                "import sys\n"
+                "Path(os.environ['SENT_LOG']).open('a', encoding='utf-8').write(sys.argv[1] + '\\n')\n",
+                encoding="utf-8",
+            )
+            helper.chmod(0o700)
+            msg = Path(tmp) / "msg.md"
+            _ = msg.write_text("same body\n", encoding="utf-8")
+            env = {
+                **os.environ,
+                "HOME": str(home),
+                "SENT_LOG": str(sent_log),
+                "OMO_MANAGER_STATE_DIR": str(Path(tmp) / "state"),
+                "OMO_MANAGER_EMAIL_DEDUPE_S": "300",
+            }
+            cmd = [
+                str(Path.home() / ".config/omo_manager/omo_email_human.sh"),
+                "--subject",
+                "Manager update",
+                "--message-file",
+                str(msg),
+            ]
+            first = subprocess.run(cmd, text=True, capture_output=True, timeout=10, env=env, check=False)
+            second = subprocess.run(cmd, text=True, capture_output=True, timeout=10, env=env, check=False)
+            self.assertEqual(0, first.returncode)
+            self.assertEqual("Emailed the human\n", first.stdout)
+            self.assertEqual(0, second.returncode)
+            self.assertEqual("Skipped duplicate human email\n", second.stdout)
+            self.assertEqual("[omo_manager] Manager update\n", sent_log.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

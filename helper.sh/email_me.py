@@ -19,6 +19,8 @@ from pathlib import Path
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 465
 ENV_FILE_PATH = Path.home() / ".config" / ".env"
+DIRECT_AGENT_PREFIX = "[omo]"
+PRESERVED_PREFIXES = ("[omo]", "[omo_manager]", "[omo_manager_recover]")
 
 
 @dataclass(frozen=True)
@@ -48,9 +50,21 @@ def parse_args(argv: list[str]) -> CliArgs:
     return CliArgs(title=title, content=content)
 
 
+def normalize_subject(title: str) -> str:
+    stripped = title.lstrip()
+    lowered = stripped.lower()
+    if lowered.startswith("re:"):
+        raise ValueError("Email subject must not start with `Re:`.")
+    if lowered.startswith(DIRECT_AGENT_PREFIX):
+        return f"{DIRECT_AGENT_PREFIX}{stripped[len(DIRECT_AGENT_PREFIX):]}"
+    if lowered.startswith(PRESERVED_PREFIXES[1:]):
+        return stripped
+    return f"{DIRECT_AGENT_PREFIX} {stripped}"
+
+
 def build_message(sender_email: str, title: str, content: str) -> EmailMessage:
     msg = EmailMessage()
-    msg.add_header("Subject", title)
+    msg.add_header("Subject", normalize_subject(title))
     msg.add_header("From", sender_email)
     msg.add_header("To", sender_email)
     msg.set_content(content)
@@ -130,9 +144,13 @@ def main(argv: list[str]) -> int:
         print("Invalid Gmail address format.", file=sys.stderr)
         return 2
 
-    msg = build_message(
-        sender_email=sender_email, title=args.title, content=args.content
-    )
+    try:
+        msg = build_message(
+            sender_email=sender_email, title=args.title, content=args.content
+        )
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
 
     try:
         ssl_context = ssl.create_default_context()
