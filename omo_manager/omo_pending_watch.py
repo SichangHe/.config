@@ -21,6 +21,7 @@ DEFAULT_MANAGER_TARGET = os.environ.get("OMO_MANAGER_TMUX_TARGET", "")
 DEFAULT_STATE = Path(os.environ.get("OMO_MANAGER_PENDING_SEEN", default_state_dir() / "pending-seen.tsv"))
 PENDING_MARKERS = {"(pending)"}
 ROUTED_PREFIXES = ("(manager handled:", "(manager routed:")
+EMAIL_SOURCE_PREFIXES = ("(from email ", "[source: email ")
 IGNORE_PARTS = {".git", ".venv", "__pycache__"}
 FENCE_PREFIXES = ("```", "~~~")
 
@@ -30,6 +31,15 @@ class Marker:
     file: Path
     line: int
     digest: str
+    source: str
+
+    @property
+    def ref(self) -> str:
+        return f"pending: file={self.file} line={self.line} source={self.source} action={self.action}"
+
+    @property
+    def action(self) -> str:
+        return "ack-human" if self.source == "email" else "no-human-ack"
 
 
 @dataclass(frozen=True)
@@ -138,6 +148,10 @@ def mtime_changed_markdown_files(root: Path, state: FileState) -> list[Path]:
     return changed
 
 
+def marker_source(next_line: str) -> str:
+    return "email" if next_line.startswith(EMAIL_SOURCE_PREFIXES) else "non-email"
+
+
 def find_markers(root: Path, files: list[Path]) -> list[Marker]:
     markers: list[Marker] = []
     for path in files:
@@ -162,12 +176,12 @@ def find_markers(root: Path, files: list[Path]) -> list[Marker]:
             if next_line.startswith(ROUTED_PREFIXES):
                 continue
             digest = hashlib.sha256(f"{rel}:{idx}:{next_line}".encode("utf-8")).hexdigest()[:16]
-            markers.append(Marker(file=rel, line=idx, digest=digest))
+            markers.append(Marker(file=rel, line=idx, digest=digest, source=marker_source(next_line)))
     return markers
 
 
 def push_ref(args: Args, marker: Marker) -> int:
-    text = f"pending: file={marker.file} line={marker.line}"
+    text = marker.ref
     if args.dry_run:
         print(text)
         return 0
