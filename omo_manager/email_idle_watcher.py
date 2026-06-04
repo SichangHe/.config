@@ -88,7 +88,7 @@ def parse_args(argv: list[str]) -> Args:
     parser.add_argument("--manager-url", default=DEFAULT_MANAGER_URL)
     parser.add_argument("--mail-dir", type=Path, default=DEFAULT_MAIL_DIR)
     parser.add_argument("--state-dir", type=Path, default=default_state_dir())
-    parser.add_argument("--manager-file", type=Path, default=Path(os.environ["OMO_MANAGER_ACTIVE_LOG"]) if "OMO_MANAGER_ACTIVE_LOG" in os.environ else None)
+    parser.add_argument("--manager-file", type=Path, default=None)
     parser.add_argument("--recovery-debounce-s", type=int, default=DEFAULT_RECOVERY_DEBOUNCE_S)
     parser.add_argument("--restart-script", type=Path, default=Path(os.environ.get("OMO_MANAGER_RECOVERY_RESTART_SCRIPT", Path.home() / ".config/omo_manager/omo_manager_restart.sh")))
     parser.add_argument("--idle-wait-s", type=float, default=DEFAULT_IDLE_WAIT_S, help="Maximum IMAP IDLE wait before polling again; lower values reduce perceived missed-email latency")
@@ -232,7 +232,7 @@ def email_source_lines(root: Path, txt_path: Path) -> tuple[str, str]:
 
 
 def existing_source_line(root: Path, txt_path: Path, manager_file: Path | None = None) -> int | None:
-    manager_file = manager_file or root / "work_manager.md"
+    manager_file = manager_file or dated_manager_file(root)
     if not manager_file.exists():
         return None
     source_lines = set(email_source_lines(root, txt_path))
@@ -244,7 +244,7 @@ def existing_source_line(root: Path, txt_path: Path, manager_file: Path | None =
 
 
 def existing_source_pending_line(root: Path, txt_path: Path, manager_file: Path | None = None) -> int | None:
-    manager_file = manager_file or root / "work_manager.md"
+    manager_file = manager_file or dated_manager_file(root)
     source_line = existing_source_line(root, txt_path, manager_file)
     if source_line is None or source_line <= 1:
         return None
@@ -256,7 +256,7 @@ def existing_source_pending_line(root: Path, txt_path: Path, manager_file: Path 
 
 
 def append_pending(root: Path, txt_path: Path, manager_file: Path | None = None) -> int:
-    manager_file = manager_file or root / "work_manager.md"
+    manager_file = manager_file or dated_manager_file(root)
     existing_line = existing_source_pending_line(root, txt_path, manager_file)
     if existing_line is not None:
         return existing_line
@@ -269,7 +269,7 @@ def append_pending(root: Path, txt_path: Path, manager_file: Path | None = None)
 
 
 def append_recovery_record(root: Path, txt_path: Path, summary: str, manager_file: Path | None = None) -> int:
-    manager_file = manager_file or root / "work_manager.md"
+    manager_file = manager_file or dated_manager_file(root)
     lines = manager_file.read_text(encoding="utf-8").splitlines() if manager_file.exists() else []
     line_no = len(lines) + 1
     stamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %z")

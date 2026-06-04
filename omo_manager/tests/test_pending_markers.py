@@ -11,7 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from omo_manager.email_idle_watcher import append_pending, existing_source_pending_line
+from omo_manager.email_idle_watcher import append_pending, dated_manager_file, existing_source_pending_line
 from omo_manager.omo_pending_watch import Args, find_markers
 
 
@@ -24,11 +24,12 @@ class PendingMarkerTests(unittest.TestCase):
             _ = mail.write_text("body\n", encoding="utf-8")
             line = append_pending(root, mail)
             self.assertEqual(line, existing_source_pending_line(root, mail))
-            text = (root / "work_manager.md").read_text(encoding="utf-8")
+            path = dated_manager_file(root)
+            text = path.read_text(encoding="utf-8")
             self.assertIn("(from email manager_mail/4002.txt)", text)
             self.assertNotIn("[source: email manager_mail/4002.txt]", text)
             self.assertNotIn("[summary: human reply to manager]", text)
-            markers = find_markers(root, [root / "work_manager.md"])
+            markers = find_markers(root, [path])
             self.assertEqual(1, len(markers))
 
     def test_email_pending_block_uses_configured_active_log(self) -> None:
@@ -58,6 +59,14 @@ class PendingMarkerTests(unittest.TestCase):
         args = parse_args(["--root", "/tmp/root", "--manager-file", "work_manager_20260527.md", "--once"])
         self.assertEqual(Path("/tmp/root/work_manager_20260527.md"), args.manager_file)
 
+    def test_email_watcher_ignores_legacy_active_log_env_by_default(self) -> None:
+        from unittest.mock import patch
+        from omo_manager.email_idle_watcher import parse_args
+
+        with patch.dict(os.environ, {"OMO_MANAGER_ACTIVE_LOG": "/tmp/root/work_manager.md"}):
+            args = parse_args(["--root", "/tmp/root", "--once"])
+        self.assertEqual(dated_manager_file(Path("/tmp/root")), args.manager_file)
+
     def test_write_mail_omits_redundant_self_headers(self) -> None:
         from email.message import EmailMessage
         from omo_manager.email_idle_watcher import Args as EmailArgs, write_mail
@@ -80,7 +89,7 @@ class PendingMarkerTests(unittest.TestCase):
     def test_legacy_email_source_block_is_delivered_by_pending_watch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            path = root / "work_manager.md"
+            path = dated_manager_file(root)
             _ = path.write_text("(pending)\n[source: email manager_mail/3979.txt]\n", encoding="utf-8")
             markers = find_markers(root, [path])
             self.assertEqual(1, len(markers))
@@ -181,7 +190,7 @@ class PendingMarkerTests(unittest.TestCase):
     def test_new_email_source_is_delivered_by_pending_watch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            path = root / "work_manager.md"
+            path = dated_manager_file(root)
             _ = path.write_text("(pending)\n(from email manager_mail/4002.txt)\n[source: email manager_mail/4002.txt]\n", encoding="utf-8")
             seen: dict[str, float] = {}
             args = Args(root=root, manager_url="", state=Path(tmp) / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, once=True, dry_run=True)
@@ -189,6 +198,12 @@ class PendingMarkerTests(unittest.TestCase):
 
             with redirect_stdout(StringIO()):
                 self.assertTrue(scan_once(args, seen, [path]))
+
+    def test_seen_pending_markers_do_not_expire_into_repush_loop(self) -> None:
+        from omo_manager.omo_pending_watch import expire_seen
+
+        seen = {"root:task.md:2:digest": 1.0}
+        self.assertEqual(seen, expire_seen(seen, 3601.0))
 
     def test_omo_email_human_skips_duplicate_subject_body(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

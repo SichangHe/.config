@@ -16,7 +16,6 @@ env_root="${OMO_WORK_LOGS_ROOT+x}${OMO_WORK_LOGS_ROOT-}"
 env_state_dir="${OMO_MANAGER_STATE_DIR+x}${OMO_MANAGER_STATE_DIR-}"
 env_pending_seen="${OMO_MANAGER_PENDING_SEEN+x}${OMO_MANAGER_PENDING_SEEN-}"
 env_mail_dir="${OMO_MANAGER_MAIL_DIR+x}${OMO_MANAGER_MAIL_DIR-}"
-env_active_log="${OMO_MANAGER_ACTIVE_LOG+x}${OMO_MANAGER_ACTIVE_LOG-}"
 env_email_enable="${OMO_MANAGER_ENABLE_EMAIL_WATCHER+x}${OMO_MANAGER_ENABLE_EMAIL_WATCHER-}"
 env_email_config="${OMO_EMAIL_CONFIG_PATH+x}${OMO_EMAIL_CONFIG_PATH-}"
 local_env="${OMO_MANAGER_LOCAL_ENV:-$HOME/.config/omo_manager/local.env}"
@@ -30,7 +29,6 @@ fi
 [ -n "$env_state_dir" ] && OMO_MANAGER_STATE_DIR="${env_state_dir#x}"
 [ -n "$env_pending_seen" ] && OMO_MANAGER_PENDING_SEEN="${env_pending_seen#x}"
 [ -n "$env_mail_dir" ] && OMO_MANAGER_MAIL_DIR="${env_mail_dir#x}"
-[ -n "$env_active_log" ] && OMO_MANAGER_ACTIVE_LOG="${env_active_log#x}"
 [ -n "$env_email_enable" ] && OMO_MANAGER_ENABLE_EMAIL_WATCHER="${env_email_enable#x}"
 [ -n "$env_email_config" ] && OMO_EMAIL_CONFIG_PATH="${env_email_config#x}"
 root="${OMO_WORK_LOGS_ROOT:-$HOME/work_logs}"
@@ -46,7 +44,7 @@ export OMO_MANAGER_PENDING_SEEN="$pending_seen"
 email_enable="${OMO_MANAGER_ENABLE_EMAIL_WATCHER:-auto}"
 email_config="${OMO_EMAIL_CONFIG_PATH:-$HOME/.config/himalaya/config.toml}"
 mail_dir="${OMO_MANAGER_MAIL_DIR:-$root/manager_mail}"
-active_log="${OMO_MANAGER_ACTIVE_LOG:-$root/work_manager_$(date +%F).md}"
+active_log="$root/work_manager_$(date +%F).md"
 export OMO_MANAGER_MAIL_DIR="$mail_dir"
 mkdir -p -m 700 "$state_dir"
 chmod 700 "$state_dir"
@@ -55,8 +53,8 @@ if [ -z "$manager_url" ] && [ -z "$manager_target" ]; then
   exit 2
 fi
 echo "manager_target=${manager_target:-unset} manager_url=${manager_url:-unset}"
-pkill -f "omo_pending_watch.py .*--root ${root}" >/dev/null 2>&1 || true
-pkill -f "email_idle_watcher.py .*--root ${root}" >/dev/null 2>&1 || true
+pkill -f "[o]mo_pending_watch.py .*--root ${root}" >/dev/null 2>&1 || true
+pkill -f "[e]mail_idle_watcher.py .*--root ${root}" >/dev/null 2>&1 || true
 rm -f "$pending_seen"
 pending_args=(--root "$root" --state "$pending_seen")
 [ -n "$manager_target" ] && pending_args+=(--manager-target "$manager_target")
@@ -81,9 +79,9 @@ else
   echo "skipped email watcher; set OMO_MANAGER_ENABLE_EMAIL_WATCHER=true and OMO_EMAIL_CONFIG_PATH to enable"
 fi
 sleep 0.2
-pgrep -f "omo_pending_watch.py .*--root ${root}" >/dev/null || { echo "pending watcher failed to stay running; see $state_dir/pending-watch.log" >&2; exit 1; }
+pgrep -f "[o]mo_pending_watch.py .*--root ${root}" >/dev/null || { echo "pending watcher failed to stay running; see $state_dir/pending-watch.log" >&2; exit 1; }
 if [ "$start_email" -eq 1 ]; then
-  if ! pgrep -f "email_idle_watcher.py .*--root ${root}" >/dev/null; then
+  if ! pgrep -f "[e]mail_idle_watcher.py .*--root ${root}" >/dev/null; then
     if [ "$email_enable" = "auto" ]; then
       echo "email watcher did not stay running in auto mode; continuing without it; see $state_dir/email-watch.log" >&2
     else
