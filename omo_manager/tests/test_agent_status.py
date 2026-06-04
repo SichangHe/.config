@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from omo_manager.omo_agent_status import Args, classify_task, load_task_state, parse_task_lines, registry_prune, session_records
+from omo_manager.omo_agent_status import Args, classify_task, load_local_env, load_task_state, parse_task_lines, registry_prune, session_records
 from omo_manager.omo_agent_status import SessionRecord, TaskLine
 from omo_manager.omo_codex_status import Report
 
@@ -56,6 +56,15 @@ class AgentStatusTests(unittest.TestCase):
             _ = path.write_text("current:\nloose.md cfg 1 (running)\n", encoding="utf-8")
             tasks = parse_task_lines(path, "todo")
             self.assertEqual("cfg:1", tasks[0].target)
+
+    def test_load_local_env_reads_work_logs_root_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            local_env = home / ".config" / "omo_manager" / "local.env"
+            local_env.parent.mkdir(parents=True)
+            _ = local_env.write_text('export OMO_WORK_LOGS_ROOT="/tmp/current-root"\n', encoding="utf-8")
+            with patch.dict("os.environ", {"HOME": str(home)}, clear=True):
+                self.assertEqual("/tmp/current-root", load_local_env()["OMO_WORK_LOGS_ROOT"])
 
     def test_session_records_reads_registry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

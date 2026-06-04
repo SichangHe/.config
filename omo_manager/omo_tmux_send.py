@@ -19,6 +19,11 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+try:
+    from omo_manager.omo_codex_status import current_block, status, tail
+except ModuleNotFoundError:
+    from omo_codex_status import current_block, status, tail
+
 
 @dataclass(frozen=True)
 class Args:
@@ -26,6 +31,7 @@ class Args:
     message_file: Path | None
     enter_count: int
     enter_delay_s: float
+    ready_timeout_s: float
     dry_run: bool
 
 
@@ -35,6 +41,7 @@ class ParsedArgs(argparse.Namespace):
     enter: bool = False
     enter_count: int = 1
     enter_delay_s: float = 0.15
+    ready_timeout_s: float = 0
     dry_run: bool = False
 
 
@@ -47,6 +54,7 @@ def parse_args(argv: list[str]) -> Args:
     _ = enter_group.add_argument("--no-enter", dest="enter", action="store_false", help="Paste only; default.")
     _ = parser.add_argument("--enter-count", type=int, default=1, help="Number of Enter keys to send when submitting; default: 1.")
     _ = parser.add_argument("--enter-delay-s", type=float, default=0.15, help="Delay between repeated Enter keys; default: 0.15.")
+    _ = parser.add_argument("--ready-timeout-s", type=float, default=0, help="When submitting to Codex, wait up to this many seconds for an idle input box before paste; default: 0.")
     _ = parser.add_argument("--dry-run", action="store_true", help="Validate inputs and print planned tmux actions without touching tmux.")
     parser.set_defaults(enter=False)
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
@@ -54,7 +62,9 @@ def parse_args(argv: list[str]) -> Args:
         parser.error("--enter-count must be positive.")
     if parsed.enter_delay_s < 0:
         parser.error("--enter-delay-s must be non-negative.")
-    return Args(parsed.target, parsed.message_file, parsed.enter_count if parsed.enter else 0, parsed.enter_delay_s, parsed.dry_run)
+    if parsed.ready_timeout_s < 0:
+        parser.error("--ready-timeout-s must be non-negative.")
+    return Args(parsed.target, parsed.message_file, parsed.enter_count if parsed.enter else 0, parsed.enter_delay_s, parsed.ready_timeout_s if parsed.enter else 0, parsed.dry_run)
 
 
 def read_message(args: Args) -> str:
@@ -78,6 +88,21 @@ def write_private_temp(message: str) -> Path:
     return path
 
 
+def wait_ready(args: Args) -> None:
+    if args.ready_timeout_s <= 0:
+        return
+    deadline_s = time.monotonic() + args.ready_timeout_s
+    last_status = "unknown"
+    while True:
+        lines = tail(args.target, 80)
+        last_status = status(lines, current_block(lines))
+        if last_status in {"ready", "not_codex"}:
+            return
+        if time.monotonic() >= deadline_s:
+            raise RuntimeError(f"target not ready after {args.ready_timeout_s:g}s: {last_status}")
+        time.sleep(min(0.5, max(0.05, deadline_s - time.monotonic())))
+
+
 def run_tmux(args: Args, message: str) -> None:
     temp_path = write_private_temp(message)
     buffer_name = f"omo-tmux-send-{os.getpid()}-{uuid.uuid4().hex}"
@@ -88,6 +113,7 @@ def run_tmux(args: Args, message: str) -> None:
             for _ in range(args.enter_count):
                 _ = print(f"would send Enter to {args.target}")
             return
+        wait_ready(args)
         _ = subprocess.run(["tmux", "load-buffer", "-b", buffer_name, str(temp_path)], timeout=5, check=True)
         _ = subprocess.run(["tmux", "paste-buffer", "-b", buffer_name, "-t", args.target], timeout=5, check=True)
         for idx in range(args.enter_count):

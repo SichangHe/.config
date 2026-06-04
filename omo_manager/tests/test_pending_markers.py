@@ -205,6 +205,13 @@ class PendingMarkerTests(unittest.TestCase):
         seen = {"root:task.md:2:digest": 1.0}
         self.assertEqual(seen, expire_seen(seen, 3601.0))
 
+    def test_manager_routed_pending_marker_is_not_redelivered(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "work_manager.md"
+            _ = path.write_text("(pending)\n(manager routed: to `task.md`.)\n(from email manager_mail/4480.txt)\n", encoding="utf-8")
+            self.assertEqual([], find_markers(root, [path]))
+
     def test_omo_email_human_skips_duplicate_subject_body(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"

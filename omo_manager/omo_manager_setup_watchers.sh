@@ -56,16 +56,23 @@ if [ -z "$manager_url" ] && [ -z "$manager_target" ]; then
   exit 2
 fi
 echo "manager_target=${manager_target:-unset} manager_url=${manager_url:-unset}"
+pkill -f "[p]ending-watch-supervisor .*--root ${root}" >/dev/null 2>&1 || true
 pkill -f "[o]mo_pending_watch.py .*--root ${root}" >/dev/null 2>&1 || true
 pkill -f "[e]mail_idle_watcher.py .*--root ${root}" >/dev/null 2>&1 || true
 pkill -f "[o]mo_stuck_watch.py .*--watch" >/dev/null 2>&1 || true
-rm -f "$pending_seen"
 pending_args=(--root "$root" --state "$pending_seen")
 [ -n "$manager_target" ] && pending_args+=(--manager-target "$manager_target")
 [ -n "$manager_url" ] && pending_args+=(--manager-url "$manager_url")
-setsid omo_pending_watch.py "${pending_args[@]}" >"$state_dir/pending-watch.log" 2>&1 &
+setsid bash -c '
+while :; do
+  "$@"
+  st=$?
+  printf "%s pending watcher exited status=%s; restarting in 5s\n" "$(date "+%Y-%m-%d %H:%M:%S %z")" "$st" >&2
+  sleep 5
+done
+' pending-watch-supervisor omo_pending_watch.py "${pending_args[@]}" >"$state_dir/pending-watch.log" 2>&1 &
 pending_pid=$!
-echo "started pending watcher pid=$pending_pid log=$state_dir/pending-watch.log"
+echo "started pending watcher supervisor pid=$pending_pid log=$state_dir/pending-watch.log"
 stuck_pid=""
 case "$stuck_enable" in
   1|true|yes)

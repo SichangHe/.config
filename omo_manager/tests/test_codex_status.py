@@ -16,6 +16,14 @@ class CodexStatusTests(unittest.TestCase):
         lines = ['────', 'done', '─ Worked for 1s ─', '  gpt-5.5']
         self.assertEqual('ready', status(lines, current_block(lines)))
 
+    def test_status_ready_from_idle_input_footer(self) -> None:
+        lines = ['────', 'done', '› Use /skills to list available skills', '  gpt-5.5']
+        self.assertEqual('ready', status(lines, current_block(lines)))
+
+    def test_status_running_when_message_is_queued(self) -> None:
+        lines = ['• Messages to be submitted after next tool call (press esc to interrupt and send immediately)', '› Use /skills to list available skills', '  gpt-5.5']
+        self.assertEqual('running', status(lines, current_block(lines)))
+
     def test_status_running_without_worked_footer(self) -> None:
         lines = ['working', '  gpt-5.5']
         self.assertEqual('running', status(lines, current_block(lines)))

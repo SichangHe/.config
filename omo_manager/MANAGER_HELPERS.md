@@ -21,7 +21,7 @@ printf '%s\n' 'literal text with $HOME, `backticks`, quotes, and C-c' \
 omo_tmux_send.py --target cfg:1.0 --message-file /tmp/instruction.md --enter
 ```
 
-It reads stdin or `--message-file`, writes the payload to a private `0600` temp file, loads that file into a tmux buffer, pastes the buffer to the target, and only uses `send-keys` for optional final Enter keys. `--enter-count N` supports repeated submit keys for TUIs such as Codex that can leave pasted prompts queued during busy/idle transitions. `omo_dispatch.sh --tmux-target TARGET` uses this helper for normal prompt dispatch and defaults submitted tmux dispatches to two Enter keys; override with `OMO_DISPATCH_TMUX_ENTER_COUNT`.
+It reads stdin or `--message-file`, writes the payload to a private `0600` temp file, loads that file into a tmux buffer, pastes the buffer to the target, and only uses `send-keys` for optional final Enter keys. `--ready-timeout-s N` waits for a Codex idle input box before submitted paste, preventing Codex from queueing dispatch text as `Messages to be submitted after next tool call`. `--enter-count N` supports repeated submit keys. `omo_dispatch.sh --tmux-target TARGET` uses this helper for normal prompt dispatch, defaults submitted tmux dispatches to two Enter keys, and waits up to `OMO_DISPATCH_TMUX_READY_TIMEOUT_S` seconds, default `300`; override Enter count with `OMO_DISPATCH_TMUX_ENTER_COUNT`.
 
 Dispatch rule: send prompts through the visible tmux pane and verify with manager-owned status helpers when needed. Tmux delivery is the common path; helper internals must not make manager docs depend on tool-specific transport details.
 

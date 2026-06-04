@@ -12,6 +12,8 @@ CODEX_RE = re.compile(r"  gpt-")
 ERROR_RE = re.compile(r"\b(error|failed|panic|traceback|exception)\b", re.IGNORECASE)
 SEP_RE = re.compile(r"^─+$")
 WORKED_RE = re.compile(r"^─ Worked for .+ ─+$")
+READY_RE = re.compile(r"^› Use /skills to list available skills$")
+BUSY_RE = re.compile(r"^• (?:Working|Messages to be submitted after next tool call)\b")
 
 
 @dataclass(frozen=True)
@@ -85,7 +87,11 @@ def status(lines: list[str], block: Block) -> str:
     text = "\n".join(block.lines or lines[-20:])
     if ERROR_RE.search(text) is not None:
         return "error"
-    return "ready" if block.has_footer else "running"
+    if any(BUSY_RE.search(line) is not None for line in lines[-20:]):
+        return "running"
+    if block.has_footer or any(READY_RE.match(line) is not None for line in lines[-10:]):
+        return "ready"
+    return "running"
 
 
 def inspect(args: Args) -> Report:

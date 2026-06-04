@@ -6,6 +6,7 @@ import argparse
 import os
 import re
 import shutil
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,8 +24,27 @@ def default_state_dir() -> Path:
     return Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "omo-manager"
 
 
-DEFAULT_ROOT = Path(os.environ.get("OMO_WORK_LOGS_ROOT", Path.home() / "work_logs"))
-DEFAULT_REGISTRY = Path(os.environ.get("OMO_MANAGER_SESSION_REGISTRY", default_state_dir() / "sessions.json"))
+def load_local_env() -> dict[str, str]:
+    env = dict(os.environ)
+    local_env = Path(env.get("OMO_MANAGER_LOCAL_ENV", Path.home() / ".config" / "omo_manager" / "local.env"))
+    if not local_env.is_file():
+        return env
+    loaded = subprocess.run(["bash", "-c", 'set -a; source "$1"; env -0', "bash", str(local_env)], capture_output=True, timeout=10, check=False)
+    if loaded.returncode != 0:
+        return env
+    for item in loaded.stdout.split(b"\0"):
+        if not item or b"=" not in item:
+            continue
+        raw_key, raw_value = item.split(b"=", 1)
+        key = raw_key.decode(errors="ignore")
+        if key and key not in os.environ:
+            env[key] = raw_value.decode(errors="surrogateescape")
+    return env
+
+
+LOCAL_ENV = load_local_env()
+DEFAULT_ROOT = Path(LOCAL_ENV.get("OMO_WORK_LOGS_ROOT", str(Path.home() / "work_logs")))
+DEFAULT_REGISTRY = Path(LOCAL_ENV.get("OMO_MANAGER_SESSION_REGISTRY", str(default_state_dir() / "sessions.json")))
 TASK_RE = re.compile(r"`?([A-Za-z0-9_.-]+\.md)`?")
 TARGET_RE = re.compile(r"\b([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\b")
 LOOSE_TARGET_RE = re.compile(r"\b([a-z][A-Za-z0-9_-]*)\s+(\d+)\b")

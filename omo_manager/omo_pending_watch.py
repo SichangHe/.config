@@ -20,6 +20,7 @@ DEFAULT_MANAGER_URL = os.environ.get("OMO_MANAGER_URL", "")
 DEFAULT_MANAGER_TARGET = os.environ.get("OMO_MANAGER_TMUX_TARGET", "")
 DEFAULT_STATE = Path(os.environ.get("OMO_MANAGER_PENDING_SEEN", default_state_dir() / "pending-seen.tsv"))
 PENDING_MARKERS = {"(pending)"}
+ROUTED_PREFIXES = ("(manager handled:", "(manager routed:")
 IGNORE_PARTS = {".git", ".venv", "__pycache__"}
 FENCE_PREFIXES = ("```", "~~~")
 
@@ -158,6 +159,8 @@ def find_markers(root: Path, files: list[Path]) -> list[Marker]:
                 continue
             next_line = lines[idx].strip() if idx < len(lines) else ""
             rel = path.relative_to(root)
+            if next_line.startswith(ROUTED_PREFIXES):
+                continue
             digest = hashlib.sha256(f"{rel}:{idx}:{next_line}".encode("utf-8")).hexdigest()[:16]
             markers.append(Marker(file=rel, line=idx, digest=digest))
     return markers
