@@ -14,6 +14,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,7 +24,8 @@ from pathlib import Path
 class Args:
     target: str
     message_file: Path | None
-    enter: bool
+    enter_count: int
+    enter_delay_s: float
     dry_run: bool
 
 
@@ -31,6 +33,8 @@ class ParsedArgs(argparse.Namespace):
     target: str = ""
     message_file: Path | None = None
     enter: bool = False
+    enter_count: int = 1
+    enter_delay_s: float = 0.15
     dry_run: bool = False
 
 
@@ -41,10 +45,16 @@ def parse_args(argv: list[str]) -> Args:
     enter_group = parser.add_mutually_exclusive_group()
     _ = enter_group.add_argument("--enter", dest="enter", action="store_true", help="Send Enter after pasting.")
     _ = enter_group.add_argument("--no-enter", dest="enter", action="store_false", help="Paste only; default.")
+    _ = parser.add_argument("--enter-count", type=int, default=1, help="Number of Enter keys to send when submitting; default: 1.")
+    _ = parser.add_argument("--enter-delay-s", type=float, default=0.15, help="Delay between repeated Enter keys; default: 0.15.")
     _ = parser.add_argument("--dry-run", action="store_true", help="Validate inputs and print planned tmux actions without touching tmux.")
     parser.set_defaults(enter=False)
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
-    return Args(parsed.target, parsed.message_file, parsed.enter, parsed.dry_run)
+    if parsed.enter_count < 1:
+        parser.error("--enter-count must be positive.")
+    if parsed.enter_delay_s < 0:
+        parser.error("--enter-delay-s must be non-negative.")
+    return Args(parsed.target, parsed.message_file, parsed.enter_count if parsed.enter else 0, parsed.enter_delay_s, parsed.dry_run)
 
 
 def read_message(args: Args) -> str:
@@ -75,12 +85,14 @@ def run_tmux(args: Args, message: str) -> None:
         if args.dry_run:
             _ = print(f"would load tmux buffer {buffer_name} from {temp_path}")
             _ = print(f"would paste buffer {buffer_name} to {args.target}")
-            if args.enter:
+            for _ in range(args.enter_count):
                 _ = print(f"would send Enter to {args.target}")
             return
         _ = subprocess.run(["tmux", "load-buffer", "-b", buffer_name, str(temp_path)], timeout=5, check=True)
         _ = subprocess.run(["tmux", "paste-buffer", "-b", buffer_name, "-t", args.target], timeout=5, check=True)
-        if args.enter:
+        for idx in range(args.enter_count):
+            if idx:
+                time.sleep(args.enter_delay_s)
             _ = subprocess.run(["tmux", "send-keys", "-t", args.target, "Enter"], timeout=5, check=True)
     finally:
         temp_path.unlink(missing_ok=True)
