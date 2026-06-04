@@ -1,3 +1,4 @@
+import hashlib
 import os
 import stat
 import subprocess
@@ -6,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from omo_manager.omo_tmux_send import Args, parse_args, read_message, run_tmux, wait_ready, write_private_temp
+from omo_manager.omo_tmux_send import Args, parse_args, pending_marker_present, read_message, run_tmux, wait_ready, write_private_temp
 
 
 class TmuxSendTests(unittest.TestCase):
@@ -30,6 +31,35 @@ class TmuxSendTests(unittest.TestCase):
         self.assertEqual(0, parse_args(["--target", "cfg:1.0", "--enter-count", "2"]).enter_count)
         self.assertEqual(3, parse_args(["--target", "cfg:1.0", "--enter", "--ready-timeout-s", "3"]).ready_timeout_s)
         self.assertEqual(0, parse_args(["--target", "cfg:1.0", "--ready-timeout-s", "3"]).ready_timeout_s)
+
+    def test_pending_guard_rechecks_after_ready_wait_before_paste(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_wait(args: Args) -> None:
+            assert args.pending_root is not None and args.pending_file is not None
+            (args.pending_root / args.pending_file).write_text("(manager handled: done.)\nsource\n", encoding="utf-8")
+
+        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        with tempfile.TemporaryDirectory() as tmp, patch("omo_manager.omo_tmux_send.wait_ready", side_effect=fake_wait), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
+            root = Path(tmp)
+            path = root / "task.md"
+            path.write_text("(pending)\nsource\n", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "pending marker cleared"):
+                run_tmux(Args("cfg:1.0", None, 1, 0.15, 10, False, root, Path("task.md"), 1, ""), "pending: file=task.md line=1")
+
+        self.assertEqual([], [call for call in calls if call[:2] != ["tmux", "delete-buffer"]])
+
+    def test_pending_guard_matches_digest_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            path.write_text("(pending)\nsource\n", encoding="utf-8")
+            digest = hashlib.sha256("task.md:1:source".encode("utf-8")).hexdigest()[:16]
+            self.assertTrue(pending_marker_present(Args("cfg:1.0", None, 0, 0.15, 0, False, root, Path("task.md"), 1, digest)))
+            self.assertFalse(pending_marker_present(Args("cfg:1.0", None, 0, 0.15, 0, False, root, Path("task.md"), 1, "bad")))
 
     def test_run_tmux_uses_buffer_and_enter_without_message_send_keys(self) -> None:
         calls: list[list[str]] = []

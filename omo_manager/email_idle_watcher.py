@@ -278,6 +278,7 @@ def push_email_ref(args: Args, line_no: int) -> bool:
         return False
     ref = args.manager_file.relative_to(args.root) if args.manager_file.is_relative_to(args.root) else args.manager_file
     command = ["omo_push_to_manager.py", f"pending: file={ref} line={line_no}", "--root", str(args.root), "--submit"]
+    command.extend(["--pending-file", str(ref), "--pending-line", str(line_no)])
     if args.manager_target:
         command.extend(["--manager-target", args.manager_target])
     if args.manager_url:

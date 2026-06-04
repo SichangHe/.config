@@ -27,6 +27,22 @@ class PushToManagerTests(unittest.TestCase):
         self.assertEqual("2", calls[0][calls[0].index("--enter-count") + 1])
         self.assertEqual("300.0", calls[0][calls[0].index("--ready-timeout-s") + 1])
 
+    def test_tmux_pending_guard_is_forwarded_to_sender(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        with tempfile.TemporaryDirectory() as tmp, patch("omo_manager.omo_push_to_manager.subprocess.run", side_effect=fake_run):
+            push_tmux(Args("pending: file=x.md line=1", "", "wl:1.0", Path(tmp), True, 5, Path("x.md"), 1, "abc"))
+
+        self.assertIn("--pending-root", calls[0])
+        self.assertEqual(str(Path(tmp)), calls[0][calls[0].index("--pending-root") + 1])
+        self.assertEqual("x.md", calls[0][calls[0].index("--pending-file") + 1])
+        self.assertEqual("1", calls[0][calls[0].index("--pending-line") + 1])
+        self.assertEqual("abc", calls[0][calls[0].index("--pending-digest") + 1])
+
 
 if __name__ == "__main__":
     unittest.main()

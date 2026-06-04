@@ -10,6 +10,7 @@ tokens specially and requires callers to get shell quoting exactly right.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import subprocess
 import sys
@@ -33,6 +34,10 @@ class Args:
     enter_delay_s: float
     ready_timeout_s: float
     dry_run: bool
+    pending_root: Path | None = None
+    pending_file: Path | None = None
+    pending_line: int = 0
+    pending_digest: str = ""
 
 
 class ParsedArgs(argparse.Namespace):
@@ -43,6 +48,10 @@ class ParsedArgs(argparse.Namespace):
     enter_delay_s: float = 0.15
     ready_timeout_s: float = 0
     dry_run: bool = False
+    pending_root: Path | None = None
+    pending_file: Path | None = None
+    pending_line: int = 0
+    pending_digest: str = ""
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -56,6 +65,10 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--enter-delay-s", type=float, default=0.15, help="Delay between repeated Enter keys; default: 0.15.")
     _ = parser.add_argument("--ready-timeout-s", type=float, default=0, help="When submitting to Codex, wait up to this many seconds for an idle input box before paste; default: 0.")
     _ = parser.add_argument("--dry-run", action="store_true", help="Validate inputs and print planned tmux actions without touching tmux.")
+    _ = parser.add_argument("--pending-root", type=Path, help="Skip paste unless the pending marker still exists under this root.")
+    _ = parser.add_argument("--pending-file", type=Path, help="Root-relative pending marker file.")
+    _ = parser.add_argument("--pending-line", type=int, default=0, help="One-based pending marker line.")
+    _ = parser.add_argument("--pending-digest", default="", help="Optional digest of the marker context.")
     parser.set_defaults(enter=False)
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     if parsed.enter_count < 1:
@@ -64,7 +77,9 @@ def parse_args(argv: list[str]) -> Args:
         parser.error("--enter-delay-s must be non-negative.")
     if parsed.ready_timeout_s < 0:
         parser.error("--ready-timeout-s must be non-negative.")
-    return Args(parsed.target, parsed.message_file, parsed.enter_count if parsed.enter else 0, parsed.enter_delay_s, parsed.ready_timeout_s if parsed.enter else 0, parsed.dry_run)
+    if any((parsed.pending_root, parsed.pending_file, parsed.pending_line)) and not all((parsed.pending_root, parsed.pending_file, parsed.pending_line > 0)):
+        parser.error("--pending-root, --pending-file, and --pending-line must be passed together.")
+    return Args(parsed.target, parsed.message_file, parsed.enter_count if parsed.enter else 0, parsed.enter_delay_s, parsed.ready_timeout_s if parsed.enter else 0, parsed.dry_run, parsed.pending_root, parsed.pending_file, parsed.pending_line, parsed.pending_digest)
 
 
 def read_message(args: Args) -> str:
@@ -103,6 +118,24 @@ def wait_ready(args: Args) -> None:
         time.sleep(min(0.5, max(0.05, deadline_s - time.monotonic())))
 
 
+def pending_marker_present(args: Args) -> bool:
+    if args.pending_root is None or args.pending_file is None:
+        return True
+    path = args.pending_root / args.pending_file
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    idx = args.pending_line - 1
+    if idx < 0 or idx >= len(lines) or lines[idx].strip() != "(pending)":
+        return False
+    if not args.pending_digest:
+        return True
+    next_line = lines[idx + 1].strip() if idx + 1 < len(lines) else ""
+    digest = hashlib.sha256(f"{args.pending_file}:{args.pending_line}:{next_line}".encode("utf-8")).hexdigest()[:16]
+    return digest == args.pending_digest
+
+
 def run_tmux(args: Args, message: str) -> None:
     temp_path = write_private_temp(message)
     buffer_name = f"omo-tmux-send-{os.getpid()}-{uuid.uuid4().hex}"
@@ -114,6 +147,8 @@ def run_tmux(args: Args, message: str) -> None:
                 _ = print(f"would send Enter to {args.target}")
             return
         wait_ready(args)
+        if not pending_marker_present(args):
+            raise RuntimeError("pending marker cleared before tmux paste")
         if args.enter_count:
             _ = subprocess.run(["tmux", "send-keys", "-t", args.target, "C-u"], timeout=5, check=True)
         _ = subprocess.run(["tmux", "load-buffer", "-b", buffer_name, str(temp_path)], timeout=5, check=True)

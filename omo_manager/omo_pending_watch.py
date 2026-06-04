@@ -175,6 +175,7 @@ def push_ref(args: Args, marker: Marker) -> int:
         print("omo_pending_watch: --manager-target or --manager-url is required outside --dry-run", file=sys.stderr)
         return 1
     command = ["omo_push_to_manager.py", text, "--root", str(args.root), "--submit"]
+    command.extend(["--pending-file", str(marker.file), "--pending-line", str(marker.line), "--pending-digest", marker.digest])
     if args.manager_target:
         command.extend(["--manager-target", args.manager_target])
     if args.manager_url:

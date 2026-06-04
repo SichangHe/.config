@@ -28,6 +28,9 @@ class Args:
     root: Path
     submit: bool
     timeout_s: float
+    pending_file: Path | None = None
+    pending_line: int = 0
+    pending_digest: str = ''
 
 
 class ParsedArgs(argparse.Namespace):
@@ -37,6 +40,9 @@ class ParsedArgs(argparse.Namespace):
     root: Path = DEFAULT_ROOT
     submit: bool = False
     timeout_s: float = 5.0
+    pending_file: Path | None = None
+    pending_line: int = 0
+    pending_digest: str = ''
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -47,6 +53,9 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument('--root', type=Path, default=DEFAULT_ROOT)
     _ = parser.add_argument('--submit', action='store_true', help='Submit the manager prompt after append.')
     _ = parser.add_argument('--timeout-s', type=float, default=5.0)
+    _ = parser.add_argument('--pending-file', type=Path, help='Root-relative pending marker file; validates before delivery.')
+    _ = parser.add_argument('--pending-line', type=int, default=0, help='One-based pending marker line; validates before delivery.')
+    _ = parser.add_argument('--pending-digest', default='', help='Optional digest of the marker context.')
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     text = parsed.text.strip()
     if not text:
@@ -55,7 +64,9 @@ def parse_args(argv: list[str]) -> Args:
     manager_target = parsed.manager_target.strip()
     if not manager_url and not manager_target:
         parser.error('--manager-target or --manager-url is required.')
-    return Args(text, manager_url, manager_target, parsed.root, parsed.submit, parsed.timeout_s)
+    if (parsed.pending_file is None) != (parsed.pending_line <= 0):
+        parser.error('--pending-file and --pending-line must be passed together.')
+    return Args(text, manager_url, manager_target, parsed.root, parsed.submit, parsed.timeout_s, parsed.pending_file, parsed.pending_line, parsed.pending_digest.strip())
 
 
 def post_json(url: str, payload: object, timeout_s: float) -> None:
@@ -92,6 +103,10 @@ def push_tmux(args: Args) -> None:
         command = ['omo_tmux_send.py', '--target', args.manager_target, '--message-file', str(path)]
         if args.submit:
             command.extend(['--enter', '--enter-count', str(DEFAULT_TMUX_ENTER_COUNT), '--ready-timeout-s', str(DEFAULT_TMUX_READY_TIMEOUT_S)])
+        if args.pending_file is not None:
+            command.extend(['--pending-root', str(args.root), '--pending-file', str(args.pending_file), '--pending-line', str(args.pending_line)])
+            if args.pending_digest:
+                command.extend(['--pending-digest', args.pending_digest])
         timeout_s = max(args.timeout_s, DEFAULT_TMUX_READY_TIMEOUT_S + 10) if args.submit else args.timeout_s
         _ = subprocess.run(command, timeout=timeout_s, check=True)
     finally:
