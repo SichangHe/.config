@@ -20,7 +20,7 @@ message:
 
 The parenthesized `(from ...)` line is the human-readable source marker. Helpers may add extra metadata lines after it, but must not weaken sender checks, recovery-email checks, or duplicate/idempotency protections. Direct manager pushes are reserved for concrete reliability exceptions where Markdown plus watcher cannot work; document the exact exception before using one. Agent report helpers should not append a second unresolved pending block with the same agent, status, and message hash.
 
-Manager prompt refs include `source=email action=ack-human` for email-origin pending blocks and `source=non-email action=no-human-ack` otherwise. Only `source=email` refs require human acknowledgment. `source=non-email` refs are worker/agent/bookkeeping work: route, update Markdown, or follow up with the worker silently unless the block itself requires a human-facing answer/status.
+Manager prompt refs include `source=email action=ack-human` for email-origin pending blocks and `source=non-email action=no-human-ack` otherwise. Only `source=email` refs require human acknowledgment. `source=non-email` refs are worker/agent/bookkeeping work: route, update Markdown, or follow up with the worker silently unless the block itself requires a human-facing answer/status. When emailing the human, describe the actual request, decision, or task in plain words; file paths, mail UIDs, and line numbers are source refs, not descriptions.
 
 For tmux fallback/recovery, use `omo_tmux_send.py --target TARGET [--message-file FILE] [--enter]` instead of manually escaping arbitrary prompt text for `tmux send-keys`. The helper pastes via a private `0600` temp file and tmux buffer, so shell metacharacters and tmux key names inside the message remain literal.
 
