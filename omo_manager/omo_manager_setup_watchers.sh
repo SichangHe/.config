@@ -95,6 +95,7 @@ if [ "$start_email" -eq 1 ]; then
   chmod 700 "$mail_dir"
   email_args=(--root "$root" --mail-dir "$mail_dir" --state-dir "$state_dir" --manager-file "$active_log")
   [ -n "$manager_url" ] && email_args+=(--manager-url "$manager_url")
+  [ -n "$manager_target" ] && email_args+=(--manager-target "$manager_target")
   setsid email_idle_watcher.py "${email_args[@]}" >"$state_dir/email-watch.log" 2>&1 &
   email_pid=$!
   echo "started email watcher pid=$email_pid log=$state_dir/email-watch.log mail_dir=$mail_dir"

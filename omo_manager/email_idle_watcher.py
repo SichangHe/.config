@@ -32,6 +32,7 @@ def dated_manager_file(root: Path) -> Path:
 
 DEFAULT_ROOT = Path(os.environ.get("OMO_WORK_LOGS_ROOT", Path.home() / "work_logs"))
 DEFAULT_MANAGER_URL = os.environ.get("OMO_MANAGER_URL", "http://127.0.0.1:18790")
+DEFAULT_MANAGER_TARGET = os.environ.get("OMO_MANAGER_TMUX_TARGET", "")
 DEFAULT_MAIL_DIR = Path(os.environ.get("OMO_MANAGER_MAIL_DIR", DEFAULT_ROOT / "manager_mail"))
 CONFIG_PATH = Path(os.environ.get("OMO_EMAIL_CONFIG_PATH", Path.home() / ".config/himalaya/config.toml"))
 MANAGER_REPLY_PREFIX = "Re: [omo_manager]"
@@ -68,11 +69,13 @@ class Args:
     recovery_debounce_s: int
     restart_script: Path
     idle_wait_s: float = DEFAULT_IDLE_WAIT_S
+    manager_target: str = ""
 
 
 class ParsedArgs(argparse.Namespace):
     root: Path = DEFAULT_ROOT
     manager_url: str = DEFAULT_MANAGER_URL
+    manager_target: str = DEFAULT_MANAGER_TARGET
     mail_dir: Path = DEFAULT_MAIL_DIR
     state_dir: Path = default_state_dir()
     manager_file: Path | None = None
@@ -86,6 +89,7 @@ def parse_args(argv: list[str]) -> Args:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     parser.add_argument("--manager-url", default=DEFAULT_MANAGER_URL)
+    parser.add_argument("--manager-target", default=DEFAULT_MANAGER_TARGET)
     parser.add_argument("--mail-dir", type=Path, default=DEFAULT_MAIL_DIR)
     parser.add_argument("--state-dir", type=Path, default=default_state_dir())
     parser.add_argument("--manager-file", type=Path, default=None)
@@ -98,7 +102,7 @@ def parse_args(argv: list[str]) -> Args:
     manager_file = parsed.manager_file or dated_manager_file(root)
     if not manager_file.is_absolute():
         manager_file = root / manager_file
-    return Args(root, parsed.manager_url.rstrip("/"), parsed.mail_dir, parsed.state_dir, manager_file, parsed.once, "", parsed.recovery_debounce_s, parsed.restart_script, parsed.idle_wait_s)
+    return Args(root, parsed.manager_url.rstrip("/"), parsed.mail_dir, parsed.state_dir, manager_file, parsed.once, "", parsed.recovery_debounce_s, parsed.restart_script, parsed.idle_wait_s, parsed.manager_target.strip())
 
 
 def parse_env_config(path: Path) -> dict[str, str]:
@@ -268,6 +272,23 @@ def append_pending(root: Path, txt_path: Path, manager_file: Path | None = None)
     return line_no + 1
 
 
+def push_email_ref(args: Args, line_no: int) -> bool:
+    if not args.manager_url and not args.manager_target:
+        logging.error("email pending push failed: manager URL or target is required")
+        return False
+    ref = args.manager_file.relative_to(args.root) if args.manager_file.is_relative_to(args.root) else args.manager_file
+    command = ["omo_push_to_manager.py", f"pending: file={ref} line={line_no}", "--root", str(args.root), "--submit"]
+    if args.manager_target:
+        command.extend(["--manager-target", args.manager_target])
+    if args.manager_url:
+        command.extend(["--manager-url", args.manager_url])
+    result = subprocess.run(command, check=False)
+    if result.returncode != 0:
+        logging.error("email pending push failed: uid line=%s status=%s", line_no, result.returncode)
+        return False
+    return True
+
+
 def append_recovery_record(root: Path, txt_path: Path, summary: str, manager_file: Path | None = None) -> int:
     manager_file = manager_file or dated_manager_file(root)
     lines = manager_file.read_text(encoding="utf-8").splitlines() if manager_file.exists() else []
@@ -399,9 +420,10 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> None:
         expected_txt_path = args.mail_dir / f"{uid}.txt"
         existing_pending_line = existing_source_pending_line(args.root, expected_txt_path, args.manager_file)
         if existing_pending_line is not None:
-            processed_uids.add(uid)
-            processed_changed = True
-            mark_seen(client, uid)
+            if push_email_ref(args, existing_pending_line):
+                processed_uids.add(uid)
+                processed_changed = True
+                mark_seen(client, uid)
             continue
         if existing_source_line(args.root, expected_txt_path, args.manager_file) is not None:
             processed_uids.add(uid)
@@ -426,10 +448,11 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> None:
             processed_changed = True
             mark_seen(client, uid)
         else:
-            append_pending(args.root, txt_path, args.manager_file)
-            processed_uids.add(uid)
-            processed_changed = True
-            mark_seen(client, uid)
+            pending_line = append_pending(args.root, txt_path, args.manager_file)
+            if push_email_ref(args, pending_line):
+                processed_uids.add(uid)
+                processed_changed = True
+                mark_seen(client, uid)
     if processed_changed:
         save_processed_uids(processed_path, processed_uids)
 
@@ -458,7 +481,7 @@ def main(argv: list[str]) -> int:
     if missing:
         print(f"email_idle_watcher: missing config keys {sorted(missing)} in {CONFIG_PATH}", file=sys.stderr)
         return 1
-    safe_args = Args(args.root, args.manager_url, args.mail_dir, args.state_dir, args.manager_file, args.once, config["user"], args.recovery_debounce_s, args.restart_script, args.idle_wait_s)
+    safe_args = Args(args.root, args.manager_url, args.mail_dir, args.state_dir, args.manager_file, args.once, config["user"], args.recovery_debounce_s, args.restart_script, args.idle_wait_s, args.manager_target)
     while True:
         try:
             with imaplib.IMAP4_SSL(config["host"]) as client:

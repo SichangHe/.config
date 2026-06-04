@@ -42,11 +42,12 @@ class TmuxSendTests(unittest.TestCase):
             run_tmux(Args("cfg:1.0", None, 1, 0.15, 0, False), "literal C-c $(bad)\n")
 
         self.assertEqual("tmux", calls[0][0])
-        self.assertEqual(["tmux", "load-buffer", "-b"], calls[0][:3])
-        buffer_name = calls[0][3]
-        self.assertEqual(["tmux", "paste-buffer", "-b", buffer_name, "-t", "cfg:1.0"], calls[1])
-        self.assertEqual(["tmux", "send-keys", "-t", "cfg:1.0", "Enter"], calls[2])
-        self.assertEqual(["tmux", "delete-buffer", "-b", buffer_name], calls[3])
+        self.assertEqual(["tmux", "send-keys", "-t", "cfg:1.0", "C-u"], calls[0])
+        self.assertEqual(["tmux", "load-buffer", "-b"], calls[1][:3])
+        buffer_name = calls[1][3]
+        self.assertEqual(["tmux", "paste-buffer", "-b", buffer_name, "-t", "cfg:1.0"], calls[2])
+        self.assertEqual(["tmux", "send-keys", "-t", "cfg:1.0", "Enter"], calls[3])
+        self.assertEqual(["tmux", "delete-buffer", "-b", buffer_name], calls[4])
         self.assertNotIn("literal C-c $(bad)\n", [part for call in calls for part in call])
 
     def test_run_tmux_can_send_repeated_enter(self) -> None:
@@ -59,9 +60,10 @@ class TmuxSendTests(unittest.TestCase):
         with patch("omo_manager.omo_tmux_send.time.sleep") as sleep, patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
             run_tmux(Args("cfg:1.0", None, 2, 0.15, 0, False), "prompt")
 
-        self.assertEqual(["tmux", "send-keys", "-t", "cfg:1.0", "Enter"], calls[2])
+        self.assertEqual(["tmux", "send-keys", "-t", "cfg:1.0", "C-u"], calls[0])
         self.assertEqual(["tmux", "send-keys", "-t", "cfg:1.0", "Enter"], calls[3])
-        self.assertEqual(["tmux", "delete-buffer", "-b", calls[0][3]], calls[4])
+        self.assertEqual(["tmux", "send-keys", "-t", "cfg:1.0", "Enter"], calls[4])
+        self.assertEqual(["tmux", "delete-buffer", "-b", calls[1][3]], calls[5])
         sleep.assert_called_once_with(0.15)
 
     def test_wait_ready_waits_through_running_codex(self) -> None:

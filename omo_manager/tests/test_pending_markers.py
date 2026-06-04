@@ -94,6 +94,99 @@ class PendingMarkerTests(unittest.TestCase):
             markers = find_markers(root, [path])
             self.assertEqual(1, len(markers))
 
+
+    def test_email_watcher_submits_new_pending_ref_before_mark_seen(self) -> None:
+        from email.message import EmailMessage
+        from omo_manager import email_idle_watcher as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            root.mkdir()
+            state = Path(tmp) / "state"
+            calls = []
+            msg = EmailMessage()
+            msg["From"] = "Human <me@example.com>"
+            msg["Subject"] = "Re: [omo_manager] submit me"
+            msg.set_content("body")
+
+            class Client:
+                stores: list[tuple[object, ...]] = []
+
+                def uid(self, command: str, *args: object) -> tuple[str, list[object]]:
+                    if command == "search":
+                        return "OK", [b"12"]
+                    if command == "fetch":
+                        return "OK", [(b"RFC822", msg.as_bytes())]
+                    if command == "store":
+                        self.stores.append(args)
+                        return "OK", [b""]
+                    raise AssertionError(command)
+
+            def push(args: watcher.Args, line_no: int) -> bool:
+                calls.append((args.manager_file.relative_to(args.root), line_no, args.manager_target))
+                return True
+
+            old_push = watcher.push_email_ref
+            watcher.push_email_ref = push
+            try:
+                client = Client()
+                args = watcher.Args(root, "", root / "manager_mail", state, root / "work_manager_today.md", True, "me@example.com", 0, Path("/bin/false"), manager_target="wl:1.0")
+                watcher.handle_unseen(client, args)
+            finally:
+                watcher.push_email_ref = old_push
+            self.assertEqual(calls, [(Path("work_manager_today.md"), 2, "wl:1.0")])
+            self.assertEqual(len(client.stores), 1)
+            self.assertIn("12	", (state / "email-processed-uids.tsv").read_text(encoding="utf-8"))
+
+    def test_email_watcher_retries_existing_pending_until_submit_succeeds(self) -> None:
+        from email.message import EmailMessage
+        from omo_manager import email_idle_watcher as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            root.mkdir()
+            state = Path(tmp) / "state"
+            mail = root / "manager_mail" / "13.txt"
+            mail.parent.mkdir()
+            mail.write_text("body", encoding="utf-8")
+            manager_file = root / "work_manager_today.md"
+            manager_file.write_text("(pending)\n(from email manager_mail/13.txt)\n", encoding="utf-8")
+            calls = []
+            msg = EmailMessage()
+            msg["From"] = "Human <me@example.com>"
+            msg["Subject"] = "Re: [omo_manager] retry me"
+            msg.set_content("body")
+
+            class Client:
+                stores: list[tuple[object, ...]] = []
+
+                def uid(self, command: str, *args: object) -> tuple[str, list[object]]:
+                    if command == "search":
+                        return "OK", [b"13"]
+                    if command == "fetch":
+                        raise AssertionError("existing pending should not refetch")
+                    if command == "store":
+                        self.stores.append(args)
+                        return "OK", [b""]
+                    raise AssertionError(command)
+
+            def push(_args: watcher.Args, line_no: int) -> bool:
+                calls.append(line_no)
+                return len(calls) == 2
+
+            old_push = watcher.push_email_ref
+            watcher.push_email_ref = push
+            try:
+                client = Client()
+                args = watcher.Args(root, "", root / "manager_mail", state, manager_file, True, "me@example.com", 0, Path("/bin/false"), manager_target="wl:1.0")
+                watcher.handle_unseen(client, args)
+                watcher.handle_unseen(client, args)
+            finally:
+                watcher.push_email_ref = old_push
+            self.assertEqual(calls, [1, 1])
+            self.assertEqual(len(client.stores), 1)
+            self.assertIn("13	", (state / "email-processed-uids.tsv").read_text(encoding="utf-8"))
+
     def test_omo_report_writes_agent_pending_source_without_direct_push(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "logs"

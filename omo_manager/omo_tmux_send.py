@@ -114,6 +114,8 @@ def run_tmux(args: Args, message: str) -> None:
                 _ = print(f"would send Enter to {args.target}")
             return
         wait_ready(args)
+        if args.enter_count:
+            _ = subprocess.run(["tmux", "send-keys", "-t", args.target, "C-u"], timeout=5, check=True)
         _ = subprocess.run(["tmux", "load-buffer", "-b", buffer_name, str(temp_path)], timeout=5, check=True)
         _ = subprocess.run(["tmux", "paste-buffer", "-b", buffer_name, "-t", args.target], timeout=5, check=True)
         for idx in range(args.enter_count):

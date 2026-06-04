@@ -16,6 +16,8 @@ from pathlib import Path
 DEFAULT_MANAGER_URL = os.environ.get('OMO_MANAGER_URL', '')
 DEFAULT_MANAGER_TARGET = os.environ.get('OMO_MANAGER_TMUX_TARGET', '')
 DEFAULT_ROOT = Path(os.environ.get('OMO_WORK_LOGS_ROOT', Path.home() / 'work_logs'))
+DEFAULT_TMUX_ENTER_COUNT = int(os.environ.get('OMO_MANAGER_TMUX_ENTER_COUNT', os.environ.get('OMO_DISPATCH_TMUX_ENTER_COUNT', '2')))
+DEFAULT_TMUX_READY_TIMEOUT_S = float(os.environ.get('OMO_MANAGER_TMUX_READY_TIMEOUT_S', os.environ.get('OMO_DISPATCH_TMUX_READY_TIMEOUT_S', '300')))
 
 
 @dataclass(frozen=True)
@@ -89,8 +91,9 @@ def push_tmux(args: Args) -> None:
     try:
         command = ['omo_tmux_send.py', '--target', args.manager_target, '--message-file', str(path)]
         if args.submit:
-            command.append('--enter')
-        _ = subprocess.run(command, timeout=args.timeout_s, check=True)
+            command.extend(['--enter', '--enter-count', str(DEFAULT_TMUX_ENTER_COUNT), '--ready-timeout-s', str(DEFAULT_TMUX_READY_TIMEOUT_S)])
+        timeout_s = max(args.timeout_s, DEFAULT_TMUX_READY_TIMEOUT_S + 10) if args.submit else args.timeout_s
+        _ = subprocess.run(command, timeout=timeout_s, check=True)
     finally:
         path.unlink(missing_ok=True)
 
