@@ -85,13 +85,13 @@ def last_output(lines: list[str]) -> list[str]:
 def status(lines: list[str], block: Block) -> str:
     if not lines or CODEX_RE.search(lines[-1]) is None:
         return "not_codex"
-    text = "\n".join(block.lines or lines[-20:])
-    if ERROR_RE.search(text) is not None:
-        return "error"
     if any(BUSY_RE.search(line) is not None for line in lines[-20:]):
         return "running"
     if block.has_footer or any(READY_RE.match(line) is not None or INPUT_RE.match(line) is not None for line in lines[-10:]):
         return "ready"
+    text = "\n".join(block.lines or lines[-20:])
+    if ERROR_RE.search(text) is not None:
+        return "error"
     return "running"
 
 
