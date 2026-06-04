@@ -27,7 +27,9 @@ Dispatch rule: send prompts through the visible tmux pane and verify with manage
 
 Listener/supervisor architecture note: do not merge `email_idle_watcher.py` and `omo_pending_watch.py` into one large listener as a first step. Email IDLE is an ingress adapter that writes `manager_mail/UID.txt` plus a Markdown `(pending)` block; `omo_pending_watch.py` is the single delivery path from Markdown to the manager. A robust next step is a small process supervisor/event loop that starts and health-checks watchers and owns restart/backoff/logging.
 
-`omo_task.py` creates/links task files and can start a Codex worker in a new tmux window with `bunx @openai/codex --dangerously-bypass-approvals-and-sandbox`. It records `runat: SESSION:WINDOW codex`; pane 0 is implied.
+`omo_task.py` creates/links task files and can start a Codex worker in a new tmux window with `bunx @openai/codex --dangerously-bypass-approvals-and-sandbox`. Use `--session-id UUID` to start `codex ... resume UUID` instead of a fresh session. It records `runat: SESSION:WINDOW codex`; pane 0 is implied.
+
+`omo_codex_stop.py --target SESSION:WINDOW.PANE` sends Ctrl-C to a Codex pane, captures the pane tail, and prints `session_id: UUID` plus `resume_cmd: codex resume UUID` when Codex emitted a resume line. It refuses to stop the current pane unless `--allow-self` is passed.
 
 `omo_codex_status.py` reads a tmux window tail and reports `not_codex`, `running`, `error`, or `ready` plus the current response tail. It detects the Codex TUI by `  gpt-` on the last visible line and extracts output between the last separator and `─ Worked for ... ─`.
 

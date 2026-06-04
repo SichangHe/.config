@@ -26,6 +26,7 @@ class Args:
     prompt_file: Path | None
     no_link: bool
     dry_run: bool
+    session_id: str
 
 
 class ParsedArgs(argparse.Namespace):
@@ -39,6 +40,7 @@ class ParsedArgs(argparse.Namespace):
     prompt_file: Path | None = None
     no_link: bool = False
     dry_run: bool = False
+    session_id: str = ""
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -54,6 +56,7 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--prompt-file", type=Path)
     _ = parser.add_argument("--no-link", action="store_true")
     _ = parser.add_argument("--dry-run", action="store_true")
+    _ = parser.add_argument("--session-id", default="", help="Codex session id to resume in a new worker window.")
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     if not parsed.task_file.endswith(".md"):
         parser.error("--task-file must end with `.md`.")
@@ -63,7 +66,7 @@ def parse_args(argv: list[str]) -> Args:
         parser.error("--workdir requires --tmux-session.")
     if parsed.tool != "codex":
         parser.error("only --tool codex is supported.")
-    return Args(parsed.root.resolve(), parsed.task_file, parsed.tmux_session, parsed.tmux_window, parsed.tool, parsed.workdir, parsed.window_name, parsed.prompt_file, parsed.no_link, parsed.dry_run)
+    return Args(parsed.root.resolve(), parsed.task_file, parsed.tmux_session, parsed.tmux_window, parsed.tool, parsed.workdir, parsed.window_name, parsed.prompt_file, parsed.no_link, parsed.dry_run, parsed.session_id)
 
 
 def task_path(root: Path, task_file: str) -> Path:
@@ -83,7 +86,9 @@ def header(tmux_target: str, tool: str) -> str:
     return f"runat: {tmux_target} {tool}" if tmux_target else ""
 
 
-def codex_cmd() -> str:
+def codex_cmd(session_id: str = "") -> str:
+    if session_id:
+        return f"{CODEX_CMD} resume {shlex.quote(session_id)}"
     return CODEX_CMD
 
 
@@ -91,7 +96,7 @@ def new_window(args: Args) -> str:
     if args.workdir is None:
         return target(args)
     name = args.window_name or Path(args.task_file).stem
-    command = ["tmux", "new-window", "-P", "-F", "#{session_name}:#{window_index}", "-t", args.tmux_session, "-n", name, "-c", str(args.workdir), codex_cmd()]
+    command = ["tmux", "new-window", "-P", "-F", "#{session_name}:#{window_index}", "-t", args.tmux_session, "-n", name, "-c", str(args.workdir), codex_cmd(args.session_id)]
     out = subprocess.run(command, capture_output=True, text=True, timeout=10, check=True)
     return out.stdout.strip()
 
@@ -148,7 +153,7 @@ def dry_run(args: Args) -> None:
         print(f"todo_line: {todo_line(args, tmux_target)}")
     if args.workdir is not None:
         name = args.window_name or Path(args.task_file).stem
-        command = ["tmux", "new-window", "-P", "-F", "#{session_name}:#{window_index}", "-t", args.tmux_session, "-n", name, "-c", str(args.workdir), codex_cmd()]
+        command = ["tmux", "new-window", "-P", "-F", "#{session_name}:#{window_index}", "-t", args.tmux_session, "-n", name, "-c", str(args.workdir), codex_cmd(args.session_id)]
         print("tmux: " + " ".join(shlex.quote(part) for part in command))
 
 
