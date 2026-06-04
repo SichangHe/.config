@@ -180,7 +180,7 @@ def push_ref(args: Args, marker: Marker) -> int:
 
 
 def expire_seen(seen: dict[str, float], now_s: float) -> dict[str, float]:
-    return {k: v for k, v in seen.items() if now_s - v < 600.0}
+    return seen
 
 
 def scan_once(args: Args, seen: dict[str, float], files: list[Path]) -> bool:

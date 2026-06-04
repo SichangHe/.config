@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 if __package__ in {None, ""}:
@@ -29,12 +30,20 @@ class Args:
     registry: Path
     state: Path
     n_lines: int
+    stale_after_s: float
+    watch: bool
+    interval_s: float
+    max_iterations: int
 
 
 class ParsedArgs(argparse.Namespace):
     registry: Path = DEFAULT_REGISTRY
     state: Path = DEFAULT_STATE
     n_lines: int = 80
+    stale_after_s: float = 900.0
+    watch: bool = False
+    interval_s: float = 60.0
+    max_iterations: int = 1
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -42,10 +51,20 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--registry", type=Path, default=DEFAULT_REGISTRY)
     _ = parser.add_argument("--state", type=Path, default=DEFAULT_STATE)
     _ = parser.add_argument("--lines", type=int, default=80)
+    _ = parser.add_argument("--stale-after-s", type=float, default=900.0)
+    _ = parser.add_argument("--watch", action="store_true")
+    _ = parser.add_argument("--interval-s", type=float, default=60.0)
+    _ = parser.add_argument("--max-iterations", type=int, default=1)
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     if parsed.n_lines <= 0:
         parser.error("--lines must be positive.")
-    return Args(parsed.registry, parsed.state, parsed.n_lines)
+    if parsed.stale_after_s < 0:
+        parser.error("--stale-after-s must be non-negative.")
+    if parsed.interval_s <= 0:
+        parser.error("--interval-s must be positive.")
+    if parsed.max_iterations < 1:
+        parser.error("--max-iterations must be positive.")
+    return Args(parsed.registry, parsed.state, parsed.n_lines, parsed.stale_after_s, parsed.watch, parsed.interval_s, parsed.max_iterations)
 
 
 def read_json(path: Path, fallback: dict[str, object]) -> dict[str, object]:
@@ -70,7 +89,12 @@ def digest(lines: list[str]) -> str:
     return hashlib.sha256("\n".join(lines).encode()).hexdigest()
 
 
+def target_state(raw: object) -> dict[str, object]:
+    return raw if isinstance(raw, dict) else {}
+
+
 def check(args: Args) -> int:
+    now_s = time.time()
     registry = read_json(args.registry, {"sessions": []})
     sessions = registry.get("sessions", []) if isinstance(registry, dict) else []
     if not isinstance(sessions, list):
@@ -89,17 +113,26 @@ def check(args: Args) -> int:
         task_file = str(item.get("task_file", ""))
         report = inspect(StatusArgs(target, args.n_lines))
         tail_hash = digest(report.lines)
-        old_hash = targets.get(target)
+        old = target_state(targets.get(target))
+        old_hash = str(old.get("hash", ""))
         changed = old_hash != tail_hash
-        targets[target] = tail_hash
-        print(f"{report.status}: task={task_file} target={target} changed={str(changed).lower()}")
+        first_seen_s = now_s if changed else float(old.get("first_seen_s", now_s))
+        age_s = max(0.0, now_s - first_seen_s)
+        status = "stale_running" if report.status == "running" and not changed and age_s >= args.stale_after_s else report.status
+        targets[target] = {"hash": tail_hash, "first_seen_s": first_seen_s, "status": report.status}
+        print(f"{status}: task={task_file} target={target} changed={str(changed).lower()} same_tail_s={age_s:.0f}", flush=True)
     write_json_private(args.state, state)
     return 0
 
 
 def main(argv: list[str]) -> int:
     try:
-        return check(parse_args(argv))
+        args = parse_args(argv)
+        for idx in range(args.max_iterations if args.watch else 1):
+            rc = check(args)
+            if not args.watch or idx == args.max_iterations - 1:
+                return rc
+            time.sleep(args.interval_s)
     except Exception as exc:
         print(f"omo_stuck_watch: {exc}", file=sys.stderr)
         return 1

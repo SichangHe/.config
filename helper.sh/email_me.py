@@ -9,6 +9,8 @@ Credentials are loaded from `~/.config/.env`:
 from __future__ import annotations
 
 import argparse
+import os
+import re
 import smtplib
 import ssl
 import sys
@@ -21,6 +23,7 @@ SMTP_PORT = 465
 ENV_FILE_PATH = Path.home() / ".config" / ".env"
 DIRECT_AGENT_PREFIX = "[omo]"
 PRESERVED_PREFIXES = ("[omo]", "[omo_manager]", "[omo_manager_recover]")
+PWD_FOOTER_RE = re.compile(r"^PWD: \S+", re.MULTILINE)
 
 
 @dataclass(frozen=True)
@@ -62,12 +65,32 @@ def normalize_subject(title: str) -> str:
     return f"{DIRECT_AGENT_PREFIX} {stripped}"
 
 
+def current_pwd() -> str:
+    pwd = os.environ.get("PWD", "")
+    cwd = Path.cwd()
+    if pwd:
+        try:
+            if Path(pwd).resolve() == cwd.resolve():
+                return pwd
+        except OSError:
+            pass
+    return str(cwd)
+
+
+def append_pwd_footer(content: str, cwd: str | Path | None = None) -> str:
+    if PWD_FOOTER_RE.search(content):
+        return content
+    footer = f"PWD: {cwd or current_pwd()}"
+    body = content.rstrip("\n")
+    return f"{body}\n\n{footer}\n"
+
+
 def build_message(sender_email: str, title: str, content: str) -> EmailMessage:
     msg = EmailMessage()
     msg.add_header("Subject", normalize_subject(title))
     msg.add_header("From", sender_email)
     msg.add_header("To", sender_email)
-    msg.set_content(content)
+    msg.set_content(append_pwd_footer(content))
     return msg
 
 

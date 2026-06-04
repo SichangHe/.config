@@ -15,7 +15,7 @@ submit=1
 tmux_target=""
 usage() {
   cat <<'EOF'
-Usage: omo_dispatch.sh --file FILE --start N --end N [--target NAME] [--tmux-target SESSION:WINDOW] [--no-submit]
+Usage: omo_dispatch.sh --file FILE --start N --end N [--target NAME] --tmux-target SESSION:WINDOW [--no-submit]
 
 Dispatch prompts through the visible tmux target with safe buffer paste.
 EOF
@@ -28,7 +28,7 @@ while [ "$#" -gt 0 ]; do
     --end) end="$2"; shift 2 ;;
     --target) target="$2"; shift 2 ;;
     --no-submit) submit=0; shift ;;
-    --tmux-target|--tmux-fallback) tmux_target="$2"; shift 2 ;;
+    --tmux-target) tmux_target="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
