@@ -47,7 +47,6 @@ email_enable="${OMO_MANAGER_ENABLE_EMAIL_WATCHER:-auto}"
 stuck_enable="${OMO_MANAGER_ENABLE_STUCK_WATCHER:-true}"
 email_config="${OMO_EMAIL_CONFIG_PATH:-$HOME/.config/himalaya/config.toml}"
 mail_dir="${OMO_MANAGER_MAIL_DIR:-$root/manager_mail}"
-active_log="$root/work_manager_$(date +%F).md"
 export OMO_MANAGER_MAIL_DIR="$mail_dir"
 mkdir -p -m 700 "$state_dir"
 chmod 700 "$state_dir"
@@ -93,7 +92,7 @@ esac
 if [ "$start_email" -eq 1 ]; then
   mkdir -p -m 700 "$mail_dir"
   chmod 700 "$mail_dir"
-  email_args=(--root "$root" --mail-dir "$mail_dir" --state-dir "$state_dir" --manager-file "$active_log")
+  email_args=(--root "$root" --mail-dir "$mail_dir" --state-dir "$state_dir")
   [ -n "$manager_url" ] && email_args+=(--manager-url "$manager_url")
   [ -n "$manager_target" ] && email_args+=(--manager-target "$manager_target")
   setsid email_idle_watcher.py "${email_args[@]}" >"$state_dir/email-watch.log" 2>&1 &

@@ -11,7 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from omo_manager.email_idle_watcher import append_pending, dated_manager_file, existing_source_pending_line
+from omo_manager.email_idle_watcher import append_pending, current_manager_file, dated_manager_file, existing_source_pending_line
 from omo_manager.omo_pending_watch import Args, find_markers
 
 
@@ -65,7 +65,8 @@ class PendingMarkerTests(unittest.TestCase):
 
         with patch.dict(os.environ, {"OMO_MANAGER_ACTIVE_LOG": "/tmp/root/work_manager.md"}):
             args = parse_args(["--root", "/tmp/root", "--once"])
-        self.assertEqual(dated_manager_file(Path("/tmp/root")), args.manager_file)
+        self.assertIsNone(args.manager_file)
+        self.assertEqual(dated_manager_file(Path("/tmp/root")), current_manager_file(args))
 
     def test_write_mail_omits_redundant_self_headers(self) -> None:
         from email.message import EmailMessage

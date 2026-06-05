@@ -13,7 +13,7 @@ import shlex
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from email import policy
 from email.utils import parseaddr
@@ -63,7 +63,7 @@ class Args:
     manager_url: str
     mail_dir: Path
     state_dir: Path
-    manager_file: Path
+    manager_file: Path | None
     once: bool
     self_email: str
     recovery_debounce_s: int
@@ -99,10 +99,18 @@ def parse_args(argv: list[str]) -> Args:
     parser.add_argument("--once", action="store_true")
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     root = parsed.root
-    manager_file = parsed.manager_file or dated_manager_file(root)
-    if not manager_file.is_absolute():
+    manager_file = parsed.manager_file
+    if manager_file is not None and not manager_file.is_absolute():
         manager_file = root / manager_file
     return Args(root, parsed.manager_url.rstrip("/"), parsed.mail_dir, parsed.state_dir, manager_file, parsed.once, "", parsed.recovery_debounce_s, parsed.restart_script, parsed.idle_wait_s, parsed.manager_target.strip())
+
+
+def current_manager_file(args: Args) -> Path:
+    return args.manager_file or dated_manager_file(args.root)
+
+
+def args_w_manager_file(args: Args, manager_file: Path) -> Args:
+    return replace(args, manager_file=manager_file)
 
 
 def parse_env_config(path: Path) -> dict[str, str]:
@@ -276,7 +284,8 @@ def push_email_ref(args: Args, line_no: int) -> bool:
     if not args.manager_url and not args.manager_target:
         logging.error("email pending push failed: manager URL or target is required")
         return False
-    ref = args.manager_file.relative_to(args.root) if args.manager_file.is_relative_to(args.root) else args.manager_file
+    manager_file = current_manager_file(args)
+    ref = manager_file.relative_to(args.root) if manager_file.is_relative_to(args.root) else manager_file
     command = ["omo_push_to_manager.py", f"pending: file={ref} line={line_no} source=email action=ack-human", "--root", str(args.root), "--submit"]
     command.extend(["--pending-file", str(ref), "--pending-line", str(line_no)])
     if args.manager_target:
@@ -405,6 +414,8 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> None:
     processed_path = processed_uids_path(args)
     processed_uids = load_processed_uids(processed_path)
     processed_changed = False
+    manager_file = current_manager_file(args)
+    push_args = args_w_manager_file(args, manager_file)
     candidate_uids: set[bytes] = set()
     for subject_prefix in NORMAL_REPLY_SEARCH_PREFIXES:
         candidate_uids.update(search_uids(client, subject_prefix, args.self_email))
@@ -419,14 +430,14 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> None:
             mark_seen(client, uid)
             continue
         expected_txt_path = args.mail_dir / f"{uid}.txt"
-        existing_pending_line = existing_source_pending_line(args.root, expected_txt_path, args.manager_file)
+        existing_pending_line = existing_source_pending_line(args.root, expected_txt_path, manager_file)
         if existing_pending_line is not None:
-            if push_email_ref(args, existing_pending_line):
+            if push_email_ref(push_args, existing_pending_line):
                 processed_uids.add(uid)
                 processed_changed = True
                 mark_seen(client, uid)
             continue
-        if existing_source_line(args.root, expected_txt_path, args.manager_file) is not None:
+        if existing_source_line(args.root, expected_txt_path, manager_file) is not None:
             processed_uids.add(uid)
             processed_changed = True
             mark_seen(client, uid)
@@ -444,13 +455,13 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> None:
             if recovery_sender_authenticated(msg, args.self_email):
                 handle_recovery_email(args, uid, txt_path)
             else:
-                append_recovery_record(args.root, txt_path, "recovery email recorded; restart refused because sender authentication did not pass", args.manager_file)
+                append_recovery_record(args.root, txt_path, "recovery email recorded; restart refused because sender authentication did not pass", manager_file)
             processed_uids.add(uid)
             processed_changed = True
             mark_seen(client, uid)
         else:
-            pending_line = append_pending(args.root, txt_path, args.manager_file)
-            if push_email_ref(args, pending_line):
+            pending_line = append_pending(args.root, txt_path, manager_file)
+            if push_email_ref(push_args, pending_line):
                 processed_uids.add(uid)
                 processed_changed = True
                 mark_seen(client, uid)
