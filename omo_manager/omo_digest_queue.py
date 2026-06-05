@@ -11,7 +11,7 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
@@ -30,6 +30,7 @@ class QueueItem:
     item_id: str
     status: str
     queued_at: str
+    published_at: str
     source: str
     title: str
     url: str
@@ -60,6 +61,24 @@ def parse_iso(value: str) -> datetime | None:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=LOCAL_TZ)
     return parsed.astimezone()
+
+
+def display_time(value: str) -> str:
+    parsed = parse_iso(value)
+    if parsed is None:
+        return safe_single_line(value)
+    return parsed.strftime("%Y-%m-%d %H:%M %Z")
+
+
+def published_at_from_relative_age(queued_at: str, age: str) -> str:
+    match = re.search(r"\bPublished\s+(\d+)\s+(minute|minutes|hour|hours|day|days)\s+ago\b", age, re.I)
+    queued = parse_iso(queued_at)
+    if match is None or queued is None:
+        return ""
+    amount = int(match.group(1))
+    unit = match.group(2).lower()
+    delta = timedelta(minutes=amount) if unit.startswith("minute") else timedelta(hours=amount) if unit.startswith("hour") else timedelta(days=amount)
+    return (queued - delta).isoformat(timespec="seconds")
 
 
 def safe_single_line(value: str) -> str:
@@ -111,6 +130,7 @@ def parse_block(raw: str) -> QueueItem | None:
         item_id=item_id,
         status=fields.get("status", "queued"),
         queued_at=fields.get("queued-at", ""),
+        published_at=fields.get("published-at", "") or published_at_from_relative_age(fields.get("queued-at", ""), fields.get("age", "")),
         source=fields.get("source", ""),
         title=fields.get("title", ""),
         url=fields.get("url", ""),
@@ -147,6 +167,8 @@ def append_item(path: Path, item: QueueItem) -> None:
         handle.write(f"id: {item.item_id}\n")
         handle.write(f"status: {item.status}\n")
         handle.write(f"queued-at: {item.queued_at}\n")
+        if item.published_at:
+            handle.write(f"published-at: {safe_single_line(item.published_at)}\n")
         handle.write(f"source: {safe_single_line(item.source)}\n")
         handle.write(f"title: {safe_single_line(item.title)}\n")
         handle.write(f"url: {safe_single_line(item.url)}\n")
@@ -245,11 +267,14 @@ def render_digest(items: list[QueueItem]) -> str:
     lines = ["Non-urgent digest items queued for afternoon/evening idle delivery:", ""]
     for idx, item in enumerate(items, start=1):
         title = item.title or "Untitled item"
-        suffix = f" ({item.age})" if item.age else ""
         if item.url:
-            lines.append(f"{idx}. [{title}]({item.url}){suffix}")
+            lines.append(f"{idx}. [{title}]({item.url})")
         else:
-            lines.append(f"{idx}. {title}{suffix}")
+            lines.append(f"{idx}. {title}")
+        if item.published_at:
+            lines.append(f"   Published: {display_time(item.published_at)}")
+        if item.queued_at:
+            lines.append(f"   Queued: {display_time(item.queued_at)}")
         if item.source:
             lines.append(f"   Source: {item.source}")
         if item.summary:
@@ -286,7 +311,9 @@ def command_submit(args: argparse.Namespace) -> int:
         if any(item.item_id == item_id and item.status in {"queued", "sent"} for item in items):
             print(f"digest item already recorded: {item_id}")
             return 0
-        append_item(path, QueueItem(item_id, "queued", iso_now(), args.source, args.title, args.url, args.age, summary.strip(), ""))
+        queued_at = iso_now()
+        published_at = args.published_at or published_at_from_relative_age(queued_at, args.age)
+        append_item(path, QueueItem(item_id, "queued", queued_at, published_at, args.source, args.title, args.url, args.age, summary.strip(), ""))
     print(f"queued digest item: {item_id} file={path}")
     return 0
 
@@ -336,6 +363,7 @@ def build_parser() -> argparse.ArgumentParser:
     submit.add_argument("--title", required=True)
     submit.add_argument("--url", default="")
     submit.add_argument("--age", default="")
+    submit.add_argument("--published-at", default="")
     submit.add_argument("--summary", default="")
     submit.add_argument("--summary-file")
     submit.add_argument("--id", default="")

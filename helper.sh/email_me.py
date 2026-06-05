@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Send a plain text email to yourself using Gmail SMTP.
+"""Send email to yourself using Gmail SMTP, with HTML links for Markdown anchors.
 
 Credentials are loaded from `~/.config/.env`:
 - `EMAIL_ME_GMAIL_ADDRESS`
@@ -16,6 +16,7 @@ import ssl
 import sys
 from dataclasses import dataclass
 from email.message import EmailMessage
+from html import escape
 from pathlib import Path
 
 SMTP_HOST = "smtp.gmail.com"
@@ -24,6 +25,7 @@ ENV_FILE_PATH = Path.home() / ".config" / ".env"
 DIRECT_AGENT_PREFIX = "[omo]"
 PRESERVED_PREFIXES = ("[omo]", "[omo_manager]", "[omo_manager_recover]")
 PWD_FOOTER_RE = re.compile(r"^PWD: \S+", re.MULTILINE)
+MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
 
 
 @dataclass(frozen=True)
@@ -85,12 +87,36 @@ def append_pwd_footer(content: str, cwd: str | Path | None = None) -> str:
     return f"{body}\n\n{footer}\n"
 
 
+def markdown_links_to_plain(text: str) -> str:
+    return MARKDOWN_LINK_RE.sub(lambda match: f"{match.group(1).strip()}: {match.group(2).strip()}", text)
+
+
+def markdown_links_to_html(text: str) -> str | None:
+    if not MARKDOWN_LINK_RE.search(text):
+        return None
+    parts: list[str] = []
+    last_end = 0
+    for match in MARKDOWN_LINK_RE.finditer(text):
+        parts.append(escape(text[last_end:match.start()]))
+        label = escape(match.group(1).strip())
+        url = escape(match.group(2).strip(), quote=True)
+        parts.append(f'<a href="{url}">{label}</a>')
+        last_end = match.end()
+    parts.append(escape(text[last_end:]))
+    html = "<br>\n".join("".join(parts).splitlines())
+    return f"<!doctype html><html><body>{html}</body></html>\n"
+
+
 def build_message(sender_email: str, title: str, content: str) -> EmailMessage:
     msg = EmailMessage()
     msg.add_header("Subject", normalize_subject(title))
     msg.add_header("From", sender_email)
     msg.add_header("To", sender_email)
-    msg.set_content(append_pwd_footer(content))
+    body = append_pwd_footer(content)
+    msg.set_content(markdown_links_to_plain(body))
+    html = markdown_links_to_html(body)
+    if html is not None:
+        msg.add_alternative(html, subtype="html")
     return msg
 
 

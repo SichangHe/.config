@@ -35,6 +35,15 @@ class EmailMeTests(unittest.TestCase):
         msg = email_me.build_message("me@example.com", "[omo_manager] hi", "body")
         self.assertEqual("[omo_manager] hi", msg["Subject"])
 
+    def test_markdown_link_gets_html_anchor_and_plain_url(self) -> None:
+        msg = email_me.build_message("me@example.com", "hi", "See [Story](https://example.com/a?b=1&c=2).")
+        plain = msg.get_body(preferencelist=("plain",))
+        html = msg.get_body(preferencelist=("html",))
+        self.assertIsNotNone(plain)
+        self.assertIsNotNone(html)
+        self.assertIn("Story: https://example.com/a?b=1&c=2", plain.get_content())
+        self.assertIn('<a href="https://example.com/a?b=1&amp;c=2">Story</a>', html.get_content())
+
 
 if __name__ == "__main__":
     _ = unittest.main()

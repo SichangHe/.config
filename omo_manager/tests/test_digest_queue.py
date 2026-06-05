@@ -91,6 +91,8 @@ class DigestQueueTests(unittest.TestCase):
                     "Queued item",
                     "--url",
                     "https://example.test",
+                    "--published-at",
+                    "2026-05-25T14:00:00-07:00",
                     "--summary",
                     "Non-urgent.",
                 ],
@@ -119,9 +121,33 @@ class DigestQueueTests(unittest.TestCase):
             )
             self.assertEqual(0, delivery.returncode, delivery.stderr)
             self.assertIn("[Queued item](https://example.test)", delivery.stdout)
+            self.assertIn("Published: 2026-05-25 14:00", delivery.stdout)
+            self.assertIn("Queued:", delivery.stdout)
             text = (root / "MANAGER_DIGEST_QUEUE.md").read_text(encoding="utf-8")
             self.assertIn("status: queued", text)
             self.assertNotIn("status: sent", text)
+
+    def test_legacy_relative_age_renders_as_absolute_published_time(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "MANAGER_DIGEST_QUEUE.md"
+            path.write_text(
+                "# Manager non-urgent digest queue\n\n"
+                "---\n(digest-item)\n"
+                "id: old\nstatus: queued\nqueued-at: 2026-05-25T20:00:00-07:00\n"
+                "source: pb\ntitle: Old item\nurl: https://example.test/old\nage: Published 3 hours ago\nsummary:\n> Old summary.\n",
+                encoding="utf-8",
+            )
+            delivery = subprocess.run(
+                [str(Path.home() / ".config/omo_manager/omo_digest_queue.py"), "--root", str(root), "deliver-once", "--dry-run"],
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+            self.assertEqual(0, delivery.returncode, delivery.stderr)
+            self.assertIn("Published: 2026-05-25 17:00", delivery.stdout)
+            self.assertNotIn("Published 3 hours ago", delivery.stdout)
 
     def test_cli_delivery_ignores_idle_gate_flags(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

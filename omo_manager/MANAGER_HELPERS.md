@@ -6,7 +6,7 @@
 
 `omo_pending_watch.py` remains conservative: it scans Markdown for literal `(pending)` markers outside fenced code. Email-created, agent-created, and manual pending blocks all flow through the same watcher path.
 
-`omo_digest_queue.py` is the durable non-urgent digest path. `submit` appends digest items to the configured queue file. `deliver-once` sends queued items immediately when requested; idle timing and recent-contact checks belong to a separate watcher.
+`omo_digest_queue.py` is the durable non-urgent digest path. `submit` appends digest items to the configured queue file, records absolute `queued-at`, and records absolute `published-at` when the source provides it or a relative `Published N ago` value can be resolved at queue time. `deliver-once` sends queued items immediately when requested and renders absolute queued/published times; idle timing and recent-contact checks belong to a separate watcher. Manager human email uses `email_me.py`, which emits HTML alternatives for Markdown links while keeping a plain text fallback with bare URLs.
 
 `omo_quiet_checks.sh` is the low-token aggregate test/check runner. Agents should run required verification as `omo_quiet_checks.sh -- "COMMAND" [-- "COMMAND" ...]` when practical. On success it prints only `checks: pass` and the command names; on failure it prints `checks: fail`, the executed command list with the failed exit status, and a bounded failure-output tail capped by the helper. Manager-facing reports must not include counts of passed tests or verbose successful test logs; include only aggregate pass/fail, command names, and failures/blockers.
 
