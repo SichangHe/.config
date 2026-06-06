@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from omo_manager.omo_task import Args, codex_cmd, ensure_task_file, link_todo, main, new_window, parse_args
+from omo_manager.omo_task import Args, codex_cmd, ensure_task_file, link_todo, main, new_window, parse_args, start_codex
 
 
 class OmoTaskTests(unittest.TestCase):
@@ -21,16 +21,24 @@ class OmoTaskTests(unittest.TestCase):
     def test_new_window_uses_tmux_new_window_shape(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             args = Args(Path(tmp), 'x.md', 'cfg', '', 'codex', Path(tmp), 'x', None, False, False, '', '', ())
-            with patch('omo_manager.omo_task.subprocess.run') as run:
-                run.return_value.stdout = 'cfg:7\n'
+            with patch('omo_manager.omo_task.tmux') as tmux, patch('omo_manager.omo_task.wait_shell') as wait_shell, patch('omo_manager.omo_task.start_codex') as start_codex_mock:
+                tmux.return_value.stdout = 'cfg:7\n'
                 self.assertEqual('cfg:7', new_window(args))
-            command = run.call_args.args[0]
-            self.assertEqual(['tmux', 'new-window', '-P'], command[:3])
-            self.assertIn('bunx @openai/codex --dangerously-bypass-approvals-and-sandbox', command)
+            command = tmux.call_args.args[0]
+            self.assertEqual(['new-window', '-P'], command[:2])
+            self.assertNotIn('bunx @openai/codex --dangerously-bypass-approvals-and-sandbox', command)
+            wait_shell.assert_called_once_with('cfg:7')
+            start_codex_mock.assert_called_once_with('cfg:7', args)
 
     def test_codex_cmd_resumes_quoted_session(self) -> None:
         self.assertEqual("bunx @openai/codex --dangerously-bypass-approvals-and-sandbox resume abc", codex_cmd("abc"))
         self.assertEqual("bunx @openai/codex --dangerously-bypass-approvals-and-sandbox resume 'abc def'", codex_cmd("abc def"))
+
+    def test_codex_cmd_uses_prompt_argument_from_file(self) -> None:
+        self.assertEqual(
+            'bunx @openai/codex --dangerously-bypass-approvals-and-sandbox "$(cat -- /tmp/prompt.md)"',
+            codex_cmd(prompt_file=Path("/tmp/prompt.md")),
+        )
 
     def test_codex_cmd_adds_reasoning_effort_and_extra_flags(self) -> None:
         self.assertEqual(
@@ -46,11 +54,23 @@ class OmoTaskTests(unittest.TestCase):
     def test_new_window_can_resume_session_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             args = Args(Path(tmp), 'x.md', 'cfg', '', 'codex', Path(tmp), 'x', None, False, False, '11111111-1111-1111-1111-111111111111', '', ())
-            with patch('omo_manager.omo_task.subprocess.run') as run:
-                run.return_value.stdout = 'cfg:7\n'
+            with patch('omo_manager.omo_task.tmux') as tmux, patch('omo_manager.omo_task.wait_shell'), patch('omo_manager.omo_task.start_codex') as start_codex_mock:
+                tmux.return_value.stdout = 'cfg:7\n'
                 self.assertEqual('cfg:7', new_window(args))
-            command = run.call_args.args[0]
-            self.assertIn('resume 11111111-1111-1111-1111-111111111111', command[-1])
+            start_codex_mock.assert_called_once_with('cfg:7', args)
+
+    def test_start_codex_sends_command_inside_existing_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            prompt = Path(tmp) / "prompt.md"
+            args = Args(Path(tmp), 'x.md', 'cfg', '', 'codex', Path(tmp), 'x', prompt, False, False, '11111111-1111-1111-1111-111111111111', '', ())
+            with patch('omo_manager.omo_task.tmux') as tmux:
+                start_codex('cfg:7', args)
+            command = tmux.call_args.args[0]
+            self.assertEqual(['send-keys', '-t', 'cfg:7'], command[:3])
+            self.assertIn('bash -lc', command[3])
+            self.assertIn('resume 11111111-1111-1111-1111-111111111111', command[3])
+            self.assertIn('$(cat --', command[3])
+            self.assertEqual('Enter', command[4])
 
     def test_main_dry_run_does_not_mutate_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -61,6 +81,7 @@ class OmoTaskTests(unittest.TestCase):
             with contextlib.redirect_stdout(out):
                 self.assertEqual(0, main(["--root", str(root), "--task-file", "x.md", "--tmux-session", "cfg", "--workdir", str(root), "--prompt-file", str(prompt), "--dry-run"]))
             self.assertIn("tmux new-window", out.getvalue())
+            self.assertIn("tmux send-keys", out.getvalue())
             self.assertFalse((root / "x.md").exists())
             self.assertFalse((root / "TODO.md").exists())
 

@@ -7,11 +7,13 @@ import os
 import shlex
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 DEFAULT_ROOT = Path(os.environ.get("OMO_WORK_LOGS_ROOT", Path.home() / "work_logs"))
 CODEX_CMD = ("bunx", "@openai/codex", "--dangerously-bypass-approvals-and-sandbox")
+SHELL_COMMANDS = {"bash", "dash", "fish", "sh", "zsh"}
 
 
 @dataclass(frozen=True)
@@ -92,23 +94,58 @@ def header(tmux_target: str, tool: str) -> str:
     return f"runat: {tmux_target} {tool}" if tmux_target else ""
 
 
-def codex_cmd(session_id: str = "", reasoning_effort: str = "", codex_flags: tuple[str, ...] = ()) -> str:
+def codex_cmd(session_id: str = "", reasoning_effort: str = "", codex_flags: tuple[str, ...] = (), prompt_file: Path | None = None) -> str:
     args = list(CODEX_CMD)
     if reasoning_effort:
         args.extend(("--config", f'model_reasoning_effort="{reasoning_effort}"'))
     args.extend(codex_flags)
     if session_id:
         args.extend(("resume", session_id))
-    return " ".join(shlex.quote(arg) for arg in args)
+    parts = [shlex.quote(arg) for arg in args]
+    if prompt_file is not None:
+        parts.append(f"\"$(cat -- {shlex.quote(str(prompt_file))})\"")
+    return " ".join(parts)
+
+
+def shell_cmd(command: str) -> str:
+    return "bash -lc " + shlex.quote(command)
+
+
+def tmux(args: list[str], check: bool = False) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["tmux", *args], capture_output=True, text=True, timeout=10, check=check)
+
+
+def current_command(target: str) -> str:
+    out = tmux(["display-message", "-p", "-t", target, "#{pane_current_command}"])
+    return out.stdout.strip() if out.returncode == 0 else ""
+
+
+def wait_shell(target: str, timeout_s: float = 5.0) -> None:
+    deadline_s = time.monotonic() + timeout_s
+    while time.monotonic() < deadline_s:
+        if current_command(target) in SHELL_COMMANDS:
+            return
+        time.sleep(0.25)
+
+
+def new_window_command(args: Args) -> list[str]:
+    name = args.window_name or Path(args.task_file).stem
+    return ["new-window", "-P", "-F", "#{session_name}:#{window_index}", "-t", args.tmux_session, "-n", name, "-c", str(args.workdir)]
+
+
+def start_codex(target: str, args: Args) -> None:
+    command = shell_cmd(codex_cmd(args.session_id, args.reasoning_effort, args.codex_flags, args.prompt_file))
+    _ = tmux(["send-keys", "-t", target, command, "Enter"], check=True)
 
 
 def new_window(args: Args) -> str:
     if args.workdir is None:
         return target(args)
-    name = args.window_name or Path(args.task_file).stem
-    command = ["tmux", "new-window", "-P", "-F", "#{session_name}:#{window_index}", "-t", args.tmux_session, "-n", name, "-c", str(args.workdir), codex_cmd(args.session_id, args.reasoning_effort, args.codex_flags)]
-    out = subprocess.run(command, capture_output=True, text=True, timeout=10, check=True)
-    return out.stdout.strip()
+    out = tmux(new_window_command(args), check=True)
+    tmux_target = out.stdout.strip()
+    wait_shell(tmux_target)
+    start_codex(tmux_target, args)
+    return tmux_target
 
 
 def ensure_task_file(args: Args, tmux_target: str) -> Path:
@@ -162,9 +199,11 @@ def dry_run(args: Args) -> None:
     if not args.no_link:
         print(f"todo_line: {todo_line(args, tmux_target)}")
     if args.workdir is not None:
-        name = args.window_name or Path(args.task_file).stem
-        command = ["tmux", "new-window", "-P", "-F", "#{session_name}:#{window_index}", "-t", args.tmux_session, "-n", name, "-c", str(args.workdir), codex_cmd(args.session_id, args.reasoning_effort, args.codex_flags)]
+        command = ["tmux", *new_window_command(args)]
         print("tmux: " + " ".join(shlex.quote(part) for part in command))
+        launch_target = f"{args.tmux_session}:DRYRUN"
+        launch = ["tmux", "send-keys", "-t", launch_target, shell_cmd(codex_cmd(args.session_id, args.reasoning_effort, args.codex_flags, args.prompt_file)), "Enter"]
+        print("tmux: " + " ".join(shlex.quote(part) for part in launch))
 
 
 def validate_inputs(args: Args) -> None:

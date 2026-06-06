@@ -2,10 +2,11 @@ import contextlib
 import io
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from omo_manager.omo_codex_stop import Args, extract_resume_id, main, record_close, stop
+from omo_manager.omo_codex_stop import Args, close_note, extract_resume_id, main, record_close, stop
 
 
 class CodexStopTests(unittest.TestCase):
@@ -34,7 +35,12 @@ class CodexStopTests(unittest.TestCase):
             )
             text = task.read_text(encoding="utf-8")
         self.assertIn("session_id: `11111111-2222-3333-4444-555555555555`", text)
-        self.assertIn("resume: `codex resume 11111111-2222-3333-4444-555555555555`", text)
+        self.assertNotIn("codex resume", text)
+
+    def test_close_note_omits_year(self) -> None:
+        text = close_note("cfg:1.0", "11111111-2222-3333-4444-555555555555", datetime(2026, 6, 6, 11, 18, tzinfo=timezone.utc))
+        self.assertIn("06-06 11:18 UTC", text)
+        self.assertNotIn("2026", text)
 
     def test_record_close_appends_no_session_note(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -72,6 +78,16 @@ class CodexStopTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "task file not found"):
                     stop(Args("cfg:1.0", 0.0, 10, False, False, Path(tmp), "missing.md"))
         tmux.assert_not_called()
+
+    def test_stop_extracts_resume_id_from_pre_interrupt_capture(self) -> None:
+        with (
+            patch("omo_manager.omo_codex_stop.pane_id", return_value="%1"),
+            patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%2"),
+            patch("omo_manager.omo_codex_stop.capture", side_effect=["codex resume 11111111-2222-3333-4444-555555555555", ""]),
+            patch("omo_manager.omo_codex_stop.wait_shell"),
+            patch("omo_manager.omo_codex_stop.tmux"),
+        ):
+            self.assertEqual("11111111-2222-3333-4444-555555555555", stop(Args("cfg:1.0", 0.0, 10, False, False)))
 
     def test_stop_dry_run_refuses_missing_target_before_printing(self) -> None:
         with patch("omo_manager.omo_codex_stop.pane_id", return_value=""):

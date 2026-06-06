@@ -109,11 +109,11 @@ def task_path(root: Path, task_file: str) -> Path:
 
 
 def close_note(target: str, session_id: str, now: datetime | None = None) -> str:
-    stamp = (now or datetime.now().astimezone()).strftime("%Y-%m-%d %H:%M %Z")
+    stamp = (now or datetime.now().astimezone()).strftime("%m-%d %H:%M %Z")
     if session_id:
         return (
             f"\n(manager closed Codex agent {stamp}; tmux target `{target}`; "
-            f"session_id: `{session_id}`; resume: `codex resume {session_id}`.)\n"
+            f"session_id: `{session_id}`.)\n"
         )
     return (
         f"\n(manager closed Codex agent {stamp}; tmux target `{target}`; "
@@ -147,9 +147,11 @@ def stop(args: Args) -> str:
     if args.dry_run:
         print(f"would send Ctrl-C to {args.target}")
         return ""
+    before = capture(args.target, args.lines)
     _ = tmux(["send-keys", "-t", args.target, "C-c"], check=True)
     wait_shell(args.target, time.monotonic() + args.wait_s)
-    return extract_resume_id(capture(args.target, args.lines))
+    after = capture(args.target, args.lines)
+    return extract_resume_id(before + "\n" + after)
 
 
 def main(argv: list[str]) -> int:
