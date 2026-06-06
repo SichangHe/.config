@@ -69,13 +69,13 @@ while :; do
   printf "%s pending watcher exited status=%s; restarting in 5s\n" "$(date "+%Y-%m-%d %H:%M:%S %z")" "$st" >&2
   sleep 5
 done
-' pending-watch-supervisor omo_pending_watch.py "${pending_args[@]}" >"$state_dir/pending-watch.log" 2>&1 &
+' pending-watch-supervisor omo_pending_watch.py "${pending_args[@]}" >>"$state_dir/pending-watch.log" 2>&1 &
 pending_pid=$!
 echo "started pending watcher supervisor pid=$pending_pid log=$state_dir/pending-watch.log"
 stuck_pid=""
 case "$stuck_enable" in
   1|true|yes)
-    setsid omo_stuck_watch.py --watch --interval-s "${OMO_MANAGER_STUCK_INTERVAL_S:-60}" --stale-after-s "${OMO_MANAGER_STUCK_STALE_AFTER_S:-900}" --max-iterations "${OMO_MANAGER_STUCK_MAX_ITERATIONS:-10000}" >"$state_dir/stuck-watch.log" 2>&1 &
+    setsid omo_stuck_watch.py --watch --interval-s "${OMO_MANAGER_STUCK_INTERVAL_S:-60}" --stale-after-s "${OMO_MANAGER_STUCK_STALE_AFTER_S:-900}" --max-iterations "${OMO_MANAGER_STUCK_MAX_ITERATIONS:-10000}" >>"$state_dir/stuck-watch.log" 2>&1 &
     stuck_pid=$!
     echo "started stuck watcher pid=$stuck_pid log=$state_dir/stuck-watch.log"
     ;;
@@ -95,7 +95,7 @@ if [ "$start_email" -eq 1 ]; then
   email_args=(--root "$root" --mail-dir "$mail_dir" --state-dir "$state_dir")
   [ -n "$manager_url" ] && email_args+=(--manager-url "$manager_url")
   [ -n "$manager_target" ] && email_args+=(--manager-target "$manager_target")
-  setsid email_idle_watcher.py "${email_args[@]}" >"$state_dir/email-watch.log" 2>&1 &
+  setsid email_idle_watcher.py "${email_args[@]}" >>"$state_dir/email-watch.log" 2>&1 &
   email_pid=$!
   echo "started email watcher pid=$email_pid log=$state_dir/email-watch.log mail_dir=$mail_dir"
 else

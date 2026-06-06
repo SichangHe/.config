@@ -54,6 +54,7 @@ _configured_auth_servers = tuple(
 TRUSTED_AUTH_SERVERS = _configured_auth_servers or ("mx.google.com",)
 DEFAULT_RECOVERY_DEBOUNCE_S = int(os.environ.get("OMO_MANAGER_RECOVERY_DEBOUNCE_S", "900"))
 DEFAULT_IDLE_WAIT_S = float(os.environ.get("OMO_MANAGER_EMAIL_IDLE_WAIT_S", "60"))
+DEFAULT_IMAP_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_EMAIL_IMAP_TIMEOUT_S", str(max(90.0, DEFAULT_IDLE_WAIT_S + 30.0))))
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 
@@ -70,6 +71,7 @@ class Args:
     restart_script: Path
     idle_wait_s: float = DEFAULT_IDLE_WAIT_S
     manager_target: str = ""
+    imap_timeout_s: float = DEFAULT_IMAP_TIMEOUT_S
 
 
 class ParsedArgs(argparse.Namespace):
@@ -83,6 +85,7 @@ class ParsedArgs(argparse.Namespace):
     recovery_debounce_s: int = DEFAULT_RECOVERY_DEBOUNCE_S
     restart_script: Path = Path.home() / ".config/omo_manager/omo_manager_restart.sh"
     idle_wait_s: float = DEFAULT_IDLE_WAIT_S
+    imap_timeout_s: float = DEFAULT_IMAP_TIMEOUT_S
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -96,13 +99,14 @@ def parse_args(argv: list[str]) -> Args:
     parser.add_argument("--recovery-debounce-s", type=int, default=DEFAULT_RECOVERY_DEBOUNCE_S)
     parser.add_argument("--restart-script", type=Path, default=Path(os.environ.get("OMO_MANAGER_RECOVERY_RESTART_SCRIPT", Path.home() / ".config/omo_manager/omo_manager_restart.sh")))
     parser.add_argument("--idle-wait-s", type=float, default=DEFAULT_IDLE_WAIT_S, help="Maximum IMAP IDLE wait before polling again; lower values reduce perceived missed-email latency")
+    parser.add_argument("--imap-timeout-s", type=float, default=DEFAULT_IMAP_TIMEOUT_S, help="Socket timeout for IMAP operations; prevents silent permanent IDLE/readline hangs")
     parser.add_argument("--once", action="store_true")
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     root = parsed.root
     manager_file = parsed.manager_file
     if manager_file is not None and not manager_file.is_absolute():
         manager_file = root / manager_file
-    return Args(root, parsed.manager_url.rstrip("/"), parsed.mail_dir, parsed.state_dir, manager_file, parsed.once, "", parsed.recovery_debounce_s, parsed.restart_script, parsed.idle_wait_s, parsed.manager_target.strip())
+    return Args(root, parsed.manager_url.rstrip("/"), parsed.mail_dir, parsed.state_dir, manager_file, parsed.once, "", parsed.recovery_debounce_s, parsed.restart_script, parsed.idle_wait_s, parsed.manager_target.strip(), parsed.imap_timeout_s)
 
 
 def current_manager_file(args: Args) -> Path:
@@ -430,7 +434,9 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> None:
     for subject in RECOVERY_SUBJECTS:
         candidate_uids.update(search_uids(client, subject, args.self_email, processed_uids))
     if not candidate_uids:
+        logging.info("email scan complete: n=0 processed_next=%s manager_file=%s", uid_search_range(processed_uids), manager_file)
         return
+    logging.info("email candidates found: n=%s uids=%s processed_max=%s manager_file=%s", len(candidate_uids), ",".join(uid.decode() for uid in sorted(candidate_uids, key=lambda value: int(value))), uid_search_range(processed_uids), manager_file)
     args.mail_dir.mkdir(parents=True, exist_ok=True)
     for raw_uid in sorted(candidate_uids, key=lambda value: int(value)):
         uid = raw_uid.decode()
@@ -452,13 +458,16 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> None:
             continue
         typ_msg, msg_data = client.uid("fetch", uid, "(BODY.PEEK[])")
         if typ_msg != "OK" or not msg_data or not isinstance(msg_data[0], tuple):
+            logging.error("email fetch failed: uid=%s typ=%s", uid, typ_msg)
             continue
         msg = BytesParser(policy=policy.default).parsebytes(msg_data[0][1])
         sender = str(msg.get("From", ""))
         subject = str(msg.get("Subject", ""))
         if not (is_manager_subject(subject) or is_recovery_subject(subject)) or not from_self(sender, args.self_email):
+            logging.warning("email candidate rejected after fetch: uid=%s subject=%r from_self=%s", uid, subject, from_self(sender, args.self_email))
             continue
         txt_path = write_mail(args, uid, msg, sender, subject)
+        logging.info("email stored: uid=%s path=%s subject=%r", uid, source_ref(args.root, txt_path), subject)
         if is_recovery_subject(subject):
             if recovery_sender_authenticated(msg, args.self_email):
                 handle_recovery_email(args, uid, txt_path)
@@ -501,12 +510,14 @@ def main(argv: list[str]) -> int:
     if missing:
         print(f"email_idle_watcher: missing config keys {sorted(missing)} in {CONFIG_PATH}", file=sys.stderr)
         return 1
-    safe_args = Args(args.root, args.manager_url, args.mail_dir, args.state_dir, args.manager_file, args.once, config["user"], args.recovery_debounce_s, args.restart_script, args.idle_wait_s, args.manager_target)
+    safe_args = Args(args.root, args.manager_url, args.mail_dir, args.state_dir, args.manager_file, args.once, config["user"], args.recovery_debounce_s, args.restart_script, args.idle_wait_s, args.manager_target, args.imap_timeout_s)
+    logging.info("email watcher starting: root=%s mail_dir=%s state_dir=%s manager_target=%s manager_url=%s idle_wait_s=%s imap_timeout_s=%s", safe_args.root, safe_args.mail_dir, safe_args.state_dir, safe_args.manager_target or "unset", safe_args.manager_url or "unset", safe_args.idle_wait_s, safe_args.imap_timeout_s)
     while True:
         try:
-            with imaplib.IMAP4_SSL(config["host"]) as client:
+            with imaplib.IMAP4_SSL(config["host"], timeout=safe_args.imap_timeout_s) as client:
                 client.login(config["user"], config["password"])
                 client.select("INBOX")
+                logging.info("email watcher connected and selected INBOX")
                 handle_unseen(client, safe_args)
                 if safe_args.once:
                     return 0

@@ -53,6 +53,12 @@ class PendingMarkerTests(unittest.TestCase):
         args = parse_args(["--root", "/tmp/root", "--idle-wait-s", "7.5", "--once"])
         self.assertEqual(7.5, args.idle_wait_s)
 
+    def test_email_watcher_imap_timeout_is_configurable(self) -> None:
+        from omo_manager.email_idle_watcher import parse_args
+
+        args = parse_args(["--root", "/tmp/root", "--imap-timeout-s", "8.5", "--once"])
+        self.assertEqual(8.5, args.imap_timeout_s)
+
     def test_email_watcher_manager_file_is_configurable(self) -> None:
         from omo_manager.email_idle_watcher import parse_args
 
