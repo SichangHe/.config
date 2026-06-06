@@ -399,8 +399,16 @@ def handle_recovery_email(args: Args, uid: str, txt_path: Path) -> None:
             os.close(lock_fd)
 
 
-def search_uids(client: imaplib.IMAP4_SSL, subject: str, self_email: str) -> set[bytes]:
-    typ, data = client.uid("search", "UNSEEN", "FROM", f'"{self_email}"', "SUBJECT", f'"{subject}"')
+def uid_search_range(processed_uids: set[str]) -> str:
+    max_uid = max((int(uid) for uid in processed_uids if uid.isdigit()), default=0)
+    return f"{max_uid + 1}:*"
+
+
+def search_uids(client: imaplib.IMAP4_SSL, subject: str, self_email: str, processed_uids: set[str]) -> set[bytes]:
+    if processed_uids:
+        typ, data = client.uid("search", None, "UID", uid_search_range(processed_uids), "FROM", f'"{self_email}"', "SUBJECT", f'"{subject}"')
+    else:
+        typ, data = client.uid("search", "UNSEEN", "FROM", f'"{self_email}"', "SUBJECT", f'"{subject}"')
     if typ != "OK" or not data or not data[0]:
         return set()
     return set(data[0].split())
@@ -418,9 +426,9 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> None:
     push_args = args_w_manager_file(args, manager_file)
     candidate_uids: set[bytes] = set()
     for subject_prefix in NORMAL_REPLY_SEARCH_PREFIXES:
-        candidate_uids.update(search_uids(client, subject_prefix, args.self_email))
+        candidate_uids.update(search_uids(client, subject_prefix, args.self_email, processed_uids))
     for subject in RECOVERY_SUBJECTS:
-        candidate_uids.update(search_uids(client, subject, args.self_email))
+        candidate_uids.update(search_uids(client, subject, args.self_email, processed_uids))
     if not candidate_uids:
         return
     args.mail_dir.mkdir(parents=True, exist_ok=True)
