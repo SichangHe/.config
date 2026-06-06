@@ -16,7 +16,6 @@ SHELL_COMMANDS = {"bash", "dash", "fish", "sh", "zsh"}
 DEFAULT_ROOT = Path(os.environ.get("OMO_WORK_LOGS_ROOT", Path.home() / "work_logs"))
 UUID_RE = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 RESUME_RE = re.compile(rf"(?i)\bcodex\s+resume\s+(?:--[\w-]+\s+)*({UUID_RE})\b")
-UUID_LINE_RE = re.compile(rf"(?i)\bresume\b[^\n\r]*\b({UUID_RE})\b")
 
 
 @dataclass(frozen=True)
@@ -92,10 +91,24 @@ def capture(target: str, n_lines: int) -> str:
 
 
 def extract_resume_id(text: str) -> str:
-    for regex in (RESUME_RE, UUID_LINE_RE):
-        matches = regex.findall(text)
-        if matches:
-            return matches[-1]
+    matches = RESUME_RE.findall(text)
+    return matches[-1] if matches else ""
+
+
+def post_interrupt_output(before: str, after: str) -> str:
+    if not before:
+        return after
+    if after.startswith(before):
+        return after[len(before) :]
+    before_lines = before.splitlines(keepends=True)
+    after_lines = after.splitlines(keepends=True)
+    for n_lines in range(min(len(before_lines), len(after_lines)), 0, -1):
+        if before_lines[-n_lines:] == after_lines[:n_lines]:
+            return "".join(after_lines[n_lines:])
+    before_text = {line.strip() for line in before_lines if line.strip()}
+    after_text = {line.strip() for line in after_lines if line.strip()}
+    if before_text.isdisjoint(after_text):
+        return after
     return ""
 
 
@@ -151,7 +164,7 @@ def stop(args: Args) -> str:
     _ = tmux(["send-keys", "-t", args.target, "C-c"], check=True)
     wait_shell(args.target, time.monotonic() + args.wait_s)
     after = capture(args.target, args.lines)
-    return extract_resume_id(before + "\n" + after)
+    return extract_resume_id(post_interrupt_output(before, after))
 
 
 def main(argv: list[str]) -> int:

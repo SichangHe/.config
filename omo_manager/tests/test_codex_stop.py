@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from omo_manager.omo_codex_stop import Args, close_note, extract_resume_id, main, record_close, stop
+from omo_manager.omo_codex_stop import Args, close_note, extract_resume_id, main, post_interrupt_output, record_close, stop
 
 
 class CodexStopTests(unittest.TestCase):
@@ -16,7 +16,12 @@ class CodexStopTests(unittest.TestCase):
 
     def test_extract_resume_id_from_resume_line(self) -> None:
         text = "Resume this session with 99999999-aaaa-bbbb-cccc-dddddddddddd when ready.\n"
-        self.assertEqual("99999999-aaaa-bbbb-cccc-dddddddddddd", extract_resume_id(text))
+        self.assertEqual("", extract_resume_id(text))
+
+    def test_post_interrupt_output_returns_only_new_tail(self) -> None:
+        before = "agent output\ncodex resume 11111111-2222-3333-4444-555555555555\n"
+        after = f"{before}To resume, run codex resume 99999999-aaaa-bbbb-cccc-dddddddddddd\n"
+        self.assertEqual("To resume, run codex resume 99999999-aaaa-bbbb-cccc-dddddddddddd\n", post_interrupt_output(before, after))
 
     def test_main_prints_empty_session_id_when_missing(self) -> None:
         out = io.StringIO()
@@ -79,15 +84,28 @@ class CodexStopTests(unittest.TestCase):
                     stop(Args("cfg:1.0", 0.0, 10, False, False, Path(tmp), "missing.md"))
         tmux.assert_not_called()
 
-    def test_stop_extracts_resume_id_from_pre_interrupt_capture(self) -> None:
+    def test_stop_ignores_resume_id_from_pre_interrupt_transcript(self) -> None:
+        visible_transcript = "codex resume 11111111-2222-3333-4444-555555555555\n"
         with (
             patch("omo_manager.omo_codex_stop.pane_id", return_value="%1"),
             patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%2"),
-            patch("omo_manager.omo_codex_stop.capture", side_effect=["codex resume 11111111-2222-3333-4444-555555555555", ""]),
+            patch("omo_manager.omo_codex_stop.capture", side_effect=[visible_transcript, visible_transcript]),
             patch("omo_manager.omo_codex_stop.wait_shell"),
             patch("omo_manager.omo_codex_stop.tmux"),
         ):
-            self.assertEqual("11111111-2222-3333-4444-555555555555", stop(Args("cfg:1.0", 0.0, 10, False, False)))
+            self.assertEqual("", stop(Args("cfg:1.0", 0.0, 10, False, False)))
+
+    def test_stop_extracts_resume_id_from_post_interrupt_output(self) -> None:
+        before = "codex resume 11111111-2222-3333-4444-555555555555\n"
+        after = f"{before}To resume, run codex resume 99999999-aaaa-bbbb-cccc-dddddddddddd\n"
+        with (
+            patch("omo_manager.omo_codex_stop.pane_id", return_value="%1"),
+            patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%2"),
+            patch("omo_manager.omo_codex_stop.capture", side_effect=[before, after]),
+            patch("omo_manager.omo_codex_stop.wait_shell"),
+            patch("omo_manager.omo_codex_stop.tmux"),
+        ):
+            self.assertEqual("99999999-aaaa-bbbb-cccc-dddddddddddd", stop(Args("cfg:1.0", 0.0, 10, False, False)))
 
     def test_stop_dry_run_refuses_missing_target_before_printing(self) -> None:
         with patch("omo_manager.omo_codex_stop.pane_id", return_value=""):
