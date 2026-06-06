@@ -29,7 +29,7 @@ Listener/supervisor architecture note: do not merge `email_idle_watcher.py` and 
 
 `omo_task.py` creates/links task files and can start a Codex worker in a new tmux window with `bunx @openai/codex --dangerously-bypass-approvals-and-sandbox`. Use `--reasoning-effort xhigh` to pass `--config 'model_reasoning_effort="xhigh"'`; allowed values are `low`, `medium`, `high`, and `xhigh`. Use repeatable `--codex-flag` for extra Codex argv tokens, for example `--codex-flag=--profile --codex-flag deep-review`. Use `--session-id UUID` to start `codex ... resume UUID` instead of a fresh session. It records `runat: SESSION:WINDOW codex`; pane 0 is implied.
 
-`omo_codex_stop.py --target SESSION:WINDOW.PANE` sends Ctrl-C to a Codex pane, captures the pane tail, and prints `session_id: UUID` plus `resume_cmd: codex resume UUID` when Codex emitted a resume line. It refuses to stop the current pane unless `--allow-self` is passed.
+`omo_codex_stop.py --target SESSION:WINDOW.PANE --root ROOT --task-file TASK.md` sends Ctrl-C to a Codex pane, captures the pane tail, appends a close note to the task file, and prints `session_id: UUID` plus `resume_cmd: codex resume UUID` when Codex emitted a resume line. Without `--task-file`, it only prints the captured ID. It refuses to stop the current pane unless `--allow-self` is passed.
 
 `omo_codex_status.py` reads a tmux window tail and reports `not_codex`, `running`, `error`, or `ready` plus the current response tail. It detects the Codex TUI by `  gpt-` on the last visible line and extracts output between the last separator and `─ Worked for ... ─`.
 
