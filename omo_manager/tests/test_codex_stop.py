@@ -6,7 +6,21 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from omo_manager.omo_codex_stop import Args, close_note, extract_new_status_session_id, extract_resume_id, extract_status_session_id, main, post_interrupt_output, query_status_session_id, record_close, send_exit_keys, stop
+from omo_manager.omo_codex_stop import (
+    Args,
+    close_note,
+    close_tmux_target,
+    extract_exit_resume_id,
+    extract_new_status_session_id,
+    extract_resume_id,
+    extract_status_session_id,
+    main,
+    post_interrupt_output,
+    query_status_session_id,
+    record_close,
+    send_exit_keys,
+    stop,
+)
 
 
 class CodexStopTests(unittest.TestCase):
@@ -17,6 +31,19 @@ class CodexStopTests(unittest.TestCase):
     def test_extract_resume_id_from_resume_line(self) -> None:
         text = "Resume this session with 99999999-aaaa-bbbb-cccc-dddddddddddd when ready.\n"
         self.assertEqual("", extract_resume_id(text))
+
+    def test_extract_exit_resume_id_from_continue_line_after_repaint(self) -> None:
+        before = "› ready\ncodex resume 11111111-2222-3333-4444-555555555555\n"
+        after = (
+            "› ready\n\n"
+            "To continue this session, run codex resume 99999999-aaaa-bbbb-cccc-dddddddddddd\n"
+        )
+        self.assertEqual("99999999-aaaa-bbbb-cccc-dddddddddddd", extract_exit_resume_id(before, after))
+
+    def test_extract_exit_resume_id_ignores_stale_continue_line(self) -> None:
+        before = "To continue this session, run codex resume 11111111-2222-3333-4444-555555555555\n"
+        after = f"› ready\n{before}"
+        self.assertEqual("", extract_exit_resume_id(before, after))
 
     def test_extract_status_session_id_from_status_box(self) -> None:
         text = "│  Session:              019e9ed9-6262-71c0-b4b3-72ffd4182e98       │\n"
@@ -123,6 +150,7 @@ class CodexStopTests(unittest.TestCase):
             patch("omo_manager.omo_codex_stop.query_status_session_id", return_value=("", visible_transcript)),
             patch("omo_manager.omo_codex_stop.send_exit_keys"),
             patch("omo_manager.omo_codex_stop.wait_shell"),
+            patch("omo_manager.omo_codex_stop.close_tmux_target"),
             patch("omo_manager.omo_codex_stop.tmux"),
         ):
             self.assertEqual("", stop(Args("cfg:1.0", 0.0, 10, False, False)))
@@ -137,6 +165,7 @@ class CodexStopTests(unittest.TestCase):
             patch("omo_manager.omo_codex_stop.query_status_session_id", return_value=("", before)),
             patch("omo_manager.omo_codex_stop.send_exit_keys"),
             patch("omo_manager.omo_codex_stop.wait_shell"),
+            patch("omo_manager.omo_codex_stop.close_tmux_target"),
             patch("omo_manager.omo_codex_stop.tmux"),
         ):
             self.assertEqual("99999999-aaaa-bbbb-cccc-dddddddddddd", stop(Args("cfg:1.0", 0.0, 10, False, False)))
@@ -150,6 +179,7 @@ class CodexStopTests(unittest.TestCase):
             patch("omo_manager.omo_codex_stop.send_exit_keys"),
             patch("omo_manager.omo_codex_stop.wait_shell"),
             patch("omo_manager.omo_codex_stop.capture", return_value=status_after),
+            patch("omo_manager.omo_codex_stop.close_tmux_target"),
         ):
             self.assertEqual("019e9ed9-6262-71c0-b4b3-72ffd4182e98", stop(Args("cfg:1.0", 0.0, 10, False, False)))
 
@@ -158,7 +188,7 @@ class CodexStopTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "tmux target not found"):
                 stop(Args("cfg:9.0", 0.0, 10, True, False))
 
-    def test_query_status_session_id_pastes_status_and_submits_with_three_enters(self) -> None:
+    def test_query_status_session_id_pastes_status_and_submits_once(self) -> None:
         before = "ready\n"
         after = f"{before}/status\n│  Session:              019e9ed9-6262-71c0-b4b3-72ffd4182e98       │\n"
         with (
@@ -166,9 +196,31 @@ class CodexStopTests(unittest.TestCase):
             patch("omo_manager.omo_codex_stop.paste_text") as paste_text,
             patch("omo_manager.omo_codex_stop.tmux") as tmux,
         ):
-            self.assertEqual(("019e9ed9-6262-71c0-b4b3-72ffd4182e98", after), query_status_session_id("cfg:1.0", 10, 0.1))
+            self.assertEqual(
+                ("019e9ed9-6262-71c0-b4b3-72ffd4182e98", after),
+                query_status_session_id("cfg:1.0", 10, 0.1),
+            )
         paste_text.assert_called_once_with("cfg:1.0", "/status")
-        self.assertEqual(["send-keys", "-t", "cfg:1.0", "Enter", "Enter", "Enter"], tmux.call_args.args[0])
+        self.assertEqual([["send-keys", "-t", "cfg:1.0", "Enter"]], [call.args[0] for call in tmux.call_args_list])
+
+    def test_query_status_session_id_sends_one_fallback_enter_when_status_remains_in_input(self) -> None:
+        before = "ready\n"
+        still_input = f"{before}› /status\n"
+        after = f"{before}/status\n│  Session:              019e9ed9-6262-71c0-b4b3-72ffd4182e98       │\n"
+        with (
+            patch("omo_manager.omo_codex_stop.capture", side_effect=[before, still_input, after]),
+            patch("omo_manager.omo_codex_stop.paste_text"),
+            patch("omo_manager.omo_codex_stop.tmux") as tmux,
+            patch("omo_manager.omo_codex_stop.time.sleep"),
+        ):
+            self.assertEqual(
+                ("019e9ed9-6262-71c0-b4b3-72ffd4182e98", after),
+                query_status_session_id("cfg:1.0", 10, 0.1),
+            )
+        self.assertEqual(
+            [["send-keys", "-t", "cfg:1.0", "Enter"], ["send-keys", "-t", "cfg:1.0", "Enter"]],
+            [call.args[0] for call in tmux.call_args_list],
+        )
 
     def test_send_exit_keys_sends_second_ctrl_c_when_codex_still_running(self) -> None:
         with patch("omo_manager.omo_codex_stop.tmux") as tmux, patch("omo_manager.omo_codex_stop.current_command", return_value="bunx"):
@@ -177,6 +229,32 @@ class CodexStopTests(unittest.TestCase):
             [["send-keys", "-t", "cfg:1.0", "C-c"], ["send-keys", "-t", "cfg:1.0", "C-c"]],
             [call.args[0] for call in tmux.call_args_list],
         )
+
+    def test_close_tmux_target_kills_single_pane_window_after_shell(self) -> None:
+        with (
+            patch("omo_manager.omo_codex_stop.current_command", return_value="zsh"),
+            patch("omo_manager.omo_codex_stop.window_panes", return_value=1),
+            patch("omo_manager.omo_codex_stop.tmux") as tmux,
+        ):
+            close_tmux_target("cfg:1.0")
+        self.assertEqual(["kill-window", "-t", "cfg:1.0"], tmux.call_args.args[0])
+
+    def test_close_tmux_target_kills_only_pane_in_multi_pane_window(self) -> None:
+        with (
+            patch("omo_manager.omo_codex_stop.current_command", return_value="zsh"),
+            patch("omo_manager.omo_codex_stop.window_panes", return_value=2),
+            patch("omo_manager.omo_codex_stop.tmux") as tmux,
+        ):
+            close_tmux_target("cfg:1.0")
+        self.assertEqual(["kill-pane", "-t", "cfg:1.0"], tmux.call_args.args[0])
+
+    def test_close_tmux_target_keeps_running_codex_pane(self) -> None:
+        with (
+            patch("omo_manager.omo_codex_stop.current_command", return_value="bunx"),
+            patch("omo_manager.omo_codex_stop.tmux") as tmux,
+        ):
+            close_tmux_target("cfg:1.0")
+        tmux.assert_not_called()
 
 
 if __name__ == "__main__":

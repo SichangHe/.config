@@ -16,6 +16,9 @@ SHELL_COMMANDS = {"bash", "dash", "fish", "sh", "zsh"}
 DEFAULT_ROOT = Path(os.environ.get("OMO_WORK_LOGS_ROOT", Path.home() / "work_logs"))
 UUID_RE = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 RESUME_RE = re.compile(rf"(?i)\bcodex\s+resume\s+(?:--[\w-]+\s+)*({UUID_RE})\b")
+EXIT_RESUME_RE = re.compile(
+    rf"(?i)\bTo\s+(?:resume|continue this session),\s+run\s+codex\s+resume\s+(?:--[\w-]+\s+)*({UUID_RE})\b"
+)
 STATUS_SESSION_RE = re.compile(rf"\bSession:\s*({UUID_RE})\b")
 
 
@@ -86,6 +89,14 @@ def current_command(target: str) -> str:
     return out.stdout.strip() if out.returncode == 0 else ""
 
 
+def window_panes(target: str) -> int:
+    out = tmux(["display-message", "-p", "-t", target, "#{window_panes}"])
+    try:
+        return int(out.stdout.strip()) if out.returncode == 0 else 0
+    except ValueError:
+        return 0
+
+
 def capture(target: str, n_lines: int) -> str:
     out = tmux(["capture-pane", "-p", "-t", target, "-S", f"-{n_lines}"])
     return out.stdout if out.returncode == 0 else ""
@@ -93,6 +104,20 @@ def capture(target: str, n_lines: int) -> str:
 
 def extract_resume_id(text: str) -> str:
     matches = RESUME_RE.findall(text)
+    return matches[-1] if matches else ""
+
+
+def extract_exit_resume_id(before: str, after: str) -> str:
+    session_id = extract_resume_id(post_interrupt_output(before, after))
+    if session_id:
+        return session_id
+    before_lines = {line.strip() for line in before.splitlines() if line.strip()}
+    matches = [
+        match.group(1)
+        for line in after.splitlines()
+        if line.strip() not in before_lines
+        for match in EXIT_RESUME_RE.finditer(line)
+    ]
     return matches[-1] if matches else ""
 
 
@@ -229,17 +254,25 @@ def paste_text(target: str, text: str) -> None:
         _ = tmux(["delete-buffer", "-b", buffer_name])
 
 
+def input_has_status_prompt(text: str) -> bool:
+    return any(line.lstrip().startswith("› ") and "/status" in line for line in text.splitlines()[-20:])
+
+
 def query_status_session_id(target: str, n_lines: int, wait_s: float) -> tuple[str, str]:
     before = capture(target, n_lines)
     paste_text(target, "/status")
-    _ = tmux(["send-keys", "-t", target, "Enter", "Enter", "Enter"], check=True)
+    _ = tmux(["send-keys", "-t", target, "Enter"], check=True)
     deadline_s = time.monotonic() + wait_s
     after = before
+    fallback_sent = False
     while time.monotonic() < deadline_s:
         after = capture(target, n_lines)
         session_id = extract_new_status_session_id(before, after)
         if session_id:
             return session_id, after
+        if not fallback_sent and input_has_status_prompt(after):
+            _ = tmux(["send-keys", "-t", target, "Enter"], check=True)
+            fallback_sent = True
         time.sleep(0.25)
     return "", after
 
@@ -249,6 +282,15 @@ def send_exit_keys(target: str) -> None:
     time.sleep(0.5)
     if current_command(target) not in SHELL_COMMANDS:
         _ = tmux(["send-keys", "-t", target, "C-c"], check=True)
+
+
+def close_tmux_target(target: str) -> None:
+    if current_command(target) not in SHELL_COMMANDS:
+        return
+    if window_panes(target) == 1:
+        _ = tmux(["kill-window", "-t", target], check=True)
+    else:
+        _ = tmux(["kill-pane", "-t", target], check=True)
 
 
 def stop(args: Args) -> str:
@@ -266,7 +308,8 @@ def stop(args: Args) -> str:
     send_exit_keys(args.target)
     wait_shell(args.target, time.monotonic() + args.wait_s)
     after = capture(args.target, args.lines)
-    return session_id or extract_resume_id(post_interrupt_output(before_close, after))
+    close_tmux_target(args.target)
+    return session_id or extract_exit_resume_id(before_close, after)
 
 
 def main(argv: list[str]) -> int:
