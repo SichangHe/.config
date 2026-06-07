@@ -12,8 +12,9 @@ if [ -n "$env_root" ]; then root="$env_root"; fi
 task_file=""
 status=""
 message_file=""
+message_file_tmp=0
 agent="${OMO_AGENT_NAME:-agent}"
-usage() { echo "Usage: omo_report.sh --task-file FILE --status STATUS --message-file /tmp/report.md [--agent NAME]"; }
+usage() { echo "Usage: omo_report.sh --task-file FILE --status STATUS [--message-file /tmp/report.md] [--agent NAME] < REPORT"; }
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --root) root="$2"; shift 2 ;;
@@ -26,11 +27,22 @@ while [ "$#" -gt 0 ]; do
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
-if [ -z "$task_file" ] || [ -z "$status" ] || [ -z "$message_file" ]; then usage >&2; exit 2; fi
+if [ -z "$task_file" ] || [ -z "$status" ]; then usage >&2; exit 2; fi
 root_real=$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve())' "$root")
 path_real=$(python3 -c 'from pathlib import Path; import sys; print((Path(sys.argv[1]) / sys.argv[2]).resolve(strict=False))' "$root_real" "$task_file")
 case "$path_real" in "$root_real"/*) ;; *) echo "task file escapes root" >&2; exit 2 ;; esac
-if [ ! -f "$message_file" ]; then echo "message file not found" >&2; exit 2; fi
+cleanup_message() {
+  if [ "$message_file_tmp" -eq 1 ]; then rm -f "$message_file"; fi
+}
+trap cleanup_message EXIT
+if [ -n "$message_file" ]; then
+  if [ ! -f "$message_file" ]; then echo "message file not found" >&2; exit 2; fi
+else
+  message_file=$(mktemp /tmp/omo-report.XXXXXX)
+  message_file_tmp=1
+  chmod 600 "$message_file"
+  cat >"$message_file"
+fi
 mkdir -p "$(dirname "$path_real")"
 stamp=$(date '+%Y-%m-%d %H:%M')
 source_line="(from agent ${agent} via omo_report.sh status=${status})"

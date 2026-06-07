@@ -2,7 +2,7 @@
 set -euo pipefail
 subject=""
 message_file=""
-usage() { echo "Usage: omo_email_human.sh --subject SUBJECT --message-file FILE"; }
+usage() { echo "Usage: omo_email_human.sh --subject SUBJECT [--message-file FILE] < BODY"; }
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --subject)
@@ -15,7 +15,7 @@ while [ "$#" -gt 0 ]; do
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
-if [ -z "$subject" ] || [ -z "$message_file" ]; then usage >&2; exit 2; fi
+if [ -z "$subject" ]; then usage >&2; exit 2; fi
 subject_lc=$(printf '%s' "$subject" | tr '[:upper:]' '[:lower:]')
 case "$subject_lc" in
   "re: [omo_manager]"*) echo "subject must not start with Re: [omo_manager]" >&2; exit 2 ;;
@@ -23,13 +23,27 @@ case "$subject_lc" in
   "[omo_manager]"*) ;;
   *) subject="[omo_manager] ${subject}" ;;
 esac
-if [ ! -f "$message_file" ]; then echo "message file not found" >&2; exit 2; fi
 email_helper="$HOME/.config/helper.sh/email_me.py"
 if [ ! -x "$email_helper" ]; then echo "email helper not executable: $email_helper" >&2; exit 2; fi
+body_file=""
+body_file_tmp=0
+cleanup_body() {
+  if [ "$body_file_tmp" -eq 1 ]; then rm -f "$body_file"; fi
+}
+trap cleanup_body EXIT
+if [ -n "$message_file" ]; then
+  if [ ! -f "$message_file" ]; then echo "message file not found" >&2; exit 2; fi
+  body_file="$message_file"
+else
+  body_file=$(mktemp /tmp/omo-human-email.XXXXXX)
+  body_file_tmp=1
+  chmod 600 "$body_file"
+  cat >"$body_file"
+fi
 state_dir="${OMO_MANAGER_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/omo-manager}"
 dedupe_s="${OMO_MANAGER_EMAIL_DEDUPE_S:-300}"
 dedupe_result=$(
-  { python3 - "$state_dir" "$subject" "$message_file" "$dedupe_s" <<'PY'
+  { python3 - "$state_dir" "$subject" "$body_file" "$dedupe_s" <<'PY'
 from __future__ import annotations
 from pathlib import Path
 import fcntl
@@ -77,11 +91,7 @@ if [ "$dedupe_result" = "duplicate" ]; then
   printf 'Skipped duplicate human email\n'
   exit 0
 fi
-body_file=$(mktemp /tmp/omo-human-email.XXXXXX)
-cleanup() { rm -f "$body_file"; }
-trap cleanup EXIT
-cat "$message_file" >"$body_file"
-"$email_helper" "$subject" "$(cat "$body_file")" >/dev/null
+"$email_helper" "$subject" <"$body_file" >/dev/null
 log_file="$state_dir/human-email-sent.tsv"
 {
   mkdir -p "$state_dir" && chmod 700 "$state_dir" 2>/dev/null || true

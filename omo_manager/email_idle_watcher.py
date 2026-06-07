@@ -326,14 +326,7 @@ def write_mail(args: Args, uid: str, msg: Message, _sender: str, subject: str) -
 
 
 def email_human(args: Args, subject: str, body: str) -> None:
-    message_dir = args.state_dir / "recovery-email"
-    message_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    message_dir.chmod(0o700)
-    message_file = message_dir / f"human-{int(time.time())}.md"
-    fd = os.open(message_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(body)
-    subprocess.run([str(Path.home() / ".config/omo_manager/omo_email_human.sh"), "--subject", subject, "--message-file", str(message_file)], check=False)
+    subprocess.run([str(Path.home() / ".config/omo_manager/omo_email_human.sh"), "--subject", subject], input=body, text=True, check=False)
 
 
 def shell_join(command: list[str]) -> str:

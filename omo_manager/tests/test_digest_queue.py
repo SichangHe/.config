@@ -245,7 +245,7 @@ class DigestQueueTests(unittest.TestCase):
             root = Path(tmp)
             state = root / "state"
             fake = root / "fake-send.sh"
-            fake.write_text(f"#!/bin/sh\necho sent >> {str(root / 'fake-send.log')!r}\nexit 0\n", encoding="utf-8")
+            fake.write_text(f"#!/bin/sh\ncat > {str(root / 'fake-send.log')!r}\nexit 0\n", encoding="utf-8")
             fake.chmod(0o755)
             submit = subprocess.run(
                 [str(Path.home() / ".config/omo_manager/omo_digest_queue.py"), "--root", str(root), "submit", "--source", "pb", "--title", "Queued item", "--summary", "Non-urgent."],
@@ -263,7 +263,7 @@ class DigestQueueTests(unittest.TestCase):
             args.root = args.root.resolve()
             with patch.object(omo_digest_queue, "now_local", return_value=datetime.fromisoformat("2026-05-25T15:00:00-07:00")):
                 self.assertEqual(0, omo_digest_queue.command_deliver(args))
-            self.assertEqual("sent\n", (root / "fake-send.log").read_text(encoding="utf-8"))
+            self.assertIn("Queued item", (root / "fake-send.log").read_text(encoding="utf-8"))
             queue_text = (root / "MANAGER_DIGEST_QUEUE.md").read_text(encoding="utf-8")
             self.assertIn("status: sent", queue_text)
             self.assertIn("sent-at:", queue_text)

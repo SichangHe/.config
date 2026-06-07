@@ -280,6 +280,38 @@ class PendingMarkerTests(unittest.TestCase):
             markers = find_markers(root, [task])
             self.assertEqual(1, len(markers))
 
+    def test_omo_report_reads_stdin_body_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            root.mkdir()
+            result = subprocess.run(
+                [
+                    str(Path.home() / ".config/omo_manager/omo_report.sh"),
+                    "--root",
+                    str(root),
+                    "--manager-url",
+                    "http://127.0.0.1:1",
+                    "--task-file",
+                    "task.md",
+                    "--status",
+                    "done",
+                    "--agent",
+                    "agent-stdin",
+                ],
+                input="stdin report\n",
+                cwd=tmp,
+                env={**os.environ, "OMO_MANAGER_LOCAL_ENV": str(Path(tmp) / "missing-local.env")},
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+            self.assertEqual("", result.stderr)
+            self.assertEqual(0, result.returncode)
+            text = (root / "task.md").read_text(encoding="utf-8")
+            self.assertIn("(from agent agent-stdin via omo_report.sh status=done)", text)
+            self.assertIn("message:\n> stdin report\n", text)
+
     def test_omo_report_concurrent_distinct_reports_keep_all_blocks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "logs"
@@ -364,12 +396,10 @@ class PendingMarkerTests(unittest.TestCase):
                 "from pathlib import Path\n"
                 "import os\n"
                 "import sys\n"
-                "Path(os.environ['SENT_LOG']).open('a', encoding='utf-8').write(sys.argv[1] + '\\n')\n",
+                "Path(os.environ['SENT_LOG']).open('a', encoding='utf-8').write(sys.argv[1] + '\\n' + sys.stdin.read())\n",
                 encoding="utf-8",
             )
             helper.chmod(0o700)
-            msg = Path(tmp) / "msg.md"
-            _ = msg.write_text("same body\n", encoding="utf-8")
             env = {
                 **os.environ,
                 "HOME": str(home),
@@ -381,16 +411,14 @@ class PendingMarkerTests(unittest.TestCase):
                 str(Path.home() / ".config/omo_manager/omo_email_human.sh"),
                 "--subject",
                 "Manager update",
-                "--message-file",
-                str(msg),
             ]
-            first = subprocess.run(cmd, text=True, capture_output=True, timeout=10, env=env, check=False)
-            second = subprocess.run(cmd, text=True, capture_output=True, timeout=10, env=env, check=False)
+            first = subprocess.run(cmd, input="same body\n", text=True, capture_output=True, timeout=10, env=env, check=False)
+            second = subprocess.run(cmd, input="same body\n", text=True, capture_output=True, timeout=10, env=env, check=False)
             self.assertEqual(0, first.returncode)
             self.assertEqual("Emailed the human\n", first.stdout)
             self.assertEqual(0, second.returncode)
             self.assertEqual("Skipped duplicate human email\n", second.stdout)
-            self.assertEqual("[omo_manager] Manager update\n", sent_log.read_text(encoding="utf-8"))
+            self.assertEqual("[omo_manager] Manager update\nsame body\n", sent_log.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

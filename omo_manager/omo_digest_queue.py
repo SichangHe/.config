@@ -9,7 +9,6 @@ import os
 import re
 import subprocess
 import sys
-import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -336,16 +335,7 @@ def command_deliver(args: argparse.Namespace) -> int:
         if args.dry_run:
             print(body, end="")
             return 0
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", prefix="omo-digest-delivery-", suffix=".md", delete=False) as handle:
-            handle.write(body)
-            message_file = Path(handle.name)
-        try:
-            result = subprocess.run([str(args.send_helper), "--subject", args.subject, "--message-file", str(message_file)], check=False)
-        finally:
-            try:
-                message_file.unlink()
-            except OSError:
-                pass
+        result = subprocess.run([str(args.send_helper), "--subject", args.subject], input=body, text=True, check=False)
         if result.returncode != 0:
             return result.returncode
         replace_statuses(path, {item.item_id for item in queued}, iso_now())

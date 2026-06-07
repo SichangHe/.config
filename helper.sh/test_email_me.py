@@ -5,7 +5,9 @@ import os
 import sys
 import tempfile
 import unittest
+from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
 MODULE_PATH = Path(__file__).with_name("email_me.py")
 SPEC = importlib.util.spec_from_file_location("email_me", MODULE_PATH)
@@ -43,6 +45,29 @@ class EmailMeTests(unittest.TestCase):
         self.assertIsNotNone(html)
         self.assertIn("Story: https://example.com/a?b=1&c=2", plain.get_content())
         self.assertIn('<a href="https://example.com/a?b=1&amp;c=2">Story</a>', html.get_content())
+
+    def test_parse_args_reads_body_from_stdin_by_default(self) -> None:
+        with patch.object(sys, "stdin", StringIO("stdin body\n")):
+            args = email_me.parse_args(["hi"])
+        self.assertEqual("hi", args.title)
+        self.assertEqual("stdin body\n", args.content)
+
+    def test_parse_args_keeps_positional_body_compatibility(self) -> None:
+        args = email_me.parse_args(["hi", "legacy body"])
+        self.assertEqual("legacy body", args.content)
+
+    def test_parse_args_keeps_message_file_compatibility(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "body.md"
+            path.write_text("file body\n", encoding="utf-8")
+            args = email_me.parse_args(["hi", "--message-file", str(path)])
+        self.assertEqual("file body\n", args.content)
+
+    def test_dry_run_does_not_require_smtp_credentials(self) -> None:
+        with patch.object(sys, "stdin", StringIO("body\n")), patch("sys.stdout", new_callable=StringIO) as stdout:
+            result = email_me.main(["--dry-run", "hi"])
+        self.assertEqual(0, result)
+        self.assertIn("dry-run: email not sent", stdout.getvalue())
 
 
 if __name__ == "__main__":

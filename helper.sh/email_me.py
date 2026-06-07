@@ -32,11 +32,14 @@ MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
 class CliArgs:
     title: str
     content: str
+    dry_run: bool
 
 
 class ParsedArgs(argparse.Namespace):
     title: str = ""
     content: str = ""
+    message_file: Path | None = None
+    dry_run: bool = False
 
 
 def parse_args(argv: list[str]) -> CliArgs:
@@ -44,15 +47,27 @@ def parse_args(argv: list[str]) -> CliArgs:
         description="Send a plain text email to your own Gmail inbox."
     )
     _ = parser.add_argument("title", type=str, help="Email subject/title")
-    _ = parser.add_argument("content", type=str, help="Email plain text body")
+    _ = parser.add_argument("content", nargs="?", type=str, help=argparse.SUPPRESS)
+    _ = parser.add_argument("--message-file", type=Path, help=argparse.SUPPRESS)
+    _ = parser.add_argument("--dry-run", action="store_true", help="Validate without sending.")
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     title = parsed.title
-    content = parsed.content
+    if parsed.content is not None and parsed.message_file is not None:
+        parser.error("pass body by stdin, positional content, or --message-file, not multiple.")
+    if parsed.message_file is not None:
+        try:
+            content = parsed.message_file.read_text(encoding="utf-8")
+        except OSError as exc:
+            parser.error(f"message file not readable: {exc}")
+    elif parsed.content is not None:
+        content = parsed.content
+    else:
+        content = sys.stdin.read()
     for ch in title:
         codepoint = ord(ch)
         if codepoint < 32 or codepoint == 127:
             parser.error("`title` must not contain control characters.")
-    return CliArgs(title=title, content=content)
+    return CliArgs(title=title, content=content, dry_run=parsed.dry_run)
 
 
 def normalize_subject(title: str) -> str:
@@ -178,6 +193,15 @@ def parse_env_file(file_path: Path) -> dict[str, str]:
 
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
+    if args.dry_run:
+        try:
+            subject = normalize_subject(args.title)
+        except ValueError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        body = append_pwd_footer(args.content)
+        print(f"dry-run: email not sent; subject={subject}; body-bytes={len(body.encode())}")
+        return 0
     env_values = parse_env_file(ENV_FILE_PATH)
     sender_email = env_values.get("EMAIL_ME_GMAIL_ADDRESS", "")
     app_password = env_values.get("EMAIL_ME_GMAIL_APP_PASSWORD", "")
