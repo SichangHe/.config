@@ -115,8 +115,34 @@ def result_message(args: Args, ok: bool, result: str) -> str:
     return f"Codex compact-when-idle {status} for {args.target}.\nResult: {result}\n"
 
 
+def tmux_pane_id(target: str) -> str:
+    proc = subprocess.run(
+        ["tmux", "display-message", "-p", "-t", target, "#{pane_id}"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=5,
+        check=True,
+    )
+    return proc.stdout.strip()
+
+
+def is_self_notify(args: Args) -> bool:
+    if not args.notify_target:
+        return False
+    if args.notify_target == args.target:
+        return True
+    return tmux_pane_id(args.notify_target) == tmux_pane_id(args.target)
+
+
 def notify(args: Args, ok: bool, result: str) -> None:
     if not args.notify_target:
+        return
+    if is_self_notify(args):
+        print(
+            f"omo_codex_compact_when_idle skipped self-notification: target={args.target} notify_target={args.notify_target}",
+            file=sys.stderr,
+        )
         return
     notify_args = SendArgs(args.notify_target, None, args.notify_enter_count, 0.15, 0, False)
     run_tmux(notify_args, result_message(args, ok, result))

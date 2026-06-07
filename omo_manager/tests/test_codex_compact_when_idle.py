@@ -8,6 +8,7 @@ from omo_manager.omo_codex_compact_when_idle import (
     Args,
     COMPACT_MESSAGE,
     launch_background,
+    notify,
     parse_args,
     run_worker,
     send_compact,
@@ -54,13 +55,33 @@ class CodexCompactWhenIdleTests(unittest.TestCase):
         def fake_run_tmux(args: object, message: str) -> None:
             calls.append((args.target, message))
 
-        with patch("omo_manager.omo_codex_compact_when_idle.send_compact", side_effect=RuntimeError("not ready")), patch("omo_manager.omo_codex_compact_when_idle.run_tmux", side_effect=fake_run_tmux), patch("sys.stdout", new_callable=StringIO):
+        with patch("omo_manager.omo_codex_compact_when_idle.send_compact", side_effect=RuntimeError("not ready")), patch("omo_manager.omo_codex_compact_when_idle.is_self_notify", return_value=False), patch("omo_manager.omo_codex_compact_when_idle.run_tmux", side_effect=fake_run_tmux), patch("sys.stdout", new_callable=StringIO):
             rc = run_worker(Args("cfg:1.0", 10, 2, 80, False, False, "cfg:0.0", 0, None, 5))
 
         self.assertEqual(1, rc)
         self.assertEqual("cfg:0.0", calls[0][0])
         self.assertIn("failed", calls[0][1])
         self.assertIn("not ready", calls[0][1])
+
+    def test_notify_skips_identical_self_target(self) -> None:
+        with patch("omo_manager.omo_codex_compact_when_idle.run_tmux") as run_tmux, patch("sys.stderr", new_callable=StringIO) as stderr:
+            notify(Args("cfg:1.0", 10, 2, 80, False, False, "cfg:1.0", 1, None, 5), True, "sent /compact")
+
+        run_tmux.assert_not_called()
+        self.assertIn("skipped self-notification", stderr.getvalue())
+
+    def test_notify_skips_same_resolved_tmux_pane(self) -> None:
+        calls: list[tuple[str, str]] = []
+
+        def fake_pane_id(target: str) -> str:
+            calls.append(("pane-id", target))
+            return "%12"
+
+        with patch("omo_manager.omo_codex_compact_when_idle.tmux_pane_id", side_effect=fake_pane_id), patch("omo_manager.omo_codex_compact_when_idle.run_tmux") as run_tmux:
+            notify(Args("cfg:1.0", 10, 2, 80, False, False, "cfg:1", 1, None, 5), True, "sent /compact")
+
+        run_tmux.assert_not_called()
+        self.assertEqual([("pane-id", "cfg:1"), ("pane-id", "cfg:1.0")], calls)
 
     def test_launch_background_starts_worker_and_logs(self) -> None:
         started: list[list[str]] = []
