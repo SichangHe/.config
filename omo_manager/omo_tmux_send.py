@@ -38,6 +38,7 @@ class Args:
     pending_file: Path | None = None
     pending_line: int = 0
     pending_digest: str = ""
+    submit_verify_timeout_s: float = 0
 
 
 class ParsedArgs(argparse.Namespace):
@@ -47,6 +48,7 @@ class ParsedArgs(argparse.Namespace):
     enter_count: int = 1
     enter_delay_s: float = 0.15
     ready_timeout_s: float = 0
+    submit_verify_timeout_s: float = 5
     dry_run: bool = False
     pending_root: Path | None = None
     pending_file: Path | None = None
@@ -64,6 +66,7 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--enter-count", type=int, default=1, help="Number of Enter keys to send when submitting; default: 1.")
     _ = parser.add_argument("--enter-delay-s", type=float, default=0.15, help="Delay between repeated Enter keys; default: 0.15.")
     _ = parser.add_argument("--ready-timeout-s", type=float, default=0, help="When submitting to Codex, wait up to this many seconds for an idle input box before paste; default: 0.")
+    _ = parser.add_argument("--submit-verify-timeout-s", type=float, default=5, help="After Enter, wait up to this many seconds to verify Codex no longer has the prompt in its input; default: 5.")
     _ = parser.add_argument("--dry-run", action="store_true", help="Validate inputs and print planned tmux actions without touching tmux.")
     _ = parser.add_argument("--pending-root", type=Path, help="Skip paste unless the pending marker still exists under this root.")
     _ = parser.add_argument("--pending-file", type=Path, help="Root-relative pending marker file.")
@@ -77,9 +80,11 @@ def parse_args(argv: list[str]) -> Args:
         parser.error("--enter-delay-s must be non-negative.")
     if parsed.ready_timeout_s < 0:
         parser.error("--ready-timeout-s must be non-negative.")
+    if parsed.submit_verify_timeout_s < 0:
+        parser.error("--submit-verify-timeout-s must be non-negative.")
     if any((parsed.pending_root, parsed.pending_file, parsed.pending_line)) and not all((parsed.pending_root, parsed.pending_file, parsed.pending_line > 0)):
         parser.error("--pending-root, --pending-file, and --pending-line must be passed together.")
-    return Args(parsed.target, parsed.message_file, parsed.enter_count if parsed.enter else 0, parsed.enter_delay_s, parsed.ready_timeout_s if parsed.enter else 0, parsed.dry_run, parsed.pending_root, parsed.pending_file, parsed.pending_line, parsed.pending_digest)
+    return Args(parsed.target, parsed.message_file, parsed.enter_count if parsed.enter else 0, parsed.enter_delay_s, parsed.ready_timeout_s if parsed.enter else 0, parsed.dry_run, parsed.pending_root, parsed.pending_file, parsed.pending_line, parsed.pending_digest, parsed.submit_verify_timeout_s if parsed.enter else 0)
 
 
 def read_message(args: Args) -> str:
@@ -136,6 +141,42 @@ def pending_marker_present(args: Args) -> bool:
     return digest == args.pending_digest
 
 
+def message_probe(message: str) -> str:
+    for line in message.splitlines():
+        probe = line.strip()
+        if probe:
+            return probe[:80]
+    return ""
+
+
+def input_has_probe(lines: list[str], probe: str) -> bool:
+    return bool(probe and any(line.lstrip().startswith("› ") and probe in line for line in lines[-20:]))
+
+
+def verify_submit(args: Args, message: str) -> None:
+    if args.enter_count <= 0 or args.submit_verify_timeout_s <= 0:
+        return
+    probe = message_probe(message)
+    if not probe:
+        return
+    deadline_s = time.monotonic() + args.submit_verify_timeout_s
+    fallback_sent = False
+    last_status = "unknown"
+    while True:
+        lines = tail(args.target, 80)
+        last_status = status(lines, current_block(lines))
+        if last_status == "not_codex":
+            return
+        if not input_has_probe(lines, probe):
+            return
+        if not fallback_sent:
+            _ = subprocess.run(["tmux", "send-keys", "-t", args.target, "Enter"], timeout=5, check=True)
+            fallback_sent = True
+        if time.monotonic() >= deadline_s:
+            raise RuntimeError(f"Codex submit not verified after {args.submit_verify_timeout_s:g}s: prompt still in input, status={last_status}")
+        time.sleep(min(0.5, max(0.05, deadline_s - time.monotonic())))
+
+
 def run_tmux(args: Args, message: str) -> None:
     temp_path = write_private_temp(message)
     buffer_name = f"omo-tmux-send-{os.getpid()}-{uuid.uuid4().hex}"
@@ -157,6 +198,7 @@ def run_tmux(args: Args, message: str) -> None:
             if idx:
                 time.sleep(args.enter_delay_s)
             _ = subprocess.run(["tmux", "send-keys", "-t", args.target, "Enter"], timeout=5, check=True)
+        verify_submit(args, message)
     finally:
         temp_path.unlink(missing_ok=True)
         if not args.dry_run:

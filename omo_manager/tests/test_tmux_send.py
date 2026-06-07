@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from omo_manager.omo_tmux_send import Args, parse_args, pending_marker_present, read_message, run_tmux, wait_ready, write_private_temp
+from omo_manager.omo_tmux_send import Args, input_has_probe, message_probe, parse_args, pending_marker_present, read_message, run_tmux, verify_submit, wait_ready, write_private_temp
 
 
 class TmuxSendTests(unittest.TestCase):
@@ -31,6 +31,9 @@ class TmuxSendTests(unittest.TestCase):
         self.assertEqual(0, parse_args(["--target", "cfg:1.0", "--enter-count", "2"]).enter_count)
         self.assertEqual(3, parse_args(["--target", "cfg:1.0", "--enter", "--ready-timeout-s", "3"]).ready_timeout_s)
         self.assertEqual(0, parse_args(["--target", "cfg:1.0", "--ready-timeout-s", "3"]).ready_timeout_s)
+        self.assertEqual(5, parse_args(["--target", "cfg:1.0", "--enter"]).submit_verify_timeout_s)
+        self.assertEqual(0, parse_args(["--target", "cfg:1.0", "--submit-verify-timeout-s", "3"]).submit_verify_timeout_s)
+        self.assertEqual(3, parse_args(["--target", "cfg:1.0", "--enter", "--submit-verify-timeout-s", "3"]).submit_verify_timeout_s)
 
     def test_pending_guard_rechecks_after_ready_wait_before_paste(self) -> None:
         calls: list[list[str]] = []
@@ -108,6 +111,35 @@ class TmuxSendTests(unittest.TestCase):
             wait_ready(Args("cfg:1.0", None, 1, 0.15, 1, False))
 
         self.assertEqual(2, len(seen))
+
+    def test_input_probe_matches_codex_input_only(self) -> None:
+        self.assertEqual("Read the dispatch prompt", message_probe("\nRead the dispatch prompt\nmore"))
+        self.assertTrue(input_has_probe(["› Read the dispatch prompt", "  gpt-5.5"], "Read the dispatch prompt"))
+        self.assertFalse(input_has_probe(["Read the dispatch prompt", "  gpt-5.5"], "Read the dispatch prompt"))
+
+    def test_verify_submit_sends_fallback_enter_when_prompt_remains_in_input(self) -> None:
+        calls: list[list[str]] = []
+        tails = iter([["› Read the dispatch prompt from /tmp/x and follow it exactly.", "  gpt-5.5"], ["• Working", "  gpt-5.5"]])
+
+        def fake_tail(_: str, __: int) -> list[str]:
+            return next(tails)
+
+        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch("omo_manager.omo_tmux_send.tail", side_effect=fake_tail), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run), patch("omo_manager.omo_tmux_send.time.sleep"):
+            verify_submit(Args("cfg:1.0", None, 1, 0.15, 0, False, submit_verify_timeout_s=1), "Read the dispatch prompt from /tmp/x and follow it exactly.\n")
+
+        self.assertEqual([["tmux", "send-keys", "-t", "cfg:1.0", "Enter"]], calls)
+
+    def test_verify_submit_fails_when_prompt_stays_in_input(self) -> None:
+        def fake_tail(_: str, __: int) -> list[str]:
+            return ["› Read the dispatch prompt from /tmp/x and follow it exactly.", "  gpt-5.5"]
+
+        with patch("omo_manager.omo_tmux_send.tail", side_effect=fake_tail), patch("omo_manager.omo_tmux_send.subprocess.run", return_value=subprocess.CompletedProcess(["tmux"], 0)), patch("omo_manager.omo_tmux_send.time.monotonic", side_effect=[0, 2]):
+            with self.assertRaisesRegex(RuntimeError, "Codex submit not verified"):
+                verify_submit(Args("cfg:1.0", None, 1, 0.15, 0, False, submit_verify_timeout_s=1), "Read the dispatch prompt from /tmp/x and follow it exactly.\n")
 
 
 if __name__ == "__main__":
