@@ -17,9 +17,18 @@ while [ "$#" -gt 0 ]; do
 done
 if [ -z "$subject" ]; then usage >&2; exit 2; fi
 subject_lc=$(printf '%s' "$subject" | tr '[:upper:]' '[:lower:]')
-case "$subject_lc" in
-  "subject"|"[omo_manager] subject") echo "subject must be a real subject, not the placeholder SUBJECT" >&2; exit 2 ;;
-esac
+placeholder_subject=$(
+  python3 - "$subject_lc" <<'PY'
+import re
+import sys
+subject = re.sub(r"^\[omo_manager\]\s*", "", sys.argv[1].strip())
+print("yes" if re.fullmatch(r"subject\W*", subject) else "no")
+PY
+)
+if [ "$placeholder_subject" = "yes" ]; then
+  echo "subject must be a real subject, not the placeholder SUBJECT" >&2
+  exit 2
+fi
 case "$subject_lc" in
   "re: [omo_manager]"*) echo "subject must not start with Re: [omo_manager]" >&2; exit 2 ;;
   "[omo]"*|"re: [omo]"*) echo "manager email subject must use [omo_manager]; [omo] is reserved for direct regular-agent email" >&2; exit 2 ;;

@@ -441,10 +441,11 @@ class PendingMarkerTests(unittest.TestCase):
                 "SENT_LOG": str(sent_log),
                 "OMO_MANAGER_STATE_DIR": str(Path(tmp) / "state"),
             }
-            cmd = [str(Path.home() / ".config/omo_manager/omo_email_human.sh"), "--subject", "SUBJECT"]
-            bad_subject = subprocess.run(cmd, input="real body\n", text=True, capture_output=True, timeout=10, env=env, check=False)
-            self.assertEqual(2, bad_subject.returncode)
-            self.assertIn("placeholder SUBJECT", bad_subject.stderr)
+            for subject in ("SUBJECT", "SUBJECT\\", "[omo_manager] SUBJECT\\"):
+                cmd = [str(Path.home() / ".config/omo_manager/omo_email_human.sh"), "--subject", subject]
+                bad_subject = subprocess.run(cmd, input="real body\n", text=True, capture_output=True, timeout=10, env=env, check=False)
+                self.assertEqual(2, bad_subject.returncode)
+                self.assertIn("placeholder SUBJECT", bad_subject.stderr)
             cmd = [str(Path.home() / ".config/omo_manager/omo_email_human.sh"), "--subject", "Real subject"]
             empty_body = subprocess.run(cmd, input="\n", text=True, capture_output=True, timeout=10, env=env, check=False)
             self.assertEqual(2, empty_body.returncode)
