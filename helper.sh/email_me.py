@@ -44,9 +44,10 @@ class ParsedArgs(argparse.Namespace):
 
 def parse_args(argv: list[str]) -> CliArgs:
     parser = argparse.ArgumentParser(
-        description="Send a plain text email to your own Gmail inbox."
+        usage="email_me.py [--dry-run] SUBJECT < BODY",
+        description="Email the human with a plain text body read from stdin by default.",
     )
-    _ = parser.add_argument("title", type=str, help="Email subject/title")
+    _ = parser.add_argument("title", metavar="SUBJECT", type=str, help="Email subject/title.")
     _ = parser.add_argument("content", nargs="?", type=str, help=argparse.SUPPRESS)
     _ = parser.add_argument("--message-file", type=Path, help=argparse.SUPPRESS)
     _ = parser.add_argument("--dry-run", action="store_true", help="Validate without sending.")
