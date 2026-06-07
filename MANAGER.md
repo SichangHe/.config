@@ -15,7 +15,7 @@ Pending message blocks use this forward format:
 (report manager YYYY-MM-DD HH:MM agent=AGENT status=STATUS)
 [message-sha256: SHA256_OF_MESSAGE_FILE]
 message:
-> report body copied from MESSAGE_FILE
+> report body read from standard input
 ```
 
 The parenthesized `(from ...)` line is the human-readable source marker. Helpers may add extra metadata lines after it, but must not weaken sender checks, recovery-email checks, or duplicate/idempotency protections. Direct manager pushes are reserved for concrete reliability exceptions where Markdown plus watcher cannot work; document the exact exception before using one. Agent report helpers should not append a second unresolved pending block with the same agent, status, and message hash.

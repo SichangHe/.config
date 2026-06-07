@@ -44,8 +44,8 @@ class ParsedArgs(argparse.Namespace):
 
 def parse_args(argv: list[str]) -> CliArgs:
     parser = argparse.ArgumentParser(
-        usage="email_me.py [--dry-run] SUBJECT < BODY",
-        description="Email the human with a plain text body read from stdin by default.",
+        usage="email_me.py [--dry-run] SUBJECT",
+        description="Reads the email body from standard input.",
     )
     _ = parser.add_argument("title", metavar="SUBJECT", type=str, help="Email subject/title.")
     _ = parser.add_argument("content", nargs="?", type=str, help=argparse.SUPPRESS)
@@ -54,7 +54,7 @@ def parse_args(argv: list[str]) -> CliArgs:
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     title = parsed.title
     if parsed.content is not None and parsed.message_file is not None:
-        parser.error("pass body by stdin, positional content, or --message-file, not multiple.")
+        parser.error("pass email body by standard input, positional content, or --message-file, not multiple.")
     if parsed.message_file is not None:
         try:
             content = parsed.message_file.read_text(encoding="utf-8")

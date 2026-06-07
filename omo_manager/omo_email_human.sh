@@ -2,7 +2,11 @@
 set -euo pipefail
 subject=""
 message_file=""
-usage() { echo "Usage: omo_email_human.sh --subject SUBJECT [--message-file FILE] < BODY"; }
+usage() {
+  printf '%s\n' \
+    "Usage: omo_email_human.sh --subject SUBJECT [--message-file FILE]" \
+    "Reads the email body from standard input unless --message-file is used."
+}
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --subject)

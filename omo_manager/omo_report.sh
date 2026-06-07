@@ -14,7 +14,11 @@ status=""
 message_file=""
 message_file_tmp=0
 agent="${OMO_AGENT_NAME:-agent}"
-usage() { echo "Usage: omo_report.sh --task-file FILE --status STATUS [--message-file /tmp/report.md] [--agent NAME] < REPORT"; }
+usage() {
+  printf '%s\n' \
+    "Usage: omo_report.sh --task-file FILE --status STATUS [--message-file /tmp/report.md] [--agent NAME]" \
+    "Reads the report body from standard input unless --message-file is used."
+}
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --root) root="$2"; shift 2 ;;
