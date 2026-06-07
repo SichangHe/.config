@@ -11,6 +11,11 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+try:
+    from omo_manager.omo_codex_status import current_block, status, tail
+except ModuleNotFoundError:
+    from omo_codex_status import current_block, status, tail
+
 DEFAULT_ROOT = Path(os.environ.get("OMO_WORK_LOGS_ROOT", Path.home() / "work_logs"))
 CODEX_CMD = ("bunx", "@openai/codex", "--dangerously-bypass-approvals-and-sandbox")
 SHELL_COMMANDS = {"bash", "dash", "fish", "sh", "zsh"}
@@ -128,6 +133,22 @@ def wait_shell(target: str, timeout_s: float = 5.0) -> None:
         time.sleep(0.25)
 
 
+def wait_command_started(target: str, timeout_s: float = 5.0) -> None:
+    deadline_s = time.monotonic() + timeout_s
+    last_command = ""
+    last_status = "unknown"
+    while time.monotonic() < deadline_s:
+        lines = tail(target, 80)
+        last_status = status(lines, current_block(lines))
+        if last_status != "not_codex":
+            return
+        last_command = current_command(target)
+        if last_command and last_command not in SHELL_COMMANDS:
+            return
+        time.sleep(0.05)
+    raise RuntimeError(f"Codex launch not verified after {timeout_s:g}s: pane command={last_command or 'unknown'}, status={last_status}")
+
+
 def new_window_command(args: Args) -> list[str]:
     name = args.window_name or Path(args.task_file).stem
     return ["new-window", "-P", "-F", "#{session_name}:#{window_index}", "-t", args.tmux_session, "-n", name, "-c", str(args.workdir)]
@@ -136,6 +157,7 @@ def new_window_command(args: Args) -> list[str]:
 def start_codex(target: str, args: Args) -> None:
     command = shell_cmd(codex_cmd(args.session_id, args.reasoning_effort, args.codex_flags, args.prompt_file))
     _ = tmux(["send-keys", "-t", target, command, "Enter"], check=True)
+    wait_command_started(target)
 
 
 def new_window(args: Args) -> str:

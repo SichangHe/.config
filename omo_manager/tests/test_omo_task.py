@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from omo_manager.omo_task import Args, codex_cmd, ensure_task_file, link_todo, main, new_window, parse_args, start_codex
+from omo_manager.omo_task import Args, codex_cmd, ensure_task_file, link_todo, main, new_window, parse_args, start_codex, wait_command_started
 
 
 class OmoTaskTests(unittest.TestCase):
@@ -63,14 +63,25 @@ class OmoTaskTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             prompt = Path(tmp) / "prompt.md"
             args = Args(Path(tmp), 'x.md', 'cfg', '', 'codex', Path(tmp), 'x', prompt, False, False, '11111111-1111-1111-1111-111111111111', '', ())
-            with patch('omo_manager.omo_task.tmux') as tmux:
+            with patch('omo_manager.omo_task.tmux') as tmux, patch('omo_manager.omo_task.wait_command_started') as wait_command_started_mock:
                 start_codex('cfg:7', args)
-            command = tmux.call_args.args[0]
+            command = tmux.call_args_list[0].args[0]
             self.assertEqual(['send-keys', '-t', 'cfg:7'], command[:3])
             self.assertIn('bash -lc', command[3])
             self.assertIn('resume 11111111-1111-1111-1111-111111111111', command[3])
             self.assertIn('$(cat --', command[3])
             self.assertEqual('Enter', command[4])
+            wait_command_started_mock.assert_called_once_with('cfg:7')
+
+    def test_wait_command_started_accepts_visible_codex_status(self) -> None:
+        with patch('omo_manager.omo_task.tail', return_value=['› Use /skills to list available skills', '  gpt-5.5']), patch('omo_manager.omo_task.current_command', return_value='bash'), patch('omo_manager.omo_task.time.sleep') as sleep:
+            wait_command_started('cfg:7')
+            sleep.assert_not_called()
+
+    def test_wait_command_started_fails_when_shell_remains_active(self) -> None:
+        with patch('omo_manager.omo_task.tail', return_value=[]), patch('omo_manager.omo_task.current_command', return_value='bash'), patch('omo_manager.omo_task.time.monotonic', side_effect=[0, 6]), patch('omo_manager.omo_task.time.sleep'):
+            with self.assertRaisesRegex(RuntimeError, 'Codex launch not verified'):
+                wait_command_started('cfg:7')
 
     def test_main_dry_run_does_not_mutate_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
