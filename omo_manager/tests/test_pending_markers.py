@@ -420,6 +420,37 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual("Skipped duplicate human email\n", second.stdout)
             self.assertEqual("[omo_manager] Manager update\nsame body\n", sent_log.read_text(encoding="utf-8"))
 
+    def test_omo_email_human_rejects_placeholder_subject_and_empty_body(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            helper_dir = home / ".config" / "helper.sh"
+            helper_dir.mkdir(parents=True)
+            helper = helper_dir / "email_me.py"
+            sent_log = Path(tmp) / "sent.log"
+            _ = helper.write_text(
+                "#!/usr/bin/env python3\n"
+                "from pathlib import Path\n"
+                "import os\n"
+                "Path(os.environ['SENT_LOG']).write_text('sent', encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            helper.chmod(0o700)
+            env = {
+                **os.environ,
+                "HOME": str(home),
+                "SENT_LOG": str(sent_log),
+                "OMO_MANAGER_STATE_DIR": str(Path(tmp) / "state"),
+            }
+            cmd = [str(Path.home() / ".config/omo_manager/omo_email_human.sh"), "--subject", "SUBJECT"]
+            bad_subject = subprocess.run(cmd, input="real body\n", text=True, capture_output=True, timeout=10, env=env, check=False)
+            self.assertEqual(2, bad_subject.returncode)
+            self.assertIn("placeholder SUBJECT", bad_subject.stderr)
+            cmd = [str(Path.home() / ".config/omo_manager/omo_email_human.sh"), "--subject", "Real subject"]
+            empty_body = subprocess.run(cmd, input="\n", text=True, capture_output=True, timeout=10, env=env, check=False)
+            self.assertEqual(2, empty_body.returncode)
+            self.assertIn("email body must not be empty", empty_body.stderr)
+            self.assertFalse(sent_log.exists())
+
 
 if __name__ == "__main__":
     _ = unittest.main()

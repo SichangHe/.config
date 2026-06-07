@@ -18,6 +18,9 @@ done
 if [ -z "$subject" ]; then usage >&2; exit 2; fi
 subject_lc=$(printf '%s' "$subject" | tr '[:upper:]' '[:lower:]')
 case "$subject_lc" in
+  "subject"|"[omo_manager] subject") echo "subject must be a real subject, not the placeholder SUBJECT" >&2; exit 2 ;;
+esac
+case "$subject_lc" in
   "re: [omo_manager]"*) echo "subject must not start with Re: [omo_manager]" >&2; exit 2 ;;
   "[omo]"*|"re: [omo]"*) echo "manager email subject must use [omo_manager]; [omo] is reserved for direct regular-agent email" >&2; exit 2 ;;
   "[omo_manager]"*) ;;
@@ -40,6 +43,13 @@ else
   chmod 600 "$body_file"
   cat >"$body_file"
 fi
+python3 - "$body_file" <<'PY'
+from pathlib import Path
+import sys
+if not Path(sys.argv[1]).read_text(encoding="utf-8").strip():
+    print("email body must not be empty", file=sys.stderr)
+    raise SystemExit(2)
+PY
 state_dir="${OMO_MANAGER_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/omo-manager}"
 dedupe_s="${OMO_MANAGER_EMAIL_DEDUPE_S:-300}"
 dedupe_result=$(
