@@ -4,10 +4,24 @@ import stat
 import subprocess
 import tempfile
 import unittest
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
-from omo_manager.omo_tmux_send import Args, input_has_probe, message_probe, parse_args, pending_marker_present, read_message, run_tmux, verify_submit, wait_ready, write_private_temp
+from omo_manager.omo_tmux_send import (
+    Args,
+    input_has_probe,
+    launch_async,
+    message_probe,
+    parse_args,
+    pending_marker_present,
+    read_message,
+    run_async_worker,
+    run_tmux,
+    verify_submit,
+    wait_ready,
+    write_private_temp,
+)
 
 
 class TmuxSendTests(unittest.TestCase):
@@ -34,6 +48,24 @@ class TmuxSendTests(unittest.TestCase):
         self.assertEqual(5, parse_args(["--target", "cfg:1.0", "--enter"]).submit_verify_timeout_s)
         self.assertEqual(0, parse_args(["--target", "cfg:1.0", "--submit-verify-timeout-s", "3"]).submit_verify_timeout_s)
         self.assertEqual(3, parse_args(["--target", "cfg:1.0", "--enter", "--submit-verify-timeout-s", "3"]).submit_verify_timeout_s)
+
+    def test_parse_async_requires_notify_target(self) -> None:
+        with patch("sys.stderr", new_callable=StringIO), self.assertRaises(SystemExit):
+            parse_args(["--target", "cfg:1.0", "--async"])
+        args = parse_args(
+            [
+                "--target",
+                "cfg:1.0",
+                "--async",
+                "--async-notify-target",
+                "cfg:0.0",
+                "--async-notify-enter-count",
+                "0",
+            ]
+        )
+        self.assertTrue(args.async_mode)
+        self.assertEqual("cfg:0.0", args.async_notify_target)
+        self.assertEqual(0, args.async_notify_enter_count)
 
     def test_pending_guard_rechecks_after_ready_wait_before_paste(self) -> None:
         calls: list[list[str]] = []
@@ -98,6 +130,103 @@ class TmuxSendTests(unittest.TestCase):
         self.assertEqual(["tmux", "send-keys", "-t", "cfg:1.0", "Enter"], calls[4])
         self.assertEqual(["tmux", "delete-buffer", "-b", calls[1][3]], calls[5])
         sleep.assert_called_once_with(0.15)
+
+    def test_launch_async_copies_payload_and_starts_worker(self) -> None:
+        started: list[list[str]] = []
+
+        class Proc:
+            pid = 1234
+
+        def fake_popen(command: list[str], **_: object) -> Proc:
+            started.append(command)
+            return Proc()
+
+        with patch("omo_manager.omo_tmux_send.subprocess.Popen", side_effect=fake_popen), patch("sys.stdout", new_callable=StringIO):
+            launch_async(
+                Args(
+                    "cfg:1.0",
+                    None,
+                    2,
+                    0.2,
+                    30,
+                    False,
+                    async_mode=True,
+                    async_notify_target="cfg:0.0",
+                    async_notify_enter_count=1,
+                ),
+                "literal $HOME\n",
+            )
+
+        self.assertEqual(1, len(started))
+        command = started[0]
+        self.assertIn("--async-worker", command)
+        self.assertNotIn("--async", command)
+        payload_path = Path(command[command.index("--message-file") + 1])
+        try:
+            self.assertEqual("literal $HOME\n", payload_path.read_text(encoding="utf-8"))
+            self.assertIn("--enter", command)
+            self.assertEqual("cfg:0.0", command[command.index("--async-notify-target") + 1])
+        finally:
+            payload_path.unlink(missing_ok=True)
+
+    def test_async_worker_notifies_success_and_cleans_payload(self) -> None:
+        calls: list[tuple[str, str]] = []
+
+        def fake_run_tmux(args: Args, message: str) -> None:
+            calls.append((args.target, message))
+
+        with tempfile.TemporaryDirectory() as tmp, patch("omo_manager.omo_tmux_send.run_tmux", side_effect=fake_run_tmux):
+            payload = Path(tmp) / "payload.txt"
+            payload.write_text("/compact\n", encoding="utf-8")
+            rc = run_async_worker(
+                Args(
+                    "cfg:1.0",
+                    payload,
+                    1,
+                    0.15,
+                    0,
+                    False,
+                    async_notify_target="cfg:0.0",
+                    async_cleanup_message_file=True,
+                )
+            )
+
+        self.assertEqual(0, rc)
+        self.assertEqual(("cfg:1.0", "/compact\n"), calls[0])
+        self.assertEqual("cfg:0.0", calls[1][0])
+        self.assertIn("succeeded", calls[1][1])
+        self.assertIn("Result: sent", calls[1][1])
+        self.assertFalse(payload.exists())
+
+    def test_async_worker_notifies_failure_details(self) -> None:
+        calls: list[tuple[str, str]] = []
+
+        def fake_run_tmux(args: Args, message: str) -> None:
+            if args.target == "cfg:1.0":
+                raise RuntimeError("target not ready")
+            calls.append((args.target, message))
+
+        with tempfile.TemporaryDirectory() as tmp, patch("omo_manager.omo_tmux_send.run_tmux", side_effect=fake_run_tmux):
+            payload = Path(tmp) / "payload.txt"
+            payload.write_text("/compact\n", encoding="utf-8")
+            rc = run_async_worker(
+                Args(
+                    "cfg:1.0",
+                    payload,
+                    1,
+                    0.15,
+                    0,
+                    False,
+                    async_notify_target="cfg:0.0",
+                    async_cleanup_message_file=True,
+                )
+            )
+
+        self.assertEqual(1, rc)
+        self.assertEqual(1, len(calls))
+        self.assertEqual("cfg:0.0", calls[0][0])
+        self.assertIn("failed", calls[0][1])
+        self.assertIn("target not ready", calls[0][1])
 
     def test_wait_ready_waits_through_running_codex(self) -> None:
         seen: list[int] = []

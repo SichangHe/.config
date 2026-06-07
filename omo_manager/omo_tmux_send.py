@@ -39,6 +39,11 @@ class Args:
     pending_line: int = 0
     pending_digest: str = ""
     submit_verify_timeout_s: float = 0
+    async_mode: bool = False
+    async_notify_target: str = ""
+    async_notify_enter_count: int = 1
+    async_worker: bool = False
+    async_cleanup_message_file: bool = False
 
 
 class ParsedArgs(argparse.Namespace):
@@ -54,6 +59,11 @@ class ParsedArgs(argparse.Namespace):
     pending_file: Path | None = None
     pending_line: int = 0
     pending_digest: str = ""
+    async_mode: bool = False
+    async_notify_target: str = ""
+    async_notify_enter_count: int = 1
+    async_worker: bool = False
+    async_cleanup_message_file: bool = False
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -72,6 +82,16 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--pending-file", type=Path, help="Root-relative pending marker file.")
     _ = parser.add_argument("--pending-line", type=int, default=0, help="One-based pending marker line.")
     _ = parser.add_argument("--pending-digest", default="", help="Optional digest of the marker context.")
+    _ = parser.add_argument(
+        "--async",
+        dest="async_mode",
+        action="store_true",
+        help="Return immediately and run the verified send in a background worker.",
+    )
+    _ = parser.add_argument("--async-notify-target", default="", help="Tmux target to notify when an async send completes.")
+    _ = parser.add_argument("--async-notify-enter-count", type=int, default=1, help="Enter keys to send after the async completion notice; default: 1.")
+    _ = parser.add_argument("--async-worker", action="store_true", help=argparse.SUPPRESS)
+    _ = parser.add_argument("--async-cleanup-message-file", action="store_true", help=argparse.SUPPRESS)
     parser.set_defaults(enter=False)
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     if parsed.enter_count < 1:
@@ -82,9 +102,30 @@ def parse_args(argv: list[str]) -> Args:
         parser.error("--ready-timeout-s must be non-negative.")
     if parsed.submit_verify_timeout_s < 0:
         parser.error("--submit-verify-timeout-s must be non-negative.")
+    if parsed.async_notify_enter_count < 0:
+        parser.error("--async-notify-enter-count must be non-negative.")
+    if parsed.async_mode and not parsed.async_notify_target:
+        parser.error("--async-notify-target is required with --async.")
     if any((parsed.pending_root, parsed.pending_file, parsed.pending_line)) and not all((parsed.pending_root, parsed.pending_file, parsed.pending_line > 0)):
         parser.error("--pending-root, --pending-file, and --pending-line must be passed together.")
-    return Args(parsed.target, parsed.message_file, parsed.enter_count if parsed.enter else 0, parsed.enter_delay_s, parsed.ready_timeout_s if parsed.enter else 0, parsed.dry_run, parsed.pending_root, parsed.pending_file, parsed.pending_line, parsed.pending_digest, parsed.submit_verify_timeout_s if parsed.enter else 0)
+    return Args(
+        parsed.target,
+        parsed.message_file,
+        parsed.enter_count if parsed.enter else 0,
+        parsed.enter_delay_s,
+        parsed.ready_timeout_s if parsed.enter else 0,
+        parsed.dry_run,
+        parsed.pending_root,
+        parsed.pending_file,
+        parsed.pending_line,
+        parsed.pending_digest,
+        parsed.submit_verify_timeout_s if parsed.enter else 0,
+        parsed.async_mode,
+        parsed.async_notify_target,
+        parsed.async_notify_enter_count,
+        parsed.async_worker,
+        parsed.async_cleanup_message_file,
+    )
 
 
 def read_message(args: Args) -> str:
@@ -205,9 +246,112 @@ def run_tmux(args: Args, message: str) -> None:
             _ = subprocess.run(["tmux", "delete-buffer", "-b", buffer_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=False)
 
 
+def worker_argv(args: Args, payload_file: Path) -> list[str]:
+    argv = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--target",
+        args.target,
+        "--message-file",
+        str(payload_file),
+        "--async-worker",
+        "--async-cleanup-message-file",
+        "--async-notify-target",
+        args.async_notify_target,
+        "--async-notify-enter-count",
+        str(args.async_notify_enter_count),
+    ]
+    if args.enter_count:
+        argv.extend(
+            [
+                "--enter",
+                "--enter-count",
+                str(args.enter_count),
+                "--enter-delay-s",
+                str(args.enter_delay_s),
+                "--submit-verify-timeout-s",
+                str(args.submit_verify_timeout_s),
+                "--ready-timeout-s",
+                str(args.ready_timeout_s),
+            ]
+        )
+    if args.pending_root is not None and args.pending_file is not None:
+        argv.extend(
+            [
+                "--pending-root",
+                str(args.pending_root),
+                "--pending-file",
+                str(args.pending_file),
+                "--pending-line",
+                str(args.pending_line),
+            ]
+        )
+    if args.pending_digest:
+        argv.extend(["--pending-digest", args.pending_digest])
+    return argv
+
+
+def launch_async(args: Args, message: str) -> None:
+    payload_file = write_private_temp(message)
+    if args.dry_run:
+        _ = print(f"would start async tmux send using {payload_file}")
+        _ = print(f"would notify {args.async_notify_target} after completion")
+        payload_file.unlink(missing_ok=True)
+        return
+    try:
+        proc = subprocess.Popen(
+            worker_argv(args, payload_file),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception:
+        payload_file.unlink(missing_ok=True)
+        raise
+    _ = print(f"omo_tmux_send: async worker pid={proc.pid}")
+
+
+def async_result_message(args: Args, ok: bool, result: str) -> str:
+    status_text = "succeeded" if ok else "failed"
+    return f"Previous async omo_tmux_send command {status_text} for {args.target}.\nResult: {result}\n"
+
+
+def notify_async_result(args: Args, ok: bool, result: str) -> None:
+    if not args.async_notify_target:
+        return
+    notify_args = Args(args.async_notify_target, None, args.async_notify_enter_count, args.enter_delay_s, 0, False)
+    run_tmux(notify_args, async_result_message(args, ok, result))
+
+
+def run_async_worker(args: Args) -> int:
+    ok = True
+    result = "sent"
+    try:
+        run_tmux(args, read_message(args))
+    except Exception as exc:
+        ok = False
+        result = str(exc)
+    finally:
+        if args.async_cleanup_message_file and args.message_file is not None:
+            args.message_file.unlink(missing_ok=True)
+    try:
+        notify_async_result(args, ok, result)
+    except Exception as exc:
+        print(f"omo_tmux_send async notify failed: {exc}", file=sys.stderr)
+        if ok:
+            return 1
+    return 0 if ok else 1
+
+
 def main(argv: list[str]) -> int:
     try:
         args = parse_args(argv)
+        if args.async_mode:
+            launch_async(args, read_message(args))
+            return 0
+        if args.async_worker:
+            return run_async_worker(args)
         run_tmux(args, read_message(args))
     except Exception as exc:
         print(f"omo_tmux_send: {exc}", file=sys.stderr)
