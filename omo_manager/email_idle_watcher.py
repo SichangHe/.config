@@ -479,17 +479,24 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> None:
         save_processed_uids(processed_path, processed_uids)
 
 
+def read_imap_line(client: imaplib.IMAP4_SSL, phase: str) -> bytes:
+    line = client.readline()
+    if not line:
+        raise ConnectionError(f"IMAP connection closed during {phase}")
+    return line
+
+
 def idle_once(client: imaplib.IMAP4_SSL, wait_s: float) -> None:
     tag = "OMOIDLE"
     client.send(f"{tag} IDLE\r\n".encode())
     while True:
-        line = client.readline()
+        line = read_imap_line(client, "IDLE start")
         if line.decode("utf-8", errors="ignore").startswith("+"):
             break
     readable, _, _ = select.select([client.socket()], [], [], wait_s)
     client.send(b"DONE\r\n")
     while True:
-        line = client.readline().decode("utf-8", errors="ignore")
+        line = read_imap_line(client, "IDLE done").decode("utf-8", errors="ignore")
         if tag in line:
             break
     if readable:
