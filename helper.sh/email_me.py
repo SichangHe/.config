@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Send email to yourself using Gmail SMTP, with HTML links for Markdown anchors.
+"""Email the human using Gmail SMTP, with HTML links for Markdown anchors.
 
 Credentials are loaded from `~/.config/.env`:
 - `EMAIL_ME_GMAIL_ADDRESS`
@@ -44,24 +44,30 @@ class ParsedArgs(argparse.Namespace):
 
 def parse_args(argv: list[str]) -> CliArgs:
     parser = argparse.ArgumentParser(
-        usage="email_me.py [--dry-run] SUBJECT",
-        description="Reads the email body from standard input.",
+        usage="email_me.py [--dry-run] [--message-file FILE] SUBJECT",
+        description=(
+            "Email the human. Reads the email body from standard input by default; "
+            "use --message-file for a saved body. Do not pass body text as a shell argument."
+        ),
     )
     _ = parser.add_argument("title", metavar="SUBJECT", type=str, help="Email subject/title.")
     _ = parser.add_argument("content", nargs="?", type=str, help=argparse.SUPPRESS)
-    _ = parser.add_argument("--message-file", type=Path, help=argparse.SUPPRESS)
+    _ = parser.add_argument("--message-file", type=Path, help="Read the email body from this file instead of stdin.")
     _ = parser.add_argument("--dry-run", action="store_true", help="Validate without sending.")
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     title = parsed.title
     if parsed.content is not None and parsed.message_file is not None:
-        parser.error("pass email body by standard input, positional content, or --message-file, not multiple.")
+        parser.error("pass email body by standard input or --message-file, not both.")
+    if parsed.content is not None:
+        parser.error(
+            "pass email body by standard input or --message-file, not as a shell argument; "
+            "shells can expand $, backticks, command substitutions, and redirection-like text before this helper runs."
+        )
     if parsed.message_file is not None:
         try:
             content = parsed.message_file.read_text(encoding="utf-8")
         except OSError as exc:
             parser.error(f"message file not readable: {exc}")
-    elif parsed.content is not None:
-        content = parsed.content
     else:
         content = sys.stdin.read()
     for ch in title:

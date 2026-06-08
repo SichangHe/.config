@@ -3,9 +3,18 @@ set -euo pipefail
 subject=""
 message_file=""
 usage() {
-  printf '%s\n' \
-    "Usage: omo_email_human.sh --subject SUBJECT [--message-file FILE]" \
-    "Reads the email body from standard input unless --message-file is used."
+  cat <<'EOF'
+Usage: omo_email_human.sh --subject SUBJECT [--message-file FILE]
+Reads the email body from standard input unless --message-file is used.
+
+Safe body input:
+  omo_email_human.sh --subject 'Subject' < body.md
+  omo_email_human.sh --subject 'Subject' <<'EMAIL_BODY'
+  literal body text
+  EMAIL_BODY
+
+Do not pass body text as a shell argument; the caller shell can expand $, `...`, $(...), and redirection-like text before this script runs.
+EOF
 }
 while [ "$#" -gt 0 ]; do
   case "$1" in

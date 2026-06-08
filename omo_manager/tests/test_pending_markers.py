@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -419,6 +420,74 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual(0, second.returncode)
             self.assertEqual("Skipped duplicate human email\n", second.stdout)
             self.assertEqual("[omo_manager] Manager update\nsame body\n", sent_log.read_text(encoding="utf-8"))
+
+    def test_omo_email_human_safe_stdin_and_file_bodies_are_literal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            helper_dir = home / ".config" / "helper.sh"
+            helper_dir.mkdir(parents=True)
+            helper = helper_dir / "email_me.py"
+            sent_log = Path(tmp) / "sent.log"
+            _ = helper.write_text(
+                "#!/usr/bin/env python3\n"
+                "from pathlib import Path\n"
+                "import os\n"
+                "import sys\n"
+                "Path(os.environ['SENT_LOG']).open('a', encoding='utf-8').write("
+                "sys.argv[1] + '\\n' + sys.stdin.read() + '\\n--END--\\n')\n",
+                encoding="utf-8",
+            )
+            helper.chmod(0o700)
+            cmd_sentinel = Path(tmp) / "cmd-substitution-ran"
+            backtick_sentinel = Path(tmp) / "backtick-ran"
+            stdin_body = (
+                "literal $HOME\n"
+                f"literal $(touch {cmd_sentinel})\n"
+                f"literal `touch {backtick_sentinel}`\n"
+                "> quoted markdown line\n"
+            )
+            env = {
+                **os.environ,
+                "HOME": str(home),
+                "SENT_LOG": str(sent_log),
+                "OMO_MANAGER_STATE_DIR": str(Path(tmp) / "state"),
+            }
+            script = Path.home() / ".config/omo_manager/omo_email_human.sh"
+            heredoc_cmd = f"""{shlex.quote(str(script))} --subject 'Literal stdin safety' <<'EMAIL_BODY'
+{stdin_body}EMAIL_BODY
+"""
+            stdin_result = subprocess.run(
+                ["bash", "-c", heredoc_cmd],
+                text=True,
+                capture_output=True,
+                timeout=10,
+                env=env,
+                check=False,
+            )
+            self.assertEqual(0, stdin_result.returncode, stdin_result.stderr)
+            message_file = Path(tmp) / "body.md"
+            file_body = stdin_body.replace("literal $HOME", "literal file $HOME")
+            message_file.write_text(file_body, encoding="utf-8")
+            file_result = subprocess.run(
+                [
+                    str(script),
+                    "--subject",
+                    "Literal file safety",
+                    "--message-file",
+                    str(message_file),
+                ],
+                text=True,
+                capture_output=True,
+                timeout=10,
+                env=env,
+                check=False,
+            )
+            self.assertEqual(0, file_result.returncode, file_result.stderr)
+            self.assertFalse(cmd_sentinel.exists())
+            self.assertFalse(backtick_sentinel.exists())
+            text = sent_log.read_text(encoding="utf-8")
+            self.assertIn("[omo_manager] Literal stdin safety\n" + stdin_body + "\n--END--\n", text)
+            self.assertIn("[omo_manager] Literal file safety\n" + file_body + "\n--END--\n", text)
 
     def test_omo_email_human_rejects_placeholder_subject_and_empty_body(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

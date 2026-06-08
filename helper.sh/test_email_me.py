@@ -16,6 +16,12 @@ email_me = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = email_me
 SPEC.loader.exec_module(email_me)
 
+SHELL_SENSITIVE_BODY = """literal $HOME
+literal $(touch /tmp/email-me-should-not-run)
+literal `touch /tmp/email-me-should-not-run-backtick`
+> quoted markdown line
+"""
+
 
 class EmailMeTests(unittest.TestCase):
     def test_appends_pwd_footer_to_body(self) -> None:
@@ -47,21 +53,23 @@ class EmailMeTests(unittest.TestCase):
         self.assertIn('<a href="https://example.com/a?b=1&amp;c=2">Story</a>', html.get_content())
 
     def test_parse_args_reads_body_from_stdin_by_default(self) -> None:
-        with patch.object(sys, "stdin", StringIO("stdin body\n")):
+        with patch.object(sys, "stdin", StringIO(SHELL_SENSITIVE_BODY)):
             args = email_me.parse_args(["hi"])
         self.assertEqual("hi", args.title)
-        self.assertEqual("stdin body\n", args.content)
+        self.assertEqual(SHELL_SENSITIVE_BODY, args.content)
 
-    def test_parse_args_keeps_positional_body_compatibility(self) -> None:
-        args = email_me.parse_args(["hi", "legacy body"])
-        self.assertEqual("legacy body", args.content)
+    def test_parse_args_rejects_positional_body(self) -> None:
+        with patch("sys.stderr", new_callable=StringIO) as stderr, self.assertRaises(SystemExit) as raised:
+            email_me.parse_args(["hi", "legacy body"])
+        self.assertEqual(2, raised.exception.code)
+        self.assertIn("not as a shell argument", stderr.getvalue())
 
-    def test_parse_args_keeps_message_file_compatibility(self) -> None:
+    def test_parse_args_reads_message_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "body.md"
-            path.write_text("file body\n", encoding="utf-8")
+            path.write_text(SHELL_SENSITIVE_BODY, encoding="utf-8")
             args = email_me.parse_args(["hi", "--message-file", str(path)])
-        self.assertEqual("file body\n", args.content)
+        self.assertEqual(SHELL_SENSITIVE_BODY, args.content)
 
     def test_dry_run_does_not_require_smtp_credentials(self) -> None:
         with patch.object(sys, "stdin", StringIO("body\n")), patch("sys.stdout", new_callable=StringIO) as stdout:
