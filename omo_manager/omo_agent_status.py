@@ -49,7 +49,6 @@ TASK_RE = re.compile(r"`?([A-Za-z0-9_.-]+\.md)`?")
 TARGET_RE = re.compile(r"\b([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\b")
 LOOSE_TARGET_RE = re.compile(r"\b([a-z][A-Za-z0-9_-]*)\s+(\d+)\b")
 PORT_RE = re.compile(r"\bport [`']?(\d{2,5})[`']?")
-HISTORICAL_SNAPSHOT_MARKERS = ("restart snapshot", "current spawned follow-ups")
 
 
 @dataclass(frozen=True)
@@ -102,16 +101,10 @@ def section_name(line: str, current: str) -> str:
     stripped = line.strip().lower().rstrip(":")
     if stripped in {"current", "previous", "human pending", "low priority"}:
         return stripped
-    if stripped.startswith("## active"):
-        return "tracker-active"
-    if stripped.startswith("## complete"):
-        return "tracker-complete"
-    if stripped.startswith("## human action"):
-        return "tracker-human-action"
     return current
 
 
-def parse_task_lines(path: Path, source: str) -> list[TaskLine]:
+def parse_task_lines(path: Path) -> list[TaskLine]:
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except OSError:
@@ -120,8 +113,6 @@ def parse_task_lines(path: Path, source: str) -> list[TaskLine]:
     tasks: list[TaskLine] = []
     for line in lines:
         section = section_name(line, section)
-        if source == "tracker" and any(marker in line.lower() for marker in HISTORICAL_SNAPSHOT_MARKERS):
-            continue
         matches = list(TASK_RE.finditer(line))
         if not matches:
             continue
@@ -136,12 +127,10 @@ def parse_task_lines(path: Path, source: str) -> list[TaskLine]:
                 target = target_match.group(1)
             elif loose_target_match is not None:
                 target = f"{loose_target_match.group(1)}:{loose_target_match.group(2)}"
-            if source == "tracker" and not target:
-                continue
             tasks.append(
                 TaskLine(
                     task_file=match.group(1),
-                    section=f"{source}:{section}",
+                    section=f"todo:{section}",
                     line=line.strip(),
                     target=target,
                     port=int(port_match.group(1)) if port_match else None,
@@ -151,13 +140,12 @@ def parse_task_lines(path: Path, source: str) -> list[TaskLine]:
 
 
 def load_task_state(root: Path) -> tuple[dict[str, TaskLine], set[str], set[str]]:
-    todo_tasks = parse_task_lines(root / "TODO.md", "todo")
-    tracker_tasks = parse_task_lines(root / "MANAGER_TRACKER.md", "tracker")
+    todo_tasks = parse_task_lines(root / "TODO.md")
     current: dict[str, TaskLine] = {}
     done_candidates: set[str] = set()
     human_pending: set[str] = set()
-    for task in [*todo_tasks, *tracker_tasks]:
-        if task.task_file in {"TODO.md", "MANAGER_TRACKER.md"}:
+    for task in todo_tasks:
+        if task.task_file == "TODO.md":
             continue
         section = task.section
         if "previous" in section or "complete" in section:

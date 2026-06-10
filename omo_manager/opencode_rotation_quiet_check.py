@@ -89,7 +89,6 @@ def checks() -> list[Check]:
                 "manager_opencode_account_rotation_runbook.md",
                 "manager_opencode_account_rotation_4104.md",
                 "work_manager.md",
-                "MANAGER_TRACKER.md",
                 "tests/test_omo_manager.py",
             ),
             WORK_LOGS,

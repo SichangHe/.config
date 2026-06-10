@@ -13,48 +13,53 @@ class AgentStatusTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n\nprevious:\ndone.md cfg 2 (done)\n", encoding="utf-8")
-            _ = (root / "MANAGER_TRACKER.md").write_text("## Active / waiting\n- `tracker.md` (`pb:4`, port `18941`): running\n\n## Complete, delivered to human\n- `active.md` complete.\n", encoding="utf-8")
+            _ = (root / "MANAGER_TRACKER.md").write_text("## Complete, delivered to human\n- `active.md` complete.\n", encoding="utf-8")
             current, done, _human_pending = load_task_state(root)
             self.assertIn("active.md", current)
-            self.assertIn("tracker.md", current)
             self.assertNotIn("active.md", done)
             self.assertIn("done.md", done)
 
+    def test_load_task_state_ignores_legacy_manager_tracker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
+            _ = (root / "MANAGER_TRACKER.md").write_text("## Active / waiting\n- `tracker.md` (`pb:4`, port `18941`): running\n", encoding="utf-8")
+            current, done, human_pending = load_task_state(root)
+            self.assertEqual({"active.md"}, set(current))
+            self.assertEqual(set(), done)
+            self.assertEqual(set(), human_pending)
+
     def test_parse_task_line_extracts_target_and_port(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "MANAGER_TRACKER.md"
-            _ = path.write_text("## Active / waiting\n- `task.md` (`pb:4`, port `18941`): running\n", encoding="utf-8")
-            tasks = parse_task_lines(path, "tracker")
+            path = Path(tmp) / "TODO.md"
+            _ = path.write_text("current:\n- `task.md` (`pb:4`, port `18941`): running\n", encoding="utf-8")
+            tasks = parse_task_lines(path)
             self.assertEqual("task.md", tasks[0].task_file)
             self.assertEqual("pb:4", tasks[0].target)
             self.assertEqual(18941, tasks[0].port)
 
     def test_parse_task_line_extracts_multiple_task_target_port_tuples(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "MANAGER_TRACKER.md"
-            _ = path.write_text("## Active / waiting\n- Active batch: `one.md` (`wl:1`, port `18930`), `two.md` (`opc:4`, port `18929`), and `three.md` (`pb:0`, port `18927`).\n", encoding="utf-8")
-            tasks = parse_task_lines(path, "tracker")
+            path = Path(tmp) / "TODO.md"
+            _ = path.write_text("current:\n- Active batch: `one.md` (`wl:1`, port `18930`), `two.md` (`opc:4`, port `18929`), and `three.md` (`pb:0`, port `18927`).\n", encoding="utf-8")
+            tasks = parse_task_lines(path)
             self.assertEqual(["one.md", "two.md", "three.md"], [task.task_file for task in tasks])
             self.assertEqual(["wl:1", "opc:4", "pb:0"], [task.target for task in tasks])
             self.assertEqual([18930, 18929, 18927], [task.port for task in tasks])
 
-    def test_parse_skips_ambiguous_historical_snapshot_lines(self) -> None:
+    def test_parse_todo_line_without_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "MANAGER_TRACKER.md"
-            _ = path.write_text("## Active / waiting\n- Restart snapshot: Current spawned follow-ups: `old.md` (`wl:1`, port `18930`) and `other.md` (`pb:0`, port `18927`).\n", encoding="utf-8")
-            self.assertEqual([], parse_task_lines(path, "tracker"))
-
-    def test_parse_ignores_false_targets_like_dates(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "MANAGER_TRACKER.md"
+            path = Path(tmp) / "TODO.md"
             _ = path.write_text("## Active / waiting\n- `verulaw_docker_resume_monitor_4081.md` has NR/OS/IR quota-limited until May 31.\n", encoding="utf-8")
-            self.assertEqual([], parse_task_lines(path, "tracker"))
+            tasks = parse_task_lines(path)
+            self.assertEqual("verulaw_docker_resume_monitor_4081.md", tasks[0].task_file)
+            self.assertEqual("", tasks[0].target)
 
     def test_parse_task_line_extracts_loose_todo_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "TODO.md"
             _ = path.write_text("current:\nloose.md cfg 1 (running)\n", encoding="utf-8")
-            tasks = parse_task_lines(path, "todo")
+            tasks = parse_task_lines(path)
             self.assertEqual("cfg:1", tasks[0].target)
 
     def test_load_local_env_reads_work_logs_root_default(self) -> None:
@@ -80,7 +85,6 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[{"task_file":"active.md","tmux_target":"cfg:1.0"},{"task_file":"done.md","tmux_target":"cfg:2.0"}]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n\nprevious:\nactive.md cfg 1 (old done)\ndone.md cfg 2 (done)\n", encoding="utf-8")
-            _ = (root / "MANAGER_TRACKER.md").write_text("", encoding="utf-8")
             current, done, _human_pending = load_task_state(root)
             self.assertIn("active.md", current)
             self.assertEqual({"done.md"}, done)

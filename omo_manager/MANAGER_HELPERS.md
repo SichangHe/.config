@@ -44,4 +44,4 @@ Listener/supervisor architecture note: do not merge `email_idle_watcher.py` and 
 
 `omo_stuck_watch.py` reads registered agent panes, calls the status helper, and stores tail hashes so repeated runs can tell whether visible output changed. It does not learn timing thresholds.
 
-`omo_agent_status.py` summarizes active tasks from `TODO.md`/tracker plus tmux status helper results. It reports `not_codex`, `running`, `error`, or `ready`; completed registry rows are stale bookkeeping and can be pruned with `--prune-completed`.
+`omo_agent_status.py` summarizes active tasks from `TODO.md` plus tmux status helper results. It reports `not_codex`, `running`, `error`, or `ready`; completed registry rows are stale bookkeeping and can be pruned with `--prune-completed`.
