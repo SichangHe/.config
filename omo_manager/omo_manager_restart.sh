@@ -6,6 +6,7 @@ env_root="${OMO_WORK_LOGS_ROOT+x}${OMO_WORK_LOGS_ROOT-}"
 env_state_dir="${OMO_MANAGER_STATE_DIR+x}${OMO_MANAGER_STATE_DIR-}"
 env_workdir="${OMO_MANAGER_WORKDIR+x}${OMO_MANAGER_WORKDIR-}"
 env_tmux_target="${OMO_MANAGER_TMUX_TARGET+x}${OMO_MANAGER_TMUX_TARGET-}"
+env_manager_model="${OMO_MANAGER_MODEL+x}${OMO_MANAGER_MODEL-}"
 local_env="${OMO_MANAGER_LOCAL_ENV:-$HOME/.config/omo_manager/local.env}"
 if [ -f "$local_env" ]; then
   # shellcheck disable=SC1090
@@ -16,12 +17,14 @@ fi
 [ -n "$env_state_dir" ] && OMO_MANAGER_STATE_DIR="${env_state_dir#x}"
 [ -n "$env_workdir" ] && OMO_MANAGER_WORKDIR="${env_workdir#x}"
 [ -n "$env_tmux_target" ] && OMO_MANAGER_TMUX_TARGET="${env_tmux_target#x}"
+[ -n "$env_manager_model" ] && OMO_MANAGER_MODEL="${env_manager_model#x}"
 
 manager_url="${OMO_MANAGER_URL:-http://127.0.0.1:18790}"
 root="${OMO_WORK_LOGS_ROOT:-$HOME/work_logs}"
 state_dir="${OMO_MANAGER_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/omo-manager}"
 workdir="${OMO_MANAGER_WORKDIR:-$root}"
 tmux_target="${OMO_MANAGER_TMUX_TARGET:-omo-manager:0.0}"
+manager_model="${OMO_MANAGER_MODEL:-openai/gpt-5.4}"
 startup_prompt=1
 refresh_watchers=1
 dry_run=0
@@ -40,6 +43,7 @@ Options:
   --state-dir DIR         Private state/log dir (default: OMO_MANAGER_STATE_DIR or ~/.local/state/omo-manager)
   --workdir DIR           Directory where manager OpenCode should run (default: root)
   --tmux-target TARGET    Existing pane or manager session pane (default: OMO_MANAGER_TMUX_TARGET or omo-manager:0.0)
+  --model MODEL           OpenCode model for the manager (default: OMO_MANAGER_MODEL or openai/gpt-5.4)
   --no-startup-prompt     Do not submit the post-restart MANAGER.md prompt
   --no-refresh-watchers   Do not run omo_manager_setup_watchers.sh after health succeeds
   --force-port            Kill any non-manager listener still occupying the manager port after Ctrl-C
@@ -67,6 +71,7 @@ while [ "$#" -gt 0 ]; do
     --state-dir) need_value "$@"; state_dir="$2"; shift 2 ;;
     --workdir) need_value "$@"; workdir="$2"; shift 2 ;;
     --tmux-target) need_value "$@"; tmux_target="$2"; shift 2 ;;
+    --model) need_value "$@"; manager_model="$2"; shift 2 ;;
     --no-startup-prompt) startup_prompt=0; shift ;;
     --no-refresh-watchers) refresh_watchers=0; shift ;;
     --force-port) force_port=1; shift ;;
@@ -322,7 +327,7 @@ if ! flock -n 9; then
   exit 1
 fi
 
-command="cd $(printf '%q' "$workdir") && opencode --hostname $(printf '%q' "$manager_host") --port $(printf '%q' "$manager_port") ."
+command="cd $(printf '%q' "$workdir") && opencode --hostname $(printf '%q' "$manager_host") --port $(printf '%q' "$manager_port") --model $(printf '%q' "$manager_model") ."
 log "manager restart time=$(date '+%Y-%m-%d %H:%M:%S %z')"
 log "manager-url=$base_url root=$root workdir=$workdir tmux-target=$tmux_target"
 describe_port_listener | tee -a "$restart_log"

@@ -12,10 +12,11 @@ root="${OMO_WORK_LOGS_ROOT:-$HOME/work_logs}"
 state_dir="${OMO_MANAGER_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/omo-manager}"
 workdir="${OMO_MANAGER_WORKDIR:-$HOME/.config}"
 tmux_target="${OMO_MANAGER_TMUX_TARGET:-}"
+manager_model="${OMO_MANAGER_MODEL:-openai/gpt-5.4}"
 
 usage() {
   cat <<'EOF'
-Usage: omo_manager_watchdog.sh [--manager-url URL] [--root DIR] [--state-dir DIR] [--workdir DIR] [--tmux-target TARGET]
+Usage: omo_manager_watchdog.sh [--manager-url URL] [--root DIR] [--state-dir DIR] [--workdir DIR] [--tmux-target TARGET] [--model MODEL]
 
 Single-shot manager health check. If unhealthy, it writes an actionable recovery
 signal and exits non-zero without looping or mutating the manager TUI.
@@ -37,6 +38,7 @@ while [ "$#" -gt 0 ]; do
     --state-dir) need_value "$@"; state_dir="$2"; shift 2 ;;
     --workdir) need_value "$@"; workdir="$2"; shift 2 ;;
     --tmux-target) need_value "$@"; tmux_target="$2"; shift 2 ;;
+    --model) need_value "$@"; manager_model="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -148,7 +150,7 @@ manager-url: $manager_url
 root: $root
 workdir: $workdir
 tmux-target: ${tmux_target:-unset}
-restart-command: start or switch to a shell in the manager pane, then run: cd $(printf '%q' "$workdir") && opencode --port $manager_port --hostname $manager_host .
+restart-command: start or switch to a shell in the manager pane, then run: cd $(printf '%q' "$workdir") && opencode --port $manager_port --hostname $manager_host --model $(printf '%q' "$manager_model") .
 watcher-refresh: ~/.config/omo_manager/omo_manager_setup_watchers.sh
 EOF
   chmod 600 "$signal_file"
