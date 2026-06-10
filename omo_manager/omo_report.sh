@@ -51,7 +51,40 @@ mkdir -p "$(dirname "$path_real")"
 stamp=$(date '+%Y-%m-%d %H:%M')
 legacy_source_line="(from agent ${agent} via omo_report.sh status=${status})"
 source_line="[omo-message-source: origin=agent agent=${agent} via=omo_report.sh status=${status}"
-if [ -n "${TMUX_PANE:-}" ]; then source_line="${source_line} tmux_pane=${TMUX_PANE}"; fi
+append_kv() {
+  python3 - "$1" "$2" <<'PY'
+from __future__ import annotations
+import sys
+from urllib.parse import quote
+key, value = sys.argv[1:3]
+if value:
+    print(f" {key}={quote(value, safe=':@._/-%')}", end="")
+PY
+}
+tmux_target="${TMUX_PANE:-}"
+tmux_info=""
+if command -v tmux >/dev/null 2>&1; then
+  if [ -n "$tmux_target" ]; then
+    tmux_info=$(tmux display-message -p -t "$tmux_target" '#{session_name}	#{window_index}	#{pane_index}	#{pane_id}	#{window_name}' 2>/dev/null || true)
+  elif [ -n "${TMUX:-}" ]; then
+    tmux_info=$(tmux display-message -p '#{session_name}	#{window_index}	#{pane_index}	#{pane_id}	#{window_name}' 2>/dev/null || true)
+  fi
+fi
+if [ -n "$tmux_info" ]; then
+  IFS=$'\t' read -r tmux_session tmux_window_index tmux_pane_index tmux_pane_id tmux_window_name <<EOF
+$tmux_info
+EOF
+  source_line="${source_line}$(append_kv tmux_session "$tmux_session")"
+  source_line="${source_line}$(append_kv tmux_window_index "$tmux_window_index")"
+  source_line="${source_line}$(append_kv tmux_pane_index "$tmux_pane_index")"
+  source_line="${source_line}$(append_kv tmux_pane_id "$tmux_pane_id")"
+  if [ -n "$tmux_session" ] && [ -n "$tmux_window_index" ] && [ -n "$tmux_pane_index" ]; then
+    source_line="${source_line}$(append_kv tmux_target "${tmux_session}:${tmux_window_index}.${tmux_pane_index}")"
+  fi
+  source_line="${source_line}$(append_kv tmux_window_name "$tmux_window_name")"
+elif [ -n "$tmux_target" ]; then
+  source_line="${source_line}$(append_kv tmux_pane_id "$tmux_target")"
+fi
 source_line="${source_line}]"
 lock_path="${path_real}.omo_report.lock"
 exec 9>"$lock_path"

@@ -150,11 +150,12 @@ def mtime_changed_markdown_files(root: Path, state: FileState) -> list[Path]:
     return changed
 
 
-def marker_origin_source(next_line: str) -> tuple[str, str]:
-    if next_line.startswith(EMAIL_SOURCE_PREFIXES):
-        return "human", "email"
-    if next_line.startswith(AGENT_SOURCE_PREFIXES):
+def marker_origin_source(block_lines: list[str]) -> tuple[str, str]:
+    stripped_lines = [line.strip() for line in block_lines]
+    if any(line.startswith(AGENT_SOURCE_PREFIXES) for line in stripped_lines):
         return "agent", "agent"
+    if any(line.startswith(EMAIL_SOURCE_PREFIXES) for line in stripped_lines):
+        return "human", "email"
     return "human", "manual"
 
 
@@ -181,7 +182,12 @@ def find_markers(root: Path, files: list[Path]) -> list[Marker]:
             rel = path.relative_to(root)
             if next_line.startswith(ROUTED_PREFIXES):
                 continue
-            origin, source = marker_origin_source(next_line)
+            end_idx = len(lines)
+            for block_idx in range(idx, len(lines)):
+                if block_idx != idx - 1 and lines[block_idx].strip() in PENDING_MARKERS:
+                    end_idx = block_idx
+                    break
+            origin, source = marker_origin_source(lines[idx - 1 : end_idx])
             digest = hashlib.sha256(f"{rel}:{idx}:{next_line}".encode("utf-8")).hexdigest()[:16]
             markers.append(Marker(file=rel, line=idx, digest=digest, origin=origin, source=source))
     return markers

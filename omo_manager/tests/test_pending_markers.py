@@ -63,6 +63,21 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual("agent", markers[0].source)
             self.assertEqual("no-human-ack", markers[0].action)
 
+    def test_agent_source_marker_later_in_pending_block_is_agent_origin(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            path.write_text(
+                "(pending)\n"
+                "(report manager 2026-06-10 12:02 agent=agent-4002 status=done)\n"
+                "[omo-message-source: origin=agent agent=agent-4002 via=omo_report.sh status=done]\n",
+                encoding="utf-8",
+            )
+            markers = find_markers(root, [path])
+            self.assertEqual(1, len(markers))
+            self.assertEqual("agent", markers[0].origin)
+            self.assertEqual("no-human-ack", markers[0].action)
+
     def test_email_pending_block_uses_configured_active_log(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -360,6 +375,56 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertIn("[omo-message-source: origin=agent agent=agent-stdin via=omo_report.sh status=done", text)
             self.assertIn("(from agent agent-stdin via omo_report.sh status=done)", text)
             self.assertIn("message:\n> stdin report\n", text)
+
+    def test_omo_report_derives_tmux_source_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            root.mkdir()
+            bin_dir = Path(tmp) / "bin"
+            bin_dir.mkdir()
+            tmux = bin_dir / "tmux"
+            tmux.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf 'cfg\\t7\\t0\\t%%1701\\tmanager window\\n'\n",
+                encoding="utf-8",
+            )
+            tmux.chmod(0o700)
+            result = subprocess.run(
+                [
+                    str(Path.home() / ".config/omo_manager/omo_report.sh"),
+                    "--root",
+                    str(root),
+                    "--manager-url",
+                    "http://127.0.0.1:1",
+                    "--task-file",
+                    "task.md",
+                    "--status",
+                    "done",
+                    "--agent",
+                    "agent-tmux",
+                ],
+                input="tmux report\n",
+                cwd=tmp,
+                env={
+                    **os.environ,
+                    "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                    "TMUX_PANE": "%1701",
+                    "OMO_MANAGER_LOCAL_ENV": str(Path(tmp) / "missing-local.env"),
+                },
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+            self.assertEqual("", result.stderr)
+            self.assertEqual(0, result.returncode)
+            text = (root / "task.md").read_text(encoding="utf-8")
+            self.assertIn("tmux_session=cfg", text)
+            self.assertIn("tmux_window_index=7", text)
+            self.assertIn("tmux_pane_index=0", text)
+            self.assertIn("tmux_pane_id=%1701", text)
+            self.assertIn("tmux_target=cfg:7.0", text)
+            self.assertIn("tmux_window_name=manager%20window", text)
 
     def test_omo_report_concurrent_distinct_reports_keep_all_blocks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
