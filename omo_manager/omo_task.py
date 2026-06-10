@@ -17,7 +17,10 @@ except ModuleNotFoundError:
     from omo_codex_status import current_block, status, tail
 
 DEFAULT_ROOT = Path(os.environ.get("OMO_WORK_LOGS_ROOT", Path.home() / "work_logs"))
-CODEX_CMD = ("bunx", "@openai/codex", "--dangerously-bypass-approvals-and-sandbox")
+COMMAND_BY_TOOL = {
+    "codex": ("bunx", "@openai/codex", "--dangerously-bypass-approvals-and-sandbox"),
+    "pcodx": ("pcodx",),
+}
 SHELL_COMMANDS = {"bash", "dash", "fish", "sh", "zsh"}
 
 
@@ -77,8 +80,8 @@ def parse_args(argv: list[str]) -> Args:
         parser.error("pane selection is no longer supported; pane 0 is implied.")
     if parsed.workdir is not None and not parsed.tmux_session:
         parser.error("--workdir requires --tmux-session.")
-    if parsed.tool != "codex":
-        parser.error("only --tool codex is supported.")
+    if parsed.tool not in COMMAND_BY_TOOL:
+        parser.error("only --tool codex or --tool pcodx is supported.")
     return Args(parsed.root.resolve(), parsed.task_file, parsed.tmux_session, parsed.tmux_window, parsed.tool, parsed.workdir, parsed.window_name, parsed.prompt_file, parsed.no_link, parsed.dry_run, parsed.session_id, parsed.reasoning_effort, tuple(parsed.codex_flag or ()))
 
 
@@ -99,8 +102,11 @@ def header(tmux_target: str, tool: str) -> str:
     return f"runat: {tmux_target} {tool}" if tmux_target else ""
 
 
-def codex_cmd(session_id: str = "", reasoning_effort: str = "", codex_flags: tuple[str, ...] = (), prompt_file: Path | None = None) -> str:
-    args = list(CODEX_CMD)
+def codex_cmd(session_id: str = "", reasoning_effort: str = "", codex_flags: tuple[str, ...] = (), prompt_file: Path | None = None, tool: str = "codex") -> str:
+    try:
+        args = list(COMMAND_BY_TOOL[tool])
+    except KeyError as exc:
+        raise ValueError(f"unsupported tool: {tool}") from exc
     if reasoning_effort:
         args.extend(("--config", f'model_reasoning_effort="{reasoning_effort}"'))
     args.extend(codex_flags)
@@ -155,7 +161,7 @@ def new_window_command(args: Args) -> list[str]:
 
 
 def start_codex(target: str, args: Args) -> None:
-    command = shell_cmd(codex_cmd(args.session_id, args.reasoning_effort, args.codex_flags, args.prompt_file))
+    command = shell_cmd(codex_cmd(args.session_id, args.reasoning_effort, args.codex_flags, args.prompt_file, args.tool))
     _ = tmux(["send-keys", "-t", target, command, "Enter"], check=True)
     wait_command_started(target)
 
@@ -224,7 +230,7 @@ def dry_run(args: Args) -> None:
         command = ["tmux", *new_window_command(args)]
         print("tmux: " + " ".join(shlex.quote(part) for part in command))
         launch_target = f"{args.tmux_session}:DRYRUN"
-        launch = ["tmux", "send-keys", "-t", launch_target, shell_cmd(codex_cmd(args.session_id, args.reasoning_effort, args.codex_flags, args.prompt_file)), "Enter"]
+        launch = ["tmux", "send-keys", "-t", launch_target, shell_cmd(codex_cmd(args.session_id, args.reasoning_effort, args.codex_flags, args.prompt_file, args.tool)), "Enter"]
         print("tmux: " + " ".join(shlex.quote(part) for part in launch))
 
 

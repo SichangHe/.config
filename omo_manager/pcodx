@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export PCODX_MODE=1
+export PCODX_POC_ROOT="${PCODX_POC_ROOT:-/ssd1/sichangheagent/opencode_partial_compact/experiments/codex-wrapper}"
+
+exec bunx @openai/codex --dangerously-bypass-approvals-and-sandbox "$@"

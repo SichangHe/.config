@@ -18,6 +18,13 @@ class OmoTaskTests(unittest.TestCase):
             self.assertEqual('runat: cfg:2 codex', path.read_text(encoding='utf-8').splitlines()[0])
             self.assertIn('x.md cfg:2', (root / 'TODO.md').read_text(encoding='utf-8'))
 
+    def test_creates_pcodx_task_header(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = Args(root, 'x.md', 'cfg', '2', 'pcodx', None, '', None, False, False, '', '', ())
+            path = ensure_task_file(args, 'cfg:2')
+            self.assertEqual('runat: cfg:2 pcodx', path.read_text(encoding='utf-8').splitlines()[0])
+
     def test_new_window_uses_tmux_new_window_shape(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             args = Args(Path(tmp), 'x.md', 'cfg', '', 'codex', Path(tmp), 'x', None, False, False, '', '', ())
@@ -46,10 +53,20 @@ class OmoTaskTests(unittest.TestCase):
             codex_cmd(reasoning_effort="xhigh", codex_flags=("--profile", "deep-review")),
         )
 
+    def test_pcodx_tool_uses_wrapper_command(self) -> None:
+        self.assertEqual(
+            "pcodx --config 'model_reasoning_effort=\"xhigh\"' --profile deep-review",
+            codex_cmd(reasoning_effort="xhigh", codex_flags=("--profile", "deep-review"), tool="pcodx"),
+        )
+
     def test_parse_args_accepts_repeatable_codex_flags(self) -> None:
         args = parse_args(["--task-file", "x.md", "--reasoning-effort", "xhigh", "--codex-flag=--profile", "--codex-flag", "deep-review"])
         self.assertEqual("xhigh", args.reasoning_effort)
         self.assertEqual(("--profile", "deep-review"), args.codex_flags)
+
+    def test_parse_args_accepts_pcodx_tool(self) -> None:
+        args = parse_args(["--task-file", "x.md", "--tool", "pcodx"])
+        self.assertEqual("pcodx", args.tool)
 
     def test_new_window_can_resume_session_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
