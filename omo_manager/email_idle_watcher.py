@@ -290,7 +290,7 @@ def push_email_ref(args: Args, line_no: int) -> bool:
         return False
     manager_file = current_manager_file(args)
     ref = manager_file.relative_to(args.root) if manager_file.is_relative_to(args.root) else manager_file
-    command = ["omo_push_to_manager.py", f"pending: file={ref} line={line_no} source=email action=ack-human", "--root", str(args.root), "--submit"]
+    command = ["omo_push_to_manager.py", f"pending: file={ref} line={line_no} origin=human source=email action=ack-human", "--root", str(args.root), "--submit"]
     command.extend(["--pending-file", str(ref), "--pending-line", str(line_no)])
     if args.manager_target:
         command.extend(["--manager-target", args.manager_target])

@@ -22,6 +22,7 @@ DEFAULT_STATE = Path(os.environ.get("OMO_MANAGER_PENDING_SEEN", default_state_di
 PENDING_MARKERS = {"(pending)"}
 ROUTED_PREFIXES = ("(manager handled:", "(manager routed:")
 EMAIL_SOURCE_PREFIXES = ("(from email ", "[source: email ")
+AGENT_SOURCE_PREFIXES = ("[omo-message-source: origin=agent ", "(from agent ")
 IGNORE_PARTS = {".git", ".venv", "__pycache__"}
 FENCE_PREFIXES = ("```", "~~~")
 
@@ -31,15 +32,16 @@ class Marker:
     file: Path
     line: int
     digest: str
+    origin: str
     source: str
 
     @property
     def ref(self) -> str:
-        return f"pending: file={self.file} line={self.line} source={self.source} action={self.action}"
+        return f"pending: file={self.file} line={self.line} origin={self.origin} source={self.source} action={self.action}"
 
     @property
     def action(self) -> str:
-        return "ack-human" if self.source == "email" else "no-human-ack"
+        return "ack-human" if self.origin == "human" else "no-human-ack"
 
 
 @dataclass(frozen=True)
@@ -148,8 +150,12 @@ def mtime_changed_markdown_files(root: Path, state: FileState) -> list[Path]:
     return changed
 
 
-def marker_source(next_line: str) -> str:
-    return "email" if next_line.startswith(EMAIL_SOURCE_PREFIXES) else "non-email"
+def marker_origin_source(next_line: str) -> tuple[str, str]:
+    if next_line.startswith(EMAIL_SOURCE_PREFIXES):
+        return "human", "email"
+    if next_line.startswith(AGENT_SOURCE_PREFIXES):
+        return "agent", "agent"
+    return "human", "manual"
 
 
 def find_markers(root: Path, files: list[Path]) -> list[Marker]:
@@ -175,8 +181,9 @@ def find_markers(root: Path, files: list[Path]) -> list[Marker]:
             rel = path.relative_to(root)
             if next_line.startswith(ROUTED_PREFIXES):
                 continue
+            origin, source = marker_origin_source(next_line)
             digest = hashlib.sha256(f"{rel}:{idx}:{next_line}".encode("utf-8")).hexdigest()[:16]
-            markers.append(Marker(file=rel, line=idx, digest=digest, source=marker_source(next_line)))
+            markers.append(Marker(file=rel, line=idx, digest=digest, origin=origin, source=source))
     return markers
 
 

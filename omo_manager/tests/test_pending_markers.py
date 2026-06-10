@@ -32,6 +32,36 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertNotIn("[summary: human reply to manager]", text)
             markers = find_markers(root, [path])
             self.assertEqual(1, len(markers))
+            self.assertEqual("human", markers[0].origin)
+            self.assertEqual("email", markers[0].source)
+            self.assertIn("origin=human source=email action=ack-human", markers[0].ref)
+
+    def test_manual_pending_block_is_human_origin(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "work_manager.md"
+            path.write_text("(pending)\nplease handle this\n", encoding="utf-8")
+            markers = find_markers(root, [path])
+            self.assertEqual(1, len(markers))
+            self.assertEqual("human", markers[0].origin)
+            self.assertEqual("manual", markers[0].source)
+            self.assertEqual("ack-human", markers[0].action)
+
+    def test_agent_source_marker_is_agent_origin(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            path.write_text(
+                "(pending)\n"
+                "[omo-message-source: origin=agent agent=agent-4002 via=omo_report.sh status=done tmux_pane=%22]\n"
+                "(from agent agent-4002 via omo_report.sh status=done)\n",
+                encoding="utf-8",
+            )
+            markers = find_markers(root, [path])
+            self.assertEqual(1, len(markers))
+            self.assertEqual("agent", markers[0].origin)
+            self.assertEqual("agent", markers[0].source)
+            self.assertEqual("no-human-ack", markers[0].action)
 
     def test_email_pending_block_uses_configured_active_log(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -286,7 +316,8 @@ class PendingMarkerTests(unittest.TestCase):
                 self.assertEqual(0, result.returncode)
             task = root / "task.md"
             text = task.read_text(encoding="utf-8")
-            self.assertIn("(pending)\n(from agent agent-4002 via omo_report.sh status=done)\n", text)
+            self.assertIn("(pending)\n[omo-message-source: origin=agent agent=agent-4002 via=omo_report.sh status=done", text)
+            self.assertIn("(from agent agent-4002 via omo_report.sh status=done)\n", text)
             self.assertEqual(1, text.count("(from agent agent-4002 via omo_report.sh status=done)"))
             self.assertIn("[message-sha256: ", text)
             self.assertIn("message:\n> done\n", text)
@@ -295,6 +326,7 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertNotIn("TMUX:", text)
             markers = find_markers(root, [task])
             self.assertEqual(1, len(markers))
+            self.assertEqual("agent", markers[0].origin)
 
     def test_omo_report_reads_stdin_body_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -325,6 +357,7 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual("", result.stderr)
             self.assertEqual(0, result.returncode)
             text = (root / "task.md").read_text(encoding="utf-8")
+            self.assertIn("[omo-message-source: origin=agent agent=agent-stdin via=omo_report.sh status=done", text)
             self.assertIn("(from agent agent-stdin via omo_report.sh status=done)", text)
             self.assertIn("message:\n> stdin report\n", text)
 
@@ -384,8 +417,10 @@ class PendingMarkerTests(unittest.TestCase):
             args = Args(root=root, manager_url="", state=Path(tmp) / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, once=True, dry_run=True)
             from omo_manager.omo_pending_watch import scan_once
 
-            with redirect_stdout(StringIO()):
+            out = StringIO()
+            with redirect_stdout(out):
                 self.assertTrue(scan_once(args, seen, [path]))
+            self.assertIn("origin=human source=email action=ack-human", out.getvalue())
 
     def test_seen_pending_markers_do_not_expire_into_repush_loop(self) -> None:
         from omo_manager.omo_pending_watch import expire_seen

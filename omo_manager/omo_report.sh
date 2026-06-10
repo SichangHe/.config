@@ -49,19 +49,22 @@ else
 fi
 mkdir -p "$(dirname "$path_real")"
 stamp=$(date '+%Y-%m-%d %H:%M')
-source_line="(from agent ${agent} via omo_report.sh status=${status})"
+legacy_source_line="(from agent ${agent} via omo_report.sh status=${status})"
+source_line="[omo-message-source: origin=agent agent=${agent} via=omo_report.sh status=${status}"
+if [ -n "${TMUX_PANE:-}" ]; then source_line="${source_line} tmux_pane=${TMUX_PANE}"; fi
+source_line="${source_line}]"
 lock_path="${path_real}.omo_report.lock"
 exec 9>"$lock_path"
 flock 9
 if [ ! -f "$path_real" ]; then : >"$path_real"; fi
-python3 - "$path_real" "$message_file" "$source_line" "$stamp" "$agent" "$status" <<'PY'
+python3 - "$path_real" "$message_file" "$source_line" "$legacy_source_line" "$stamp" "$agent" "$status" <<'PY'
 from __future__ import annotations
 import hashlib
 import sys
 from pathlib import Path
 path = Path(sys.argv[1])
 message_path = Path(sys.argv[2])
-source_line, stamp, agent, status = sys.argv[3:7]
+source_line, legacy_source_line, stamp, agent, status = sys.argv[3:8]
 message_bytes = message_path.read_bytes()
 message_hash = hashlib.sha256(message_bytes).hexdigest()
 hash_line = f"[message-sha256: {message_hash}]"
@@ -74,13 +77,14 @@ for idx, line in enumerate(lines):
         if block_line.strip() == "(pending)":
             block = lines[idx:next_idx]
             break
-    if source_line in block and hash_line in block:
+    if (source_line in block or legacy_source_line in block) and hash_line in block:
         raise SystemExit(0)
 message = message_bytes.decode("utf-8", errors="replace")
 block = [
     "",
     "(pending)",
     source_line,
+    legacy_source_line,
     f"(report manager {stamp} agent={agent} status={status})",
     hash_line,
     f"message-file: {message_path}",
