@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from omo_manager.omo_tmux_send import (
     Args,
+    current_input_text,
     input_has_probe,
     launch_async,
     message_probe,
@@ -244,7 +245,20 @@ class TmuxSendTests(unittest.TestCase):
     def test_input_probe_matches_codex_input_only(self) -> None:
         self.assertEqual("Read the dispatch prompt", message_probe("\nRead the dispatch prompt\nmore"))
         self.assertTrue(input_has_probe(["› Read the dispatch prompt", "  gpt-5.5"], "Read the dispatch prompt"))
+        self.assertFalse(input_has_probe(["› Older submitted prompt", "• Working", "  gpt-5.5"], "Older submitted prompt"))
         self.assertFalse(input_has_probe(["Read the dispatch prompt", "  gpt-5.5"], "Read the dispatch prompt"))
+        self.assertEqual("", current_input_text(["› Use /skills to list available skills", "  gpt-5.5"]))
+        self.assertEqual("Write tests for @filename", current_input_text(["• Working (1m 59s • esc to interrupt)", "", "› Write tests for @filename", "", "  gpt-5.5"]))
+        multi_line_input = [
+            "• Working (1m 59s • esc to interrupt)",
+            "",
+            "› Run `~/.config/getagentsmd` first.",
+            "  Continue `x.md`.",
+            "  - Report back.",
+            "",
+            "  gpt-5.5",
+        ]
+        self.assertEqual("Run `~/.config/getagentsmd` first.\n  Continue `x.md`.\n  - Report back.", current_input_text(multi_line_input))
 
     def test_verify_submit_sends_fallback_enter_when_prompt_remains_in_input(self) -> None:
         calls: list[list[str]] = []
@@ -269,6 +283,22 @@ class TmuxSendTests(unittest.TestCase):
         with patch("omo_manager.omo_tmux_send.tail", side_effect=fake_tail), patch("omo_manager.omo_tmux_send.subprocess.run", return_value=subprocess.CompletedProcess(["tmux"], 0)), patch("omo_manager.omo_tmux_send.time.monotonic", side_effect=[0, 2]):
             with self.assertRaisesRegex(RuntimeError, "Codex submit not verified"):
                 verify_submit(Args("cfg:1.0", None, 1, 0.15, 0, False, submit_verify_timeout_s=1), "Read the dispatch prompt from /tmp/x and follow it exactly.\n")
+
+    def test_verify_submit_fails_when_running_input_box_still_has_other_text(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_tail(_: str, __: int) -> list[str]:
+            return ["• Working (1m 59s • esc to interrupt)", "", "› Write tests for @filename", "", "  gpt-5.5"]
+
+        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch("omo_manager.omo_tmux_send.tail", side_effect=fake_tail), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run), patch("omo_manager.omo_tmux_send.time.monotonic", side_effect=[0, 2]):
+            with self.assertRaisesRegex(RuntimeError, "input box still has text"):
+                verify_submit(Args("cfg:1.0", None, 1, 0.15, 0, False, submit_verify_timeout_s=1), "Read the dispatch prompt from /tmp/x and follow it exactly.\n")
+
+        self.assertEqual([["tmux", "send-keys", "-t", "cfg:1.0", "Enter"]], calls)
 
 
 if __name__ == "__main__":

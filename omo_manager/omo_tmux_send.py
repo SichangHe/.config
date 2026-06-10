@@ -190,8 +190,25 @@ def message_probe(message: str) -> str:
     return ""
 
 
+def current_input_text(lines: list[str]) -> str:
+    body = lines[:-1] if lines and lines[-1].startswith("  gpt-") else lines[:]
+    while body and not body[-1].strip():
+        body.pop()
+    for idx in range(len(body) - 1, -1, -1):
+        line = body[idx].lstrip()
+        if line.startswith("›"):
+            input_lines = body[idx:]
+            if any(after.startswith(("• ", "│", "└", "├", "─")) for after in input_lines[1:]):
+                return ""
+            text_lines = [line[1:].strip()]
+            text_lines.extend(after.rstrip() for after in input_lines[1:])
+            text = "\n".join(text_lines).strip()
+            return "" if text == "Use /skills to list available skills" else text
+    return ""
+
+
 def input_has_probe(lines: list[str], probe: str) -> bool:
-    return bool(probe and any(line.lstrip().startswith("› ") and probe in line for line in lines[-20:]))
+    return bool(probe and probe in current_input_text(lines))
 
 
 def verify_submit(args: Args, message: str) -> None:
@@ -208,13 +225,15 @@ def verify_submit(args: Args, message: str) -> None:
         last_status = status(lines, current_block(lines))
         if last_status == "not_codex":
             return
-        if not input_has_probe(lines, probe):
+        input_text = current_input_text(lines)
+        if not input_text:
             return
         if not fallback_sent:
             _ = subprocess.run(["tmux", "send-keys", "-t", args.target, "Enter"], timeout=5, check=True)
             fallback_sent = True
         if time.monotonic() >= deadline_s:
-            raise RuntimeError(f"Codex submit not verified after {args.submit_verify_timeout_s:g}s: prompt still in input, status={last_status}")
+            suffix = "prompt still in input" if probe in input_text else "input box still has text"
+            raise RuntimeError(f"Codex submit not verified after {args.submit_verify_timeout_s:g}s: {suffix}, status={last_status}")
         time.sleep(min(0.5, max(0.05, deadline_s - time.monotonic())))
 
 
