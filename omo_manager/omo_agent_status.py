@@ -45,10 +45,13 @@ def load_local_env() -> dict[str, str]:
 LOCAL_ENV = load_local_env()
 DEFAULT_ROOT = Path(LOCAL_ENV.get("OMO_WORK_LOGS_ROOT", str(Path.home() / "work_logs")))
 DEFAULT_REGISTRY = Path(LOCAL_ENV.get("OMO_MANAGER_SESSION_REGISTRY", str(default_state_dir() / "sessions.json")))
-TASK_RE = re.compile(r"`?([A-Za-z0-9_.-]+\.md)`?")
+TASK_RE = re.compile(r"`?([A-Za-z0-9_./-]+\.md)`?")
 TARGET_RE = re.compile(r"\b([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\b")
 LOOSE_TARGET_RE = re.compile(r"\b([a-z][A-Za-z0-9_-]*)\s+(\d+)\b")
 PORT_RE = re.compile(r"\bport [`']?(\d{2,5})[`']?")
+STATUS_RE = re.compile(r"^\((pending|running|done|blocked)(?::[^)]*)?\)$")
+RUNAT_RE = re.compile(r"^runat:\s+([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\b")
+CLOSE_TARGET_RE = re.compile(r"\btmux target [`']?([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)[`']?")
 
 
 @dataclass(frozen=True)
@@ -80,6 +83,13 @@ class StatusRow:
     task_file: str
     status: str
     evidence: str
+
+
+@dataclass(frozen=True)
+class TaskState:
+    status: str
+    target: str
+    port: int | None
 
 
 class ParsedArgs(argparse.Namespace):
@@ -139,26 +149,75 @@ def parse_task_lines(path: Path) -> list[TaskLine]:
     return tasks
 
 
+def resolve_task_path(root: Path, task_file: str) -> Path | None:
+    path = Path(task_file).expanduser()
+    if not path.is_absolute():
+        path = root / path
+    try:
+        resolved = path.resolve(strict=False)
+    except OSError:
+        return None
+    try:
+        root_resolved = root.resolve(strict=False)
+    except OSError:
+        root_resolved = root
+    if resolved != root_resolved and root_resolved not in resolved.parents:
+        return None
+    return resolved if resolved.is_file() else None
+
+
+def scan_task_state(path: Path) -> TaskState | None:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    status = ""
+    target = ""
+    port: int | None = None
+    for line in reversed(lines):
+        stripped = line.strip()
+        if not status:
+            status_match = STATUS_RE.match(stripped)
+            if status_match is not None:
+                status = status_match.group(1)
+        if not target:
+            runat_match = RUNAT_RE.match(stripped)
+            if runat_match is not None:
+                target = runat_match.group(1)
+            else:
+                close_target_match = CLOSE_TARGET_RE.search(stripped)
+                if close_target_match is not None:
+                    target = close_target_match.group(1)
+        if port is None:
+            port_match = PORT_RE.search(stripped)
+            if port_match is not None:
+                port = int(port_match.group(1))
+        if status and target and port is not None:
+            break
+    return TaskState(status, target, port) if status else None
+
+
 def load_task_state(root: Path) -> tuple[dict[str, TaskLine], set[str], set[str]]:
     todo_tasks = parse_task_lines(root / "TODO.md")
     current: dict[str, TaskLine] = {}
-    done_candidates: set[str] = set()
+    done: set[str] = set()
     human_pending: set[str] = set()
     for task in todo_tasks:
         if task.task_file == "TODO.md":
             continue
-        section = task.section
-        if "previous" in section or "complete" in section:
-            done_candidates.add(task.task_file)
+        state_path = resolve_task_path(root, task.task_file)
+        state = scan_task_state(state_path) if state_path is not None else None
+        if state is None:
             continue
-        if "human pending" in section or "human-action" in section:
+        if state.status == "done":
+            done.add(task.task_file)
+            continue
+        if state.status == "blocked":
             human_pending.add(task.task_file)
             continue
-        if "current" in section or "active" in section:
-            existing = current.get(task.task_file)
-            if existing is None or task.target or not existing.target:
-                current[task.task_file] = task
-    done = done_candidates - set(current)
+        target = state.target or task.target
+        port = state.port if state.port is not None else task.port
+        current[task.task_file] = TaskLine(task.task_file, "task-file", task.line, target, port)
     return current, done, human_pending
 
 

@@ -200,10 +200,6 @@ def section_bounds(lines: list[str], name: str) -> tuple[int, int] | None:
     return start, end
 
 
-def done_todo_line(line: str) -> str:
-    return line if "(done)" in line else f"{line} (done)"
-
-
 def move_todo_to_previous(root: Path, task_file: str) -> None:
     todo = root / "TODO.md"
     if not todo.exists():
@@ -221,7 +217,7 @@ def move_todo_to_previous(root: Path, task_file: str) -> None:
             break
     if source_idx < 0:
         return
-    moved = done_todo_line(lines.pop(source_idx).strip())
+    moved = lines.pop(source_idx).strip()
     previous = section_bounds(lines, "previous")
     if previous is None:
         if lines and lines[-1].strip():

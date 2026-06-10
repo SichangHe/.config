@@ -83,7 +83,7 @@ class CodexStopTests(unittest.TestCase):
         self.assertIn("session_id: `11111111-2222-3333-4444-555555555555`", text)
         self.assertNotIn("codex resume", text)
 
-    def test_record_close_moves_todo_current_entry_to_previous_done(self) -> None:
+    def test_record_close_moves_todo_current_entry_to_previous(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             task = root / "task.md"
@@ -97,7 +97,7 @@ class CodexStopTests(unittest.TestCase):
                 "11111111-2222-3333-4444-555555555555",
             )
             todo = (root / "TODO.md").read_text(encoding="utf-8")
-        self.assertIn("current:\n\nother.md cfg:2\n\nprevious:\ntask.md cfg:1 (done)\nold.md cfg:0 (done)\n", todo)
+        self.assertIn("current:\n\nother.md cfg:2\n\nprevious:\ntask.md cfg:1\nold.md cfg:0 (done)\n", todo)
 
     def test_close_note_omits_year(self) -> None:
         text = close_note("cfg:1.0", "11111111-2222-3333-4444-555555555555", datetime(2026, 6, 6, 11, 18, tzinfo=timezone.utc))

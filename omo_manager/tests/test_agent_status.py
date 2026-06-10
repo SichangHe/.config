@@ -14,6 +14,8 @@ class AgentStatusTests(unittest.TestCase):
             root = Path(tmp)
             _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n\nprevious:\ndone.md cfg 2 (done)\n", encoding="utf-8")
             _ = (root / "MANAGER_TRACKER.md").write_text("## Complete, delivered to human\n- `active.md` complete.\n", encoding="utf-8")
+            _ = (root / "active.md").write_text("runat: cfg:1 codex\n(running)\n", encoding="utf-8")
+            _ = (root / "done.md").write_text("runat: cfg:2 codex\n(done)\n", encoding="utf-8")
             current, done, _human_pending = load_task_state(root)
             self.assertIn("active.md", current)
             self.assertNotIn("active.md", done)
@@ -24,10 +26,23 @@ class AgentStatusTests(unittest.TestCase):
             root = Path(tmp)
             _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
             _ = (root / "MANAGER_TRACKER.md").write_text("## Active / waiting\n- `tracker.md` (`pb:4`, port `18941`): running\n", encoding="utf-8")
+            _ = (root / "active.md").write_text("runat: cfg:1 codex\n(running)\n", encoding="utf-8")
             current, done, human_pending = load_task_state(root)
             self.assertEqual({"active.md"}, set(current))
             self.assertEqual(set(), done)
             self.assertEqual(set(), human_pending)
+
+    def test_load_task_state_uses_latest_task_file_tag_not_todo_section(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "TODO.md").write_text("human pending:\nreview.md (done)\n\nprevious:\nold.md (blocked)\n", encoding="utf-8")
+            _ = (root / "review.md").write_text("runat: pb:4 codex\n(done)\n\n(blocked)\n", encoding="utf-8")
+            _ = (root / "old.md").write_text("runat: wl:2 codex\n(running)\n", encoding="utf-8")
+            current, done, human_pending = load_task_state(root)
+            self.assertEqual({"old.md"}, set(current))
+            self.assertEqual(set(), done)
+            self.assertEqual({"review.md"}, human_pending)
+            self.assertEqual("wl:2", current["old.md"].target)
 
     def test_parse_task_line_extracts_target_and_port(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -85,6 +100,8 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[{"task_file":"active.md","tmux_target":"cfg:1.0"},{"task_file":"done.md","tmux_target":"cfg:2.0"}]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n\nprevious:\nactive.md cfg 1 (old done)\ndone.md cfg 2 (done)\n", encoding="utf-8")
+            _ = (root / "active.md").write_text("runat: cfg:1 codex\n(running)\n", encoding="utf-8")
+            _ = (root / "done.md").write_text("runat: cfg:2 codex\n(done)\n", encoding="utf-8")
             current, done, _human_pending = load_task_state(root)
             self.assertIn("active.md", current)
             self.assertEqual({"done.md"}, done)
