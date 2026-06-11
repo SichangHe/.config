@@ -479,7 +479,7 @@ class PendingMarkerTests(unittest.TestCase):
             path = dated_manager_file(root)
             _ = path.write_text("(pending)\n(from email manager_mail/4002.txt)\n[source: email manager_mail/4002.txt]\n", encoding="utf-8")
             seen: dict[str, float] = {}
-            args = Args(root=root, manager_url="", state=Path(tmp) / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, once=True, dry_run=True)
+            args = Args(root=root, manager_url="", state=Path(tmp) / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=True)
             from omo_manager.omo_pending_watch import scan_once
 
             out = StringIO()
@@ -499,6 +499,33 @@ class PendingMarkerTests(unittest.TestCase):
             path = root / "work_manager.md"
             _ = path.write_text("(pending)\n(manager routed: to `task.md`.)\n(from email manager_mail/4480.txt)\n", encoding="utf-8")
             self.assertEqual([], find_markers(root, [path]))
+
+    def test_idle_status_pushes_when_status_script_reports_active_work(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            status_script = Path(tmp) / "status.py"
+            _ = status_script.write_text("#!/usr/bin/env python3\nprint('agent-status: running=1')\nraise SystemExit(3)\n", encoding="utf-8")
+            status_script.chmod(0o700)
+            args = Args(Path(tmp), "", Path(tmp) / "seen.tsv", 1.0, 1.0, 30.0, status_script, False, True)
+            out = StringIO()
+            with redirect_stdout(out):
+                pushed = watcher.maybe_push_idle_status(args, 100.0, 130.0)
+            self.assertTrue(pushed)
+            text = out.getvalue()
+            self.assertIn("manager idle status: watcher has been idle", text)
+            self.assertIn("Please check on running agents", text)
+            self.assertIn("agent-status: running=1", text)
+
+    def test_idle_status_stays_quiet_before_idle_interval(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/missing-status.py"), False, True)
+        out = StringIO()
+        with redirect_stdout(out):
+            pushed = watcher.maybe_push_idle_status(args, 100.0, 129.9)
+        self.assertFalse(pushed)
+        self.assertEqual("", out.getvalue())
 
     def test_omo_email_human_skips_duplicate_subject_body(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

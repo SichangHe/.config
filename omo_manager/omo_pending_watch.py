@@ -51,6 +51,8 @@ class Args:
     state: Path
     interval_s: float
     full_scan_interval_s: float
+    idle_status_interval_s: float
+    status_script: Path
     once: bool
     dry_run: bool
     manager_target: str = ""
@@ -68,6 +70,8 @@ class ParsedArgs(argparse.Namespace):
     state: Path = DEFAULT_STATE
     interval_s: float = 2.0
     full_scan_interval_s: float = 300.0
+    idle_status_interval_s: float = 1800.0
+    status_script: Path = Path(__file__).with_name("omo_agent_status.py")
     once: bool = False
     dry_run: bool = False
 
@@ -80,10 +84,25 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--state", type=Path, default=DEFAULT_STATE)
     _ = parser.add_argument("--interval-s", type=float, default=2.0)
     _ = parser.add_argument("--full-scan-interval-s", type=float, default=300.0)
+    _ = parser.add_argument("--idle-status-interval-s", type=float, default=1800.0)
+    _ = parser.add_argument("--status-script", type=Path, default=Path(__file__).with_name("omo_agent_status.py"))
     _ = parser.add_argument("--once", action="store_true")
     _ = parser.add_argument("--dry-run", action="store_true")
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
-    return Args(parsed.root.resolve(), parsed.manager_url.rstrip("/"), parsed.state, parsed.interval_s, parsed.full_scan_interval_s, parsed.once, parsed.dry_run, parsed.manager_target)
+    if parsed.idle_status_interval_s <= 0:
+        parser.error("--idle-status-interval-s must be positive.")
+    return Args(
+        parsed.root.resolve(),
+        parsed.manager_url.rstrip("/"),
+        parsed.state,
+        parsed.interval_s,
+        parsed.full_scan_interval_s,
+        parsed.idle_status_interval_s,
+        parsed.status_script,
+        parsed.once,
+        parsed.dry_run,
+        parsed.manager_target,
+    )
 
 
 def load_seen(path: Path) -> dict[str, float]:
@@ -210,6 +229,39 @@ def push_ref(args: Args, marker: Marker) -> int:
     return subprocess.run(command, check=False).returncode
 
 
+def push_manager_text(args: Args, text: str) -> int:
+    if args.dry_run:
+        print(text)
+        return 0
+    if not args.manager_url and not args.manager_target:
+        print("omo_pending_watch: --manager-target or --manager-url is required outside --dry-run", file=sys.stderr)
+        return 1
+    command = ["omo_push_to_manager.py", text, "--root", str(args.root), "--submit"]
+    if args.manager_target:
+        command.extend(["--manager-target", args.manager_target])
+    if args.manager_url:
+        command.extend(["--manager-url", args.manager_url])
+    return subprocess.run(command, check=False).returncode
+
+
+def maybe_push_idle_status(args: Args, last_activity_s: float, now_s: float) -> bool:
+    if now_s - last_activity_s < args.idle_status_interval_s:
+        return False
+    command = [str(args.status_script), "--root", str(args.root), "--exit-code-if-active"]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=30, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"omo_pending_watch: idle status check failed: {exc}", file=sys.stderr)
+        return False
+    if result.returncode != 3:
+        return False
+    output = result.stdout.strip()
+    if result.stderr.strip():
+        output = f"{output}\nstderr:\n{result.stderr.strip()}".strip()
+    text = f"manager idle status: watcher has been idle; active agents remain. Please check on running agents.\n{output}"
+    return push_manager_text(args, text) in {0, 2}
+
+
 def expire_seen(seen: dict[str, float], now_s: float) -> dict[str, float]:
     return seen
 
@@ -237,6 +289,7 @@ def main(argv: list[str]) -> int:
         return 0
     file_state = FileState(mtimes_ns={})
     next_full_s = 0.0
+    last_activity_s = time.monotonic()
     while True:
         now_s = time.monotonic()
         full = now_s >= next_full_s
@@ -247,8 +300,13 @@ def main(argv: list[str]) -> int:
             files.extend(path for path in git_changed_markdown_files(args.root) if path not in files)
         changed = scan_once(args, seen, files)
         seen = expire_seen(seen, time.time())
+        idle_status_due = now_s - last_activity_s >= args.idle_status_interval_s
         if changed:
             save_seen(args.state, seen)
+            last_activity_s = now_s
+        elif idle_status_due:
+            _ = maybe_push_idle_status(args, last_activity_s, now_s)
+            last_activity_s = now_s
         time.sleep(args.interval_s)
 
 

@@ -59,6 +59,7 @@ class Args:
     root: Path
     registry: Path
     prune_completed: bool
+    exit_code_if_active: bool
 
 
 @dataclass(frozen=True)
@@ -96,6 +97,7 @@ class ParsedArgs(argparse.Namespace):
     root: Path = DEFAULT_ROOT
     registry: Path = DEFAULT_REGISTRY
     prune_completed: bool = False
+    exit_code_if_active: bool = False
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -103,8 +105,9 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     _ = parser.add_argument("--registry", type=Path, default=DEFAULT_REGISTRY)
     _ = parser.add_argument("--prune-completed", action="store_true", help="Remove completed/previous tasks from sessions.json after writing a .bak.TIMESTAMP backup.")
+    _ = parser.add_argument("--exit-code-if-active", action="store_true", help="Exit 3 when any task is still active, meaning not done or blocked.")
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
-    return Args(parsed.root.resolve(), parsed.registry, parsed.prune_completed)
+    return Args(parsed.root.resolve(), parsed.registry, parsed.prune_completed, parsed.exit_code_if_active)
 
 
 def section_name(line: str, current: str) -> str:
@@ -320,6 +323,8 @@ def main(argv: list[str]) -> int:
         completed_stale = {record.task_file for record in records if record.task_file in done}
         pruned_count = registry_prune(args, completed_stale) if args.prune_completed else 0
         print(format_summary(rows, len(completed_stale), pruned_count))
+        if args.exit_code_if_active and rows:
+            return 3
     except Exception as exc:
         print(f"omo_agent_status: {exc}", file=sys.stderr)
         return 1

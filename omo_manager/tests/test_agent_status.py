@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from omo_manager.omo_agent_status import Args, classify_task, load_local_env, load_task_state, parse_task_lines, registry_prune, session_records
+from omo_manager.omo_agent_status import Args, classify_task, load_local_env, load_task_state, main, parse_task_lines, registry_prune, session_records
 from omo_manager.omo_agent_status import SessionRecord, TaskLine
 from omo_manager.omo_codex_status import Report
 
@@ -105,7 +105,7 @@ class AgentStatusTests(unittest.TestCase):
             current, done, _human_pending = load_task_state(root)
             self.assertIn("active.md", current)
             self.assertEqual({"done.md"}, done)
-            removed = registry_prune(Args(root, registry, True), done)
+            removed = registry_prune(Args(root, registry, True, False), done)
             self.assertEqual(1, removed)
             text = registry.read_text(encoding="utf-8")
             self.assertIn("active.md", text)
@@ -119,6 +119,26 @@ class AgentStatusTests(unittest.TestCase):
             row = classify_task(task, record)
         self.assertEqual("ready", row.status)
         self.assertIn("done", row.evidence)
+
+    def test_exit_code_if_active_returns_distinct_code(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[{"task_file":"active.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
+            _ = (root / "active.md").write_text("runat: cfg:1 codex\n(running)\n", encoding="utf-8")
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["waiting"])):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--exit-code-if-active"]))
+
+    def test_default_exit_code_stays_zero_when_active(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[{"task_file":"active.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
+            _ = (root / "active.md").write_text("runat: cfg:1 codex\n(running)\n", encoding="utf-8")
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("running", ["working"])):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry)]))
 
 
 if __name__ == "__main__":
