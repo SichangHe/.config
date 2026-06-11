@@ -500,12 +500,12 @@ class PendingMarkerTests(unittest.TestCase):
             _ = path.write_text("(pending)\n(manager routed: to `task.md`.)\n(from email manager_mail/4480.txt)\n", encoding="utf-8")
             self.assertEqual([], find_markers(root, [path]))
 
-    def test_idle_status_pushes_when_status_script_reports_active_work(self) -> None:
+    def test_idle_status_pushes_only_when_status_script_reports_problem(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
         with tempfile.TemporaryDirectory() as tmp:
             status_script = Path(tmp) / "status.py"
-            _ = status_script.write_text("#!/usr/bin/env python3\nprint('agent-status: running=1')\nraise SystemExit(3)\n", encoding="utf-8")
+            _ = status_script.write_text("#!/usr/bin/env python3\nprint('agent-problems: not_codex=1 error=0 ready=0 done-registry-stale=0')\nprint('not_codex: task=task.md evidence=target=cfg:1')\nraise SystemExit(3)\n", encoding="utf-8")
             status_script.chmod(0o700)
             args = Args(Path(tmp), "", Path(tmp) / "seen.tsv", 1.0, 1.0, 30.0, status_script, False, True)
             out = StringIO()
@@ -513,9 +513,9 @@ class PendingMarkerTests(unittest.TestCase):
                 pushed = watcher.maybe_push_idle_status(args, 100.0, 130.0)
             self.assertTrue(pushed)
             text = out.getvalue()
-            self.assertIn("manager idle status: watcher has been idle", text)
-            self.assertIn("Please check on running agents", text)
-            self.assertIn("agent-status: running=1", text)
+            self.assertIn("manager agent problem: idle watcher found", text)
+            self.assertIn("agent-problems: not_codex=1", text)
+            self.assertIn("not_codex: task=task.md", text)
 
     def test_idle_status_stays_quiet_before_idle_interval(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -526,6 +526,37 @@ class PendingMarkerTests(unittest.TestCase):
             pushed = watcher.maybe_push_idle_status(args, 100.0, 129.9)
         self.assertFalse(pushed)
         self.assertEqual("", out.getvalue())
+
+    def test_agent_problem_check_pushes_only_changed_or_unthrottled_problem(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            status_script = Path(tmp) / "status.py"
+            _ = status_script.write_text("#!/usr/bin/env python3\nprint('agent-problems: not_codex=1 error=0 ready=0 done-registry-stale=0')\nprint('not_codex: task=task.md evidence=target=cfg:1')\nraise SystemExit(3)\n", encoding="utf-8")
+            status_script.chmod(0o700)
+            args = Args(Path(tmp), "", Path(tmp) / "seen.tsv", 1.0, 1.0, 30.0, status_script, False, True, agent_problem_repeat_s=300.0)
+            seen: dict[str, float] = {}
+            out = StringIO()
+            with redirect_stdout(out):
+                self.assertTrue(watcher.maybe_push_agent_problems(args, seen, 1000.0))
+                self.assertFalse(watcher.maybe_push_agent_problems(args, seen, 1200.0))
+                self.assertTrue(watcher.maybe_push_agent_problems(args, seen, 1300.0))
+            text = out.getvalue()
+            self.assertEqual(2, text.count("manager agent problem: running task marker needs attention."))
+            self.assertIn("not_codex: task=task.md", text)
+
+    def test_agent_problem_check_stays_quiet_on_healthy_status(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            status_script = Path(tmp) / "status.py"
+            _ = status_script.write_text("#!/usr/bin/env python3\nraise SystemExit(0)\n", encoding="utf-8")
+            status_script.chmod(0o700)
+            args = Args(Path(tmp), "", Path(tmp) / "seen.tsv", 1.0, 1.0, 30.0, status_script, False, True)
+            out = StringIO()
+            with redirect_stdout(out):
+                self.assertFalse(watcher.maybe_push_agent_problems(args, {}, 1000.0))
+            self.assertEqual("", out.getvalue())
 
     def test_idle_digest_delivery_waits_for_one_hour_without_human_email(self) -> None:
         from omo_manager import omo_pending_watch as watcher

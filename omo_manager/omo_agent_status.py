@@ -60,6 +60,7 @@ class Args:
     registry: Path
     prune_completed: bool
     exit_code_if_active: bool
+    problems_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -69,6 +70,7 @@ class TaskLine:
     line: str
     target: str
     port: int | None
+    status: str = ""
 
 
 @dataclass(frozen=True)
@@ -98,6 +100,7 @@ class ParsedArgs(argparse.Namespace):
     registry: Path = DEFAULT_REGISTRY
     prune_completed: bool = False
     exit_code_if_active: bool = False
+    problems_only: bool = False
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -106,8 +109,9 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--registry", type=Path, default=DEFAULT_REGISTRY)
     _ = parser.add_argument("--prune-completed", action="store_true", help="Remove completed/previous tasks from sessions.json after writing a .bak.TIMESTAMP backup.")
     _ = parser.add_argument("--exit-code-if-active", action="store_true", help="Exit 3 when any task is still active, meaning not done or blocked.")
+    _ = parser.add_argument("--problems-only", action="store_true", help="Print only active-agent problems and exit 3 when any are found.")
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
-    return Args(parsed.root.resolve(), parsed.registry, parsed.prune_completed, parsed.exit_code_if_active)
+    return Args(parsed.root.resolve(), parsed.registry, parsed.prune_completed, parsed.exit_code_if_active, parsed.problems_only)
 
 
 def section_name(line: str, current: str) -> str:
@@ -220,7 +224,7 @@ def load_task_state(root: Path) -> tuple[dict[str, TaskLine], set[str], set[str]
             continue
         target = state.target or task.target
         port = state.port if state.port is not None else task.port
-        current[task.task_file] = TaskLine(task.task_file, "task-file", task.line, target, port)
+        current[task.task_file] = TaskLine(task.task_file, "task-file", task.line, target, port, state.status)
     return current, done, human_pending
 
 
@@ -314,14 +318,44 @@ def format_summary(rows: list[StatusRow], completed_stale_count: int, pruned_cou
         lines.append(f"{row.status}: task={row.task_file} evidence={row.evidence}")
     return "\n".join(lines)
 
+
+PROBLEM_STATUSES = {"error", "not_codex", "ready"}
+
+
+def format_problem_summary(rows: list[StatusRow], completed_stale: set[str]) -> str:
+    problem_rows = [row for row in rows if row.status in PROBLEM_STATUSES]
+    if not problem_rows and not completed_stale:
+        return ""
+    counts: dict[str, int] = {"not_codex": 0, "error": 0, "ready": 0}
+    for row in problem_rows:
+        counts[row.status] = counts.get(row.status, 0) + 1
+    lines = [
+        f"agent-problems: not_codex={counts['not_codex']} error={counts['error']} ready={counts['ready']} done-registry-stale={len(completed_stale)}",
+    ]
+    for row in sorted(problem_rows, key=lambda item: (item.status, item.task_file)):
+        lines.append(f"{row.status}: task={row.task_file} evidence={row.evidence}")
+    for task_file in sorted(completed_stale):
+        lines.append(f"done-stale: task={task_file} evidence=session registry still has a completed task")
+    return "\n".join(lines)
+
+
 def main(argv: list[str]) -> int:
     try:
         args = parse_args(argv)
         current, done, _human_pending = load_task_state(args.root)
         records = session_records(args.registry)
-        rows = [classify_task(task, choose_session(task, records)) for task in current.values()]
+        tasks = list(current.values())
+        if args.problems_only:
+            tasks = [task for task in tasks if task.status == "running"]
+        rows = [classify_task(task, choose_session(task, records)) for task in tasks]
         completed_stale = {record.task_file for record in records if record.task_file in done}
         pruned_count = registry_prune(args, completed_stale) if args.prune_completed else 0
+        if args.problems_only:
+            text = format_problem_summary(rows, completed_stale)
+            if not text:
+                return 0
+            print(text)
+            return 3
         print(format_summary(rows, len(completed_stale), pruned_count))
         if args.exit_code_if_active and rows:
             return 3

@@ -20,6 +20,8 @@ DEFAULT_MANAGER_URL = os.environ.get("OMO_MANAGER_URL", "")
 DEFAULT_MANAGER_TARGET = os.environ.get("OMO_MANAGER_TMUX_TARGET", "")
 DEFAULT_STATE = Path(os.environ.get("OMO_MANAGER_PENDING_SEEN", default_state_dir() / "pending-seen.tsv"))
 DEFAULT_DIGEST_IDLE_AFTER_S = float(os.environ.get("OMO_MANAGER_DIGEST_IDLE_AFTER_S", "3600"))
+DEFAULT_AGENT_PROBLEM_INTERVAL_S = float(os.environ.get("OMO_MANAGER_AGENT_PROBLEM_INTERVAL_S", "300"))
+DEFAULT_AGENT_PROBLEM_REPEAT_S = float(os.environ.get("OMO_MANAGER_AGENT_PROBLEM_REPEAT_S", "1800"))
 PENDING_MARKERS = {"(pending)"}
 ROUTED_PREFIXES = ("(manager handled:", "(manager routed:")
 EMAIL_SOURCE_PREFIXES = ("(from email ", "[source: email ")
@@ -60,6 +62,8 @@ class Args:
     mail_dir: Path | None = None
     digest_script: Path | None = None
     digest_idle_after_s: float = DEFAULT_DIGEST_IDLE_AFTER_S
+    agent_problem_interval_s: float = DEFAULT_AGENT_PROBLEM_INTERVAL_S
+    agent_problem_repeat_s: float = DEFAULT_AGENT_PROBLEM_REPEAT_S
 
 
 @dataclass
@@ -75,6 +79,8 @@ class ParsedArgs(argparse.Namespace):
     interval_s: float = 2.0
     full_scan_interval_s: float = 300.0
     idle_status_interval_s: float = 1800.0
+    agent_problem_interval_s: float = DEFAULT_AGENT_PROBLEM_INTERVAL_S
+    agent_problem_repeat_s: float = DEFAULT_AGENT_PROBLEM_REPEAT_S
     status_script: Path = Path(__file__).with_name("omo_agent_status.py")
     once: bool = False
     dry_run: bool = False
@@ -92,6 +98,8 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--interval-s", type=float, default=2.0)
     _ = parser.add_argument("--full-scan-interval-s", type=float, default=300.0)
     _ = parser.add_argument("--idle-status-interval-s", type=float, default=1800.0)
+    _ = parser.add_argument("--agent-problem-interval-s", type=float, default=DEFAULT_AGENT_PROBLEM_INTERVAL_S)
+    _ = parser.add_argument("--agent-problem-repeat-s", type=float, default=DEFAULT_AGENT_PROBLEM_REPEAT_S)
     _ = parser.add_argument("--status-script", type=Path, default=Path(__file__).with_name("omo_agent_status.py"))
     _ = parser.add_argument("--mail-dir", type=Path, default=None)
     _ = parser.add_argument("--digest-script", type=Path, default=None)
@@ -101,6 +109,10 @@ def parse_args(argv: list[str]) -> Args:
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     if parsed.idle_status_interval_s <= 0:
         parser.error("--idle-status-interval-s must be positive.")
+    if parsed.agent_problem_interval_s <= 0:
+        parser.error("--agent-problem-interval-s must be positive.")
+    if parsed.agent_problem_repeat_s <= 0:
+        parser.error("--agent-problem-repeat-s must be positive.")
     if parsed.digest_idle_after_s <= 0:
         parser.error("--digest-idle-after-s must be positive.")
     root = parsed.root.resolve()
@@ -118,6 +130,8 @@ def parse_args(argv: list[str]) -> Args:
         parsed.mail_dir or root / "manager_mail",
         parsed.digest_script or root / "scripts" / "manager-digest",
         parsed.digest_idle_after_s,
+        parsed.agent_problem_interval_s,
+        parsed.agent_problem_repeat_s,
     )
 
 
@@ -263,7 +277,7 @@ def push_manager_text(args: Args, text: str) -> int:
 def maybe_push_idle_status(args: Args, last_activity_s: float, now_s: float) -> bool:
     if now_s - last_activity_s < args.idle_status_interval_s:
         return False
-    command = [str(args.status_script), "--root", str(args.root), "--exit-code-if-active"]
+    command = [str(args.status_script), "--root", str(args.root), "--problems-only"]
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=30, check=False)
     except (OSError, subprocess.SubprocessError) as exc:
@@ -274,8 +288,36 @@ def maybe_push_idle_status(args: Args, last_activity_s: float, now_s: float) -> 
     output = result.stdout.strip()
     if result.stderr.strip():
         output = f"{output}\nstderr:\n{result.stderr.strip()}".strip()
-    text = f"manager idle status: watcher has been idle; active agents remain. Please check on running agents.\n{output}"
+    text = f"manager agent problem: idle watcher found a running task marker needing attention.\n{output}"
     return push_manager_text(args, text) in {0, 2}
+
+
+def maybe_push_agent_problems(args: Args, seen: dict[str, float], now_wall_s: float) -> bool:
+    command = [str(args.status_script), "--root", str(args.root), "--problems-only"]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=30, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"omo_pending_watch: agent problem check failed: {exc}", file=sys.stderr)
+        return False
+    if result.returncode == 0:
+        return False
+    if result.returncode != 3:
+        print(f"omo_pending_watch: agent problem check exited status={result.returncode}: {result.stderr.strip()}", file=sys.stderr)
+        return False
+    output = result.stdout.strip()
+    if not output:
+        return False
+    if result.stderr.strip():
+        output = f"{output}\nstderr:\n{result.stderr.strip()}".strip()
+    digest = hashlib.sha256(output.encode("utf-8")).hexdigest()[:16]
+    key = f"agent-problem:{digest}"
+    if now_wall_s - seen.get(key, 0.0) < args.agent_problem_repeat_s:
+        return False
+    text = f"manager agent problem: running task marker needs attention.\n{output}"
+    if push_manager_text(args, text) not in {0, 2}:
+        return False
+    seen[key] = now_wall_s
+    return True
 
 
 def latest_mail_mtime_s(mail_dir: Path) -> float | None:
@@ -344,9 +386,9 @@ def main(argv: list[str]) -> int:
         return 0
     file_state = FileState(mtimes_ns={})
     next_full_s = 0.0
-    last_activity_s = time.monotonic()
     fallback_mail_activity_s = time.time()
     last_digest_check_s = 0.0
+    last_agent_problem_check_s = 0.0
     while True:
         now_s = time.monotonic()
         now_wall_s = time.time()
@@ -357,14 +399,12 @@ def main(argv: list[str]) -> int:
         if not full:
             files.extend(path for path in git_changed_markdown_files(args.root) if path not in files)
         changed = scan_once(args, seen, files)
+        if now_s - last_agent_problem_check_s >= args.agent_problem_interval_s:
+            changed = maybe_push_agent_problems(args, seen, now_wall_s) or changed
+            last_agent_problem_check_s = now_s
         seen = expire_seen(seen, time.time())
-        idle_status_due = now_s - last_activity_s >= args.idle_status_interval_s
         if changed:
             save_seen(args.state, seen)
-            last_activity_s = now_s
-        elif idle_status_due:
-            _ = maybe_push_idle_status(args, last_activity_s, now_s)
-            last_activity_s = now_s
         if now_s - last_digest_check_s >= min(args.digest_idle_after_s, 60.0):
             if maybe_deliver_idle_digest(args, fallback_mail_activity_s, now_wall_s):
                 fallback_mail_activity_s = now_wall_s

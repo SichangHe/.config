@@ -1,10 +1,12 @@
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
-from omo_manager.omo_agent_status import Args, classify_task, load_local_env, load_task_state, main, parse_task_lines, registry_prune, session_records
-from omo_manager.omo_agent_status import SessionRecord, TaskLine
+from omo_manager.omo_agent_status import Args, classify_task, format_problem_summary, load_local_env, load_task_state, main, parse_task_lines, registry_prune, session_records
+from omo_manager.omo_agent_status import SessionRecord, StatusRow, TaskLine
 from omo_manager.omo_codex_status import Report
 
 
@@ -119,6 +121,57 @@ class AgentStatusTests(unittest.TestCase):
             row = classify_task(task, record)
         self.assertEqual("ready", row.status)
         self.assertIn("done", row.evidence)
+
+    def test_problem_summary_includes_only_problem_rows(self) -> None:
+        rows = [
+            StatusRow("ok.md", "running", "target=cfg:1"),
+            StatusRow("bad.md", "error", "target=cfg:2 output=traceback"),
+            StatusRow("idle.md", "ready", "target=cfg:3 output=ready"),
+            StatusRow("gone.md", "not_codex", "target=cfg:4"),
+        ]
+        text = format_problem_summary(rows, {"done.md"})
+        self.assertIn("agent-problems: not_codex=1 error=1 ready=1 done-registry-stale=1", text)
+        self.assertIn("error: task=bad.md", text)
+        self.assertIn("ready: task=idle.md", text)
+        self.assertIn("not_codex: task=gone.md", text)
+        self.assertIn("done-stale: task=done.md", text)
+        self.assertNotIn("ok.md", text)
+
+    def test_problems_only_stays_quiet_when_all_active_agents_are_running(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[{"task_file":"active.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
+            _ = (root / "active.md").write_text("runat: cfg:1 codex\n(running)\n", encoding="utf-8")
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("running", ["working"])), redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertEqual("", out.getvalue())
+
+    def test_problems_only_reports_ready_running_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[{"task_file":"active.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
+            _ = (root / "active.md").write_text("runat: cfg:1 codex\n(running)\n", encoding="utf-8")
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["› Use /skills to list available skills"])), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertIn("ready: task=active.md", out.getvalue())
+
+    def test_problems_only_ignores_pending_task_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[{"task_file":"pending.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\npending.md cfg 1\n", encoding="utf-8")
+            _ = (root / "pending.md").write_text("runat: cfg:1 codex\n(pending)\n", encoding="utf-8")
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["ready"])), redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertEqual("", out.getvalue())
 
     def test_exit_code_if_active_returns_distinct_code(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
