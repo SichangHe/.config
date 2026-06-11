@@ -12,6 +12,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+try:
+    from omo_manager.omo_codex_status import current_block, status, tail
+except ModuleNotFoundError:
+    from omo_codex_status import current_block, status, tail
+
 SHELL_COMMANDS = {"bash", "dash", "fish", "sh", "zsh"}
 DEFAULT_ROOT = Path(os.environ.get("OMO_WORK_LOGS_ROOT", Path.home() / "work_logs"))
 UUID_RE = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
@@ -31,6 +36,8 @@ class Args:
     allow_self: bool
     root: Path = DEFAULT_ROOT
     task_file: str = ""
+    no_feedback: bool = False
+    feedback_wait_s: float = 180.0
 
 
 class ParsedArgs(argparse.Namespace):
@@ -41,6 +48,8 @@ class ParsedArgs(argparse.Namespace):
     allow_self: bool = False
     root: Path = DEFAULT_ROOT
     task_file: str = ""
+    no_feedback: bool = False
+    feedback_wait_s: float = 180.0
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -52,6 +61,8 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--allow-self", action="store_true", help="Allow stopping the current tmux pane.")
     _ = parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     _ = parser.add_argument("--task-file", default="", help="Append a durable close note to this task markdown file.")
+    _ = parser.add_argument("--no-feedback", action="store_true", help="Skip the default idle-worker feedback request.")
+    _ = parser.add_argument("--feedback-wait-s", type=float, default=180.0, help="Seconds to wait for feedback response before closing.")
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     if parsed.wait_s < 0:
         parser.error("--wait-s must be non-negative.")
@@ -59,6 +70,8 @@ def parse_args(argv: list[str]) -> Args:
         parser.error("--lines must be positive.")
     if parsed.task_file and not parsed.task_file.endswith(".md"):
         parser.error("--task-file must end with `.md`.")
+    if parsed.feedback_wait_s < 0:
+        parser.error("--feedback-wait-s must be non-negative.")
     return Args(
         parsed.target,
         parsed.wait_s,
@@ -67,6 +80,8 @@ def parse_args(argv: list[str]) -> Args:
         parsed.allow_self,
         parsed.root.resolve(),
         parsed.task_file,
+        parsed.no_feedback,
+        parsed.feedback_wait_s,
     )
 
 
@@ -289,6 +304,45 @@ def close_tmux_target(target: str) -> None:
         _ = tmux(["kill-pane", "-t", target], check=True)
 
 
+def codex_status(target: str) -> str:
+    lines = tail(target, 80)
+    return status(lines, current_block(lines))
+
+
+def feedback_prompt(task_file: str) -> str:
+    return (
+        "Before the manager closes this session, please send concise process feedback if this was a non-trivial task. "
+        "If there is anything worth preserving, create a report file with `omo_text.py temp --kind agent-message`, then run `omo_report.sh --task-file "
+        f"{task_file} --status done --message-file REPORT_FILE`. "
+        "Mention unclear instructions, routing/communication gaps, missing tooling/docs, check friction, or whether manager-triggered compaction would have helped you continue. "
+        "Keep it to at most five short bullets. If there is no useful feedback, say so briefly."
+    )
+
+
+def wait_feedback(target: str, timeout_s: float) -> None:
+    deadline_s = time.monotonic() + timeout_s
+    saw_running = False
+    while time.monotonic() < deadline_s:
+        current = codex_status(target)
+        if current == "running":
+            saw_running = True
+        elif saw_running and current == "ready":
+            return
+        elif current in {"error", "not_codex"}:
+            return
+        time.sleep(0.5)
+
+
+def maybe_request_feedback(args: Args) -> None:
+    if args.no_feedback or not args.task_file or args.feedback_wait_s <= 0:
+        return
+    if codex_status(args.target) != "ready":
+        return
+    paste_text(args.target, feedback_prompt(args.task_file))
+    _ = tmux(["send-keys", "-t", args.target, "Enter"], check=True)
+    wait_feedback(args.target, args.feedback_wait_s)
+
+
 def stop(args: Args) -> str:
     target_pane = pane_id(args.target)
     if not target_pane:
@@ -300,6 +354,7 @@ def stop(args: Args) -> str:
     if args.dry_run:
         print(f"would send Ctrl-C to {args.target}")
         return ""
+    maybe_request_feedback(args)
     session_id, before_close = query_status_session_id(args.target, args.lines, args.wait_s)
     send_exit_keys(args.target)
     wait_shell(args.target, time.monotonic() + args.wait_s)

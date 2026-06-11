@@ -14,7 +14,9 @@ from omo_manager.omo_codex_stop import (
     extract_new_status_session_id,
     extract_resume_id,
     extract_status_session_id,
+    feedback_prompt,
     main,
+    maybe_request_feedback,
     post_interrupt_output,
     query_status_session_id,
     record_close,
@@ -182,6 +184,31 @@ class CodexStopTests(unittest.TestCase):
             patch("omo_manager.omo_codex_stop.close_tmux_target"),
         ):
             self.assertEqual("019e9ed9-6262-71c0-b4b3-72ffd4182e98", stop(Args("cfg:1.0", 0.0, 10, False, False)))
+
+    def test_maybe_request_feedback_prompts_ready_task_worker(self) -> None:
+        with (
+            patch("omo_manager.omo_codex_stop.codex_status", side_effect=["ready", "running", "ready"]),
+            patch("omo_manager.omo_codex_stop.paste_text") as paste_text,
+            patch("omo_manager.omo_codex_stop.tmux") as tmux,
+            patch("omo_manager.omo_codex_stop.time.sleep"),
+        ):
+            maybe_request_feedback(Args("cfg:1.0", 0.0, 10, False, False, task_file="task.md", feedback_wait_s=1.0))
+        self.assertIn("manager-triggered compaction", paste_text.call_args.args[1])
+        self.assertEqual(["send-keys", "-t", "cfg:1.0", "Enter"], tmux.call_args.args[0])
+
+    def test_maybe_request_feedback_skips_non_ready_worker(self) -> None:
+        with (
+            patch("omo_manager.omo_codex_stop.codex_status", return_value="running"),
+            patch("omo_manager.omo_codex_stop.paste_text") as paste_text,
+        ):
+            maybe_request_feedback(Args("cfg:1.0", 0.0, 10, False, False, task_file="task.md"))
+        paste_text.assert_not_called()
+
+    def test_feedback_prompt_names_task_file_and_report_path(self) -> None:
+        text = feedback_prompt("task.md")
+        self.assertIn("omo_text.py temp --kind agent-message", text)
+        self.assertIn("--task-file task.md", text)
+        self.assertIn("at most five short bullets", text)
 
     def test_stop_dry_run_refuses_missing_target_before_printing(self) -> None:
         with patch("omo_manager.omo_codex_stop.pane_id", return_value=""):

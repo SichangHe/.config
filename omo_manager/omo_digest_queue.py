@@ -9,6 +9,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
@@ -22,6 +23,19 @@ SAFE_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,80}$")
 DEFAULT_SEND_HELPER = Path.home() / ".config/omo_manager/omo_email_human.sh"
 LOCAL_TZ = datetime.now().astimezone().tzinfo
 BLOCK_RE = re.compile(r"(?ms)^---\n\(digest-item\)\n(?P<body>.*?)(?=^---\n\(digest-item\)\n|\Z)")
+
+
+def write_private_temp(text: str, suffix: str) -> Path:
+    fd, raw_path = tempfile.mkstemp(prefix="omo-digest-", suffix=suffix, text=True)
+    path = Path(raw_path)
+    try:
+        path.chmod(0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
+    return path
 
 
 @dataclass(frozen=True)
@@ -335,12 +349,18 @@ def command_deliver(args: argparse.Namespace) -> int:
         if args.dry_run:
             print(body, end="")
             return 0
-        result = subprocess.run([str(args.send_helper), "--subject", args.subject], input=body, text=True, check=False)
-        if result.returncode != 0:
-            return result.returncode
-        replace_statuses(path, {item.item_id for item in queued}, iso_now())
-        print(f"delivered {len(queued)} digest item(s)")
-        return 0
+        subject_file = write_private_temp(args.subject + "\n", ".txt")
+        body_file = write_private_temp(body, ".md")
+        try:
+            result = subprocess.run([str(args.send_helper), "--subject-file", str(subject_file), "--message-file", str(body_file)], text=True, check=False)
+            if result.returncode != 0:
+                return result.returncode
+            replace_statuses(path, {item.item_id for item in queued}, iso_now())
+            print(f"delivered {len(queued)} digest item(s)")
+            return 0
+        finally:
+            subject_file.unlink(missing_ok=True)
+            body_file.unlink(missing_ok=True)
 
 
 def build_parser() -> argparse.ArgumentParser:

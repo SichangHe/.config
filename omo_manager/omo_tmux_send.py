@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
-"""Safely paste text into a tmux target without shell/key escaping.
-
-The helper accepts message text from stdin or a file, copies it to a private
-temporary file, loads that file into a tmux buffer, pastes the buffer into the
-target pane/window, and optionally sends Enter. It intentionally avoids
-`tmux send-keys MESSAGE` for arbitrary text because send-keys treats some
-tokens specially and requires callers to get shell quoting exactly right.
-"""
+"""Paste file-backed text into a tmux target via a tmux buffer."""
 from __future__ import annotations
 
 import argparse
@@ -69,7 +62,7 @@ class ParsedArgs(argparse.Namespace):
 def parse_args(argv: list[str]) -> Args:
     parser = argparse.ArgumentParser(description=__doc__)
     _ = parser.add_argument("--target", required=True, help="tmux target pane/window, e.g. cfg:1.0")
-    _ = parser.add_argument("--message-file", type=Path, help="Read message text from this file instead of stdin.")
+    _ = parser.add_argument("--message-file", type=Path, required=True, help="Read prompt text from this file.")
     enter_group = parser.add_mutually_exclusive_group()
     _ = enter_group.add_argument("--enter", dest="enter", action="store_true", help="Send Enter after pasting.")
     _ = enter_group.add_argument("--no-enter", dest="enter", action="store_false", help="Paste only; default.")
@@ -130,7 +123,7 @@ def parse_args(argv: list[str]) -> Args:
 
 def read_message(args: Args) -> str:
     if args.message_file is None:
-        return sys.stdin.read()
+        raise RuntimeError("--message-file is required.")
     if not args.message_file.is_file():
         raise RuntimeError(f"message file not found: {args.message_file}")
     return args.message_file.read_text(encoding="utf-8")
@@ -339,8 +332,13 @@ def async_result_message(args: Args, ok: bool, result: str) -> str:
 def notify_async_result(args: Args, ok: bool, result: str) -> None:
     if not args.async_notify_target:
         return
-    notify_args = Args(args.async_notify_target, None, args.async_notify_enter_count, args.enter_delay_s, 0, False)
-    run_tmux(notify_args, async_result_message(args, ok, result))
+    message = async_result_message(args, ok, result)
+    notify_path = write_private_temp(message)
+    try:
+        notify_args = Args(args.async_notify_target, notify_path, args.async_notify_enter_count, args.enter_delay_s, 0, False)
+        run_tmux(notify_args, message)
+    finally:
+        notify_path.unlink(missing_ok=True)
 
 
 def run_async_worker(args: Args) -> int:

@@ -33,6 +33,10 @@ class TmuxSendTests(unittest.TestCase):
             _ = path.write_text(text, encoding="utf-8")
             self.assertEqual(text, read_message(Args("cfg:1.0", path, 0, 0.15, 0, False)))
 
+    def test_read_message_requires_file(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "--message-file is required"):
+            read_message(Args("cfg:1.0", None, 0, 0.15, 0, False))
+
     def test_private_temp_file_is_0600_and_preserves_text(self) -> None:
         path = write_private_temp("secret text\n")
         try:
@@ -42,21 +46,24 @@ class TmuxSendTests(unittest.TestCase):
             path.unlink(missing_ok=True)
 
     def test_parse_enter_count_only_applies_with_enter(self) -> None:
-        self.assertEqual(2, parse_args(["--target", "cfg:1.0", "--enter", "--enter-count", "2"]).enter_count)
-        self.assertEqual(0, parse_args(["--target", "cfg:1.0", "--enter-count", "2"]).enter_count)
-        self.assertEqual(3, parse_args(["--target", "cfg:1.0", "--enter", "--ready-timeout-s", "3"]).ready_timeout_s)
-        self.assertEqual(0, parse_args(["--target", "cfg:1.0", "--ready-timeout-s", "3"]).ready_timeout_s)
-        self.assertEqual(5, parse_args(["--target", "cfg:1.0", "--enter"]).submit_verify_timeout_s)
-        self.assertEqual(0, parse_args(["--target", "cfg:1.0", "--submit-verify-timeout-s", "3"]).submit_verify_timeout_s)
-        self.assertEqual(3, parse_args(["--target", "cfg:1.0", "--enter", "--submit-verify-timeout-s", "3"]).submit_verify_timeout_s)
+        base = ["--target", "cfg:1.0", "--message-file", "prompt.md"]
+        self.assertEqual(2, parse_args([*base, "--enter", "--enter-count", "2"]).enter_count)
+        self.assertEqual(0, parse_args([*base, "--enter-count", "2"]).enter_count)
+        self.assertEqual(3, parse_args([*base, "--enter", "--ready-timeout-s", "3"]).ready_timeout_s)
+        self.assertEqual(0, parse_args([*base, "--ready-timeout-s", "3"]).ready_timeout_s)
+        self.assertEqual(5, parse_args([*base, "--enter"]).submit_verify_timeout_s)
+        self.assertEqual(0, parse_args([*base, "--submit-verify-timeout-s", "3"]).submit_verify_timeout_s)
+        self.assertEqual(3, parse_args([*base, "--enter", "--submit-verify-timeout-s", "3"]).submit_verify_timeout_s)
 
     def test_parse_async_requires_notify_target(self) -> None:
         with patch("sys.stderr", new_callable=StringIO), self.assertRaises(SystemExit):
-            parse_args(["--target", "cfg:1.0", "--async"])
+            parse_args(["--target", "cfg:1.0", "--message-file", "prompt.md", "--async"])
         args = parse_args(
             [
                 "--target",
                 "cfg:1.0",
+                "--message-file",
+                "prompt.md",
                 "--async",
                 "--async-notify-target",
                 "cfg:0.0",

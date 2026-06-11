@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: omo_quiet_checks.sh [--tail N] -- COMMAND [-- COMMAND ...]
+Usage: omo_quiet_checks.sh [--tail N] [--timeout-s N] -- COMMAND [-- COMMAND ...]
 
 Run test/check commands quietly and print only aggregate status, command names,
 and failure details for executed commands. Failure tails are capped at 500 lines. Successful command output is suppressed; test pass counts are
@@ -19,12 +19,18 @@ USAGE
 
 tail_lines=120
 max_tail_lines=500
+timeout_s=300
 commands=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --tail)
       if [ "$#" -lt 2 ]; then echo "--tail requires a number" >&2; exit 2; fi
       tail_lines="$2"
+      shift 2
+      ;;
+    --timeout-s)
+      if [ "$#" -lt 2 ]; then echo "--timeout-s requires a number" >&2; exit 2; fi
+      timeout_s="$2"
       shift 2
       ;;
     -h|--help)
@@ -47,8 +53,15 @@ done
 case "$tail_lines" in
   ''|*[!0-9]*) echo "--tail must be a non-negative integer" >&2; exit 2 ;;
 esac
+case "$timeout_s" in
+  ''|*[!0-9]*) echo "--timeout-s must be a positive integer" >&2; exit 2 ;;
+esac
 if [ "$tail_lines" -gt "$max_tail_lines" ]; then
   echo "--tail must be <= ${max_tail_lines}" >&2
+  exit 2
+fi
+if [ "$timeout_s" -lt 1 ]; then
+  echo "--timeout-s must be a positive integer" >&2
   exit 2
 fi
 
@@ -68,7 +81,7 @@ failed_log=""
 
 for idx in "${!commands[@]}"; do
   log="$tmpdir/check-${idx}.log"
-  if bash -lc "${commands[$idx]}" >"$log" 2>&1; then
+  if timeout --kill-after=5s "${timeout_s}s" bash -lc "${commands[$idx]}" >"$log" 2>&1; then
     continue
   else
     failed_status="$?"

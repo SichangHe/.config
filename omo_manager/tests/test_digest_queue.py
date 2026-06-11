@@ -245,7 +245,18 @@ class DigestQueueTests(unittest.TestCase):
             root = Path(tmp)
             state = root / "state"
             fake = root / "fake-send.sh"
-            fake.write_text(f"#!/bin/sh\ncat > {str(root / 'fake-send.log')!r}\nexit 0\n", encoding="utf-8")
+            fake.write_text(
+                f"#!/usr/bin/env bash\n"
+                "while [ \"$#\" -gt 0 ]; do\n"
+                "  case \"$1\" in\n"
+                "    --subject-file) subject_file=\"$2\"; shift 2 ;;\n"
+                "    --message-file) message_file=\"$2\"; shift 2 ;;\n"
+                "    *) echo \"bad arg: $1\" >&2; exit 2 ;;\n"
+                "  esac\n"
+                "done\n"
+                f"cat \"$subject_file\" \"$message_file\" > {str(root / 'fake-send.log')!r}\n",
+                encoding="utf-8",
+            )
             fake.chmod(0o755)
             submit = subprocess.run(
                 [str(Path.home() / ".config/omo_manager/omo_digest_queue.py"), "--root", str(root), "submit", "--source", "pb", "--title", "Queued item", "--summary", "Non-urgent."],
@@ -279,10 +290,12 @@ class DigestQueueTests(unittest.TestCase):
             email_helper.chmod(0o755)
             msg = Path(tmp) / "msg.md"
             msg.write_text("body\n", encoding="utf-8")
+            subject = Path(tmp) / "subject.txt"
+            subject.write_text("[omo_manager] test\n", encoding="utf-8")
             bad_state = Path(tmp) / "not-a-dir"
             bad_state.write_text("file blocks mkdir\n", encoding="utf-8")
             result = subprocess.run(
-                [str(Path.home() / ".config/omo_manager/omo_email_human.sh"), "--subject", "[omo_manager] test", "--message-file", str(msg)],
+                [str(Path.home() / ".config/omo_manager/omo_email_human.sh"), "--subject-file", str(subject), "--message-file", str(msg)],
                 cwd=tmp,
                 env={"HOME": str(home), "OMO_MANAGER_STATE_DIR": str(bad_state), "PATH": "/usr/bin:/bin"},
                 text=True,

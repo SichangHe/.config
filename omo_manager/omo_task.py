@@ -17,6 +17,7 @@ except ModuleNotFoundError:
     from omo_codex_status import current_block, status, tail
 
 DEFAULT_ROOT = Path(os.environ.get("OMO_WORK_LOGS_ROOT", Path.home() / "work_logs"))
+DEFAULT_WORKER_INSTRUCTIONS = Path(__file__).with_name("WORKER_DEFAULTS.md")
 COMMAND_BY_TOOL = {
     "codex": ("bunx", "@openai/codex", "--dangerously-bypass-approvals-and-sandbox"),
     "pcodx": ("pcodx",),
@@ -102,6 +103,16 @@ def header(tmux_target: str, tool: str) -> str:
     return f"runat: {tmux_target} {tool}" if tmux_target else ""
 
 
+def prompt_input(prompt_file: Path | None) -> str:
+    if prompt_file is None:
+        return ""
+    if not DEFAULT_WORKER_INSTRUCTIONS.is_file():
+        raise FileNotFoundError(f"worker defaults file not found: {DEFAULT_WORKER_INSTRUCTIONS}")
+    paths = [DEFAULT_WORKER_INSTRUCTIONS, prompt_file]
+    quoted_paths = " ".join(shlex.quote(str(path)) for path in paths)
+    return f"\"$(cat -- {quoted_paths})\""
+
+
 def codex_cmd(session_id: str = "", reasoning_effort: str = "", codex_flags: tuple[str, ...] = (), prompt_file: Path | None = None, tool: str = "codex") -> str:
     try:
         args = list(COMMAND_BY_TOOL[tool])
@@ -113,8 +124,9 @@ def codex_cmd(session_id: str = "", reasoning_effort: str = "", codex_flags: tup
     if session_id:
         args.extend(("resume", session_id))
     parts = [shlex.quote(arg) for arg in args]
-    if prompt_file is not None:
-        parts.append(f"\"$(cat -- {shlex.quote(str(prompt_file))})\"")
+    prompt = prompt_input(prompt_file)
+    if prompt:
+        parts.append(prompt)
     return " ".join(parts)
 
 

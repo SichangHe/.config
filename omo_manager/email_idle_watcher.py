@@ -12,6 +12,7 @@ import select
 import shlex
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -325,8 +326,29 @@ def write_mail(args: Args, uid: str, msg: Message, _sender: str, subject: str) -
     return txt_path
 
 
+def write_private_temp(text: str, suffix: str) -> Path:
+    fd, raw_path = tempfile.mkstemp(prefix="omo-recovery-", suffix=suffix, text=True)
+    path = Path(raw_path)
+    try:
+        path.chmod(0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
+    return path
+
+
 def email_human(args: Args, subject: str, body: str) -> None:
-    subprocess.run([str(Path.home() / ".config/omo_manager/omo_email_human.sh"), "--subject", subject], input=body, text=True, check=False)
+    subject_path = write_private_temp(subject.rstrip("\n") + "\n", ".txt")
+    body_path = write_private_temp(body, ".md")
+    try:
+        result = subprocess.run([str(Path.home() / ".config/omo_manager/omo_email_human.sh"), "--subject-file", str(subject_path), "--message-file", str(body_path)], text=True, check=False)
+        if result.returncode != 0:
+            logging.error("recovery human email failed: status=%s", result.returncode)
+    finally:
+        subject_path.unlink(missing_ok=True)
+        body_path.unlink(missing_ok=True)
 
 
 def shell_join(command: list[str]) -> str:

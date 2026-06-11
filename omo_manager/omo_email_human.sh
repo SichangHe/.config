@@ -1,26 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 subject=""
+subject_file=""
 message_file=""
 usage() {
   cat <<'EOF'
-Usage: omo_email_human.sh --subject SUBJECT [--message-file FILE]
-Reads the email body from standard input unless --message-file is used.
+Usage: omo_email_human.sh --subject-file FILE --message-file FILE
 
-Safe body input:
-  cat > /tmp/body.md <<'EOF_BODY'
-  literal body text
-  EOF_BODY
-  omo_email_human.sh --subject 'Subject' < /tmp/body.md
-
-Do not put the heredoc or email body inside an extra double-quoted sh -c or zsh -c string; the caller shell can expand $, `...`, $(...), and redirection-like text before this script runs.
+Manager-safe input:
+  subject_file=$(omo_text.py temp --kind email-subject)
+  body_file=$(omo_text.py temp --kind email-body)
+  $EDITOR "$subject_file" "$body_file"
+  omo_email_human.sh --subject-file "$subject_file" --message-file "$body_file"
 EOF
 }
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --subject)
+    --subject-file)
       if [ "$#" -lt 2 ]; then usage >&2; exit 2; fi
-      subject="$2"; shift 2 ;;
+      subject_file="$2"; shift 2 ;;
     --message-file)
       if [ "$#" -lt 2 ]; then usage >&2; exit 2; fi
       message_file="$2"; shift 2 ;;
@@ -28,7 +26,21 @@ while [ "$#" -gt 0 ]; do
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
-if [ -z "$subject" ]; then usage >&2; exit 2; fi
+if [ -z "$subject_file" ] || [ -z "$message_file" ]; then usage >&2; exit 2; fi
+if [ ! -f "$subject_file" ]; then echo "subject file not found" >&2; exit 2; fi
+subject=$(python3 - "$subject_file" <<'PY'
+from pathlib import Path
+import sys
+subject = Path(sys.argv[1]).read_text(encoding="utf-8").rstrip("\n")
+if not subject.strip():
+    print("subject file must not be empty", file=sys.stderr)
+    raise SystemExit(2)
+if "\n" in subject or "\r" in subject or "\0" in subject:
+    print("subject file must contain exactly one text line", file=sys.stderr)
+    raise SystemExit(2)
+print(subject)
+PY
+)
 subject_lc=$(printf '%s' "$subject" | tr '[:upper:]' '[:lower:]')
 placeholder_subject=$(
   python3 - "$subject_lc" <<'PY'
@@ -50,21 +62,8 @@ case "$subject_lc" in
 esac
 email_helper="$HOME/.config/helper.sh/email_me.py"
 if [ ! -x "$email_helper" ]; then echo "email helper not executable: $email_helper" >&2; exit 2; fi
-body_file=""
-body_file_tmp=0
-cleanup_body() {
-  if [ "$body_file_tmp" -eq 1 ]; then rm -f "$body_file"; fi
-}
-trap cleanup_body EXIT
-if [ -n "$message_file" ]; then
-  if [ ! -f "$message_file" ]; then echo "message file not found" >&2; exit 2; fi
-  body_file="$message_file"
-else
-  body_file=$(mktemp /tmp/omo-human-email.XXXXXX)
-  body_file_tmp=1
-  chmod 600 "$body_file"
-  cat >"$body_file"
-fi
+if [ ! -f "$message_file" ]; then echo "message file not found" >&2; exit 2; fi
+body_file="$message_file"
 python3 - "$body_file" <<'PY'
 from pathlib import Path
 import sys

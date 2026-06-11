@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from omo_manager.omo_task import Args, codex_cmd, ensure_task_file, link_todo, main, new_window, parse_args, start_codex, wait_command_started
+from omo_manager.omo_task import Args, DEFAULT_WORKER_INSTRUCTIONS, codex_cmd, ensure_task_file, link_todo, main, new_window, parse_args, start_codex, wait_command_started
 
 
 class OmoTaskTests(unittest.TestCase):
@@ -42,10 +42,14 @@ class OmoTaskTests(unittest.TestCase):
         self.assertEqual("bunx @openai/codex --dangerously-bypass-approvals-and-sandbox resume 'abc def'", codex_cmd("abc def"))
 
     def test_codex_cmd_uses_prompt_argument_from_file(self) -> None:
+        expected_paths = f"{DEFAULT_WORKER_INSTRUCTIONS} /tmp/prompt.md"
         self.assertEqual(
-            'bunx @openai/codex --dangerously-bypass-approvals-and-sandbox "$(cat -- /tmp/prompt.md)"',
+            f'bunx @openai/codex --dangerously-bypass-approvals-and-sandbox "$(cat -- {expected_paths})"',
             codex_cmd(prompt_file=Path("/tmp/prompt.md")),
         )
+
+    def test_codex_cmd_prepends_worker_defaults_to_prompt_file(self) -> None:
+        self.assertIn(str(DEFAULT_WORKER_INSTRUCTIONS), codex_cmd(prompt_file=Path("/tmp/prompt.md")))
 
     def test_codex_cmd_adds_reasoning_effort_and_extra_flags(self) -> None:
         self.assertEqual(

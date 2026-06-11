@@ -61,7 +61,7 @@ for line in lines:
 sys.stdout.write("1" if found else "")' "$manager_line_pattern")
 if [ -n "$report_request" ]; then
   report_task=$(python3 -c 'import shlex, sys; print(shlex.quote(sys.argv[1]))' "$file")
-  report_instruction="\`omo_report.sh --task-file ${report_task} --status STATUS --agent agent-name\` reads the report body from standard input; STATUS=blocked|in-progress|done. Email human only if manager unreachable/explicit; \`email_me.py SUBJECT\` reads the email body from standard input. Verification: aggregate only—command names + pass/fail/failures, no test counts or verbose passing logs. Prefer \`omo_quiet_checks.sh -- \"COMMAND\" [-- \"COMMAND\" ...]\`; if the same repeated command set is used, create/run a tiny-output \`*_quiet_check.*\` wrapper and report only that aggregate output."
+  report_instruction="For manager reports, create a report file with \`omo_text.py temp --kind agent-message\`, write the report text with an editor/file-editing tool, then run \`omo_report.sh --task-file ${report_task} --status STATUS --agent agent-name --message-file REPORT_FILE\`; STATUS=blocked|in-progress|done. Email human only if manager unreachable/explicit, using \`omo_email_human.sh --subject-file SUBJECT_FILE --message-file BODY_FILE\`. Verification: aggregate only—command names + pass/fail/failures, no test counts or verbose passing logs. Prefer \`omo_quiet_checks.sh -- \"COMMAND\" [-- \"COMMAND\" ...]\`; if the same repeated command set is used, create/run a tiny-output \`*_quiet_check.*\` wrapper and report only that aggregate output."
   prompt=$(printf '%s\n\n%s' "$prompt" "$report_instruction")
 fi
 prompt_file=$(mktemp /tmp/omo-dispatch-prompt.XXXXXX)
