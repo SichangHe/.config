@@ -2,11 +2,15 @@
 set -euo pipefail
 
 cd "${OMO_MANAGER_CONFIG_ROOT:-$HOME/.config}"
+py_cmd="python3"
+if command -v uv >/dev/null 2>&1; then
+  py_cmd="uv run --project omo_manager python"
+fi
 
 omo_quiet_checks.sh \
   -- "bash -n omo_manager/omo_quiet_checks.sh omo_manager/omo_manager_quiet_check.sh omo_manager/omo_dispatch.sh omo_manager/omo_report.sh" \
-  -- "python3 -m unittest discover omo_manager/tests" \
-  -- "python3 - <<'PY'
+  -- "$py_cmd -m unittest discover omo_manager/tests" \
+  -- "$py_cmd - <<'PY'
 from pathlib import Path
 checks = {
     'MANAGER.md': ['Do not report how many tests passed', 'repeatedly called commands'],

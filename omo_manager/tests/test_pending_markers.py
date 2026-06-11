@@ -631,11 +631,39 @@ class PendingMarkerTests(unittest.TestCase):
             try:
                 path = root / "task.md"
                 path.write_text("(pending)\nnew event\n", encoding="utf-8")
-                files, full_scan = watcher.wait(2.0)
+                files, full_scan, notified = watcher.wait(2.0)
             finally:
                 watcher.close()
+            self.assertTrue(notified)
             self.assertFalse(full_scan)
             self.assertIn(path, files)
+
+    def test_pending_watch_poll_backstop_interval_is_configurable(self) -> None:
+        from omo_manager.omo_pending_watch import parse_args
+
+        args = parse_args(["--root", "/tmp/root", "--poll-backstop-interval-s", "12.5", "--once"])
+        self.assertEqual(12.5, args.poll_backstop_interval_s)
+
+    def test_pending_watch_poll_backstop_detects_silent_missed_event(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            path.write_text("old\n", encoding="utf-8")
+            state = watcher.FileState(mtimes_ns={})
+            self.assertEqual([path], watcher.mtime_changed_markdown_files(root, state))
+            self.assertEqual([], watcher.mtime_changed_markdown_files(root, state))
+            path.write_text("(pending)\nmissed by inotify\n", encoding="utf-8")
+            os.utime(path, ns=(2_000_000_000, 2_000_000_000))
+            changed = watcher.mtime_changed_markdown_files(root, state)
+            self.assertEqual([path], changed)
+            args = Args(root, "", root / "seen.tsv", 1.0, 300.0, 30.0, Path("/missing-status.py"), False, True)
+            seen: dict[str, float] = {}
+            out = StringIO()
+            with redirect_stdout(out):
+                self.assertTrue(watcher.scan_once(args, seen, changed))
+            self.assertIn("pending: file=task.md", out.getvalue())
 
     def test_background_agent_problem_check_does_not_block_pending_scan(self) -> None:
         from omo_manager import omo_pending_watch as watcher

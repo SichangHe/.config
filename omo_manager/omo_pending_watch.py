@@ -27,6 +27,7 @@ DEFAULT_STATE = Path(os.environ.get("OMO_MANAGER_PENDING_SEEN", default_state_di
 DEFAULT_DIGEST_IDLE_AFTER_S = float(os.environ.get("OMO_MANAGER_DIGEST_IDLE_AFTER_S", "3600"))
 DEFAULT_AGENT_PROBLEM_INTERVAL_S = float(os.environ.get("OMO_MANAGER_AGENT_PROBLEM_INTERVAL_S", "300"))
 DEFAULT_AGENT_PROBLEM_REPEAT_S = float(os.environ.get("OMO_MANAGER_AGENT_PROBLEM_REPEAT_S", "1800"))
+DEFAULT_POLL_BACKSTOP_INTERVAL_S = float(os.environ.get("OMO_MANAGER_POLL_BACKSTOP_INTERVAL_S", "30"))
 PENDING_MARKERS = {"(pending)"}
 ROUTED_PREFIXES = ("(manager handled:", "(manager routed:")
 EMAIL_SOURCE_PREFIXES = ("(from email ", "[source: email ")
@@ -86,6 +87,7 @@ class Args:
     digest_idle_after_s: float = DEFAULT_DIGEST_IDLE_AFTER_S
     agent_problem_interval_s: float = DEFAULT_AGENT_PROBLEM_INTERVAL_S
     agent_problem_repeat_s: float = DEFAULT_AGENT_PROBLEM_REPEAT_S
+    poll_backstop_interval_s: float = DEFAULT_POLL_BACKSTOP_INTERVAL_S
 
 
 @dataclass
@@ -169,10 +171,10 @@ class MarkdownChangeWatcher:
                 continue
             self.add_tree(child)
 
-    def wait(self, timeout_s: float) -> tuple[list[Path], bool]:
+    def wait(self, timeout_s: float) -> tuple[list[Path], bool, bool]:
         ready, _, _ = select.select([self.fd], [], [], max(0.0, timeout_s))
         if not ready:
-            return [], False
+            return [], False, False
         changed: set[Path] = set()
         full_scan = False
         while True:
@@ -182,7 +184,7 @@ class MarkdownChangeWatcher:
                 break
             except OSError as exc:
                 print(f"omo_pending_watch: inotify read failed, forcing full scan: {exc}", file=sys.stderr)
-                return [], True
+                return [], True, True
             if not data:
                 break
             offset = 0
@@ -208,7 +210,7 @@ class MarkdownChangeWatcher:
                     continue
                 if path.suffix == ".md" and not is_ignored(path.relative_to(self.root)):
                     changed.add(path)
-        return sorted(changed), full_scan
+        return sorted(changed), full_scan, True
 
 
 class ParsedArgs(argparse.Namespace):
@@ -221,6 +223,7 @@ class ParsedArgs(argparse.Namespace):
     idle_status_interval_s: float = 1800.0
     agent_problem_interval_s: float = DEFAULT_AGENT_PROBLEM_INTERVAL_S
     agent_problem_repeat_s: float = DEFAULT_AGENT_PROBLEM_REPEAT_S
+    poll_backstop_interval_s: float = DEFAULT_POLL_BACKSTOP_INTERVAL_S
     status_script: Path = Path(__file__).with_name("omo_agent_status.py")
     once: bool = False
     dry_run: bool = False
@@ -240,6 +243,7 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--idle-status-interval-s", type=float, default=1800.0)
     _ = parser.add_argument("--agent-problem-interval-s", type=float, default=DEFAULT_AGENT_PROBLEM_INTERVAL_S)
     _ = parser.add_argument("--agent-problem-repeat-s", type=float, default=DEFAULT_AGENT_PROBLEM_REPEAT_S)
+    _ = parser.add_argument("--poll-backstop-interval-s", type=float, default=DEFAULT_POLL_BACKSTOP_INTERVAL_S)
     _ = parser.add_argument("--status-script", type=Path, default=Path(__file__).with_name("omo_agent_status.py"))
     _ = parser.add_argument("--mail-dir", type=Path, default=None)
     _ = parser.add_argument("--digest-script", type=Path, default=None)
@@ -255,6 +259,8 @@ def parse_args(argv: list[str]) -> Args:
         parser.error("--agent-problem-repeat-s must be positive.")
     if parsed.digest_idle_after_s <= 0:
         parser.error("--digest-idle-after-s must be positive.")
+    if parsed.poll_backstop_interval_s <= 0:
+        parser.error("--poll-backstop-interval-s must be positive.")
     root = parsed.root.resolve()
     return Args(
         root,
@@ -272,6 +278,7 @@ def parse_args(argv: list[str]) -> Args:
         parsed.digest_idle_after_s,
         parsed.agent_problem_interval_s,
         parsed.agent_problem_repeat_s,
+        parsed.poll_backstop_interval_s,
     )
 
 
@@ -559,6 +566,7 @@ def main(argv: list[str]) -> int:
     file_state = FileState(mtimes_ns={})
     _ = mtime_changed_markdown_files(args.root, file_state)
     next_full_s = time.monotonic() + args.full_scan_interval_s
+    next_poll_s = time.monotonic() + args.poll_backstop_interval_s
     pending_files = markdown_files(args.root)
     fallback_mail_activity_s = time.time()
     last_digest_check_s = 0.0
@@ -571,8 +579,12 @@ def main(argv: list[str]) -> int:
         changed = False
         if now_s >= next_full_s:
             next_full_s = now_s + args.full_scan_interval_s
+            next_poll_s = now_s + args.poll_backstop_interval_s
             pending_files = markdown_files(args.root)
             _ = mtime_changed_markdown_files(args.root, file_state)
+        elif watcher is not None and now_s >= next_poll_s:
+            next_poll_s = now_s + args.poll_backstop_interval_s
+            pending_files = mtime_changed_markdown_files(args.root, file_state)
         if pending_files:
             changed = scan_once(args, seen, pending_files)
             pending_files = []
@@ -605,6 +617,8 @@ def main(argv: list[str]) -> int:
                     print(f"omo_pending_watch: digest delivery exited status={result.returncode}: {result.stderr.strip()}", file=sys.stderr)
                 digest_run = None
         deadlines = [next_full_s, last_agent_problem_check_s + args.agent_problem_interval_s, last_digest_check_s + min(args.digest_idle_after_s, 60.0)]
+        if watcher is not None:
+            deadlines.append(next_poll_s)
         if agent_problem_run is not None or digest_run is not None:
             deadlines.append(now_s + 0.2)
         timeout_s = args.interval_s if watcher is None else max(0.0, min(deadlines) - now_s)
@@ -613,10 +627,13 @@ def main(argv: list[str]) -> int:
             now_s = time.monotonic()
             pending_files = markdown_files(args.root) if now_s >= next_full_s else mtime_changed_markdown_files(args.root, file_state)
             continue
-        event_files, full_scan = watcher.wait(timeout_s)
+        event_files, full_scan, notified = watcher.wait(timeout_s)
+        if notified:
+            next_poll_s = time.monotonic() + args.poll_backstop_interval_s
         if full_scan:
             pending_files = markdown_files(args.root)
             next_full_s = time.monotonic() + args.full_scan_interval_s
+            next_poll_s = time.monotonic() + args.poll_backstop_interval_s
         else:
             pending_files = event_files
 
