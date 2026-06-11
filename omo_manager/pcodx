@@ -8,13 +8,24 @@ export PCODX_LEDGER_PATH="${PCODX_LEDGER_PATH:-$PCODX_RUN_DIR/ledger.json}"
 export PCODX_SESSION_ID="${PCODX_SESSION_ID:-pcodx-$$}"
 mkdir -p "$PCODX_RUN_DIR"
 
-PCODX_DEVELOPER_INSTRUCTIONS=$(cat <<INSTRUCTIONS
-You are running in pcodx, Partial-Compactable cODeX mode.
-Use the MCP tools named mcp__pcodx_partial_compact__partial_compact_instructions, mcp__pcodx_partial_compact__partial_compact_record_message, mcp__pcodx_partial_compact__partial_compact_current_session_message_ids, and mcp__pcodx_partial_compact__partial_compact when the user asks to partially compact or when retained context should be compacted.
-Start by calling partial_compact_instructions if the exact workflow is unclear.
-This prototype stores compacted working memory in the sidecar ledger at $PCODX_LEDGER_PATH. It does not rewrite Codex's hidden native transcript.
-INSTRUCTIONS
-)
+prev_arg_was_config=0
+for arg in "$@"; do
+  if [[ "$prev_arg_was_config" == 1 ]]; then
+    echo "pcodx owns Codex config injection; pass task instructions as prompt text instead" >&2
+    exit 2
+  fi
+  case "$arg" in
+    -c|--config)
+      prev_arg_was_config=1
+      ;;
+    -c*|--config=*)
+      echo "pcodx owns Codex config injection; pass task instructions as prompt text instead" >&2
+      exit 2
+      ;;
+  esac
+done
+
+PCODX_DEVELOPER_INSTRUCTIONS=$(bun run "$PCODX_POC_ROOT/src/pcodx-instructions.ts")
 PCODX_DEVELOPER_INSTRUCTIONS_TOML=$(PCODX_DEVELOPER_INSTRUCTIONS="$PCODX_DEVELOPER_INSTRUCTIONS" python3 -c 'import json, os; print(json.dumps(os.environ["PCODX_DEVELOPER_INSTRUCTIONS"]))')
 PCODX_LEDGER_PATH_TOML=$(PCODX_LEDGER_PATH="$PCODX_LEDGER_PATH" python3 -c 'import json, os; print(json.dumps(os.environ["PCODX_LEDGER_PATH"]))')
 PCODX_SESSION_ID_TOML=$(PCODX_SESSION_ID="$PCODX_SESSION_ID" python3 -c 'import json, os; print(json.dumps(os.environ["PCODX_SESSION_ID"]))')
