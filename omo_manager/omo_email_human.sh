@@ -8,12 +8,12 @@ Usage: omo_email_human.sh --subject SUBJECT [--message-file FILE]
 Reads the email body from standard input unless --message-file is used.
 
 Safe body input:
-  omo_email_human.sh --subject 'Subject' < body.md
-  omo_email_human.sh --subject 'Subject' <<'EMAIL_BODY'
+  cat > /tmp/body.md <<'EOF_BODY'
   literal body text
-  EMAIL_BODY
+  EOF_BODY
+  omo_email_human.sh --subject 'Subject' < /tmp/body.md
 
-Do not pass body text as a shell argument; the caller shell can expand $, `...`, $(...), and redirection-like text before this script runs.
+Do not put the heredoc or email body inside an extra double-quoted sh -c or zsh -c string; the caller shell can expand $, `...`, $(...), and redirection-like text before this script runs.
 EOF
 }
 while [ "$#" -gt 0 ]; do

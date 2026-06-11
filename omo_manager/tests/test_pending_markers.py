@@ -826,6 +826,14 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertIn("[omo_manager] Literal stdin safety\n" + stdin_body + "\n--END--\n", text)
             self.assertIn("[omo_manager] Literal file safety\n" + file_body + "\n--END--\n", text)
 
+    def test_omo_email_human_help_shows_safe_body_pattern(self) -> None:
+        script = Path.home() / ".config/omo_manager/omo_email_human.sh"
+        result = subprocess.run([str(script), "--help"], text=True, capture_output=True, timeout=10, check=False)
+        self.assertEqual(0, result.returncode)
+        self.assertIn("cat > /tmp/body.md <<'EOF_BODY'", result.stdout)
+        self.assertIn('omo_email_human.sh --subject \'Subject\' < /tmp/body.md', result.stdout)
+        self.assertIn("extra double-quoted sh -c or zsh -c string", result.stdout)
+
     def test_omo_email_human_rejects_placeholder_subject_and_empty_body(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"
