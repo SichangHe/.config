@@ -527,6 +527,43 @@ class PendingMarkerTests(unittest.TestCase):
         self.assertFalse(pushed)
         self.assertEqual("", out.getvalue())
 
+    def test_idle_digest_delivery_waits_for_one_hour_without_human_email(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mail_dir = root / "manager_mail"
+            mail_dir.mkdir()
+            mail = mail_dir / "5125.txt"
+            _ = mail.write_text("Subject: test\n", encoding="utf-8")
+            os.utime(mail, (1000.0, 1000.0))
+            _ = (root / "manager_digest.md").write_text("digest item\n", encoding="utf-8")
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/missing-status.py"), False, True, mail_dir=mail_dir, digest_script=root / "scripts" / "manager-digest", digest_idle_after_s=3600.0)
+            out = StringIO()
+            with redirect_stdout(out):
+                self.assertFalse(watcher.maybe_deliver_idle_digest(args, 0.0, 4599.9))
+                self.assertTrue(watcher.maybe_deliver_idle_digest(args, 0.0, 4600.0))
+            self.assertIn("no human email for 3600s", out.getvalue())
+
+    def test_idle_digest_delivery_runs_manager_digest_script(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mail_dir = root / "manager_mail"
+            mail_dir.mkdir()
+            mail = mail_dir / "5125.txt"
+            _ = mail.write_text("Subject: old\n", encoding="utf-8")
+            os.utime(mail, (1000.0, 1000.0))
+            _ = (root / "manager_digest.md").write_text("digest item\n", encoding="utf-8")
+            script = root / "manager-digest"
+            log = root / "deliver.log"
+            _ = script.write_text(f"#!/usr/bin/env bash\nprintf '%s\\n' \"$PWD $*\" > {log}\n", encoding="utf-8")
+            script.chmod(0o700)
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/missing-status.py"), False, False, mail_dir=mail_dir, digest_script=script, digest_idle_after_s=3600.0)
+            self.assertTrue(watcher.maybe_deliver_idle_digest(args, 0.0, 4600.0))
+            self.assertEqual(f"{root} deliver\n", log.read_text(encoding="utf-8"))
+
     def test_omo_email_human_skips_duplicate_subject_body(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"

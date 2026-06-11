@@ -19,6 +19,7 @@ DEFAULT_ROOT = Path(os.environ.get("OMO_WORK_LOGS_ROOT", Path.home() / "work_log
 DEFAULT_MANAGER_URL = os.environ.get("OMO_MANAGER_URL", "")
 DEFAULT_MANAGER_TARGET = os.environ.get("OMO_MANAGER_TMUX_TARGET", "")
 DEFAULT_STATE = Path(os.environ.get("OMO_MANAGER_PENDING_SEEN", default_state_dir() / "pending-seen.tsv"))
+DEFAULT_DIGEST_IDLE_AFTER_S = float(os.environ.get("OMO_MANAGER_DIGEST_IDLE_AFTER_S", "3600"))
 PENDING_MARKERS = {"(pending)"}
 ROUTED_PREFIXES = ("(manager handled:", "(manager routed:")
 EMAIL_SOURCE_PREFIXES = ("(from email ", "[source: email ")
@@ -56,6 +57,9 @@ class Args:
     once: bool
     dry_run: bool
     manager_target: str = ""
+    mail_dir: Path | None = None
+    digest_script: Path | None = None
+    digest_idle_after_s: float = DEFAULT_DIGEST_IDLE_AFTER_S
 
 
 @dataclass
@@ -74,6 +78,9 @@ class ParsedArgs(argparse.Namespace):
     status_script: Path = Path(__file__).with_name("omo_agent_status.py")
     once: bool = False
     dry_run: bool = False
+    mail_dir: Path | None = None
+    digest_script: Path | None = None
+    digest_idle_after_s: float = DEFAULT_DIGEST_IDLE_AFTER_S
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -86,13 +93,19 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--full-scan-interval-s", type=float, default=300.0)
     _ = parser.add_argument("--idle-status-interval-s", type=float, default=1800.0)
     _ = parser.add_argument("--status-script", type=Path, default=Path(__file__).with_name("omo_agent_status.py"))
+    _ = parser.add_argument("--mail-dir", type=Path, default=None)
+    _ = parser.add_argument("--digest-script", type=Path, default=None)
+    _ = parser.add_argument("--digest-idle-after-s", type=float, default=DEFAULT_DIGEST_IDLE_AFTER_S)
     _ = parser.add_argument("--once", action="store_true")
     _ = parser.add_argument("--dry-run", action="store_true")
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     if parsed.idle_status_interval_s <= 0:
         parser.error("--idle-status-interval-s must be positive.")
+    if parsed.digest_idle_after_s <= 0:
+        parser.error("--digest-idle-after-s must be positive.")
+    root = parsed.root.resolve()
     return Args(
-        parsed.root.resolve(),
+        root,
         parsed.manager_url.rstrip("/"),
         parsed.state,
         parsed.interval_s,
@@ -102,6 +115,9 @@ def parse_args(argv: list[str]) -> Args:
         parsed.once,
         parsed.dry_run,
         parsed.manager_target,
+        parsed.mail_dir or root / "manager_mail",
+        parsed.digest_script or root / "scripts" / "manager-digest",
+        parsed.digest_idle_after_s,
     )
 
 
@@ -262,6 +278,45 @@ def maybe_push_idle_status(args: Args, last_activity_s: float, now_s: float) -> 
     return push_manager_text(args, text) in {0, 2}
 
 
+def latest_mail_mtime_s(mail_dir: Path) -> float | None:
+    try:
+        paths = list(mail_dir.glob("*.txt"))
+    except OSError:
+        return None
+    latest_s: float | None = None
+    for path in paths:
+        try:
+            mtime_s = path.stat().st_mtime
+        except OSError:
+            continue
+        if latest_s is None or mtime_s > latest_s:
+            latest_s = mtime_s
+    return latest_s
+
+
+def maybe_deliver_idle_digest(args: Args, fallback_mail_activity_s: float, now_wall_s: float) -> bool:
+    mail_dir = args.mail_dir or args.root / "manager_mail"
+    digest_script = args.digest_script or args.root / "scripts" / "manager-digest"
+    last_mail_s = latest_mail_mtime_s(mail_dir) or fallback_mail_activity_s
+    if now_wall_s - last_mail_s < args.digest_idle_after_s:
+        return False
+    queue = args.root / "manager_digest.md"
+    try:
+        if not queue.read_text(encoding="utf-8").strip():
+            return False
+    except OSError:
+        return False
+    if args.dry_run:
+        print(f"manager digest idle delivery due: no human email for {int(now_wall_s - last_mail_s)}s")
+        return True
+    try:
+        result = subprocess.run([str(digest_script), "deliver"], cwd=args.root, timeout=180, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"omo_pending_watch: digest delivery failed: {exc}", file=sys.stderr)
+        return False
+    return result.returncode == 0
+
+
 def expire_seen(seen: dict[str, float], now_s: float) -> dict[str, float]:
     return seen
 
@@ -290,8 +345,11 @@ def main(argv: list[str]) -> int:
     file_state = FileState(mtimes_ns={})
     next_full_s = 0.0
     last_activity_s = time.monotonic()
+    fallback_mail_activity_s = time.time()
+    last_digest_check_s = 0.0
     while True:
         now_s = time.monotonic()
+        now_wall_s = time.time()
         full = now_s >= next_full_s
         if full:
             next_full_s = now_s + args.full_scan_interval_s
@@ -307,6 +365,10 @@ def main(argv: list[str]) -> int:
         elif idle_status_due:
             _ = maybe_push_idle_status(args, last_activity_s, now_s)
             last_activity_s = now_s
+        if now_s - last_digest_check_s >= min(args.digest_idle_after_s, 60.0):
+            if maybe_deliver_idle_digest(args, fallback_mail_activity_s, now_wall_s):
+                fallback_mail_activity_s = now_wall_s
+            last_digest_check_s = now_s
         time.sleep(args.interval_s)
 
 
