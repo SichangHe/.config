@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
+import ctypes.util
+import errno
 import os
 import hashlib
+import select
+import struct
 import subprocess
 import sys
 import time
@@ -28,6 +33,23 @@ EMAIL_SOURCE_PREFIXES = ("(from email ", "[source: email ")
 AGENT_SOURCE_PREFIXES = ("[omo-message-source: origin=agent ", "(from agent ")
 IGNORE_PARTS = {".git", ".venv", "__pycache__"}
 FENCE_PREFIXES = ("```", "~~~")
+INOTIFY_EVENT = struct.Struct("iIII")
+IN_MODIFY = 0x00000002
+IN_ATTRIB = 0x00000004
+IN_CLOSE_WRITE = 0x00000008
+IN_MOVED_FROM = 0x00000040
+IN_MOVED_TO = 0x00000080
+IN_CREATE = 0x00000100
+IN_DELETE = 0x00000200
+IN_DELETE_SELF = 0x00000400
+IN_MOVE_SELF = 0x00000800
+IN_UNMOUNT = 0x00002000
+IN_Q_OVERFLOW = 0x00004000
+IN_IGNORED = 0x00008000
+IN_ISDIR = 0x40000000
+IN_NONBLOCK = getattr(os, "O_NONBLOCK", 0o0004000)
+IN_CLOEXEC = getattr(os, "O_CLOEXEC", 0o2000000)
+WATCH_MASK = IN_MODIFY | IN_ATTRIB | IN_CLOSE_WRITE | IN_MOVED_FROM | IN_MOVED_TO | IN_CREATE | IN_DELETE | IN_DELETE_SELF | IN_MOVE_SELF | IN_UNMOUNT
 
 
 @dataclass(frozen=True)
@@ -69,6 +91,124 @@ class Args:
 @dataclass
 class FileState:
     mtimes_ns: dict[Path, int]
+
+
+@dataclass
+class CommandRun:
+    name: str
+    command: list[str]
+    process: subprocess.Popen[str]
+    started_wall_s: float
+    timeout_s: float
+
+
+@dataclass(frozen=True)
+class CommandOutput:
+    name: str
+    returncode: int
+    stdout: str
+    stderr: str
+    timed_out: bool = False
+
+
+class MarkdownChangeWatcher:
+    def __init__(self, root: Path, libc: ctypes.CDLL, fd: int) -> None:
+        self.root = root
+        self.libc = libc
+        self.fd = fd
+        self.wd_paths: dict[int, Path] = {}
+
+    @classmethod
+    def open(cls, root: Path) -> "MarkdownChangeWatcher | None":
+        libc_path = ctypes.util.find_library("c")
+        if libc_path is None:
+            return None
+        libc = ctypes.CDLL(libc_path, use_errno=True)
+        inotify_init1 = libc.inotify_init1
+        inotify_init1.argtypes = [ctypes.c_int]
+        inotify_init1.restype = ctypes.c_int
+        fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC)
+        if fd < 0:
+            return None
+        watcher = cls(root, libc, fd)
+        try:
+            watcher.add_tree(root)
+        except OSError as exc:
+            print(f"omo_pending_watch: inotify setup failed, falling back to polling: {exc}", file=sys.stderr)
+            watcher.close()
+            return None
+        return watcher
+
+    def close(self) -> None:
+        if self.fd >= 0:
+            os.close(self.fd)
+            self.fd = -1
+
+    def add_watch(self, path: Path) -> None:
+        inotify_add_watch = self.libc.inotify_add_watch
+        inotify_add_watch.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
+        inotify_add_watch.restype = ctypes.c_int
+        wd = inotify_add_watch(self.fd, os.fsencode(path), WATCH_MASK)
+        if wd < 0:
+            err = ctypes.get_errno()
+            if err in {errno.ENOENT, errno.ENOTDIR, errno.EACCES, errno.EPERM}:
+                return
+            raise OSError(err, os.strerror(err), str(path))
+        self.wd_paths[wd] = path
+
+    def add_tree(self, path: Path) -> None:
+        if path != self.root and is_ignored(path.relative_to(self.root)):
+            return
+        self.add_watch(path)
+        try:
+            children = list(path.iterdir())
+        except OSError:
+            return
+        for child in children:
+            if not child.is_dir() or is_ignored(child.relative_to(self.root)):
+                continue
+            self.add_tree(child)
+
+    def wait(self, timeout_s: float) -> tuple[list[Path], bool]:
+        ready, _, _ = select.select([self.fd], [], [], max(0.0, timeout_s))
+        if not ready:
+            return [], False
+        changed: set[Path] = set()
+        full_scan = False
+        while True:
+            try:
+                data = os.read(self.fd, 65536)
+            except BlockingIOError:
+                break
+            except OSError as exc:
+                print(f"omo_pending_watch: inotify read failed, forcing full scan: {exc}", file=sys.stderr)
+                return [], True
+            if not data:
+                break
+            offset = 0
+            while offset + INOTIFY_EVENT.size <= len(data):
+                wd, mask, _cookie, name_len = INOTIFY_EVENT.unpack_from(data, offset)
+                offset += INOTIFY_EVENT.size
+                raw_name = data[offset : offset + name_len].split(b"\0", 1)[0]
+                offset += name_len
+                base = self.wd_paths.get(wd, self.root)
+                path = base / os.fsdecode(raw_name) if raw_name else base
+                if mask & (IN_Q_OVERFLOW | IN_UNMOUNT):
+                    full_scan = True
+                    continue
+                if mask & IN_IGNORED:
+                    self.wd_paths.pop(wd, None)
+                    full_scan = True
+                    continue
+                if mask & IN_ISDIR:
+                    if mask & (IN_CREATE | IN_MOVED_TO):
+                        self.add_tree(path)
+                    if not is_ignored(path.relative_to(self.root)):
+                        full_scan = True
+                    continue
+                if path.suffix == ".md" and not is_ignored(path.relative_to(self.root)):
+                    changed.add(path)
+        return sorted(changed), full_scan
 
 
 class ParsedArgs(argparse.Namespace):
@@ -167,20 +307,6 @@ def is_ignored(path: Path) -> bool:
 
 def markdown_files(root: Path) -> list[Path]:
     return [p for p in root.rglob("*.md") if p.is_file() and not is_ignored(p.relative_to(root))]
-
-
-def git_changed_markdown_files(root: Path) -> list[Path]:
-    try:
-        out = subprocess.run(["git", "-C", str(root), "diff", "--name-only", "--", "*.md"], capture_output=True, text=True, timeout=10, check=False)
-    except (OSError, subprocess.SubprocessError):
-        return []
-    files: list[Path] = []
-    for line in out.stdout.splitlines():
-        rel = Path(line.strip())
-        path = root / rel
-        if path.is_file() and path.suffix == ".md" and not is_ignored(rel):
-            files.append(path)
-    return files
 
 
 def mtime_changed_markdown_files(root: Path, state: FileState) -> list[Path]:
@@ -299,6 +425,13 @@ def maybe_push_agent_problems(args: Args, seen: dict[str, float], now_wall_s: fl
     except (OSError, subprocess.SubprocessError) as exc:
         print(f"omo_pending_watch: agent problem check failed: {exc}", file=sys.stderr)
         return False
+    return handle_agent_problem_result(args, seen, CommandOutput("agent-problems", result.returncode, result.stdout, result.stderr), now_wall_s)
+
+
+def handle_agent_problem_result(args: Args, seen: dict[str, float], result: CommandOutput, now_wall_s: float) -> bool:
+    if result.timed_out:
+        print("omo_pending_watch: agent problem check timed out", file=sys.stderr)
+        return False
     if result.returncode == 0:
         return False
     if result.returncode != 3:
@@ -318,6 +451,30 @@ def maybe_push_agent_problems(args: Args, seen: dict[str, float], now_wall_s: fl
         return False
     seen[key] = now_wall_s
     return True
+
+
+def start_command(name: str, command: list[str], timeout_s: float, cwd: Path | None = None) -> CommandRun | None:
+    try:
+        process = subprocess.Popen(command, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    except OSError as exc:
+        print(f"omo_pending_watch: {name} start failed: {exc}", file=sys.stderr)
+        return None
+    return CommandRun(name, command, process, time.time(), timeout_s)
+
+
+def poll_command(run: CommandRun, now_wall_s: float) -> CommandOutput | None:
+    timed_out = now_wall_s - run.started_wall_s >= run.timeout_s
+    if run.process.poll() is None and not timed_out:
+        return None
+    if timed_out and run.process.poll() is None:
+        run.process.kill()
+    try:
+        stdout, stderr = run.process.communicate(timeout=1)
+    except subprocess.TimeoutExpired:
+        run.process.kill()
+        stdout, stderr = run.process.communicate(timeout=1)
+        timed_out = True
+    return CommandOutput(run.name, run.process.returncode or 0, stdout, stderr, timed_out)
 
 
 def latest_mail_mtime_s(mail_dir: Path) -> float | None:
@@ -359,6 +516,18 @@ def maybe_deliver_idle_digest(args: Args, fallback_mail_activity_s: float, now_w
     return result.returncode == 0
 
 
+def idle_digest_due(args: Args, fallback_mail_activity_s: float, now_wall_s: float) -> bool:
+    mail_dir = args.mail_dir or args.root / "manager_mail"
+    last_mail_s = latest_mail_mtime_s(mail_dir) or fallback_mail_activity_s
+    if now_wall_s - last_mail_s < args.digest_idle_after_s:
+        return False
+    queue = args.root / "manager_digest.md"
+    try:
+        return bool(queue.read_text(encoding="utf-8").strip())
+    except OSError:
+        return False
+
+
 def expire_seen(seen: dict[str, float], now_s: float) -> dict[str, float]:
     return seen
 
@@ -384,32 +553,72 @@ def main(argv: list[str]) -> int:
         if changed and not args.dry_run:
             save_seen(args.state, seen)
         return 0
+    watcher = MarkdownChangeWatcher.open(args.root)
+    if watcher is None:
+        print("omo_pending_watch: using mtime polling fallback", file=sys.stderr)
     file_state = FileState(mtimes_ns={})
-    next_full_s = 0.0
+    _ = mtime_changed_markdown_files(args.root, file_state)
+    next_full_s = time.monotonic() + args.full_scan_interval_s
+    pending_files = markdown_files(args.root)
     fallback_mail_activity_s = time.time()
     last_digest_check_s = 0.0
     last_agent_problem_check_s = 0.0
+    agent_problem_run: CommandRun | None = None
+    digest_run: CommandRun | None = None
     while True:
         now_s = time.monotonic()
         now_wall_s = time.time()
-        full = now_s >= next_full_s
-        if full:
+        changed = False
+        if now_s >= next_full_s:
             next_full_s = now_s + args.full_scan_interval_s
-        files = markdown_files(args.root) if full else mtime_changed_markdown_files(args.root, file_state)
-        if not full:
-            files.extend(path for path in git_changed_markdown_files(args.root) if path not in files)
-        changed = scan_once(args, seen, files)
-        if now_s - last_agent_problem_check_s >= args.agent_problem_interval_s:
-            changed = maybe_push_agent_problems(args, seen, now_wall_s) or changed
+            pending_files = markdown_files(args.root)
+            _ = mtime_changed_markdown_files(args.root, file_state)
+        if pending_files:
+            changed = scan_once(args, seen, pending_files)
+            pending_files = []
+        if agent_problem_run is None and now_s - last_agent_problem_check_s >= args.agent_problem_interval_s:
+            agent_problem_run = start_command("agent problem check", [str(args.status_script), "--root", str(args.root), "--problems-only"], 30)
             last_agent_problem_check_s = now_s
+        if agent_problem_run is not None:
+            result = poll_command(agent_problem_run, now_wall_s)
+            if result is not None:
+                changed = handle_agent_problem_result(args, seen, result, now_wall_s) or changed
+                agent_problem_run = None
         seen = expire_seen(seen, time.time())
         if changed:
             save_seen(args.state, seen)
         if now_s - last_digest_check_s >= min(args.digest_idle_after_s, 60.0):
-            if maybe_deliver_idle_digest(args, fallback_mail_activity_s, now_wall_s):
+            if args.dry_run and maybe_deliver_idle_digest(args, fallback_mail_activity_s, now_wall_s):
                 fallback_mail_activity_s = now_wall_s
+            elif digest_run is None and idle_digest_due(args, fallback_mail_activity_s, now_wall_s):
+                digest_script = args.digest_script or args.root / "scripts" / "manager-digest"
+                digest_run = start_command("digest delivery", [str(digest_script), "deliver"], 180, args.root)
             last_digest_check_s = now_s
-        time.sleep(args.interval_s)
+        if digest_run is not None:
+            result = poll_command(digest_run, now_wall_s)
+            if result is not None:
+                if result.timed_out:
+                    print("omo_pending_watch: digest delivery timed out", file=sys.stderr)
+                elif result.returncode == 0:
+                    fallback_mail_activity_s = now_wall_s
+                elif result.stderr.strip():
+                    print(f"omo_pending_watch: digest delivery exited status={result.returncode}: {result.stderr.strip()}", file=sys.stderr)
+                digest_run = None
+        deadlines = [next_full_s, last_agent_problem_check_s + args.agent_problem_interval_s, last_digest_check_s + min(args.digest_idle_after_s, 60.0)]
+        if agent_problem_run is not None or digest_run is not None:
+            deadlines.append(now_s + 0.2)
+        timeout_s = args.interval_s if watcher is None else max(0.0, min(deadlines) - now_s)
+        if watcher is None:
+            time.sleep(timeout_s)
+            now_s = time.monotonic()
+            pending_files = markdown_files(args.root) if now_s >= next_full_s else mtime_changed_markdown_files(args.root, file_state)
+            continue
+        event_files, full_scan = watcher.wait(timeout_s)
+        if full_scan:
+            pending_files = markdown_files(args.root)
+            next_full_s = time.monotonic() + args.full_scan_interval_s
+        else:
+            pending_files = event_files
 
 
 if __name__ == "__main__":

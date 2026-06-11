@@ -5,6 +5,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
@@ -618,6 +619,58 @@ class PendingMarkerTests(unittest.TestCase):
             text = out.getvalue()
             self.assertEqual(2, text.count("manager agent problem: running task marker needs attention."))
             self.assertIn("not_codex: task=task.md", text)
+
+    def test_markdown_inotify_watcher_reports_new_file(self) -> None:
+        from omo_manager.omo_pending_watch import MarkdownChangeWatcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            watcher = MarkdownChangeWatcher.open(root)
+            if watcher is None:
+                self.skipTest("inotify unavailable")
+            try:
+                path = root / "task.md"
+                path.write_text("(pending)\nnew event\n", encoding="utf-8")
+                files, full_scan = watcher.wait(2.0)
+            finally:
+                watcher.close()
+            self.assertFalse(full_scan)
+            self.assertIn(path, files)
+
+    def test_background_agent_problem_check_does_not_block_pending_scan(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            status_script = root / "slow-status.sh"
+            status_script.write_text(
+                "#!/usr/bin/env bash\n"
+                "sleep 0.5\n"
+                "printf 'agent-problems: not_codex=1 error=0 ready=0 done-registry-stale=0\\n'\n"
+                "exit 3\n",
+                encoding="utf-8",
+            )
+            status_script.chmod(0o700)
+            run = watcher.start_command("agent problem check", [str(status_script)], 30)
+            self.assertIsNotNone(run)
+            assert run is not None
+            self.assertIsNone(watcher.poll_command(run, time.time()))
+            path = root / "task.md"
+            path.write_text("(pending)\nplease route\n", encoding="utf-8")
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, status_script, False, True)
+            seen: dict[str, float] = {}
+            out = StringIO()
+            started_s = time.monotonic()
+            with redirect_stdout(out):
+                self.assertTrue(watcher.scan_once(args, seen, [path]))
+            self.assertLess(time.monotonic() - started_s, 0.2)
+            self.assertIn("pending: file=task.md", out.getvalue())
+            while True:
+                result = watcher.poll_command(run, time.time())
+                if result is not None:
+                    break
+                time.sleep(0.05)
+            self.assertEqual(3, result.returncode)
 
     def test_agent_problem_check_stays_quiet_on_healthy_status(self) -> None:
         from omo_manager import omo_pending_watch as watcher
