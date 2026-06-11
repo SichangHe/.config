@@ -3,5 +3,26 @@ set -euo pipefail
 
 export PCODX_MODE=1
 export PCODX_POC_ROOT="${PCODX_POC_ROOT:-/ssd1/sichangheagent/opencode_partial_compact/experiments/codex-wrapper}"
+export PCODX_RUN_DIR="${PCODX_RUN_DIR:-/tmp/pcodx-runs/$(date -u +%Y%m%dT%H%M%SZ)-$$}"
+export PCODX_LEDGER_PATH="${PCODX_LEDGER_PATH:-$PCODX_RUN_DIR/ledger.json}"
+export PCODX_SESSION_ID="${PCODX_SESSION_ID:-pcodx-$$}"
+mkdir -p "$PCODX_RUN_DIR"
 
-exec bunx @openai/codex --dangerously-bypass-approvals-and-sandbox "$@"
+PCODX_DEVELOPER_INSTRUCTIONS=$(cat <<INSTRUCTIONS
+You are running in pcodx, Partial-Compactable cODeX mode.
+Use the MCP tools named mcp__pcodx_partial_compact__partial_compact_instructions, mcp__pcodx_partial_compact__partial_compact_record_message, mcp__pcodx_partial_compact__partial_compact_current_session_message_ids, and mcp__pcodx_partial_compact__partial_compact when the user asks to partially compact or when retained context should be compacted.
+Start by calling partial_compact_instructions if the exact workflow is unclear.
+This prototype stores compacted working memory in the sidecar ledger at $PCODX_LEDGER_PATH. It does not rewrite Codex's hidden native transcript.
+INSTRUCTIONS
+)
+PCODX_DEVELOPER_INSTRUCTIONS_TOML=$(PCODX_DEVELOPER_INSTRUCTIONS="$PCODX_DEVELOPER_INSTRUCTIONS" python3 -c 'import json, os; print(json.dumps(os.environ["PCODX_DEVELOPER_INSTRUCTIONS"]))')
+PCODX_LEDGER_PATH_TOML=$(PCODX_LEDGER_PATH="$PCODX_LEDGER_PATH" python3 -c 'import json, os; print(json.dumps(os.environ["PCODX_LEDGER_PATH"]))')
+PCODX_SESSION_ID_TOML=$(PCODX_SESSION_ID="$PCODX_SESSION_ID" python3 -c 'import json, os; print(json.dumps(os.environ["PCODX_SESSION_ID"]))')
+
+exec bunx @openai/codex \
+  --dangerously-bypass-approvals-and-sandbox \
+  --config "developer_instructions=$PCODX_DEVELOPER_INSTRUCTIONS_TOML" \
+  --config 'mcp_servers.pcodx_partial_compact.command="bun"' \
+  --config "mcp_servers.pcodx_partial_compact.args=[\"run\",\"$PCODX_POC_ROOT/src/mcp-server.ts\"]" \
+  --config "mcp_servers.pcodx_partial_compact.env={PCODX_LEDGER_PATH=$PCODX_LEDGER_PATH_TOML,PCODX_SESSION_ID=$PCODX_SESSION_ID_TOML}" \
+  "$@"
