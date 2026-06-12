@@ -37,8 +37,6 @@ case "$path_real" in "$root_real"/*) ;; *) echo "task file escapes root" >&2; ex
 if [ ! -f "$message_file" ]; then echo "message file not found" >&2; exit 2; fi
 mkdir -p "$(dirname "$path_real")"
 stamp=$(date '+%Y-%m-%d %H:%M')
-legacy_source_line="(from agent ${agent} via omo_report.sh status=${status})"
-source_line="[omo-message-source: origin=agent agent=${agent} via=omo_report.sh status=${status}"
 append_kv() {
   python3 - "$1" "$2" <<'PY'
 from __future__ import annotations
@@ -49,6 +47,55 @@ if value:
     print(f" {key}={quote(value, safe=':@._/-%')}", end="")
 PY
 }
+report_info=$(python3 - "$root_real" "$message_file" "$agent" "$status" <<'PY'
+from __future__ import annotations
+import hashlib
+import os
+import re
+import sys
+import tempfile
+from pathlib import Path
+root = Path(sys.argv[1])
+message_path = Path(sys.argv[2])
+agent, status = sys.argv[3:5]
+message_bytes = message_path.read_bytes()
+message_hash = hashlib.sha256(message_bytes).hexdigest()
+
+def safe_part(value: str) -> str:
+    part = re.sub(r"[^A-Za-z0-9._-]+", "_", value.strip()).strip("._-")
+    return part[:80] or "unknown"
+
+reports_dir = root / "agent_reports"
+reports_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+if reports_dir.resolve() != Path("/tmp"):
+    reports_dir.chmod(0o700)
+report_path = reports_dir / f"{safe_part(agent)}_{safe_part(status)}_{message_hash}.txt"
+if report_path.exists():
+    existing = report_path.read_bytes()
+    if existing != message_bytes:
+        raise RuntimeError(f"hash collision or stale report file: {report_path}")
+    report_path.chmod(0o600)
+else:
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{report_path.name}.", suffix=".tmp", dir=reports_dir)
+    tmp_path = Path(tmp_name)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(message_bytes)
+    tmp_path.chmod(0o600)
+    os.replace(tmp_path, report_path)
+    report_path.chmod(0o600)
+print(f"{message_hash}\t{report_path}")
+PY
+)
+IFS=$'\t' read -r message_hash durable_message_file <<EOF
+$report_info
+EOF
+legacy_source_line="(from agent ${agent} via omo_report.sh status=${status} report-file=${durable_message_file})"
+old_legacy_source_line="(from agent ${agent} via omo_report.sh status=${status})"
+source_line="[omo-message-source: origin=agent agent=${agent} via=omo_report.sh status=${status}"
+old_source_prefix="${source_line}"
+old_source_line="${old_source_prefix}"
+source_line="${source_line}$(append_kv report_file "$durable_message_file")"
+source_line="${source_line}$(append_kv report_sha256 "$message_hash")"
 tmux_target="${TMUX_PANE:-}"
 tmux_info=""
 if command -v tmux >/dev/null 2>&1; then
@@ -63,31 +110,40 @@ if [ -n "$tmux_info" ]; then
 $tmux_info
 EOF
   source_line="${source_line}$(append_kv tmux_session "$tmux_session")"
+  old_source_line="${old_source_line}$(append_kv tmux_session "$tmux_session")"
   source_line="${source_line}$(append_kv tmux_window_index "$tmux_window_index")"
+  old_source_line="${old_source_line}$(append_kv tmux_window_index "$tmux_window_index")"
   source_line="${source_line}$(append_kv tmux_pane_index "$tmux_pane_index")"
+  old_source_line="${old_source_line}$(append_kv tmux_pane_index "$tmux_pane_index")"
   source_line="${source_line}$(append_kv tmux_pane_id "$tmux_pane_id")"
+  old_source_line="${old_source_line}$(append_kv tmux_pane_id "$tmux_pane_id")"
   if [ -n "$tmux_session" ] && [ -n "$tmux_window_index" ] && [ -n "$tmux_pane_index" ]; then
     source_line="${source_line}$(append_kv tmux_target "${tmux_session}:${tmux_window_index}.${tmux_pane_index}")"
+    old_source_line="${old_source_line}$(append_kv tmux_target "${tmux_session}:${tmux_window_index}.${tmux_pane_index}")"
   fi
   source_line="${source_line}$(append_kv tmux_window_name "$tmux_window_name")"
+  old_source_line="${old_source_line}$(append_kv tmux_window_name "$tmux_window_name")"
 elif [ -n "$tmux_target" ]; then
   source_line="${source_line}$(append_kv tmux_pane_id "$tmux_target")"
+  old_source_line="${old_source_line}$(append_kv tmux_pane_id "$tmux_target")"
 fi
 source_line="${source_line}]"
+old_source_line="${old_source_line}]"
+old_legacy_source_match="$old_legacy_source_line"
+if [ "$old_source_line" != "${old_source_prefix}]" ]; then
+  old_legacy_source_match=""
+fi
 lock_path="${path_real}.omo_report.lock"
 exec 9>"$lock_path"
 flock 9
 if [ ! -f "$path_real" ]; then : >"$path_real"; fi
-python3 - "$path_real" "$message_file" "$source_line" "$legacy_source_line" "$stamp" "$agent" "$status" <<'PY'
+python3 - "$path_real" "$durable_message_file" "$message_hash" "$source_line" "$legacy_source_line" "$old_legacy_source_match" "$old_source_line" "$stamp" "$agent" "$status" <<'PY'
 from __future__ import annotations
-import hashlib
 import sys
 from pathlib import Path
 path = Path(sys.argv[1])
 message_path = Path(sys.argv[2])
-source_line, legacy_source_line, stamp, agent, status = sys.argv[3:8]
-message_bytes = message_path.read_bytes()
-message_hash = hashlib.sha256(message_bytes).hexdigest()
+message_hash, source_line, legacy_source_line, old_legacy_source_match, old_source_line, stamp, agent, status = sys.argv[3:11]
 hash_line = f"[message-sha256: {message_hash}]"
 lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
 for idx, line in enumerate(lines):
@@ -98,21 +154,22 @@ for idx, line in enumerate(lines):
         if block_line.strip() == "(pending)":
             block = lines[idx:next_idx]
             break
-    if (source_line in block or legacy_source_line in block) and hash_line in block:
+    if any(block_line.strip().startswith(("(manager handled:", "(manager routed:")) for block_line in block[1:]):
+        continue
+    if hash_line in block and (
+        source_line in block
+        or (old_legacy_source_match and old_legacy_source_match in block)
+        or old_source_line in block
+    ):
         raise SystemExit(0)
-message = message_bytes.decode("utf-8", errors="replace")
 block = [
     "",
     "(pending)",
     source_line,
     legacy_source_line,
-    f"(report manager {stamp} agent={agent} status={status})",
+    f"(report manager {stamp} agent={agent} status={status} report-file={message_path})",
     hash_line,
     f"message-file: {message_path}",
-    "message:",
 ]
-block.extend(f"> {line}" for line in message.splitlines())
-if message.endswith("\n"):
-    block.append("> ")
 path.write_text("\n".join(lines + block) + "\n", encoding="utf-8")
 PY
