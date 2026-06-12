@@ -44,7 +44,7 @@ Options:
   --workdir DIR           Directory where manager OpenCode should run (default: root)
   --tmux-target TARGET    Existing pane or manager session pane (default: OMO_MANAGER_TMUX_TARGET or omo-manager:0.0)
   --model MODEL           OpenCode model for the manager (default: OMO_MANAGER_MODEL or openai/gpt-5.4)
-  --no-startup-prompt     Do not submit the post-restart MANAGER.md prompt
+  --no-startup-prompt     Do not submit the post-restart work-log MANAGER.md prompt
   --no-refresh-watchers   Do not run omo_manager_setup_watchers.sh after health succeeds
   --force-port            Kill any non-manager listener still occupying the manager port after Ctrl-C
   --dry-run               Print planned actions without changing tmux/processes/watchers
@@ -296,7 +296,7 @@ import urllib.parse
 
 base_url = sys.argv[1].rstrip("/")
 root = sys.argv[2]
-prompt = """Follow MANAGER.md. Restarted by `omo_manager_restart.sh`.
+prompt = f"""Follow `{root}/MANAGER.md`. Restarted by `omo_manager_restart.sh`.
 Run: `~/.config/getagentsmd`; `~/.config/omo_manager/omo_manager_setup_watchers.sh`; `~/.config/omo_manager/omo_pending_watch.py --once --dry-run`.
 Continue current pending/report/email refs. If old session was stuck/context-full, stay in this fresh session."""
 parsed = urllib.parse.urlparse(base_url)
