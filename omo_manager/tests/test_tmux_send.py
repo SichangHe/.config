@@ -257,7 +257,8 @@ class TmuxSendTests(unittest.TestCase):
         self.assertTrue(input_has_probe(["› Read the dispatch prompt", "  gpt-5.5"], "Read the dispatch prompt"))
         self.assertFalse(input_has_probe(["› Older submitted prompt", "• Working", "  gpt-5.5"], "Older submitted prompt"))
         self.assertFalse(input_has_probe(["Read the dispatch prompt", "  gpt-5.5"], "Read the dispatch prompt"))
-        self.assertEqual("", current_input_text(["› Use /skills to list available skills", "  gpt-5.5"]))
+        self.assertEqual("Use /skills to list available skills", current_input_text(["› Use /skills to list available skills", "  gpt-5.5"]))
+        self.assertEqual("Summarize recent commits", current_input_text(["› Summarize recent commits", "  gpt-5.5"]))
         self.assertEqual("Write tests for @filename", current_input_text(["• Working (1m 59s • esc to interrupt)", "", "› Write tests for @filename", "", "  gpt-5.5"]))
         multi_line_input = [
             "• Working (1m 59s • esc to interrupt)",
@@ -325,6 +326,17 @@ class TmuxSendTests(unittest.TestCase):
 
         sleep.assert_called_once()
 
+    def test_wait_paste_visible_does_not_accept_codex_suggestion_for_different_prompt(self) -> None:
+        def fake_tail(_: str, __: int) -> list[str]:
+            return ["• Working (1m 59s • esc to interrupt)", "", "› Summarize recent commits", "", "  gpt-5.5"]
+
+        prompts = ("Summarize\nwith details\n", "Summarize recent commits\n")
+        for prompt in prompts:
+            with self.subTest(prompt=prompt):
+                with patch("omo_manager.omo_tmux_send.tail", side_effect=fake_tail), patch("omo_manager.omo_tmux_send.time.monotonic", side_effect=[0, 2]):
+                    with self.assertRaisesRegex(RuntimeError, "prompt not visible"):
+                        wait_paste_visible(Args("cfg:1.0", None, 1, 0.15, 0, False, submit_verify_timeout_s=1), prompt)
+
     def test_wait_paste_visible_checks_trailing_probe_for_long_message(self) -> None:
         long_message = "\n".join(["first line", *[f"middle {idx}" for idx in range(100)], "last line"]) + "\n"
         tails = iter([["› last line", "  gpt-5.5"]])
@@ -360,6 +372,87 @@ class TmuxSendTests(unittest.TestCase):
         with patch("omo_manager.omo_tmux_send.tail", side_effect=fake_tail), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run), patch("omo_manager.omo_tmux_send.time.monotonic", side_effect=[0, 2]):
             with self.assertRaisesRegex(RuntimeError, "input box still has text"):
                 verify_submit(Args("cfg:1.0", None, 1, 0.15, 0, False, submit_verify_timeout_s=1), "Read the dispatch prompt from /tmp/x and follow it exactly.\n")
+
+        self.assertEqual([], calls)
+
+    def test_verify_submit_ignores_codex_suggestion_while_running(self) -> None:
+        prompts = (
+            "Read the dispatch prompt from /tmp/x and follow it exactly.\n",
+            "Summarize\n",
+            "Summarize recent commits\nwith details\n",
+        )
+        for prompt in prompts:
+            with self.subTest(prompt=prompt):
+                calls: list[list[str]] = []
+
+                def fake_tail(_: str, __: int) -> list[str]:
+                    return ["• Working (1m 59s • esc to interrupt)", "", "› Summarize recent commits", "", "  gpt-5.5"]
+
+                def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                    calls.append(command)
+                    return subprocess.CompletedProcess(command, 0)
+
+                with patch("omo_manager.omo_tmux_send.tail", side_effect=fake_tail), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
+                    verify_submit(Args("cfg:1.0", None, 1, 0.15, 0, False, submit_verify_timeout_s=1), prompt)
+
+                self.assertEqual([], calls)
+
+    def test_run_tmux_verifies_exact_codex_suggestion_prompt_with_probe(self) -> None:
+        calls: list[list[str]] = []
+        sentinel = "__omo_paste_probe_abcdef12__"
+        tails = iter(
+            [
+                [f"› Summarize recent commits{sentinel}", "  gpt-5.5"],
+                ["› Summarize recent commits", "  gpt-5.5"],
+                ["• Working", "  gpt-5.5"],
+            ]
+        )
+
+        class Uuid:
+            hex = "abcdef1234567890"
+
+        def fake_tail(_: str, __: int) -> list[str]:
+            return next(tails)
+
+        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch("omo_manager.omo_tmux_send.uuid.uuid4", return_value=Uuid()), patch("omo_manager.omo_tmux_send.tail", side_effect=fake_tail), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
+            run_tmux(Args("cfg:1.0", None, 1, 0.15, 0, False, submit_verify_timeout_s=1), "Summarize recent commits\n")
+
+        self.assertIn(["tmux", "send-keys", "-l", "-t", "cfg:1.0", sentinel], calls)
+        self.assertIn(["tmux", "send-keys", "-N", str(len(sentinel)), "-t", "cfg:1.0", "BSpace"], calls)
+        self.assertLess(calls.index(["tmux", "send-keys", "-N", str(len(sentinel)), "-t", "cfg:1.0", "BSpace"]), calls.index(["tmux", "send-keys", "-t", "cfg:1.0", "Enter"]))
+
+    def test_verify_submit_accepts_matching_codex_suggestion_prompt_when_running(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_tail(_: str, __: int) -> list[str]:
+            return ["• Working (1m 59s • esc to interrupt)", "", "› Summarize recent commits", "", "  gpt-5.5"]
+
+        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch("omo_manager.omo_tmux_send.tail", side_effect=fake_tail), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
+            verify_submit(Args("cfg:1.0", None, 1, 0.15, 0, False, submit_verify_timeout_s=1), "Summarize recent commits\n")
+
+        self.assertEqual([], calls)
+
+    def test_verify_submit_does_not_retry_ready_matching_codex_suggestion_prompt(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_tail(_: str, __: int) -> list[str]:
+            return ["› Summarize recent commits", "  gpt-5.5"]
+
+        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch("omo_manager.omo_tmux_send.tail", side_effect=fake_tail), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run), patch("omo_manager.omo_tmux_send.time.monotonic", side_effect=[0, 1]):
+            with self.assertRaisesRegex(RuntimeError, "prompt still in input"):
+                verify_submit(Args("cfg:1.0", None, 1, 0.15, 0, False, submit_verify_timeout_s=1), "Summarize recent commits\n")
 
         self.assertEqual([], calls)
 

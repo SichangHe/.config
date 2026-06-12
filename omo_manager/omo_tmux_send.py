@@ -19,6 +19,14 @@ except ModuleNotFoundError:
     from omo_codex_status import current_block, status, tail
 
 
+CODEX_EMPTY_INPUT_TEXTS = {
+    "Use /skills to list available skills",
+    "Find and fix a bug in @filename",
+    "Summarize recent commits",
+    "Improve documentation in @filename",
+}
+
+
 @dataclass(frozen=True)
 class Args:
     target: str
@@ -210,8 +218,7 @@ def current_input_text(lines: list[str]) -> str:
                 return ""
             text_lines = [line[1:].strip()]
             text_lines.extend(after.rstrip() for after in input_lines[1:])
-            text = "\n".join(text_lines).strip()
-            return "" if text == "Use /skills to list available skills" else text
+            return "\n".join(text_lines).strip()
     return ""
 
 
@@ -222,6 +229,15 @@ def input_has_probe(lines: list[str], probe: str) -> bool:
 def input_has_any_probe(lines: list[str], probes: list[str]) -> bool:
     input_text = current_input_text(lines)
     return any(probe in input_text for probe in probes)
+
+
+def send_literal(target: str, text: str) -> None:
+    _ = subprocess.run(["tmux", "send-keys", "-l", "-t", target, text], timeout=5, check=True)
+
+
+def send_backspaces(target: str, n_chars: int) -> None:
+    if n_chars > 0:
+        _ = subprocess.run(["tmux", "send-keys", "-N", str(n_chars), "-t", target, "BSpace"], timeout=5, check=True)
 
 
 def send_enter(target: str) -> None:
@@ -241,13 +257,49 @@ def wait_paste_visible(args: Args, message: str) -> None:
     while True:
         lines = tail(args.target, n_lines)
         last_status = status(lines, current_block(lines))
-        if last_status == "not_codex" or input_has_any_probe(lines, probes):
+        if last_status == "not_codex":
             return
-        last_input = current_input_text(lines)
+        input_text = current_input_text(lines)
+        if input_text and input_text not in CODEX_EMPTY_INPUT_TEXTS and any(probe in input_text for probe in probes):
+            return
+        last_input = "" if input_text in CODEX_EMPTY_INPUT_TEXTS else input_text
         now_s = time.monotonic()
         if now_s >= deadline_s:
             suffix = "input box has different text" if last_input else "prompt not visible in input"
             raise RuntimeError(f"Codex paste not verified after {args.submit_verify_timeout_s:g}s: {suffix}, status={last_status}")
+        time.sleep(min(0.25, max(0.05, deadline_s - now_s)))
+
+
+def verify_placeholder_paste(args: Args, message: str) -> bool:
+    submitted_text = message.strip()
+    if args.enter_count <= 0 or args.submit_verify_timeout_s <= 0 or submitted_text not in CODEX_EMPTY_INPUT_TEXTS:
+        return False
+    sentinel = f"__omo_paste_probe_{uuid.uuid4().hex[:8]}__"
+    n_lines = inspect_lines_for_message(f"{message}\n{sentinel}")
+    deadline_s = time.monotonic() + args.submit_verify_timeout_s
+    send_literal(args.target, sentinel)
+    while True:
+        input_text = current_input_text(tail(args.target, n_lines))
+        if sentinel in input_text and input_text.endswith(sentinel) and input_text[: -len(sentinel)].strip() == submitted_text:
+            send_backspaces(args.target, len(sentinel))
+            wait_probe_removed(args, sentinel, n_lines, max(deadline_s, time.monotonic() + 1.0))
+            return True
+        now_s = time.monotonic()
+        if now_s >= deadline_s:
+            if sentinel in input_text:
+                send_backspaces(args.target, len(sentinel))
+                wait_probe_removed(args, sentinel, n_lines, max(deadline_s, time.monotonic() + 1.0))
+            raise RuntimeError(f"Codex paste not verified after {args.submit_verify_timeout_s:g}s: placeholder probe did not attach to prompt")
+        time.sleep(min(0.25, max(0.05, deadline_s - now_s)))
+
+
+def wait_probe_removed(args: Args, probe: str, n_lines: int, deadline_s: float) -> None:
+    while True:
+        if probe not in current_input_text(tail(args.target, n_lines)):
+            return
+        now_s = time.monotonic()
+        if now_s >= deadline_s:
+            raise RuntimeError(f"Codex paste cleanup not verified after {args.submit_verify_timeout_s:g}s: placeholder probe still in input")
         time.sleep(min(0.25, max(0.05, deadline_s - now_s)))
 
 
@@ -257,6 +309,7 @@ def verify_submit(args: Args, message: str) -> None:
     probe = message_probe(message)
     if not probe:
         return
+    submitted_text = message.strip()
     n_lines = inspect_lines_for_message(message)
     deadline_s = time.monotonic() + args.submit_verify_timeout_s
     last_status = "unknown"
@@ -269,6 +322,14 @@ def verify_submit(args: Args, message: str) -> None:
         input_text = current_input_text(lines)
         if not input_text:
             return
+        if input_text in CODEX_EMPTY_INPUT_TEXTS:
+            if input_text != submitted_text or last_status == "running":
+                return
+            now_s = time.monotonic()
+            if now_s >= deadline_s:
+                raise RuntimeError(f"Codex submit not verified after {args.submit_verify_timeout_s:g}s: prompt still in input, status={last_status}")
+            time.sleep(min(0.25, max(0.05, deadline_s - now_s)))
+            continue
         now_s = time.monotonic()
         if probe in input_text and now_s >= next_enter_s:
             send_enter(args.target)
@@ -296,7 +357,8 @@ def run_tmux(args: Args, message: str) -> None:
             _ = subprocess.run(["tmux", "send-keys", "-t", args.target, "C-u"], timeout=5, check=True)
         _ = subprocess.run(["tmux", "load-buffer", "-b", buffer_name, str(temp_path)], timeout=5, check=True)
         _ = subprocess.run(["tmux", "paste-buffer", "-b", buffer_name, "-t", args.target], timeout=5, check=True)
-        wait_paste_visible(args, message)
+        if not verify_placeholder_paste(args, message):
+            wait_paste_visible(args, message)
         for idx in range(args.enter_count):
             if idx:
                 time.sleep(args.enter_delay_s)

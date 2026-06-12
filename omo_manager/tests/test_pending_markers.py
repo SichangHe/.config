@@ -19,6 +19,10 @@ from omo_manager.email_idle_watcher import append_pending, current_manager_file,
 from omo_manager.omo_pending_watch import Args, find_markers
 
 
+def agent_pointer_paths(text: str) -> list[Path]:
+    return [Path(match) for match in re.findall(r"^\(from agent [^ ]+ (/tmp/[^)]+)\)$", text, flags=re.MULTILINE)]
+
+
 class PendingMarkerTests(unittest.TestCase):
     def test_email_pending_block_has_single_source_marker_and_is_not_generic_pending(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -483,7 +487,7 @@ class PendingMarkerTests(unittest.TestCase):
                         str(message_file),
                     ],
                     cwd=tmp,
-                    env={**os.environ, "OMO_MANAGER_LOCAL_ENV": str(Path(tmp) / "missing-local.env")},
+                    env={**{key: value for key, value in os.environ.items() if key not in {"TMUX", "TMUX_PANE"}}, "OMO_MANAGER_LOCAL_ENV": str(Path(tmp) / "missing-local.env")},
                     text=True,
                     capture_output=True,
                     timeout=10,
@@ -493,18 +497,23 @@ class PendingMarkerTests(unittest.TestCase):
                 self.assertEqual(0, result.returncode)
             task = root / "task.md"
             text = task.read_text(encoding="utf-8")
-            self.assertIn("(pending)\n[omo-message-source: origin=agent agent=agent-4002 via=omo_report.sh status=done", text)
-            self.assertIn("(from agent agent-4002 via omo_report.sh status=done report-file=", text)
-            self.assertEqual(1, text.count("(from agent agent-4002 via omo_report.sh status=done "))
-            self.assertIn("[message-sha256: ", text)
-            self.assertIn("report_file=", text)
-            self.assertIn("report_sha256=", text)
-            self.assertIn("message-file: ", text)
+            self.assertRegex(text, re.compile(r"^\(pending\)\n\(from agent agent-4002 /tmp/omo-agent-messages-\d+/agent-4002_done_[0-9a-f]{64}\.md\)$", re.MULTILINE))
+            self.assertNotIn("[omo-message-source: ", text)
+            self.assertNotIn("(report manager ", text)
+            self.assertNotIn("[message-sha256: ", text)
+            self.assertNotIn("message-file: ", text)
             self.assertNotIn("message:\n", text)
             self.assertNotIn("> done", text)
-            report_path = Path(next(line.removeprefix("message-file: ") for line in text.splitlines() if line.startswith("message-file: ")))
-            self.assertEqual(root / "agent_reports", report_path.parent)
-            self.assertEqual("done\n", report_path.read_text(encoding="utf-8"))
+            report_paths = agent_pointer_paths(text)
+            self.assertEqual(1, len(report_paths))
+            report_path = report_paths[0]
+            self.assertEqual(Path("/tmp") / f"omo-agent-messages-{os.getuid()}", report_path.parent)
+            report_text = report_path.read_text(encoding="utf-8")
+            self.assertIn("[omo-message-source: origin=agent agent=agent-4002 via=omo_report.sh status=done]", report_text)
+            self.assertIn("(report manager ", report_text)
+            self.assertIn("[message-sha256: ", report_text)
+            self.assertIn("message-file: ", report_text)
+            self.assertTrue(report_text.endswith("message:\ndone\n"))
             self.assertEqual(0o600, report_path.stat().st_mode & 0o777)
             self.assertEqual(0o700, report_path.parent.stat().st_mode & 0o777)
             self.assertNotIn("PWD:", text)
@@ -513,6 +522,80 @@ class PendingMarkerTests(unittest.TestCase):
             markers = find_markers(root, [task])
             self.assertEqual(1, len(markers))
             self.assertEqual("agent", markers[0].origin)
+
+    def test_omo_report_same_body_different_task_keeps_task_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            root.mkdir()
+            msg = Path(tmp) / "msg.md"
+            msg.write_text("same done\n", encoding="utf-8")
+            env = {**{key: value for key, value in os.environ.items() if key not in {"TMUX", "TMUX_PANE"}}, "OMO_MANAGER_LOCAL_ENV": str(Path(tmp) / "missing-local.env")}
+            for task_name in ("task-a.md", "task-b.md"):
+                result = subprocess.run(
+                    [
+                        str(Path.home() / ".config/omo_manager/omo_report.sh"),
+                        "--root",
+                        str(root),
+                        "--manager-url",
+                        "http://127.0.0.1:1",
+                        "--task-file",
+                        task_name,
+                        "--status",
+                        "done",
+                        "--agent",
+                        "agent-4002",
+                        "--message-file",
+                        str(msg),
+                    ],
+                    cwd=tmp,
+                    env=env,
+                    text=True,
+                    capture_output=True,
+                    timeout=10,
+                    check=False,
+                )
+                self.assertEqual("", result.stderr)
+                self.assertEqual(0, result.returncode)
+            task_a_text = (root / "task-a.md").read_text(encoding="utf-8")
+            task_b_text = (root / "task-b.md").read_text(encoding="utf-8")
+            task_a_paths = agent_pointer_paths(task_a_text)
+            task_b_paths = agent_pointer_paths(task_b_text)
+            self.assertEqual(1, len(task_a_paths))
+            self.assertEqual(1, len(task_b_paths))
+            self.assertNotEqual(task_a_paths[0], task_b_paths[0])
+            self.assertIn(f"task-file: {root / 'task-a.md'}", task_a_paths[0].read_text(encoding="utf-8"))
+            self.assertIn(f"task-file: {root / 'task-b.md'}", task_b_paths[0].read_text(encoding="utf-8"))
+
+    def test_omo_report_rejects_corrupt_existing_tmp_pointer_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            root.mkdir()
+            msg = Path(tmp) / "msg.md"
+            msg.write_text("done\n", encoding="utf-8")
+            env = {**{key: value for key, value in os.environ.items() if key not in {"TMUX", "TMUX_PANE"}}, "OMO_MANAGER_LOCAL_ENV": str(Path(tmp) / "missing-local.env")}
+            base_cmd = [
+                str(Path.home() / ".config/omo_manager/omo_report.sh"),
+                "--root",
+                str(root),
+                "--manager-url",
+                "http://127.0.0.1:1",
+                "--task-file",
+                "task.md",
+                "--status",
+                "done",
+                "--agent",
+                "agent-4002",
+                "--message-file",
+                str(msg),
+            ]
+            first = subprocess.run(base_cmd, cwd=tmp, env=env, text=True, capture_output=True, timeout=10, check=False)
+            self.assertEqual("", first.stderr)
+            self.assertEqual(0, first.returncode)
+            report_path = agent_pointer_paths((root / "task.md").read_text(encoding="utf-8"))[0]
+            report_path.write_text("wrong\n", encoding="utf-8")
+            second = subprocess.run(base_cmd, cwd=tmp, env=env, text=True, capture_output=True, timeout=10, check=False)
+            self.assertNotEqual(0, second.returncode)
+            self.assertIn("stale or corrupt report file", second.stderr)
 
     def test_omo_report_deduplicates_old_format_pending_block(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -615,8 +698,8 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual(0, result.returncode)
             text = task.read_text(encoding="utf-8")
             self.assertEqual(2, text.count("(pending)"))
-            self.assertEqual(2, text.count("[message-sha256: "))
-            self.assertIn("message-file: ", text)
+            self.assertEqual(1, text.count("[message-sha256: "))
+            self.assertRegex(text, re.compile(r"^\(from agent agent-4002 /tmp/omo-agent-messages-\d+/agent-4002_done_[0-9a-f]{64}\.md\)$", re.MULTILINE))
 
     def test_omo_report_old_format_tmux_route_dedupes_only_same_route(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -761,13 +844,73 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual("", result.stderr)
             self.assertEqual(0, result.returncode)
             text = (root / "task.md").read_text(encoding="utf-8")
-            self.assertIn("tmux_session=cfg", text)
-            self.assertIn("tmux_window_index=7", text)
-            self.assertIn("tmux_pane_index=0", text)
-            self.assertIn("tmux_pane_id=%1701", text)
-            self.assertIn("tmux_target=cfg:7.0", text)
-            self.assertIn("tmux_window_name=manager%20window", text)
-            self.assertRegex(text, r"message-file: .*/agent_reports/agent-tmux_done_[0-9a-f]{64}\.txt")
+            self.assertRegex(text, re.compile(r"^\(from agent cfg:7 /tmp/omo-agent-messages-\d+/agent-tmux_done_[0-9a-f]{64}\.md\)$", re.MULTILINE))
+            self.assertNotIn("tmux_session=cfg", text)
+            self.assertNotIn("message-file: ", text)
+            report_paths = agent_pointer_paths(text)
+            self.assertEqual(1, len(report_paths))
+            report_text = report_paths[0].read_text(encoding="utf-8")
+            self.assertIn("tmux_session=cfg", report_text)
+            self.assertIn("tmux_window_index=7", report_text)
+            self.assertIn("tmux_pane_index=0", report_text)
+            self.assertIn("tmux_pane_id=%1701", report_text)
+            self.assertIn("tmux_target=cfg:7.0", report_text)
+            self.assertIn("tmux_window_name=manager%20window", report_text)
+
+    def test_omo_report_tmux_window_rename_updates_tmp_without_duplicate_pointer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            root.mkdir()
+            bin_dir = Path(tmp) / "bin"
+            bin_dir.mkdir()
+            tmux = bin_dir / "tmux"
+            tmux.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf 'cfg\\t7\\t0\\t%%1701\\t%s\\n' \"$OMO_FAKE_WINDOW_NAME\"\n",
+                encoding="utf-8",
+            )
+            tmux.chmod(0o700)
+            msg = Path(tmp) / "msg.md"
+            msg.write_text("same body\n", encoding="utf-8")
+            base_env = {
+                **os.environ,
+                "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                "TMUX_PANE": "%1701",
+                "OMO_MANAGER_LOCAL_ENV": str(Path(tmp) / "missing-local.env"),
+            }
+            for window_name in ("left", "right"):
+                result = subprocess.run(
+                    [
+                        str(Path.home() / ".config/omo_manager/omo_report.sh"),
+                        "--root",
+                        str(root),
+                        "--manager-url",
+                        "http://127.0.0.1:1",
+                        "--task-file",
+                        "task.md",
+                        "--status",
+                        "done",
+                        "--agent",
+                        "agent-tmux",
+                        "--message-file",
+                        str(msg),
+                    ],
+                    cwd=tmp,
+                    env={**base_env, "OMO_FAKE_WINDOW_NAME": window_name},
+                    text=True,
+                    capture_output=True,
+                    timeout=10,
+                    check=False,
+                )
+                self.assertEqual("", result.stderr)
+                self.assertEqual(0, result.returncode)
+            text = (root / "task.md").read_text(encoding="utf-8")
+            self.assertEqual(1, text.count("(pending)"))
+            report_paths = agent_pointer_paths(text)
+            self.assertEqual(1, len(report_paths))
+            report_text = report_paths[0].read_text(encoding="utf-8")
+            self.assertIn("tmux_window_name=right", report_text)
+            self.assertNotIn("tmux_window_name=left", report_text)
 
     def test_omo_report_same_hash_different_tmux_routes_append_distinct_blocks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -821,9 +964,12 @@ class PendingMarkerTests(unittest.TestCase):
                 self.assertEqual(0, result.returncode)
             text = (root / "task.md").read_text(encoding="utf-8")
             self.assertEqual(2, text.count("(pending)"))
-            self.assertEqual(2, text.count("message-file: "))
-            self.assertIn("tmux_target=cfg:7.0", text)
-            self.assertIn("tmux_target=cfg:8.0", text)
+            self.assertEqual(0, text.count("message-file: "))
+            self.assertIn("(from agent cfg:7 ", text)
+            self.assertIn("(from agent cfg:8 ", text)
+            report_text = "\n".join(path.read_text(encoding="utf-8") for path in agent_pointer_paths(text))
+            self.assertIn("tmux_target=cfg:7.0", report_text)
+            self.assertIn("tmux_target=cfg:8.0", report_text)
             self.assertNotIn("message:\n", text)
 
     def test_omo_report_concurrent_distinct_reports_keep_all_blocks(self) -> None:
@@ -835,7 +981,7 @@ class PendingMarkerTests(unittest.TestCase):
                 msg = Path(tmp) / f"msg-{idx}.md"
                 _ = msg.write_text(f"distinct report {idx}\n", encoding="utf-8")
                 messages.append(msg)
-            env = {**os.environ, "OMO_MANAGER_LOCAL_ENV": str(Path(tmp) / "missing-local.env")}
+            env = {**{key: value for key, value in os.environ.items() if key not in {"TMUX", "TMUX_PANE"}}, "OMO_MANAGER_LOCAL_ENV": str(Path(tmp) / "missing-local.env")}
             procs = [
                 subprocess.Popen(
                     [
@@ -868,14 +1014,15 @@ class PendingMarkerTests(unittest.TestCase):
                 self.assertEqual(0, proc.returncode)
             task = root / "task.md"
             text = task.read_text(encoding="utf-8")
-            self.assertEqual(12, text.count("(from agent agent-4002 via omo_report.sh status=done "))
-            self.assertEqual(12, text.count("message-file: "))
+            self.assertEqual(12, text.count("(from agent agent-4002 "))
+            self.assertEqual(0, text.count("message-file: "))
             self.assertNotIn("message:\n", text)
             for idx in range(12):
                 self.assertNotIn(f"> distinct report {idx}", text)
-            report_paths = [Path(match) for match in re.findall(r"^message-file: (.+)$", text, flags=re.MULTILINE)]
+            report_paths = agent_pointer_paths(text)
             self.assertEqual(12, len(report_paths))
-            self.assertEqual(sorted(f"distinct report {idx}\n" for idx in range(12)), sorted(path.read_text(encoding="utf-8") for path in report_paths))
+            report_bodies = sorted(path.read_text(encoding="utf-8").rsplit("message:\n", 1)[1] for path in report_paths)
+            self.assertEqual(sorted(f"distinct report {idx}\n" for idx in range(12)), report_bodies)
             self.assertEqual(12, len(find_markers(root, [task])))
 
     def test_new_email_source_is_delivered_by_pending_watch(self) -> None:
