@@ -49,9 +49,10 @@ TASK_RE = re.compile(r"`?([A-Za-z0-9_./-]+\.md)`?")
 TARGET_RE = re.compile(r"\b([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\b")
 LOOSE_TARGET_RE = re.compile(r"\b([a-z][A-Za-z0-9_-]*)\s+(\d+)\b")
 PORT_RE = re.compile(r"\bport [`']?(\d{2,5})[`']?")
-STATUS_RE = re.compile(r"^\((pending|running|done|blocked)(?::[^)]*)?\)$")
+STATUS_RE = re.compile(r"^\((pending|running|done|blocked)(?::[^)]*)?\)(?:\s+\([^)]*\))?$")
 RUNAT_RE = re.compile(r"^runat:\s+([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\b")
 CLOSE_TARGET_RE = re.compile(r"\btmux target [`']?([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)[`']?")
+PERSISTENT_ROLE_RE = re.compile(r"\bpersistent\b.*\brole\b")
 
 
 @dataclass(frozen=True)
@@ -71,6 +72,7 @@ class TaskLine:
     target: str
     port: int | None
     status: str = ""
+    persistent_role: bool = False
 
 
 @dataclass(frozen=True)
@@ -86,6 +88,8 @@ class StatusRow:
     task_file: str
     status: str
     evidence: str
+    persistent_role: bool = False
+    task_status: str = ""
 
 
 @dataclass(frozen=True)
@@ -93,6 +97,7 @@ class TaskState:
     status: str
     target: str
     port: int | None
+    persistent_role: bool = False
 
 
 class ParsedArgs(argparse.Namespace):
@@ -181,12 +186,19 @@ def scan_task_state(path: Path) -> TaskState | None:
     status = ""
     target = ""
     port: int | None = None
+    persistent_role = False
+    persistent_role_note_seen = False
     for line in reversed(lines):
         stripped = line.strip()
         if not status:
             status_match = STATUS_RE.match(stripped)
             if status_match is not None:
                 status = status_match.group(1)
+                persistent_role = persistent_role_note_seen or PERSISTENT_ROLE_RE.search(stripped.lower()) is not None
+            elif stripped.startswith("(") and stripped.endswith(")") and PERSISTENT_ROLE_RE.search(stripped.lower()) is not None:
+                persistent_role_note_seen = True
+            else:
+                persistent_role_note_seen = False
         if not target:
             runat_match = RUNAT_RE.match(stripped)
             if runat_match is not None:
@@ -201,7 +213,7 @@ def scan_task_state(path: Path) -> TaskState | None:
                 port = int(port_match.group(1))
         if status and target and port is not None:
             break
-    return TaskState(status, target, port) if status else None
+    return TaskState(status, target, port, persistent_role) if status else None
 
 
 def load_task_state(root: Path) -> tuple[dict[str, TaskLine], set[str], set[str]]:
@@ -224,8 +236,25 @@ def load_task_state(root: Path) -> tuple[dict[str, TaskLine], set[str], set[str]
             continue
         target = state.target or task.target
         port = state.port if state.port is not None else task.port
-        current[task.task_file] = TaskLine(task.task_file, "task-file", task.line, target, port, state.status)
+        current[task.task_file] = TaskLine(task.task_file, "task-file", task.line, target, port, state.status, state.persistent_role)
     return current, done, human_pending
+
+
+def persistent_blocked_task_lines(root: Path) -> list[TaskLine]:
+    tasks: list[TaskLine] = []
+    seen: set[str] = set()
+    for task in parse_task_lines(root / "TODO.md"):
+        if task.task_file == "TODO.md" or task.task_file in seen:
+            continue
+        state_path = resolve_task_path(root, task.task_file)
+        state = scan_task_state(state_path) if state_path is not None else None
+        if state is None or state.status != "blocked" or not state.persistent_role:
+            continue
+        target = state.target or task.target
+        port = state.port if state.port is not None else task.port
+        tasks.append(TaskLine(task.task_file, "task-file", task.line, target, port, state.status, True))
+        seen.add(task.task_file)
+    return tasks
 
 
 def session_records(registry: Path) -> list[SessionRecord]:
@@ -275,12 +304,16 @@ def display_target(task: TaskLine, record: SessionRecord | None) -> str:
 def classify_task(task: TaskLine, record: SessionRecord | None) -> StatusRow:
     target = display_target(task, record)
     if not target:
-        return StatusRow(task.task_file, "not_codex", "target=")
+        return StatusRow(task.task_file, "not_codex", "target=", task.persistent_role, task.status)
     report = inspect(StatusArgs(target, 80))
     evidence = f"target={target}"
+    if task.persistent_role:
+        evidence += " persistent_role=true"
+    if task.status:
+        evidence += f" task_status={task.status}"
     if report.lines:
         evidence += " output=" + " / ".join(report.lines[-3:])
-    return StatusRow(task.task_file, report.status, evidence)
+    return StatusRow(task.task_file, report.status, evidence, task.persistent_role, task.status)
 
 def registry_prune(args: Args, completed: set[str]) -> int:
     if not completed or not args.registry.exists():
@@ -323,7 +356,7 @@ PROBLEM_STATUSES = {"error", "not_codex", "ready"}
 
 
 def format_problem_summary(rows: list[StatusRow], completed_stale: set[str]) -> str:
-    problem_rows = [row for row in rows if row.status in PROBLEM_STATUSES]
+    problem_rows = [row for row in rows if row.status in PROBLEM_STATUSES and not (row.status == "ready" and row.persistent_role and row.task_status == "blocked")]
     if not problem_rows and not completed_stale:
         return ""
     counts: dict[str, int] = {"not_codex": 0, "error": 0, "ready": 0}
@@ -348,6 +381,8 @@ def main(argv: list[str]) -> int:
         if args.problems_only:
             tasks = [task for task in tasks if task.status == "running"]
         rows = [classify_task(task, choose_session(task, records)) for task in tasks]
+        if args.problems_only:
+            rows.extend(classify_task(task, choose_session(task, records)) for task in persistent_blocked_task_lines(args.root))
         completed_stale = {record.task_file for record in records if record.task_file in done}
         pruned_count = registry_prune(args, completed_stale) if args.prune_completed else 0
         if args.problems_only:

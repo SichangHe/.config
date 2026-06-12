@@ -5,7 +5,7 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
-from omo_manager.omo_agent_status import Args, classify_task, format_problem_summary, load_local_env, load_task_state, main, parse_task_lines, registry_prune, session_records
+from omo_manager.omo_agent_status import Args, classify_task, format_problem_summary, load_local_env, load_task_state, main, parse_task_lines, persistent_blocked_task_lines, registry_prune, session_records
 from omo_manager.omo_agent_status import SessionRecord, StatusRow, TaskLine
 from omo_manager.omo_codex_status import Report
 
@@ -45,6 +45,58 @@ class AgentStatusTests(unittest.TestCase):
             self.assertEqual(set(), done)
             self.assertEqual({"review.md"}, human_pending)
             self.assertEqual("wl:2", current["old.md"].target)
+
+    def test_persistent_blocked_task_lines_marks_role_from_latest_blocked_note(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "TODO.md").write_text("current:\nrole.md cfg 1\n", encoding="utf-8")
+            _ = (root / "role.md").write_text("runat: cfg:1 codex\n(running)\n\n(done)\n\n(blocked: persistent VL proof-analysis role waiting for follow-up)\n", encoding="utf-8")
+            current, _done, _human_pending = load_task_state(root)
+            standby = persistent_blocked_task_lines(root)
+            self.assertNotIn("role.md", current)
+            self.assertEqual("role.md", standby[0].task_file)
+            self.assertTrue(standby[0].persistent_role)
+            self.assertEqual("blocked", standby[0].status)
+
+    def test_persistent_blocked_task_lines_accepts_separate_note_form(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "TODO.md").write_text("current:\nrole.md cfg 1\n", encoding="utf-8")
+            _ = (root / "role.md").write_text("runat: cfg:1 codex\n(running)\n\n(blocked) (persistent role waiting for followup)\n", encoding="utf-8")
+            standby = persistent_blocked_task_lines(root)
+            self.assertEqual("role.md", standby[0].task_file)
+            self.assertTrue(standby[0].persistent_role)
+
+    def test_persistent_blocked_task_lines_accepts_split_note_form(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "TODO.md").write_text("current:\nrole.md cfg 1\n", encoding="utf-8")
+            _ = (root / "role.md").write_text("runat: cfg:1 codex\n(running)\n\n(blocked)\n(persistent VL supervisor role waiting for follow-up)\n", encoding="utf-8")
+            standby = persistent_blocked_task_lines(root)
+            self.assertEqual("role.md", standby[0].task_file)
+            self.assertTrue(standby[0].persistent_role)
+
+    def test_persistent_blocked_task_lines_rejects_nonadjacent_split_note_form(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "TODO.md").write_text("current:\nrole.md cfg 1\n", encoding="utf-8")
+            _ = (root / "role.md").write_text("runat: cfg:1 codex\n(blocked)\nplain prose between status and note\n(persistent VL supervisor role waiting for follow-up)\n", encoding="utf-8")
+            self.assertEqual([], persistent_blocked_task_lines(root))
+
+    def test_persistent_blocked_task_lines_rejects_blank_line_split_note_form(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "TODO.md").write_text("current:\nrole.md cfg 1\n", encoding="utf-8")
+            _ = (root / "role.md").write_text("runat: cfg:1 codex\n(blocked)\n\n(persistent VL supervisor role waiting for follow-up)\n", encoding="utf-8")
+            self.assertEqual([], persistent_blocked_task_lines(root))
+
+    def test_persistent_blocked_task_lines_deduplicates_todo_refs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "TODO.md").write_text("current:\nrole.md cfg 1\nrole.md cfg 1\n", encoding="utf-8")
+            _ = (root / "role.md").write_text("runat: cfg:1 codex\n(blocked: persistent VL supervisor role waiting for follow-up)\n", encoding="utf-8")
+            standby = persistent_blocked_task_lines(root)
+            self.assertEqual(1, len(standby))
 
     def test_parse_task_line_extracts_target_and_port(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -137,6 +189,22 @@ class AgentStatusTests(unittest.TestCase):
         self.assertIn("done-stale: task=done.md", text)
         self.assertNotIn("ok.md", text)
 
+    def test_problem_summary_ignores_ready_persistent_roles_only(self) -> None:
+        rows = [
+            StatusRow("standby.md", "ready", "target=cfg:1 persistent_role=true task_status=blocked", True, "blocked"),
+            StatusRow("broken.md", "error", "target=cfg:2 persistent_role=true task_status=blocked", True, "blocked"),
+            StatusRow("gone.md", "not_codex", "target=cfg:3 persistent_role=true task_status=blocked", True, "blocked"),
+            StatusRow("wrong-marker.md", "ready", "target=cfg:5 persistent_role=true task_status=running", True, "running"),
+            StatusRow("ordinary.md", "ready", "target=cfg:4"),
+        ]
+        text = format_problem_summary(rows, set())
+        self.assertIn("agent-problems: not_codex=1 error=1 ready=2 done-registry-stale=0", text)
+        self.assertNotIn("standby.md", text)
+        self.assertIn("error: task=broken.md", text)
+        self.assertIn("not_codex: task=gone.md", text)
+        self.assertIn("ready: task=ordinary.md", text)
+        self.assertIn("ready: task=wrong-marker.md", text)
+
     def test_problems_only_stays_quiet_when_all_active_agents_are_running(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -160,6 +228,92 @@ class AgentStatusTests(unittest.TestCase):
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["› Use /skills to list available skills"])), redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             self.assertIn("ready: task=active.md", out.getvalue())
+
+    def test_problems_only_reports_ready_running_persistent_role_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[{"task_file":"role.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nrole.md cfg 1\n", encoding="utf-8")
+            _ = (root / "role.md").write_text("runat: cfg:1 codex\n(running: persistent VL spec-analysis role resumed for follow-up work)\n", encoding="utf-8")
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["› Use /skills to list available skills"])), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertIn("ready: task=role.md", out.getvalue())
+
+    def test_problems_only_stays_quiet_for_ready_blocked_persistent_role(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[{"task_file":"role.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nrole.md cfg 1\n", encoding="utf-8")
+            _ = (root / "role.md").write_text("runat: cfg:1 codex\n(blocked: persistent VL spec-analysis role waiting for follow-up)\n", encoding="utf-8")
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["› Use /skills to list available skills"])), redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertEqual("", out.getvalue())
+
+    def test_problems_only_stays_quiet_for_ready_blocked_persistent_role_separate_note_form(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[{"task_file":"role.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nrole.md cfg 1\n", encoding="utf-8")
+            _ = (root / "role.md").write_text("runat: cfg:1 codex\n(blocked) (persistent role waiting for followup)\n", encoding="utf-8")
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["› Use /skills to list available skills"])), redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertEqual("", out.getvalue())
+
+    def test_problems_only_reports_error_for_blocked_persistent_role(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[{"task_file":"role.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nrole.md cfg 1\n", encoding="utf-8")
+            _ = (root / "role.md").write_text("runat: cfg:1 codex\n(blocked: persistent VL supervisor role waiting for follow-up)\n", encoding="utf-8")
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("error", ["traceback"])), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertIn("error: task=role.md", out.getvalue())
+
+    def test_problems_only_reports_not_codex_for_blocked_persistent_role(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[{"task_file":"role.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nrole.md cfg 1\n", encoding="utf-8")
+            _ = (root / "role.md").write_text("runat: cfg:1 codex\n(blocked) (persistent role waiting for followup)\n", encoding="utf-8")
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("not_codex", [])), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertIn("not_codex: task=role.md", out.getvalue())
+
+    def test_problems_only_reports_not_codex_for_split_note_blocked_persistent_role(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[{"task_file":"role.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nrole.md cfg 1\n", encoding="utf-8")
+            _ = (root / "role.md").write_text("runat: cfg:1 codex\n(blocked)\n(persistent VL supervisor role waiting for follow-up)\n", encoding="utf-8")
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("not_codex", [])), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertIn("not_codex: task=role.md", out.getvalue())
+
+    def test_problems_only_reports_stale_done_registry_even_with_ready_persistent_role(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[{"task_file":"role.md","tmux_target":"cfg:1.0","started_at_s":1},{"task_file":"done.md","tmux_target":"cfg:2.0","started_at_s":1}]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nrole.md cfg 1\n\nprevious:\ndone.md cfg 2\n", encoding="utf-8")
+            _ = (root / "role.md").write_text("runat: cfg:1 codex\n(blocked: persistent VL supervisor role waiting for follow-up)\n", encoding="utf-8")
+            _ = (root / "done.md").write_text("runat: cfg:2 codex\n(done)\n", encoding="utf-8")
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["ready"])), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertIn("done-stale: task=done.md", out.getvalue())
+            self.assertNotIn("ready: task=role.md", out.getvalue())
 
     def test_problems_only_ignores_pending_task_marker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
