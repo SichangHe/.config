@@ -231,6 +231,8 @@ class PendingMarkerTests(unittest.TestCase):
 
                 def uid(self, command: str, *args: object) -> tuple[str, list[object]]:
                     if command == "search":
+                        if args and args[0] == "UNSEEN" and self.stores:
+                            return "OK", [b""]
                         if "UID" in args and "14:*" in args:
                             return "OK", [b""]
                         return "OK", [b"13"]
@@ -330,7 +332,7 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertIn("(pending)\n(from email manager_mail/15.txt)\n", (root / "work_manager_today.md").read_text(encoding="utf-8"))
             self.assertIn("15	", (state / "email-processed-uids.tsv").read_text(encoding="utf-8"))
 
-    def test_email_watcher_searches_seen_uid_range_after_processed_state(self) -> None:
+    def test_email_watcher_searches_unseen_and_seen_uid_range_after_processed_state(self) -> None:
         from email.message import EmailMessage
         from omo_manager import email_idle_watcher as watcher
 
@@ -350,6 +352,8 @@ class PendingMarkerTests(unittest.TestCase):
 
                 def uid(self, command: str, *args: object) -> tuple[str, list[object]]:
                     if command == "search":
+                        if args and args[0] == "UNSEEN":
+                            return "OK", [b""]
                         self.searches.append(args)
                         return "OK", [b"13"]
                     if command == "fetch":
@@ -369,6 +373,87 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertTrue(client.searches)
             self.assertEqual(client.searches[0][:6], (None, "UID", "13:*", "FROM", '"me@example.com"', "SUBJECT"))
             self.assertIn("13	", (state / "email-processed-uids.tsv").read_text(encoding="utf-8"))
+
+    def test_email_watcher_marks_new_pending_seen_when_push_raises(self) -> None:
+        from email.message import EmailMessage
+        from omo_manager import email_idle_watcher as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            root.mkdir()
+            state = Path(tmp) / "state"
+            msg = EmailMessage()
+            msg["From"] = "Human <me@example.com>"
+            msg["Subject"] = "Re: [omo_manager] push raises"
+            msg.set_content("body")
+
+            class Client:
+                stores: list[tuple[object, ...]] = []
+
+                def uid(self, command: str, *args: object) -> tuple[str, list[object]]:
+                    if command == "search":
+                        return "OK", [b"16"]
+                    if command == "fetch":
+                        return "OK", [(b"RFC822", msg.as_bytes())]
+                    if command == "store":
+                        self.stores.append(args)
+                        return "OK", [b""]
+                    raise AssertionError(command)
+
+            def run_raises(*_args: object, **_kwargs: object) -> object:
+                raise FileNotFoundError("omo_push_to_manager.py")
+
+            with patch.object(watcher.subprocess, "run", run_raises):
+                client = Client()
+                manager_file = root / "work_manager_today.md"
+                args = watcher.Args(root, "", root / "manager_mail", state, manager_file, True, "me@example.com", 0, Path("/bin/false"), manager_target="wl:1.0")
+                watcher.handle_unseen(client, args)
+            self.assertIn("(pending)\n(from email manager_mail/16.txt)\n", manager_file.read_text(encoding="utf-8"))
+            self.assertEqual(client.stores, [("16", "+FLAGS", r"(\Seen)")])
+            self.assertIn("16	", (state / "email-processed-uids.tsv").read_text(encoding="utf-8"))
+
+    def test_email_watcher_processes_lower_unread_uid_after_higher_processed_uid(self) -> None:
+        from email.message import EmailMessage
+        from omo_manager import email_idle_watcher as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            root.mkdir()
+            state = Path(tmp) / "state"
+            state.mkdir()
+            (state / "email-processed-uids.tsv").write_text("20\t1\n", encoding="utf-8")
+            msg = EmailMessage()
+            msg["From"] = "Human <me@example.com>"
+            msg["Subject"] = "Re: [omo_manager] lower uid"
+            msg.set_content("body")
+
+            class Client:
+                stores: list[tuple[object, ...]] = []
+
+                def uid(self, command: str, *args: object) -> tuple[str, list[object]]:
+                    if command == "search":
+                        if args and args[0] == "UNSEEN":
+                            return "OK", [b"19"]
+                        return "OK", [b""]
+                    if command == "fetch":
+                        return "OK", [(b"RFC822", msg.as_bytes())]
+                    if command == "store":
+                        self.stores.append(args)
+                        return "OK", [b""]
+                    raise AssertionError(command)
+
+            old_push = watcher.push_email_ref
+            watcher.push_email_ref = lambda *_args: True
+            try:
+                client = Client()
+                manager_file = root / "work_manager_today.md"
+                args = watcher.Args(root, "", root / "manager_mail", state, manager_file, True, "me@example.com", 0, Path("/bin/false"), manager_target="wl:1.0")
+                watcher.handle_unseen(client, args)
+            finally:
+                watcher.push_email_ref = old_push
+            self.assertIn("(pending)\n(from email manager_mail/19.txt)\n", manager_file.read_text(encoding="utf-8"))
+            self.assertEqual(client.stores, [("19", "+FLAGS", r"(\Seen)")])
+            self.assertIn("19	", (state / "email-processed-uids.tsv").read_text(encoding="utf-8"))
 
     def test_omo_report_writes_agent_pending_source_without_direct_push(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

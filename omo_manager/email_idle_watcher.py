@@ -297,7 +297,11 @@ def push_email_ref(args: Args, line_no: int) -> bool:
         command.extend(["--manager-target", args.manager_target])
     if args.manager_url:
         command.extend(["--manager-url", args.manager_url])
-    result = subprocess.run(command, check=False)
+    try:
+        result = subprocess.run(command, check=False)
+    except OSError as exc:
+        logging.error("email pending push failed: uid line=%s error=%s", line_no, exc)
+        return False
     if result.returncode != 0:
         logging.error("email pending push failed: uid line=%s status=%s", line_no, result.returncode)
         return False
@@ -424,13 +428,15 @@ def uid_search_range(processed_uids: set[str]) -> str:
 
 
 def search_uids(client: imaplib.IMAP4_SSL, subject: str, self_email: str, processed_uids: set[str]) -> set[bytes]:
+    candidate_uids: set[bytes] = set()
+    typ, data = client.uid("search", "UNSEEN", "FROM", f'"{self_email}"', "SUBJECT", f'"{subject}"')
+    if typ == "OK" and data and data[0]:
+        candidate_uids.update(data[0].split())
     if processed_uids:
         typ, data = client.uid("search", None, "UID", uid_search_range(processed_uids), "FROM", f'"{self_email}"', "SUBJECT", f'"{subject}"')
-    else:
-        typ, data = client.uid("search", "UNSEEN", "FROM", f'"{self_email}"', "SUBJECT", f'"{subject}"')
-    if typ != "OK" or not data or not data[0]:
-        return set()
-    return set(data[0].split())
+        if typ == "OK" and data and data[0]:
+            candidate_uids.update(data[0].split())
+    return candidate_uids
 
 
 def mark_seen(client: imaplib.IMAP4_SSL, uid: str) -> bool:
