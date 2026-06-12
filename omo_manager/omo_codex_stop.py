@@ -312,7 +312,7 @@ def codex_status(target: str) -> str:
 def feedback_prompt(task_file: str) -> str:
     return (
         "Before the manager closes this session, please send concise process feedback if this was a non-trivial task. "
-        "If there is anything worth preserving, create a report file with `omo_text.py temp --kind agent-message`, then run `omo_report.sh --task-file "
+        "If there is anything worth preserving, write a report file through an editor, apply_patch, or another non-shell text channel, then run `omo_report.sh --task-file "
         f"{task_file} --status done --message-file REPORT_FILE`. "
         "Mention unclear instructions, routing/communication gaps, missing tooling/docs, check friction, or whether manager-triggered compaction would have helped you continue. "
         "Keep it to at most five short bullets. If there is no useful feedback, say so briefly."

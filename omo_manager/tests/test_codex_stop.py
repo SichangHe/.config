@@ -206,7 +206,7 @@ class CodexStopTests(unittest.TestCase):
 
     def test_feedback_prompt_names_task_file_and_report_path(self) -> None:
         text = feedback_prompt("task.md")
-        self.assertIn("omo_text.py temp --kind agent-message", text)
+        self.assertIn("write a report file through an editor", text)
         self.assertIn("--task-file task.md", text)
         self.assertIn("at most five short bullets", text)
 

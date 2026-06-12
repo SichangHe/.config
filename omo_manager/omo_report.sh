@@ -16,7 +16,7 @@ agent="${OMO_AGENT_NAME:-agent}"
 usage() {
   printf '%s\n' \
     "Usage: omo_report.sh --task-file FILE --status STATUS --message-file FILE [--agent NAME]" \
-    "Create report files with: omo_text.py temp --kind agent-message"
+    "Create REPORT as a private mktemp/chmod 600 file, then write it through an editor, apply_patch, or another non-shell text channel before calling this helper."
 }
 while [ "$#" -gt 0 ]; do
   case "$1" in

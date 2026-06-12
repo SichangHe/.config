@@ -1214,9 +1214,12 @@ class PendingMarkerTests(unittest.TestCase):
         script = Path.home() / ".config/omo_manager/omo_email_human.sh"
         result = subprocess.run([str(script), "--help"], text=True, capture_output=True, timeout=10, check=False)
         self.assertEqual(0, result.returncode)
-        self.assertIn("subject_file=$(omo_text.py temp --kind email-subject)", result.stdout)
-        self.assertIn("body_file=$(omo_text.py temp --kind email-body)", result.stdout)
+        self.assertIn('subject_file=$(mktemp "${TMPDIR:-/tmp}/omo-email-subject.XXXXXX")', result.stdout)
+        self.assertIn('body_file=$(mktemp "${TMPDIR:-/tmp}/omo-email-body.XXXXXX")', result.stdout)
+        self.assertIn('chmod 600 "$subject_file" "$body_file"', result.stdout)
+        self.assertIn("Write both files through an editor", result.stdout)
         self.assertIn('omo_email_human.sh --subject-file "$subject_file" --message-file "$body_file"', result.stdout)
+        self.assertNotIn("omo" + "_text.py", result.stdout)
 
     def test_omo_email_human_rejects_placeholder_subject_and_empty_body(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

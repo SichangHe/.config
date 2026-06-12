@@ -8,9 +8,10 @@ usage() {
 Usage: omo_email_human.sh --subject-file FILE --message-file FILE
 
 Manager-safe input:
-  subject_file=$(omo_text.py temp --kind email-subject)
-  body_file=$(omo_text.py temp --kind email-body)
-  $EDITOR "$subject_file" "$body_file"
+  subject_file=$(mktemp "${TMPDIR:-/tmp}/omo-email-subject.XXXXXX")
+  body_file=$(mktemp "${TMPDIR:-/tmp}/omo-email-body.XXXXXX")
+  chmod 600 "$subject_file" "$body_file"
+  Write both files through an editor, apply_patch, or another non-shell text channel.
   omo_email_human.sh --subject-file "$subject_file" --message-file "$body_file"
 EOF
 }

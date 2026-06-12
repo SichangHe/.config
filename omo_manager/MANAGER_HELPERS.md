@@ -6,7 +6,7 @@
 
 `omo_pending_watch.py` remains conservative for pending refs: it scans Markdown for literal `(pending)` markers outside fenced code and inspects each pending block for explicit source markers. It sends manager refs as `pending: file=... line=... origin=human|agent source=email|manual|agent action=ack-human|no-human-ack`. Email source markers are `origin=human source=email`; explicit agent source markers anywhere in the same pending block are `origin=agent source=agent`; unmarked pending blocks are `origin=human source=manual` because prompts appended to `work_manager*.md` are human-origin unless explicitly marked otherwise. Human-origin refs require manager email acknowledgement. Linux hosts use inotify for low-latency Markdown events, plus `--poll-backstop-interval-s`, default `30`, to run an mtime scan after 30 seconds without a filesystem notification, full scan, or previous backstop poll; `--full-scan-interval-s` remains broader recovery. The watcher also runs `omo_agent_status.py --problems-only` every `--agent-problem-interval-s` seconds, default `300`, to detect task files still marked `(running)` whose pane is `error`, `not_codex`, or `ready`, blocked persistent-role task files whose pane is `error` or `not_codex`, plus completed task files that still have stale registry rows. A ready pane is not a problem when the latest task-file status note is a blocked note containing `persistent role`; persistent-role blocked standby still reports `error`, `not_codex`, and stale done-registry rows. Healthy `running` agents produce no manager message. Identical problem output is keyed by SHA-256 in the pending seen state and is repeated at most once per `--agent-problem-repeat-s` seconds, default `1800`. Digest idle delivery uses a separate human-contact clock: if `manager_digest.md` has content and the newest `manager_mail/*.txt` is at least `--digest-idle-after-s` seconds old, default `3600`, it runs `scripts/manager-digest deliver`. Human-review note: this one-hour no-human-email digest policy was added after mail `manager_mail/5125.txt`; review whether future manager instructions should make this a standing obligation or keep it as helper behavior. Human-review note: running-agent reminders are now problem-only; review standing manager instructions if they still expect periodic healthy running-agent reminders.
 
-Manager-authored prose must live in a named file before a helper command is assembled. Command source should contain helper names, flags, paths, task refs, tmux targets, and machine-generated refs. Use `omo_text.py temp --kind email-subject|email-body|worker-prompt|agent-message` to create a private `0600` text file under `${TMPDIR:-/tmp}`; temporary human text belongs in TMP, not in repo-local scratch paths. Human-facing email subjects must include the relevant task md filename so replies can route after manager compaction. Write the file with an editor or file-editing tool, then pass it with `omo_email_human.sh --subject-file SUBJECT --message-file BODY`, `omo_tmux_send.py --message-file PROMPT`, `omo_task.py --prompt-file PROMPT`, `omo_report.sh --message-file REPORT`, or `omo_text.py email|tmux|task --body-file ...`. Human-review note: review and approve this standing manager rule and consider adding the same invariant to broader AGENTS.md.
+Manager-authored prose must live in a named file before a helper command is assembled. Command source should contain helper names, flags, paths, task refs, tmux targets, and machine-generated refs. For new temporary prose, create a random private empty file with `mktemp "${TMPDIR:-/tmp}/omo-file.XXXXXX"` plus `chmod 600`, then write the text through an editor, `apply_patch`, or another non-shell text channel. Temporary human text belongs in private files under `${TMPDIR:-/tmp}`, not in repo-local scratch paths. Human-facing email subjects must include the relevant task md filename so replies can route after manager compaction. Then pass files directly with `omo_email_human.sh --subject-file SUBJECT --message-file BODY`, `omo_tmux_send.py --message-file PROMPT`, `omo_task.py --prompt-file PROMPT`, or `omo_report.sh --message-file REPORT`. Human-review note: review and approve this standing manager rule and consider adding the same invariant to broader AGENTS.md.
 
 `omo_digest_queue.py` is the durable non-urgent digest path. `submit` appends digest items to the configured queue file, records absolute `queued-at`, and records absolute `published-at` when the source provides it or a relative `Published N ago` value can be resolved at queue time. `deliver-once` sends queued items immediately when requested and renders absolute queued/published times; idle timing and recent-contact checks belong to a separate watcher. `omo_email_human.sh` remains the lower-level email sender and rejects placeholder subjects and empty bodies before sending. `email_me.py` emits HTML alternatives for Markdown links while keeping a plain text fallback with bare URLs.
 
@@ -18,21 +18,24 @@ For any repeatedly called command set, add a dedicated tiny-output script wrappe
 
 `omo_tmux_send.py` is the safe tmux paste primitive. Use its file path input for arbitrary prompt text:
 
+Create a private prompt file, write it through an editor, `apply_patch`, or another non-shell text channel, then run:
+
 ```sh
-prompt_file=$(omo_text.py temp --kind worker-prompt)
-$EDITOR "$prompt_file"
+prompt_file=$(mktemp "${TMPDIR:-/tmp}/omo-worker-prompt.XXXXXX")
+chmod 600 "$prompt_file"
 omo_tmux_send.py --target cfg:1.0 --message-file "$prompt_file" --enter
 ```
 
-Prefer the single manager-facing wrapper when writing new manager commands:
+Use direct file-based helpers for manager-authored files:
 
 ```sh
-subject_file=$(omo_text.py temp --kind email-subject)
-body_file=$(omo_text.py temp --kind email-body)
-prompt_file=$(omo_text.py temp --kind worker-prompt)
-omo_text.py email --subject-file "$subject_file" --body-file "$body_file"
-omo_text.py tmux --target cfg:1.0 --body-file "$prompt_file" --enter
-omo_text.py task --task-file x.md --tmux-session cfg --workdir /repo --body-file "$prompt_file"
+subject_file=$(mktemp "${TMPDIR:-/tmp}/omo-email-subject.XXXXXX")
+body_file=$(mktemp "${TMPDIR:-/tmp}/omo-email-body.XXXXXX")
+prompt_file=$(mktemp "${TMPDIR:-/tmp}/omo-worker-prompt.XXXXXX")
+chmod 600 "$subject_file" "$body_file" "$prompt_file"
+omo_email_human.sh --subject-file "$subject_file" --message-file "$body_file"
+omo_tmux_send.py --target cfg:1.0 --message-file "$prompt_file" --enter
+omo_task.py --task-file x.md --tmux-session cfg --workdir /repo --prompt-file "$prompt_file"
 ```
 
 For prompts, it reads `--message-file`, writes the payload to a private `0600` temp file, loads that file into a tmux buffer, pastes the buffer to the target, and only uses `send-keys` for optional final Enter keys. `--ready-timeout-s N` waits for a Codex idle input box before submitted paste, preventing Codex from queueing dispatch text as `Messages to be submitted after next tool call`. `--enter-count N` supports repeated submit keys. Submitted Codex sends verify that the active input line is empty after Enter; if it still contains text, the helper sends one fallback Enter and then fails if any non-placeholder input text remains. `omo_dispatch.sh --tmux-target TARGET` uses this helper for normal prompt dispatch, defaults submitted tmux dispatches to two Enter keys, and waits up to `OMO_DISPATCH_TMUX_READY_TIMEOUT_S` seconds, default `300`; override Enter count with `OMO_DISPATCH_TMUX_ENTER_COUNT`.
