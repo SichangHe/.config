@@ -8,22 +8,64 @@ export PCODX_LEDGER_PATH="${PCODX_LEDGER_PATH:-$PCODX_RUN_DIR/ledger.json}"
 export PCODX_SESSION_ID="${PCODX_SESSION_ID:-pcodx-$$}"
 mkdir -p "$PCODX_RUN_DIR"
 
+trim() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s\n' "$value"
+}
+
+config_key() {
+  trim "${1%%=*}"
+}
+
+config_allowed() {
+  local spec="$1"
+  [[ "$spec" == *=* && "$spec" != *$'\n'* && "$spec" != *$'\r'* ]] || return 1
+  [[ "$(config_key "$spec")" == "model_reasoning_effort" ]] || return 1
+  case "$(trim "${spec#*=}")" in
+    low|medium|high|xhigh|'"low"'|'"medium"'|'"high"'|'"xhigh"'|"'low'"|"'medium'"|"'high'"|"'xhigh'") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+reject_config() {
+  echo "pcodx owns Codex config injection; pass task instructions as prompt text instead" >&2
+  exit 2
+}
+
 prev_arg_was_config=0
+forward_args=()
+pcodx_allowed_configs=()
 for arg in "$@"; do
   if [[ "$prev_arg_was_config" == 1 ]]; then
-    echo "pcodx owns Codex config injection; pass task instructions as prompt text instead" >&2
-    exit 2
+    config_allowed "$arg" || reject_config
+    pcodx_allowed_configs+=(--config "$arg")
+    prev_arg_was_config=0
+    continue
   fi
   case "$arg" in
     -c|--config)
       prev_arg_was_config=1
       ;;
-    -c*|--config=*)
-      echo "pcodx owns Codex config injection; pass task instructions as prompt text instead" >&2
-      exit 2
+    --config=*)
+      config_value="${arg#--config=}"
+      config_allowed "$config_value" || reject_config
+      pcodx_allowed_configs+=(--config "$config_value")
+      ;;
+    -c*)
+      config_value="${arg#-c}"
+      config_allowed "$config_value" || reject_config
+      pcodx_allowed_configs+=(--config "$config_value")
+      ;;
+    *)
+      forward_args+=("$arg")
       ;;
   esac
 done
+if [[ "$prev_arg_was_config" == 1 ]]; then
+  reject_config
+fi
 
 PCODX_DEVELOPER_INSTRUCTIONS=$(bun run "$PCODX_POC_ROOT/src/pcodx-instructions.ts")
 PCODX_DEVELOPER_INSTRUCTIONS_TOML=$(PCODX_DEVELOPER_INSTRUCTIONS="$PCODX_DEVELOPER_INSTRUCTIONS" python3 -c 'import json, os; print(json.dumps(os.environ["PCODX_DEVELOPER_INSTRUCTIONS"]))')
@@ -36,4 +78,5 @@ exec bunx @openai/codex \
   --config 'mcp_servers.pcodx_partial_compact.command="bun"' \
   --config "mcp_servers.pcodx_partial_compact.args=[\"run\",\"$PCODX_POC_ROOT/src/mcp-server.ts\"]" \
   --config "mcp_servers.pcodx_partial_compact.env={PCODX_LEDGER_PATH=$PCODX_LEDGER_PATH_TOML,PCODX_SESSION_ID=$PCODX_SESSION_ID_TOML}" \
-  "$@"
+  "${pcodx_allowed_configs[@]}" \
+  "${forward_args[@]}"

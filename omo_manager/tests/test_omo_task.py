@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from omo_manager.omo_task import Args, DEFAULT_WORKER_INSTRUCTIONS, codex_cmd, ensure_task_file, link_todo, main, new_window, parse_args, start_codex, wait_command_started
+from omo_manager.omo_task import Args, DEFAULT_TOOL, DEFAULT_WORKER_INSTRUCTIONS, codex_cmd, effective_tool, ensure_task_file, link_todo, main, new_window, parse_args, start_codex, wait_command_started
 
 
 class OmoTaskTests(unittest.TestCase):
@@ -25,6 +25,24 @@ class OmoTaskTests(unittest.TestCase):
             path = ensure_task_file(args, 'cfg:2')
             self.assertEqual('runat: cfg:2 pcodx', path.read_text(encoding='utf-8').splitlines()[0])
 
+    def test_existing_task_file_header_tracks_latest_launch_tool(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "x.md"
+            path.write_text("runat: cfg:2 codex\n\nold body\n", encoding="utf-8")
+            args = Args(root, "x.md", "cfg", "2", "pcodx", root, "", None, False, False, "", "", ())
+            self.assertEqual(path, ensure_task_file(args, "cfg:2"))
+            self.assertEqual("runat: cfg:2 pcodx\n\nold body\n", path.read_text(encoding="utf-8"))
+
+    def test_metadata_only_existing_task_preserves_runat_header(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "x.md"
+            path.write_text("runat: cfg:2 codex\n\nold body\n", encoding="utf-8")
+            args = Args(root, "x.md", "cfg", "2", "pcodx", None, "", None, False, False, "", "", ())
+            self.assertEqual(path, ensure_task_file(args, "cfg:2"))
+            self.assertEqual("runat: cfg:2 codex\n\nold body\n", path.read_text(encoding="utf-8"))
+
     def test_new_window_uses_tmux_new_window_shape(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             args = Args(Path(tmp), 'x.md', 'cfg', '', 'codex', Path(tmp), 'x', None, False, False, '', '', ())
@@ -38,13 +56,14 @@ class OmoTaskTests(unittest.TestCase):
             start_codex_mock.assert_called_once_with('cfg:7', args)
 
     def test_codex_cmd_resumes_quoted_session(self) -> None:
-        self.assertEqual("bunx @openai/codex --dangerously-bypass-approvals-and-sandbox resume abc", codex_cmd("abc"))
-        self.assertEqual("bunx @openai/codex --dangerously-bypass-approvals-and-sandbox resume 'abc def'", codex_cmd("abc def"))
+        self.assertEqual("pcodx resume abc", codex_cmd("abc"))
+        self.assertEqual("pcodx resume 'abc def'", codex_cmd("abc def"))
+        self.assertEqual("bunx @openai/codex --dangerously-bypass-approvals-and-sandbox resume abc", codex_cmd("abc", tool="codex"))
 
     def test_codex_cmd_uses_prompt_argument_from_file(self) -> None:
         expected_paths = f"{DEFAULT_WORKER_INSTRUCTIONS} /tmp/prompt.md"
         self.assertEqual(
-            f'bunx @openai/codex --dangerously-bypass-approvals-and-sandbox "$(cat -- {expected_paths})"',
+            f'pcodx "$(cat -- {expected_paths})"',
             codex_cmd(prompt_file=Path("/tmp/prompt.md")),
         )
 
@@ -53,8 +72,12 @@ class OmoTaskTests(unittest.TestCase):
 
     def test_codex_cmd_adds_reasoning_effort_and_extra_flags(self) -> None:
         self.assertEqual(
-            "bunx @openai/codex --dangerously-bypass-approvals-and-sandbox --config 'model_reasoning_effort=\"xhigh\"' --profile deep-review",
+            "pcodx --config 'model_reasoning_effort=\"xhigh\"' --profile deep-review",
             codex_cmd(reasoning_effort="xhigh", codex_flags=("--profile", "deep-review")),
+        )
+        self.assertEqual(
+            "bunx @openai/codex --dangerously-bypass-approvals-and-sandbox --config 'model_reasoning_effort=\"xhigh\"' --profile deep-review",
+            codex_cmd(reasoning_effort="xhigh", codex_flags=("--profile", "deep-review"), tool="codex"),
         )
 
     def test_pcodx_tool_uses_wrapper_command(self) -> None:
@@ -67,10 +90,43 @@ class OmoTaskTests(unittest.TestCase):
         args = parse_args(["--task-file", "x.md", "--reasoning-effort", "xhigh", "--codex-flag=--profile", "--codex-flag", "deep-review"])
         self.assertEqual("xhigh", args.reasoning_effort)
         self.assertEqual(("--profile", "deep-review"), args.codex_flags)
+        self.assertEqual(DEFAULT_TOOL, args.tool)
 
     def test_parse_args_accepts_pcodx_tool(self) -> None:
         args = parse_args(["--task-file", "x.md", "--tool", "pcodx"])
         self.assertEqual("pcodx", args.tool)
+        self.assertTrue(args.tool_explicit)
+
+    def test_session_resume_preserves_existing_codex_task_tool_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "x.md"
+            path.write_text("runat: cfg:2 codex\n\nold body\n", encoding="utf-8")
+            args = Args(root, "x.md", "cfg", "2", "pcodx", root, "", None, False, False, "11111111-1111-1111-1111-111111111111", "", ())
+            self.assertEqual("codex", effective_tool(args))
+            ensure_task_file(args, "cfg:2")
+            self.assertEqual("runat: cfg:2 codex\n\nold body\n", path.read_text(encoding="utf-8"))
+
+    def test_session_resume_uses_legacy_runat_tool_without_top_header(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "x.md"
+            path.write_text("old notes\nrunat: cfg:2 codex\n", encoding="utf-8")
+            args = Args(root, "x.md", "cfg", "2", "pcodx", root, "", None, False, False, "11111111-1111-1111-1111-111111111111", "", ())
+
+            self.assertEqual("codex", effective_tool(args))
+            ensure_task_file(args, "cfg:2")
+            self.assertEqual("runat: cfg:2 codex\n\nold notes\nrunat: cfg:2 codex\n", path.read_text(encoding="utf-8"))
+
+    def test_session_resume_explicit_tool_overrides_existing_task_tool(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "x.md"
+            path.write_text("runat: cfg:2 codex\n\nold body\n", encoding="utf-8")
+            args = Args(root, "x.md", "cfg", "2", "pcodx", root, "", None, False, False, "11111111-1111-1111-1111-111111111111", "", (), True)
+            self.assertEqual("pcodx", effective_tool(args))
+            ensure_task_file(args, "cfg:2")
+            self.assertEqual("runat: cfg:2 pcodx\n\nold body\n", path.read_text(encoding="utf-8"))
 
     def test_new_window_can_resume_session_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

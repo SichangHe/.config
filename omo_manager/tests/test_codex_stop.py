@@ -20,6 +20,7 @@ from omo_manager.omo_codex_stop import (
     post_interrupt_output,
     query_status_session_id,
     record_close,
+    resume_cmd,
     send_exit_keys,
     stop,
 )
@@ -130,7 +131,29 @@ class CodexStopTests(unittest.TestCase):
                 )
             text = task.read_text(encoding="utf-8")
         self.assertIn("session_id: 11111111-2222-3333-4444-555555555555\n", out.getvalue())
+        self.assertIn("resume_cmd: codex resume 11111111-2222-3333-4444-555555555555\n", out.getvalue())
         self.assertIn("tmux target `cfg:1.0`", text)
+
+    def test_resume_cmd_defaults_to_pcodx_and_uses_task_tool(self) -> None:
+        session_id = "11111111-2222-3333-4444-555555555555"
+        self.assertEqual(f"pcodx resume {session_id}", resume_cmd(Args("cfg:1.0", 0.0, 10, False, False), session_id))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "task.md").write_text("runat: cfg:1 pcodx\n", encoding="utf-8")
+            self.assertEqual(f"pcodx resume {session_id}", resume_cmd(Args("cfg:1.0", 0.0, 10, False, False, root, "task.md"), session_id))
+            _ = (root / "task.md").write_text("runat: cfg:1 codex\n", encoding="utf-8")
+            self.assertEqual(f"codex resume {session_id}", resume_cmd(Args("cfg:1.0", 0.0, 10, False, False, root, "task.md"), session_id))
+            _ = (root / "task.md").write_text("old notes\nrunat: cfg:1 codex\n\nrunat: cfg:2 pcodx\n", encoding="utf-8")
+            self.assertEqual(f"pcodx resume {session_id}", resume_cmd(Args("cfg:2.0", 0.0, 10, False, False, root, "task.md"), session_id))
+            self.assertEqual(f"pcodx resume {session_id}", resume_cmd(Args("cfg:9.0", 0.0, 10, False, False, root, "task.md"), session_id))
+            _ = (root / "task.md").write_text("old notes\nrunat: cfg:2 codex\n\nrunat: cfg:9 pcodx\n", encoding="utf-8")
+            self.assertEqual(f"codex resume {session_id}", resume_cmd(Args("cfg:2.1", 0.0, 10, False, False, root, "task.md"), session_id))
+            _ = (root / "task.md").write_text("runat: cfg:1 codex\n\nold notes\nrunat: cfg:2 pcodx\n", encoding="utf-8")
+            self.assertEqual(f"pcodx resume {session_id}", resume_cmd(Args("cfg:2.0", 0.0, 10, False, False, root, "task.md"), session_id))
+            self.assertEqual(f"pcodx resume {session_id}", resume_cmd(Args("cfg:9.0", 0.0, 10, False, False, root, "task.md"), session_id))
+            _ = (root / "task.md").write_text("runat: cfg:2 pcodx\n\nold notes\nrunat: cfg:2 codex\n", encoding="utf-8")
+            self.assertEqual(f"pcodx resume {session_id}", resume_cmd(Args("cfg:2.0", 0.0, 10, False, False, root, "task.md"), session_id))
+            self.assertEqual(f"pcodx resume {session_id}", resume_cmd(Args("cfg:9.0", 0.0, 10, False, False, root, "task.md"), session_id))
 
     def test_stop_preflights_task_file_before_sending_ctrl_c(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -208,6 +231,10 @@ class CodexStopTests(unittest.TestCase):
         text = feedback_prompt("task.md")
         self.assertIn("write a report file through an editor", text)
         self.assertIn("--task-file task.md", text)
+        self.assertIn("whether you had partial-compaction access", text)
+        self.assertIn("whether you used it", text)
+        self.assertIn("PCODX ledger path", text)
+        self.assertIn("forward it to OPC partial-compaction work", text)
         self.assertIn("at most five short bullets", text)
 
     def test_stop_dry_run_refuses_missing_target_before_printing(self) -> None:

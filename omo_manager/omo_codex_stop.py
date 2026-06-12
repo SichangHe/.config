@@ -19,6 +19,8 @@ except ModuleNotFoundError:
 
 SHELL_COMMANDS = {"bash", "dash", "fish", "sh", "zsh"}
 DEFAULT_ROOT = Path(os.environ.get("OMO_WORK_LOGS_ROOT", Path.home() / "work_logs"))
+DEFAULT_RESUME_TOOL = "pcodx"
+RESUME_TOOLS = {"codex", "pcodx"}
 UUID_RE = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 RESUME_RE = re.compile(rf"(?i)\bcodex\s+resume\s+(?:--[\w-]+\s+)*({UUID_RE})\b")
 EXIT_RESUME_RE = re.compile(
@@ -176,6 +178,63 @@ def task_path(root: Path, task_file: str) -> Path:
     return path
 
 
+def target_aliases(target: str) -> set[str]:
+    aliases = {target}
+    window_target, dot, _pane = target.rpartition(".")
+    if dot and ":" in window_target:
+        aliases.add(window_target)
+    elif not dot:
+        aliases.add(f"{target}.0")
+    return aliases
+
+
+def runat_entries(text: str) -> list[tuple[str, str]]:
+    entries: list[tuple[str, str]] = []
+    for line in text.splitlines():
+        parts = line.strip().split()
+        if len(parts) >= 3 and parts[0] == "runat:" and parts[-1] in RESUME_TOOLS:
+            entries.append((parts[1], parts[-1]))
+    return entries
+
+
+def top_runat_entry(text: str) -> tuple[str, str] | None:
+    first = text.splitlines()[0].strip().split() if text.splitlines() else []
+    if len(first) >= 3 and first[0] == "runat:" and first[-1] in RESUME_TOOLS:
+        return first[1], first[-1]
+    return None
+
+
+def resume_tool(args: Args) -> str:
+    if not args.task_file or args.dry_run:
+        return DEFAULT_RESUME_TOOL
+    text = task_path(args.root, args.task_file).read_text(encoding="utf-8")
+    top = top_runat_entry(text)
+    aliases = target_aliases(args.target)
+    if top and top[0] in aliases:
+        return top[1]
+    entries = runat_entries(text)
+    legacy_entries = entries[1:] if top else entries
+    for tmux_target, tool in reversed(legacy_entries):
+        if tmux_target in aliases:
+            return tool
+    if top:
+        return DEFAULT_RESUME_TOOL
+    if entries:
+        return entries[-1][1]
+    return DEFAULT_RESUME_TOOL
+
+
+def top_runat_tool(text: str) -> str:
+    if entry := top_runat_entry(text):
+        _, tool = entry
+        return tool
+    return ""
+
+
+def resume_cmd(args: Args, session_id: str) -> str:
+    return f"{resume_tool(args)} resume {session_id}"
+
+
 def close_note(target: str, session_id: str, now: datetime | None = None) -> str:
     stamp = (now or datetime.now().astimezone()).strftime("%m-%d %H:%M %Z")
     if session_id:
@@ -314,7 +373,9 @@ def feedback_prompt(task_file: str) -> str:
         "Before the manager closes this session, please send concise process feedback if this was a non-trivial task. "
         "If there is anything worth preserving, write a report file through an editor, apply_patch, or another non-shell text channel, then run `omo_report.sh --task-file "
         f"{task_file} --status done --message-file REPORT_FILE`. "
+        "Say whether you had partial-compaction access, whether you used it, why or why not, and any feedback about the PCODX instructions, tools, or compaction triggers. "
         "Mention unclear instructions, routing/communication gaps, missing tooling/docs, check friction, or whether manager-triggered compaction would have helped you continue. "
+        "If the partial-compaction feedback is substantial, include the relevant evidence paths, such as the task file, tmux target, session id, transcript path, or PCODX ledger path, so the manager can email the human and forward it to OPC partial-compaction work. "
         "Keep it to at most five short bullets. If there is no useful feedback, say so briefly."
     )
 
@@ -370,7 +431,7 @@ def main(argv: list[str]) -> int:
         record_close(args, session_id)
         if session_id:
             print(f"session_id: {session_id}")
-            print(f"resume_cmd: codex resume {session_id}")
+            print(f"resume_cmd: {resume_cmd(args, session_id)}")
         else:
             print("session_id:")
             if args.task_file and not args.dry_run:

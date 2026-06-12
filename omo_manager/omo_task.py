@@ -22,6 +22,7 @@ COMMAND_BY_TOOL = {
     "codex": ("bunx", "@openai/codex", "--dangerously-bypass-approvals-and-sandbox"),
     "pcodx": ("pcodx",),
 }
+DEFAULT_TOOL = "pcodx"
 SHELL_COMMANDS = {"bash", "dash", "fish", "sh", "zsh"}
 
 
@@ -40,6 +41,7 @@ class Args:
     session_id: str
     reasoning_effort: str
     codex_flags: tuple[str, ...]
+    tool_explicit: bool = False
 
 
 class ParsedArgs(argparse.Namespace):
@@ -47,7 +49,7 @@ class ParsedArgs(argparse.Namespace):
     task_file: str = ""
     tmux_session: str = ""
     tmux_window: str = ""
-    tool: str = "codex"
+    tool: str = DEFAULT_TOOL
     workdir: Path | None = None
     window_name: str = ""
     prompt_file: Path | None = None
@@ -65,7 +67,7 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--tmux-session", default="")
     _ = parser.add_argument("--tmux-window", default="")
     _ = parser.add_argument("--pane", default="", help=argparse.SUPPRESS)
-    _ = parser.add_argument("--tool", default="codex")
+    _ = parser.add_argument("--tool", default=DEFAULT_TOOL)
     _ = parser.add_argument("--workdir", type=Path)
     _ = parser.add_argument("--window-name", default="")
     _ = parser.add_argument("--prompt-file", type=Path)
@@ -83,7 +85,8 @@ def parse_args(argv: list[str]) -> Args:
         parser.error("--workdir requires --tmux-session.")
     if parsed.tool not in COMMAND_BY_TOOL:
         parser.error("only --tool codex or --tool pcodx is supported.")
-    return Args(parsed.root.resolve(), parsed.task_file, parsed.tmux_session, parsed.tmux_window, parsed.tool, parsed.workdir, parsed.window_name, parsed.prompt_file, parsed.no_link, parsed.dry_run, parsed.session_id, parsed.reasoning_effort, tuple(parsed.codex_flag or ()))
+    tool_explicit = any(arg == "--tool" or arg.startswith("--tool=") for arg in argv)
+    return Args(parsed.root.resolve(), parsed.task_file, parsed.tmux_session, parsed.tmux_window, parsed.tool, parsed.workdir, parsed.window_name, parsed.prompt_file, parsed.no_link, parsed.dry_run, parsed.session_id, parsed.reasoning_effort, tuple(parsed.codex_flag or ()), tool_explicit)
 
 
 def task_path(root: Path, task_file: str) -> Path:
@@ -103,6 +106,66 @@ def header(tmux_target: str, tool: str) -> str:
     return f"runat: {tmux_target} {tool}" if tmux_target else ""
 
 
+def target_aliases(tmux_target: str) -> set[str]:
+    aliases = {tmux_target} if tmux_target else set()
+    window_target, dot, _pane = tmux_target.rpartition(".")
+    if dot and ":" in window_target:
+        aliases.add(window_target)
+    elif tmux_target and not dot:
+        aliases.add(f"{tmux_target}.0")
+    return aliases
+
+
+def upsert_header(existing: str, first: str) -> str:
+    if not first:
+        return existing
+    if not existing:
+        return f"{first}\n\n"
+    lines = existing.splitlines(keepends=True)
+    if lines and lines[0].startswith("runat: "):
+        lines[0] = f"{first}\n"
+        return "".join(lines)
+    return f"{first}\n\n{existing}"
+
+
+def top_header_tool(text: str) -> str:
+    first = text.splitlines()[0].strip().split() if text.splitlines() else []
+    if len(first) >= 3 and first[0] == "runat:" and first[-1] in COMMAND_BY_TOOL:
+        return first[-1]
+    return ""
+
+
+def runat_entries(text: str) -> list[tuple[str, str]]:
+    entries: list[tuple[str, str]] = []
+    for line in text.splitlines():
+        parts = line.strip().split()
+        if len(parts) >= 3 and parts[0] == "runat:" and parts[-1] in COMMAND_BY_TOOL:
+            entries.append((parts[1], parts[-1]))
+    return entries
+
+
+def task_file_tool(text: str, tmux_target: str) -> str:
+    if tool := top_header_tool(text):
+        return tool
+    entries = runat_entries(text)
+    aliases = target_aliases(tmux_target)
+    for entry_target, tool in reversed(entries):
+        if entry_target in aliases:
+            return tool
+    if entries:
+        return entries[-1][1]
+    return ""
+
+
+def effective_tool(args: Args) -> str:
+    if args.tool_explicit or not args.session_id:
+        return args.tool
+    path = task_path(args.root, args.task_file)
+    if path.exists() and (tool := task_file_tool(path.read_text(encoding="utf-8"), target(args))):
+        return tool
+    return args.tool
+
+
 def prompt_input(prompt_file: Path | None) -> str:
     if prompt_file is None:
         return ""
@@ -113,7 +176,7 @@ def prompt_input(prompt_file: Path | None) -> str:
     return f"\"$(cat -- {quoted_paths})\""
 
 
-def codex_cmd(session_id: str = "", reasoning_effort: str = "", codex_flags: tuple[str, ...] = (), prompt_file: Path | None = None, tool: str = "codex") -> str:
+def codex_cmd(session_id: str = "", reasoning_effort: str = "", codex_flags: tuple[str, ...] = (), prompt_file: Path | None = None, tool: str = DEFAULT_TOOL) -> str:
     try:
         args = list(COMMAND_BY_TOOL[tool])
     except KeyError as exc:
@@ -173,7 +236,7 @@ def new_window_command(args: Args) -> list[str]:
 
 
 def start_codex(target: str, args: Args) -> None:
-    command = shell_cmd(codex_cmd(args.session_id, args.reasoning_effort, args.codex_flags, args.prompt_file, args.tool))
+    command = shell_cmd(codex_cmd(args.session_id, args.reasoning_effort, args.codex_flags, args.prompt_file, effective_tool(args)))
     _ = tmux(["send-keys", "-t", target, command, "Enter"], check=True)
     wait_command_started(target)
 
@@ -191,19 +254,14 @@ def new_window(args: Args) -> str:
 def ensure_task_file(args: Args, tmux_target: str) -> Path:
     path = task_path(args.root, args.task_file)
     path.parent.mkdir(parents=True, exist_ok=True)
-    chunks: list[str] = []
-    if not path.exists():
-        first = header(tmux_target, args.tool)
-        if first:
-            chunks.append(f"{first}\n\n")
+    existed = path.exists()
+    existing = path.read_text(encoding="utf-8") if existed else ""
+    text = upsert_header(existing, header(tmux_target, effective_tool(args))) if args.workdir is not None or not existed else existing
     if args.prompt_file is not None:
-        chunks.append(args.prompt_file.read_text(encoding="utf-8").rstrip() + "\n")
-    if chunks:
-        existing = path.read_text(encoding="utf-8") if path.exists() else ""
-        sep = "" if not existing or existing.endswith("\n") else "\n"
-        _ = path.write_text(existing + sep + "".join(chunks), encoding="utf-8")
-    elif not path.exists():
-        _ = path.write_text("", encoding="utf-8")
+        sep = "" if not text or text.endswith("\n") else "\n"
+        text += sep + args.prompt_file.read_text(encoding="utf-8").rstrip() + "\n"
+    if text != existing or not existed:
+        _ = path.write_text(text, encoding="utf-8")
     return path
 
 
@@ -242,7 +300,7 @@ def dry_run(args: Args) -> None:
         command = ["tmux", *new_window_command(args)]
         print("tmux: " + " ".join(shlex.quote(part) for part in command))
         launch_target = f"{args.tmux_session}:DRYRUN"
-        launch = ["tmux", "send-keys", "-t", launch_target, shell_cmd(codex_cmd(args.session_id, args.reasoning_effort, args.codex_flags, args.prompt_file, args.tool)), "Enter"]
+        launch = ["tmux", "send-keys", "-t", launch_target, shell_cmd(codex_cmd(args.session_id, args.reasoning_effort, args.codex_flags, args.prompt_file, effective_tool(args))), "Enter"]
         print("tmux: " + " ".join(shlex.quote(part) for part in launch))
 
 
