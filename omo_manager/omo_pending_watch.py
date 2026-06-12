@@ -28,6 +28,8 @@ DEFAULT_DIGEST_IDLE_AFTER_S = float(os.environ.get("OMO_MANAGER_DIGEST_IDLE_AFTE
 DEFAULT_AGENT_PROBLEM_INTERVAL_S = float(os.environ.get("OMO_MANAGER_AGENT_PROBLEM_INTERVAL_S", "300"))
 DEFAULT_AGENT_PROBLEM_REPEAT_S = float(os.environ.get("OMO_MANAGER_AGENT_PROBLEM_REPEAT_S", "1800"))
 DEFAULT_POLL_BACKSTOP_INTERVAL_S = float(os.environ.get("OMO_MANAGER_POLL_BACKSTOP_INTERVAL_S", "30"))
+DEFAULT_TMUX_READY_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_TMUX_READY_TIMEOUT_S", os.environ.get("OMO_DISPATCH_TMUX_READY_TIMEOUT_S", "300")))
+DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_TMUX_SUBMIT_VERIFY_TIMEOUT_S", "5"))
 PENDING_MARKERS = {"(pending)"}
 ROUTED_PREFIXES = ("(manager handled:", "(manager routed:")
 EMAIL_SOURCE_PREFIXES = ("(from email ", "[source: email ")
@@ -399,30 +401,68 @@ def push_manager_text(args: Args, text: str) -> int:
     if not args.manager_url and not args.manager_target:
         print("omo_pending_watch: --manager-target or --manager-url is required outside --dry-run", file=sys.stderr)
         return 1
+    return subprocess.run(push_manager_command(args, text), check=False).returncode
+
+
+def push_manager_command(args: Args, text: str) -> list[str]:
     command = ["omo_push_to_manager.py", text, "--root", str(args.root), "--submit"]
     if args.manager_target:
         command.extend(["--manager-target", args.manager_target])
     if args.manager_url:
         command.extend(["--manager-url", args.manager_url])
-    return subprocess.run(command, check=False).returncode
+    return command
 
 
 def maybe_push_idle_status(args: Args, last_activity_s: float, now_s: float) -> bool:
     if now_s - last_activity_s < args.idle_status_interval_s:
         return False
-    command = [str(args.status_script), "--root", str(args.root), "--problems-only"]
+    command = [str(args.status_script), "--root", str(args.root)]
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=30, check=False)
     except (OSError, subprocess.SubprocessError) as exc:
         print(f"omo_pending_watch: idle status check failed: {exc}", file=sys.stderr)
         return False
-    if result.returncode != 3:
+    if result.returncode not in {0, 3}:
+        print(f"omo_pending_watch: idle status check exited status={result.returncode}: {result.stderr.strip()}", file=sys.stderr)
         return False
     output = result.stdout.strip()
+    if not output:
+        return False
     if result.stderr.strip():
         output = f"{output}\nstderr:\n{result.stderr.strip()}".strip()
-    text = f"manager agent problem: idle watcher found a running task marker needing attention.\n{output}"
+    text = f"manager agent status: periodic running-agent status.\n{output}"
     return push_manager_text(args, text) in {0, 2}
+
+
+def periodic_status_text(args: Args, result: CommandOutput) -> str | None:
+    if result.timed_out:
+        print("omo_pending_watch: idle status check timed out", file=sys.stderr)
+        return None
+    if result.returncode not in {0, 3}:
+        print(f"omo_pending_watch: idle status check exited status={result.returncode}: {result.stderr.strip()}", file=sys.stderr)
+        return None
+    output = result.stdout.strip()
+    if not output:
+        return None
+    if result.stderr.strip():
+        output = f"{output}\nstderr:\n{result.stderr.strip()}".strip()
+    return f"manager agent status: periodic running-agent status.\n{output}"
+
+
+def manager_push_timeout_s() -> float:
+    return DEFAULT_TMUX_READY_TIMEOUT_S + (2 * DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S) + 15
+
+
+def update_idle_status_check(args: Args, last_check_s: float, now_s: float, status_run: CommandRun | None) -> tuple[float, CommandRun | None]:
+    if now_s - last_check_s < args.idle_status_interval_s:
+        return last_check_s, status_run
+    if status_run is not None:
+        return last_check_s, status_run
+    if args.dry_run:
+        _ = maybe_push_idle_status(args, last_check_s, now_s)
+        return now_s, None
+    run = start_command("idle status check", [str(args.status_script), "--root", str(args.root)], 30)
+    return now_s, run
 
 
 def maybe_push_agent_problems(args: Args, seen: dict[str, float], now_wall_s: float) -> bool:
@@ -571,7 +611,10 @@ def main(argv: list[str]) -> int:
     fallback_mail_activity_s = time.time()
     last_digest_check_s = 0.0
     last_agent_problem_check_s = 0.0
+    last_idle_status_check_s = time.monotonic()
     agent_problem_run: CommandRun | None = None
+    idle_status_run: CommandRun | None = None
+    idle_status_push_run: CommandRun | None = None
     digest_run: CommandRun | None = None
     while True:
         now_s = time.monotonic()
@@ -596,6 +639,22 @@ def main(argv: list[str]) -> int:
             if result is not None:
                 changed = handle_agent_problem_result(args, seen, result, now_wall_s) or changed
                 agent_problem_run = None
+        last_idle_status_check_s, idle_status_run = update_idle_status_check(args, last_idle_status_check_s, now_s, idle_status_run)
+        if idle_status_run is not None:
+            result = poll_command(idle_status_run, now_wall_s)
+            if result is not None:
+                text = periodic_status_text(args, result)
+                if text is not None and idle_status_push_run is None:
+                    idle_status_push_run = start_command("idle status delivery", push_manager_command(args, text), manager_push_timeout_s())
+                idle_status_run = None
+        if idle_status_push_run is not None:
+            result = poll_command(idle_status_push_run, now_wall_s)
+            if result is not None:
+                if result.timed_out:
+                    print("omo_pending_watch: idle status delivery timed out", file=sys.stderr)
+                elif result.returncode not in {0, 2} and result.stderr.strip():
+                    print(f"omo_pending_watch: idle status delivery exited status={result.returncode}: {result.stderr.strip()}", file=sys.stderr)
+                idle_status_push_run = None
         seen = expire_seen(seen, time.time())
         if changed:
             save_seen(args.state, seen)
@@ -616,10 +675,15 @@ def main(argv: list[str]) -> int:
                 elif result.stderr.strip():
                     print(f"omo_pending_watch: digest delivery exited status={result.returncode}: {result.stderr.strip()}", file=sys.stderr)
                 digest_run = None
-        deadlines = [next_full_s, last_agent_problem_check_s + args.agent_problem_interval_s, last_digest_check_s + min(args.digest_idle_after_s, 60.0)]
+        deadlines = [
+            next_full_s,
+            last_agent_problem_check_s + args.agent_problem_interval_s,
+            last_idle_status_check_s + args.idle_status_interval_s,
+            last_digest_check_s + min(args.digest_idle_after_s, 60.0),
+        ]
         if watcher is not None:
             deadlines.append(next_poll_s)
-        if agent_problem_run is not None or digest_run is not None:
+        if agent_problem_run is not None or idle_status_run is not None or idle_status_push_run is not None or digest_run is not None:
             deadlines.append(now_s + 0.2)
         timeout_s = args.interval_s if watcher is None else max(0.0, min(deadlines) - now_s)
         if watcher is None:

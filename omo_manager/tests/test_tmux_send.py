@@ -14,12 +14,14 @@ from omo_manager.omo_tmux_send import (
     input_has_probe,
     launch_async,
     message_probe,
+    message_probes,
     parse_args,
     pending_marker_present,
     read_message,
     run_async_worker,
     run_tmux,
     verify_submit,
+    wait_paste_visible,
     wait_ready,
     write_private_temp,
 )
@@ -251,6 +253,7 @@ class TmuxSendTests(unittest.TestCase):
 
     def test_input_probe_matches_codex_input_only(self) -> None:
         self.assertEqual("Read the dispatch prompt", message_probe("\nRead the dispatch prompt\nmore"))
+        self.assertEqual(["first", "last"], message_probes("first\nmiddle\nlast\n"))
         self.assertTrue(input_has_probe(["› Read the dispatch prompt", "  gpt-5.5"], "Read the dispatch prompt"))
         self.assertFalse(input_has_probe(["› Older submitted prompt", "• Working", "  gpt-5.5"], "Older submitted prompt"))
         self.assertFalse(input_has_probe(["Read the dispatch prompt", "  gpt-5.5"], "Read the dispatch prompt"))
@@ -283,6 +286,59 @@ class TmuxSendTests(unittest.TestCase):
 
         self.assertEqual([["tmux", "send-keys", "-t", "cfg:1.0", "Enter"]], calls)
 
+    def test_verify_submit_retries_enter_until_prompt_clears(self) -> None:
+        calls: list[list[str]] = []
+        tails = iter(
+            [
+                ["› Read the dispatch prompt from /tmp/x and follow it exactly.", "  gpt-5.5"],
+                ["› Read the dispatch prompt from /tmp/x and follow it exactly.", "  gpt-5.5"],
+                ["• Working", "  gpt-5.5"],
+            ]
+        )
+
+        def fake_tail(_: str, __: int) -> list[str]:
+            return next(tails)
+
+        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch("omo_manager.omo_tmux_send.tail", side_effect=fake_tail), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run), patch("omo_manager.omo_tmux_send.time.monotonic", side_effect=[0.0, 0.0, 0.3]), patch("omo_manager.omo_tmux_send.time.sleep"):
+            verify_submit(Args("cfg:1.0", None, 1, 0.15, 0, False, submit_verify_timeout_s=1), "Read the dispatch prompt from /tmp/x and follow it exactly.\n")
+
+        self.assertEqual(
+            [
+                ["tmux", "send-keys", "-t", "cfg:1.0", "Enter"],
+                ["tmux", "send-keys", "-t", "cfg:1.0", "Enter"],
+            ],
+            calls,
+        )
+
+    def test_wait_paste_visible_requires_prompt_before_enter(self) -> None:
+        tails = iter([["›", "  gpt-5.5"], ["› Read the dispatch prompt from /tmp/x and follow it exactly.", "  gpt-5.5"]])
+
+        def fake_tail(_: str, __: int) -> list[str]:
+            return next(tails)
+
+        with patch("omo_manager.omo_tmux_send.tail", side_effect=fake_tail), patch("omo_manager.omo_tmux_send.time.monotonic", side_effect=[0.0, 0.1]), patch("omo_manager.omo_tmux_send.time.sleep") as sleep:
+            wait_paste_visible(Args("cfg:1.0", None, 1, 0.15, 0, False, submit_verify_timeout_s=1), "Read the dispatch prompt from /tmp/x and follow it exactly.\n")
+
+        sleep.assert_called_once()
+
+    def test_wait_paste_visible_checks_trailing_probe_for_long_message(self) -> None:
+        long_message = "\n".join(["first line", *[f"middle {idx}" for idx in range(100)], "last line"]) + "\n"
+        tails = iter([["› last line", "  gpt-5.5"]])
+        seen_n_lines: list[int] = []
+
+        def fake_tail(_: str, n_lines: int) -> list[str]:
+            seen_n_lines.append(n_lines)
+            return next(tails)
+
+        with patch("omo_manager.omo_tmux_send.tail", side_effect=fake_tail):
+            wait_paste_visible(Args("cfg:1.0", None, 1, 0.15, 0, False, submit_verify_timeout_s=1), long_message)
+
+        self.assertEqual([122], seen_n_lines)
+
     def test_verify_submit_fails_when_prompt_stays_in_input(self) -> None:
         def fake_tail(_: str, __: int) -> list[str]:
             return ["› Read the dispatch prompt from /tmp/x and follow it exactly.", "  gpt-5.5"]
@@ -305,7 +361,7 @@ class TmuxSendTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "input box still has text"):
                 verify_submit(Args("cfg:1.0", None, 1, 0.15, 0, False, submit_verify_timeout_s=1), "Read the dispatch prompt from /tmp/x and follow it exactly.\n")
 
-        self.assertEqual([["tmux", "send-keys", "-t", "cfg:1.0", "Enter"]], calls)
+        self.assertEqual([], calls)
 
 
 if __name__ == "__main__":

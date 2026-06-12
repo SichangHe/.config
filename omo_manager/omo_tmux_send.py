@@ -183,6 +183,21 @@ def message_probe(message: str) -> str:
     return ""
 
 
+def message_probes(message: str) -> list[str]:
+    probes: list[str] = []
+    for line in message.splitlines():
+        probe = line.strip()
+        if probe:
+            probes.append(probe[:80])
+    if len(probes) <= 2:
+        return probes
+    return [probes[0], probes[-1]]
+
+
+def inspect_lines_for_message(message: str) -> int:
+    return min(2000, max(80, len(message.splitlines()) + 20))
+
+
 def current_input_text(lines: list[str]) -> str:
     body = lines[:-1] if lines and lines[-1].startswith("  gpt-") else lines[:]
     while body and not body[-1].strip():
@@ -204,30 +219,64 @@ def input_has_probe(lines: list[str], probe: str) -> bool:
     return bool(probe and probe in current_input_text(lines))
 
 
+def input_has_any_probe(lines: list[str], probes: list[str]) -> bool:
+    input_text = current_input_text(lines)
+    return any(probe in input_text for probe in probes)
+
+
+def send_enter(target: str) -> None:
+    _ = subprocess.run(["tmux", "send-keys", "-t", target, "Enter"], timeout=5, check=True)
+
+
+def wait_paste_visible(args: Args, message: str) -> None:
+    if args.enter_count <= 0 or args.submit_verify_timeout_s <= 0:
+        return
+    probes = message_probes(message)
+    if not probes:
+        return
+    n_lines = inspect_lines_for_message(message)
+    deadline_s = time.monotonic() + args.submit_verify_timeout_s
+    last_status = "unknown"
+    last_input = ""
+    while True:
+        lines = tail(args.target, n_lines)
+        last_status = status(lines, current_block(lines))
+        if last_status == "not_codex" or input_has_any_probe(lines, probes):
+            return
+        last_input = current_input_text(lines)
+        now_s = time.monotonic()
+        if now_s >= deadline_s:
+            suffix = "input box has different text" if last_input else "prompt not visible in input"
+            raise RuntimeError(f"Codex paste not verified after {args.submit_verify_timeout_s:g}s: {suffix}, status={last_status}")
+        time.sleep(min(0.25, max(0.05, deadline_s - now_s)))
+
+
 def verify_submit(args: Args, message: str) -> None:
     if args.enter_count <= 0 or args.submit_verify_timeout_s <= 0:
         return
     probe = message_probe(message)
     if not probe:
         return
+    n_lines = inspect_lines_for_message(message)
     deadline_s = time.monotonic() + args.submit_verify_timeout_s
-    fallback_sent = False
     last_status = "unknown"
+    next_enter_s = 0.0
     while True:
-        lines = tail(args.target, 80)
+        lines = tail(args.target, n_lines)
         last_status = status(lines, current_block(lines))
         if last_status == "not_codex":
             return
         input_text = current_input_text(lines)
         if not input_text:
             return
-        if not fallback_sent:
-            _ = subprocess.run(["tmux", "send-keys", "-t", args.target, "Enter"], timeout=5, check=True)
-            fallback_sent = True
-        if time.monotonic() >= deadline_s:
+        now_s = time.monotonic()
+        if probe in input_text and now_s >= next_enter_s:
+            send_enter(args.target)
+            next_enter_s = now_s + max(args.enter_delay_s, 0.25)
+        if now_s >= deadline_s:
             suffix = "prompt still in input" if probe in input_text else "input box still has text"
             raise RuntimeError(f"Codex submit not verified after {args.submit_verify_timeout_s:g}s: {suffix}, status={last_status}")
-        time.sleep(min(0.5, max(0.05, deadline_s - time.monotonic())))
+        time.sleep(min(0.25, max(0.05, min(deadline_s, next_enter_s) - now_s)))
 
 
 def run_tmux(args: Args, message: str) -> None:
@@ -247,10 +296,11 @@ def run_tmux(args: Args, message: str) -> None:
             _ = subprocess.run(["tmux", "send-keys", "-t", args.target, "C-u"], timeout=5, check=True)
         _ = subprocess.run(["tmux", "load-buffer", "-b", buffer_name, str(temp_path)], timeout=5, check=True)
         _ = subprocess.run(["tmux", "paste-buffer", "-b", buffer_name, "-t", args.target], timeout=5, check=True)
+        wait_paste_visible(args, message)
         for idx in range(args.enter_count):
             if idx:
                 time.sleep(args.enter_delay_s)
-            _ = subprocess.run(["tmux", "send-keys", "-t", args.target, "Enter"], timeout=5, check=True)
+            send_enter(args.target)
         verify_submit(args, message)
     finally:
         temp_path.unlink(missing_ok=True)

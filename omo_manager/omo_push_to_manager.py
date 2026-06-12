@@ -18,6 +18,7 @@ DEFAULT_MANAGER_TARGET = os.environ.get('OMO_MANAGER_TMUX_TARGET', '')
 DEFAULT_ROOT = Path(os.environ.get('OMO_WORK_LOGS_ROOT', Path.home() / 'work_logs'))
 DEFAULT_TMUX_ENTER_COUNT = int(os.environ.get('OMO_MANAGER_TMUX_ENTER_COUNT', os.environ.get('OMO_DISPATCH_TMUX_ENTER_COUNT', '2')))
 DEFAULT_TMUX_READY_TIMEOUT_S = float(os.environ.get('OMO_MANAGER_TMUX_READY_TIMEOUT_S', os.environ.get('OMO_DISPATCH_TMUX_READY_TIMEOUT_S', '300')))
+DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S = float(os.environ.get('OMO_MANAGER_TMUX_SUBMIT_VERIFY_TIMEOUT_S', '5'))
 
 
 @dataclass(frozen=True)
@@ -102,12 +103,12 @@ def push_tmux(args: Args) -> None:
     try:
         command = ['omo_tmux_send.py', '--target', args.manager_target, '--message-file', str(path)]
         if args.submit:
-            command.extend(['--enter', '--enter-count', str(DEFAULT_TMUX_ENTER_COUNT), '--ready-timeout-s', str(DEFAULT_TMUX_READY_TIMEOUT_S)])
+            command.extend(['--enter', '--enter-count', str(DEFAULT_TMUX_ENTER_COUNT), '--ready-timeout-s', str(DEFAULT_TMUX_READY_TIMEOUT_S), '--submit-verify-timeout-s', str(DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S)])
         if args.pending_file is not None:
             command.extend(['--pending-root', str(args.root), '--pending-file', str(args.pending_file), '--pending-line', str(args.pending_line)])
             if args.pending_digest:
                 command.extend(['--pending-digest', args.pending_digest])
-        timeout_s = max(args.timeout_s, DEFAULT_TMUX_READY_TIMEOUT_S + 10) if args.submit else args.timeout_s
+        timeout_s = max(args.timeout_s, DEFAULT_TMUX_READY_TIMEOUT_S + (2 * DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S) + 15) if args.submit else args.timeout_s
         _ = subprocess.run(command, timeout=timeout_s, check=True)
     finally:
         path.unlink(missing_ok=True)

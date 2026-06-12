@@ -9,6 +9,7 @@ import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -573,12 +574,12 @@ class PendingMarkerTests(unittest.TestCase):
             _ = path.write_text("(pending)\n(manager routed: to `task.md`.)\n(from email manager_mail/4480.txt)\n", encoding="utf-8")
             self.assertEqual([], find_markers(root, [path]))
 
-    def test_idle_status_pushes_only_when_status_script_reports_problem(self) -> None:
+    def test_idle_status_pushes_full_periodic_agent_status(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
         with tempfile.TemporaryDirectory() as tmp:
             status_script = Path(tmp) / "status.py"
-            _ = status_script.write_text("#!/usr/bin/env python3\nprint('agent-problems: not_codex=1 error=0 ready=0 done-registry-stale=0')\nprint('not_codex: task=task.md evidence=target=cfg:1')\nraise SystemExit(3)\n", encoding="utf-8")
+            _ = status_script.write_text("#!/usr/bin/env python3\nprint('agent-status: not_codex=0 running=2 error=0 ready=0 done-registry-stale=0 pruned=0')\nprint('running: task=a.md evidence=target=cfg:1')\nprint('running: task=b.md evidence=target=cfg:2')\n", encoding="utf-8")
             status_script.chmod(0o700)
             args = Args(Path(tmp), "", Path(tmp) / "seen.tsv", 1.0, 1.0, 30.0, status_script, False, True)
             out = StringIO()
@@ -586,9 +587,41 @@ class PendingMarkerTests(unittest.TestCase):
                 pushed = watcher.maybe_push_idle_status(args, 100.0, 130.0)
             self.assertTrue(pushed)
             text = out.getvalue()
-            self.assertIn("manager agent problem: idle watcher found", text)
-            self.assertIn("agent-problems: not_codex=1", text)
-            self.assertIn("not_codex: task=task.md", text)
+            self.assertIn("manager agent status: periodic running-agent status.", text)
+            self.assertIn("agent-status: not_codex=0 running=2", text)
+            self.assertIn("running: task=a.md", text)
+            self.assertIn("running: task=b.md", text)
+
+    def test_idle_status_tick_updates_after_due_check(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/missing-status.py"), False, True)
+        with patch("omo_manager.omo_pending_watch.maybe_push_idle_status", return_value=False) as push:
+            self.assertEqual((100.0, None), watcher.update_idle_status_check(args, 100.0, 129.9, None))
+            self.assertEqual((130.0, None), watcher.update_idle_status_check(args, 100.0, 130.0, None))
+        push.assert_called_once_with(args, 100.0, 130.0)
+
+    def test_idle_status_tick_starts_background_check(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "http://127.0.0.1:1", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False)
+        with patch("omo_manager.omo_pending_watch.start_command", return_value="run") as start:
+            self.assertEqual((130.0, "run"), watcher.update_idle_status_check(args, 100.0, 130.0, None))
+        start.assert_called_once_with("idle status check", ["/status.py", "--root", "/tmp"], 30)
+
+    def test_periodic_status_text_formats_full_status(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        result = watcher.CommandOutput("idle status check", 0, "agent-status: running=1\nrunning: task=a.md\n", "")
+        self.assertEqual(
+            "manager agent status: periodic running-agent status.\nagent-status: running=1\nrunning: task=a.md",
+            watcher.periodic_status_text(Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, True), result),
+        )
+
+    def test_idle_status_delivery_timeout_matches_push_budget(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        self.assertEqual(325.0, watcher.manager_push_timeout_s())
 
     def test_idle_status_stays_quiet_before_idle_interval(self) -> None:
         from omo_manager import omo_pending_watch as watcher
