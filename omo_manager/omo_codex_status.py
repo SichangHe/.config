@@ -24,7 +24,10 @@ CODEX_EMPTY_INPUT_TEXTS = {
     "Write tests for @filename",
     "Run /review on my current changes",
 }
-CODEX_RUNNING_EMPTY_INPUT_TEXTS = {"Explain this codebase"}
+CODEX_RUNNING_EMPTY_INPUT_TEXTS = {
+    "Explain this codebase",
+    "Implement {feature}",
+}
 
 
 @dataclass(frozen=True)

@@ -35,8 +35,18 @@ class CodexStatusTests(unittest.TestCase):
         self.assertEqual('running', status(lines, current_block(lines)))
         self.assertFalse(can_submit_stuck_input(lines))
 
+    def test_status_running_while_working_with_implement_placeholder(self) -> None:
+        lines = ['• Working (4m 34s • esc to interrupt)', '', '› Implement {feature}', '  gpt-5.5']
+        self.assertEqual('running', status(lines, current_block(lines)))
+        self.assertFalse(can_submit_stuck_input(lines))
+
     def test_status_stuck_input_for_user_entered_explain_on_idle_worker(self) -> None:
         lines = ['────', 'done', '› Explain this codebase', '  gpt-5.5']
+        self.assertEqual('stuck_input', status(lines, current_block(lines)))
+        self.assertTrue(can_submit_stuck_input(lines))
+
+    def test_status_stuck_input_for_user_entered_implement_on_idle_worker(self) -> None:
+        lines = ['────', 'done', '› Implement {feature}', '  gpt-5.5']
         self.assertEqual('stuck_input', status(lines, current_block(lines)))
         self.assertTrue(can_submit_stuck_input(lines))
 
