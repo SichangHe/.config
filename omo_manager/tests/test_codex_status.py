@@ -30,6 +30,16 @@ class CodexStatusTests(unittest.TestCase):
         self.assertEqual('running', status(lines, current_block(lines)))
         self.assertFalse(can_submit_stuck_input(lines))
 
+    def test_status_running_while_working_with_explain_placeholder(self) -> None:
+        lines = ['• Working (4m 34s • esc to interrupt)', '', '› Explain this codebase', '  gpt-5.5']
+        self.assertEqual('running', status(lines, current_block(lines)))
+        self.assertFalse(can_submit_stuck_input(lines))
+
+    def test_status_stuck_input_for_user_entered_explain_on_idle_worker(self) -> None:
+        lines = ['────', 'done', '› Explain this codebase', '  gpt-5.5']
+        self.assertEqual('stuck_input', status(lines, current_block(lines)))
+        self.assertTrue(can_submit_stuck_input(lines))
+
     def test_status_ready_with_finished_background_terminal_and_input(self) -> None:
         lines = ['• Waited for background terminal · timeout 900s verifier', '› Use /skills to list available skills', '  gpt-5.5']
         self.assertEqual('ready', status(lines, current_block(lines)))

@@ -24,6 +24,7 @@ CODEX_EMPTY_INPUT_TEXTS = {
     "Write tests for @filename",
     "Run /review on my current changes",
 }
+CODEX_RUNNING_EMPTY_INPUT_TEXTS = {"Explain this codebase"}
 
 
 @dataclass(frozen=True)
@@ -113,9 +114,13 @@ def has_running_indicator(lines: list[str]) -> bool:
     return any(BUSY_RE.search(line) is not None or BACKGROUND_RUNNING_RE.search(line) is not None for line in lines[-20:])
 
 
+def is_empty_input_text(lines: list[str], input_text: str) -> bool:
+    return input_text in CODEX_EMPTY_INPUT_TEXTS or (has_running_indicator(lines) and input_text in CODEX_RUNNING_EMPTY_INPUT_TEXTS)
+
+
 def can_submit_stuck_input(lines: list[str]) -> bool:
     input_text = current_input_text(lines)
-    return bool(lines and CODEX_RE.search(lines[-1]) is not None and input_text and input_text not in CODEX_EMPTY_INPUT_TEXTS)
+    return bool(lines and CODEX_RE.search(lines[-1]) is not None and input_text and not is_empty_input_text(lines, input_text))
 
 
 def submit_stuck_input_if_present(target: str, report: Report, n_lines: int = 80) -> str:
@@ -135,7 +140,7 @@ def status(lines: list[str], block: Block) -> str:
     if not lines or CODEX_RE.search(lines[-1]) is None:
         return "not_codex"
     input_text = current_input_text(lines)
-    if input_text and input_text not in CODEX_EMPTY_INPUT_TEXTS:
+    if input_text and not is_empty_input_text(lines, input_text):
         return "stuck_input"
     if has_running_indicator(lines):
         return "running"
