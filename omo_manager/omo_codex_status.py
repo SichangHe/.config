@@ -16,6 +16,13 @@ READY_RE = re.compile(r"^› Use /skills to list available skills$")
 INPUT_RE = re.compile(r"^› ")
 BUSY_RE = re.compile(r"^• (?:Working|Messages to be submitted after next tool call)\b")
 BACKGROUND_RUNNING_RE = re.compile(r"^• .*?\b(?:Waiting for background terminal|[1-9][0-9]* background terminals? running)\b")
+CODEX_EMPTY_INPUT_TEXTS = {
+    "Use /skills to list available skills",
+    "Find and fix a bug in @filename",
+    "Summarize recent commits",
+    "Improve documentation in @filename",
+    "Write tests for @filename",
+}
 
 
 @dataclass(frozen=True)
@@ -34,6 +41,8 @@ class Block:
 class Report:
     status: str
     lines: list[str]
+    input_text: str = ""
+    can_submit_input: bool = False
 
 
 class ParsedArgs(argparse.Namespace):
@@ -83,10 +92,51 @@ def last_output(lines: list[str]) -> list[str]:
     return current_block(lines).lines
 
 
+def current_input_text(lines: list[str]) -> str:
+    body = lines[:-1] if lines and CODEX_RE.search(lines[-1]) is not None else lines[:]
+    while body and not body[-1].strip():
+        body.pop()
+    for idx in range(len(body) - 1, -1, -1):
+        line = body[idx].lstrip()
+        if line.startswith("›"):
+            input_lines = body[idx:]
+            if any(after.startswith(("• ", "│", "└", "├", "─")) for after in input_lines[1:]):
+                return ""
+            text_lines = [line[1:].strip()]
+            text_lines.extend(after.rstrip() for after in input_lines[1:])
+            return "\n".join(text_lines).strip()
+    return ""
+
+
+def has_running_indicator(lines: list[str]) -> bool:
+    return any(BUSY_RE.search(line) is not None or BACKGROUND_RUNNING_RE.search(line) is not None for line in lines[-20:])
+
+
+def can_submit_stuck_input(lines: list[str]) -> bool:
+    input_text = current_input_text(lines)
+    return bool(lines and CODEX_RE.search(lines[-1]) is not None and input_text and input_text not in CODEX_EMPTY_INPUT_TEXTS)
+
+
+def submit_stuck_input_if_present(target: str, report: Report, n_lines: int = 80) -> str:
+    if report.status != "stuck_input":
+        return ""
+    latest = inspect(Args(target, n_lines))
+    if latest.status != "stuck_input":
+        return "not_stuck"
+    try:
+        result = subprocess.run(["tmux", "send-keys", "-t", target, "Enter"], capture_output=True, text=True, timeout=5, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return "failed"
+    return "sent_enter" if result.returncode == 0 else "failed"
+
+
 def status(lines: list[str], block: Block) -> str:
     if not lines or CODEX_RE.search(lines[-1]) is None:
         return "not_codex"
-    if any(BUSY_RE.search(line) is not None or BACKGROUND_RUNNING_RE.search(line) is not None for line in lines[-20:]):
+    input_text = current_input_text(lines)
+    if input_text and input_text not in CODEX_EMPTY_INPUT_TEXTS:
+        return "stuck_input"
+    if has_running_indicator(lines):
         return "running"
     if block.has_footer or any(READY_RE.match(line) is not None or INPUT_RE.match(line) is not None for line in lines[-10:]):
         return "ready"
@@ -99,7 +149,7 @@ def status(lines: list[str], block: Block) -> str:
 def inspect(args: Args) -> Report:
     lines = tail(args.target, args.n_lines)
     block = current_block(lines)
-    return Report(status(lines, block), block.lines)
+    return Report(status(lines, block), block.lines, current_input_text(lines), can_submit_stuck_input(lines))
 
 
 def main(argv: list[str]) -> int:

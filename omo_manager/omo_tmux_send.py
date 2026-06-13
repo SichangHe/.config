@@ -14,17 +14,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 try:
-    from omo_manager.omo_codex_status import current_block, status, tail
+    from omo_manager.omo_codex_status import CODEX_EMPTY_INPUT_TEXTS, Args as StatusArgs, current_block, current_input_text, inspect, status, submit_stuck_input_if_present, tail
 except ModuleNotFoundError:
-    from omo_codex_status import current_block, status, tail
-
-
-CODEX_EMPTY_INPUT_TEXTS = {
-    "Use /skills to list available skills",
-    "Find and fix a bug in @filename",
-    "Summarize recent commits",
-    "Improve documentation in @filename",
-}
+    from omo_codex_status import CODEX_EMPTY_INPUT_TEXTS, Args as StatusArgs, current_block, current_input_text, inspect, status, submit_stuck_input_if_present, tail
 
 
 @dataclass(frozen=True)
@@ -160,6 +152,8 @@ def wait_ready(args: Args) -> None:
         last_status = status(lines, current_block(lines))
         if last_status in {"ready", "not_codex"}:
             return
+        if last_status == "stuck_input":
+            return
         if time.monotonic() >= deadline_s:
             raise RuntimeError(f"target not ready after {args.ready_timeout_s:g}s: {last_status}")
         time.sleep(min(0.5, max(0.05, deadline_s - time.monotonic())))
@@ -204,22 +198,6 @@ def message_probes(message: str) -> list[str]:
 
 def inspect_lines_for_message(message: str) -> int:
     return min(2000, max(80, len(message.splitlines()) + 20))
-
-
-def current_input_text(lines: list[str]) -> str:
-    body = lines[:-1] if lines and lines[-1].startswith("  gpt-") else lines[:]
-    while body and not body[-1].strip():
-        body.pop()
-    for idx in range(len(body) - 1, -1, -1):
-        line = body[idx].lstrip()
-        if line.startswith("›"):
-            input_lines = body[idx:]
-            if any(after.startswith(("• ", "│", "└", "├", "─")) for after in input_lines[1:]):
-                return ""
-            text_lines = [line[1:].strip()]
-            text_lines.extend(after.rstrip() for after in input_lines[1:])
-            return "\n".join(text_lines).strip()
-    return ""
 
 
 def input_has_probe(lines: list[str], probe: str) -> bool:
@@ -340,6 +318,19 @@ def verify_submit(args: Args, message: str) -> None:
         time.sleep(min(0.25, max(0.05, min(deadline_s, next_enter_s) - now_s)))
 
 
+def clear_stuck_input_before_send(args: Args) -> str:
+    try:
+        report = inspect(StatusArgs(args.target, 80))
+    except Exception:
+        return ""
+    if report.status != "stuck_input":
+        return ""
+    result = submit_stuck_input_if_present(args.target, report)
+    if result == "sent_enter" and args.enter_delay_s > 0:
+        time.sleep(args.enter_delay_s)
+    return result
+
+
 def run_tmux(args: Args, message: str) -> None:
     temp_path = write_private_temp(message)
     buffer_name = f"omo-tmux-send-{os.getpid()}-{uuid.uuid4().hex}"
@@ -350,9 +341,13 @@ def run_tmux(args: Args, message: str) -> None:
             for _ in range(args.enter_count):
                 _ = print(f"would send Enter to {args.target}")
             return
+        if not pending_marker_present(args):
+            raise RuntimeError("pending marker cleared before tmux paste")
+        _ = clear_stuck_input_before_send(args)
         wait_ready(args)
         if not pending_marker_present(args):
             raise RuntimeError("pending marker cleared before tmux paste")
+        _ = clear_stuck_input_before_send(args)
         if args.enter_count:
             _ = subprocess.run(["tmux", "send-keys", "-t", args.target, "C-u"], timeout=5, check=True)
         _ = subprocess.run(["tmux", "load-buffer", "-b", buffer_name, str(temp_path)], timeout=5, check=True)

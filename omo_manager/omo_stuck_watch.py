@@ -34,6 +34,7 @@ class Args:
     watch: bool
     interval_s: float
     max_iterations: int
+    manager_target: str = ""
 
 
 class ParsedArgs(argparse.Namespace):
@@ -44,6 +45,7 @@ class ParsedArgs(argparse.Namespace):
     watch: bool = False
     interval_s: float = 60.0
     max_iterations: int = 1
+    manager_target: str = os.environ.get("OMO_MANAGER_TMUX_TARGET", "")
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -55,6 +57,7 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--watch", action="store_true")
     _ = parser.add_argument("--interval-s", type=float, default=60.0)
     _ = parser.add_argument("--max-iterations", type=int, default=1)
+    _ = parser.add_argument("--manager-target", default=os.environ.get("OMO_MANAGER_TMUX_TARGET", ""))
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     if parsed.n_lines <= 0:
         parser.error("--lines must be positive.")
@@ -64,7 +67,7 @@ def parse_args(argv: list[str]) -> Args:
         parser.error("--interval-s must be positive.")
     if parsed.max_iterations < 1:
         parser.error("--max-iterations must be positive.")
-    return Args(parsed.registry, parsed.state, parsed.n_lines, parsed.stale_after_s, parsed.watch, parsed.interval_s, parsed.max_iterations)
+    return Args(parsed.registry, parsed.state, parsed.n_lines, parsed.stale_after_s, parsed.watch, parsed.interval_s, parsed.max_iterations, parsed.manager_target)
 
 
 def read_json(path: Path, fallback: dict[str, object]) -> dict[str, object]:
@@ -93,6 +96,22 @@ def target_state(raw: object) -> dict[str, object]:
     return raw if isinstance(raw, dict) else {}
 
 
+def session_targets(sessions: list[object], manager_target: str) -> list[tuple[str, str]]:
+    targets: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for item in sessions:
+        if not isinstance(item, dict):
+            continue
+        target = str(item.get("tmux_target", ""))
+        if not target:
+            continue
+        targets.append((str(item.get("task_file", "")), target))
+        seen.add(target)
+    if manager_target and manager_target not in seen:
+        targets.append(("manager", manager_target))
+    return targets
+
+
 def check(args: Args) -> int:
     now_s = time.time()
     registry = read_json(args.registry, {"sessions": []})
@@ -104,13 +123,7 @@ def check(args: Args) -> int:
     if not isinstance(targets, dict):
         targets = {}
         state["targets"] = targets
-    for item in sessions:
-        if not isinstance(item, dict):
-            continue
-        target = str(item.get("tmux_target", ""))
-        if not target:
-            continue
-        task_file = str(item.get("task_file", ""))
+    for task_file, target in session_targets(sessions, args.manager_target):
         report = inspect(StatusArgs(target, args.n_lines))
         tail_hash = digest(report.lines)
         old = target_state(targets.get(target))
@@ -120,7 +133,9 @@ def check(args: Args) -> int:
         age_s = max(0.0, now_s - first_seen_s)
         status = "stale_running" if report.status == "running" and not changed and age_s >= args.stale_after_s else report.status
         targets[target] = {"hash": tail_hash, "first_seen_s": first_seen_s, "status": report.status}
-        print(f"{status}: task={task_file} target={target} changed={str(changed).lower()} same_tail_s={age_s:.0f}", flush=True)
+        unstick = "report_only" if report.status == "stuck_input" else ""
+        unstick_text = f" unstick={unstick}" if unstick else ""
+        print(f"{status}: task={task_file} target={target} changed={str(changed).lower()} same_tail_s={age_s:.0f}{unstick_text}", flush=True)
     write_json_private(args.state, state)
     return 0
 

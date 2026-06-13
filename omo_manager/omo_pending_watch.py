@@ -416,7 +416,7 @@ def push_manager_command(args: Args, text: str) -> list[str]:
 def maybe_push_idle_status(args: Args, last_activity_s: float, now_s: float) -> bool:
     if now_s - last_activity_s < args.idle_status_interval_s:
         return False
-    command = [str(args.status_script), "--root", str(args.root)]
+    command = status_command(args)
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=30, check=False)
     except (OSError, subprocess.SubprocessError) as exc:
@@ -461,12 +461,21 @@ def update_idle_status_check(args: Args, last_check_s: float, now_s: float, stat
     if args.dry_run:
         _ = maybe_push_idle_status(args, last_check_s, now_s)
         return now_s, None
-    run = start_command("idle status check", [str(args.status_script), "--root", str(args.root)], 30)
+    run = start_command("idle status check", status_command(args), 30)
     return now_s, run
 
 
+def status_command(args: Args, problems_only: bool = False) -> list[str]:
+    command = [str(args.status_script), "--root", str(args.root)]
+    if args.manager_target:
+        command.extend(["--manager-target", args.manager_target])
+    if problems_only:
+        command.append("--problems-only")
+    return command
+
+
 def maybe_push_agent_problems(args: Args, seen: dict[str, float], now_wall_s: float) -> bool:
-    command = [str(args.status_script), "--root", str(args.root), "--problems-only"]
+    command = status_command(args, True)
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=30, check=False)
     except (OSError, subprocess.SubprocessError) as exc:
@@ -489,9 +498,10 @@ def handle_agent_problem_result(args: Args, seen: dict[str, float], result: Comm
         return False
     if result.stderr.strip():
         output = f"{output}\nstderr:\n{result.stderr.strip()}".strip()
+    has_unstuck = any(line.startswith("unstuck: ") for line in output.splitlines())
     digest = hashlib.sha256(output.encode("utf-8")).hexdigest()[:16]
     key = f"agent-problem:{digest}"
-    if now_wall_s - seen.get(key, 0.0) < args.agent_problem_repeat_s:
+    if not has_unstuck and now_wall_s - seen.get(key, 0.0) < args.agent_problem_repeat_s:
         return False
     text = f"manager agent problem: running task marker needs attention.\n{output}"
     if push_manager_text(args, text) not in {0, 2}:
@@ -632,7 +642,7 @@ def main(argv: list[str]) -> int:
             changed = scan_once(args, seen, pending_files)
             pending_files = []
         if agent_problem_run is None and now_s - last_agent_problem_check_s >= args.agent_problem_interval_s:
-            agent_problem_run = start_command("agent problem check", [str(args.status_script), "--root", str(args.root), "--problems-only"], 30)
+            agent_problem_run = start_command("agent problem check", status_command(args, True), 30)
             last_agent_problem_check_s = now_s
         if agent_problem_run is not None:
             result = poll_command(agent_problem_run, now_wall_s)

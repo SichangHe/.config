@@ -17,6 +17,7 @@ if __package__ in {None, ""}:
 
 from omo_manager.omo_codex_status import Args as StatusArgs
 from omo_manager.omo_codex_status import inspect
+from omo_manager.omo_codex_status import submit_stuck_input_if_present
 from omo_manager.omo_stuck_watch import read_json, write_json_private
 
 
@@ -45,6 +46,7 @@ def load_local_env() -> dict[str, str]:
 LOCAL_ENV = load_local_env()
 DEFAULT_ROOT = Path(LOCAL_ENV.get("OMO_WORK_LOGS_ROOT", str(Path.home() / "work_logs")))
 DEFAULT_REGISTRY = Path(LOCAL_ENV.get("OMO_MANAGER_SESSION_REGISTRY", str(default_state_dir() / "sessions.json")))
+DEFAULT_MANAGER_TARGET = ""
 TASK_RE = re.compile(r"`?([A-Za-z0-9_./-]+\.md)`?")
 TARGET_RE = re.compile(r"\b([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\b")
 LOOSE_TARGET_RE = re.compile(r"\b([a-z][A-Za-z0-9_-]*)\s+(\d+)\b")
@@ -62,6 +64,8 @@ class Args:
     prune_completed: bool
     exit_code_if_active: bool
     problems_only: bool = False
+    manager_target: str = ""
+    auto_unstick: bool = True
 
 
 @dataclass(frozen=True)
@@ -90,6 +94,8 @@ class StatusRow:
     evidence: str
     persistent_role: bool = False
     task_status: str = ""
+    target: str = ""
+    unstick: str = ""
 
 
 @dataclass(frozen=True)
@@ -106,6 +112,8 @@ class ParsedArgs(argparse.Namespace):
     prune_completed: bool = False
     exit_code_if_active: bool = False
     problems_only: bool = False
+    manager_target: str = DEFAULT_MANAGER_TARGET
+    auto_unstick: bool = True
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -115,8 +123,10 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--prune-completed", action="store_true", help="Remove completed/previous tasks from sessions.json after writing a .bak.TIMESTAMP backup.")
     _ = parser.add_argument("--exit-code-if-active", action="store_true", help="Exit 3 when any task is still active, meaning not done or blocked.")
     _ = parser.add_argument("--problems-only", action="store_true", help="Print only active-agent problems and exit 3 when any are found.")
+    _ = parser.add_argument("--manager-target", default=DEFAULT_MANAGER_TARGET, help="Optional manager Codex tmux target to include in problem checks.")
+    _ = parser.add_argument("--no-auto-unstick", dest="auto_unstick", action="store_false", help="Report stuck input without sending Enter even when the pane looks safe to submit.")
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
-    return Args(parsed.root.resolve(), parsed.registry, parsed.prune_completed, parsed.exit_code_if_active, parsed.problems_only)
+    return Args(parsed.root.resolve(), parsed.registry, parsed.prune_completed, parsed.exit_code_if_active, parsed.problems_only, parsed.manager_target, parsed.auto_unstick)
 
 
 def section_name(line: str, current: str) -> str:
@@ -301,19 +311,43 @@ def display_target(task: TaskLine, record: SessionRecord | None) -> str:
     return task.target
 
 
-def classify_task(task: TaskLine, record: SessionRecord | None) -> StatusRow:
-    target = display_target(task, record)
+def classify_target(task_file: str, target: str, persistent_role: bool = False, task_status: str = "", auto_unstick: bool = False, role: str = "", unstick_by_target: dict[str, str] | None = None) -> StatusRow:
     if not target:
-        return StatusRow(task.task_file, "not_codex", "target=", task.persistent_role, task.status)
+        return StatusRow(task_file, "not_codex", "target=", persistent_role, task_status)
     report = inspect(StatusArgs(target, 80))
     evidence = f"target={target}"
-    if task.persistent_role:
+    unstick = ""
+    if role:
+        evidence += f" role={role}"
+    if persistent_role:
         evidence += " persistent_role=true"
-    if task.status:
-        evidence += f" task_status={task.status}"
+    if task_status:
+        evidence += f" task_status={task_status}"
     if report.lines:
         evidence += " output=" + " / ".join(report.lines[-3:])
-    return StatusRow(task.task_file, report.status, evidence, task.persistent_role, task.status)
+    if report.status == "stuck_input":
+        if auto_unstick:
+            if unstick_by_target is not None and target in unstick_by_target:
+                unstick = "already_sent" if unstick_by_target[target] == "sent_enter" else unstick_by_target[target]
+            else:
+                unstick = submit_stuck_input_if_present(target, report)
+                if unstick_by_target is not None:
+                    unstick_by_target[target] = unstick
+        else:
+            unstick = "disabled"
+        evidence += f" unstick={unstick}"
+    return StatusRow(task_file, report.status, evidence, persistent_role, task_status, target, unstick)
+
+
+def classify_task(task: TaskLine, record: SessionRecord | None, auto_unstick: bool = False, unstick_by_target: dict[str, str] | None = None) -> StatusRow:
+    return classify_target(task.task_file, display_target(task, record), task.persistent_role, task.status, auto_unstick, unstick_by_target=unstick_by_target)
+
+
+def manager_problem_row(args: Args, skip_targets: set[str], unstick_by_target: dict[str, str]) -> StatusRow | None:
+    if not args.manager_target or args.manager_target in skip_targets:
+        return None
+    row = classify_target("manager", args.manager_target, auto_unstick=args.auto_unstick, role="manager", unstick_by_target=unstick_by_target)
+    return row if row.status in {"error", "not_codex", "stuck_input"} else None
 
 def registry_prune(args: Args, completed: set[str]) -> int:
     if not completed or not args.registry.exists():
@@ -341,32 +375,39 @@ def registry_prune(args: Args, completed: set[str]) -> int:
 
 
 def format_summary(rows: list[StatusRow], completed_stale_count: int, pruned_count: int) -> str:
-    counts: dict[str, int] = {"not_codex": 0, "running": 0, "error": 0, "ready": 0}
+    counts: dict[str, int] = {"not_codex": 0, "running": 0, "error": 0, "ready": 0, "stuck_input": 0}
     for row in rows:
         counts[row.status] = counts.get(row.status, 0) + 1
     lines = [
-        f"agent-status: not_codex={counts['not_codex']} running={counts['running']} error={counts['error']} ready={counts['ready']} done-registry-stale={completed_stale_count} pruned={pruned_count}",
+        f"agent-status: not_codex={counts['not_codex']} running={counts['running']} error={counts['error']} ready={counts['ready']} stuck_input={counts['stuck_input']} done-registry-stale={completed_stale_count} pruned={pruned_count}",
     ]
     for row in sorted(rows, key=lambda item: (item.status != "error", item.status, item.task_file)):
         lines.append(f"{row.status}: task={row.task_file} evidence={row.evidence}")
     return "\n".join(lines)
 
 
-PROBLEM_STATUSES = {"error", "not_codex", "ready"}
+PROBLEM_STATUSES = {"error", "not_codex", "ready", "stuck_input"}
 
 
 def format_problem_summary(rows: list[StatusRow], completed_stale: set[str]) -> str:
     problem_rows = [row for row in rows if row.status in PROBLEM_STATUSES and not (row.status == "ready" and row.persistent_role and row.task_status == "blocked")]
     if not problem_rows and not completed_stale:
         return ""
-    counts: dict[str, int] = {"not_codex": 0, "error": 0, "ready": 0}
+    counts: dict[str, int] = {"not_codex": 0, "error": 0, "ready": 0, "stuck_input": 0}
     for row in problem_rows:
         counts[row.status] = counts.get(row.status, 0) + 1
-    lines = [
-        f"agent-problems: not_codex={counts['not_codex']} error={counts['error']} ready={counts['ready']} done-registry-stale={len(completed_stale)}",
-    ]
+    parts = [f"{status}={counts[status]}" for status in ("not_codex", "error", "ready", "stuck_input") if counts[status]]
+    if completed_stale:
+        parts.append(f"done-registry-stale={len(completed_stale)}")
+    lines = [f"agent-problems: {' '.join(parts)}"]
     for row in sorted(problem_rows, key=lambda item: (item.status, item.task_file)):
         lines.append(f"{row.status}: task={row.task_file} evidence={row.evidence}")
+    unstuck: dict[str, str] = {}
+    for row in problem_rows:
+        if row.unstick == "sent_enter" and row.target:
+            unstuck.setdefault(row.target, row.task_file)
+    for target, task_file in sorted(unstuck.items()):
+        lines.append(f"unstuck: target={target} task={task_file} action=sent_enter")
     for task_file in sorted(completed_stale):
         lines.append(f"done-stale: task={task_file} evidence=session registry still has a completed task")
     return "\n".join(lines)
@@ -380,9 +421,15 @@ def main(argv: list[str]) -> int:
         tasks = list(current.values())
         if args.problems_only:
             tasks = [task for task in tasks if task.status == "running"]
-        rows = [classify_task(task, choose_session(task, records)) for task in tasks]
+        auto_unstick = args.problems_only and args.auto_unstick
+        unstick_by_target: dict[str, str] = {}
+        rows = [classify_task(task, choose_session(task, records), auto_unstick, unstick_by_target) for task in tasks]
         if args.problems_only:
-            rows.extend(classify_task(task, choose_session(task, records)) for task in persistent_blocked_task_lines(args.root))
+            standby_tasks = persistent_blocked_task_lines(args.root)
+            rows.extend(classify_task(task, choose_session(task, records), auto_unstick, unstick_by_target) for task in standby_tasks)
+            manager_row = manager_problem_row(args, {display_target(task, choose_session(task, records)) for task in [*tasks, *standby_tasks]}, unstick_by_target)
+            if manager_row is not None:
+                rows.append(manager_row)
         completed_stale = {record.task_file for record in records if record.task_file in done}
         pruned_count = registry_prune(args, completed_stale) if args.prune_completed else 0
         if args.problems_only:

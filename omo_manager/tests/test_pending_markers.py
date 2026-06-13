@@ -1087,6 +1087,12 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual((130.0, "run"), watcher.update_idle_status_check(args, 100.0, 130.0, None))
         start.assert_called_once_with("idle status check", ["/status.py", "--root", "/tmp"], 30)
 
+    def test_status_command_passes_manager_target_to_problem_check(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, True, "cfg:0.0")
+        self.assertEqual(["/status.py", "--root", "/tmp", "--manager-target", "cfg:0.0", "--problems-only"], watcher.status_command(args, True))
+
     def test_periodic_status_text_formats_full_status(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
@@ -1128,6 +1134,23 @@ class PendingMarkerTests(unittest.TestCase):
             text = out.getvalue()
             self.assertEqual(2, text.count("manager agent problem: running task marker needs attention."))
             self.assertIn("not_codex: task=task.md", text)
+
+    def test_agent_problem_check_does_not_throttle_unstuck_reports(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, True, agent_problem_repeat_s=300.0)
+        result = watcher.CommandOutput(
+            "agent-problems",
+            3,
+            "agent-problems: stuck_input=1\nstuck_input: task=task.md evidence=target=cfg:1 unstick=sent_enter\nunstuck: target=cfg:1 task=task.md action=sent_enter\n",
+            "",
+        )
+        seen: dict[str, float] = {}
+        out = StringIO()
+        with redirect_stdout(out):
+            self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 1000.0))
+            self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 1001.0))
+        self.assertEqual(2, out.getvalue().count("unstuck: target=cfg:1"))
 
     def test_markdown_inotify_watcher_reports_new_file(self) -> None:
         from omo_manager.omo_pending_watch import MarkdownChangeWatcher

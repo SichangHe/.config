@@ -34,6 +34,41 @@ class StuckWatchTests(unittest.TestCase):
                 self.assertEqual(0, check(Args(registry, state, 80, 30.0, False, 60.0, 1)))
             self.assertIn('stale_running: task=x.md target=cfg:1 changed=false same_tail_s=31', out.getvalue())
 
+    def test_check_includes_manager_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / 'sessions.json'
+            state = root / 'state.json'
+            _ = registry.write_text('{"sessions":[]}', encoding='utf-8')
+            out = io.StringIO()
+            with patch('omo_manager.omo_stuck_watch.inspect', return_value=Report('ready', ['done'])), contextlib.redirect_stdout(out):
+                self.assertEqual(0, check(Args(registry, state, 80, 900.0, False, 60.0, 1, 'mgr:1.0')))
+            self.assertIn('ready: task=manager target=mgr:1.0', out.getvalue())
+
+    def test_check_reports_stuck_input_without_unstick(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / 'sessions.json'
+            state = root / 'state.json'
+            _ = registry.write_text('{"sessions":[{"task_file":"x.md","tmux_target":"cfg:1"}]}', encoding='utf-8')
+            out = io.StringIO()
+            report = Report('stuck_input', ['› Continue task'], 'Continue task', True)
+            with patch('omo_manager.omo_stuck_watch.inspect', return_value=report), contextlib.redirect_stdout(out):
+                self.assertEqual(0, check(Args(registry, state, 80, 900.0, False, 60.0, 1)))
+            self.assertIn('stuck_input: task=x.md target=cfg:1 changed=true same_tail_s=0 unstick=report_only', out.getvalue())
+
+    def test_check_reports_duplicate_stuck_input_rows_without_unstick(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / 'sessions.json'
+            state = root / 'state.json'
+            _ = registry.write_text('{"sessions":[{"task_file":"x.md","tmux_target":"cfg:1"},{"task_file":"y.md","tmux_target":"cfg:1"}]}', encoding='utf-8')
+            out = io.StringIO()
+            report = Report('stuck_input', ['› Continue task'], 'Continue task', True)
+            with patch('omo_manager.omo_stuck_watch.inspect', return_value=report), contextlib.redirect_stdout(out):
+                self.assertEqual(0, check(Args(registry, state, 80, 900.0, False, 60.0, 1)))
+            self.assertEqual(2, out.getvalue().count('unstick=report_only'))
+
 
 if __name__ == '__main__':
     _ = unittest.main()

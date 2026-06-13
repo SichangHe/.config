@@ -80,7 +80,9 @@ echo "started pending watcher supervisor pid=$pending_pid log=$state_dir/pending
 stuck_pid=""
 case "$stuck_enable" in
   1|true|yes)
-    setsid "${uv_run[@]}" "$helper_dir/omo_stuck_watch.py" --watch --interval-s "${OMO_MANAGER_STUCK_INTERVAL_S:-60}" --stale-after-s "${OMO_MANAGER_STUCK_STALE_AFTER_S:-900}" --max-iterations "${OMO_MANAGER_STUCK_MAX_ITERATIONS:-10000}" >>"$state_dir/stuck-watch.log" 2>&1 &
+    stuck_args=(--watch --interval-s "${OMO_MANAGER_STUCK_INTERVAL_S:-60}" --stale-after-s "${OMO_MANAGER_STUCK_STALE_AFTER_S:-900}" --max-iterations "${OMO_MANAGER_STUCK_MAX_ITERATIONS:-10000}")
+    [ -n "$manager_target" ] && stuck_args+=(--manager-target "$manager_target")
+    setsid "${uv_run[@]}" "$helper_dir/omo_stuck_watch.py" "${stuck_args[@]}" >>"$state_dir/stuck-watch.log" 2>&1 &
     stuck_pid=$!
     echo "started stuck watcher pid=$stuck_pid log=$state_dir/stuck-watch.log"
     ;;

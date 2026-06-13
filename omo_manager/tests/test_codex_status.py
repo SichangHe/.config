@@ -1,7 +1,8 @@
+import subprocess
 import unittest
 from unittest.mock import patch
 
-from omo_manager.omo_codex_status import Args, current_block, inspect, last_output, status
+from omo_manager.omo_codex_status import Args, Report, can_submit_stuck_input, current_block, current_input_text, inspect, last_output, status, submit_stuck_input_if_present
 
 
 class CodexStatusTests(unittest.TestCase):
@@ -24,13 +25,35 @@ class CodexStatusTests(unittest.TestCase):
         lines = ['• Messages to be submitted after next tool call (press esc to interrupt and send immediately)', '› Use /skills to list available skills', '  gpt-5.5']
         self.assertEqual('running', status(lines, current_block(lines)))
 
-    def test_status_running_while_waiting_for_background_terminal_with_stale_input(self) -> None:
+    def test_status_stuck_input_while_waiting_for_background_terminal_with_real_input(self) -> None:
         lines = ['• Waiting for background terminal · 1 background terminal running · /ps to view · /stop to close', '', '› Run /review on my current changes', '  gpt-5.5']
-        self.assertEqual('running', status(lines, current_block(lines)))
+        self.assertEqual('stuck_input', status(lines, current_block(lines)))
+        self.assertTrue(can_submit_stuck_input(lines))
 
     def test_status_ready_with_finished_background_terminal_and_input(self) -> None:
         lines = ['• Waited for background terminal · timeout 900s verifier', '› Use /skills to list available skills', '  gpt-5.5']
         self.assertEqual('ready', status(lines, current_block(lines)))
+
+    def test_status_stuck_input_for_non_placeholder_input_box(self) -> None:
+        lines = ['────', 'done', '› Continue `opc_pcodx_live_context_compaction_5481.md`.', '  gpt-5.5']
+        self.assertEqual('Continue `opc_pcodx_live_context_compaction_5481.md`.', current_input_text(lines))
+        self.assertEqual('stuck_input', status(lines, current_block(lines)))
+        self.assertTrue(can_submit_stuck_input(lines))
+
+    def test_status_ready_for_known_placeholder_suggestion(self) -> None:
+        lines = ['────', 'done', '› Summarize recent commits', '  gpt-5.5']
+        self.assertEqual('ready', status(lines, current_block(lines)))
+        self.assertFalse(can_submit_stuck_input(lines))
+
+    def test_status_ready_for_write_tests_placeholder_suggestion(self) -> None:
+        lines = ['• Working (1m 59s • esc to interrupt)', '', '› Write tests for @filename', '', '  gpt-5.5']
+        self.assertEqual('running', status(lines, current_block(lines)))
+        self.assertFalse(can_submit_stuck_input(lines))
+
+    def test_status_stuck_input_for_multiline_input_box(self) -> None:
+        lines = ['────', 'done', '› Run `~/.config/getagentsmd` first.', '  Continue `x.md`.', '  - Report back.', '  gpt-5.5']
+        self.assertEqual('Run `~/.config/getagentsmd` first.\n  Continue `x.md`.\n  - Report back.', current_input_text(lines))
+        self.assertEqual('stuck_input', status(lines, current_block(lines)))
 
     def test_status_running_without_worked_footer(self) -> None:
         lines = ['working', '  gpt-5.5']
@@ -50,6 +73,30 @@ class CodexStatusTests(unittest.TestCase):
             report = inspect(Args('cfg:1', 20))
         self.assertEqual('ready', report.status)
         self.assertEqual(['done'], report.lines)
+
+    def test_submit_stuck_input_if_present_sends_enter_for_stuck_input(self) -> None:
+        report = Report('stuck_input', ['› Continue task'], 'Continue task', True)
+        with patch('omo_manager.omo_codex_status.tail', return_value=['› Continue task', '  gpt-5.5']), patch('omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)) as run:
+            self.assertEqual('sent_enter', submit_stuck_input_if_present('cfg:1.0', report))
+        run.assert_called_once_with(['tmux', 'send-keys', '-t', 'cfg:1.0', 'Enter'], capture_output=True, text=True, timeout=5, check=False)
+
+    def test_submit_stuck_input_if_present_ignores_latest_placeholder(self) -> None:
+        report = Report('stuck_input', ['› Continue task'], 'Continue task', True)
+        with patch('omo_manager.omo_codex_status.tail', return_value=['› Summarize recent commits', '  gpt-5.5']), patch('omo_manager.omo_codex_status.subprocess.run') as run:
+            self.assertEqual('not_stuck', submit_stuck_input_if_present('cfg:1.0', report))
+        run.assert_not_called()
+
+    def test_submit_stuck_input_if_present_sends_enter_while_latest_screen_is_busy(self) -> None:
+        report = Report('stuck_input', ['› Continue task'], 'Continue task', True)
+        with patch('omo_manager.omo_codex_status.tail', return_value=['• Working', '', '› Continue task', '  gpt-5.5']), patch('omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)) as run:
+            self.assertEqual('sent_enter', submit_stuck_input_if_present('cfg:1.0', report))
+        run.assert_called_once_with(['tmux', 'send-keys', '-t', 'cfg:1.0', 'Enter'], capture_output=True, text=True, timeout=5, check=False)
+
+    def test_submit_stuck_input_if_present_ignores_non_stuck_report(self) -> None:
+        report = Report('ready', ['› Use /skills to list available skills'], 'Use /skills to list available skills', False)
+        with patch('omo_manager.omo_codex_status.subprocess.run') as run:
+            self.assertEqual('', submit_stuck_input_if_present('cfg:1.0', report))
+        run.assert_not_called()
 
 
 if __name__ == '__main__':
