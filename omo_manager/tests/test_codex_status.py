@@ -40,6 +40,38 @@ class CodexStatusTests(unittest.TestCase):
         self.assertEqual('running', status(lines, current_block(lines)))
         self.assertFalse(can_submit_stuck_input(lines))
 
+    def test_status_running_with_queued_input_footer_without_model_footer(self) -> None:
+        lines = [
+            '• Working (19m 47s • esc to interrupt)',
+            '',
+            '› [Pasted Content 1020 chars] as hypothesis-generating, not reassuring proof.',
+            '  - Add population and marker tables.',
+            '',
+            '',
+            '  tab to queue message                                                                                    28% context left',
+        ]
+        self.assertEqual('running', status(lines, current_block(lines)))
+        self.assertFalse(can_submit_stuck_input(lines))
+
+    def test_status_running_with_long_queued_input_footer_without_model_footer(self) -> None:
+        lines = [
+            '• Working (19m 47s • esc to interrupt)',
+            '',
+            '› [Pasted Content 3000 chars] first queued line',
+            *[f'  queued line {idx}' for idx in range(25)],
+            '  tab to queue message                                                                                    28% context left',
+        ]
+        self.assertEqual('running', status(lines, current_block(lines)))
+        self.assertFalse(can_submit_stuck_input(lines))
+
+    def test_status_not_codex_for_queued_footer_without_working_indicator(self) -> None:
+        lines = ['shell output', '  tab to queue message                                                                                    28% context left']
+        self.assertEqual('not_codex', status(lines, current_block(lines)))
+
+    def test_status_not_codex_when_queued_footer_is_not_final(self) -> None:
+        lines = ['• Working (19m 47s • esc to interrupt)', '  tab to queue message                                                                                    28% context left', '$ shell prompt']
+        self.assertEqual('not_codex', status(lines, current_block(lines)))
+
     def test_status_stuck_input_for_user_entered_explain_on_idle_worker(self) -> None:
         lines = ['────', 'done', '› Explain this codebase', '  gpt-5.5']
         self.assertEqual('stuck_input', status(lines, current_block(lines)))

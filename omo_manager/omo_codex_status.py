@@ -16,6 +16,7 @@ READY_RE = re.compile(r"^› Use /skills to list available skills$")
 INPUT_RE = re.compile(r"^› ")
 BUSY_RE = re.compile(r"^• (?:Working|Messages to be submitted after next tool call)\b")
 BACKGROUND_RUNNING_RE = re.compile(r"^• .*?\b(?:Waiting for background terminal|[1-9][0-9]* background terminals? running)\b")
+QUEUE_MESSAGE_FOOTER_RE = re.compile(r"\btab to queue message\b")
 CODEX_EMPTY_INPUT_TEXTS = {
     "Use /skills to list available skills",
     "Find and fix a bug in @filename",
@@ -75,8 +76,12 @@ def tail(target: str, n_lines: int) -> list[str]:
     return lines
 
 
+def has_codex_model_footer(lines: list[str]) -> bool:
+    return bool(lines and CODEX_RE.search(lines[-1]) is not None)
+
+
 def current_block(lines: list[str]) -> Block:
-    body = lines[:-1] if lines and CODEX_RE.search(lines[-1]) is not None else lines[:]
+    body = lines[:-1] if has_codex_model_footer(lines) else lines[:]
     start = 0
     for idx in range(len(body) - 1, -1, -1):
         if SEP_RE.match(body[idx]):
@@ -98,7 +103,7 @@ def last_output(lines: list[str]) -> list[str]:
 
 
 def current_input_text(lines: list[str]) -> str:
-    body = lines[:-1] if lines and CODEX_RE.search(lines[-1]) is not None else lines[:]
+    body = lines[:-1] if has_codex_model_footer(lines) else lines[:]
     while body and not body[-1].strip():
         body.pop()
     for idx in range(len(body) - 1, -1, -1):
@@ -117,13 +122,27 @@ def has_running_indicator(lines: list[str]) -> bool:
     return any(BUSY_RE.search(line) is not None or BACKGROUND_RUNNING_RE.search(line) is not None for line in lines[-20:])
 
 
+def has_visible_running_indicator(lines: list[str]) -> bool:
+    return any(BUSY_RE.search(line) is not None or BACKGROUND_RUNNING_RE.search(line) is not None for line in lines)
+
+
+def has_queued_message_footer(lines: list[str]) -> bool:
+    return bool(lines and QUEUE_MESSAGE_FOOTER_RE.search(lines[-1]) is not None)
+
+
+def has_queued_running_input(lines: list[str]) -> bool:
+    return has_queued_message_footer(lines) and has_visible_running_indicator(lines)
+
+
 def is_empty_input_text(lines: list[str], input_text: str) -> bool:
     return input_text in CODEX_EMPTY_INPUT_TEXTS or (has_running_indicator(lines) and input_text in CODEX_RUNNING_EMPTY_INPUT_TEXTS)
 
 
 def can_submit_stuck_input(lines: list[str]) -> bool:
+    if has_queued_running_input(lines):
+        return False
     input_text = current_input_text(lines)
-    return bool(lines and CODEX_RE.search(lines[-1]) is not None and input_text and not is_empty_input_text(lines, input_text))
+    return bool(has_codex_model_footer(lines) and input_text and not is_empty_input_text(lines, input_text))
 
 
 def submit_stuck_input_if_present(target: str, report: Report, n_lines: int = 80) -> str:
@@ -140,8 +159,12 @@ def submit_stuck_input_if_present(target: str, report: Report, n_lines: int = 80
 
 
 def status(lines: list[str], block: Block) -> str:
-    if not lines or CODEX_RE.search(lines[-1]) is None:
+    if not lines:
         return "not_codex"
+    if not has_codex_model_footer(lines):
+        return "running" if has_queued_running_input(lines) else "not_codex"
+    if has_queued_running_input(lines):
+        return "running"
     input_text = current_input_text(lines)
     if input_text and not is_empty_input_text(lines, input_text):
         return "stuck_input"
