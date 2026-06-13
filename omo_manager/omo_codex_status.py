@@ -15,6 +15,7 @@ WORKED_RE = re.compile(r"^─ Worked for .+ ─+$")
 READY_RE = re.compile(r"^› Use /skills to list available skills$")
 INPUT_RE = re.compile(r"^› ")
 BUSY_RE = re.compile(r"^• (?:Working|Messages to be submitted after next tool call)\b")
+BACKGROUND_RUNNING_RE = re.compile(r"^• .*?\b(?:Waiting for background terminal|[1-9][0-9]* background terminals? running)\b")
 
 
 @dataclass(frozen=True)
@@ -85,7 +86,7 @@ def last_output(lines: list[str]) -> list[str]:
 def status(lines: list[str], block: Block) -> str:
     if not lines or CODEX_RE.search(lines[-1]) is None:
         return "not_codex"
-    if any(BUSY_RE.search(line) is not None for line in lines[-20:]):
+    if any(BUSY_RE.search(line) is not None or BACKGROUND_RUNNING_RE.search(line) is not None for line in lines[-20:]):
         return "running"
     if block.has_footer or any(READY_RE.match(line) is not None or INPUT_RE.match(line) is not None for line in lines[-10:]):
         return "ready"

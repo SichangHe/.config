@@ -24,6 +24,14 @@ class CodexStatusTests(unittest.TestCase):
         lines = ['• Messages to be submitted after next tool call (press esc to interrupt and send immediately)', '› Use /skills to list available skills', '  gpt-5.5']
         self.assertEqual('running', status(lines, current_block(lines)))
 
+    def test_status_running_while_waiting_for_background_terminal_with_stale_input(self) -> None:
+        lines = ['• Waiting for background terminal · 1 background terminal running · /ps to view · /stop to close', '', '› Run /review on my current changes', '  gpt-5.5']
+        self.assertEqual('running', status(lines, current_block(lines)))
+
+    def test_status_ready_with_finished_background_terminal_and_input(self) -> None:
+        lines = ['• Waited for background terminal · timeout 900s verifier', '› Use /skills to list available skills', '  gpt-5.5']
+        self.assertEqual('ready', status(lines, current_block(lines)))
+
     def test_status_running_without_worked_footer(self) -> None:
         lines = ['working', '  gpt-5.5']
         self.assertEqual('running', status(lines, current_block(lines)))
