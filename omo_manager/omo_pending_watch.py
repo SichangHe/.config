@@ -34,6 +34,7 @@ PENDING_MARKERS = {"(pending)"}
 ROUTED_PREFIXES = ("(manager handled:", "(manager routed:")
 EMAIL_SOURCE_PREFIXES = ("(from email ", "[source: email ")
 AGENT_SOURCE_PREFIXES = ("[omo-message-source: origin=agent ", "(from agent ")
+AGENT_PROBLEM_SOURCE_LINE = "[omo-message-source: origin=agent source=agent action=no-human-ack agent=omo_pending_watch via=omo_pending_watch.py status=agent-problem]"
 IGNORE_PARTS = {".git", ".venv", "__pycache__"}
 FENCE_PREFIXES = ("```", "~~~")
 INOTIFY_EVENT = struct.Struct("iIII")
@@ -503,7 +504,7 @@ def handle_agent_problem_result(args: Args, seen: dict[str, float], result: Comm
     key = f"agent-problem:{digest}"
     if not has_unstuck and now_wall_s - seen.get(key, 0.0) < args.agent_problem_repeat_s:
         return False
-    text = f"manager agent problem: running task marker needs attention.\n{output}"
+    text = f"{AGENT_PROBLEM_SOURCE_LINE}\nmanager agent problem: running task marker needs attention.\n{output}"
     if push_manager_text(args, text) not in {0, 2}:
         return False
     seen[key] = now_wall_s

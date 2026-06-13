@@ -85,6 +85,23 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual("agent", markers[0].origin)
             self.assertEqual("no-human-ack", markers[0].action)
 
+    def test_manager_agent_problem_pending_block_is_agent_origin(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "work_manager.md"
+            path.write_text(
+                "(pending)\n"
+                "[omo-message-source: origin=agent source=agent action=no-human-ack agent=omo_pending_watch via=omo_pending_watch.py status=agent-problem]\n"
+                "manager agent problem: running task marker needs attention.\n"
+                "agent-problems: stuck_input=1\n",
+                encoding="utf-8",
+            )
+            markers = find_markers(root, [path])
+            self.assertEqual(1, len(markers))
+            self.assertEqual("agent", markers[0].origin)
+            self.assertEqual("agent", markers[0].source)
+            self.assertEqual("no-human-ack", markers[0].action)
+
     def test_email_pending_block_uses_configured_active_log(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1133,6 +1150,7 @@ class PendingMarkerTests(unittest.TestCase):
                 self.assertTrue(watcher.maybe_push_agent_problems(args, seen, 1300.0))
             text = out.getvalue()
             self.assertEqual(2, text.count("manager agent problem: running task marker needs attention."))
+            self.assertEqual(2, text.count("[omo-message-source: origin=agent source=agent action=no-human-ack agent=omo_pending_watch via=omo_pending_watch.py status=agent-problem]"))
             self.assertIn("not_codex: task=task.md", text)
 
     def test_agent_problem_check_does_not_throttle_unstuck_reports(self) -> None:
@@ -1151,6 +1169,7 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 1000.0))
             self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 1001.0))
         self.assertEqual(2, out.getvalue().count("unstuck: target=cfg:1"))
+        self.assertEqual(2, out.getvalue().count("[omo-message-source: origin=agent source=agent action=no-human-ack agent=omo_pending_watch via=omo_pending_watch.py status=agent-problem]"))
 
     def test_markdown_inotify_watcher_reports_new_file(self) -> None:
         from omo_manager.omo_pending_watch import MarkdownChangeWatcher

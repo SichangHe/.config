@@ -22,6 +22,7 @@ CODEX_EMPTY_INPUT_TEXTS = {
     "Summarize recent commits",
     "Improve documentation in @filename",
     "Write tests for @filename",
+    "Run /review on my current changes",
 }
 
 

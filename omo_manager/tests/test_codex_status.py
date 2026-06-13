@@ -25,10 +25,10 @@ class CodexStatusTests(unittest.TestCase):
         lines = ['• Messages to be submitted after next tool call (press esc to interrupt and send immediately)', '› Use /skills to list available skills', '  gpt-5.5']
         self.assertEqual('running', status(lines, current_block(lines)))
 
-    def test_status_stuck_input_while_waiting_for_background_terminal_with_real_input(self) -> None:
+    def test_status_running_while_waiting_for_background_terminal_with_review_placeholder(self) -> None:
         lines = ['• Waiting for background terminal · 1 background terminal running · /ps to view · /stop to close', '', '› Run /review on my current changes', '  gpt-5.5']
-        self.assertEqual('stuck_input', status(lines, current_block(lines)))
-        self.assertTrue(can_submit_stuck_input(lines))
+        self.assertEqual('running', status(lines, current_block(lines)))
+        self.assertFalse(can_submit_stuck_input(lines))
 
     def test_status_ready_with_finished_background_terminal_and_input(self) -> None:
         lines = ['• Waited for background terminal · timeout 900s verifier', '› Use /skills to list available skills', '  gpt-5.5']
@@ -37,6 +37,12 @@ class CodexStatusTests(unittest.TestCase):
     def test_status_stuck_input_for_non_placeholder_input_box(self) -> None:
         lines = ['────', 'done', '› Continue `opc_pcodx_live_context_compaction_5481.md`.', '  gpt-5.5']
         self.assertEqual('Continue `opc_pcodx_live_context_compaction_5481.md`.', current_input_text(lines))
+        self.assertEqual('stuck_input', status(lines, current_block(lines)))
+        self.assertTrue(can_submit_stuck_input(lines))
+
+    def test_status_stuck_input_for_user_entered_review_command_with_details(self) -> None:
+        lines = ['────', 'done', '› Run /review on my current changes and summarize findings', '  gpt-5.5']
+        self.assertEqual('Run /review on my current changes and summarize findings', current_input_text(lines))
         self.assertEqual('stuck_input', status(lines, current_block(lines)))
         self.assertTrue(can_submit_stuck_input(lines))
 
@@ -83,6 +89,12 @@ class CodexStatusTests(unittest.TestCase):
     def test_submit_stuck_input_if_present_ignores_latest_placeholder(self) -> None:
         report = Report('stuck_input', ['› Continue task'], 'Continue task', True)
         with patch('omo_manager.omo_codex_status.tail', return_value=['› Summarize recent commits', '  gpt-5.5']), patch('omo_manager.omo_codex_status.subprocess.run') as run:
+            self.assertEqual('not_stuck', submit_stuck_input_if_present('cfg:1.0', report))
+        run.assert_not_called()
+
+    def test_submit_stuck_input_if_present_ignores_latest_review_placeholder(self) -> None:
+        report = Report('stuck_input', ['› Continue task'], 'Continue task', True)
+        with patch('omo_manager.omo_codex_status.tail', return_value=['› Run /review on my current changes', '  gpt-5.5']), patch('omo_manager.omo_codex_status.subprocess.run') as run:
             self.assertEqual('not_stuck', submit_stuck_input_if_present('cfg:1.0', report))
         run.assert_not_called()
 

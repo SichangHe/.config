@@ -221,8 +221,22 @@ class AgentStatusTests(unittest.TestCase):
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             self.assertEqual("", out.getvalue())
 
-    def test_problems_only_reports_stuck_input_during_background_terminal_wait(self) -> None:
+    def test_problems_only_stays_quiet_for_review_placeholder_during_background_terminal_wait(self) -> None:
         pane = ['• Waiting for background terminal · 1 background terminal running · /ps to view · /stop to close', '', '› Run /review on my current changes', '  gpt-5.5']
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[{"task_file":"active.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
+            _ = (root / "active.md").write_text("runat: cfg:1 codex\n(running)\n", encoding="utf-8")
+            out = StringIO()
+            with patch("omo_manager.omo_codex_status.tail", return_value=pane), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present") as unstick, redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            unstick.assert_not_called()
+            self.assertEqual("", out.getvalue())
+
+    def test_problems_only_reports_user_entered_review_input_during_background_terminal_wait(self) -> None:
+        pane = ['• Waiting for background terminal · 1 background terminal running · /ps to view · /stop to close', '', '› Run /review on my current changes and summarize findings', '  gpt-5.5']
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             registry = root / "sessions.json"
@@ -233,9 +247,10 @@ class AgentStatusTests(unittest.TestCase):
             with patch("omo_manager.omo_codex_status.tail", return_value=pane), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present", return_value="sent_enter") as unstick, redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             unstick.assert_called_once()
-            self.assertIn("stuck_input: task=active.md", out.getvalue())
-            self.assertIn("unstick=sent_enter", out.getvalue())
-            self.assertIn("unstuck: target=cfg:1.0 task=active.md action=sent_enter", out.getvalue())
+            text = out.getvalue()
+            self.assertIn("stuck_input: task=active.md", text)
+            self.assertIn("unstick=sent_enter", text)
+            self.assertIn("unstuck: target=cfg:1.0 task=active.md action=sent_enter", text)
 
     def test_problems_only_auto_unsticks_safe_stuck_input(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -352,9 +367,25 @@ class AgentStatusTests(unittest.TestCase):
             _ = (root / "TODO.md").write_text("current:\nrole.md cfg 1\n", encoding="utf-8")
             _ = (root / "role.md").write_text("runat: cfg:1 codex\n(blocked: persistent VL spec-analysis role waiting for follow-up)\n", encoding="utf-8")
             out = StringIO()
-            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("stuck_input", ["› Run /review on my current changes"])), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present", return_value="sent_enter"), redirect_stdout(out):
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("stuck_input", ["› Continue follow-up"], "Continue follow-up", True)), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present", return_value="sent_enter"), redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             self.assertIn("stuck_input: task=role.md", out.getvalue())
+
+    def test_problems_only_stays_quiet_for_repeated_blocked_persistent_role_review_placeholders(self) -> None:
+        pane = ['• Waiting for background terminal · 1 background terminal running · /ps to view · /stop to close', '', '› Run /review on my current changes', '  gpt-5.5']
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[{"task_file":"role.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nrole.md cfg 1\n", encoding="utf-8")
+            _ = (root / "role.md").write_text("runat: cfg:1 codex\n(blocked: persistent VL supervisor role waiting for follow-up)\n", encoding="utf-8")
+            with patch("omo_manager.omo_codex_status.tail", return_value=pane), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present") as unstick:
+                for _ in range(2):
+                    out = StringIO()
+                    with redirect_stdout(out):
+                        self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+                    self.assertEqual("", out.getvalue())
+            unstick.assert_not_called()
 
     def test_problems_only_reports_error_for_blocked_persistent_role(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
