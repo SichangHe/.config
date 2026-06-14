@@ -1,0 +1,1 @@
+../omo_manager/omo_manager_mail_compress.py
