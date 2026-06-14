@@ -129,6 +129,14 @@ def parse_args(argv: list[str]) -> Args:
     return Args(parsed.root.resolve(), parsed.registry, parsed.prune_completed, parsed.exit_code_if_active, parsed.problems_only, parsed.manager_target, parsed.auto_unstick)
 
 
+def target_aliases(target: str) -> set[str]:
+    return {target, target[:-2] if target.endswith(".0") else f"{target}.0"} if target else set()
+
+
+def same_tmux_target(left: str, right: str) -> bool:
+    return bool(target_aliases(left) & target_aliases(right))
+
+
 def section_name(line: str, current: str) -> str:
     stripped = line.strip().lower().rstrip(":")
     if stripped in {"current", "previous", "human pending", "low priority"}:
@@ -326,7 +334,9 @@ def classify_target(task_file: str, target: str, persistent_role: bool = False, 
     if report.lines:
         evidence += " output=" + " / ".join(report.lines[-3:])
     if report.status == "stuck_input":
-        if auto_unstick:
+        if role == "manager":
+            unstick = "report_only"
+        elif auto_unstick:
             if unstick_by_target is not None and target in unstick_by_target:
                 unstick = "already_sent" if unstick_by_target[target] == "sent_enter" else unstick_by_target[target]
             else:
@@ -339,12 +349,13 @@ def classify_target(task_file: str, target: str, persistent_role: bool = False, 
     return StatusRow(task_file, report.status, evidence, persistent_role, task_status, target, unstick)
 
 
-def classify_task(task: TaskLine, record: SessionRecord | None, auto_unstick: bool = False, unstick_by_target: dict[str, str] | None = None) -> StatusRow:
-    return classify_target(task.task_file, display_target(task, record), task.persistent_role, task.status, auto_unstick, unstick_by_target=unstick_by_target)
+def classify_task(task: TaskLine, record: SessionRecord | None, auto_unstick: bool = False, unstick_by_target: dict[str, str] | None = None, no_auto_unstick_target: str = "") -> StatusRow:
+    target = display_target(task, record)
+    return classify_target(task.task_file, target, task.persistent_role, task.status, auto_unstick and not same_tmux_target(target, no_auto_unstick_target), unstick_by_target=unstick_by_target)
 
 
 def manager_problem_row(args: Args, skip_targets: set[str], unstick_by_target: dict[str, str]) -> StatusRow | None:
-    if not args.manager_target or args.manager_target in skip_targets:
+    if not args.manager_target or any(same_tmux_target(args.manager_target, target) for target in skip_targets):
         return None
     row = classify_target("manager", args.manager_target, auto_unstick=args.auto_unstick, role="manager", unstick_by_target=unstick_by_target)
     return row if row.status in {"error", "not_codex", "stuck_input"} else None
@@ -423,10 +434,10 @@ def main(argv: list[str]) -> int:
             tasks = [task for task in tasks if task.status == "running"]
         auto_unstick = args.problems_only and args.auto_unstick
         unstick_by_target: dict[str, str] = {}
-        rows = [classify_task(task, choose_session(task, records), auto_unstick, unstick_by_target) for task in tasks]
+        rows = [classify_task(task, choose_session(task, records), auto_unstick, unstick_by_target, args.manager_target) for task in tasks]
         if args.problems_only:
             standby_tasks = persistent_blocked_task_lines(args.root)
-            rows.extend(classify_task(task, choose_session(task, records), auto_unstick, unstick_by_target) for task in standby_tasks)
+            rows.extend(classify_task(task, choose_session(task, records), auto_unstick, unstick_by_target, args.manager_target) for task in standby_tasks)
             manager_row = manager_problem_row(args, {display_target(task, choose_session(task, records)) for task in [*tasks, *standby_tasks]}, unstick_by_target)
             if manager_row is not None:
                 rows.append(manager_row)

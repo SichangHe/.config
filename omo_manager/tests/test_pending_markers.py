@@ -1353,6 +1353,40 @@ class PendingMarkerTests(unittest.TestCase):
         self.assertEqual(2, out.getvalue().count("unstuck: target=cfg:1"))
         self.assertEqual(2, out.getvalue().count("[omo-message-source: origin=agent source=agent action=no-human-ack agent=omo_pending_watch via=omo_pending_watch.py status=agent-problem]"))
 
+    def test_agent_problem_check_suppresses_manager_self_stuck_prompt(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, True, agent_problem_repeat_s=300.0)
+        result = watcher.CommandOutput(
+            "agent-problems",
+            3,
+            "agent-problems: stuck_input=1\nstuck_input: task=manager evidence=target=wl:1.0 role=manager unstick=report_only\n",
+            "",
+        )
+        out = StringIO()
+        with redirect_stdout(out):
+            self.assertFalse(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
+        text = out.getvalue()
+        self.assertIn("suppressed manager self-problem report", text)
+        self.assertNotIn("manager agent problem: running task marker needs attention.", text)
+
+    def test_agent_problem_check_suppresses_manager_target_alias_prompt(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, True, manager_target="wl:1.0", agent_problem_repeat_s=300.0)
+        result = watcher.CommandOutput(
+            "agent-problems",
+            3,
+            "agent-problems: stuck_input=1\nstuck_input: task=active.md evidence=target=wl:1 unstick=disabled\n",
+            "",
+        )
+        out = StringIO()
+        with redirect_stdout(out):
+            self.assertFalse(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
+        text = out.getvalue()
+        self.assertIn("suppressed manager self-problem report", text)
+        self.assertNotIn("manager agent problem: running task marker needs attention.", text)
+
     def test_markdown_inotify_watcher_reports_new_file(self) -> None:
         from omo_manager.omo_pending_watch import MarkdownChangeWatcher
 

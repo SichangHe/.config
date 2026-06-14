@@ -8,6 +8,7 @@ import ctypes.util
 import errno
 import os
 import hashlib
+import re
 import select
 import struct
 import subprocess
@@ -475,6 +476,57 @@ def status_command(args: Args, problems_only: bool = False) -> list[str]:
     return command
 
 
+def target_aliases(target: str) -> set[str]:
+    return {target, target[:-2] if target.endswith(".0") else f"{target}.0"} if target else set()
+
+
+def same_tmux_target(left: str, right: str) -> bool:
+    return bool(target_aliases(left) & target_aliases(right))
+
+
+def evidence_target(line: str) -> str:
+    match = re.search(r"\bevidence=target=(\S+)", line)
+    return match.group(1) if match is not None else ""
+
+
+def manager_self_problem_line(line: str, manager_target: str = "") -> bool:
+    if re.match(r"^(?:error|not_codex|ready|stuck_input): task=manager evidence=.*\brole=manager\b", line):
+        return True
+    if re.match(r"^(?:error|not_codex|ready|stuck_input): task=\S+ evidence=target=", line) is None:
+        return False
+    return same_tmux_target(evidence_target(line), manager_target)
+
+
+def manager_self_unstuck_line(line: str, manager_target: str = "") -> bool:
+    if re.match(r"^unstuck: target=\S+ task=manager action=sent_enter$", line):
+        return True
+    match = re.match(r"^unstuck: target=(\S+) task=\S+ action=sent_enter$", line)
+    return bool(match is not None and same_tmux_target(match.group(1), manager_target))
+
+
+def filter_manager_self_problem_output(output: str, manager_target: str = "") -> str | None:
+    lines = output.splitlines()
+    if not lines or not lines[0].startswith("agent-problems:"):
+        return output
+    kept = [line for line in lines[1:] if not manager_self_problem_line(line, manager_target) and not manager_self_unstuck_line(line, manager_target)]
+    if len(kept) == len(lines) - 1:
+        return output
+    counts = {"not_codex": 0, "error": 0, "ready": 0, "stuck_input": 0, "done-registry-stale": 0}
+    for line in kept:
+        problem_match = re.match(r"^(not_codex|error|ready|stuck_input): ", line)
+        if problem_match is not None:
+            counts[problem_match.group(1)] += 1
+        elif line.startswith("done-stale: "):
+            counts["done-registry-stale"] += 1
+    parts = [f"{status}={counts[status]}" for status in ("not_codex", "error", "ready", "stuck_input") if counts[status]]
+    if counts["done-registry-stale"]:
+        parts.append(f"done-registry-stale={counts['done-registry-stale']}")
+    if not parts:
+        print("omo_pending_watch: suppressed manager self-problem report", flush=True)
+        return None
+    return "\n".join([f"agent-problems: {' '.join(parts)}", *kept])
+
+
 def maybe_push_agent_problems(args: Args, seen: dict[str, float], now_wall_s: float) -> bool:
     command = status_command(args, True)
     try:
@@ -499,6 +551,9 @@ def handle_agent_problem_result(args: Args, seen: dict[str, float], result: Comm
         return False
     if result.stderr.strip():
         output = f"{output}\nstderr:\n{result.stderr.strip()}".strip()
+    output = filter_manager_self_problem_output(output, args.manager_target) or ""
+    if not output:
+        return False
     has_unstuck = any(line.startswith("unstuck: ") for line in output.splitlines())
     digest = hashlib.sha256(output.encode("utf-8")).hexdigest()[:16]
     key = f"agent-problem:{digest}"
