@@ -150,6 +150,10 @@ def is_empty_input_text(lines: list[str], input_text: str) -> bool:
     return input_text in CODEX_EMPTY_INPUT_TEXTS or (has_running_indicator(lines) and input_text in CODEX_RUNNING_EMPTY_INPUT_TEXTS)
 
 
+def is_stock_placeholder_input_text(input_text: str) -> bool:
+    return input_text in CODEX_EMPTY_INPUT_TEXTS or input_text in CODEX_RUNNING_EMPTY_INPUT_TEXTS
+
+
 def can_submit_stuck_input(lines: list[str]) -> bool:
     if has_queued_running_input(lines) or has_compacting_indicator(lines):
         return False

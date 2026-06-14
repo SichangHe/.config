@@ -17,6 +17,7 @@ if __package__ in {None, ""}:
 
 from omo_manager.omo_codex_status import Args as StatusArgs
 from omo_manager.omo_codex_status import inspect
+from omo_manager.omo_codex_status import is_stock_placeholder_input_text
 from omo_manager.omo_codex_status import submit_stuck_input_if_present
 from omo_manager.omo_stuck_watch import read_json, write_json_private
 
@@ -333,6 +334,8 @@ def classify_target(task_file: str, target: str, persistent_role: bool = False, 
         evidence += f" task_status={task_status}"
     if report.lines:
         evidence += " output=" + " / ".join(report.lines[-3:])
+    if report.status == "stuck_input" and persistent_role and task_status == "blocked" and is_stock_placeholder_input_text(report.input_text):
+        return StatusRow(task_file, "ready", evidence, persistent_role, task_status, target)
     if report.status == "stuck_input":
         if auto_unstick:
             if unstick_by_target is not None and target in unstick_by_target:
@@ -398,8 +401,12 @@ def format_summary(rows: list[StatusRow], completed_stale_count: int, pruned_cou
 PROBLEM_STATUSES = {"error", "not_codex", "ready", "stuck_input"}
 
 
+def is_parked_persistent_blocked_row(row: StatusRow) -> bool:
+    return row.persistent_role and row.task_status == "blocked" and row.status in {"not_codex", "ready"}
+
+
 def format_problem_summary(rows: list[StatusRow], completed_stale: set[str]) -> str:
-    problem_rows = [row for row in rows if row.status in PROBLEM_STATUSES and not (row.status == "ready" and row.persistent_role and row.task_status == "blocked")]
+    problem_rows = [row for row in rows if row.status in PROBLEM_STATUSES and not is_parked_persistent_blocked_row(row)]
     if not problem_rows and not completed_stale:
         return ""
     counts: dict[str, int] = {"not_codex": 0, "error": 0, "ready": 0, "stuck_input": 0}
