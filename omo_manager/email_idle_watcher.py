@@ -266,6 +266,19 @@ def existing_source_line(root: Path, txt_path: Path, manager_file: Path | None =
     return None
 
 
+def existing_source_line_in_root(root: Path, txt_path: Path, manager_file: Path | None = None) -> int | None:
+    source_line = existing_source_line(root, txt_path, manager_file)
+    if source_line is not None:
+        return source_line
+    for path in sorted(root.glob("work_manager_*.md")):
+        if manager_file is not None and path == manager_file:
+            continue
+        source_line = existing_source_line(root, txt_path, path)
+        if source_line is not None:
+            return source_line
+    return None
+
+
 def existing_source_pending_line(root: Path, txt_path: Path, manager_file: Path | None = None) -> int | None:
     manager_file = manager_file or dated_manager_file(root)
     source_line = existing_source_line(root, txt_path, manager_file)
@@ -479,7 +492,7 @@ def recoverable_processed_uids(processed_uids: set[str], root: Path, mail_dir: P
     return [
         uid
         for uid in sorted(processed_uids, key=lambda value: (0, int(value)) if value.isdigit() else (1, value))
-        if uid.isdigit() and int(uid) >= min_uid and existing_source_pending_line_in_root(root, mail_dir / f"{uid}.txt", manager_file) is None
+        if uid.isdigit() and int(uid) >= min_uid and existing_source_line_in_root(root, mail_dir / f"{uid}.txt", manager_file) is None
     ]
 
 
@@ -504,10 +517,10 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> None:
     candidate_uids: set[bytes] = set()
     for subject_prefix in NORMAL_REPLY_SEARCH_PREFIXES:
         candidate_uids.update(search_uids(client, subject_prefix, args.self_email, processed_uids))
-    processed_missing_source = recoverable_processed_uids(processed_uids, args.root, args.mail_dir, manager_file)
+    processed_missing_source = set(recoverable_processed_uids(processed_uids, args.root, args.mail_dir, manager_file))
     if processed_missing_source:
         for subject_prefix in NORMAL_REPLY_SEARCH_PREFIXES:
-            candidate_uids.update(search_processed_uids(client, subject_prefix, args.self_email, processed_missing_source))
+            candidate_uids.update(search_processed_uids(client, subject_prefix, args.self_email, sorted(processed_missing_source, key=lambda value: int(value))))
     for subject in RECOVERY_SUBJECTS:
         candidate_uids.update(search_uids(client, subject, args.self_email, processed_uids))
     if not candidate_uids:
@@ -519,11 +532,13 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> None:
         uid = raw_uid.decode()
         expected_txt_path = args.mail_dir / f"{uid}.txt"
         if uid in processed_uids:
-            if existing_source_pending_line_in_root(args.root, expected_txt_path, manager_file) is not None:
+            if existing_source_line_in_root(args.root, expected_txt_path, manager_file) is not None:
                 mark_seen(client, uid)
                 continue
-            else:
-                logging.warning("email processed uid lacks pending source in current root; reprocessing: uid=%s root=%s", uid, args.root)
+            if uid not in processed_missing_source:
+                logging.warning("email processed uid lacks source in current root and is outside recovery window; skipping: uid=%s root=%s", uid, args.root)
+                continue
+            logging.warning("email processed uid lacks source in current root; reprocessing: uid=%s root=%s", uid, args.root)
         existing_pending_line = existing_source_pending_line(args.root, expected_txt_path, manager_file)
         if existing_pending_line is not None:
             push_email_ref(push_args, existing_pending_line)
