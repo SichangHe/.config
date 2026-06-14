@@ -37,10 +37,11 @@ DEFAULT_MANAGER_TARGET = os.environ.get("OMO_MANAGER_TMUX_TARGET", "")
 DEFAULT_MAIL_DIR = Path(os.environ.get("OMO_MANAGER_MAIL_DIR", DEFAULT_ROOT / "manager_mail"))
 CONFIG_PATH = Path(os.environ.get("OMO_EMAIL_CONFIG_PATH", Path.home() / ".config/himalaya/config.toml"))
 MANAGER_REPLY_PREFIX = "Re: [omo_manager]"
+MANAGER_REPLY_SEARCH_PREFIXES = (MANAGER_REPLY_PREFIX, "Re:[omo_manager]")
 AGENT_REPLY_PREFIX = "Re: [omo]"
 AGENT_REPLY_SEARCH_PREFIXES = (AGENT_REPLY_PREFIX, "Re: [OMO]")
-NORMAL_REPLY_PREFIXES = (MANAGER_REPLY_PREFIX, AGENT_REPLY_PREFIX)
-NORMAL_REPLY_SEARCH_PREFIXES = (MANAGER_REPLY_PREFIX, *AGENT_REPLY_SEARCH_PREFIXES)
+NORMAL_REPLY_SEARCH_PREFIXES = (*MANAGER_REPLY_SEARCH_PREFIXES, *AGENT_REPLY_SEARCH_PREFIXES)
+MANAGER_REPLY_SUBJECT_RE = re.compile(r"^re:\s*\[omo_manager\]\s*", re.IGNORECASE)
 RECOVERY_SUBJECTS = {"[omo_manager_recover]", "Re: [omo_manager_recover]"}
 # Fail closed by default: raw email can contain sender-injected Authentication-Results.
 # This opt-in is an operator/admin-trusted escape hatch for mailbox/provider setups
@@ -203,7 +204,11 @@ def recovery_sender_authenticated(msg: Message, self_email: str) -> bool:
 
 def is_manager_subject(subject: str) -> bool:
     normalized = subject.lower()
-    return normalized.startswith(tuple(prefix.lower() for prefix in NORMAL_REPLY_PREFIXES))
+    return MANAGER_REPLY_SUBJECT_RE.match(subject) is not None or normalized.startswith(tuple(prefix.lower() for prefix in AGENT_REPLY_SEARCH_PREFIXES))
+
+
+def normalize_human_subject(subject: str) -> str:
+    return MANAGER_REPLY_SUBJECT_RE.sub("Re: ", subject, count=1)
 
 
 def is_recovery_subject(subject: str) -> bool:
@@ -272,6 +277,19 @@ def existing_source_pending_line(root: Path, txt_path: Path, manager_file: Path 
     return None
 
 
+def existing_source_pending_line_in_root(root: Path, txt_path: Path, manager_file: Path | None = None) -> int | None:
+    pending_line = existing_source_pending_line(root, txt_path, manager_file)
+    if pending_line is not None:
+        return pending_line
+    for path in sorted(root.glob("work_manager_*.md")):
+        if manager_file is not None and path == manager_file:
+            continue
+        pending_line = existing_source_pending_line(root, txt_path, path)
+        if pending_line is not None:
+            return pending_line
+    return None
+
+
 def append_pending(root: Path, txt_path: Path, manager_file: Path | None = None) -> int:
     manager_file = manager_file or dated_manager_file(root)
     existing_line = existing_source_pending_line(root, txt_path, manager_file)
@@ -323,7 +341,7 @@ def write_mail(args: Args, uid: str, msg: Message, _sender: str, subject: str) -
     args.mail_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     args.mail_dir.chmod(0o700)
     txt_path = args.mail_dir / f"{uid}.txt"
-    body = f"Subject: {subject}\n\n{message_text(msg)}"
+    body = f"Subject: {normalize_human_subject(subject)}\n\n{message_text(msg)}"
     fd = os.open(txt_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write(body)
@@ -439,6 +457,19 @@ def search_uids(client: imaplib.IMAP4_SSL, subject: str, self_email: str, proces
     return candidate_uids
 
 
+def chunks(values: list[str], n_values: int) -> list[list[str]]:
+    return [values[idx : idx + n_values] for idx in range(0, len(values), n_values)]
+
+
+def search_processed_uids(client: imaplib.IMAP4_SSL, subject: str, self_email: str, uids: list[str]) -> set[bytes]:
+    candidate_uids: set[bytes] = set()
+    for uid_chunk in chunks(uids, 50):
+        typ, data = client.uid("search", None, "UID", ",".join(uid_chunk), "FROM", f'"{self_email}"', "SUBJECT", f'"{subject}"')
+        if typ == "OK" and data and data[0]:
+            candidate_uids.update(data[0].split())
+    return candidate_uids
+
+
 def mark_seen(client: imaplib.IMAP4_SSL, uid: str) -> bool:
     try:
         typ, _data = client.uid("store", uid, "+FLAGS", r"(\Seen)")
@@ -460,6 +491,10 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> None:
     candidate_uids: set[bytes] = set()
     for subject_prefix in NORMAL_REPLY_SEARCH_PREFIXES:
         candidate_uids.update(search_uids(client, subject_prefix, args.self_email, processed_uids))
+    processed_missing_source = [uid for uid in processed_uids if existing_source_pending_line_in_root(args.root, args.mail_dir / f"{uid}.txt", manager_file) is None]
+    if processed_missing_source:
+        for subject_prefix in NORMAL_REPLY_SEARCH_PREFIXES:
+            candidate_uids.update(search_processed_uids(client, subject_prefix, args.self_email, processed_missing_source))
     for subject in RECOVERY_SUBJECTS:
         candidate_uids.update(search_uids(client, subject, args.self_email, processed_uids))
     if not candidate_uids:
@@ -469,18 +504,16 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> None:
     args.mail_dir.mkdir(parents=True, exist_ok=True)
     for raw_uid in sorted(candidate_uids, key=lambda value: int(value)):
         uid = raw_uid.decode()
-        if uid in processed_uids:
-            mark_seen(client, uid)
-            continue
         expected_txt_path = args.mail_dir / f"{uid}.txt"
+        if uid in processed_uids:
+            if existing_source_pending_line_in_root(args.root, expected_txt_path, manager_file) is not None:
+                mark_seen(client, uid)
+                continue
+            else:
+                logging.warning("email processed uid lacks pending source in current root; reprocessing: uid=%s root=%s", uid, args.root)
         existing_pending_line = existing_source_pending_line(args.root, expected_txt_path, manager_file)
         if existing_pending_line is not None:
-            if push_email_ref(push_args, existing_pending_line):
-                processed_uids.add(uid)
-                processed_changed = True
-                mark_seen(client, uid)
-            continue
-        if existing_source_line(args.root, expected_txt_path, manager_file) is not None:
+            push_email_ref(push_args, existing_pending_line)
             processed_uids.add(uid)
             processed_changed = True
             mark_seen(client, uid)
@@ -507,10 +540,10 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> None:
             mark_seen(client, uid)
         else:
             pending_line = append_pending(args.root, txt_path, manager_file)
-            if push_email_ref(push_args, pending_line):
-                processed_uids.add(uid)
-                processed_changed = True
-                mark_seen(client, uid)
+            push_email_ref(push_args, pending_line)
+            processed_uids.add(uid)
+            processed_changed = True
+            mark_seen(client, uid)
     if processed_changed:
         save_processed_uids(processed_path, processed_uids)
 

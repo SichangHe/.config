@@ -60,6 +60,10 @@ if [ -z "$manager_url" ] && [ -z "$manager_target" ]; then
   exit 2
 fi
 echo "manager_target=${manager_target:-unset} manager_url=${manager_url:-unset}"
+pkill -f "[p]ending-watch-supervisor .*--state ${pending_seen}" >/dev/null 2>&1 || true
+pkill -f "[o]mo_pending_watch.py .*--state ${pending_seen}" >/dev/null 2>&1 || true
+pkill -f "[e]mail_idle_watcher.py .*--state-dir ${state_dir}" >/dev/null 2>&1 || true
+pkill -f "[e]mail_idle_watcher.py" >/dev/null 2>&1 || true
 pkill -f "[p]ending-watch-supervisor .*--root ${root}" >/dev/null 2>&1 || true
 pkill -f "[o]mo_pending_watch.py .*--root ${root}" >/dev/null 2>&1 || true
 pkill -f "[e]mail_idle_watcher.py .*--root ${root}" >/dev/null 2>&1 || true

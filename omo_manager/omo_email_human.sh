@@ -48,6 +48,7 @@ placeholder_subject=$(
 import re
 import sys
 subject = re.sub(r"^(?:re: *)?\[omo_manager\] *", "", sys.argv[1].strip())
+subject = re.sub(r"^re:\s*", "", subject)
 print("yes" if re.fullmatch(r"subject\W*", subject) else "no")
 PY
 )
