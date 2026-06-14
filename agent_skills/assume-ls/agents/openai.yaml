@@ -1,0 +1,4 @@
+interface:
+  display_name: "Assume LS"
+  short_description: "Shared assumption docs and assumls checks"
+  default_prompt: "Use $assume-ls to document shared assumptions and run assumption checks."

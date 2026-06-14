@@ -1,0 +1,4 @@
+interface:
+  display_name: "Python Coding"
+  short_description: "Python 3.13, uv, ruff, and typing rules"
+  default_prompt: "Use $python-coding when writing or reviewing Python code."

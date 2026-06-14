@@ -1,0 +1,4 @@
+interface:
+  display_name: "SQL Coding"
+  short_description: "SQL style for joins, aliases, and columns"
+  default_prompt: "Use $sql-coding when writing or reviewing SQL."

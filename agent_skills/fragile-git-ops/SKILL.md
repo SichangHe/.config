@@ -10,5 +10,3 @@ First, to see what the editor would be editing, use script that print out file c
 Then, to actually edit, use a script that directly writes desired content to file
 If the preview file contains a non‑empty commit message or todo, proceed by writing it back unchanged with the write script. Only ask user if the preview content is empty or I explicitly asked to edit it. Existing commit messages are acceptable by default
 For each conflict, figure out yourself what each side is doing, and combine the changes in a way that preserves both functionalities
-
-Run focused checks after conflict resolution.

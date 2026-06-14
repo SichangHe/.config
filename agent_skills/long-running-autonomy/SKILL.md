@@ -1,6 +1,6 @@
 ---
 name: long-running-autonomy
-description: Use when the human explicitly asks for long-running autonomous mode, durable multi-stage work, a persistent PLAN file, or continued work across many implementation and verification cycles.
+description: Use when asked to run in long-running autonomous mode.
 ---
 
 **Long Running Autonomous Mode:** Keep your task and progress in
@@ -45,8 +45,3 @@ When you are fully done, remove `PLAN.md`.
 **Make sure to write STUCK LOOP CHECK STOP instructions in `PLAN.md`**.
 
 Do not use Long Running Autonomous Mode unless instructed to.
-
-Additional skill bookkeeping:
-
-- Remove the temporary plan only after all remaining work is resolved or moved to a durable task record.
-- Report the result, changed artifacts, checks, blockers, and remaining human decisions.
