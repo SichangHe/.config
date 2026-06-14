@@ -240,6 +240,37 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual(len(client.stores), 1)
             self.assertIn("12	", (state / "email-processed-uids.tsv").read_text(encoding="utf-8"))
 
+    def test_email_watcher_direct_push_uses_short_ready_timeout(self) -> None:
+        from omo_manager import email_idle_watcher as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            root.mkdir()
+            manager_file = root / "work_manager_today.md"
+            state = Path(tmp) / "state"
+            calls = []
+
+            class Result:
+                returncode = 1
+
+            def run(command: list[str], check: bool = False, env: dict[str, str] | None = None) -> Result:
+                calls.append((command, check, env))
+                return Result()
+
+            old_run = watcher.subprocess.run
+            watcher.subprocess.run = run
+            try:
+                args = watcher.Args(root, "", root / "manager_mail", state, manager_file, True, "me@example.com", 0, Path("/bin/false"), manager_target="wl:1.0")
+                self.assertFalse(watcher.push_email_ref(args, 2))
+            finally:
+                watcher.subprocess.run = old_run
+            self.assertEqual(len(calls), 1)
+            command, check, env = calls[0]
+            self.assertFalse(check)
+            self.assertIn("--submit", command)
+            self.assertEqual(env["OMO_MANAGER_TMUX_READY_TIMEOUT_S"], str(watcher.DEFAULT_EMAIL_PUSH_READY_TIMEOUT_S))
+            self.assertEqual(env["OMO_MANAGER_TMUX_SUBMIT_VERIFY_TIMEOUT_S"], str(watcher.DEFAULT_EMAIL_PUSH_SUBMIT_VERIFY_TIMEOUT_S))
+
     def test_email_watcher_marks_existing_pending_read_when_submit_fails(self) -> None:
         from email.message import EmailMessage
         from omo_manager import email_idle_watcher as watcher

@@ -58,6 +58,8 @@ DEFAULT_RECOVERY_DEBOUNCE_S = int(os.environ.get("OMO_MANAGER_RECOVERY_DEBOUNCE_
 DEFAULT_IDLE_WAIT_S = float(os.environ.get("OMO_MANAGER_EMAIL_IDLE_WAIT_S", "60"))
 DEFAULT_IMAP_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_EMAIL_IMAP_TIMEOUT_S", str(max(90.0, DEFAULT_IDLE_WAIT_S + 30.0))))
 DEFAULT_PROCESSED_RECOVERY_UID_WINDOW = int(os.environ.get("OMO_MANAGER_EMAIL_PROCESSED_RECOVERY_UID_WINDOW", "256"))
+DEFAULT_EMAIL_PUSH_READY_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_EMAIL_PUSH_READY_TIMEOUT_S", "2"))
+DEFAULT_EMAIL_PUSH_SUBMIT_VERIFY_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_EMAIL_PUSH_SUBMIT_VERIFY_TIMEOUT_S", "1"))
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 
@@ -329,8 +331,11 @@ def push_email_ref(args: Args, line_no: int) -> bool:
         command.extend(["--manager-target", args.manager_target])
     if args.manager_url:
         command.extend(["--manager-url", args.manager_url])
+    env = os.environ.copy()
+    env["OMO_MANAGER_TMUX_READY_TIMEOUT_S"] = str(DEFAULT_EMAIL_PUSH_READY_TIMEOUT_S)
+    env["OMO_MANAGER_TMUX_SUBMIT_VERIFY_TIMEOUT_S"] = str(DEFAULT_EMAIL_PUSH_SUBMIT_VERIFY_TIMEOUT_S)
     try:
-        result = subprocess.run(command, check=False)
+        result = subprocess.run(command, check=False, env=env)
     except OSError as exc:
         logging.error("email pending push failed: uid line=%s error=%s", line_no, exc)
         return False
