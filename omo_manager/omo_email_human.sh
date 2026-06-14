@@ -47,7 +47,7 @@ placeholder_subject=$(
   python3 - "$subject_lc" <<'PY'
 import re
 import sys
-subject = re.sub(r"^\[omo_manager\]\s*", "", sys.argv[1].strip())
+subject = re.sub(r"^(?:re: *)?\[omo_manager\] *", "", sys.argv[1].strip())
 print("yes" if re.fullmatch(r"subject\W*", subject) else "no")
 PY
 )
@@ -55,10 +55,23 @@ if [ "$placeholder_subject" = "yes" ]; then
   echo "subject must be a real subject, not the placeholder SUBJECT" >&2
   exit 2
 fi
-case "$subject_lc" in
-  "[omo]"*|"re: [omo]"*) echo "manager email subject must use [omo_manager]; [omo] is reserved for direct regular-agent email" >&2; exit 2 ;;
-  "[omo_manager]"*|"re: [omo_manager]"*) ;;
-  *) subject="[omo_manager] ${subject}" ;;
+subject_route=$(
+  python3 - "$subject_lc" <<'PY'
+import re
+import sys
+subject = sys.argv[1].strip()
+if re.match(r"^(?:re:\s*)?\[omo\]", subject):
+    print("agent")
+elif re.match(r"^(?:re: *)?\[omo_manager\]", subject):
+    print("manager")
+else:
+    print("prefix")
+PY
+)
+case "$subject_route" in
+  agent) echo "manager email subject must use [omo_manager]; [omo] is reserved for direct regular-agent email" >&2; exit 2 ;;
+  manager) ;;
+  prefix) subject="[omo_manager] ${subject}" ;;
 esac
 email_helper="$HOME/.config/helper.sh/email_me.py"
 if [ ! -x "$email_helper" ]; then echo "email helper not executable: $email_helper" >&2; exit 2; fi

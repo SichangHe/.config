@@ -43,6 +43,20 @@ class EmailMeTests(unittest.TestCase):
         msg = email_me.build_message("me@example.com", "[omo_manager] hi", "body")
         self.assertEqual("[omo_manager] hi", msg["Subject"])
 
+    def test_preserves_manager_reply_subject(self) -> None:
+        for subject in ("Re: [omo_manager] hi", "Re:[omo_manager] hi", "Re:  [omo_manager] hi"):
+            with self.subTest(subject=subject):
+                msg = email_me.build_message("me@example.com", subject, "body")
+                self.assertEqual(subject, msg["Subject"])
+
+    def test_rejects_non_manager_reply_subject(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must not start"):
+            email_me.build_message("me@example.com", "Re: [omo] hi", "body")
+        with self.assertRaisesRegex(ValueError, "must not start"):
+            email_me.build_message("me@example.com", "Re:[omo] hi", "body")
+        with self.assertRaisesRegex(ValueError, "must not start"):
+            email_me.build_message("me@example.com", "Re: hi", "body")
+
     def test_markdown_link_gets_html_anchor_and_plain_url(self) -> None:
         msg = email_me.build_message("me@example.com", "hi", "See [Story](https://example.com/a?b=1&c=2).")
         plain = msg.get_body(preferencelist=("plain",))

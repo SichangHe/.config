@@ -1408,10 +1408,22 @@ class PendingMarkerTests(unittest.TestCase):
             sent_log = Path(tmp) / "sent.log"
             _ = helper.write_text(
                 "#!/usr/bin/env python3\n"
+                "from contextlib import redirect_stdout\n"
+                "from io import StringIO\n"
                 "from pathlib import Path\n"
+                "import importlib.util\n"
                 "import os\n"
                 "import sys\n"
-                "Path(os.environ['SENT_LOG']).write_text(sys.argv[1] + '\\n' + sys.stdin.read(), encoding='utf-8')\n",
+                f"spec = importlib.util.spec_from_file_location('email_me_live', {str(Path.home() / '.config/helper.sh/email_me.py')!r})\n"
+                "assert spec and spec.loader\n"
+                "module = importlib.util.module_from_spec(spec)\n"
+                "sys.modules[spec.name] = module\n"
+                "spec.loader.exec_module(module)\n"
+                "stdout = StringIO()\n"
+                "with redirect_stdout(stdout):\n"
+                "    code = module.main(['--dry-run', sys.argv[1]])\n"
+                "Path(os.environ['SENT_LOG']).write_text(stdout.getvalue(), encoding='utf-8')\n"
+                "raise SystemExit(code)\n",
                 encoding="utf-8",
             )
             helper.chmod(0o700)
@@ -1421,26 +1433,28 @@ class PendingMarkerTests(unittest.TestCase):
                 "SENT_LOG": str(sent_log),
                 "OMO_MANAGER_STATE_DIR": str(Path(tmp) / "state"),
             }
-            subject_file = Path(tmp) / "subject.txt"
-            subject_file.write_text("Re: [omo_manager] existing thread\n", encoding="utf-8")
             message_file = Path(tmp) / "body.md"
             message_file.write_text("ack\n", encoding="utf-8")
-            result = subprocess.run(
-                [
-                    str(Path.home() / ".config/omo_manager/omo_email_human.sh"),
-                    "--subject-file",
-                    str(subject_file),
-                    "--message-file",
-                    str(message_file),
-                ],
-                text=True,
-                capture_output=True,
-                timeout=10,
-                env=env,
-                check=False,
-            )
-            self.assertEqual(0, result.returncode, result.stderr)
-            self.assertEqual("Re: [omo_manager] existing thread\nack\n", sent_log.read_text(encoding="utf-8"))
+            for subject in ("Re: [omo_manager] existing thread", "Re:[omo_manager] existing thread", "Re:  [omo_manager] existing thread"):
+                with self.subTest(subject=subject):
+                    subject_file = Path(tmp) / "subject.txt"
+                    subject_file.write_text(subject + "\n", encoding="utf-8")
+                    result = subprocess.run(
+                        [
+                            str(Path.home() / ".config/omo_manager/omo_email_human.sh"),
+                            "--subject-file",
+                            str(subject_file),
+                            "--message-file",
+                            str(message_file),
+                        ],
+                        text=True,
+                        capture_output=True,
+                        timeout=10,
+                        env=env,
+                        check=False,
+                    )
+                    self.assertEqual(0, result.returncode, result.stderr)
+                    self.assertIn(f"subject={subject};", sent_log.read_text(encoding="utf-8"))
 
     def test_omo_email_human_help_shows_safe_body_pattern(self) -> None:
         script = Path.home() / ".config/omo_manager/omo_email_human.sh"
@@ -1476,7 +1490,7 @@ class PendingMarkerTests(unittest.TestCase):
             }
             message_file = Path(tmp) / "body.md"
             message_file.write_text("real body\n", encoding="utf-8")
-            for subject in ("SUBJECT", "SUBJECT\\", "[omo_manager] SUBJECT\\"):
+            for subject in ("SUBJECT", "SUBJECT\\", "[omo_manager] SUBJECT\\", "Re: [omo_manager] SUBJECT\\"):
                 subject_file = Path(tmp) / "subject.txt"
                 subject_file.write_text(subject + "\n", encoding="utf-8")
                 cmd = [str(Path.home() / ".config/omo_manager/omo_email_human.sh"), "--subject-file", str(subject_file), "--message-file", str(message_file)]
@@ -1497,6 +1511,45 @@ class PendingMarkerTests(unittest.TestCase):
             inline_subject = subprocess.run([str(Path.home() / ".config/omo_manager/omo_email_human.sh"), "--subject", "Real subject", "--message-file", str(message_file)], text=True, capture_output=True, timeout=10, env=env, check=False)
             self.assertEqual(2, inline_subject.returncode)
             self.assertIn("unknown argument", inline_subject.stderr)
+            self.assertFalse(sent_log.exists())
+
+    def test_omo_email_human_rejects_regular_agent_subjects(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            helper_dir = home / ".config" / "helper.sh"
+            helper_dir.mkdir(parents=True)
+            helper = helper_dir / "email_me.py"
+            sent_log = Path(tmp) / "sent.log"
+            _ = helper.write_text(
+                "#!/usr/bin/env python3\n"
+                "from pathlib import Path\n"
+                "import os\n"
+                "Path(os.environ['SENT_LOG']).write_text('sent', encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            helper.chmod(0o700)
+            env = {
+                **os.environ,
+                "HOME": str(home),
+                "SENT_LOG": str(sent_log),
+                "OMO_MANAGER_STATE_DIR": str(Path(tmp) / "state"),
+            }
+            message_file = Path(tmp) / "body.md"
+            message_file.write_text("real body\n", encoding="utf-8")
+            for subject in (
+                "[omo] agent-only tag",
+                "Re: [omo] agent reply tag",
+                "Re:[omo] agent reply tag",
+                "Re:  [omo] agent reply tag",
+                "RE:\t[omo] agent reply tag",
+                "[OMO] legacy agent tag",
+            ):
+                subject_file = Path(tmp) / "subject.txt"
+                subject_file.write_text(subject + "\n", encoding="utf-8")
+                cmd = [str(Path.home() / ".config/omo_manager/omo_email_human.sh"), "--subject-file", str(subject_file), "--message-file", str(message_file)]
+                result = subprocess.run(cmd, text=True, capture_output=True, timeout=10, env=env, check=False)
+                self.assertEqual(2, result.returncode)
+                self.assertIn("[omo] is reserved for direct regular-agent email", result.stderr)
             self.assertFalse(sent_log.exists())
 
 

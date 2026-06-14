@@ -80,6 +80,8 @@ def parse_args(argv: list[str]) -> CliArgs:
 def normalize_subject(title: str) -> str:
     stripped = title.lstrip()
     lowered = stripped.lower()
+    if re.match(r"re: *\[omo_manager\]", lowered):
+        return stripped
     if lowered.startswith("re:"):
         raise ValueError("Email subject must not start with `Re:`.")
     if lowered.startswith(DIRECT_AGENT_PREFIX):
