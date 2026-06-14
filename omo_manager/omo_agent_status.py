@@ -334,9 +334,7 @@ def classify_target(task_file: str, target: str, persistent_role: bool = False, 
     if report.lines:
         evidence += " output=" + " / ".join(report.lines[-3:])
     if report.status == "stuck_input":
-        if role == "manager":
-            unstick = "report_only"
-        elif auto_unstick:
+        if auto_unstick:
             if unstick_by_target is not None and target in unstick_by_target:
                 unstick = "already_sent" if unstick_by_target[target] == "sent_enter" else unstick_by_target[target]
             else:
@@ -351,7 +349,7 @@ def classify_target(task_file: str, target: str, persistent_role: bool = False, 
 
 def classify_task(task: TaskLine, record: SessionRecord | None, auto_unstick: bool = False, unstick_by_target: dict[str, str] | None = None, no_auto_unstick_target: str = "") -> StatusRow:
     target = display_target(task, record)
-    return classify_target(task.task_file, target, task.persistent_role, task.status, auto_unstick and not same_tmux_target(target, no_auto_unstick_target), unstick_by_target=unstick_by_target)
+    return classify_target(task.task_file, target, task.persistent_role, task.status, auto_unstick, unstick_by_target=unstick_by_target)
 
 
 def manager_problem_row(args: Args, skip_targets: set[str], unstick_by_target: dict[str, str]) -> StatusRow | None:

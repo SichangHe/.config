@@ -90,7 +90,7 @@ class TmuxSendTests(unittest.TestCase):
             calls.append(command)
             return subprocess.CompletedProcess(command, 0)
 
-        with tempfile.TemporaryDirectory() as tmp, patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.wait_ready", side_effect=fake_wait), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
+        with tempfile.TemporaryDirectory() as tmp, patch("omo_manager.omo_tmux_send.wait_compaction_over_before_send"), patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.wait_ready", side_effect=fake_wait), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
             root = Path(tmp)
             path = root / "task.md"
             path.write_text("(pending)\nsource\n", encoding="utf-8")
@@ -115,7 +115,7 @@ class TmuxSendTests(unittest.TestCase):
             calls.append(command)
             return subprocess.CompletedProcess(command, 0)
 
-        with patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
+        with patch("omo_manager.omo_tmux_send.wait_compaction_over_before_send"), patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
             run_tmux(Args("cfg:1.0", None, 1, 0.15, 0, False), "literal C-c $(bad)\n")
 
         self.assertEqual("tmux", calls[0][0])
@@ -127,6 +127,26 @@ class TmuxSendTests(unittest.TestCase):
         self.assertEqual(["tmux", "delete-buffer", "-b", buffer_name], calls[4])
         self.assertNotIn("literal C-c $(bad)\n", [part for call in calls for part in call])
 
+    def test_run_tmux_waits_for_compaction_before_paste_and_enter(self) -> None:
+        events: list[str] = []
+
+        def fake_wait(_: Args, __: int = 80) -> None:
+            events.append("wait")
+
+        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            events.append(command[1])
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch("omo_manager.omo_tmux_send.wait_compaction_over_before_send", side_effect=fake_wait), patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
+            run_tmux(Args("cfg:1.0", None, 1, 0.15, 0, False), "prompt")
+
+        load_idx = events.index("load-buffer")
+        paste_idx = events.index("paste-buffer")
+        enter_idx = events.index("send-keys", paste_idx)
+        self.assertEqual(["wait", "wait"], events[:2])
+        self.assertEqual("wait", events[enter_idx - 1])
+        self.assertLess(load_idx, paste_idx)
+
     def test_run_tmux_can_send_repeated_enter(self) -> None:
         calls: list[list[str]] = []
 
@@ -134,9 +154,10 @@ class TmuxSendTests(unittest.TestCase):
             calls.append(command)
             return subprocess.CompletedProcess(command, 0)
 
-        with patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.time.sleep") as sleep, patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
+        with patch("omo_manager.omo_tmux_send.wait_compaction_over_before_send") as wait_compaction, patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.time.sleep") as sleep, patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
             run_tmux(Args("cfg:1.0", None, 2, 0.15, 0, False), "prompt")
 
+        self.assertEqual(4, wait_compaction.call_count)
         self.assertEqual(["tmux", "send-keys", "-t", "cfg:1.0", "C-u"], calls[0])
         self.assertEqual(["tmux", "send-keys", "-t", "cfg:1.0", "Enter"], calls[3])
         self.assertEqual(["tmux", "send-keys", "-t", "cfg:1.0", "Enter"], calls[4])
@@ -328,6 +349,22 @@ class TmuxSendTests(unittest.TestCase):
 
         sleep.assert_called_once()
 
+    def test_wait_paste_visible_waits_through_compacting_prompt(self) -> None:
+        tails = iter(
+            [
+                ["• Compacting conversation", "", "› Read the dispatch prompt from /tmp/x and follow it exactly.", "  gpt-5.5"],
+                ["› Read the dispatch prompt from /tmp/x and follow it exactly.", "  gpt-5.5"],
+            ]
+        )
+
+        def fake_tail(_: str, __: int) -> list[str]:
+            return next(tails)
+
+        with patch("omo_manager.omo_tmux_send.tail", side_effect=fake_tail), patch("omo_manager.omo_tmux_send.wait_compaction_over_before_send") as wait_compaction:
+            wait_paste_visible(Args("cfg:1.0", None, 1, 0.15, 10, False, submit_verify_timeout_s=1), "Read the dispatch prompt from /tmp/x and follow it exactly.\n")
+
+        wait_compaction.assert_called_once()
+
     def test_wait_paste_visible_does_not_accept_codex_suggestion_for_different_prompt(self) -> None:
         def fake_tail(_: str, __: int) -> list[str]:
             return ["• Working (1m 59s • esc to interrupt)", "", "› Summarize recent commits", "", "  gpt-5.5"]
@@ -361,6 +398,48 @@ class TmuxSendTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "Codex submit not verified"):
                 verify_submit(Args("cfg:1.0", None, 1, 0.15, 0, False, submit_verify_timeout_s=1), "Read the dispatch prompt from /tmp/x and follow it exactly.\n")
 
+    def test_verify_submit_waits_for_compaction_before_fallback_enter(self) -> None:
+        calls: list[tuple[list[str], int]] = []
+        n_captures = 0
+        tails = iter(
+            [
+                ["• Compacting conversation", "", "› Read the dispatch prompt from /tmp/x and follow it exactly.", "  gpt-5.5"],
+                ["› Read the dispatch prompt from /tmp/x and follow it exactly.", "  gpt-5.5"],
+                ["• Working", "  gpt-5.5"],
+            ]
+        )
+
+        def fake_tail(_: str, __: int) -> list[str]:
+            nonlocal n_captures
+            n_captures += 1
+            return next(tails)
+
+        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            calls.append((command, n_captures))
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch("omo_manager.omo_tmux_send.tail", side_effect=fake_tail), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run), patch("omo_manager.omo_tmux_send.wait_compaction_over_before_send") as wait_compaction, patch("omo_manager.omo_tmux_send.time.sleep"):
+            verify_submit(Args("cfg:1.0", None, 1, 0.15, 10, False, submit_verify_timeout_s=1), "Read the dispatch prompt from /tmp/x and follow it exactly.\n")
+
+        wait_compaction.assert_called_once()
+        self.assertEqual([(["tmux", "send-keys", "-t", "cfg:1.0", "Enter"], 2)], calls)
+
+    def test_verify_submit_waits_for_compaction_before_placeholder_return(self) -> None:
+        tails = iter(
+            [
+                ["• Compacting conversation", "", "› Summarize recent commits", "  gpt-5.5"],
+                ["• Working", "  gpt-5.5"],
+            ]
+        )
+
+        def fake_tail(_: str, __: int) -> list[str]:
+            return next(tails)
+
+        with patch("omo_manager.omo_tmux_send.tail", side_effect=fake_tail), patch("omo_manager.omo_tmux_send.wait_compaction_over_before_send") as wait_compaction:
+            verify_submit(Args("cfg:1.0", None, 1, 0.15, 10, False, submit_verify_timeout_s=1), "Summarize recent commits\n")
+
+        wait_compaction.assert_called_once()
+
     def test_verify_submit_fails_when_running_input_box_still_has_other_text(self) -> None:
         calls: list[list[str]] = []
 
@@ -381,7 +460,8 @@ class TmuxSendTests(unittest.TestCase):
         report = Report("stuck_input", ["› Draft the manager reply"], "Draft the manager reply", True)
         with patch("omo_manager.omo_tmux_send.inspect", return_value=report), patch("omo_manager.omo_tmux_send.submit_stuck_input_if_present", return_value="sent_enter") as submit, patch("omo_manager.omo_tmux_send.time.sleep") as sleep:
             self.assertEqual("sent_enter", clear_stuck_input_before_send(Args("cfg:1.0", None, 1, 0.15, 0, False)))
-        submit.assert_called_once_with("cfg:1.0", report)
+        submit.assert_called_once()
+        self.assertEqual(("cfg:1.0", report), submit.call_args.args)
         sleep.assert_called_once_with(0.15)
 
     def test_clear_stuck_input_before_send_ignores_placeholder(self) -> None:
@@ -394,7 +474,8 @@ class TmuxSendTests(unittest.TestCase):
         report = Report("stuck_input", ["› Draft the manager reply"], "Draft the manager reply", True)
         with patch("omo_manager.omo_tmux_send.inspect", return_value=report), patch("omo_manager.omo_tmux_send.submit_stuck_input_if_present", return_value="sent_enter") as submit:
             self.assertEqual("sent_enter", clear_stuck_input_before_send(Args("cfg:1.0", None, 0, 0.15, 0, False)))
-        submit.assert_called_once_with("cfg:1.0", report)
+        submit.assert_called_once()
+        self.assertEqual(("cfg:1.0", report), submit.call_args.args)
 
     def test_run_tmux_clears_stuck_input_after_ready_wait(self) -> None:
         calls: list[str] = []
@@ -403,11 +484,24 @@ class TmuxSendTests(unittest.TestCase):
             calls.append("clear")
             return "sent_enter" if len(calls) == 2 else ""
 
-        with patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", side_effect=fake_clear), patch("omo_manager.omo_tmux_send.wait_ready") as wait, patch("omo_manager.omo_tmux_send.subprocess.run", return_value=subprocess.CompletedProcess(["tmux"], 0)):
+        with patch("omo_manager.omo_tmux_send.wait_compaction_over_before_send"), patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", side_effect=fake_clear), patch("omo_manager.omo_tmux_send.wait_ready") as wait, patch("omo_manager.omo_tmux_send.subprocess.run", return_value=subprocess.CompletedProcess(["tmux"], 0)):
             run_tmux(Args("cfg:1.0", None, 0, 0.15, 0, False), "prompt")
 
         wait.assert_called_once()
         self.assertEqual(["clear", "clear"], calls)
+
+    def test_run_tmux_stops_if_clear_stuck_input_times_out_on_compaction(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch("omo_manager.omo_tmux_send.wait_compaction_over_before_send"), patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", side_effect=["", "compacting"]), patch("omo_manager.omo_tmux_send.wait_ready"), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
+            with self.assertRaisesRegex(RuntimeError, "target still compacting"):
+                run_tmux(Args("cfg:1.0", None, 1, 0.15, 0, False), "prompt")
+
+        self.assertEqual([], [call for call in calls if call[:2] != ["tmux", "delete-buffer"]])
 
     def test_verify_submit_ignores_codex_suggestion_while_running(self) -> None:
         prompts = (
@@ -452,7 +546,7 @@ class TmuxSendTests(unittest.TestCase):
             calls.append(command)
             return subprocess.CompletedProcess(command, 0)
 
-        with patch("omo_manager.omo_tmux_send.uuid.uuid4", return_value=Uuid()), patch("omo_manager.omo_tmux_send.tail", side_effect=fake_tail), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
+        with patch("omo_manager.omo_tmux_send.wait_compaction_over_before_send"), patch("omo_manager.omo_tmux_send.uuid.uuid4", return_value=Uuid()), patch("omo_manager.omo_tmux_send.tail", side_effect=fake_tail), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
             run_tmux(Args("cfg:1.0", None, 1, 0.15, 0, False, submit_verify_timeout_s=1), "Summarize recent commits\n")
 
         self.assertIn(["tmux", "send-keys", "-l", "-t", "cfg:1.0", sentinel], calls)

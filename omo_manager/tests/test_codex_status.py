@@ -2,7 +2,7 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from omo_manager.omo_codex_status import Args, Report, can_submit_stuck_input, current_block, current_input_text, inspect, last_output, status, submit_stuck_input_if_present
+from omo_manager.omo_codex_status import Args, Report, can_submit_stuck_input, current_block, current_input_text, has_compacting_indicator, inspect, last_output, status, submit_stuck_input_if_present
 
 
 class CodexStatusTests(unittest.TestCase):
@@ -63,6 +63,18 @@ class CodexStatusTests(unittest.TestCase):
         ]
         self.assertEqual('running', status(lines, current_block(lines)))
         self.assertFalse(can_submit_stuck_input(lines))
+
+    def test_status_stuck_input_while_compacting_but_not_safe_to_submit_immediately(self) -> None:
+        lines = ['• Compacting conversation', '', '› Continue task', '  gpt-5.5']
+        self.assertEqual('Continue task', current_input_text(lines))
+        self.assertEqual('stuck_input', status(lines, current_block(lines)))
+        self.assertFalse(can_submit_stuck_input(lines))
+        self.assertTrue(has_compacting_indicator(lines))
+
+    def test_compacting_indicator_requires_active_codex_compacting_status(self) -> None:
+        self.assertFalse(has_compacting_indicator(['• Compacting conversation', '› Continue task']))
+        self.assertFalse(has_compacting_indicator(['────', '• Compacting conversation', '────', 'done', '› Continue task', '  gpt-5.5']))
+        self.assertFalse(has_compacting_indicator(['────', 'done', '• compact this report later', '› Continue task', '  gpt-5.5']))
 
     def test_status_not_codex_for_queued_footer_without_working_indicator(self) -> None:
         lines = ['shell output', '  tab to queue message                                                                                    28% context left']
@@ -154,6 +166,28 @@ class CodexStatusTests(unittest.TestCase):
         report = Report('stuck_input', ['› Continue task'], 'Continue task', True)
         with patch('omo_manager.omo_codex_status.tail', return_value=['• Working', '', '› Continue task', '  gpt-5.5']), patch('omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)) as run:
             self.assertEqual('sent_enter', submit_stuck_input_if_present('cfg:1.0', report))
+        run.assert_called_once_with(['tmux', 'send-keys', '-t', 'cfg:1.0', 'Enter'], capture_output=True, text=True, timeout=5, check=False)
+
+    def test_submit_stuck_input_if_present_waits_for_compaction_then_sends_enter(self) -> None:
+        report = Report('stuck_input', ['› Continue task'], 'Continue task', True)
+        captures = 0
+        line_counts: list[int] = []
+        tails = iter([
+            ['• Compacting conversation', '', '› Continue task', '  gpt-5.5'],
+            ['› Continue task', '  gpt-5.5'],
+        ])
+
+        def fake_tail(_: str, n_lines: int) -> list[str]:
+            nonlocal captures
+            captures += 1
+            line_counts.append(n_lines)
+            return next(tails)
+
+        with patch('omo_manager.omo_codex_status.tail', side_effect=fake_tail), patch('omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)) as run, patch('omo_manager.omo_codex_status.time.sleep') as sleep:
+            self.assertEqual('sent_enter', submit_stuck_input_if_present('cfg:1.0', report, compaction_wait_timeout_s=10))
+        self.assertEqual(2, captures)
+        self.assertEqual([2000, 2000], line_counts)
+        sleep.assert_called_once()
         run.assert_called_once_with(['tmux', 'send-keys', '-t', 'cfg:1.0', 'Enter'], capture_output=True, text=True, timeout=5, check=False)
 
     def test_submit_stuck_input_if_present_ignores_non_stuck_report(self) -> None:

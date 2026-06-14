@@ -369,7 +369,7 @@ class AgentStatusTests(unittest.TestCase):
             self.assertIn("unstick=sent_enter", text)
             self.assertIn("unstick=already_sent", text)
 
-    def test_problems_only_reports_manager_target_stuck_input_without_self_unstick(self) -> None:
+    def test_problems_only_auto_unsticks_manager_target_without_direct_suppression(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             registry = root / "sessions.json"
@@ -378,14 +378,14 @@ class AgentStatusTests(unittest.TestCase):
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("stuck_input", ["› Reply to human"], "Reply to human", True)), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present", return_value="sent_enter") as unstick, redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "wl:1.0"]))
-            unstick.assert_not_called()
+            unstick.assert_called_once()
             text = out.getvalue()
             self.assertIn("agent-problems: stuck_input=1", text)
             self.assertIn("stuck_input: task=manager evidence=target=wl:1.0 role=manager", text)
-            self.assertIn("unstick=report_only", text)
-            self.assertNotIn("unstuck:", text)
+            self.assertIn("unstick=sent_enter", text)
+            self.assertIn("unstuck: target=wl:1.0 task=manager action=sent_enter", text)
 
-    def test_problems_only_does_not_unstick_manager_target_alias_task(self) -> None:
+    def test_problems_only_auto_unsticks_manager_target_alias_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             registry = root / "sessions.json"
@@ -396,11 +396,11 @@ class AgentStatusTests(unittest.TestCase):
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=report), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present", return_value="sent_enter") as unstick, redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "wl:1.0"]))
-            unstick.assert_not_called()
+            unstick.assert_called_once()
             text = out.getvalue()
             self.assertIn("stuck_input: task=active.md evidence=target=wl:1", text)
-            self.assertIn("unstick=disabled", text)
-            self.assertNotIn("unstuck:", text)
+            self.assertIn("unstick=sent_enter", text)
+            self.assertIn("unstuck: target=wl:1 task=active.md action=sent_enter", text)
 
     def test_problems_only_omits_ready_manager_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

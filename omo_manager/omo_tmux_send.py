@@ -14,9 +14,35 @@ from dataclasses import dataclass
 from pathlib import Path
 
 try:
-    from omo_manager.omo_codex_status import CODEX_EMPTY_INPUT_TEXTS, Args as StatusArgs, current_block, current_input_text, inspect, status, submit_stuck_input_if_present, tail
+    from omo_manager.omo_codex_status import (
+        CODEX_EMPTY_INPUT_TEXTS,
+        COMPACTION_WAIT_LINES,
+        DEFAULT_COMPACTION_WAIT_TIMEOUT_S,
+        Args as StatusArgs,
+        current_block,
+        current_input_text,
+        has_compacting_indicator,
+        inspect,
+        status,
+        submit_stuck_input_if_present,
+        tail,
+        wait_while_compacting,
+    )
 except ModuleNotFoundError:
-    from omo_codex_status import CODEX_EMPTY_INPUT_TEXTS, Args as StatusArgs, current_block, current_input_text, inspect, status, submit_stuck_input_if_present, tail
+    from omo_codex_status import (
+        CODEX_EMPTY_INPUT_TEXTS,
+        COMPACTION_WAIT_LINES,
+        DEFAULT_COMPACTION_WAIT_TIMEOUT_S,
+        Args as StatusArgs,
+        current_block,
+        current_input_text,
+        has_compacting_indicator,
+        inspect,
+        status,
+        submit_stuck_input_if_present,
+        tail,
+        wait_while_compacting,
+    )
 
 
 @dataclass(frozen=True)
@@ -209,6 +235,17 @@ def input_has_any_probe(lines: list[str], probes: list[str]) -> bool:
     return any(probe in input_text for probe in probes)
 
 
+def compaction_wait_timeout_s(args: Args) -> float:
+    return max(args.ready_timeout_s, DEFAULT_COMPACTION_WAIT_TIMEOUT_S)
+
+
+def wait_compaction_over_before_send(args: Args, n_lines: int = COMPACTION_WAIT_LINES) -> None:
+    try:
+        _ = wait_while_compacting(args.target, n_lines, compaction_wait_timeout_s(args))
+    except TimeoutError as exc:
+        raise RuntimeError(str(exc)) from exc
+
+
 def send_literal(target: str, text: str) -> None:
     _ = subprocess.run(["tmux", "send-keys", "-l", "-t", target, text], timeout=5, check=True)
 
@@ -238,6 +275,10 @@ def wait_paste_visible(args: Args, message: str) -> None:
         if last_status == "not_codex":
             return
         input_text = current_input_text(lines)
+        if has_compacting_indicator(lines):
+            wait_compaction_over_before_send(args, n_lines)
+            deadline_s = time.monotonic() + args.submit_verify_timeout_s
+            continue
         if input_text and input_text not in CODEX_EMPTY_INPUT_TEXTS and any(probe in input_text for probe in probes):
             return
         last_input = "" if input_text in CODEX_EMPTY_INPUT_TEXTS else input_text
@@ -300,6 +341,10 @@ def verify_submit(args: Args, message: str) -> None:
         input_text = current_input_text(lines)
         if not input_text:
             return
+        if has_compacting_indicator(lines):
+            wait_compaction_over_before_send(args, n_lines)
+            deadline_s = time.monotonic() + args.submit_verify_timeout_s
+            continue
         if input_text in CODEX_EMPTY_INPUT_TEXTS:
             if input_text != submitted_text or last_status == "running":
                 return
@@ -325,7 +370,7 @@ def clear_stuck_input_before_send(args: Args) -> str:
         return ""
     if report.status != "stuck_input":
         return ""
-    result = submit_stuck_input_if_present(args.target, report)
+    result = submit_stuck_input_if_present(args.target, report, compaction_wait_timeout_s=compaction_wait_timeout_s(args))
     if result == "sent_enter" and args.enter_delay_s > 0:
         time.sleep(args.enter_delay_s)
     return result
@@ -343,20 +388,26 @@ def run_tmux(args: Args, message: str) -> None:
             return
         if not pending_marker_present(args):
             raise RuntimeError("pending marker cleared before tmux paste")
-        _ = clear_stuck_input_before_send(args)
+        wait_compaction_over_before_send(args)
+        if clear_stuck_input_before_send(args) == "compacting":
+            raise RuntimeError("target still compacting before tmux paste")
         wait_ready(args)
         if not pending_marker_present(args):
             raise RuntimeError("pending marker cleared before tmux paste")
-        _ = clear_stuck_input_before_send(args)
+        wait_compaction_over_before_send(args)
+        if clear_stuck_input_before_send(args) == "compacting":
+            raise RuntimeError("target still compacting before tmux paste")
         if args.enter_count:
             _ = subprocess.run(["tmux", "send-keys", "-t", args.target, "C-u"], timeout=5, check=True)
         _ = subprocess.run(["tmux", "load-buffer", "-b", buffer_name, str(temp_path)], timeout=5, check=True)
         _ = subprocess.run(["tmux", "paste-buffer", "-b", buffer_name, "-t", args.target], timeout=5, check=True)
         if not verify_placeholder_paste(args, message):
             wait_paste_visible(args, message)
+        enter_n_lines = inspect_lines_for_message(message)
         for idx in range(args.enter_count):
             if idx:
                 time.sleep(args.enter_delay_s)
+            wait_compaction_over_before_send(args, enter_n_lines)
             send_enter(args.target)
         verify_submit(args, message)
     finally:

@@ -28,6 +28,12 @@ DEFAULT_STATE = Path(os.environ.get("OMO_MANAGER_PENDING_SEEN", default_state_di
 DEFAULT_DIGEST_IDLE_AFTER_S = float(os.environ.get("OMO_MANAGER_DIGEST_IDLE_AFTER_S", "3600"))
 DEFAULT_AGENT_PROBLEM_INTERVAL_S = float(os.environ.get("OMO_MANAGER_AGENT_PROBLEM_INTERVAL_S", "300"))
 DEFAULT_AGENT_PROBLEM_REPEAT_S = float(os.environ.get("OMO_MANAGER_AGENT_PROBLEM_REPEAT_S", "1800"))
+DEFAULT_AGENT_PROBLEM_TIMEOUT_S = float(
+    os.environ.get(
+        "OMO_MANAGER_AGENT_PROBLEM_TIMEOUT_S",
+        str(max(30.0, float(os.environ.get("OMO_CODEX_COMPACTION_WAIT_TIMEOUT_S", "300")) + 15.0)),
+    )
+)
 DEFAULT_POLL_BACKSTOP_INTERVAL_S = float(os.environ.get("OMO_MANAGER_POLL_BACKSTOP_INTERVAL_S", "30"))
 DEFAULT_TMUX_READY_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_TMUX_READY_TIMEOUT_S", os.environ.get("OMO_DISPATCH_TMUX_READY_TIMEOUT_S", "300")))
 DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_TMUX_SUBMIT_VERIFY_TIMEOUT_S", "5"))
@@ -530,7 +536,7 @@ def filter_manager_self_problem_output(output: str, manager_target: str = "") ->
 def maybe_push_agent_problems(args: Args, seen: dict[str, float], now_wall_s: float) -> bool:
     command = status_command(args, True)
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=30, check=False)
+        result = subprocess.run(command, capture_output=True, text=True, timeout=DEFAULT_AGENT_PROBLEM_TIMEOUT_S, check=False)
     except (OSError, subprocess.SubprocessError) as exc:
         print(f"omo_pending_watch: agent problem check failed: {exc}", file=sys.stderr)
         return False
@@ -698,7 +704,7 @@ def main(argv: list[str]) -> int:
             changed = scan_once(args, seen, pending_files)
             pending_files = []
         if agent_problem_run is None and now_s - last_agent_problem_check_s >= args.agent_problem_interval_s:
-            agent_problem_run = start_command("agent problem check", status_command(args, True), 30)
+            agent_problem_run = start_command("agent problem check", status_command(args, True), DEFAULT_AGENT_PROBLEM_TIMEOUT_S)
             last_agent_problem_check_s = now_s
         if agent_problem_run is not None:
             result = poll_command(agent_problem_run, now_wall_s)

@@ -1292,6 +1292,16 @@ class PendingMarkerTests(unittest.TestCase):
         args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, True, "cfg:0.0")
         self.assertEqual(["/status.py", "--root", "/tmp", "--manager-target", "cfg:0.0", "--problems-only"], watcher.status_command(args, True))
 
+    def test_agent_problem_check_uses_compaction_aware_timeout(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, True)
+        result = subprocess.CompletedProcess(["/status.py"], 0, "", "")
+        with patch("omo_manager.omo_pending_watch.subprocess.run", return_value=result) as run:
+            self.assertFalse(watcher.maybe_push_agent_problems(args, {}, 1000.0))
+        run.assert_called_once()
+        self.assertEqual(watcher.DEFAULT_AGENT_PROBLEM_TIMEOUT_S, run.call_args.kwargs["timeout"])
+
     def test_periodic_status_text_formats_full_status(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
@@ -1360,7 +1370,7 @@ class PendingMarkerTests(unittest.TestCase):
         result = watcher.CommandOutput(
             "agent-problems",
             3,
-            "agent-problems: stuck_input=1\nstuck_input: task=manager evidence=target=wl:1.0 role=manager unstick=report_only\n",
+            "agent-problems: stuck_input=1\nstuck_input: task=manager evidence=target=wl:1.0 role=manager unstick=sent_enter\nunstuck: target=wl:1.0 task=manager action=sent_enter\n",
             "",
         )
         out = StringIO()
@@ -1369,6 +1379,7 @@ class PendingMarkerTests(unittest.TestCase):
         text = out.getvalue()
         self.assertIn("suppressed manager self-problem report", text)
         self.assertNotIn("manager agent problem: running task marker needs attention.", text)
+        self.assertNotIn("unstuck:", text)
 
     def test_agent_problem_check_suppresses_manager_target_alias_prompt(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -1377,7 +1388,7 @@ class PendingMarkerTests(unittest.TestCase):
         result = watcher.CommandOutput(
             "agent-problems",
             3,
-            "agent-problems: stuck_input=1\nstuck_input: task=active.md evidence=target=wl:1 unstick=disabled\n",
+            "agent-problems: stuck_input=1\nstuck_input: task=active.md evidence=target=wl:1 unstick=sent_enter\nunstuck: target=wl:1 task=active.md action=sent_enter\n",
             "",
         )
         out = StringIO()
@@ -1386,6 +1397,7 @@ class PendingMarkerTests(unittest.TestCase):
         text = out.getvalue()
         self.assertIn("suppressed manager self-problem report", text)
         self.assertNotIn("manager agent problem: running task marker needs attention.", text)
+        self.assertNotIn("unstuck:", text)
 
     def test_markdown_inotify_watcher_reports_new_file(self) -> None:
         from omo_manager.omo_pending_watch import MarkdownChangeWatcher

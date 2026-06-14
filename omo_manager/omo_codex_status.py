@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 
+DEFAULT_COMPACTION_WAIT_TIMEOUT_S = float(os.environ.get("OMO_CODEX_COMPACTION_WAIT_TIMEOUT_S", "300"))
+COMPACTION_WAIT_INTERVAL_S = 0.5
+COMPACTION_WAIT_LINES = 2000
 CODEX_RE = re.compile(r"  gpt-")
 ERROR_RE = re.compile(r"\b(error|failed|panic|traceback|exception)\b", re.IGNORECASE)
 SEP_RE = re.compile(r"^─+$")
@@ -15,6 +20,7 @@ WORKED_RE = re.compile(r"^─ Worked for .+ ─+$")
 READY_RE = re.compile(r"^› Use /skills to list available skills$")
 INPUT_RE = re.compile(r"^› ")
 BUSY_RE = re.compile(r"^• (?:Working|Messages to be submitted after next tool call)\b")
+COMPACTING_RE = re.compile(r"^• Compacting\b", re.IGNORECASE)
 BACKGROUND_RUNNING_RE = re.compile(r"^• .*?\b(?:Waiting for background terminal|[1-9][0-9]* background terminals? running)\b")
 QUEUE_MESSAGE_FOOTER_RE = re.compile(r"\btab to queue message\b")
 CODEX_EMPTY_INPUT_TEXTS = {
@@ -70,7 +76,7 @@ def tail(target: str, n_lines: int) -> list[str]:
     out = subprocess.run(["tmux", "capture-pane", "-p", "-t", target, "-S", f"-{n_lines}"], capture_output=True, text=True, timeout=5, check=False)
     if out.returncode != 0:
         return []
-    lines = [line.rstrip() for line in out.stdout.splitlines()]
+    lines = [line.rstrip() for line in (out.stdout or "").splitlines()]
     while lines and not lines[-1]:
         lines.pop()
     return lines
@@ -119,11 +125,17 @@ def current_input_text(lines: list[str]) -> str:
 
 
 def has_running_indicator(lines: list[str]) -> bool:
-    return any(BUSY_RE.search(line) is not None or BACKGROUND_RUNNING_RE.search(line) is not None for line in lines[-20:])
+    return has_compacting_indicator(lines) or any(BUSY_RE.search(line) is not None or BACKGROUND_RUNNING_RE.search(line) is not None for line in lines[-20:])
 
 
 def has_visible_running_indicator(lines: list[str]) -> bool:
-    return any(BUSY_RE.search(line) is not None or BACKGROUND_RUNNING_RE.search(line) is not None for line in lines)
+    return has_compacting_indicator(lines) or any(BUSY_RE.search(line) is not None or BACKGROUND_RUNNING_RE.search(line) is not None for line in lines)
+
+
+def has_compacting_indicator(lines: list[str]) -> bool:
+    if not has_codex_model_footer(lines):
+        return False
+    return any(COMPACTING_RE.search(line) is not None for line in current_block(lines).lines)
 
 
 def has_queued_message_footer(lines: list[str]) -> bool:
@@ -139,16 +151,19 @@ def is_empty_input_text(lines: list[str], input_text: str) -> bool:
 
 
 def can_submit_stuck_input(lines: list[str]) -> bool:
-    if has_queued_running_input(lines):
+    if has_queued_running_input(lines) or has_compacting_indicator(lines):
         return False
     input_text = current_input_text(lines)
     return bool(has_codex_model_footer(lines) and input_text and not is_empty_input_text(lines, input_text))
 
 
-def submit_stuck_input_if_present(target: str, report: Report, n_lines: int = 80) -> str:
+def submit_stuck_input_if_present(target: str, report: Report, n_lines: int = COMPACTION_WAIT_LINES, compaction_wait_timeout_s: float = DEFAULT_COMPACTION_WAIT_TIMEOUT_S) -> str:
     if report.status != "stuck_input":
         return ""
-    latest = inspect(Args(target, n_lines))
+    try:
+        latest = wait_while_compacting(target, n_lines, compaction_wait_timeout_s)
+    except TimeoutError:
+        return "compacting"
     if latest.status != "stuck_input":
         return "not_stuck"
     try:
@@ -178,10 +193,26 @@ def status(lines: list[str], block: Block) -> str:
     return "running"
 
 
-def inspect(args: Args) -> Report:
-    lines = tail(args.target, args.n_lines)
+def report_from_lines(lines: list[str]) -> Report:
     block = current_block(lines)
     return Report(status(lines, block), block.lines, current_input_text(lines), can_submit_stuck_input(lines))
+
+
+def inspect(args: Args) -> Report:
+    return report_from_lines(tail(args.target, args.n_lines))
+
+
+def wait_while_compacting(target: str, n_lines: int = COMPACTION_WAIT_LINES, timeout_s: float = DEFAULT_COMPACTION_WAIT_TIMEOUT_S, interval_s: float = COMPACTION_WAIT_INTERVAL_S) -> Report:
+    deadline_s = time.monotonic() + timeout_s
+    latest = Report("unknown", [])
+    while True:
+        lines = tail(target, n_lines)
+        latest = report_from_lines(lines)
+        if not has_compacting_indicator(lines):
+            return latest
+        if time.monotonic() >= deadline_s:
+            raise TimeoutError(f"target still compacting after {timeout_s:g}s")
+        time.sleep(min(interval_s, max(0.05, deadline_s - time.monotonic())))
 
 
 def main(argv: list[str]) -> int:
