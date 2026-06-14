@@ -12,11 +12,13 @@ if [ -n "$env_root" ]; then root="$env_root"; fi
 task_file=""
 status=""
 message_file=""
+alloc_message_file=0
 agent="${OMO_AGENT_NAME:-agent}"
 usage() {
   printf '%s\n' \
     "Usage: omo_report.sh --task-file FILE --status STATUS --message-file FILE [--agent NAME]" \
-    "Create REPORT as a private mktemp/chmod 600 file, then write it through an editor, apply_patch, or another non-shell text channel before calling this helper."
+    "       omo_report.sh --task-file FILE --alloc-message-file" \
+    "Create report text in a private helper-allocated file, then pass that path with --message-file. A file named REPORT is refused unless it is in a private owner-only directory."
 }
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -25,15 +27,59 @@ while [ "$#" -gt 0 ]; do
     --task-file) task_file="$2"; shift 2 ;;
     --status) status="$2"; shift 2 ;;
     --message-file) message_file="$2"; shift 2 ;;
+    --alloc-message-file) alloc_message_file=1; shift ;;
     --agent) agent="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
-if [ -z "$task_file" ] || [ -z "$status" ] || [ -z "$message_file" ]; then usage >&2; exit 2; fi
+if [ -z "$task_file" ]; then usage >&2; exit 2; fi
+if [ "$alloc_message_file" -eq 1 ] && [ -n "$message_file" ]; then echo "--alloc-message-file cannot be combined with --message-file" >&2; exit 2; fi
+if [ "$alloc_message_file" -eq 0 ] && { [ -z "$status" ] || [ -z "$message_file" ]; }; then usage >&2; exit 2; fi
 root_real=$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve())' "$root")
 path_real=$(python3 -c 'from pathlib import Path; import sys; print((Path(sys.argv[1]) / sys.argv[2]).resolve(strict=False))' "$root_real" "$task_file")
 case "$path_real" in "$root_real"/*) ;; *) echo "task file escapes root" >&2; exit 2 ;; esac
+if [ "$alloc_message_file" -eq 1 ]; then
+  python3 - "$path_real" <<'PY'
+from __future__ import annotations
+import os
+import re
+import sys
+import tempfile
+from pathlib import Path
+task_path = Path(sys.argv[1])
+safe_stem = re.sub(r"[^A-Za-z0-9._-]+", "_", task_path.stem).strip("._-")[:80] or "task"
+drafts_dir = Path("/tmp") / f"omo-report-drafts-{os.getuid()}"
+drafts_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+drafts_dir.chmod(0o700)
+fd, tmp_name = tempfile.mkstemp(prefix=f"{safe_stem}.", suffix=".md", dir=drafts_dir)
+os.close(fd)
+path = Path(tmp_name)
+path.chmod(0o600)
+print(path)
+PY
+  exit 0
+fi
+python3 - "$message_file" <<'PY'
+from __future__ import annotations
+import os
+import stat
+import sys
+from pathlib import Path
+path = Path(sys.argv[1]).resolve(strict=False)
+if path.name != "REPORT":
+    raise SystemExit(0)
+try:
+    parent_stat = path.parent.stat()
+except FileNotFoundError:
+    parent_stat = None
+if parent_stat is not None and parent_stat.st_uid == os.getuid() and stat.S_IMODE(parent_stat.st_mode) & 0o077 == 0:
+    raise SystemExit(0)
+print(f"refusing shared report path: {sys.argv[1]}", file=sys.stderr)
+print("files named REPORT are accepted only from a private owner-only directory", file=sys.stderr)
+print("allocate a private path first: omo_report.sh --task-file TASK.md --alloc-message-file", file=sys.stderr)
+raise SystemExit(2)
+PY
 if [ ! -f "$message_file" ]; then echo "message file not found" >&2; exit 2; fi
 mkdir -p "$(dirname "$path_real")"
 stamp=$(date '+%Y-%m-%d %H:%M')
