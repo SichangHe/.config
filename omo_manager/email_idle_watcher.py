@@ -475,10 +475,10 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> None:
         expected_txt_path = args.mail_dir / f"{uid}.txt"
         existing_pending_line = existing_source_pending_line(args.root, expected_txt_path, manager_file)
         if existing_pending_line is not None:
-            _ = push_email_ref(push_args, existing_pending_line)
-            processed_uids.add(uid)
-            processed_changed = True
-            mark_seen(client, uid)
+            if push_email_ref(push_args, existing_pending_line):
+                processed_uids.add(uid)
+                processed_changed = True
+                mark_seen(client, uid)
             continue
         if existing_source_line(args.root, expected_txt_path, manager_file) is not None:
             processed_uids.add(uid)
@@ -507,10 +507,10 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> None:
             mark_seen(client, uid)
         else:
             pending_line = append_pending(args.root, txt_path, manager_file)
-            _ = push_email_ref(push_args, pending_line)
-            processed_uids.add(uid)
-            processed_changed = True
-            mark_seen(client, uid)
+            if push_email_ref(push_args, pending_line):
+                processed_uids.add(uid)
+                processed_changed = True
+                mark_seen(client, uid)
     if processed_changed:
         save_processed_uids(processed_path, processed_uids)
 

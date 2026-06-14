@@ -56,9 +56,8 @@ if [ "$placeholder_subject" = "yes" ]; then
   exit 2
 fi
 case "$subject_lc" in
-  "re: [omo_manager]"*) echo "subject must not start with Re: [omo_manager]" >&2; exit 2 ;;
   "[omo]"*|"re: [omo]"*) echo "manager email subject must use [omo_manager]; [omo] is reserved for direct regular-agent email" >&2; exit 2 ;;
-  "[omo_manager]"*) ;;
+  "[omo_manager]"*|"re: [omo_manager]"*) ;;
   *) subject="[omo_manager] ${subject}" ;;
 esac
 email_helper="$HOME/.config/helper.sh/email_me.py"

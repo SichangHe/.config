@@ -230,7 +230,7 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual(len(client.stores), 1)
             self.assertIn("12	", (state / "email-processed-uids.tsv").read_text(encoding="utf-8"))
 
-    def test_email_watcher_marks_existing_pending_seen_even_if_submit_fails(self) -> None:
+    def test_email_watcher_retries_existing_pending_when_submit_fails(self) -> None:
         from email.message import EmailMessage
         from omo_manager import email_idle_watcher as watcher
 
@@ -279,11 +279,11 @@ class PendingMarkerTests(unittest.TestCase):
                 watcher.handle_unseen(client, args)
             finally:
                 watcher.push_email_ref = old_push
-            self.assertEqual(calls, [1])
-            self.assertEqual(len(client.stores), 1)
-            self.assertIn("13	", (state / "email-processed-uids.tsv").read_text(encoding="utf-8"))
+            self.assertEqual(calls, [1, 1])
+            self.assertEqual(len(client.stores), 0)
+            self.assertFalse((state / "email-processed-uids.tsv").exists())
 
-    def test_email_watcher_marks_new_pending_seen_after_markdown_even_if_submit_fails(self) -> None:
+    def test_email_watcher_retries_new_pending_when_submit_fails(self) -> None:
         from email.message import EmailMessage
         from omo_manager import email_idle_watcher as watcher
 
@@ -319,8 +319,8 @@ class PendingMarkerTests(unittest.TestCase):
             finally:
                 watcher.push_email_ref = old_push
             self.assertIn("(pending)\n(from email manager_mail/14.txt)\n", manager_file.read_text(encoding="utf-8"))
-            self.assertEqual(client.stores, [("14", "+FLAGS", r"(\Seen)")])
-            self.assertIn("14	", (state / "email-processed-uids.tsv").read_text(encoding="utf-8"))
+            self.assertEqual(client.stores, [])
+            self.assertFalse((state / "email-processed-uids.tsv").exists())
 
     def test_email_watcher_keeps_processed_state_when_mark_seen_returns_no(self) -> None:
         from email.message import EmailMessage
@@ -397,7 +397,7 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual(client.searches[0][:6], (None, "UID", "13:*", "FROM", '"me@example.com"', "SUBJECT"))
             self.assertIn("13	", (state / "email-processed-uids.tsv").read_text(encoding="utf-8"))
 
-    def test_email_watcher_marks_new_pending_seen_when_push_raises(self) -> None:
+    def test_email_watcher_retries_new_pending_when_push_raises(self) -> None:
         from email.message import EmailMessage
         from omo_manager import email_idle_watcher as watcher
 
@@ -432,8 +432,8 @@ class PendingMarkerTests(unittest.TestCase):
                 args = watcher.Args(root, "", root / "manager_mail", state, manager_file, True, "me@example.com", 0, Path("/bin/false"), manager_target="wl:1.0")
                 watcher.handle_unseen(client, args)
             self.assertIn("(pending)\n(from email manager_mail/16.txt)\n", manager_file.read_text(encoding="utf-8"))
-            self.assertEqual(client.stores, [("16", "+FLAGS", r"(\Seen)")])
-            self.assertIn("16	", (state / "email-processed-uids.tsv").read_text(encoding="utf-8"))
+            self.assertEqual(client.stores, [])
+            self.assertFalse((state / "email-processed-uids.tsv").exists())
 
     def test_email_watcher_processes_lower_unread_uid_after_higher_processed_uid(self) -> None:
         from email.message import EmailMessage
@@ -1398,6 +1398,49 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertFalse(backtick_sentinel.exists())
             text = sent_log.read_text(encoding="utf-8")
             self.assertIn("[omo_manager] - Literal $HOME `subject`\n" + body_text + "\n--END--\n", text)
+
+    def test_omo_email_human_preserves_manager_reply_subject(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            helper_dir = home / ".config" / "helper.sh"
+            helper_dir.mkdir(parents=True)
+            helper = helper_dir / "email_me.py"
+            sent_log = Path(tmp) / "sent.log"
+            _ = helper.write_text(
+                "#!/usr/bin/env python3\n"
+                "from pathlib import Path\n"
+                "import os\n"
+                "import sys\n"
+                "Path(os.environ['SENT_LOG']).write_text(sys.argv[1] + '\\n' + sys.stdin.read(), encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            helper.chmod(0o700)
+            env = {
+                **os.environ,
+                "HOME": str(home),
+                "SENT_LOG": str(sent_log),
+                "OMO_MANAGER_STATE_DIR": str(Path(tmp) / "state"),
+            }
+            subject_file = Path(tmp) / "subject.txt"
+            subject_file.write_text("Re: [omo_manager] existing thread\n", encoding="utf-8")
+            message_file = Path(tmp) / "body.md"
+            message_file.write_text("ack\n", encoding="utf-8")
+            result = subprocess.run(
+                [
+                    str(Path.home() / ".config/omo_manager/omo_email_human.sh"),
+                    "--subject-file",
+                    str(subject_file),
+                    "--message-file",
+                    str(message_file),
+                ],
+                text=True,
+                capture_output=True,
+                timeout=10,
+                env=env,
+                check=False,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual("Re: [omo_manager] existing thread\nack\n", sent_log.read_text(encoding="utf-8"))
 
     def test_omo_email_human_help_shows_safe_body_pattern(self) -> None:
         script = Path.home() / ".config/omo_manager/omo_email_human.sh"
