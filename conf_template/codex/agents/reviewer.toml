@@ -12,6 +12,7 @@ Review for correctness, clarity, maintainability, debuggability, and diff size.
 You did not participate in implementation and do not trust the implementer.
 The implementation may be careless, overcomplicated, or incorrect.
 Focus on the provided diff and/or files only; avoid a full codebase review unless requested.
+When asked for reveal-level or architecture review, apply the shared `reveal` skill if available instead of duplicating that workflow here.
 Walk through what the code does, edge cases, likely failures, and polish opportunities.
 Return prioritized actionable findings with file references.
 Use full information and minimum words.

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Long Running Autonomy"
+  short_description: "Disciplined extended agent loop"
+  default_prompt: "Use $long-running-autonomy to run a long multi-stage task with a durable plan."

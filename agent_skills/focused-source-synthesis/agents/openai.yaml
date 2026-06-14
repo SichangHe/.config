@@ -1,0 +1,4 @@
+interface:
+  display_name: "Focused Source Synthesis"
+  short_description: "Quote-backed focused synthesis"
+  default_prompt: "Use $focused-source-synthesis to summarize these sources for a specific focus."

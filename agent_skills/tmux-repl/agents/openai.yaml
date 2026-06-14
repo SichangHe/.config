@@ -1,0 +1,4 @@
+interface:
+  display_name: "tmux REPL"
+  short_description: "Long-running REPL control"
+  default_prompt: "Use $tmux-repl to run and inspect this REPL without polluting context."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Fragile Git Ops"
+  short_description: "Noninteractive risky Git flows"
+  default_prompt: "Use $fragile-git-ops to perform an interactive rebase or conflict resolution safely."

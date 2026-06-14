@@ -1,0 +1,4 @@
+interface:
+  display_name: "Ubiquitous Language"
+  short_description: "Shared terminology tables"
+  default_prompt: "Use $ubiquitous-language to extract shared terminology from this codebase."

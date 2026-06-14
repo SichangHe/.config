@@ -1,0 +1,4 @@
+interface:
+  display_name: "Prose Revision"
+  short_description: "Critique and compress prose"
+  default_prompt: "Use $prose-revision to critique or compress this draft while preserving meaning."
