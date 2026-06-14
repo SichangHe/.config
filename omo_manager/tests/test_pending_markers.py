@@ -485,6 +485,31 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertIn("(done)\n(from email manager_mail/18.txt)\n\n(pending)\n(from email manager_mail/18.txt)\n", text)
             self.assertEqual(client.stores, [("18", "+FLAGS", r"(\Seen)")])
 
+    def test_email_watcher_does_not_recover_old_processed_source_only_uid(self) -> None:
+        from omo_manager import email_idle_watcher as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            root.mkdir()
+            state = Path(tmp) / "state"
+            state.mkdir()
+            (state / "email-processed-uids.tsv").write_text("18\t1\n500\t1\n", encoding="utf-8")
+            manager_file = root / "work_manager_today.md"
+            manager_file.write_text("(done)\n(from email manager_mail/18.txt)\n", encoding="utf-8")
+
+            class Client:
+                def uid(self, command: str, *args: object) -> tuple[str, list[object]]:
+                    if command == "search":
+                        joined = " ".join(str(arg) for arg in args)
+                        if "18" in joined:
+                            raise AssertionError("old UID should not be searched for recovery")
+                        return "OK", [b""]
+                    raise AssertionError(command)
+
+            args = watcher.Args(root, "", root / "manager_mail", state, manager_file, True, "me@example.com", 0, Path("/bin/false"), manager_target="wl:1.0")
+            watcher.handle_unseen(Client(), args)
+            self.assertEqual("(done)\n(from email manager_mail/18.txt)\n", manager_file.read_text(encoding="utf-8"))
+
     def test_email_watcher_keeps_processed_state_when_mark_seen_returns_no(self) -> None:
         from email.message import EmailMessage
         from omo_manager import email_idle_watcher as watcher

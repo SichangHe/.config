@@ -57,6 +57,7 @@ TRUSTED_AUTH_SERVERS = _configured_auth_servers or ("mx.google.com",)
 DEFAULT_RECOVERY_DEBOUNCE_S = int(os.environ.get("OMO_MANAGER_RECOVERY_DEBOUNCE_S", "900"))
 DEFAULT_IDLE_WAIT_S = float(os.environ.get("OMO_MANAGER_EMAIL_IDLE_WAIT_S", "60"))
 DEFAULT_IMAP_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_EMAIL_IMAP_TIMEOUT_S", str(max(90.0, DEFAULT_IDLE_WAIT_S + 30.0))))
+DEFAULT_PROCESSED_RECOVERY_UID_WINDOW = int(os.environ.get("OMO_MANAGER_EMAIL_PROCESSED_RECOVERY_UID_WINDOW", "256"))
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 
@@ -470,6 +471,18 @@ def search_processed_uids(client: imaplib.IMAP4_SSL, subject: str, self_email: s
     return candidate_uids
 
 
+def recoverable_processed_uids(processed_uids: set[str], root: Path, mail_dir: Path, manager_file: Path, uid_window: int = DEFAULT_PROCESSED_RECOVERY_UID_WINDOW) -> list[str]:
+    numeric_uids = [int(uid) for uid in processed_uids if uid.isdigit()]
+    if uid_window <= 0 or not numeric_uids:
+        return []
+    min_uid = max(numeric_uids) - uid_window + 1
+    return [
+        uid
+        for uid in sorted(processed_uids, key=lambda value: (0, int(value)) if value.isdigit() else (1, value))
+        if uid.isdigit() and int(uid) >= min_uid and existing_source_pending_line_in_root(root, mail_dir / f"{uid}.txt", manager_file) is None
+    ]
+
+
 def mark_seen(client: imaplib.IMAP4_SSL, uid: str) -> bool:
     try:
         typ, _data = client.uid("store", uid, "+FLAGS", r"(\Seen)")
@@ -491,7 +504,7 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> None:
     candidate_uids: set[bytes] = set()
     for subject_prefix in NORMAL_REPLY_SEARCH_PREFIXES:
         candidate_uids.update(search_uids(client, subject_prefix, args.self_email, processed_uids))
-    processed_missing_source = [uid for uid in processed_uids if existing_source_pending_line_in_root(args.root, args.mail_dir / f"{uid}.txt", manager_file) is None]
+    processed_missing_source = recoverable_processed_uids(processed_uids, args.root, args.mail_dir, manager_file)
     if processed_missing_source:
         for subject_prefix in NORMAL_REPLY_SEARCH_PREFIXES:
             candidate_uids.update(search_processed_uids(client, subject_prefix, args.self_email, processed_missing_source))
