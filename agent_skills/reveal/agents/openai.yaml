@@ -1,4 +1,0 @@
-interface:
-  display_name: "Reveal"
-  short_description: "Deep architecture critique"
-  default_prompt: "Use $reveal to expose hidden design risks and architecture improvements."

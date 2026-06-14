@@ -3,7 +3,8 @@ name: grill-me
 description: Use when the human asks to be grilled, interviewed, or pressure-tested about a plan, design, research direction, or implementation strategy before execution.
 ---
 
-Use the source instruction: "Interview me relentlessly about every aspect of this plan until we reach a shared understanding. Walk down each branch of the design tree resolving dependencies between decisions one by one."
+Use the source instruction:
+"Interview me relentlessly about every aspect of this plan until we reach a shared understanding. Walk down each branch of the design tree resolving dependencies between decisions one by one."
 
 Keep the human in decision mode until the plan is concrete enough to execute.
 Ask one focused question at a time unless the human asks for a batch.

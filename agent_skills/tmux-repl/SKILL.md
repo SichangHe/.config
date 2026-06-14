@@ -3,18 +3,20 @@ name: tmux-repl
 description: Use when a task needs controlled interaction with a long-running REPL, shell, server, notebook, or interactive process.
 ---
 
-Use tmux as the control surface for any long-running interactive process.
+To spawn and continuously interact w/ long-running REPL, you MUST use tmux
 
-Create a named tmux session or window for the process.
-Start the process inside tmux.
-Record the tmux target in task notes when the run is non-trivial.
+Create a tmux session and start the REPL there
 
-Send commands with `tmux send-keys` ending in Enter.
-Print unique markers before commands that produce important output.
-Capture pane output to a temp file.
-Read only bounded line ranges around the relevant marker.
-Avoid reading the full pane when the process has long history.
+To read REPL output, pipe `tmux capture-pane` to a file
+Never directly read the entire REPL output screen to avoid context pollution
+Print unique markers to help yourself find relevant new output
+To run commands in the REPL, `tmux send-keys` ending with Enter
 
-Leave useful long-running processes alive only when the user or task needs them.
-Kill unused sessions created by the agent.
-Report the tmux target and any live process the user may need.
+Be very careful to kill all unused tmux session you create to avoid leaking resources
+
+Additional skill procedure:
+
+- Record the tmux target in task notes when the run is non-trivial.
+- Read only bounded line ranges around the relevant marker.
+- Leave useful long-running processes alive only when the user or task needs them.
+- Report the tmux target and any live process the user may need.

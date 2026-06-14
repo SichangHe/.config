@@ -1,0 +1,4 @@
+interface:
+  display_name: "Review"
+  short_description: "Deep architecture critique"
+  default_prompt: "Use $review to expose hidden design risks and architecture improvements."

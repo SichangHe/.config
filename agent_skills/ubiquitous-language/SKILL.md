@@ -5,6 +5,9 @@ description: Use when asked to scan a codebase for domain terms, produce termino
 
 Build a compact glossary from the codebase, not from guesses.
 
+Use the source description:
+"A skill that scans the codebase to look for terminology and creates a markdown file containing markdown tables of all shared terminology to be used by the developer and the AI."
+
 Inspect existing names before proposing terminology:
 
 - Public types, modules, functions, routes, commands, migrations, schemas, configs, tests, docs, and error text.
