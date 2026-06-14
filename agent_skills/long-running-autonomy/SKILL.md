@@ -3,8 +3,7 @@ name: long-running-autonomy
 description: Use when asked to run in long-running autonomous mode.
 ---
 
-**Long Running Autonomous Mode:** Keep your task and progress in
-`PLAN-[session-name].md`.
+Keep your task and progress in `PLAN-[session-name].md`.
 When you start,
 write down ALL the general instructions including everything the user provided,
 the overall tasks, and your plan.
@@ -41,7 +40,7 @@ STOP: When you have no TODOs left, do a comprehensive review of changes.
 Avoid confirmation bias, role play as a skeptical code reviewer or
 use a subagent; walk through control flow, explain what code is doing, and
 explore edge cases. Go back to LOOP if CHECK finds any issues.
-When you are fully done, remove `PLAN.md`.
+When you are fully done, document long-term notes and remove `PLAN.md`.
 **Make sure to write STUCK LOOP CHECK STOP instructions in `PLAN.md`**.
 
 Do not use Long Running Autonomous Mode unless instructed to.
