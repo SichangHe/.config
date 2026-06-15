@@ -52,6 +52,8 @@ email_enable="${OMO_MANAGER_ENABLE_EMAIL_WATCHER:-auto}"
 stuck_enable="${OMO_MANAGER_ENABLE_STUCK_WATCHER:-true}"
 email_config="${OMO_EMAIL_CONFIG_PATH:-$HOME/.config/himalaya/config.toml}"
 mail_dir="${OMO_MANAGER_MAIL_DIR:-$root/manager_mail}"
+email_supervisor_startup_grace_s="${OMO_MANAGER_EMAIL_SUPERVISOR_STARTUP_GRACE_S:-2}"
+export OMO_MANAGER_EMAIL_SUPERVISOR_STARTUP_GRACE_S="$email_supervisor_startup_grace_s"
 export OMO_MANAGER_MAIL_DIR="$mail_dir"
 mkdir -p -m 700 "$state_dir"
 chmod 700 "$state_dir"
@@ -62,7 +64,9 @@ fi
 echo "manager_target=${manager_target:-unset} manager_url=${manager_url:-unset}"
 pkill -f "[p]ending-watch-supervisor .*--state ${pending_seen}" >/dev/null 2>&1 || true
 pkill -f "[o]mo_pending_watch.py .*--state ${pending_seen}" >/dev/null 2>&1 || true
+pkill -f "[e]mail-watch-supervisor .*--state-dir ${state_dir}" >/dev/null 2>&1 || true
 pkill -f "[e]mail_idle_watcher.py .*--state-dir ${state_dir}" >/dev/null 2>&1 || true
+pkill -f "[e]mail-watch-supervisor .*--root ${root}" >/dev/null 2>&1 || true
 pkill -f "[e]mail_idle_watcher.py" >/dev/null 2>&1 || true
 pkill -f "[p]ending-watch-supervisor .*--root ${root}" >/dev/null 2>&1 || true
 pkill -f "[o]mo_pending_watch.py .*--root ${root}" >/dev/null 2>&1 || true
@@ -106,9 +110,24 @@ if [ "$start_email" -eq 1 ]; then
   email_args=(--root "$root" --mail-dir "$mail_dir" --state-dir "$state_dir")
   [ -n "$manager_url" ] && email_args+=(--manager-url "$manager_url")
   [ -n "$manager_target" ] && email_args+=(--manager-target "$manager_target")
-  setsid "${uv_run[@]}" "$helper_dir/email_idle_watcher.py" "${email_args[@]}" >>"$state_dir/email-watch.log" 2>&1 &
+  setsid bash -c '
+startup_grace_s="${OMO_MANAGER_EMAIL_SUPERVISOR_STARTUP_GRACE_S:-2}"
+started=0
+while :; do
+  start_s=$SECONDS
+  "$@"
+  st=$?
+  runtime_s=$((SECONDS - start_s))
+  printf "%s email watcher exited status=%s; restarting in 5s\n" "$(date "+%Y-%m-%d %H:%M:%S %z")" "$st" >&2
+  if [ "$started" -eq 0 ] && [ "$runtime_s" -lt "$startup_grace_s" ]; then
+    exit "$st"
+  fi
+  started=1
+  sleep 5
+done
+' email-watch-supervisor "${uv_run[@]}" "$helper_dir/email_idle_watcher.py" "${email_args[@]}" >>"$state_dir/email-watch.log" 2>&1 &
   email_pid=$!
-  echo "started email watcher pid=$email_pid log=$state_dir/email-watch.log mail_dir=$mail_dir"
+  echo "started email watcher supervisor pid=$email_pid log=$state_dir/email-watch.log mail_dir=$mail_dir"
 else
   echo "skipped email watcher; set OMO_MANAGER_ENABLE_EMAIL_WATCHER=true and OMO_EMAIL_CONFIG_PATH to enable"
 fi
@@ -118,6 +137,7 @@ if [ -n "$stuck_pid" ]; then
   kill -0 "$stuck_pid" 2>/dev/null || { echo "stuck watcher failed to stay running; see $state_dir/stuck-watch.log" >&2; exit 1; }
 fi
 if [ "$start_email" -eq 1 ]; then
+  sleep "$email_supervisor_startup_grace_s"
   if ! kill -0 "$email_pid" 2>/dev/null; then
     if [ "$email_enable" = "auto" ]; then
       echo "email watcher did not stay running in auto mode; continuing without it; see $state_dir/email-watch.log" >&2

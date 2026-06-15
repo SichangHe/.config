@@ -60,6 +60,8 @@ DEFAULT_RECOVERY_DEBOUNCE_S = int(os.environ.get("OMO_MANAGER_RECOVERY_DEBOUNCE_
 DEFAULT_IDLE_WAIT_S = float(os.environ.get("OMO_MANAGER_EMAIL_IDLE_WAIT_S", "60"))
 DEFAULT_IDLE_RESPONSE_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_EMAIL_IDLE_RESPONSE_TIMEOUT_S", "10"))
 DEFAULT_IMAP_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_EMAIL_IMAP_TIMEOUT_S", str(max(90.0, DEFAULT_IDLE_WAIT_S + 30.0))))
+DEFAULT_PULL_INTERVAL_S = float(os.environ.get("OMO_MANAGER_EMAIL_PULL_INTERVAL_S", "600"))
+DEFAULT_IDLE_EXIT_AFTER_S = float(os.environ.get("OMO_MANAGER_EMAIL_IDLE_EXIT_AFTER_S", "3600"))
 DEFAULT_PROCESSED_RECOVERY_UID_WINDOW = int(os.environ.get("OMO_MANAGER_EMAIL_PROCESSED_RECOVERY_UID_WINDOW", "256"))
 DEFAULT_EMAIL_PUSH_READY_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_EMAIL_PUSH_READY_TIMEOUT_S", "2"))
 DEFAULT_EMAIL_PUSH_SUBMIT_VERIFY_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_EMAIL_PUSH_SUBMIT_VERIFY_TIMEOUT_S", "1"))
@@ -92,6 +94,8 @@ class Args:
     idle_wait_s: float = DEFAULT_IDLE_WAIT_S
     manager_target: str = ""
     imap_timeout_s: float = DEFAULT_IMAP_TIMEOUT_S
+    pull_interval_s: float = DEFAULT_PULL_INTERVAL_S
+    idle_exit_after_s: float = DEFAULT_IDLE_EXIT_AFTER_S
 
 
 class ParsedArgs(argparse.Namespace):
@@ -106,6 +110,8 @@ class ParsedArgs(argparse.Namespace):
     restart_script: Path = Path.home() / ".config/omo_manager/omo_manager_restart.sh"
     idle_wait_s: float = DEFAULT_IDLE_WAIT_S
     imap_timeout_s: float = DEFAULT_IMAP_TIMEOUT_S
+    pull_interval_s: float = DEFAULT_PULL_INTERVAL_S
+    idle_exit_after_s: float = DEFAULT_IDLE_EXIT_AFTER_S
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -120,13 +126,15 @@ def parse_args(argv: list[str]) -> Args:
     parser.add_argument("--restart-script", type=Path, default=Path(os.environ.get("OMO_MANAGER_RECOVERY_RESTART_SCRIPT", Path.home() / ".config/omo_manager/omo_manager_restart.sh")))
     parser.add_argument("--idle-wait-s", type=float, default=DEFAULT_IDLE_WAIT_S, help="Maximum IMAP IDLE wait before polling again; lower values reduce perceived missed-email latency")
     parser.add_argument("--imap-timeout-s", type=float, default=DEFAULT_IMAP_TIMEOUT_S, help="Socket timeout for IMAP operations; prevents silent permanent IDLE/readline hangs")
+    parser.add_argument("--pull-interval-s", type=float, default=DEFAULT_PULL_INTERVAL_S, help="Unread mailbox scan interval while IDLE is otherwise quiet")
+    parser.add_argument("--idle-exit-after-s", type=float, default=DEFAULT_IDLE_EXIT_AFTER_S, help="Exit after this many quiet seconds so the outer supervisor refreshes the process; set <=0 to disable")
     parser.add_argument("--once", action="store_true")
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     root = parsed.root
     manager_file = parsed.manager_file
     if manager_file is not None and not manager_file.is_absolute():
         manager_file = root / manager_file
-    return Args(root, parsed.manager_url.rstrip("/"), parsed.mail_dir, parsed.state_dir, manager_file, parsed.once, "", parsed.recovery_debounce_s, parsed.restart_script, parsed.idle_wait_s, parsed.manager_target.strip(), parsed.imap_timeout_s)
+    return Args(root, parsed.manager_url.rstrip("/"), parsed.mail_dir, parsed.state_dir, manager_file, parsed.once, "", parsed.recovery_debounce_s, parsed.restart_script, parsed.idle_wait_s, parsed.manager_target.strip(), parsed.imap_timeout_s, parsed.pull_interval_s, parsed.idle_exit_after_s)
 
 
 def current_manager_file(args: Args) -> Path:
@@ -564,10 +572,11 @@ def mark_seen(client: imaplib.IMAP4_SSL, uid: str) -> bool:
     return True
 
 
-def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> None:
+def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
     processed_path = processed_uids_path(args)
     processed_uids = load_processed_uids(processed_path)
     processed_changed = False
+    handled = False
     manager_file = current_manager_file(args)
     push_args = args_w_manager_file(args, manager_file)
     candidate_uids: set[bytes] = set()
@@ -581,7 +590,7 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> None:
         candidate_uids.update(search_uids(client, subject, args.self_email, processed_uids))
     if not candidate_uids:
         logging.info("email scan complete: n=0 processed_next=%s manager_file=%s", uid_search_range(processed_uids), manager_file)
-        return
+        return False
     logging.info("email candidates found: n=%s uids=%s processed_max=%s manager_file=%s", len(candidate_uids), ",".join(uid.decode() for uid in sorted(candidate_uids, key=lambda value: int(value))), uid_search_range(processed_uids), manager_file)
     args.mail_dir.mkdir(parents=True, exist_ok=True)
     for raw_uid in sorted(candidate_uids, key=lambda value: int(value)):
@@ -589,7 +598,7 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> None:
         expected_txt_path = args.mail_dir / f"{uid}.txt"
         if uid in processed_uids:
             if existing_source_line_in_root(args.root, expected_txt_path, manager_file) is not None:
-                mark_seen(client, uid)
+                handled = mark_seen(client, uid) or handled
                 continue
             if uid not in processed_missing_source:
                 logging.warning("email processed uid lacks source in current root and is outside recovery window; skipping: uid=%s root=%s", uid, args.root)
@@ -601,6 +610,7 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> None:
             processed_uids.add(uid)
             processed_changed = True
             mark_seen(client, uid)
+            handled = True
             continue
         typ_msg, msg_data = client.uid("fetch", uid, "(BODY.PEEK[])")
         if typ_msg != "OK" or not msg_data or not isinstance(msg_data[0], tuple):
@@ -622,14 +632,17 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> None:
             processed_uids.add(uid)
             processed_changed = True
             mark_seen(client, uid)
+            handled = True
         else:
             pending_line = append_pending(args.root, txt_path, manager_file)
             push_email_ref(push_args, pending_line)
             processed_uids.add(uid)
             processed_changed = True
             mark_seen(client, uid)
+            handled = True
     if processed_changed:
         save_processed_uids(processed_path, processed_uids)
+    return handled or processed_changed
 
 
 def read_imap_line(client: imaplib.IMAP4_SSL, phase: str, deadline_s: float | None = None) -> bytes:
@@ -653,7 +666,7 @@ def read_imap_line(client: imaplib.IMAP4_SSL, phase: str, deadline_s: float | No
     return line
 
 
-def idle_once(client: imaplib.IMAP4_SSL, wait_s: float) -> None:
+def idle_once(client: imaplib.IMAP4_SSL, wait_s: float) -> bool:
     tag = "OMOIDLE"
     client.send(f"{tag} IDLE\r\n".encode())
     deadline_s = time.monotonic() + DEFAULT_IDLE_RESPONSE_TIMEOUT_S
@@ -662,14 +675,42 @@ def idle_once(client: imaplib.IMAP4_SSL, wait_s: float) -> None:
         if line.decode("utf-8", errors="ignore").startswith("+"):
             break
     readable, _, _ = select.select([client.socket()], [], [], wait_s)
+    event_seen = bool(readable)
     client.send(b"DONE\r\n")
     deadline_s = time.monotonic() + DEFAULT_IDLE_RESPONSE_TIMEOUT_S
     while True:
         line = read_imap_line(client, "IDLE done", deadline_s).decode("utf-8", errors="ignore")
         if tag in line:
             break
-    if readable:
-        return
+        event_seen = True
+    return event_seen
+
+
+def watch_inbox(client: imaplib.IMAP4_SSL, args: Args) -> int:
+    activity = handle_unseen(client, args)
+    now_s = time.monotonic()
+    last_activity_s = now_s
+    next_pull_s = now_s + args.pull_interval_s if args.pull_interval_s > 0 else float("inf")
+    if activity:
+        logging.info("email watcher startup scan found candidate mail")
+    while True:
+        now_s = time.monotonic()
+        if args.idle_exit_after_s > 0 and now_s - last_activity_s >= args.idle_exit_after_s:
+            logging.info("email watcher exiting after idle refresh window: idle_s=%.1f", now_s - last_activity_s)
+            return 0
+        if now_s >= next_pull_s:
+            client.select("INBOX")
+            if handle_unseen(client, args):
+                last_activity_s = time.monotonic()
+            next_pull_s = time.monotonic() + args.pull_interval_s
+            continue
+        wait_s = args.idle_wait_s
+        if args.pull_interval_s > 0:
+            wait_s = min(wait_s, max(0.0, next_pull_s - now_s))
+        if idle_once(client, wait_s):
+            client.select("INBOX")
+            if handle_unseen(client, args):
+                last_activity_s = time.monotonic()
 
 
 def main(argv: list[str]) -> int:
@@ -679,22 +720,21 @@ def main(argv: list[str]) -> int:
     if missing:
         print(f"email_idle_watcher: missing config keys {sorted(missing)} in {CONFIG_PATH}", file=sys.stderr)
         return 1
-    safe_args = Args(args.root, args.manager_url, args.mail_dir, args.state_dir, args.manager_file, args.once, config["user"], args.recovery_debounce_s, args.restart_script, args.idle_wait_s, args.manager_target, args.imap_timeout_s)
-    logging.info("email watcher starting: root=%s mail_dir=%s state_dir=%s manager_target=%s manager_url=%s idle_wait_s=%s imap_timeout_s=%s", safe_args.root, safe_args.mail_dir, safe_args.state_dir, safe_args.manager_target or "unset", safe_args.manager_url or "unset", safe_args.idle_wait_s, safe_args.imap_timeout_s)
+    safe_args = Args(args.root, args.manager_url, args.mail_dir, args.state_dir, args.manager_file, args.once, config["user"], args.recovery_debounce_s, args.restart_script, args.idle_wait_s, args.manager_target, args.imap_timeout_s, args.pull_interval_s, args.idle_exit_after_s)
+    logging.info("email watcher starting: root=%s mail_dir=%s state_dir=%s manager_target=%s manager_url=%s idle_wait_s=%s imap_timeout_s=%s pull_interval_s=%s idle_exit_after_s=%s", safe_args.root, safe_args.mail_dir, safe_args.state_dir, safe_args.manager_target or "unset", safe_args.manager_url or "unset", safe_args.idle_wait_s, safe_args.imap_timeout_s, safe_args.pull_interval_s, safe_args.idle_exit_after_s)
     while True:
         try:
             with imaplib.IMAP4_SSL(config["host"], timeout=safe_args.imap_timeout_s) as client:
                 client.login(config["user"], config["password"])
                 client.select("INBOX")
                 logging.info("email watcher connected and selected INBOX")
-                handle_unseen(client, safe_args)
                 if safe_args.once:
+                    handle_unseen(client, safe_args)
                     wait_email_pushes()
                     return 0
-                while True:
-                    idle_once(client, safe_args.idle_wait_s)
-                    client.select("INBOX")
-                    handle_unseen(client, safe_args)
+                result = watch_inbox(client, safe_args)
+                wait_email_pushes()
+                return result
         except Exception as exc:
             logging.error("email watcher failed: %s", exc)
             if safe_args.once:
