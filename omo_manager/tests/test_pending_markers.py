@@ -132,17 +132,92 @@ class PendingMarkerTests(unittest.TestCase):
     def test_email_watcher_idle_eof_raises_instead_of_spinning(self) -> None:
         from omo_manager import email_idle_watcher as watcher
 
+        class Socket:
+            timeout_s: float | None = None
+
+            def gettimeout(self) -> float | None:
+                return self.timeout_s
+
+            def settimeout(self, timeout_s: float | None) -> None:
+                self.timeout_s = timeout_s
+
         class Client:
             sent: list[bytes] = []
+            sock = Socket()
 
             def send(self, data: bytes) -> None:
                 self.sent.append(data)
+
+            def socket(self) -> Socket:
+                return self.sock
 
             def readline(self) -> bytes:
                 return b""
 
         with self.assertRaises(ConnectionError):
             watcher.idle_once(Client(), 0)
+
+    def test_email_watcher_idle_start_read_timeout_raises_and_restores_socket_timeout(self) -> None:
+        from omo_manager import email_idle_watcher as watcher
+
+        class Socket:
+            timeout_s: float | None = 42.0
+
+            def gettimeout(self) -> float | None:
+                return self.timeout_s
+
+            def settimeout(self, timeout_s: float | None) -> None:
+                self.timeout_s = timeout_s
+
+        class Client:
+            sent: list[bytes] = []
+            sock = Socket()
+
+            def send(self, data: bytes) -> None:
+                self.sent.append(data)
+
+            def socket(self) -> Socket:
+                return self.sock
+
+            def readline(self) -> bytes:
+                raise TimeoutError("socket timed out")
+
+        client = Client()
+        with self.assertRaises(TimeoutError):
+            watcher.idle_once(client, 0)
+        self.assertEqual(42.0, client.sock.timeout_s)
+
+    def test_email_watcher_idle_done_reads_buffered_completion(self) -> None:
+        from omo_manager import email_idle_watcher as watcher
+
+        class Socket:
+            timeout_s: float | None = None
+
+            def gettimeout(self) -> float | None:
+                return self.timeout_s
+
+            def settimeout(self, timeout_s: float | None) -> None:
+                self.timeout_s = timeout_s
+
+        class Client:
+            sent: list[bytes] = []
+            lines = [b"+ idling\r\n", b"* 1 EXISTS\r\n", b"OMOIDLE OK IDLE terminated\r\n"]
+            sock = Socket()
+
+            def send(self, data: bytes) -> None:
+                self.sent.append(data)
+
+            def socket(self) -> Socket:
+                return self.sock
+
+            def readline(self) -> bytes:
+                return self.lines.pop(0)
+
+        client = Client()
+        with patch.object(watcher.select, "select", return_value=([object()], [], [])):
+            watcher.idle_once(client, 0)
+        self.assertEqual([], client.lines)
+        self.assertEqual([b"OMOIDLE IDLE\r\n", b"DONE\r\n"], client.sent)
 
     def test_email_watcher_manager_file_is_configurable(self) -> None:
         from omo_manager.email_idle_watcher import parse_args

@@ -58,6 +58,7 @@ _configured_auth_servers = tuple(
 TRUSTED_AUTH_SERVERS = _configured_auth_servers or ("mx.google.com",)
 DEFAULT_RECOVERY_DEBOUNCE_S = int(os.environ.get("OMO_MANAGER_RECOVERY_DEBOUNCE_S", "900"))
 DEFAULT_IDLE_WAIT_S = float(os.environ.get("OMO_MANAGER_EMAIL_IDLE_WAIT_S", "60"))
+DEFAULT_IDLE_RESPONSE_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_EMAIL_IDLE_RESPONSE_TIMEOUT_S", "10"))
 DEFAULT_IMAP_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_EMAIL_IMAP_TIMEOUT_S", str(max(90.0, DEFAULT_IDLE_WAIT_S + 30.0))))
 DEFAULT_PROCESSED_RECOVERY_UID_WINDOW = int(os.environ.get("OMO_MANAGER_EMAIL_PROCESSED_RECOVERY_UID_WINDOW", "256"))
 DEFAULT_EMAIL_PUSH_READY_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_EMAIL_PUSH_READY_TIMEOUT_S", "2"))
@@ -631,8 +632,22 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> None:
         save_processed_uids(processed_path, processed_uids)
 
 
-def read_imap_line(client: imaplib.IMAP4_SSL, phase: str) -> bytes:
-    line = client.readline()
+def read_imap_line(client: imaplib.IMAP4_SSL, phase: str, deadline_s: float | None = None) -> bytes:
+    sock = client.socket() if deadline_s is not None else None
+    old_timeout_s = None
+    if deadline_s is not None:
+        wait_s = deadline_s - time.monotonic()
+        if wait_s <= 0:
+            raise TimeoutError(f"IMAP timed out during {phase}")
+        old_timeout_s = sock.gettimeout()
+        sock.settimeout(wait_s)
+    try:
+        line = client.readline()
+    except TimeoutError as exc:
+        raise TimeoutError(f"IMAP timed out during {phase}") from exc
+    finally:
+        if sock is not None:
+            sock.settimeout(old_timeout_s)
     if not line:
         raise ConnectionError(f"IMAP connection closed during {phase}")
     return line
@@ -641,14 +656,16 @@ def read_imap_line(client: imaplib.IMAP4_SSL, phase: str) -> bytes:
 def idle_once(client: imaplib.IMAP4_SSL, wait_s: float) -> None:
     tag = "OMOIDLE"
     client.send(f"{tag} IDLE\r\n".encode())
+    deadline_s = time.monotonic() + DEFAULT_IDLE_RESPONSE_TIMEOUT_S
     while True:
-        line = read_imap_line(client, "IDLE start")
+        line = read_imap_line(client, "IDLE start", deadline_s)
         if line.decode("utf-8", errors="ignore").startswith("+"):
             break
     readable, _, _ = select.select([client.socket()], [], [], wait_s)
     client.send(b"DONE\r\n")
+    deadline_s = time.monotonic() + DEFAULT_IDLE_RESPONSE_TIMEOUT_S
     while True:
-        line = read_imap_line(client, "IDLE done").decode("utf-8", errors="ignore")
+        line = read_imap_line(client, "IDLE done", deadline_s).decode("utf-8", errors="ignore")
         if tag in line:
             break
     if readable:
