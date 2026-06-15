@@ -7,12 +7,14 @@ import os
 import fcntl
 import imaplib
 import logging
+import queue
 import re
 import select
 import shlex
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -60,7 +62,19 @@ DEFAULT_IMAP_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_EMAIL_IMAP_TIMEOUT_S"
 DEFAULT_PROCESSED_RECOVERY_UID_WINDOW = int(os.environ.get("OMO_MANAGER_EMAIL_PROCESSED_RECOVERY_UID_WINDOW", "256"))
 DEFAULT_EMAIL_PUSH_READY_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_EMAIL_PUSH_READY_TIMEOUT_S", "2"))
 DEFAULT_EMAIL_PUSH_SUBMIT_VERIFY_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_EMAIL_PUSH_SUBMIT_VERIFY_TIMEOUT_S", "1"))
+DEFAULT_EMAIL_PUSH_PROCESS_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_EMAIL_PUSH_PROCESS_TIMEOUT_S", str(max(30.0, DEFAULT_EMAIL_PUSH_READY_TIMEOUT_S + (2 * DEFAULT_EMAIL_PUSH_SUBMIT_VERIFY_TIMEOUT_S) + 15.0))))
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+
+@dataclass(frozen=True)
+class EmailPush:
+    line_no: int
+    command: list[str]
+    env: dict[str, str]
+
+
+_email_push_queue: queue.Queue[EmailPush] = queue.Queue()
+_email_push_worker_started = False
 
 
 @dataclass(frozen=True)
@@ -319,6 +333,43 @@ def append_pending(root: Path, txt_path: Path, manager_file: Path | None = None)
     return line_no + 1
 
 
+def run_email_push(push: EmailPush) -> None:
+    try:
+        result = subprocess.run(push.command, check=False, env=push.env, timeout=DEFAULT_EMAIL_PUSH_PROCESS_TIMEOUT_S)
+    except subprocess.TimeoutExpired as exc:
+        logging.error("email pending async push timed out: line=%s timeout_s=%s command=%s", push.line_no, exc.timeout, shell_join(push.command))
+        return
+    except OSError as exc:
+        logging.error("email pending async push failed: line=%s error=%s", push.line_no, exc)
+        return
+    if result.returncode != 0:
+        logging.error("email pending async push failed: line=%s status=%s", push.line_no, result.returncode)
+
+
+def email_push_worker() -> None:
+    while True:
+        push = _email_push_queue.get()
+        try:
+            run_email_push(push)
+        except Exception as exc:
+            logging.exception("email pending async push worker failed: %s", exc)
+        finally:
+            _email_push_queue.task_done()
+
+
+def start_email_push_worker() -> None:
+    global _email_push_worker_started
+    if _email_push_worker_started:
+        return
+    thread = threading.Thread(target=email_push_worker, name="omo-email-push", daemon=True)
+    thread.start()
+    _email_push_worker_started = True
+
+
+def wait_email_pushes() -> None:
+    _email_push_queue.join()
+
+
 def push_email_ref(args: Args, line_no: int) -> bool:
     if not args.manager_url and not args.manager_target:
         logging.error("email pending push failed: manager URL or target is required")
@@ -335,13 +386,12 @@ def push_email_ref(args: Args, line_no: int) -> bool:
     env["OMO_MANAGER_TMUX_READY_TIMEOUT_S"] = str(DEFAULT_EMAIL_PUSH_READY_TIMEOUT_S)
     env["OMO_MANAGER_TMUX_SUBMIT_VERIFY_TIMEOUT_S"] = str(DEFAULT_EMAIL_PUSH_SUBMIT_VERIFY_TIMEOUT_S)
     try:
-        result = subprocess.run(command, check=False, env=env)
-    except OSError as exc:
-        logging.error("email pending push failed: uid line=%s error=%s", line_no, exc)
+        start_email_push_worker()
+    except RuntimeError as exc:
+        logging.error("email pending async push worker start failed: line=%s error=%s", line_no, exc)
         return False
-    if result.returncode != 0:
-        logging.error("email pending push failed: uid line=%s status=%s", line_no, result.returncode)
-        return False
+    _email_push_queue.put(EmailPush(line_no, command, env))
+    logging.info("email pending async push queued: line=%s", line_no)
     return True
 
 
@@ -622,6 +672,7 @@ def main(argv: list[str]) -> int:
                 logging.info("email watcher connected and selected INBOX")
                 handle_unseen(client, safe_args)
                 if safe_args.once:
+                    wait_email_pushes()
                     return 0
                 while True:
                     idle_once(client, safe_args.idle_wait_s)
@@ -630,6 +681,7 @@ def main(argv: list[str]) -> int:
         except Exception as exc:
             logging.error("email watcher failed: %s", exc)
             if safe_args.once:
+                wait_email_pushes()
                 return 1
             time.sleep(30)
 

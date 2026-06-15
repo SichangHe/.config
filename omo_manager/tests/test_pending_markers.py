@@ -240,7 +240,7 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual(len(client.stores), 1)
             self.assertIn("12	", (state / "email-processed-uids.tsv").read_text(encoding="utf-8"))
 
-    def test_email_watcher_direct_push_uses_short_ready_timeout(self) -> None:
+    def test_email_watcher_direct_push_queues_async_with_short_ready_timeout(self) -> None:
         from omo_manager import email_idle_watcher as watcher
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -248,28 +248,61 @@ class PendingMarkerTests(unittest.TestCase):
             root.mkdir()
             manager_file = root / "work_manager_today.md"
             state = Path(tmp) / "state"
-            calls = []
 
-            class Result:
-                returncode = 1
+            def drain_queue() -> list[watcher.EmailPush]:
+                items = []
+                while True:
+                    try:
+                        items.append(watcher._email_push_queue.get_nowait())
+                        watcher._email_push_queue.task_done()
+                    except watcher.queue.Empty:
+                        return items
 
-            def run(command: list[str], check: bool = False, env: dict[str, str] | None = None) -> Result:
-                calls.append((command, check, env))
-                return Result()
-
-            old_run = watcher.subprocess.run
-            watcher.subprocess.run = run
+            old_start = watcher.start_email_push_worker
+            old_started = watcher._email_push_worker_started
+            old_queue = watcher._email_push_queue
+            watcher._email_push_queue = watcher.queue.Queue()
+            watcher.start_email_push_worker = lambda: None
+            watcher._email_push_worker_started = False
             try:
                 args = watcher.Args(root, "", root / "manager_mail", state, manager_file, True, "me@example.com", 0, Path("/bin/false"), manager_target="wl:1.0")
-                self.assertFalse(watcher.push_email_ref(args, 2))
+                self.assertTrue(watcher.push_email_ref(args, 2))
+                self.assertTrue(watcher.push_email_ref(args, 3))
+                queued = drain_queue()
             finally:
-                watcher.subprocess.run = old_run
-            self.assertEqual(len(calls), 1)
-            command, check, env = calls[0]
-            self.assertFalse(check)
+                drain_queue()
+                watcher.start_email_push_worker = old_start
+                watcher._email_push_worker_started = old_started
+                watcher._email_push_queue = old_queue
+            self.assertEqual([2, 3], [push.line_no for push in queued])
+            push = queued[0]
+            command = push.command
+            env = push.env
             self.assertIn("--submit", command)
             self.assertEqual(env["OMO_MANAGER_TMUX_READY_TIMEOUT_S"], str(watcher.DEFAULT_EMAIL_PUSH_READY_TIMEOUT_S))
             self.assertEqual(env["OMO_MANAGER_TMUX_SUBMIT_VERIFY_TIMEOUT_S"], str(watcher.DEFAULT_EMAIL_PUSH_SUBMIT_VERIFY_TIMEOUT_S))
+
+    def test_email_watcher_async_worker_start_failure_can_retry(self) -> None:
+        from omo_manager import email_idle_watcher as watcher
+
+        class Thread:
+            def __init__(self, **_kwargs: object) -> None:
+                pass
+
+            def start(self) -> None:
+                raise RuntimeError("thread start failed")
+
+        old_thread = watcher.threading.Thread
+        old_started = watcher._email_push_worker_started
+        watcher.threading.Thread = Thread
+        watcher._email_push_worker_started = False
+        try:
+            with self.assertRaises(RuntimeError):
+                watcher.start_email_push_worker()
+            self.assertFalse(watcher._email_push_worker_started)
+        finally:
+            watcher.threading.Thread = old_thread
+            watcher._email_push_worker_started = old_started
 
     def test_email_watcher_marks_existing_pending_read_when_submit_fails(self) -> None:
         from email.message import EmailMessage
@@ -610,7 +643,7 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual(client.searches[0][:6], (None, "UID", "13:*", "FROM", '"me@example.com"', "SUBJECT"))
             self.assertIn("13	", (state / "email-processed-uids.tsv").read_text(encoding="utf-8"))
 
-    def test_email_watcher_marks_new_pending_read_when_push_raises(self) -> None:
+    def test_email_watcher_marks_new_pending_read_after_async_enqueue(self) -> None:
         from email.message import EmailMessage
         from omo_manager import email_idle_watcher as watcher
 
@@ -636,17 +669,37 @@ class PendingMarkerTests(unittest.TestCase):
                         return "OK", [b""]
                     raise AssertionError(command)
 
-            def run_raises(*_args: object, **_kwargs: object) -> object:
-                raise FileNotFoundError("omo_push_to_manager.py")
+            def drain_queue() -> list[watcher.EmailPush]:
+                items = []
+                while True:
+                    try:
+                        items.append(watcher._email_push_queue.get_nowait())
+                        watcher._email_push_queue.task_done()
+                    except watcher.queue.Empty:
+                        return items
 
-            with patch.object(watcher.subprocess, "run", run_raises):
+            old_start = watcher.start_email_push_worker
+            old_started = watcher._email_push_worker_started
+            old_queue = watcher._email_push_queue
+            watcher._email_push_queue = watcher.queue.Queue()
+            watcher.start_email_push_worker = lambda: None
+            watcher._email_push_worker_started = False
+            try:
                 client = Client()
                 manager_file = root / "work_manager_today.md"
                 args = watcher.Args(root, "", root / "manager_mail", state, manager_file, True, "me@example.com", 0, Path("/bin/false"), manager_target="wl:1.0")
                 watcher.handle_unseen(client, args)
+                queued = drain_queue()
+            finally:
+                drain_queue()
+                watcher.start_email_push_worker = old_start
+                watcher._email_push_worker_started = old_started
+                watcher._email_push_queue = old_queue
             self.assertIn("(pending)\n(from email manager_mail/16.txt)\n", manager_file.read_text(encoding="utf-8"))
             self.assertEqual(client.stores, [("16", "+FLAGS", r"(\Seen)")])
             self.assertIn("16	", (state / "email-processed-uids.tsv").read_text(encoding="utf-8"))
+            self.assertEqual(1, len(queued))
+            self.assertEqual(2, queued[0].line_no)
 
     def test_email_watcher_processes_lower_unread_uid_after_higher_processed_uid(self) -> None:
         from email.message import EmailMessage
