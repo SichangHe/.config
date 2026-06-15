@@ -17,8 +17,9 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from email import policy
+from email.utils import parsedate_to_datetime
 from email.utils import parseaddr
 from email.message import Message
 from email.parser import BytesParser
@@ -39,6 +40,7 @@ DEFAULT_MANAGER_TARGET = os.environ.get("OMO_MANAGER_TMUX_TARGET", "")
 DEFAULT_MAIL_DIR = Path(os.environ.get("OMO_MANAGER_MAIL_DIR", DEFAULT_ROOT / "manager_mail"))
 CONFIG_PATH = Path(os.environ.get("OMO_EMAIL_CONFIG_PATH", Path.home() / ".config/himalaya/config.toml"))
 MANAGER_REPLY_PREFIX = "Re: [omo_manager]"
+MANAGER_SUBJECT_TOKEN = "[omo_manager]"
 MANAGER_REPLY_SEARCH_PREFIXES = (MANAGER_REPLY_PREFIX, "Re:[omo_manager]")
 AGENT_REPLY_PREFIX = "Re: [omo]"
 AGENT_REPLY_SEARCH_PREFIXES = (AGENT_REPLY_PREFIX, "Re: [OMO]")
@@ -66,6 +68,9 @@ DEFAULT_PROCESSED_RECOVERY_UID_WINDOW = int(os.environ.get("OMO_MANAGER_EMAIL_PR
 DEFAULT_EMAIL_PUSH_READY_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_EMAIL_PUSH_READY_TIMEOUT_S", "2"))
 DEFAULT_EMAIL_PUSH_SUBMIT_VERIFY_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_EMAIL_PUSH_SUBMIT_VERIFY_TIMEOUT_S", "1"))
 DEFAULT_EMAIL_PUSH_PROCESS_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_EMAIL_PUSH_PROCESS_TIMEOUT_S", str(max(30.0, DEFAULT_EMAIL_PUSH_READY_TIMEOUT_S + (2 * DEFAULT_EMAIL_PUSH_SUBMIT_VERIFY_TIMEOUT_S) + 15.0))))
+DEFAULT_MANAGER_UNREAD_COMPRESSION_THRESHOLD = int(os.environ.get("OMO_MANAGER_EMAIL_UNREAD_COMPRESSION_THRESHOLD", "16"))
+DEFAULT_MANAGER_RECENT_CLEANUP_THRESHOLD = int(os.environ.get("OMO_MANAGER_EMAIL_RECENT_CLEANUP_THRESHOLD", "64"))
+DEFAULT_MANAGER_RECENT_CLEANUP_WINDOW_S = float(os.environ.get("OMO_MANAGER_EMAIL_RECENT_CLEANUP_WINDOW_S", str(24 * 60 * 60)))
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 
@@ -74,6 +79,15 @@ class EmailPush:
     line_no: int
     command: list[str]
     env: dict[str, str]
+
+
+@dataclass(frozen=True)
+class ManagerMailCounts:
+    total: int
+    unread: int
+    recent_window_s: float
+    recent_total: int
+    recent_exact: bool
 
 
 _email_push_queue: queue.Queue[EmailPush] = queue.Queue()
@@ -96,6 +110,9 @@ class Args:
     imap_timeout_s: float = DEFAULT_IMAP_TIMEOUT_S
     pull_interval_s: float = DEFAULT_PULL_INTERVAL_S
     idle_exit_after_s: float = DEFAULT_IDLE_EXIT_AFTER_S
+    unread_compression_threshold: int = DEFAULT_MANAGER_UNREAD_COMPRESSION_THRESHOLD
+    recent_cleanup_threshold: int = DEFAULT_MANAGER_RECENT_CLEANUP_THRESHOLD
+    recent_cleanup_window_s: float = DEFAULT_MANAGER_RECENT_CLEANUP_WINDOW_S
 
 
 class ParsedArgs(argparse.Namespace):
@@ -112,6 +129,9 @@ class ParsedArgs(argparse.Namespace):
     imap_timeout_s: float = DEFAULT_IMAP_TIMEOUT_S
     pull_interval_s: float = DEFAULT_PULL_INTERVAL_S
     idle_exit_after_s: float = DEFAULT_IDLE_EXIT_AFTER_S
+    unread_compression_threshold: int = DEFAULT_MANAGER_UNREAD_COMPRESSION_THRESHOLD
+    recent_cleanup_threshold: int = DEFAULT_MANAGER_RECENT_CLEANUP_THRESHOLD
+    recent_cleanup_window_s: float = DEFAULT_MANAGER_RECENT_CLEANUP_WINDOW_S
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -128,13 +148,16 @@ def parse_args(argv: list[str]) -> Args:
     parser.add_argument("--imap-timeout-s", type=float, default=DEFAULT_IMAP_TIMEOUT_S, help="Socket timeout for IMAP operations; prevents silent permanent IDLE/readline hangs")
     parser.add_argument("--pull-interval-s", type=float, default=DEFAULT_PULL_INTERVAL_S, help="Unread mailbox scan interval while IDLE is otherwise quiet")
     parser.add_argument("--idle-exit-after-s", type=float, default=DEFAULT_IDLE_EXIT_AFTER_S, help="Exit after this many quiet seconds so the outer supervisor refreshes the process; set <=0 to disable")
+    parser.add_argument("--unread-compression-threshold", type=int, default=DEFAULT_MANAGER_UNREAD_COMPRESSION_THRESHOLD, help="Queue manager-sent unread mail compression when unread manager mail exceeds this count; set <=0 to disable")
+    parser.add_argument("--recent-cleanup-threshold", type=int, default=DEFAULT_MANAGER_RECENT_CLEANUP_THRESHOLD, help="Queue manager-human cleanup when recent manager mail exceeds this count; set <=0 to disable")
+    parser.add_argument("--recent-cleanup-window-s", type=float, default=DEFAULT_MANAGER_RECENT_CLEANUP_WINDOW_S, help="Recent manager-human cleanup threshold window")
     parser.add_argument("--once", action="store_true")
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     root = parsed.root
     manager_file = parsed.manager_file
     if manager_file is not None and not manager_file.is_absolute():
         manager_file = root / manager_file
-    return Args(root, parsed.manager_url.rstrip("/"), parsed.mail_dir, parsed.state_dir, manager_file, parsed.once, "", parsed.recovery_debounce_s, parsed.restart_script, parsed.idle_wait_s, parsed.manager_target.strip(), parsed.imap_timeout_s, parsed.pull_interval_s, parsed.idle_exit_after_s)
+    return Args(root, parsed.manager_url.rstrip("/"), parsed.mail_dir, parsed.state_dir, manager_file, parsed.once, "", parsed.recovery_debounce_s, parsed.restart_script, parsed.idle_wait_s, parsed.manager_target.strip(), parsed.imap_timeout_s, parsed.pull_interval_s, parsed.idle_exit_after_s, parsed.unread_compression_threshold, parsed.recent_cleanup_threshold, parsed.recent_cleanup_window_s)
 
 
 def current_manager_file(args: Args) -> Path:
@@ -257,6 +280,14 @@ def processed_uids_path(args: Args) -> Path:
     return args.state_dir / "email-processed-uids.tsv"
 
 
+def manager_mail_counts_path(args: Args) -> Path:
+    return args.state_dir / "email-manager-mail-counts.tsv"
+
+
+def manager_mail_threshold_state_path(args: Args) -> Path:
+    return args.state_dir / "email-manager-mail-thresholds.tsv"
+
+
 def load_processed_uids(path: Path) -> set[str]:
     try:
         return {line.split("\t", 1)[0] for line in path.read_text(encoding="utf-8").splitlines() if line.strip()}
@@ -272,6 +303,44 @@ def save_processed_uids(path: Path, uids: set[str]) -> None:
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write(body)
+
+
+def write_private_state(path: Path, body: str) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.parent.chmod(0o700)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(body)
+
+
+def save_manager_mail_counts(path: Path, counts: ManagerMailCounts) -> None:
+    body = (
+        f"updated_at_s\t{int(time.time())}\n"
+        f"manager_total\t{counts.total}\n"
+        f"manager_unread\t{counts.unread}\n"
+        f"manager_human_recent_window_s\t{int(counts.recent_window_s)}\n"
+        f"manager_human_recent_total\t{counts.recent_total}\n"
+        f"manager_human_recent_exact\t{int(counts.recent_exact)}\n"
+    )
+    write_private_state(path, body)
+
+
+def load_active_manager_mail_thresholds(path: Path) -> set[str]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return set()
+    active: set[str] = set()
+    for line in lines:
+        parts = line.split("\t", 1)
+        if len(parts) == 2 and parts[1] == "1":
+            active.add(parts[0])
+    return active
+
+
+def save_active_manager_mail_thresholds(path: Path, active: set[str]) -> None:
+    body = "".join(f"{kind}\t1\n" for kind in sorted(active))
+    write_private_state(path, body)
 
 
 def email_source_lines(root: Path, txt_path: Path) -> tuple[str, str]:
@@ -402,6 +471,83 @@ def push_email_ref(args: Args, line_no: int) -> bool:
     _email_push_queue.put(EmailPush(line_no, command, env))
     logging.info("email pending async push queued: line=%s", line_no)
     return True
+
+
+def push_manager_mail_threshold_ref(args: Args, line_no: int, kind: str) -> bool:
+    if not args.manager_url and not args.manager_target:
+        logging.error("manager mail threshold push failed: kind=%s manager URL or target is required", kind)
+        return False
+    manager_file = current_manager_file(args)
+    ref = manager_file.relative_to(args.root) if manager_file.is_relative_to(args.root) else manager_file
+    command = ["omo_push_to_manager.py", f"pending: file={ref} line={line_no} origin=agent source=email-watcher action=no-human-ack kind={kind}", "--root", str(args.root), "--submit"]
+    command.extend(["--pending-file", str(ref), "--pending-line", str(line_no)])
+    if args.manager_target:
+        command.extend(["--manager-target", args.manager_target])
+    if args.manager_url:
+        command.extend(["--manager-url", args.manager_url])
+    env = os.environ.copy()
+    env["OMO_MANAGER_TMUX_READY_TIMEOUT_S"] = str(DEFAULT_EMAIL_PUSH_READY_TIMEOUT_S)
+    env["OMO_MANAGER_TMUX_SUBMIT_VERIFY_TIMEOUT_S"] = str(DEFAULT_EMAIL_PUSH_SUBMIT_VERIFY_TIMEOUT_S)
+    try:
+        start_email_push_worker()
+    except RuntimeError as exc:
+        logging.error("manager mail threshold async push worker start failed: kind=%s line=%s error=%s", kind, line_no, exc)
+        return False
+    _email_push_queue.put(EmailPush(line_no, command, env))
+    logging.info("manager mail threshold async push queued: kind=%s line=%s", kind, line_no)
+    return True
+
+
+def threshold_marker(kind: str) -> str:
+    return f"(from manager-email-threshold {kind})"
+
+
+def existing_current_threshold_pending_line(manager_file: Path, kind: str) -> int | None:
+    if not manager_file.exists():
+        return None
+    lines = manager_file.read_text(encoding="utf-8").splitlines()
+    marker = threshold_marker(kind)
+    for idx, line in enumerate(lines):
+        if line.strip() != marker:
+            continue
+        for pending_idx in range(max(0, idx - 6), idx):
+            if lines[pending_idx].strip() == "(pending)":
+                return pending_idx + 1
+        return idx + 1
+    return None
+
+
+def append_manager_mail_threshold_pending(args: Args, kind: str, counts: ManagerMailCounts, dedupe_current: bool = False) -> int:
+    manager_file = current_manager_file(args)
+    if dedupe_current:
+        existing_line = existing_current_threshold_pending_line(manager_file, kind)
+        if existing_line is not None:
+            return existing_line
+    lines = manager_file.read_text(encoding="utf-8").splitlines() if manager_file.exists() else []
+    line_no = len(lines) + 1
+    if kind == "unread-compression":
+        summary = f"manager email watcher threshold: unread manager mail {counts.unread} exceeds {args.unread_compression_threshold}"
+        route = "route a worker through `~/.config/omo_manager/docs/manager-mail-compression.md`"
+        retention = "compress only unread manager-sent mail, send replacement summaries first, then mark only the explicit superseded UID set seen"
+    elif kind == "recent-cleanup":
+        hours = args.recent_cleanup_window_s / 3600
+        summary = f"manager email watcher threshold: manager-human mail within last {hours:g}h is {counts.recent_total}, exceeding {args.recent_cleanup_threshold}"
+        route = "route a worker through `~/.config/omo_manager/docs/manager-mail-cleanup.md` and the compression workflow if replacement summaries are needed"
+        retention = "threshold is trigger-only; rerun cleanup classification and retain recent, unread, active, human-pending, long-report, and uncertain threads"
+    else:
+        raise ValueError(f"unknown manager mail threshold kind: {kind}")
+    block = [
+        "",
+        "(pending)",
+        f"[omo-message-source: origin=agent agent=email_idle_watcher via=manager-mail-threshold status=trigger kind={kind}]",
+        threshold_marker(kind),
+        summary,
+        f"- counts: manager_total={counts.total} manager_unread={counts.unread} manager_human_recent={counts.recent_total} recent_window_s={int(counts.recent_window_s)}",
+        f"- action: {route}",
+        f"- retention: {retention}",
+    ]
+    manager_file.write_text("\n".join(lines + block) + "\n", encoding="utf-8")
+    return line_no + 1
 
 
 def append_recovery_record(root: Path, txt_path: Path, summary: str, manager_file: Path | None = None) -> int:
@@ -548,6 +694,108 @@ def search_processed_uids(client: imaplib.IMAP4_SSL, subject: str, self_email: s
     return candidate_uids
 
 
+def decode_search_uids(data: list[object]) -> list[str]:
+    if not data or not data[0]:
+        return []
+    raw = data[0]
+    if isinstance(raw, bytes):
+        return [uid.decode() for uid in raw.split()]
+    if isinstance(raw, str):
+        return raw.split()
+    return []
+
+
+def search_manager_mail_uids(client: imaplib.IMAP4_SSL, self_email: str, unread: bool = False, since: datetime | None = None) -> list[str]:
+    criteria: list[str] = []
+    if unread:
+        criteria.append("UNSEEN")
+    if since is not None:
+        criteria.extend(["SINCE", since.strftime("%d-%b-%Y")])
+    criteria.extend(["FROM", f'"{self_email}"', "SUBJECT", f'"{MANAGER_SUBJECT_TOKEN}"'])
+    typ, data = client.uid("search", *criteria)
+    if typ != "OK":
+        raise RuntimeError(f"IMAP manager mail search failed: {typ}")
+    return decode_search_uids(data)
+
+
+def parsed_message_date(msg: Message) -> datetime | None:
+    raw_date = str(msg.get("Date", ""))
+    if not raw_date:
+        return None
+    try:
+        dt = parsedate_to_datetime(raw_date)
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=datetime.now().astimezone().tzinfo)
+    return dt.astimezone()
+
+
+def recent_manager_mail_uids(client: imaplib.IMAP4_SSL, self_email: str, candidate_uids: list[str], cutoff: datetime) -> list[str]:
+    recent: list[str] = []
+    for uid in candidate_uids:
+        typ, data = client.uid("fetch", uid, "(BODY.PEEK[HEADER.FIELDS (DATE FROM SUBJECT)])")
+        if typ != "OK" or not data or not isinstance(data[0], tuple):
+            raise RuntimeError(f"IMAP manager mail header fetch failed: uid={uid} typ={typ}")
+        msg = BytesParser(policy=policy.default).parsebytes(data[0][1])
+        sender = str(msg.get("From", ""))
+        subject = str(msg.get("Subject", ""))
+        dt = parsed_message_date(msg)
+        if dt is not None and dt >= cutoff and from_self(sender, self_email) and MANAGER_SUBJECT_TOKEN.lower() in subject.lower():
+            recent.append(uid)
+    return recent
+
+
+def manager_mail_counts(client: imaplib.IMAP4_SSL, self_email: str, recent_window_s: float, recent_threshold: int, now: datetime | None = None) -> ManagerMailCounts:
+    now = now or datetime.now().astimezone()
+    cutoff = now - timedelta(seconds=recent_window_s)
+    total_uids = search_manager_mail_uids(client, self_email)
+    unread_uids = search_manager_mail_uids(client, self_email, unread=True)
+    recent_candidates = search_manager_mail_uids(client, self_email, since=cutoff)
+    recent_total = len(recent_manager_mail_uids(client, self_email, recent_candidates, cutoff))
+    return ManagerMailCounts(len(total_uids), len(unread_uids), recent_window_s, recent_total, True)
+
+
+def handle_manager_mail_thresholds(client: imaplib.IMAP4_SSL, args: Args) -> bool:
+    counts = manager_mail_counts(client, args.self_email, args.recent_cleanup_window_s, args.recent_cleanup_threshold)
+    save_manager_mail_counts(manager_mail_counts_path(args), counts)
+    logging.info("manager mail counts: total=%s unread=%s recent_window_s=%s recent_total=%s recent_exact=%s", counts.total, counts.unread, int(counts.recent_window_s), counts.recent_total, counts.recent_exact)
+    threshold_state_path = manager_mail_threshold_state_path(args)
+    state_missing = not threshold_state_path.exists()
+    active = load_active_manager_mail_thresholds(threshold_state_path)
+    next_active = set(active)
+    triggered = False
+    state_changed = False
+    checks = (
+        ("unread-compression", args.unread_compression_threshold, counts.unread),
+        ("recent-cleanup", args.recent_cleanup_threshold, counts.recent_total),
+    )
+    for kind, threshold, count in checks:
+        exceeded = threshold > 0 and count > threshold
+        if exceeded and kind not in active:
+            line_no = append_manager_mail_threshold_pending(args, kind, counts, dedupe_current=state_missing)
+            next_active.add(kind)
+            save_active_manager_mail_thresholds(threshold_state_path, next_active)
+            state_missing = False
+            active = set(next_active)
+            push_manager_mail_threshold_ref(args, line_no, kind)
+            triggered = True
+        elif not exceeded and kind in next_active:
+            next_active.remove(kind)
+            state_changed = True
+    if state_changed:
+        save_active_manager_mail_thresholds(threshold_state_path, next_active)
+    return triggered
+
+
+def maybe_handle_manager_mail_thresholds(client: imaplib.IMAP4_SSL, args: Args) -> bool:
+    try:
+        return handle_manager_mail_thresholds(client, args)
+    except (OSError, RuntimeError, imaplib.IMAP4.error) as exc:
+        logging.warning("manager mail threshold check failed: %s", exc)
+        return False
+
+
 def recoverable_processed_uids(processed_uids: set[str], root: Path, mail_dir: Path, manager_file: Path, uid_window: int = DEFAULT_PROCESSED_RECOVERY_UID_WINDOW) -> list[str]:
     numeric_uids = [int(uid) for uid in processed_uids if uid.isdigit()]
     if uid_window <= 0 or not numeric_uids:
@@ -590,7 +838,7 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
         candidate_uids.update(search_uids(client, subject, args.self_email, processed_uids))
     if not candidate_uids:
         logging.info("email scan complete: n=0 processed_next=%s manager_file=%s", uid_search_range(processed_uids), manager_file)
-        return False
+        return maybe_handle_manager_mail_thresholds(client, args)
     logging.info("email candidates found: n=%s uids=%s processed_max=%s manager_file=%s", len(candidate_uids), ",".join(uid.decode() for uid in sorted(candidate_uids, key=lambda value: int(value))), uid_search_range(processed_uids), manager_file)
     args.mail_dir.mkdir(parents=True, exist_ok=True)
     for raw_uid in sorted(candidate_uids, key=lambda value: int(value)):
@@ -642,7 +890,8 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
             handled = True
     if processed_changed:
         save_processed_uids(processed_path, processed_uids)
-    return handled or processed_changed
+    threshold_handled = maybe_handle_manager_mail_thresholds(client, args)
+    return handled or processed_changed or threshold_handled
 
 
 def read_imap_line(client: imaplib.IMAP4_SSL, phase: str, deadline_s: float | None = None) -> bytes:
@@ -720,8 +969,8 @@ def main(argv: list[str]) -> int:
     if missing:
         print(f"email_idle_watcher: missing config keys {sorted(missing)} in {CONFIG_PATH}", file=sys.stderr)
         return 1
-    safe_args = Args(args.root, args.manager_url, args.mail_dir, args.state_dir, args.manager_file, args.once, config["user"], args.recovery_debounce_s, args.restart_script, args.idle_wait_s, args.manager_target, args.imap_timeout_s, args.pull_interval_s, args.idle_exit_after_s)
-    logging.info("email watcher starting: root=%s mail_dir=%s state_dir=%s manager_target=%s manager_url=%s idle_wait_s=%s imap_timeout_s=%s pull_interval_s=%s idle_exit_after_s=%s", safe_args.root, safe_args.mail_dir, safe_args.state_dir, safe_args.manager_target or "unset", safe_args.manager_url or "unset", safe_args.idle_wait_s, safe_args.imap_timeout_s, safe_args.pull_interval_s, safe_args.idle_exit_after_s)
+    safe_args = Args(args.root, args.manager_url, args.mail_dir, args.state_dir, args.manager_file, args.once, config["user"], args.recovery_debounce_s, args.restart_script, args.idle_wait_s, args.manager_target, args.imap_timeout_s, args.pull_interval_s, args.idle_exit_after_s, args.unread_compression_threshold, args.recent_cleanup_threshold, args.recent_cleanup_window_s)
+    logging.info("email watcher starting: root=%s mail_dir=%s state_dir=%s manager_target=%s manager_url=%s idle_wait_s=%s imap_timeout_s=%s pull_interval_s=%s idle_exit_after_s=%s unread_compression_threshold=%s recent_cleanup_threshold=%s recent_cleanup_window_s=%s", safe_args.root, safe_args.mail_dir, safe_args.state_dir, safe_args.manager_target or "unset", safe_args.manager_url or "unset", safe_args.idle_wait_s, safe_args.imap_timeout_s, safe_args.pull_interval_s, safe_args.idle_exit_after_s, safe_args.unread_compression_threshold, safe_args.recent_cleanup_threshold, int(safe_args.recent_cleanup_window_s))
     while True:
         try:
             with imaplib.IMAP4_SSL(config["host"], timeout=safe_args.imap_timeout_s) as client:

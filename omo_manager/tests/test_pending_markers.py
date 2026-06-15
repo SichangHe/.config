@@ -357,6 +357,206 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual(env["OMO_MANAGER_TMUX_READY_TIMEOUT_S"], str(watcher.DEFAULT_EMAIL_PUSH_READY_TIMEOUT_S))
             self.assertEqual(env["OMO_MANAGER_TMUX_SUBMIT_VERIFY_TIMEOUT_S"], str(watcher.DEFAULT_EMAIL_PUSH_SUBMIT_VERIFY_TIMEOUT_S))
 
+    def test_email_watcher_tracks_manager_mail_counts(self) -> None:
+        from datetime import datetime
+        from email.message import EmailMessage
+        from email.utils import format_datetime
+        from omo_manager import email_idle_watcher as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            root.mkdir()
+            state = Path(tmp) / "state"
+            recent_date = format_datetime(datetime.now().astimezone())
+
+            class Client:
+                def uid(self, command: str, *args: object) -> tuple[str, list[object]]:
+                    if command == "search":
+                        if args and args[0] == "UNSEEN":
+                            return "OK", [b"2 3"]
+                        if "SINCE" in args:
+                            return "OK", [b"1 2 3"]
+                        return "OK", [b"1 2 3 4"]
+                    if command == "fetch":
+                        msg = EmailMessage()
+                        msg["From"] = "Manager <me@example.com>"
+                        msg["Subject"] = "[omo_manager] item"
+                        msg["Date"] = recent_date
+                        msg.set_content("body")
+                        return "OK", [(b"HEADER", msg.as_bytes())]
+                    raise AssertionError(command)
+
+            old_push = watcher.push_manager_mail_threshold_ref
+            watcher.push_manager_mail_threshold_ref = lambda *_args: (_ for _ in ()).throw(AssertionError("threshold should not trigger"))
+            try:
+                args = watcher.Args(root, "", root / "manager_mail", state, root / "work_manager_today.md", True, "me@example.com", 0, Path("/bin/false"), manager_target="wl:1.0")
+                self.assertFalse(watcher.handle_manager_mail_thresholds(Client(), args))
+            finally:
+                watcher.push_manager_mail_threshold_ref = old_push
+            counts_text = (state / "email-manager-mail-counts.tsv").read_text(encoding="utf-8")
+            self.assertIn("manager_total\t4\n", counts_text)
+            self.assertIn("manager_unread\t2\n", counts_text)
+            self.assertIn("manager_human_recent_total\t3\n", counts_text)
+
+    def test_email_watcher_triggers_unread_compression_once(self) -> None:
+        from omo_manager import email_idle_watcher as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            root.mkdir()
+            state = Path(tmp) / "state"
+            total = " ".join(str(uid) for uid in range(1, 21)).encode()
+            unread = " ".join(str(uid) for uid in range(1, 18)).encode()
+            calls: list[tuple[int, str]] = []
+
+            class Client:
+                def uid(self, command: str, *args: object) -> tuple[str, list[object]]:
+                    if command == "search":
+                        if "SINCE" in args:
+                            return "OK", [b""]
+                        if args and args[0] == "UNSEEN":
+                            return "OK", [unread]
+                        return "OK", [total]
+                    raise AssertionError(command)
+
+            def push(_args: watcher.Args, line_no: int, kind: str) -> bool:
+                calls.append((line_no, kind))
+                return True
+
+            old_push = watcher.push_manager_mail_threshold_ref
+            watcher.push_manager_mail_threshold_ref = push
+            try:
+                args = watcher.Args(root, "", root / "manager_mail", state, root / "work_manager_today.md", True, "me@example.com", 0, Path("/bin/false"), manager_target="wl:1.0")
+                self.assertTrue(watcher.handle_manager_mail_thresholds(Client(), args))
+                self.assertFalse(watcher.handle_manager_mail_thresholds(Client(), args))
+            finally:
+                watcher.push_manager_mail_threshold_ref = old_push
+            manager_text = (root / "work_manager_today.md").read_text(encoding="utf-8")
+            self.assertEqual([(2, "unread-compression")], calls)
+            self.assertEqual(1, manager_text.count(watcher.threshold_marker("unread-compression")))
+            self.assertIn("docs/manager-mail-compression.md", manager_text)
+            self.assertIn("unread-compression\t1\n", (state / "email-manager-mail-thresholds.tsv").read_text(encoding="utf-8"))
+
+    def test_email_watcher_unread_threshold_can_retrigger_after_count_drops(self) -> None:
+        from omo_manager import email_idle_watcher as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            root.mkdir()
+            state = Path(tmp) / "state"
+            calls: list[tuple[int, str]] = []
+
+            class Client:
+                unread_n = 17
+
+                def uid(self, command: str, *args: object) -> tuple[str, list[object]]:
+                    if command == "search":
+                        if "SINCE" in args:
+                            return "OK", [b""]
+                        if args and args[0] == "UNSEEN":
+                            return "OK", [" ".join(str(uid) for uid in range(1, self.unread_n + 1)).encode()]
+                        return "OK", [b"1 2 3 4"]
+                    raise AssertionError(command)
+
+            def push(_args: watcher.Args, line_no: int, kind: str) -> bool:
+                calls.append((line_no, kind))
+                return True
+
+            client = Client()
+            old_push = watcher.push_manager_mail_threshold_ref
+            watcher.push_manager_mail_threshold_ref = push
+            try:
+                args = watcher.Args(root, "", root / "manager_mail", state, root / "work_manager_today.md", True, "me@example.com", 0, Path("/bin/false"), manager_target="wl:1.0")
+                self.assertTrue(watcher.handle_manager_mail_thresholds(client, args))
+                client.unread_n = 16
+                self.assertFalse(watcher.handle_manager_mail_thresholds(client, args))
+                client.unread_n = 17
+                self.assertTrue(watcher.handle_manager_mail_thresholds(client, args))
+            finally:
+                watcher.push_manager_mail_threshold_ref = old_push
+            manager_text = (root / "work_manager_today.md").read_text(encoding="utf-8")
+            self.assertEqual([(2, "unread-compression"), (10, "unread-compression")], calls)
+            self.assertEqual(2, manager_text.count(watcher.threshold_marker("unread-compression")))
+
+    def test_email_watcher_recent_cleanup_threshold_filters_to_last_24h(self) -> None:
+        from datetime import datetime, timedelta
+        from email.message import EmailMessage
+        from email.utils import format_datetime
+        from omo_manager import email_idle_watcher as watcher
+
+        now = datetime.now().astimezone()
+        recent_date = format_datetime(now - timedelta(hours=1))
+        old_date = format_datetime(now - timedelta(hours=25))
+        uids = [str(uid) for uid in range(1, 66)]
+
+        class Client:
+            def uid(self, command: str, *args: object) -> tuple[str, list[object]]:
+                if command == "search":
+                    if "SINCE" in args:
+                        return "OK", [" ".join(uids).encode()]
+                    return "OK", [b""]
+                if command == "fetch":
+                    uid = str(args[0])
+                    msg = EmailMessage()
+                    msg["From"] = "Manager <me@example.com>"
+                    msg["Subject"] = "[omo_manager] item"
+                    msg["Date"] = old_date if uid == "65" else recent_date
+                    msg.set_content("body")
+                    return "OK", [(b"HEADER", msg.as_bytes())]
+                raise AssertionError(command)
+
+        counts = watcher.manager_mail_counts(Client(), "me@example.com", 24 * 60 * 60, 64, now)
+        self.assertTrue(counts.recent_exact)
+        self.assertEqual(64, counts.recent_total)
+
+    def test_email_watcher_triggers_recent_cleanup_once(self) -> None:
+        from datetime import datetime, timedelta
+        from email.message import EmailMessage
+        from email.utils import format_datetime
+        from omo_manager import email_idle_watcher as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            root.mkdir()
+            state = Path(tmp) / "state"
+            uids = [str(uid) for uid in range(1, 66)]
+            encoded_uids = " ".join(uids).encode()
+            recent_date = format_datetime(datetime.now().astimezone() - timedelta(hours=1))
+            calls: list[tuple[int, str]] = []
+
+            class Client:
+                def uid(self, command: str, *args: object) -> tuple[str, list[object]]:
+                    if command == "search":
+                        if args and args[0] == "UNSEEN":
+                            return "OK", [b""]
+                        return "OK", [encoded_uids]
+                    if command == "fetch":
+                        msg = EmailMessage()
+                        msg["From"] = "Manager <me@example.com>"
+                        msg["Subject"] = "[omo_manager] item"
+                        msg["Date"] = recent_date
+                        msg.set_content("body")
+                        return "OK", [(b"HEADER", msg.as_bytes())]
+                    raise AssertionError(command)
+
+            def push(_args: watcher.Args, line_no: int, kind: str) -> bool:
+                calls.append((line_no, kind))
+                return True
+
+            old_push = watcher.push_manager_mail_threshold_ref
+            watcher.push_manager_mail_threshold_ref = push
+            try:
+                args = watcher.Args(root, "", root / "manager_mail", state, root / "work_manager_today.md", True, "me@example.com", 0, Path("/bin/false"), manager_target="wl:1.0")
+                self.assertTrue(watcher.handle_manager_mail_thresholds(Client(), args))
+                self.assertFalse(watcher.handle_manager_mail_thresholds(Client(), args))
+            finally:
+                watcher.push_manager_mail_threshold_ref = old_push
+            manager_text = (root / "work_manager_today.md").read_text(encoding="utf-8")
+            self.assertEqual([(2, "recent-cleanup")], calls)
+            self.assertEqual(1, manager_text.count(watcher.threshold_marker("recent-cleanup")))
+            self.assertIn("docs/manager-mail-cleanup.md", manager_text)
+            self.assertIn("recent-cleanup\t1\n", (state / "email-manager-mail-thresholds.tsv").read_text(encoding="utf-8"))
+
     def test_email_watcher_async_worker_start_failure_can_retry(self) -> None:
         from omo_manager import email_idle_watcher as watcher
 
@@ -403,6 +603,8 @@ class PendingMarkerTests(unittest.TestCase):
 
                 def uid(self, command: str, *args: object) -> tuple[str, list[object]]:
                     if command == "search":
+                        if "SINCE" in args:
+                            return "OK", [b""]
                         if args and args[0] == "UNSEEN" and self.stores:
                             return "OK", [b""]
                         if "UID" in args and "14:*" in args:
@@ -490,6 +692,8 @@ class PendingMarkerTests(unittest.TestCase):
 
                 def uid(self, command: str, *args: object) -> tuple[str, list[object]]:
                     if command == "search":
+                        if "SINCE" in args:
+                            return "OK", [b""]
                         return "OK", [b"42"]
                     if command == "store":
                         self.stores.append(args)
@@ -597,6 +801,8 @@ class PendingMarkerTests(unittest.TestCase):
 
                 def uid(self, command: str, *args: object) -> tuple[str, list[object]]:
                     if command == "search":
+                        if "SINCE" in args:
+                            return "OK", [b""]
                         return "OK", [b"18"]
                     if command == "store":
                         self.stores.append(args)

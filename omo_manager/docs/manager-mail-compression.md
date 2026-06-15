@@ -20,6 +20,11 @@ Workflow:
 - report through `omo_report.sh`
 - delete the private export directory after the task if the audit no longer needs raw local copies
 
+Watcher trigger:
+- `email_idle_watcher.py` records manager mail counts in `email-manager-mail-counts.tsv`
+- it queues this workflow when unread manager mail is more than `16`
+- the trigger is a manager work item only; replacement summaries and `mark-seen` still require the explicit workflow above
+
 Safety boundary:
 - the helper reads the same Gmail/Himalaya config as `email_idle_watcher.py`
 - snapshot/export search only `INBOX` unread messages from the configured self address with `[omo_manager]` in the subject
@@ -28,6 +33,7 @@ Safety boundary:
 - before changing flags, `mark-seen` rechecks that each still-unread UID is self-addressed manager mail
 - export refuses a non-empty output directory so stale private body files are not mixed into a new run
 - the helper only sets `\Seen`; it never expunges or deletes message bodies
+- use `omo_email_human.sh --subject-file SUBJECT --message-file BODY` for replacement summary text
 
 Judgment boundary:
 - the helper does not choose topics or summarize email bodies

@@ -12,6 +12,7 @@ Tools:
   - reads the Gmail/Himalaya config
   - stores accepted human replies as `manager_mail/UID.txt`
   - marks processed source inbox mail seen
+  - records manager mail counts and queues threshold cleanup work
 - `~/.config/omo_manager/omo_manager_mail_compress.py`
   - only compresses unread manager-sent mail and marks an explicit UID set seen
   - not a stale-thread trash cleanup helper
@@ -33,6 +34,12 @@ Retain every thread with any of these properties:
 - linked to unresolved `(pending)` email source refs in current `work_manager_*.md`
 - long report/update message
 - uncertain routing, active worker relevance, or human-pending relevance
+
+Watcher trigger:
+- `email_idle_watcher.py` queues this workflow when manager-human `[omo_manager]` mail within the last `24` hours is more than `64`
+- the `64` threshold is only a trigger scope; it is not deletion eligibility
+- compression/replacement text must go through files, for example `omo_email_human.sh --subject-file SUBJECT --message-file BODY`
+- trash movement remains limited to explicit seen stale UIDs after the read-only classification is rerun
 
 Cleanup criteria used in the 2026-06-15 run:
 - scoped to `INBOX` self-addressed `[omo_manager]` mail
