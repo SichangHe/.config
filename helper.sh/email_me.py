@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Email the human using Gmail SMTP, with HTML links for Markdown anchors.
+"""Email the human using Gmail SMTP, with Markdown HTML alternatives.
 
 Credentials are loaded from `~/.config/.env`:
 - `EMAIL_ME_GMAIL_ADDRESS`
@@ -26,6 +26,13 @@ DIRECT_AGENT_PREFIX = "[omo]"
 PRESERVED_PREFIXES = ("[omo]", "[omo_manager]", "[omo_manager_recover]")
 PWD_FOOTER_RE = re.compile(r"^PWD: \S+", re.MULTILINE)
 MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
+INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
+HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)(?:\s+#+\s*)?$")
+UNORDERED_LIST_RE = re.compile(r"^\s{0,3}[-*+]\s+(.+)$")
+ORDERED_LIST_RE = re.compile(r"^\s{0,3}\d+[.)]\s+(.+)$")
+BLOCKQUOTE_RE = re.compile(r"^\s{0,3}>\s?(.*)$")
+FENCE_RE = re.compile(r"^\s{0,3}(```|~~~)")
+HR_RE = re.compile(r"^\s{0,3}([-*_])(?:\s*\1){2,}\s*$")
 
 
 @dataclass(frozen=True)
@@ -46,7 +53,8 @@ def parse_args(argv: list[str]) -> CliArgs:
     parser = argparse.ArgumentParser(
         usage="email_me.py [--dry-run] [--message-file FILE] SUBJECT",
         description=(
-            "Email the human. Reads the email body from standard input by default; "
+            "Email the human. The body accepts Markdown input, but plain text is preferred. "
+            "Reads the email body from standard input by default; "
             "use --message-file for a saved body. Do not pass body text as a shell argument."
         ),
     )
@@ -115,20 +123,148 @@ def markdown_links_to_plain(text: str) -> str:
     return MARKDOWN_LINK_RE.sub(lambda match: f"{match.group(1).strip()}: {match.group(2).strip()}", text)
 
 
-def markdown_links_to_html(text: str) -> str | None:
-    if not MARKDOWN_LINK_RE.search(text):
-        return None
+def render_inline_markdown(text: str) -> str:
+    parts: list[str] = []
+    last_end = 0
+    for match in INLINE_CODE_RE.finditer(text):
+        parts.append(render_inline_text(text[last_end:match.start()]))
+        parts.append(f'<code style="font-family: monospace;">{escape(match.group(1))}</code>')
+        last_end = match.end()
+    parts.append(render_inline_text(text[last_end:]))
+    return "".join(parts)
+
+
+def render_inline_text(text: str) -> str:
     parts: list[str] = []
     last_end = 0
     for match in MARKDOWN_LINK_RE.finditer(text):
-        parts.append(escape(text[last_end:match.start()]))
-        label = escape(match.group(1).strip())
+        parts.append(render_inline_styles(text[last_end:match.start()]))
+        label = render_inline_styles(match.group(1).strip())
         url = escape(match.group(2).strip(), quote=True)
-        parts.append(f'<a href="{url}">{label}</a>')
+        parts.append(f'<a href="{url}" style="color: #1155cc;">{label}</a>')
         last_end = match.end()
-    parts.append(escape(text[last_end:]))
-    html = "<br>\n".join("".join(parts).splitlines())
-    return f"<!doctype html><html><body>{html}</body></html>\n"
+    parts.append(render_inline_styles(text[last_end:]))
+    return "".join(parts)
+
+
+def render_inline_styles(text: str) -> str:
+    html = escape(text)
+    html = re.sub(r"\*\*(?=\S)(.+?)(?<=\S)\*\*|(?<![A-Za-z0-9])__(?=\S)(.+?)(?<=\S)__(?![A-Za-z0-9])", lambda match: f"<strong>{match.group(1) or match.group(2)}</strong>", html)
+    return re.sub(r"(?<!\*)\*(?!\*)(?=\S)(.+?)(?<=\S)\*(?!\*)|(?<![A-Za-z0-9])_(?!_)(?=\S)(.+?)(?<=\S)_(?![A-Za-z0-9])", lambda match: f"<em>{match.group(1) or match.group(2)}</em>", html)
+
+
+def inline_lines_html(text: str) -> str:
+    return "<br> ".join(render_inline_markdown(line) for line in text.splitlines())
+
+
+def paragraph_html(lines: list[str]) -> str:
+    text = "\n".join(lines)
+    return f'<p style="margin: 0 0 12px 0;">{inline_lines_html(text)}</p>'
+
+
+def list_html(kind: str, items: list[str]) -> str:
+    tag = "ol" if kind == "ol" else "ul"
+    rendered_items = "\n".join(f'<li style="margin: 0 0 4px 0;">{inline_lines_html(item)}</li>' for item in items)
+    return f'<{tag} style="margin: 0 0 12px 24px; padding: 0;">\n{rendered_items}\n</{tag}>'
+
+
+def blockquote_html(lines: list[str]) -> str:
+    text = "\n".join(lines)
+    inner = inline_lines_html(text)
+    return f'<blockquote style="margin: 0 0 12px 0; padding-left: 12px; border-left: 4px solid #d0d7de; color: #57606a;">{inner}</blockquote>'
+
+
+def markdown_to_html(text: str) -> str:
+    blocks: list[str] = []
+    paragraph: list[str] = []
+    list_kind = ""
+    list_items: list[str] = []
+    quote_lines: list[str] = []
+    lines = text.splitlines()
+    idx = 0
+
+    def flush_paragraph() -> None:
+        if paragraph:
+            blocks.append(paragraph_html(paragraph))
+            paragraph.clear()
+
+    def flush_list() -> None:
+        nonlocal list_kind
+        if list_items:
+            blocks.append(list_html(list_kind, list_items))
+            list_items.clear()
+        list_kind = ""
+
+    def flush_quote() -> None:
+        if quote_lines:
+            blocks.append(blockquote_html(quote_lines))
+            quote_lines.clear()
+
+    def flush_all() -> None:
+        flush_paragraph()
+        flush_list()
+        flush_quote()
+
+    while idx < len(lines):
+        line = lines[idx]
+        if not line.strip():
+            flush_all()
+            idx += 1
+            continue
+        if FENCE_RE.match(line):
+            flush_all()
+            fence = FENCE_RE.match(line)
+            assert fence is not None
+            marker = fence.group(1)
+            idx += 1
+            code_lines: list[str] = []
+            while idx < len(lines) and not lines[idx].lstrip().startswith(marker):
+                code_lines.append(lines[idx])
+                idx += 1
+            if idx < len(lines):
+                idx += 1
+            code = escape("\n".join(code_lines))
+            blocks.append(f'<pre style="margin: 0 0 12px 0; padding: 10px; background: #f6f8fa; white-space: pre-wrap;"><code>{code}</code></pre>')
+            continue
+        quote = BLOCKQUOTE_RE.match(line)
+        if quote is not None:
+            flush_paragraph()
+            flush_list()
+            quote_lines.append(quote.group(1))
+            idx += 1
+            continue
+        unordered = UNORDERED_LIST_RE.match(line)
+        ordered = ORDERED_LIST_RE.match(line)
+        if unordered is not None or ordered is not None:
+            flush_paragraph()
+            flush_quote()
+            kind = "ul" if unordered is not None else "ol"
+            if list_kind and list_kind != kind:
+                flush_list()
+            list_kind = kind
+            list_items.append((unordered or ordered).group(1))
+            idx += 1
+            continue
+        if list_items and (line.startswith(" ") or line.startswith("\t")):
+            list_items[-1] = f"{list_items[-1]}\n{line.strip()}"
+            idx += 1
+            continue
+        flush_list()
+        flush_quote()
+        heading = HEADING_RE.match(line)
+        if heading is not None:
+            flush_paragraph()
+            level = min(len(heading.group(1)), 6)
+            blocks.append(f'<h{level} style="margin: 0 0 12px 0;">{render_inline_markdown(heading.group(2).strip())}</h{level}>')
+        elif HR_RE.match(line):
+            flush_paragraph()
+            blocks.append('<hr style="border: 0; border-top: 1px solid #d0d7de; margin: 16px 0;">')
+        else:
+            paragraph.append(line)
+        idx += 1
+    flush_all()
+    body = "\n".join(blocks)
+    return f'<!doctype html><html><body style="font-family: -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif; line-height: 1.45;">{body}</body></html>\n'
 
 
 def build_message(sender_email: str, title: str, content: str) -> EmailMessage:
@@ -138,9 +274,7 @@ def build_message(sender_email: str, title: str, content: str) -> EmailMessage:
     msg.add_header("To", sender_email)
     body = append_pwd_footer(content)
     msg.set_content(markdown_links_to_plain(body))
-    html = markdown_links_to_html(body)
-    if html is not None:
-        msg.add_alternative(html, subtype="html")
+    msg.add_alternative(markdown_to_html(body), subtype="html")
     return msg
 
 

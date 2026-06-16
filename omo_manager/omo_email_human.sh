@@ -7,6 +7,8 @@ usage() {
   cat <<'EOF'
 Usage: omo_email_human.sh --subject-file FILE --message-file FILE
 
+Message body accepts Markdown input; plain text is preferred.
+
 Manager-safe input:
   subject_file=$(mktemp "${TMPDIR:-/tmp}/omo-email-subject.XXXXXX")
   body_file=$(mktemp "${TMPDIR:-/tmp}/omo-email-body.XXXXXX")

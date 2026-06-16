@@ -32,12 +32,16 @@ class EmailMeTests(unittest.TestCase):
                 msg = email_me.build_message("me@example.com", "hi", "body\n")
             finally:
                 os.chdir(old_cwd)
-        self.assertEqual(f"body\n\nPWD: {tmp}\n", msg.get_content())
+        plain = msg.get_body(preferencelist=("plain",))
+        self.assertIsNotNone(plain)
+        self.assertEqual(f"body\n\nPWD: {tmp}\n", plain.get_content())
 
     def test_keeps_existing_pwd_footer(self) -> None:
         content = "body\n\nPWD: /already-there\n"
         msg = email_me.build_message("me@example.com", "hi", content)
-        self.assertEqual(content, msg.get_content())
+        plain = msg.get_body(preferencelist=("plain",))
+        self.assertIsNotNone(plain)
+        self.assertEqual(content, plain.get_content())
 
     def test_preserves_manager_subject_prefix(self) -> None:
         msg = email_me.build_message("me@example.com", "[omo_manager] hi", "body")
@@ -57,20 +61,72 @@ class EmailMeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must not start"):
             email_me.build_message("me@example.com", "Re: hi", "body")
 
-    def test_markdown_link_gets_html_anchor_and_plain_url(self) -> None:
-        msg = email_me.build_message("me@example.com", "hi", "See [Story](https://example.com/a?b=1&c=2).")
+    def test_markdown_gets_html_and_plain_url_fallback(self) -> None:
+        body = "# Update\n\n- See [Story](https://example.com/a?b=1&c=2).\n- Run `echo $HOME`.\n\n> quoted <raw>\n"
+        msg = email_me.build_message("me@example.com", "hi", body)
         plain = msg.get_body(preferencelist=("plain",))
         html = msg.get_body(preferencelist=("html",))
         self.assertIsNotNone(plain)
         self.assertIsNotNone(html)
         self.assertIn("Story: https://example.com/a?b=1&c=2", plain.get_content())
-        self.assertIn('<a href="https://example.com/a?b=1&amp;c=2">Story</a>', html.get_content())
+        self.assertIn("<h1", html.get_content())
+        self.assertIn("<ul", html.get_content())
+        self.assertIn('href="https://example.com/a?b=1&amp;c=2"', html.get_content())
+        self.assertIn(">Story</a>", html.get_content())
+        self.assertIn("<code", html.get_content())
+        self.assertIn("echo $HOME", html.get_content())
+        self.assertIn("<blockquote", html.get_content())
+        self.assertIn("quoted &lt;raw&gt;", html.get_content())
+
+    def test_non_link_markdown_still_gets_html_alternative(self) -> None:
+        msg = email_me.build_message("me@example.com", "hi", "## Tasks\n\n1. first\n2. second\n")
+        html = msg.get_body(preferencelist=("html",))
+        self.assertIsNotNone(html)
+        self.assertIn("<h2", html.get_content())
+        self.assertIn("<ol", html.get_content())
+        self.assertIn("<li", html.get_content())
+
+    def test_markdown_html_keeps_intraword_underscores_literal(self) -> None:
+        msg = email_me.build_message("me@example.com", "hi", "work_manager_2026-06-15.md\nhttps://example.com/foo_bar_baz\nsnake_case_identifier\n\n_emphasis_\n")
+        html = msg.get_body(preferencelist=("html",))
+        self.assertIsNotNone(html)
+        content = html.get_content()
+        self.assertIn("work_manager_2026-06-15.md", content)
+        self.assertIn("https://example.com/foo_bar_baz", content)
+        self.assertIn("snake_case_identifier", content)
+        self.assertIn("<em>emphasis</em>", content)
+        self.assertNotIn("work<em>", content)
+        self.assertNotIn("snake<em>", content)
+
+    def test_heading_keeps_trailing_hash_without_space(self) -> None:
+        msg = email_me.build_message("me@example.com", "hi", "# C#\n\n# Title #\n")
+        html = msg.get_body(preferencelist=("html",))
+        self.assertIsNotNone(html)
+        content = html.get_content()
+        self.assertIn(">C#</h1>", content)
+        self.assertIn(">Title</h1>", content)
+
+    def test_list_continuation_stays_inside_list_item(self) -> None:
+        msg = email_me.build_message("me@example.com", "hi", "- first line\n  continuation with work_manager_foo.md\n- second\n")
+        html = msg.get_body(preferencelist=("html",))
+        self.assertIsNotNone(html)
+        content = html.get_content()
+        self.assertIn("first line<br> continuation with work_manager_foo.md</li>", content)
+        self.assertEqual(2, content.count("<li"))
 
     def test_parse_args_reads_body_from_stdin_by_default(self) -> None:
         with patch.object(sys, "stdin", StringIO(SHELL_SENSITIVE_BODY)):
             args = email_me.parse_args(["hi"])
         self.assertEqual("hi", args.title)
         self.assertEqual(SHELL_SENSITIVE_BODY, args.content)
+
+    def test_help_mentions_markdown_but_prefers_plain_text(self) -> None:
+        with patch("sys.stdout", new_callable=StringIO) as stdout, self.assertRaises(SystemExit) as raised:
+            email_me.parse_args(["--help"])
+        self.assertEqual(0, raised.exception.code)
+        help_text = " ".join(stdout.getvalue().split())
+        self.assertIn("body accepts Markdown input", help_text)
+        self.assertIn("plain text is preferred", help_text)
 
     def test_parse_args_rejects_positional_body(self) -> None:
         with patch("sys.stderr", new_callable=StringIO) as stderr, self.assertRaises(SystemExit) as raised:

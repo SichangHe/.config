@@ -2096,6 +2096,7 @@ class PendingMarkerTests(unittest.TestCase):
         script = Path.home() / ".config/omo_manager/omo_email_human.sh"
         result = subprocess.run([str(script), "--help"], text=True, capture_output=True, timeout=10, check=False)
         self.assertEqual(0, result.returncode)
+        self.assertIn("Message body accepts Markdown input; plain text is preferred.", result.stdout)
         self.assertIn('subject_file=$(mktemp "${TMPDIR:-/tmp}/omo-email-subject.XXXXXX")', result.stdout)
         self.assertIn('body_file=$(mktemp "${TMPDIR:-/tmp}/omo-email-body.XXXXXX")', result.stdout)
         self.assertIn('chmod 600 "$subject_file" "$body_file"', result.stdout)
