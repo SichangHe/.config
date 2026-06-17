@@ -55,6 +55,8 @@ omo_codex_compact_when_idle.py --target cfg:1.0 --background --notify-target cfg
 omo_codex_compact_when_idle.py --target cfg:1.0 --background --timeout-s 1800
 ```
 
+`docs/codex-live-model-switch.md` is the durable live-session model-switch reference. It records the validated tmux sequence for an in-progress Codex pane and the fallback when `/model` is rejected or the picker does not match expectations. No helper script is shipped for this path because the picker is UI-fragile and model availability is account-specific.
+
 Dispatch rule: send prompts through the visible tmux pane and verify with manager-owned status helpers when needed. Tmux delivery is the common path; helper internals must not make manager docs depend on tool-specific transport details.
 
 Listener/supervisor architecture note: do not merge `email_idle_watcher.py` and `omo_pending_watch.py` into one large listener as a first step. Email IDLE is an ingress adapter that writes `manager_mail/UID.txt` plus a Markdown `(pending)` block; `omo_pending_watch.py` is the single delivery path from Markdown to the manager. A robust next step is a small process supervisor/event loop that starts and health-checks watchers and owns restart/backoff/logging.
