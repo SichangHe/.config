@@ -3,6 +3,11 @@ set -euo pipefail
 subject=""
 subject_file=""
 message_file=""
+script_path="${BASH_SOURCE[0]}"
+if resolved_script=$(readlink -f -- "$script_path" 2>/dev/null); then
+  script_path="$resolved_script"
+fi
+script_dir="$(cd -- "$(dirname -- "$script_path")" && pwd)"
 usage() {
   cat <<'EOF'
 Usage: omo_email_human.sh --subject-file FILE --message-file FILE
@@ -44,38 +49,7 @@ if "\n" in subject or "\r" in subject or "\0" in subject:
 print(subject)
 PY
 )
-subject_lc=$(printf '%s' "$subject" | tr '[:upper:]' '[:lower:]')
-placeholder_subject=$(
-  python3 - "$subject_lc" <<'PY'
-import re
-import sys
-subject = re.sub(r"^(?:re: *)?\[omo_manager\] *", "", sys.argv[1].strip())
-subject = re.sub(r"^re:\s*", "", subject)
-print("yes" if re.fullmatch(r"subject\W*", subject) else "no")
-PY
-)
-if [ "$placeholder_subject" = "yes" ]; then
-  echo "subject must be a real subject, not the placeholder SUBJECT" >&2
-  exit 2
-fi
-subject_route=$(
-  python3 - "$subject_lc" <<'PY'
-import re
-import sys
-subject = sys.argv[1].strip()
-if re.match(r"^(?:re:\s*)?\[omo\]", subject):
-    print("agent")
-elif re.match(r"^(?:re: *)?\[omo_manager\]", subject):
-    print("manager")
-else:
-    print("prefix")
-PY
-)
-case "$subject_route" in
-  agent) echo "manager email subject must use [omo_manager]; [omo] is reserved for direct regular-agent email" >&2; exit 2 ;;
-  manager) ;;
-  prefix) subject="[omo_manager] ${subject}" ;;
-esac
+subject=$(python3 "$script_dir/omo_email_subject.py" prepare -- "$subject")
 email_helper="$HOME/.config/helper.sh/email_me.py"
 if [ ! -x "$email_helper" ]; then echo "email helper not executable: $email_helper" >&2; exit 2; fi
 if [ ! -f "$message_file" ]; then echo "message file not found" >&2; exit 2; fi

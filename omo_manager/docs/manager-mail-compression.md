@@ -27,7 +27,7 @@ Watcher trigger:
 
 Safety boundary:
 - the helper reads the same Gmail/Himalaya config as `email_idle_watcher.py`
-- snapshot/export search only `INBOX` unread messages from the configured self address with `[omo_manager]` in the subject
+- snapshot/export search only `INBOX` unread messages from the configured self address with `[a]` or old `[omo_manager]` in the subject
 - snapshot/export locally re-parse headers and skip boundary mismatches before exporting bodies
 - `mark-seen` only acts on an explicit UID list
 - before changing flags, `mark-seen` rechecks that each still-unread UID is self-addressed manager mail

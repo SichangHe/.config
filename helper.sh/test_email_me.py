@@ -43,12 +43,28 @@ class EmailMeTests(unittest.TestCase):
         self.assertIsNotNone(plain)
         self.assertEqual(content, plain.get_content())
 
+    def test_keeps_existing_quoted_pwd_footer(self) -> None:
+        content = "body\n\n> PWD: /already-there\n"
+        msg = email_me.build_message("me@example.com", "hi", content)
+        plain = msg.get_body(preferencelist=("plain",))
+        self.assertIsNotNone(plain)
+        self.assertEqual(content, plain.get_content())
+
+    def test_keeps_existing_pwd_footer_with_spaces(self) -> None:
+        content = "body\n\nPWD: /tmp/path with space\n"
+        msg = email_me.build_message("me@example.com", "hi", content)
+        plain = msg.get_body(preferencelist=("plain",))
+        self.assertIsNotNone(plain)
+        self.assertEqual(content, plain.get_content())
+
     def test_preserves_manager_subject_prefix(self) -> None:
-        msg = email_me.build_message("me@example.com", "[omo_manager] hi", "body")
-        self.assertEqual("[omo_manager] hi", msg["Subject"])
+        for subject in ("[a] hi", "[omo_manager] hi"):
+            with self.subTest(subject=subject):
+                msg = email_me.build_message("me@example.com", subject, "body")
+                self.assertEqual(subject, msg["Subject"])
 
     def test_preserves_manager_reply_subject(self) -> None:
-        for subject in ("Re: [omo_manager] hi", "Re:[omo_manager] hi", "Re:  [omo_manager] hi"):
+        for subject in ("Re: [a] hi", "Re:[a] hi", "Re: [omo_manager] hi", "Re:[omo_manager] hi", "Re:  [omo_manager] hi"):
             with self.subTest(subject=subject):
                 msg = email_me.build_message("me@example.com", subject, "body")
                 self.assertEqual(subject, msg["Subject"])

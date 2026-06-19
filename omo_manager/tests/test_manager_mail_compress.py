@@ -18,6 +18,12 @@ class ManagerMailCompressTests(unittest.TestCase):
     def test_manager_record_boundary_requires_self_and_manager_subject(self) -> None:
         self.assertTrue(
             is_manager_record(
+                MailRecord("1", "", "Human <me@example.test>", "", "Re: [a] x", "sha"),
+                "me@example.test",
+            )
+        )
+        self.assertTrue(
+            is_manager_record(
                 MailRecord("1", "", "Human <me@example.test>", "", "Re: [omo_manager] x", "sha"),
                 "me@example.test",
             )

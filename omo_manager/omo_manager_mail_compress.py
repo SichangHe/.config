@@ -18,9 +18,8 @@ from pathlib import Path
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from omo_manager.email_idle_watcher import CONFIG_PATH, message_text, parse_env_config
+from omo_manager.email_idle_watcher import CONFIG_PATH, MANAGER_SUBJECT_TOKENS, message_text, parse_env_config
 
-MANAGER_SUBJECT_TOKEN = "[omo_manager]"
 HEADER_FETCH = "(BODY.PEEK[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)])"
 FULL_FETCH = "(BODY.PEEK[])"
 
@@ -78,7 +77,7 @@ def record_from_msg(uid: str, msg: Message, body: str = "") -> MailRecord:
 
 
 def is_manager_record(record: MailRecord, self_email: str) -> bool:
-    return parseaddr(record.sender)[1].lower() == self_email.lower() and MANAGER_SUBJECT_TOKEN.lower() in record.subject.lower()
+    return parseaddr(record.sender)[1].lower() == self_email.lower() and any(token.lower() in record.subject.lower() for token in MANAGER_SUBJECT_TOKENS)
 
 
 def load_config() -> dict[str, str]:
@@ -90,10 +89,17 @@ def load_config() -> dict[str, str]:
 
 
 def manager_unread_uids(client: imaplib.IMAP4_SSL, self_email: str) -> list[str]:
-    typ, data = client.uid("search", None, "UNSEEN", "FROM", f'"{self_email}"', "SUBJECT", f'"{MANAGER_SUBJECT_TOKEN}"')
-    if typ != "OK":
-        raise RuntimeError(f"IMAP search failed: {typ}")
-    return [raw.decode() for raw in data[0].split()] if data and data[0] else []
+    found: list[str] = []
+    seen: set[str] = set()
+    for token in MANAGER_SUBJECT_TOKENS:
+        typ, data = client.uid("search", None, "UNSEEN", "FROM", f'"{self_email}"', "SUBJECT", f'"{token}"')
+        if typ != "OK":
+            raise RuntimeError(f"IMAP search failed: {typ}")
+        for uid in [raw.decode() for raw in data[0].split()] if data and data[0] else []:
+            if uid not in seen:
+                seen.add(uid)
+                found.append(uid)
+    return found
 
 
 def unread_subset(client: imaplib.IMAP4_SSL, uids: list[str]) -> list[str]:

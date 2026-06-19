@@ -23,8 +23,8 @@ SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 465
 ENV_FILE_PATH = Path.home() / ".config" / ".env"
 DIRECT_AGENT_PREFIX = "[omo]"
-PRESERVED_PREFIXES = ("[omo]", "[omo_manager]", "[omo_manager_recover]")
-PWD_FOOTER_RE = re.compile(r"^PWD: \S+", re.MULTILINE)
+PRESERVED_PREFIXES = ("[omo]", "[a]", "[omo_manager]", "[omo_manager_recover]")
+PWD_FOOTER_RE = re.compile(r"(?:^|\n)(?:>\s*)?PWD: [^\n]+\n?\Z")
 MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
 INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)(?:\s+#+\s*)?$")
@@ -88,7 +88,7 @@ def parse_args(argv: list[str]) -> CliArgs:
 def normalize_subject(title: str) -> str:
     stripped = title.lstrip()
     lowered = stripped.lower()
-    if re.match(r"re: *\[omo_manager\]", lowered):
+    if re.match(r"re: *(?:\[a\]|\[omo_manager\])", lowered):
         return stripped
     if lowered.startswith("re:"):
         raise ValueError("Email subject must not start with `Re:`.")

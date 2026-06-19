@@ -23,7 +23,7 @@ Tools:
 
 Read-only classification:
 - open `INBOX` read-only with the config from `email_idle_watcher.py`
-- search `FROM configured-self-address SUBJECT "[omo_manager]"`
+- search `FROM configured-self-address SUBJECT "[a]"` plus old `[omo_manager]`
 - fetch only `FLAGS`, `RFC822.SIZE`, `X-GM-THRID`, and header fields with `BODY.PEEK[HEADER.FIELDS (DATE SUBJECT)]`
 - group by `X-GM-THRID`, then decide at thread level
 
@@ -36,13 +36,13 @@ Retain every thread with any of these properties:
 - uncertain routing, active worker relevance, or human-pending relevance
 
 Watcher trigger:
-- `email_idle_watcher.py` queues this workflow when manager-human `[omo_manager]` mail within the last `24` hours is more than `64`
+- `email_idle_watcher.py` queues this workflow when manager-human `[a]` mail, plus old `[omo_manager]` compatibility, within the last `24` hours is more than `64`
 - the `64` threshold is only a trigger scope; it is not deletion eligibility
 - compression/replacement text must go through files, for example `omo_email_human.sh --subject-file SUBJECT --message-file BODY`
 - trash movement remains limited to explicit seen stale UIDs after the read-only classification is rerun
 
 Cleanup criteria used in the 2026-06-15 run:
-- scoped to `INBOX` self-addressed `[omo_manager]` mail
+- scoped to `INBOX` self-addressed `[a]` mail plus old `[omo_manager]` mail
 - recent cutoff was `2026-06-14 22:00 PDT`
 - long-report threshold was `8000` bytes
 - active tokens came from `TODO.md` `current` and `human pending`
@@ -68,4 +68,4 @@ Safety notes:
 - do not operate on all mail, sent mail, or non-manager mail
 - prefer retaining a thread when the classification depends on judgment
 
-Human-review note: review and approve this standing cleanup workflow before treating it as policy beyond manager-human `[omo_manager]` threads.
+Human-review note: review and approve this standing cleanup workflow before treating it as policy beyond manager-human `[a]` and old `[omo_manager]` threads.

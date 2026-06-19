@@ -1,0 +1,240 @@
+#!/usr/bin/env python3
+"""Prepare manager-human email subjects."""
+from __future__ import annotations
+
+import argparse
+import imaplib
+import os
+import re
+import sys
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from email import policy
+from email.parser import BytesParser
+from email.utils import parseaddr, parsedate_to_datetime
+from pathlib import Path
+
+SHORT_MANAGER_TAG = "[a]"
+CONFIG_PATH = Path(os.environ.get("OMO_EMAIL_CONFIG_PATH", Path.home() / ".config/himalaya/config.toml"))
+SUBJECT_TAG_RE = re.compile(r"^\s*\[(?:a|omo_manager|omo)\]\s*", re.IGNORECASE)
+MANAGER_TAG_RE = re.compile(r"^\s*(?:\[a\]|\[omo_manager\])\s*", re.IGNORECASE)
+RESERVED_AGENT_TAG_RE = re.compile(r"^(?:re:\s*)*\[omo\]\s*", re.IGNORECASE)
+RE_PREFIX_RE = re.compile(r"^\s*re:\s*", re.IGNORECASE)
+PLACEHOLDER_RE = re.compile(r"subject\W*", re.IGNORECASE)
+DEFAULT_THREAD_LOOKUP_WINDOW_S = 3 * 24 * 60 * 60
+
+
+class SubjectInputError(ValueError):
+    pass
+
+
+@dataclass(frozen=True)
+class RecentHeader:
+    sender: str
+    subject: str
+    date: datetime | None
+
+
+def parse_env_config(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    section = ""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return values
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1]
+            continue
+        if "=" not in line:
+            continue
+        key, raw_value = line.split("=", 1)
+        value = raw_value.strip().strip('"').strip("'")
+        key = key.strip()
+        if section == "accounts.gmail.backend" and key in {"host", "login"}:
+            values["host" if key == "host" else "user"] = value
+        if section == "accounts.gmail.backend.auth" and key == "cmd" and "echo" in value:
+            parts = value.split("'")
+            if len(parts) >= 2:
+                values["password"] = parts[1]
+    return values
+
+
+def strip_re_prefixes(subject: str) -> str:
+    text = subject.strip()
+    while True:
+        next_text = RE_PREFIX_RE.sub("", text, count=1)
+        if next_text == text:
+            return text
+        text = next_text.strip()
+
+
+def normalized_subject_key(subject: str) -> str:
+    text = subject.strip()
+    while True:
+        before = text
+        text = RE_PREFIX_RE.sub("", text, count=1).strip()
+        text = SUBJECT_TAG_RE.sub("", text, count=1).strip()
+        if text == before:
+            return " ".join(text.split()).casefold()
+
+
+def subject_base(subject: str) -> str:
+    text = subject.strip()
+    while True:
+        before = text
+        text = RE_PREFIX_RE.sub("", text, count=1).strip()
+        text = SUBJECT_TAG_RE.sub("", text, count=1).strip()
+        if text == before:
+            return text
+
+
+def canonical_manager_subject(subject: str) -> str:
+    base = subject_base(subject)
+    if starts_w_re(subject):
+        return manager_reply_subject(base)
+    return manager_subject(base)
+
+
+def has_manager_tag(subject: str) -> bool:
+    text = subject.strip()
+    while True:
+        text = RE_PREFIX_RE.sub("", text, count=1).strip()
+        if MANAGER_TAG_RE.match(text) is not None:
+            return True
+        next_text = MANAGER_TAG_RE.sub("", text, count=1).strip()
+        if next_text == text:
+            return False
+        text = next_text
+
+
+def validate_subject(subject: str) -> None:
+    if PLACEHOLDER_RE.fullmatch(normalized_subject_key(subject)):
+        raise SubjectInputError("subject must be a real subject, not the placeholder SUBJECT")
+    if RESERVED_AGENT_TAG_RE.match(subject.strip()):
+        raise SubjectInputError("manager email subject must use [a]; [omo] is reserved for direct regular-agent email")
+
+
+def starts_w_re(subject: str) -> bool:
+    return RE_PREFIX_RE.match(subject.strip()) is not None
+
+
+def manager_reply_subject(base: str) -> str:
+    return f"Re: {SHORT_MANAGER_TAG} {base.strip()}"
+
+
+def manager_subject(base: str) -> str:
+    return f"{SHORT_MANAGER_TAG} {base.strip()}"
+
+
+def parsed_header_date(raw_date: str) -> datetime | None:
+    if not raw_date:
+        return None
+    try:
+        parsed = parsedate_to_datetime(raw_date)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=datetime.now().astimezone().tzinfo)
+    return parsed.astimezone()
+
+
+def recent_thread_exists(subject_key: str) -> bool:
+    lookup_s = int(os.environ.get("OMO_MANAGER_EMAIL_THREAD_LOOKUP_S", str(DEFAULT_THREAD_LOOKUP_WINDOW_S)))
+    if lookup_s <= 0:
+        return False
+    config = parse_env_config(Path(os.environ.get("OMO_EMAIL_CONFIG_PATH", CONFIG_PATH)))
+    if not {"host", "user", "password"} <= set(config):
+        return False
+    cutoff = datetime.now().astimezone() - timedelta(seconds=lookup_s)
+    timeout_s = float(os.environ.get("OMO_MANAGER_EMAIL_THREAD_LOOKUP_TIMEOUT_S", "10"))
+    client = imaplib.IMAP4_SSL(config["host"], timeout=timeout_s)
+    try:
+        client.login(config["user"], config["password"])
+        typ, _data = client.select("INBOX", readonly=True)
+        if typ != "OK":
+            return False
+        typ, data = client.uid("search", None, "SINCE", cutoff.strftime("%d-%b-%Y"), "FROM", f'"{config["user"]}"')
+        if typ != "OK" or not data or not data[0]:
+            return False
+        for raw_uid in data[0].split():
+            uid = raw_uid.decode() if isinstance(raw_uid, bytes) else str(raw_uid)
+            header = fetch_recent_header(client, uid)
+            if header is None or header.date is None or header.date < cutoff:
+                continue
+            if parseaddr(header.sender)[1].lower() == config["user"].lower() and normalized_subject_key(header.subject) == subject_key:
+                return True
+        return False
+    finally:
+        try:
+            client.logout()
+        except imaplib.IMAP4.error:
+            pass
+
+
+def fetch_recent_header(client: imaplib.IMAP4_SSL, uid: str) -> RecentHeader | None:
+    typ, data = client.uid("fetch", uid, "(BODY.PEEK[HEADER.FIELDS (DATE FROM SUBJECT)])")
+    if typ != "OK" or not data or not isinstance(data[0], tuple):
+        return None
+    msg = BytesParser(policy=policy.default).parsebytes(data[0][1])
+    return RecentHeader(str(msg.get("From", "")), str(msg.get("Subject", "")), parsed_header_date(str(msg.get("Date", ""))))
+
+
+def has_recent_thread(subject_key: str) -> bool:
+    try:
+        return recent_thread_exists(subject_key)
+    except Exception as exc:
+        print(f"omo_email_subject: recent thread lookup skipped: {exc}", file=sys.stderr)
+        return False
+
+
+def fallback_subject(subject: str) -> str:
+    if has_manager_tag(subject):
+        return canonical_manager_subject(subject)
+    if starts_w_re(subject):
+        return manager_reply_subject(subject_base(subject))
+    return manager_subject(subject_base(subject))
+
+
+def prepare_subject(subject: str) -> str:
+    validate_subject(subject)
+    stripped = subject.strip()
+    if starts_w_re(stripped) and has_manager_tag(stripped):
+        return canonical_manager_subject(stripped)
+    base = subject_base(stripped)
+    if starts_w_re(stripped) or has_recent_thread(normalized_subject_key(stripped)):
+        return manager_reply_subject(base)
+    return manager_subject(base)
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    prepare = subparsers.add_parser("prepare")
+    prepare.add_argument("subject")
+    normalize = subparsers.add_parser("normalize")
+    normalize.add_argument("subject")
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    if args.command == "normalize":
+        print(normalized_subject_key(args.subject))
+        return 0
+    try:
+        print(prepare_subject(args.subject))
+    except SubjectInputError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    except Exception as exc:
+        print(f"omo_email_subject: subject preparation fell back: {exc}", file=sys.stderr)
+        print(fallback_subject(args.subject))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

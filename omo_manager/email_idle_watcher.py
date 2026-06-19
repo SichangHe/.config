@@ -39,13 +39,14 @@ DEFAULT_MANAGER_URL = os.environ.get("OMO_MANAGER_URL", "http://127.0.0.1:18790"
 DEFAULT_MANAGER_TARGET = os.environ.get("OMO_MANAGER_TMUX_TARGET", "")
 DEFAULT_MAIL_DIR = Path(os.environ.get("OMO_MANAGER_MAIL_DIR", DEFAULT_ROOT / "manager_mail"))
 CONFIG_PATH = Path(os.environ.get("OMO_EMAIL_CONFIG_PATH", Path.home() / ".config/himalaya/config.toml"))
-MANAGER_REPLY_PREFIX = "Re: [omo_manager]"
-MANAGER_SUBJECT_TOKEN = "[omo_manager]"
-MANAGER_REPLY_SEARCH_PREFIXES = (MANAGER_REPLY_PREFIX, "Re:[omo_manager]")
+MANAGER_REPLY_PREFIX = "Re: [a]"
+MANAGER_SUBJECT_TOKEN = "[a]"
+MANAGER_SUBJECT_TOKENS = (MANAGER_SUBJECT_TOKEN, "[omo_manager]")
+MANAGER_REPLY_SEARCH_PREFIXES = (MANAGER_REPLY_PREFIX, "Re:[a]", "Re: [omo_manager]", "Re:[omo_manager]")
 AGENT_REPLY_PREFIX = "Re: [omo]"
 AGENT_REPLY_SEARCH_PREFIXES = (AGENT_REPLY_PREFIX, "Re: [OMO]")
 NORMAL_REPLY_SEARCH_PREFIXES = (*MANAGER_REPLY_SEARCH_PREFIXES, *AGENT_REPLY_SEARCH_PREFIXES)
-MANAGER_REPLY_SUBJECT_RE = re.compile(r"^re:\s*\[omo_manager\]\s*", re.IGNORECASE)
+MANAGER_REPLY_SUBJECT_RE = re.compile(r"^re:\s*(?:\[a\]|\[omo_manager\])\s*", re.IGNORECASE)
 RECOVERY_SUBJECTS = {"[omo_manager_recover]", "Re: [omo_manager_recover]"}
 # Fail closed by default: raw email can contain sender-injected Authentication-Results.
 # This opt-in is an operator/admin-trusted escape hatch for mailbox/provider setups
@@ -637,7 +638,7 @@ def handle_recovery_email(args: Args, uid: str, txt_path: Path) -> None:
             command = [str(args.restart_script), "--manager-url", args.manager_url, "--root", str(args.root)]
             record_recovery_attempt(last_path, now_s, uid, "refused-non-loopback")
             append_recovery_record(args.root, txt_path, "recovery email recorded; restart refused because manager URL is not loopback", args.manager_file)
-            email_human(args, "[omo_manager] Recovery action needed", f"Recovery email {source_ref(args.root, txt_path)} was accepted from the configured self address, but automatic restart was refused because manager-url is not loopback: {args.manager_url}\n\nRun only after correcting configuration:\n\n```sh\n{shell_join(command)}\n```\n")
+            email_human(args, "[a] Recovery action needed", f"Recovery email {source_ref(args.root, txt_path)} was accepted from the configured self address, but automatic restart was refused because manager-url is not loopback: {args.manager_url}\n\nRun only after correcting configuration:\n\n```sh\n{shell_join(command)}\n```\n")
             return
         log_path = recovery_dir / f"recover-{uid}-{int(now_s)}.log"
         command = [str(args.restart_script), "--manager-url", args.manager_url, "--root", str(args.root), "--state-dir", str(args.state_dir)]
@@ -651,12 +652,12 @@ def handle_recovery_email(args: Args, uid: str, txt_path: Path) -> None:
                 log_handle.write(f"failed to run restart helper: {exc}\n")
                 record_recovery_attempt(last_path, now_s, uid, "launch-failed")
                 append_recovery_record(args.root, txt_path, f"recovery restart helper could not be launched; see `{log_path}`", args.manager_file)
-                email_human(args, "[omo_manager] Recovery action needed", f"Recovery email {source_ref(args.root, txt_path)} was accepted from the configured self address, but automatic restart helper launch failed.\n\nLog: {log_path}\n\nManual recovery command:\n\n```sh\n{shell_join(command)}\n```\n")
+                email_human(args, "[a] Recovery action needed", f"Recovery email {source_ref(args.root, txt_path)} was accepted from the configured self address, but automatic restart helper launch failed.\n\nLog: {log_path}\n\nManual recovery command:\n\n```sh\n{shell_join(command)}\n```\n")
                 return
         record_recovery_attempt(last_path, now_s, uid, f"returncode={result.returncode}")
         if result.returncode != 0:
             append_recovery_record(args.root, txt_path, f"recovery restart failed with exit {result.returncode}; see `{log_path}`", args.manager_file)
-            email_human(args, "[omo_manager] Recovery action needed", f"Recovery email {source_ref(args.root, txt_path)} was accepted from the configured self address, but automatic restart failed with exit {result.returncode}.\n\nLog: {log_path}\n\nManual recovery command:\n\n```sh\n{shell_join(command)}\n```\n")
+            email_human(args, "[a] Recovery action needed", f"Recovery email {source_ref(args.root, txt_path)} was accepted from the configured self address, but automatic restart failed with exit {result.returncode}.\n\nLog: {log_path}\n\nManual recovery command:\n\n```sh\n{shell_join(command)}\n```\n")
     finally:
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
@@ -711,11 +712,17 @@ def search_manager_mail_uids(client: imaplib.IMAP4_SSL, self_email: str, unread:
         criteria.append("UNSEEN")
     if since is not None:
         criteria.extend(["SINCE", since.strftime("%d-%b-%Y")])
-    criteria.extend(["FROM", f'"{self_email}"', "SUBJECT", f'"{MANAGER_SUBJECT_TOKEN}"'])
-    typ, data = client.uid("search", *criteria)
-    if typ != "OK":
-        raise RuntimeError(f"IMAP manager mail search failed: {typ}")
-    return decode_search_uids(data)
+    found: list[str] = []
+    seen: set[str] = set()
+    for token in MANAGER_SUBJECT_TOKENS:
+        typ, data = client.uid("search", *(criteria + ["FROM", f'"{self_email}"', "SUBJECT", f'"{token}"']))
+        if typ != "OK":
+            raise RuntimeError(f"IMAP manager mail search failed: {typ}")
+        for uid in decode_search_uids(data):
+            if uid not in seen:
+                seen.add(uid)
+                found.append(uid)
+    return found
 
 
 def parsed_message_date(msg: Message) -> datetime | None:
@@ -741,7 +748,7 @@ def recent_manager_mail_uids(client: imaplib.IMAP4_SSL, self_email: str, candida
         sender = str(msg.get("From", ""))
         subject = str(msg.get("Subject", ""))
         dt = parsed_message_date(msg)
-        if dt is not None and dt >= cutoff and from_self(sender, self_email) and MANAGER_SUBJECT_TOKEN.lower() in subject.lower():
+        if dt is not None and dt >= cutoff and from_self(sender, self_email) and any(token.lower() in subject.lower() for token in MANAGER_SUBJECT_TOKENS):
             recent.append(uid)
     return recent
 

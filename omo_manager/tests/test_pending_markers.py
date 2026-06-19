@@ -16,6 +16,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from omo_manager.email_idle_watcher import append_pending, current_manager_file, dated_manager_file, existing_source_pending_line, normalize_human_subject
+from omo_manager.omo_email_subject import normalized_subject_key, prepare_subject
 from omo_manager.omo_pending_watch import Args, find_markers
 
 
@@ -255,13 +256,46 @@ class PendingMarkerTests(unittest.TestCase):
 
     def test_email_watcher_normalizes_manager_reply_subjects_for_storage(self) -> None:
         self.assertEqual("Re: Book demo regression fixed pb_book_demo_regression_5818.md", normalize_human_subject("Re: [omo_manager] Book demo regression fixed pb_book_demo_regression_5818.md"))
+        self.assertEqual("Re: Book demo regression fixed pb_book_demo_regression_5818.md", normalize_human_subject("Re: [a] Book demo regression fixed pb_book_demo_regression_5818.md"))
         self.assertEqual("Re: Re: VL supervisor follow-up vl_supervisor_5410.md", normalize_human_subject("Re:[omo_manager] Re: VL supervisor follow-up vl_supervisor_5410.md"))
 
     def test_email_watcher_accepts_no_space_manager_reply_subject(self) -> None:
         from omo_manager import email_idle_watcher as watcher
 
+        self.assertIn("Re:[a]", watcher.NORMAL_REPLY_SEARCH_PREFIXES)
         self.assertIn("Re:[omo_manager]", watcher.NORMAL_REPLY_SEARCH_PREFIXES)
+        self.assertTrue(watcher.is_manager_subject("Re:[a] VL supervisor follow-up vl_supervisor_5410.md"))
         self.assertTrue(watcher.is_manager_subject("Re:[omo_manager] VL supervisor follow-up vl_supervisor_5410.md"))
+
+    def test_email_subject_normalization_strips_re_and_manager_tags(self) -> None:
+        self.assertEqual("topic", normalized_subject_key("Re: Re: [a] Topic"))
+        self.assertEqual("topic", normalized_subject_key("Re:[omo_manager] Topic"))
+        self.assertEqual("topic", normalized_subject_key("[omo] Re: topic"))
+
+    def test_email_subject_recent_thread_uses_reply_subject(self) -> None:
+        from omo_manager import omo_email_subject as subject
+
+        old_recent_thread_exists = subject.recent_thread_exists
+        subject.recent_thread_exists = lambda key: key == "topic"
+        try:
+            self.assertEqual("Re: [a] Topic", prepare_subject("Topic"))
+            self.assertEqual("Re: [a] Topic", prepare_subject("[omo_manager] Topic"))
+            self.assertEqual("Re: [a] Topic", prepare_subject("Re: [omo_manager] Topic"))
+            self.assertEqual("Re: [a] Topic", prepare_subject("[a] Re: Topic"))
+            self.assertEqual("Re: [a] Topic", prepare_subject("[a] [omo] Topic"))
+        finally:
+            subject.recent_thread_exists = old_recent_thread_exists
+
+    def test_email_subject_lookup_error_falls_back_to_new_tag(self) -> None:
+        from omo_manager import omo_email_subject as subject
+
+        old_recent_thread_exists = subject.recent_thread_exists
+        subject.recent_thread_exists = lambda _key: (_ for _ in ()).throw(RuntimeError("imap down"))
+        try:
+            self.assertEqual("[a] Topic", prepare_subject("Topic"))
+            self.assertEqual("[a] Topic", prepare_subject("[omo_manager] Topic"))
+        finally:
+            subject.recent_thread_exists = old_recent_thread_exists
 
     def test_legacy_email_source_block_is_delivered_by_pending_watch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1934,7 +1968,7 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual("Emailed the human\n", first.stdout)
             self.assertEqual(0, second.returncode)
             self.assertEqual("Skipped duplicate human email\n", second.stdout)
-            self.assertEqual("[omo_manager] Manager update\nsame body\n", sent_log.read_text(encoding="utf-8"))
+            self.assertEqual("[a] Manager update\nsame body\n", sent_log.read_text(encoding="utf-8"))
 
     def test_omo_email_human_subject_file_and_file_body_are_literal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1966,11 +2000,12 @@ class PendingMarkerTests(unittest.TestCase):
                 "HOME": str(home),
                 "SENT_LOG": str(sent_log),
                 "OMO_MANAGER_STATE_DIR": str(Path(tmp) / "state"),
+                "OMO_MANAGER_EMAIL_UNREAD_COMPRESSION_THRESHOLD": "not-an-int",
             }
             script = Path.home() / ".config/omo_manager/omo_email_human.sh"
             subject_file = Path(tmp) / "subject.txt"
             message_file = Path(tmp) / "body.md"
-            subject_file.write_text("- Literal $HOME `subject`\n", encoding="utf-8")
+            subject_file.write_text("--help $HOME `subject`\n", encoding="utf-8")
             message_file.write_text(body_text, encoding="utf-8")
             file_result = subprocess.run(
                 [
@@ -1990,9 +2025,46 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertFalse(cmd_sentinel.exists())
             self.assertFalse(backtick_sentinel.exists())
             text = sent_log.read_text(encoding="utf-8")
-            self.assertIn("[omo_manager] - Literal $HOME `subject`\n" + body_text + "\n--END--\n", text)
+            self.assertIn("[a] --help $HOME `subject`\n" + body_text + "\n--END--\n", text)
 
-    def test_omo_email_human_preserves_manager_reply_subject(self) -> None:
+    def test_omo_email_human_bin_symlink_finds_subject_helper(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            helper_dir = home / ".config" / "helper.sh"
+            helper_dir.mkdir(parents=True)
+            helper = helper_dir / "email_me.py"
+            sent_log = Path(tmp) / "sent.log"
+            _ = helper.write_text(
+                "#!/usr/bin/env python3\n"
+                "from pathlib import Path\n"
+                "import os\n"
+                "import sys\n"
+                "Path(os.environ['SENT_LOG']).write_text(sys.argv[1] + '\\n' + sys.stdin.read(), encoding='utf-8')\n",
+                encoding="utf-8",
+            )
+            helper.chmod(0o700)
+            subject_file = Path(tmp) / "subject.txt"
+            subject_file.write_text("Bin symlink subject\n", encoding="utf-8")
+            message_file = Path(tmp) / "body.md"
+            message_file.write_text("body\n", encoding="utf-8")
+            result = subprocess.run(
+                [
+                    str(Path.home() / ".config/bin/omo_email_human.sh"),
+                    "--subject-file",
+                    str(subject_file),
+                    "--message-file",
+                    str(message_file),
+                ],
+                text=True,
+                capture_output=True,
+                timeout=10,
+                env={**os.environ, "HOME": str(home), "SENT_LOG": str(sent_log), "OMO_MANAGER_STATE_DIR": str(Path(tmp) / "state"), "OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "0"},
+                check=False,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual("[a] Bin symlink subject\nbody\n", sent_log.read_text(encoding="utf-8"))
+
+    def test_omo_email_human_canonicalizes_manager_reply_subject(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"
             helper_dir = home / ".config" / "helper.sh"
@@ -2047,9 +2119,9 @@ class PendingMarkerTests(unittest.TestCase):
                         check=False,
                     )
                     self.assertEqual(0, result.returncode, result.stderr)
-                    self.assertIn(f"subject={subject};", sent_log.read_text(encoding="utf-8"))
+                    self.assertIn("subject=Re: [a] existing thread;", sent_log.read_text(encoding="utf-8"))
 
-    def test_omo_email_human_prefixes_bare_reply_subject(self) -> None:
+    def test_omo_email_human_sends_bare_reply_subject_with_short_tag(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"
             helper_dir = home / ".config" / "helper.sh"
@@ -2090,7 +2162,7 @@ class PendingMarkerTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(0, result.returncode, result.stderr)
-            self.assertEqual("[omo_manager] Re: VL supervisor follow-up vl_supervisor_5410.md", sent_log.read_text(encoding="utf-8"))
+            self.assertEqual("Re: [a] VL supervisor follow-up vl_supervisor_5410.md", sent_log.read_text(encoding="utf-8"))
 
     def test_omo_email_human_help_shows_safe_body_pattern(self) -> None:
         script = Path.home() / ".config/omo_manager/omo_email_human.sh"
@@ -2127,7 +2199,7 @@ class PendingMarkerTests(unittest.TestCase):
             }
             message_file = Path(tmp) / "body.md"
             message_file.write_text("real body\n", encoding="utf-8")
-            for subject in ("SUBJECT", "SUBJECT\\", "Re: SUBJECT", "[omo_manager] SUBJECT\\", "Re: [omo_manager] SUBJECT\\"):
+            for subject in ("SUBJECT", "SUBJECT\\", "Re: SUBJECT", "[a] SUBJECT\\", "Re: [a] SUBJECT\\", "[omo_manager] SUBJECT\\", "Re: [omo_manager] SUBJECT\\"):
                 subject_file = Path(tmp) / "subject.txt"
                 subject_file.write_text(subject + "\n", encoding="utf-8")
                 cmd = [str(Path.home() / ".config/omo_manager/omo_email_human.sh"), "--subject-file", str(subject_file), "--message-file", str(message_file)]
