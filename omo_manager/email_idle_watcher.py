@@ -45,6 +45,7 @@ MANAGER_SUBJECT_TOKENS = (MANAGER_SUBJECT_TOKEN, "[omo_manager]")
 MANAGER_REPLY_SEARCH_PREFIXES = (MANAGER_REPLY_PREFIX, "Re:[a]", "Re: [omo_manager]", "Re:[omo_manager]")
 NORMAL_REPLY_SEARCH_PREFIXES = MANAGER_REPLY_SEARCH_PREFIXES
 MANAGER_REPLY_SUBJECT_RE = re.compile(r"^re:\s*(?:\[a\]|\[omo_manager\])\s*", re.IGNORECASE)
+PWD_FOOTER_RE = re.compile(r"(?:^|\n)PWD: [^\n]+\n?\Z")
 RECOVERY_SUBJECTS = {"[omo_manager_recover]", "Re: [omo_manager_recover]"}
 # Fail closed by default: raw email can contain sender-injected Authentication-Results.
 # This opt-in is an operator/admin-trusted escape hatch for mailbox/provider setups
@@ -262,6 +263,10 @@ def is_recovery_subject(subject: str) -> bool:
     return " ".join(subject.split()) in RECOVERY_SUBJECTS
 
 
+def has_pwd_footer(text: str) -> bool:
+    return PWD_FOOTER_RE.search(text) is not None
+
+
 def manager_url_is_loopback(manager_url: str) -> bool:
     parsed = urlparse(manager_url.rstrip("/"))
     return parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost"} and parsed.port is not None
@@ -276,6 +281,10 @@ def source_ref(root: Path, txt_path: Path) -> Path:
 
 def processed_uids_path(args: Args) -> Path:
     return args.state_dir / "email-processed-uids.tsv"
+
+
+def ignored_uids_path(args: Args) -> Path:
+    return args.state_dir / "email-ignored-uids.tsv"
 
 
 def unaccepted_pending_uids_path(args: Args) -> Path:
@@ -766,18 +775,25 @@ def recent_manager_mail_uids(client: imaplib.IMAP4_SSL, self_email: str, candida
     return recent
 
 
-def manager_mail_counts(client: imaplib.IMAP4_SSL, self_email: str, recent_window_s: float, recent_threshold: int, now: datetime | None = None) -> ManagerMailCounts:
+def filter_ignored_uids(uids: list[str], ignored_uids: set[str]) -> list[str]:
+    if not ignored_uids:
+        return uids
+    return [uid for uid in uids if uid not in ignored_uids]
+
+
+def manager_mail_counts(client: imaplib.IMAP4_SSL, self_email: str, recent_window_s: float, recent_threshold: int, now: datetime | None = None, ignored_uids: set[str] | None = None) -> ManagerMailCounts:
     now = now or datetime.now().astimezone()
     cutoff = now - timedelta(seconds=recent_window_s)
-    total_uids = search_manager_mail_uids(client, self_email)
-    unread_uids = search_manager_mail_uids(client, self_email, unread=True)
-    recent_candidates = search_manager_mail_uids(client, self_email, since=cutoff)
+    ignored = ignored_uids or set()
+    total_uids = filter_ignored_uids(search_manager_mail_uids(client, self_email), ignored)
+    unread_uids = filter_ignored_uids(search_manager_mail_uids(client, self_email, unread=True), ignored)
+    recent_candidates = filter_ignored_uids(search_manager_mail_uids(client, self_email, since=cutoff), ignored)
     recent_total = len(recent_manager_mail_uids(client, self_email, recent_candidates, cutoff))
     return ManagerMailCounts(len(total_uids), len(unread_uids), recent_window_s, recent_total, True)
 
 
 def handle_manager_mail_thresholds(client: imaplib.IMAP4_SSL, args: Args) -> bool:
-    counts = manager_mail_counts(client, args.self_email, args.recent_cleanup_window_s, args.recent_cleanup_threshold)
+    counts = manager_mail_counts(client, args.self_email, args.recent_cleanup_window_s, args.recent_cleanup_threshold, ignored_uids=load_processed_uids(ignored_uids_path(args)))
     save_manager_mail_counts(manager_mail_counts_path(args), counts)
     logging.info("manager mail counts: total=%s unread=%s recent_window_s=%s recent_total=%s recent_exact=%s", counts.total, counts.unread, int(counts.recent_window_s), counts.recent_total, counts.recent_exact)
     threshold_state_path = manager_mail_threshold_state_path(args)
@@ -843,9 +859,12 @@ def mark_seen(client: imaplib.IMAP4_SSL, uid: str) -> bool:
 def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
     processed_path = processed_uids_path(args)
     processed_uids = load_processed_uids(processed_path)
+    ignored_path = ignored_uids_path(args)
+    ignored_uids = load_processed_uids(ignored_path)
     unaccepted_path = unaccepted_pending_uids_path(args)
     unaccepted_pending_uids = load_processed_uids(unaccepted_path)
     processed_changed = False
+    ignored_changed = False
     unaccepted_changed = False
     handled = False
     manager_file = current_manager_file(args)
@@ -869,6 +888,8 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
     args.mail_dir.mkdir(parents=True, exist_ok=True)
     for raw_uid in sorted(candidate_uids, key=lambda value: int(value)):
         uid = raw_uid.decode()
+        if uid in ignored_uids:
+            continue
         expected_txt_path = args.mail_dir / f"{uid}.txt"
         pending_ref = existing_source_pending_path_line_in_root(args.root, expected_txt_path, manager_file) if uid in unaccepted_pending_uids else None
         if pending_ref is not None:
@@ -921,6 +942,12 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
         if not (is_manager_subject(subject) or is_recovery_subject(subject)) or not from_self(sender, args.self_email):
             logging.warning("email candidate rejected after fetch: uid=%s subject=%r from_self=%s", uid, subject, from_self(sender, args.self_email))
             continue
+        body = message_text(msg)
+        if is_manager_subject(subject) and has_pwd_footer(body):
+            logging.info("email candidate ignored as manager-authored echo: uid=%s subject=%r", uid, subject)
+            ignored_uids.add(uid)
+            ignored_changed = True
+            continue
         txt_path = write_mail(args, uid, msg, sender, subject)
         logging.info("email stored: uid=%s path=%s subject=%r", uid, source_ref(args.root, txt_path), subject)
         if is_recovery_subject(subject):
@@ -946,6 +973,8 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
                 unaccepted_changed = True
     if processed_changed:
         save_processed_uids(processed_path, processed_uids)
+    if ignored_changed:
+        save_processed_uids(ignored_path, ignored_uids)
     if unaccepted_changed:
         save_processed_uids(unaccepted_path, unaccepted_pending_uids)
     threshold_handled = maybe_handle_manager_mail_thresholds(client, args)

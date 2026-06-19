@@ -431,6 +431,38 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertIn("manager_unread\t2\n", counts_text)
             self.assertIn("manager_human_recent_total\t3\n", counts_text)
 
+    def test_email_watcher_threshold_counts_ignore_ignored_uids(self) -> None:
+        from omo_manager import email_idle_watcher as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            root.mkdir()
+            state = Path(tmp) / "state"
+            state.mkdir()
+            (state / "email-ignored-uids.tsv").write_text("1\t1\n2\t1\n3\t1\n", encoding="utf-8")
+
+            class Client:
+                def uid(self, command: str, *args: object) -> tuple[str, list[object]]:
+                    if command == "search":
+                        if args and args[0] == "UNSEEN":
+                            return "OK", [b"1 2 3"]
+                        if "SINCE" in args:
+                            return "OK", [b"1 2 3"]
+                        return "OK", [b"1 2 3"]
+                    raise AssertionError(command)
+
+            old_push = watcher.push_manager_mail_threshold_ref
+            watcher.push_manager_mail_threshold_ref = lambda *_args: (_ for _ in ()).throw(AssertionError("threshold should not trigger"))
+            try:
+                args = watcher.Args(root, "", root / "manager_mail", state, root / "work_manager_today.md", True, "me@example.com", 0, Path("/bin/false"), manager_target="wl:1.0")
+                self.assertFalse(watcher.handle_manager_mail_thresholds(Client(), args))
+            finally:
+                watcher.push_manager_mail_threshold_ref = old_push
+            counts_text = (state / "email-manager-mail-counts.tsv").read_text(encoding="utf-8")
+            self.assertIn("manager_total\t0\n", counts_text)
+            self.assertIn("manager_unread\t0\n", counts_text)
+            self.assertIn("manager_human_recent_total\t0\n", counts_text)
+
     def test_email_watcher_triggers_unread_compression_once(self) -> None:
         from omo_manager import email_idle_watcher as watcher
 
@@ -756,6 +788,52 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertFalse((root / "manager_mail" / "48.txt").exists())
             self.assertEqual(client.stores, [])
             self.assertFalse((state / "email-processed-uids.tsv").exists())
+
+    def test_email_watcher_ignores_manager_authored_reply_echo_with_pwd(self) -> None:
+        from email.message import EmailMessage
+        from omo_manager import email_idle_watcher as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            root.mkdir()
+            state = Path(tmp) / "state"
+            msg = EmailMessage()
+            msg["From"] = "Manager <me@example.com>"
+            msg["Subject"] = "Re: [a] Update on manager_email_watcher_read_after_forward_6901.md"
+            msg.set_content(
+                "Acknowledged. I will route this to a separate VL worker now.\n\n"
+                "Scope I am giving it: inspect why VL build artifacts leaked into the manager work-log PWD.\n\n"
+                "PWD: /ssd1/sichangheagent/work_logs\n"
+            )
+
+            class Client:
+                fetches = 0
+                stores: list[tuple[object, ...]] = []
+
+                def uid(self, command: str, *args: object) -> tuple[str, list[object]]:
+                    if command == "search":
+                        if "SINCE" in args:
+                            return "OK", [b""]
+                        return "OK", [b"49"]
+                    if command == "fetch":
+                        self.fetches += 1
+                        return "OK", [(b"RFC822", msg.as_bytes())]
+                    if command == "store":
+                        self.stores.append(args)
+                        return "OK", [b""]
+                    raise AssertionError(command)
+
+            client = Client()
+            manager_file = root / "work_manager_today.md"
+            args = watcher.Args(root, "", root / "manager_mail", state, manager_file, True, "me@example.com", 0, Path("/bin/false"), manager_target="wl:1.0")
+            watcher.handle_unseen(client, args)
+            watcher.handle_unseen(client, args)
+            self.assertEqual(1, client.fetches)
+            self.assertFalse(manager_file.exists())
+            self.assertFalse((root / "manager_mail" / "49.txt").exists())
+            self.assertEqual(client.stores, [])
+            self.assertFalse((state / "email-processed-uids.tsv").exists())
+            self.assertIn("49\t", (state / "email-ignored-uids.tsv").read_text(encoding="utf-8"))
 
     def test_email_watcher_recovers_processed_uid_without_current_source(self) -> None:
         from email.message import EmailMessage
@@ -1386,7 +1464,7 @@ class PendingMarkerTests(unittest.TestCase):
             msg = EmailMessage()
             msg["From"] = "Human <me@example.com>"
             msg["Subject"] = "Re: [a] push raises"
-            msg.set_content("body\n\nPWD: /tmp/agent-work\n")
+            msg.set_content("body\n\n> PWD: /tmp/agent-work\n")
 
             class Client:
                 stores: list[tuple[object, ...]] = []
