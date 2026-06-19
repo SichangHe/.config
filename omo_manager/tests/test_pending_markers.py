@@ -1047,7 +1047,7 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual(client.stores, [])
             self.assertFalse((root / "work_manager_2026-06-14.md").exists())
 
-    def test_email_watcher_reprocesses_processed_unaccepted_source_without_pending(self) -> None:
+    def test_email_watcher_accepts_processed_unaccepted_source_without_pending(self) -> None:
         from email.message import EmailMessage
         from omo_manager import email_idle_watcher as watcher
 
@@ -1089,9 +1089,9 @@ class PendingMarkerTests(unittest.TestCase):
                 watcher.handle_unseen(client, args)
             finally:
                 watcher.push_email_ref = old_push
-            self.assertIn("(pending)\n(from email manager_mail/45.txt)\n", manager_file.read_text(encoding="utf-8"))
-            self.assertEqual(client.stores, [])
-            self.assertIn("45\t", (state / "email-unaccepted-pending-uids.tsv").read_text(encoding="utf-8"))
+            self.assertFalse(manager_file.exists())
+            self.assertEqual(client.stores, [("45", "+FLAGS", r"(\Seen)")])
+            self.assertFalse((state / "email-unaccepted-pending-uids.tsv").read_text(encoding="utf-8").strip())
 
     def test_email_watcher_reprocesses_old_processed_unaccepted_uid_without_source(self) -> None:
         from email.message import EmailMessage
@@ -1139,7 +1139,7 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual(client.stores, [])
             self.assertIn("45\t", (state / "email-unaccepted-pending-uids.tsv").read_text(encoding="utf-8"))
 
-    def test_email_watcher_reprocesses_unprocessed_stale_unaccepted_source(self) -> None:
+    def test_email_watcher_accepts_unprocessed_stale_unaccepted_source(self) -> None:
         from email.message import EmailMessage
         from omo_manager import email_idle_watcher as watcher
 
@@ -1165,7 +1165,7 @@ class PendingMarkerTests(unittest.TestCase):
                             return "OK", [b""]
                         return "OK", [b"46"]
                     if command == "fetch":
-                        return "OK", [(b"RFC822", msg.as_bytes())]
+                        raise AssertionError("consumed source should not refetch")
                     if command == "store":
                         self.stores.append(args)
                         return "OK", [b""]
@@ -1179,10 +1179,10 @@ class PendingMarkerTests(unittest.TestCase):
                 watcher.handle_unseen(client, args)
             finally:
                 watcher.push_email_ref = old_push
-            self.assertIn("(done)\n(from email manager_mail/46.txt)\n\n(pending)\n(from email manager_mail/46.txt)\n", manager_file.read_text(encoding="utf-8"))
-            self.assertEqual(client.stores, [])
-            self.assertFalse((state / "email-processed-uids.tsv").exists())
-            self.assertIn("46\t", (state / "email-unaccepted-pending-uids.tsv").read_text(encoding="utf-8"))
+            self.assertEqual("(done)\n(from email manager_mail/46.txt)\n", manager_file.read_text(encoding="utf-8"))
+            self.assertEqual(client.stores, [("46", "+FLAGS", r"(\Seen)")])
+            self.assertIn("46\t", (state / "email-processed-uids.tsv").read_text(encoding="utf-8"))
+            self.assertFalse((state / "email-unaccepted-pending-uids.tsv").read_text(encoding="utf-8").strip())
 
     def test_email_watcher_retries_unaccepted_pending_with_distant_source_marker(self) -> None:
         from omo_manager import email_idle_watcher as watcher

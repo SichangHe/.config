@@ -905,6 +905,15 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
                 unaccepted_pending_uids.add(uid)
                 unaccepted_changed = True
             continue
+        if uid in unaccepted_pending_uids and existing_source_line_in_root(args.root, expected_txt_path, manager_file) is not None:
+            logging.info("email unaccepted uid already has consumed source; accepting: uid=%s root=%s", uid, args.root)
+            unaccepted_pending_uids.discard(uid)
+            unaccepted_changed = True
+            processed_uids.add(uid)
+            processed_changed = True
+            mark_seen(client, uid)
+            handled = True
+            continue
         if uid in processed_uids:
             existing_source_line = existing_source_line_in_root(args.root, expected_txt_path, manager_file)
             if uid not in unaccepted_pending_uids and existing_source_line is not None:
