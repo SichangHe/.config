@@ -43,9 +43,7 @@ MANAGER_REPLY_PREFIX = "Re: [a]"
 MANAGER_SUBJECT_TOKEN = "[a]"
 MANAGER_SUBJECT_TOKENS = (MANAGER_SUBJECT_TOKEN, "[omo_manager]")
 MANAGER_REPLY_SEARCH_PREFIXES = (MANAGER_REPLY_PREFIX, "Re:[a]", "Re: [omo_manager]", "Re:[omo_manager]")
-AGENT_REPLY_PREFIX = "Re: [omo]"
-AGENT_REPLY_SEARCH_PREFIXES = (AGENT_REPLY_PREFIX, "Re: [OMO]")
-NORMAL_REPLY_SEARCH_PREFIXES = (*MANAGER_REPLY_SEARCH_PREFIXES, *AGENT_REPLY_SEARCH_PREFIXES)
+NORMAL_REPLY_SEARCH_PREFIXES = MANAGER_REPLY_SEARCH_PREFIXES
 MANAGER_REPLY_SUBJECT_RE = re.compile(r"^re:\s*(?:\[a\]|\[omo_manager\])\s*", re.IGNORECASE)
 RECOVERY_SUBJECTS = {"[omo_manager_recover]", "Re: [omo_manager_recover]"}
 # Fail closed by default: raw email can contain sender-injected Authentication-Results.
@@ -253,8 +251,7 @@ def recovery_sender_authenticated(msg: Message, self_email: str) -> bool:
 
 
 def is_manager_subject(subject: str) -> bool:
-    normalized = subject.lower()
-    return MANAGER_REPLY_SUBJECT_RE.match(subject) is not None or normalized.startswith(tuple(prefix.lower() for prefix in AGENT_REPLY_SEARCH_PREFIXES))
+    return MANAGER_REPLY_SUBJECT_RE.match(subject) is not None
 
 
 def normalize_human_subject(subject: str) -> str:
@@ -279,6 +276,10 @@ def source_ref(root: Path, txt_path: Path) -> Path:
 
 def processed_uids_path(args: Args) -> Path:
     return args.state_dir / "email-processed-uids.tsv"
+
+
+def unaccepted_pending_uids_path(args: Args) -> Path:
+    return args.state_dir / "email-unaccepted-pending-uids.tsv"
 
 
 def manager_mail_counts_path(args: Args) -> Path:
@@ -380,9 +381,12 @@ def existing_source_pending_line(root: Path, txt_path: Path, manager_file: Path 
     if source_line is None or source_line <= 1:
         return None
     lines = manager_file.read_text(encoding="utf-8").splitlines()
-    for pending_idx in range(max(0, source_line - 4), source_line - 1):
-        if lines[pending_idx].strip() == "(pending)":
+    for pending_idx in range(source_line - 2, -1, -1):
+        stripped = lines[pending_idx].strip()
+        if stripped == "(pending)":
             return pending_idx + 1
+        if stripped.startswith(("(", "#")) and stripped != "(pending)":
+            break
     return None
 
 
@@ -399,6 +403,20 @@ def existing_source_pending_line_in_root(root: Path, txt_path: Path, manager_fil
     return None
 
 
+def existing_source_pending_path_line_in_root(root: Path, txt_path: Path, manager_file: Path | None = None) -> tuple[Path, int] | None:
+    manager_file = manager_file or dated_manager_file(root)
+    pending_line = existing_source_pending_line(root, txt_path, manager_file)
+    if pending_line is not None:
+        return manager_file, pending_line
+    for path in sorted(root.glob("work_manager_*.md")):
+        if path == manager_file:
+            continue
+        pending_line = existing_source_pending_line(root, txt_path, path)
+        if pending_line is not None:
+            return path, pending_line
+    return None
+
+
 def append_pending(root: Path, txt_path: Path, manager_file: Path | None = None) -> int:
     manager_file = manager_file or dated_manager_file(root)
     existing_line = existing_source_pending_line(root, txt_path, manager_file)
@@ -412,17 +430,19 @@ def append_pending(root: Path, txt_path: Path, manager_file: Path | None = None)
     return line_no + 1
 
 
-def run_email_push(push: EmailPush) -> None:
+def run_email_push(push: EmailPush) -> bool:
     try:
         result = subprocess.run(push.command, check=False, env=push.env, timeout=DEFAULT_EMAIL_PUSH_PROCESS_TIMEOUT_S)
     except subprocess.TimeoutExpired as exc:
         logging.error("email pending async push timed out: line=%s timeout_s=%s command=%s", push.line_no, exc.timeout, shell_join(push.command))
-        return
+        return False
     except OSError as exc:
         logging.error("email pending async push failed: line=%s error=%s", push.line_no, exc)
-        return
+        return False
     if result.returncode != 0:
         logging.error("email pending async push failed: line=%s status=%s", push.line_no, result.returncode)
+        return False
+    return True
 
 
 def email_push_worker() -> None:
@@ -464,14 +484,7 @@ def push_email_ref(args: Args, line_no: int) -> bool:
     env = os.environ.copy()
     env["OMO_MANAGER_TMUX_READY_TIMEOUT_S"] = str(DEFAULT_EMAIL_PUSH_READY_TIMEOUT_S)
     env["OMO_MANAGER_TMUX_SUBMIT_VERIFY_TIMEOUT_S"] = str(DEFAULT_EMAIL_PUSH_SUBMIT_VERIFY_TIMEOUT_S)
-    try:
-        start_email_push_worker()
-    except RuntimeError as exc:
-        logging.error("email pending async push worker start failed: line=%s error=%s", line_no, exc)
-        return False
-    _email_push_queue.put(EmailPush(line_no, command, env))
-    logging.info("email pending async push queued: line=%s", line_no)
-    return True
+    return run_email_push(EmailPush(line_no, command, env))
 
 
 def push_manager_mail_threshold_ref(args: Args, line_no: int, kind: str) -> bool:
@@ -830,7 +843,10 @@ def mark_seen(client: imaplib.IMAP4_SSL, uid: str) -> bool:
 def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
     processed_path = processed_uids_path(args)
     processed_uids = load_processed_uids(processed_path)
+    unaccepted_path = unaccepted_pending_uids_path(args)
+    unaccepted_pending_uids = load_processed_uids(unaccepted_path)
     processed_changed = False
+    unaccepted_changed = False
     handled = False
     manager_file = current_manager_file(args)
     push_args = args_w_manager_file(args, manager_file)
@@ -841,6 +857,9 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
     if processed_missing_source:
         for subject_prefix in NORMAL_REPLY_SEARCH_PREFIXES:
             candidate_uids.update(search_processed_uids(client, subject_prefix, args.self_email, sorted(processed_missing_source, key=lambda value: int(value))))
+    if unaccepted_pending_uids:
+        for subject_prefix in NORMAL_REPLY_SEARCH_PREFIXES:
+            candidate_uids.update(search_processed_uids(client, subject_prefix, args.self_email, sorted(unaccepted_pending_uids, key=lambda value: int(value))))
     for subject in RECOVERY_SUBJECTS:
         candidate_uids.update(search_uids(client, subject, args.self_email, processed_uids))
     if not candidate_uids:
@@ -851,21 +870,46 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
     for raw_uid in sorted(candidate_uids, key=lambda value: int(value)):
         uid = raw_uid.decode()
         expected_txt_path = args.mail_dir / f"{uid}.txt"
+        pending_ref = existing_source_pending_path_line_in_root(args.root, expected_txt_path, manager_file) if uid in unaccepted_pending_uids else None
+        if pending_ref is not None:
+            pending_file, pending_line = pending_ref
+            if push_email_ref(args_w_manager_file(args, pending_file), pending_line):
+                unaccepted_pending_uids.discard(uid)
+                unaccepted_changed = True
+                processed_uids.add(uid)
+                processed_changed = True
+                mark_seen(client, uid)
+                handled = True
+            else:
+                unaccepted_pending_uids.add(uid)
+                unaccepted_changed = True
+            continue
         if uid in processed_uids:
-            if existing_source_line_in_root(args.root, expected_txt_path, manager_file) is not None:
+            existing_source_line = existing_source_line_in_root(args.root, expected_txt_path, manager_file)
+            if uid not in unaccepted_pending_uids and existing_source_line is not None:
                 handled = mark_seen(client, uid) or handled
                 continue
-            if uid not in processed_missing_source:
+            if uid in unaccepted_pending_uids and existing_source_line is not None:
+                logging.warning("email unaccepted processed uid has source without pending; reprocessing: uid=%s root=%s", uid, args.root)
+            elif uid in unaccepted_pending_uids:
+                logging.warning("email unaccepted processed uid lacks source; reprocessing: uid=%s root=%s", uid, args.root)
+            elif uid not in processed_missing_source:
                 logging.warning("email processed uid lacks source in current root and is outside recovery window; skipping: uid=%s root=%s", uid, args.root)
                 continue
-            logging.warning("email processed uid lacks source in current root; reprocessing: uid=%s root=%s", uid, args.root)
+            else:
+                logging.warning("email processed uid lacks source in current root; reprocessing: uid=%s root=%s", uid, args.root)
         existing_pending_line = existing_source_pending_line(args.root, expected_txt_path, manager_file)
         if existing_pending_line is not None:
-            push_email_ref(push_args, existing_pending_line)
-            processed_uids.add(uid)
-            processed_changed = True
-            mark_seen(client, uid)
-            handled = True
+            if push_email_ref(push_args, existing_pending_line):
+                unaccepted_pending_uids.discard(uid)
+                unaccepted_changed = True
+                processed_uids.add(uid)
+                processed_changed = True
+                mark_seen(client, uid)
+                handled = True
+            else:
+                unaccepted_pending_uids.add(uid)
+                unaccepted_changed = True
             continue
         typ_msg, msg_data = client.uid("fetch", uid, "(BODY.PEEK[])")
         if typ_msg != "OK" or not msg_data or not isinstance(msg_data[0], tuple):
@@ -890,13 +934,20 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
             handled = True
         else:
             pending_line = append_pending(args.root, txt_path, manager_file)
-            push_email_ref(push_args, pending_line)
-            processed_uids.add(uid)
-            processed_changed = True
-            mark_seen(client, uid)
-            handled = True
+            if push_email_ref(push_args, pending_line):
+                unaccepted_pending_uids.discard(uid)
+                unaccepted_changed = True
+                processed_uids.add(uid)
+                processed_changed = True
+                mark_seen(client, uid)
+                handled = True
+            else:
+                unaccepted_pending_uids.add(uid)
+                unaccepted_changed = True
     if processed_changed:
         save_processed_uids(processed_path, processed_uids)
+    if unaccepted_changed:
+        save_processed_uids(unaccepted_path, unaccepted_pending_uids)
     threshold_handled = maybe_handle_manager_mail_thresholds(client, args)
     return handled or processed_changed or threshold_handled
 
