@@ -497,9 +497,22 @@ class TmuxSendTests(unittest.TestCase):
             calls.append(command)
             return subprocess.CompletedProcess(command, 0)
 
-        with patch("omo_manager.omo_tmux_send.wait_compaction_over_before_send"), patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", side_effect=["", "compacting"]), patch("omo_manager.omo_tmux_send.wait_ready"), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
-            with self.assertRaisesRegex(RuntimeError, "target still compacting"):
+        with patch("omo_manager.omo_tmux_send.wait_compaction_over_before_send"), patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", side_effect=["", "not_safe:compacting"]), patch("omo_manager.omo_tmux_send.wait_ready"), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
+            with self.assertRaisesRegex(RuntimeError, "not_safe:compacting"):
                 run_tmux(Args("cfg:1.0", None, 1, 0.15, 0, False), "prompt")
+
+        self.assertEqual([], [call for call in calls if call[:2] != ["tmux", "delete-buffer"]])
+
+    def test_run_tmux_stops_if_clear_stuck_input_fails_before_paste_only_send(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch("omo_manager.omo_tmux_send.wait_compaction_over_before_send"), patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", return_value="failed"), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
+            with self.assertRaisesRegex(RuntimeError, "failed"):
+                run_tmux(Args("cfg:1.0", None, 0, 0.15, 0, False), "prompt")
 
         self.assertEqual([], [call for call in calls if call[:2] != ["tmux", "delete-buffer"]])
 

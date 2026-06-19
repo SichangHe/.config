@@ -369,6 +369,24 @@ class AgentStatusTests(unittest.TestCase):
             self.assertIn("unstick=sent_enter", text)
             self.assertIn("unstick=already_sent", text)
 
+    def test_problems_only_unsticks_alias_target_once(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[{"task_file":"active.md","tmux_target":"cfg:1","started_at_s":1},{"task_file":"other.md","tmux_target":"cfg:1.0","started_at_s":2}]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\nother.md cfg 1\n", encoding="utf-8")
+            _ = (root / "active.md").write_text("runat: cfg:1 codex\n(running)\n", encoding="utf-8")
+            _ = (root / "other.md").write_text("runat: cfg:1.0 codex\n(running)\n", encoding="utf-8")
+            out = StringIO()
+            report = Report("stuck_input", ["› Continue task"], "Continue task", True)
+            with patch("omo_manager.omo_agent_status.inspect", return_value=report), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present", return_value="sent_enter") as unstick, redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            unstick.assert_called_once_with("cfg:1", report)
+            text = out.getvalue()
+            self.assertEqual(1, text.count("unstuck: target=cfg:1"))
+            self.assertIn("unstick=sent_enter", text)
+            self.assertIn("unstick=already_sent", text)
+
     def test_problems_only_auto_unsticks_manager_target_without_direct_suppression(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

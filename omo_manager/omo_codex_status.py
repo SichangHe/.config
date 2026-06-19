@@ -55,6 +55,7 @@ class Report:
     lines: list[str]
     input_text: str = ""
     can_submit_input: bool = False
+    input_blocker: str = ""
 
 
 class ParsedArgs(argparse.Namespace):
@@ -161,15 +162,31 @@ def can_submit_stuck_input(lines: list[str]) -> bool:
     return bool(has_codex_model_footer(lines) and input_text and not is_empty_input_text(lines, input_text))
 
 
+def stuck_input_blocker(lines: list[str], input_text: str) -> str:
+    if not has_codex_model_footer(lines):
+        return "no_codex_footer"
+    if has_compacting_indicator(lines):
+        return "compacting"
+    if has_queued_running_input(lines):
+        return "queued_running_input"
+    if not input_text:
+        return "empty_input"
+    if is_empty_input_text(lines, input_text):
+        return "placeholder_input"
+    return ""
+
+
 def submit_stuck_input_if_present(target: str, report: Report, n_lines: int = COMPACTION_WAIT_LINES, compaction_wait_timeout_s: float = DEFAULT_COMPACTION_WAIT_TIMEOUT_S) -> str:
     if report.status != "stuck_input":
         return ""
     try:
         latest = wait_while_compacting(target, n_lines, compaction_wait_timeout_s)
     except TimeoutError:
-        return "compacting"
+        return "not_safe:compacting"
     if latest.status != "stuck_input":
         return "not_stuck"
+    if not latest.can_submit_input:
+        return f"not_safe:{latest.input_blocker or 'unknown'}"
     try:
         result = subprocess.run(["tmux", "send-keys", "-t", target, "Enter"], capture_output=True, text=True, timeout=5, check=False)
     except (OSError, subprocess.SubprocessError):
@@ -199,7 +216,11 @@ def status(lines: list[str], block: Block) -> str:
 
 def report_from_lines(lines: list[str]) -> Report:
     block = current_block(lines)
-    return Report(status(lines, block), block.lines, current_input_text(lines), can_submit_stuck_input(lines))
+    input_text = current_input_text(lines)
+    can_submit_input = can_submit_stuck_input(lines)
+    report_status = status(lines, block)
+    input_blocker = stuck_input_blocker(lines, input_text) if report_status == "stuck_input" and not can_submit_input else ""
+    return Report(report_status, block.lines, input_text, can_submit_input, input_blocker)
 
 
 def inspect(args: Args) -> Report:

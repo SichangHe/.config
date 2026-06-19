@@ -2,7 +2,7 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from omo_manager.omo_codex_status import Args, Report, can_submit_stuck_input, current_block, current_input_text, has_compacting_indicator, inspect, last_output, status, submit_stuck_input_if_present
+from omo_manager.omo_codex_status import Args, Report, can_submit_stuck_input, current_block, current_input_text, has_compacting_indicator, inspect, last_output, report_from_lines, status, submit_stuck_input_if_present
 
 
 class CodexStatusTests(unittest.TestCase):
@@ -70,6 +70,7 @@ class CodexStatusTests(unittest.TestCase):
         self.assertEqual('stuck_input', status(lines, current_block(lines)))
         self.assertFalse(can_submit_stuck_input(lines))
         self.assertTrue(has_compacting_indicator(lines))
+        self.assertEqual('compacting', report_from_lines(lines).input_blocker)
 
     def test_compacting_indicator_requires_active_codex_compacting_status(self) -> None:
         self.assertFalse(has_compacting_indicator(['• Compacting conversation', '› Continue task']))
@@ -160,6 +161,19 @@ class CodexStatusTests(unittest.TestCase):
         report = Report('stuck_input', ['› Continue task'], 'Continue task', True)
         with patch('omo_manager.omo_codex_status.tail', return_value=['› Run /review on my current changes', '  gpt-5.5']), patch('omo_manager.omo_codex_status.subprocess.run') as run:
             self.assertEqual('not_stuck', submit_stuck_input_if_present('cfg:1.0', report))
+        run.assert_not_called()
+
+    def test_submit_stuck_input_if_present_reports_latest_unsafe_input(self) -> None:
+        report = Report('stuck_input', ['› Continue task'], 'Continue task', True)
+        latest = Report('stuck_input', ['• Compacting conversation', '', '› Continue task'], 'Continue task', False, 'compacting')
+        with patch('omo_manager.omo_codex_status.wait_while_compacting', return_value=latest), patch('omo_manager.omo_codex_status.subprocess.run') as run:
+            self.assertEqual('not_safe:compacting', submit_stuck_input_if_present('cfg:1.0', report))
+        run.assert_not_called()
+
+    def test_submit_stuck_input_if_present_reports_compaction_timeout_as_unsafe(self) -> None:
+        report = Report('stuck_input', ['› Continue task'], 'Continue task', True)
+        with patch('omo_manager.omo_codex_status.wait_while_compacting', side_effect=TimeoutError), patch('omo_manager.omo_codex_status.subprocess.run') as run:
+            self.assertEqual('not_safe:compacting', submit_stuck_input_if_present('cfg:1.0', report))
         run.assert_not_called()
 
     def test_submit_stuck_input_if_present_sends_enter_while_latest_screen_is_busy(self) -> None:

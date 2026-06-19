@@ -389,14 +389,16 @@ def run_tmux(args: Args, message: str) -> None:
         if not pending_marker_present(args):
             raise RuntimeError("pending marker cleared before tmux paste")
         wait_compaction_over_before_send(args)
-        if clear_stuck_input_before_send(args) == "compacting":
-            raise RuntimeError("target still compacting before tmux paste")
+        clear_result = clear_stuck_input_before_send(args)
+        if clear_result in {"compacting", "failed"} or clear_result.startswith("not_safe:"):
+            raise RuntimeError(f"target stuck input not cleared before tmux paste: {clear_result}")
         wait_ready(args)
         if not pending_marker_present(args):
             raise RuntimeError("pending marker cleared before tmux paste")
         wait_compaction_over_before_send(args)
-        if clear_stuck_input_before_send(args) == "compacting":
-            raise RuntimeError("target still compacting before tmux paste")
+        clear_result = clear_stuck_input_before_send(args)
+        if clear_result in {"compacting", "failed"} or clear_result.startswith("not_safe:"):
+            raise RuntimeError(f"target stuck input not cleared before tmux paste: {clear_result}")
         if args.enter_count:
             _ = subprocess.run(["tmux", "send-keys", "-t", args.target, "C-u"], timeout=5, check=True)
         _ = subprocess.run(["tmux", "load-buffer", "-b", buffer_name, str(temp_path)], timeout=5, check=True)
