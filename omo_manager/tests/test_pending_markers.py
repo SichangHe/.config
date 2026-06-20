@@ -268,6 +268,9 @@ class PendingMarkerTests(unittest.TestCase):
         self.assertTrue(watcher.is_manager_subject("Re:[a] VL supervisor follow-up vl_supervisor_5410.md"))
         self.assertTrue(watcher.is_manager_subject("Re:[omo_manager] VL supervisor follow-up vl_supervisor_5410.md"))
         self.assertFalse(watcher.is_manager_subject("Re: [omo] direct agent follow-up"))
+        self.assertFalse(watcher.is_manager_subject("Re: pb news"))
+        self.assertFalse(watcher.is_manager_subject("Re: pb news setup"))
+        self.assertNotIn("Re: pb news", watcher.NORMAL_REPLY_SEARCH_PREFIXES)
 
     def test_email_subject_normalization_strips_re_and_manager_tags(self) -> None:
         self.assertEqual("topic", normalized_subject_key("Re: Re: [a] Topic"))
@@ -786,6 +789,43 @@ class PendingMarkerTests(unittest.TestCase):
             watcher.handle_unseen(client, args)
             self.assertFalse(manager_file.exists())
             self.assertFalse((root / "manager_mail" / "48.txt").exists())
+            self.assertEqual(client.stores, [])
+            self.assertFalse((state / "email-processed-uids.tsv").exists())
+
+    def test_email_watcher_rejects_pb_news_reply(self) -> None:
+        from email.message import EmailMessage
+        from omo_manager import email_idle_watcher as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            root.mkdir()
+            state = Path(tmp) / "state"
+            msg = EmailMessage()
+            msg["From"] = "Human <me@example.com>"
+            msg["Subject"] = "Re: pb news"
+            msg.set_content("PB news reply body.\n")
+
+            class Client:
+                stores: list[tuple[object, ...]] = []
+
+                def uid(self, command: str, *args: object) -> tuple[str, list[object]]:
+                    if command == "search":
+                        if "SINCE" in args:
+                            return "OK", [b""]
+                        return "OK", [b"50"]
+                    if command == "fetch":
+                        return "OK", [(b"RFC822", msg.as_bytes())]
+                    if command == "store":
+                        self.stores.append(args)
+                        return "OK", [b""]
+                    raise AssertionError(command)
+
+            client = Client()
+            manager_file = root / "work_manager_today.md"
+            args = watcher.Args(root, "", root / "manager_mail", state, manager_file, True, "me@example.com", 0, Path("/bin/false"), manager_target="wl:1.0")
+            watcher.handle_unseen(client, args)
+            self.assertFalse(manager_file.exists())
+            self.assertFalse((root / "manager_mail" / "50.txt").exists())
             self.assertEqual(client.stores, [])
             self.assertFalse((state / "email-processed-uids.tsv").exists())
 
