@@ -5,14 +5,19 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from omo_manager.omo_task import Args, DEFAULT_TOOL, DEFAULT_WORKER_INSTRUCTIONS, codex_cmd, effective_tool, ensure_task_file, link_todo, main, new_window, parse_args, start_codex, wait_command_started
+from omo_manager.omo_task import Args, DEFAULT_TOOL, DEFAULT_WORKER_INSTRUCTIONS, codex_cmd, effective_tool, ensure_task_file, link_todo, main, new_window, parse_args, runat_goal_tree_error, start_codex, validate_runat_goal_tree, wait_command_started
+
+
+VALID_GOAL_TREE = "implement manager check\n- reject missing task goal tree\n"
 
 
 class OmoTaskTests(unittest.TestCase):
     def test_creates_task_file_with_runat_header_and_todo_link(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            args = Args(root, 'x.md', 'cfg', '2', 'codex', None, '', None, False, False, '', '', ())
+            prompt = root / "prompt.md"
+            prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
+            args = Args(root, 'x.md', 'cfg', '2', 'codex', None, '', prompt, False, False, '', '', ())
             path = ensure_task_file(args, 'cfg:2')
             link_todo(args, 'cfg:2')
             self.assertEqual('runat: cfg:2 codex', path.read_text(encoding='utf-8').splitlines()[0])
@@ -21,9 +26,25 @@ class OmoTaskTests(unittest.TestCase):
     def test_creates_pcodx_task_header(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            args = Args(root, 'x.md', 'cfg', '2', 'pcodx', None, '', None, False, False, '', '', ())
+            prompt = root / "prompt.md"
+            prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
+            args = Args(root, 'x.md', 'cfg', '2', 'pcodx', None, '', prompt, False, False, '', '', ())
             path = ensure_task_file(args, 'cfg:2')
             self.assertEqual('runat: cfg:2 pcodx', path.read_text(encoding='utf-8').splitlines()[0])
+
+    def test_validates_runat_goal_tree(self) -> None:
+        validate_runat_goal_tree("runat: cfg:2 pcodx\nimplement manager check\n- reject missing task goal tree\n")
+        self.assertIn("high-level goal", runat_goal_tree_error("runat: cfg:2 pcodx\n\n- reject missing task goal tree\n"))
+        self.assertIn("plain high-level", runat_goal_tree_error("runat: cfg:2 pcodx\n- implement manager check\n- reject missing task goal tree\n"))
+        self.assertIn("concrete bullet subgoal", runat_goal_tree_error("runat: cfg:2 pcodx\nimplement manager check\n"))
+        self.assertIn("concrete bullet subgoal", runat_goal_tree_error("runat:\tcfg:2 pcodx\nimplement manager check\n"))
+
+    def test_new_task_file_requires_goal_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = Args(root, "x.md", "cfg", "2", "pcodx", None, "", None, False, False, "", "", ())
+            with self.assertRaisesRegex(ValueError, "high-level goal"):
+                ensure_task_file(args, "cfg:2")
 
     def test_existing_task_file_header_tracks_latest_launch_tool(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -164,12 +185,40 @@ class OmoTaskTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             prompt = root / "prompt.md"
-            prompt.write_text("hello", encoding="utf-8")
+            prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
                 self.assertEqual(0, main(["--root", str(root), "--task-file", "x.md", "--tmux-session", "cfg", "--workdir", str(root), "--prompt-file", str(prompt), "--dry-run"]))
             self.assertIn("tmux new-window", out.getvalue())
             self.assertIn("tmux send-keys", out.getvalue())
+            self.assertFalse((root / "x.md").exists())
+            self.assertFalse((root / "TODO.md").exists())
+
+    def test_main_dry_run_rejects_missing_goal_tree_before_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.md"
+            prompt.write_text("implement manager check\n", encoding="utf-8")
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(1, main(["--root", str(root), "--task-file", "x.md", "--tmux-session", "cfg", "--workdir", str(root), "--prompt-file", str(prompt), "--dry-run"]))
+            self.assertFalse((root / "x.md").exists())
+            self.assertFalse((root / "TODO.md").exists())
+
+    def test_main_dry_run_allows_new_task_without_runat_header(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(0, main(["--root", str(root), "--task-file", "x.md", "--dry-run"]))
+            self.assertFalse((root / "x.md").exists())
+            self.assertFalse((root / "TODO.md").exists())
+
+    def test_main_dry_run_validates_prompt_started_runat_without_tmux_header(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.md"
+            prompt.write_text("runat: cfg:2 pcodx\nimplement manager check\n", encoding="utf-8")
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(1, main(["--root", str(root), "--task-file", "x.md", "--prompt-file", str(prompt), "--dry-run"]))
             self.assertFalse((root / "x.md").exists())
             self.assertFalse((root / "TODO.md").exists())
 

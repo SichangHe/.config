@@ -24,6 +24,7 @@ COMMAND_BY_TOOL = {
 }
 DEFAULT_TOOL = "pcodx"
 SHELL_COMMANDS = {"bash", "dash", "fish", "sh", "zsh"}
+BULLET_MARKERS = ("- ", "* ")
 
 
 @dataclass(frozen=True)
@@ -120,12 +121,39 @@ def upsert_header(existing: str, first: str) -> str:
     if not first:
         return existing
     if not existing:
-        return f"{first}\n\n"
+        return f"{first}\n"
     lines = existing.splitlines(keepends=True)
     if lines and lines[0].startswith("runat: "):
         lines[0] = f"{first}\n"
         return "".join(lines)
     return f"{first}\n\n{existing}"
+
+
+def is_bullet(line: str) -> bool:
+    stripped = line.lstrip()
+    return any(stripped.startswith(marker) for marker in BULLET_MARKERS)
+
+
+def is_runat_header(line: str) -> bool:
+    return line.strip().split(maxsplit=1)[0:1] == ["runat:"]
+
+
+def runat_goal_tree_error(text: str) -> str:
+    lines = text.splitlines()
+    if not lines or not is_runat_header(lines[0]):
+        return ""
+    if len(lines) < 2 or not lines[1].strip():
+        return "task files starting with `runat:` must put a high-level goal directly after the `runat:` line."
+    if is_bullet(lines[1]):
+        return "task files starting with `runat:` must use a plain high-level goal line before bullet subgoals."
+    if len(lines) < 3 or not is_bullet(lines[2]):
+        return "task files starting with `runat:` must put at least one concrete bullet subgoal directly under the high-level goal."
+    return ""
+
+
+def validate_runat_goal_tree(text: str) -> None:
+    if error := runat_goal_tree_error(text):
+        raise ValueError(error)
 
 
 def top_header_tool(text: str) -> str:
@@ -260,6 +288,8 @@ def ensure_task_file(args: Args, tmux_target: str) -> Path:
     if args.prompt_file is not None:
         sep = "" if not text or text.endswith("\n") else "\n"
         text += sep + args.prompt_file.read_text(encoding="utf-8").rstrip() + "\n"
+    if not existed:
+        validate_runat_goal_tree(text)
     if text != existing or not existed:
         _ = path.write_text(text, encoding="utf-8")
     return path
@@ -309,6 +339,14 @@ def validate_inputs(args: Args) -> None:
         raise ValueError(f"prompt file not found: {args.prompt_file}")
     if any(not flag or "\0" in flag or "\n" in flag for flag in args.codex_flags):
         raise ValueError("codex flags must be non-empty single-line argv tokens.")
+    path = task_path(args.root, args.task_file)
+    if path.exists():
+        return
+    tmux_target = "target" if args.workdir is not None else target(args)
+    first = header(tmux_target, effective_tool(args))
+    prompt = args.prompt_file.read_text(encoding="utf-8").rstrip() if args.prompt_file is not None else ""
+    text = f"{first}\n{prompt}\n" if first else f"{prompt}\n"
+    validate_runat_goal_tree(text)
 
 
 def main(argv: list[str]) -> int:
