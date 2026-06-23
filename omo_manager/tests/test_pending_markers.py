@@ -9,6 +9,8 @@ import tempfile
 import time
 import unittest
 from contextlib import redirect_stdout
+from datetime import datetime
+from email.utils import format_datetime
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
@@ -301,6 +303,76 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual("[a] Topic", prepare_subject("[omo_manager] Topic"))
         finally:
             subject.recent_thread_exists = old_recent_thread_exists
+
+    def test_email_subject_lookup_deadline_falls_back_for_recorded_timeout_subject(self) -> None:
+        from omo_manager import omo_email_subject as subject
+
+        old_recent_thread_exists = subject.recent_thread_exists
+        subject.recent_thread_exists = lambda _key: time.sleep(10) or False
+        try:
+            started_s = time.monotonic()
+            with patch.dict(os.environ, {"OMO_MANAGER_EMAIL_THREAD_LOOKUP_DEADLINE_S": "0.05"}):
+                self.assertEqual("[a] Updates on manager email filtering manager_market_alert_email_filter_7564.md", prepare_subject("Updates on manager email filtering manager_market_alert_email_filter_7564.md"))
+            self.assertLess(time.monotonic() - started_s, 1.0)
+        finally:
+            subject.recent_thread_exists = old_recent_thread_exists
+
+    def test_email_subject_lookup_deadline_skips_slow_logout(self) -> None:
+        from omo_manager import omo_email_subject as subject
+
+        self.assertFalse(issubclass(subject.SubjectLookupTimeout, OSError))
+
+        class SlowLogoutClient:
+            def login(self, _user: str, _password: str) -> None:
+                return None
+
+            def select(self, _mailbox: str, readonly: bool) -> tuple[str, list[bytes]]:
+                self.readonly = readonly
+                return ("OK", [])
+
+            def uid(self, _command: str, *_args: str) -> tuple[str, list[bytes]]:
+                time.sleep(10)
+                return ("OK", [])
+
+            def logout(self) -> None:
+                time.sleep(10)
+
+            def shutdown(self) -> None:
+                return None
+
+        started_s = time.monotonic()
+        with patch.object(subject.imaplib, "IMAP4_SSL", return_value=SlowLogoutClient()), patch.object(subject, "parse_env_config", return_value={"host": "imap.example", "user": "me@example.com", "password": "secret"}), patch.dict(os.environ, {"OMO_MANAGER_EMAIL_THREAD_LOOKUP_DEADLINE_S": "0.05"}):
+            self.assertFalse(subject.has_recent_thread("topic"))
+        self.assertLess(time.monotonic() - started_s, 1.0)
+
+    def test_email_subject_slow_logout_preserves_found_recent_thread(self) -> None:
+        from omo_manager import omo_email_subject as subject
+
+        header_date = format_datetime(datetime.now().astimezone())
+
+        class MatchingSlowLogoutClient:
+            def login(self, _user: str, _password: str) -> None:
+                return None
+
+            def select(self, _mailbox: str, readonly: bool) -> tuple[str, list[bytes]]:
+                self.readonly = readonly
+                return ("OK", [])
+
+            def uid(self, command: str, *_args: str) -> tuple[str, list[bytes] | list[tuple[bytes, bytes]]]:
+                if command == "search":
+                    return ("OK", [b"1"])
+                return ("OK", [(b"1", f"Date: {header_date}\r\nFrom: me@example.com\r\nSubject: Topic\r\n\r\n".encode())])
+
+            def logout(self) -> None:
+                time.sleep(10)
+
+            def shutdown(self) -> None:
+                return None
+
+        started_s = time.monotonic()
+        with patch.object(subject.imaplib, "IMAP4_SSL", return_value=MatchingSlowLogoutClient()), patch.object(subject, "parse_env_config", return_value={"host": "imap.example", "user": "me@example.com", "password": "secret"}), patch.dict(os.environ, {"OMO_MANAGER_EMAIL_THREAD_LOOKUP_DEADLINE_S": "0.05"}):
+            self.assertTrue(subject.has_recent_thread("topic"))
+        self.assertLess(time.monotonic() - started_s, 1.0)
 
     def test_legacy_email_source_block_is_delivered_by_pending_watch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

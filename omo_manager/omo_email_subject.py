@@ -6,7 +6,11 @@ import argparse
 import imaplib
 import os
 import re
+import signal
 import sys
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import policy
@@ -22,9 +26,14 @@ RESERVED_AGENT_TAG_RE = re.compile(r"^(?:re:\s*)*\[omo\]\s*", re.IGNORECASE)
 RE_PREFIX_RE = re.compile(r"^\s*re:\s*", re.IGNORECASE)
 PLACEHOLDER_RE = re.compile(r"subject\W*", re.IGNORECASE)
 DEFAULT_THREAD_LOOKUP_WINDOW_S = 3 * 24 * 60 * 60
+DEFAULT_THREAD_LOOKUP_DEADLINE_S = 5.0
 
 
 class SubjectInputError(ValueError):
+    pass
+
+
+class SubjectLookupTimeout(Exception):
     pass
 
 
@@ -152,6 +161,7 @@ def recent_thread_exists(subject_key: str) -> bool:
     cutoff = datetime.now().astimezone() - timedelta(seconds=lookup_s)
     timeout_s = float(os.environ.get("OMO_MANAGER_EMAIL_THREAD_LOOKUP_TIMEOUT_S", "10"))
     client = imaplib.IMAP4_SSL(config["host"], timeout=timeout_s)
+    timed_out = False
     try:
         client.login(config["user"], config["password"])
         typ, _data = client.select("INBOX", readonly=True)
@@ -168,10 +178,16 @@ def recent_thread_exists(subject_key: str) -> bool:
             if parseaddr(header.sender)[1].lower() == config["user"].lower() and normalized_subject_key(header.subject) == subject_key:
                 return True
         return False
+    except SubjectLookupTimeout:
+        timed_out = True
+        raise
     finally:
         try:
-            client.logout()
-        except imaplib.IMAP4.error:
+            if timed_out:
+                client.shutdown()
+            else:
+                client.logout()
+        except (SubjectLookupTimeout, OSError, imaplib.IMAP4.error):
             pass
 
 
@@ -183,9 +199,32 @@ def fetch_recent_header(client: imaplib.IMAP4_SSL, uid: str) -> RecentHeader | N
     return RecentHeader(str(msg.get("From", "")), str(msg.get("Subject", "")), parsed_header_date(str(msg.get("Date", ""))))
 
 
+@contextmanager
+def recent_thread_lookup_deadline(timeout_s: float) -> Iterator[None]:
+    if timeout_s <= 0 or threading.current_thread() is not threading.main_thread() or not hasattr(signal, "setitimer"):
+        yield
+        return
+    old_handler = signal.getsignal(signal.SIGALRM)
+
+    def raise_timeout(_signum: int, _frame: object) -> None:
+        raise SubjectLookupTimeout(f"recent thread lookup exceeded {timeout_s:g}s")
+
+    signal.signal(signal.SIGALRM, raise_timeout)
+    old_timer = signal.setitimer(signal.ITIMER_REAL, timeout_s)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old_handler)
+        if old_timer[0] > 0:
+            signal.setitimer(signal.ITIMER_REAL, old_timer[0], old_timer[1])
+
+
 def has_recent_thread(subject_key: str) -> bool:
     try:
-        return recent_thread_exists(subject_key)
+        deadline_s = float(os.environ.get("OMO_MANAGER_EMAIL_THREAD_LOOKUP_DEADLINE_S", str(DEFAULT_THREAD_LOOKUP_DEADLINE_S)))
+        with recent_thread_lookup_deadline(deadline_s):
+            return recent_thread_exists(subject_key)
     except Exception as exc:
         print(f"omo_email_subject: recent thread lookup skipped: {exc}", file=sys.stderr)
         return False
