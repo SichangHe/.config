@@ -57,6 +57,12 @@ class EmailMeTests(unittest.TestCase):
         self.assertIsNotNone(plain)
         self.assertEqual(content, plain.get_content())
 
+    def test_can_omit_pwd_footer_when_explicitly_requested(self) -> None:
+        msg = email_me.build_message("me@example.com", "hi", "body\n", add_pwd_footer=False)
+        plain = msg.get_body(preferencelist=("plain",))
+        self.assertIsNotNone(plain)
+        self.assertEqual("body\n", plain.get_content())
+
     def test_preserves_manager_subject_prefix(self) -> None:
         for subject in ("[a] hi", "[omo_manager] hi"):
             with self.subTest(subject=subject):
@@ -135,6 +141,12 @@ class EmailMeTests(unittest.TestCase):
             args = email_me.parse_args(["hi"])
         self.assertEqual("hi", args.title)
         self.assertEqual(SHELL_SENSITIVE_BODY, args.content)
+        self.assertTrue(args.add_pwd_footer)
+
+    def test_parse_args_can_disable_pwd_footer(self) -> None:
+        with patch.object(sys, "stdin", StringIO("body\n")):
+            args = email_me.parse_args(["--no-pwd-footer", "hi"])
+        self.assertFalse(args.add_pwd_footer)
 
     def test_help_mentions_markdown_but_prefers_plain_text(self) -> None:
         with patch("sys.stdout", new_callable=StringIO) as stdout, self.assertRaises(SystemExit) as raised:
@@ -162,6 +174,12 @@ class EmailMeTests(unittest.TestCase):
             result = email_me.main(["--dry-run", "hi"])
         self.assertEqual(0, result)
         self.assertIn("dry-run: email not sent", stdout.getvalue())
+
+    def test_dry_run_can_omit_pwd_footer(self) -> None:
+        with patch.object(sys, "stdin", StringIO("body\n")), patch("sys.stdout", new_callable=StringIO) as stdout:
+            result = email_me.main(["--dry-run", "--no-pwd-footer", "hi"])
+        self.assertEqual(0, result)
+        self.assertIn("body-bytes=5", stdout.getvalue())
 
 
 if __name__ == "__main__":

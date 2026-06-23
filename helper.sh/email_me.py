@@ -40,6 +40,7 @@ class CliArgs:
     title: str
     content: str
     dry_run: bool
+    add_pwd_footer: bool
 
 
 class ParsedArgs(argparse.Namespace):
@@ -47,6 +48,7 @@ class ParsedArgs(argparse.Namespace):
     content: str = ""
     message_file: Path | None = None
     dry_run: bool = False
+    no_pwd_footer: bool = False
 
 
 def parse_args(argv: list[str]) -> CliArgs:
@@ -62,6 +64,7 @@ def parse_args(argv: list[str]) -> CliArgs:
     _ = parser.add_argument("content", nargs="?", type=str, help=argparse.SUPPRESS)
     _ = parser.add_argument("--message-file", type=Path, help="Read the email body from this file instead of stdin.")
     _ = parser.add_argument("--dry-run", action="store_true", help="Validate without sending.")
+    _ = parser.add_argument("--no-pwd-footer", action="store_true", help="Send the body exactly as provided, without appending a PWD footer.")
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     title = parsed.title
     if parsed.content is not None and parsed.message_file is not None:
@@ -82,7 +85,7 @@ def parse_args(argv: list[str]) -> CliArgs:
         codepoint = ord(ch)
         if codepoint < 32 or codepoint == 127:
             parser.error("`title` must not contain control characters.")
-    return CliArgs(title=title, content=content, dry_run=parsed.dry_run)
+    return CliArgs(title=title, content=content, dry_run=parsed.dry_run, add_pwd_footer=not parsed.no_pwd_footer)
 
 
 def normalize_subject(title: str) -> str:
@@ -267,12 +270,12 @@ def markdown_to_html(text: str) -> str:
     return f'<!doctype html><html><body style="font-family: -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif; line-height: 1.45;">{body}</body></html>\n'
 
 
-def build_message(sender_email: str, title: str, content: str) -> EmailMessage:
+def build_message(sender_email: str, title: str, content: str, add_pwd_footer: bool = True) -> EmailMessage:
     msg = EmailMessage()
     msg.add_header("Subject", normalize_subject(title))
     msg.add_header("From", sender_email)
     msg.add_header("To", sender_email)
-    body = append_pwd_footer(content)
+    body = append_pwd_footer(content) if add_pwd_footer else content
     msg.set_content(markdown_links_to_plain(body))
     msg.add_alternative(markdown_to_html(body), subtype="html")
     return msg
@@ -342,7 +345,7 @@ def main(argv: list[str]) -> int:
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
             return 2
-        body = append_pwd_footer(args.content)
+        body = append_pwd_footer(args.content) if args.add_pwd_footer else args.content
         print(f"dry-run: email not sent; subject={subject}; body-bytes={len(body.encode())}")
         return 0
     env_values = parse_env_file(ENV_FILE_PATH)
@@ -362,7 +365,7 @@ def main(argv: list[str]) -> int:
 
     try:
         msg = build_message(
-            sender_email=sender_email, title=args.title, content=args.content
+            sender_email=sender_email, title=args.title, content=args.content, add_pwd_footer=args.add_pwd_footer
         )
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
