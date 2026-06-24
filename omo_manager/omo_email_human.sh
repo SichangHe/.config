@@ -12,6 +12,7 @@ usage() {
   cat <<'EOF'
 Usage: omo_email_human.sh --subject-file FILE --message-file FILE
 
+Deprecated compatibility wrapper for email_me.py.
 Message body accepts Markdown input; plain text is preferred.
 
 Manager-safe input:
@@ -39,11 +40,16 @@ if [ ! -f "$subject_file" ]; then echo "subject file not found" >&2; exit 2; fi
 subject=$(python3 - "$subject_file" <<'PY'
 from pathlib import Path
 import sys
-subject = Path(sys.argv[1]).read_text(encoding="utf-8").rstrip("\n")
+raw_subject = Path(sys.argv[1]).read_text(encoding="utf-8")
+subject_lines = raw_subject.splitlines()
+if len(subject_lines) != 1:
+    print("subject file must contain exactly one text line", file=sys.stderr)
+    raise SystemExit(2)
+subject = subject_lines[0]
 if not subject.strip():
     print("subject file must not be empty", file=sys.stderr)
     raise SystemExit(2)
-if "\n" in subject or "\r" in subject or "\0" in subject:
+if "\r" in subject or "\0" in subject:
     print("subject file must contain exactly one text line", file=sys.stderr)
     raise SystemExit(2)
 print(subject)

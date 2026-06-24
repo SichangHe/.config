@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Email the human using Gmail SMTP, with Markdown HTML alternatives.
+"""Email the human using Gmail SMTP.
 
 Credentials are loaded from `~/.config/.env`:
 - `EMAIL_ME_GMAIL_ADDRESS`
@@ -22,14 +22,23 @@ from pathlib import Path
 SMTP_HOST = "smtp.gmail.com"
 SMTP_PORT = 465
 ENV_FILE_PATH = Path.home() / ".config" / ".env"
-DIRECT_AGENT_PREFIX = "[omo]"
-PRESERVED_PREFIXES = ("[omo]", "[a]", "[omo_manager]", "[omo_manager_recover]")
+MANAGER_DIR = Path(__file__).resolve().parents[1] / "omo_manager"
+if MANAGER_DIR.is_dir():
+    sys.path.insert(0, str(MANAGER_DIR))
+try:
+    from omo_email_subject import SubjectInputError, prepare_subject
+except ImportError:
+    SubjectInputError = ValueError
+    prepare_subject = None
+
+MANAGER_PREFIX = "[a]"
 PWD_FOOTER_RE = re.compile(r"(?:^|\n)(?:>\s*)?PWD: [^\n]+\n?\Z")
 MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
 INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)(?:\s+#+\s*)?$")
 UNORDERED_LIST_RE = re.compile(r"^\s{0,3}[-*+]\s+(.+)$")
 ORDERED_LIST_RE = re.compile(r"^\s{0,3}\d+[.)]\s+(.+)$")
+ANY_LIST_RE = re.compile(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)", re.MULTILINE)
 BLOCKQUOTE_RE = re.compile(r"^\s{0,3}>\s?(.*)$")
 FENCE_RE = re.compile(r"^\s{0,3}(```|~~~)")
 HR_RE = re.compile(r"^\s{0,3}([-*_])(?:\s*\1){2,}\s*$")
@@ -44,8 +53,9 @@ class CliArgs:
 
 
 class ParsedArgs(argparse.Namespace):
-    title: str = ""
+    title: str | None = None
     content: str = ""
+    subject_file: Path | None = None
     message_file: Path | None = None
     dry_run: bool = False
     no_pwd_footer: bool = False
@@ -53,20 +63,40 @@ class ParsedArgs(argparse.Namespace):
 
 def parse_args(argv: list[str]) -> CliArgs:
     parser = argparse.ArgumentParser(
-        usage="email_me.py [--dry-run] [--message-file FILE] SUBJECT",
+        usage="email_me.py [--dry-run] [--subject-file FILE | SUBJECT] [--message-file FILE]",
         description=(
-            "Email the human. The body accepts Markdown input, but plain text is preferred. "
+            "Email the human with manager-safe subject handling. The body accepts Markdown input, but plain text is preferred. "
             "Reads the email body from standard input by default; "
             "use --message-file for a saved body. Do not pass body text as a shell argument."
         ),
     )
-    _ = parser.add_argument("title", metavar="SUBJECT", type=str, help="Email subject/title.")
+    _ = parser.add_argument("title", metavar="SUBJECT", type=str, nargs="?", help="Email subject/title.")
     _ = parser.add_argument("content", nargs="?", type=str, help=argparse.SUPPRESS)
+    _ = parser.add_argument("--subject-file", type=Path, help="Read the email subject from this one-line file instead of an argument.")
     _ = parser.add_argument("--message-file", type=Path, help="Read the email body from this file instead of stdin.")
     _ = parser.add_argument("--dry-run", action="store_true", help="Validate without sending.")
     _ = parser.add_argument("--no-pwd-footer", action="store_true", help="Send the body exactly as provided, without appending a PWD footer.")
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
-    title = parsed.title
+    if parsed.title is not None and parsed.subject_file is not None:
+        parser.error("pass email subject by argument or --subject-file, not both.")
+    if parsed.title is None and parsed.subject_file is None:
+        parser.error("email subject required.")
+    if parsed.subject_file is not None:
+        try:
+            raw_title = parsed.subject_file.read_text(encoding="utf-8")
+        except OSError as exc:
+            parser.error(f"subject file not readable: {exc}")
+        title_lines = raw_title.splitlines()
+        if len(title_lines) != 1:
+            parser.error("subject file must contain exactly one text line.")
+        title = title_lines[0]
+        if not title.strip():
+            parser.error("subject file must not be empty.")
+        if "\r" in title or "\0" in title:
+            parser.error("subject file must contain exactly one text line.")
+    else:
+        assert parsed.title is not None
+        title = parsed.title
     if parsed.content is not None and parsed.message_file is not None:
         parser.error("pass email body by standard input or --message-file, not both.")
     if parsed.content is not None:
@@ -89,17 +119,35 @@ def parse_args(argv: list[str]) -> CliArgs:
 
 
 def normalize_subject(title: str) -> str:
-    stripped = title.lstrip()
+    if prepare_subject is not None:
+        try:
+            return prepare_subject(title)
+        except SubjectInputError as exc:
+            raise ValueError(str(exc)) from exc
+    stripped = title.strip()
     lowered = stripped.lower()
-    if re.match(r"re: *(?:\[a\]|\[omo_manager\])", lowered):
-        return stripped
+    normalized_placeholder = re.sub(r"\W+", "", stripped).casefold()
+    if normalized_placeholder == "subject":
+        raise ValueError("subject must be a real subject, not the placeholder SUBJECT")
+    if re.match(r"^(?:re:\s*)*\[omo\]\s*", lowered):
+        raise ValueError("manager email subject must use [a]; [omo] is reserved for direct regular-agent email")
+    base = stripped
+    reply = False
+    while True:
+        before = base
+        if re.match(r"^\s*re:\s*", base, flags=re.IGNORECASE):
+            reply = True
+            base = re.sub(r"^\s*re:\s*", "", base, count=1, flags=re.IGNORECASE).strip()
+        base = re.sub(r"^\s*(?:\[a\]|\[omo_manager\]|\[omo_manager_recover\])\s*", "", base, count=1, flags=re.IGNORECASE).strip()
+        if base == before:
+            break
+    if re.sub(r"\W+", "", base).casefold() == "subject":
+        raise ValueError("subject must be a real subject, not the placeholder SUBJECT")
     if lowered.startswith("re:"):
-        raise ValueError("Email subject must not start with `Re:`.")
-    if lowered.startswith(DIRECT_AGENT_PREFIX):
-        return f"{DIRECT_AGENT_PREFIX}{stripped[len(DIRECT_AGENT_PREFIX):]}"
-    if lowered.startswith(PRESERVED_PREFIXES[1:]):
-        return stripped
-    return f"{DIRECT_AGENT_PREFIX} {stripped}"
+        return f"Re: {MANAGER_PREFIX} {base}"
+    if reply:
+        return f"Re: {MANAGER_PREFIX} {base}"
+    return f"{MANAGER_PREFIX} {base}"
 
 
 def current_pwd() -> str:
@@ -117,9 +165,14 @@ def current_pwd() -> str:
 def append_pwd_footer(content: str, cwd: str | Path | None = None) -> str:
     if PWD_FOOTER_RE.search(content):
         return content
-    footer = f"PWD: {cwd or current_pwd()}"
+    footer = f"PWD: {short_pwd(cwd or current_pwd())}"
     body = content.rstrip("\n")
     return f"{body}\n\n{footer}\n"
+
+
+def short_pwd(cwd: str | Path) -> str:
+    path = Path(cwd)
+    return path.name or str(path)
 
 
 def markdown_links_to_plain(text: str) -> str:
@@ -177,7 +230,14 @@ def blockquote_html(lines: list[str]) -> str:
     return f'<blockquote style="margin: 0 0 12px 0; padding-left: 12px; border-left: 4px solid #d0d7de; color: #57606a;">{inner}</blockquote>'
 
 
+def source_html(text: str) -> str:
+    body = f'<pre style="margin: 0; white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;">{escape(text)}</pre>'
+    return f'<!doctype html><html><body style="font-family: -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif; line-height: 1.45;">{body}</body></html>\n'
+
+
 def markdown_to_html(text: str) -> str:
+    if ANY_LIST_RE.search(text):
+        return source_html(text)
     blocks: list[str] = []
     paragraph: list[str] = []
     list_kind = ""

@@ -24,6 +24,13 @@ literal `touch /tmp/email-me-should-not-run-backtick`
 
 
 class EmailMeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.env_patch = patch.dict(os.environ, {"OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "0"})
+        self.env_patch.start()
+
+    def tearDown(self) -> None:
+        self.env_patch.stop()
+
     def test_appends_pwd_footer_to_body(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             old_cwd = Path.cwd()
@@ -34,7 +41,7 @@ class EmailMeTests(unittest.TestCase):
                 os.chdir(old_cwd)
         plain = msg.get_body(preferencelist=("plain",))
         self.assertIsNotNone(plain)
-        self.assertEqual(f"body\n\nPWD: {tmp}\n", plain.get_content())
+        self.assertEqual(f"body\n\nPWD: {Path(tmp).name}\n", plain.get_content())
 
     def test_keeps_existing_pwd_footer(self) -> None:
         content = "body\n\nPWD: /already-there\n"
@@ -67,21 +74,34 @@ class EmailMeTests(unittest.TestCase):
         for subject in ("[a] hi", "[omo_manager] hi"):
             with self.subTest(subject=subject):
                 msg = email_me.build_message("me@example.com", subject, "body")
-                self.assertEqual(subject, msg["Subject"])
+                self.assertEqual("[a] hi", msg["Subject"])
+
+    def test_uses_short_manager_subject_prefix_by_default(self) -> None:
+        msg = email_me.build_message("me@example.com", "hi", "body")
+        self.assertEqual("[a] hi", msg["Subject"])
 
     def test_preserves_manager_reply_subject(self) -> None:
         for subject in ("Re: [a] hi", "Re:[a] hi", "Re: [omo_manager] hi", "Re:[omo_manager] hi", "Re:  [omo_manager] hi"):
             with self.subTest(subject=subject):
                 msg = email_me.build_message("me@example.com", subject, "body")
-                self.assertEqual(subject, msg["Subject"])
+                self.assertEqual("Re: [a] hi", msg["Subject"])
+
+    def test_fallback_subject_normalizer_matches_manager_basics(self) -> None:
+        with patch.object(email_me, "prepare_subject", None):
+            self.assertEqual("[a] hi", email_me.normalize_subject("[omo_manager] hi"))
+            self.assertEqual("Re: [a] hi", email_me.normalize_subject("Re: [omo_manager] hi"))
+            with self.assertRaisesRegex(ValueError, "placeholder SUBJECT"):
+                email_me.normalize_subject("[a] SUBJECT")
+            with self.assertRaisesRegex(ValueError, r"\[omo\] is reserved"):
+                email_me.normalize_subject("Re: Re: [omo] direct")
 
     def test_rejects_non_manager_reply_subject(self) -> None:
-        with self.assertRaisesRegex(ValueError, "must not start"):
+        with self.assertRaisesRegex(ValueError, r"\[omo\] is reserved"):
             email_me.build_message("me@example.com", "Re: [omo] hi", "body")
-        with self.assertRaisesRegex(ValueError, "must not start"):
+        with self.assertRaisesRegex(ValueError, r"\[omo\] is reserved"):
             email_me.build_message("me@example.com", "Re:[omo] hi", "body")
-        with self.assertRaisesRegex(ValueError, "must not start"):
-            email_me.build_message("me@example.com", "Re: hi", "body")
+        msg = email_me.build_message("me@example.com", "Re: hi", "body")
+        self.assertEqual("Re: [a] hi", msg["Subject"])
 
     def test_markdown_gets_html_and_plain_url_fallback(self) -> None:
         body = "# Update\n\n- See [Story](https://example.com/a?b=1&c=2).\n- Run `echo $HOME`.\n\n> quoted <raw>\n"
@@ -91,22 +111,18 @@ class EmailMeTests(unittest.TestCase):
         self.assertIsNotNone(plain)
         self.assertIsNotNone(html)
         self.assertIn("Story: https://example.com/a?b=1&c=2", plain.get_content())
-        self.assertIn("<h1", html.get_content())
-        self.assertIn("<ul", html.get_content())
-        self.assertIn('href="https://example.com/a?b=1&amp;c=2"', html.get_content())
-        self.assertIn(">Story</a>", html.get_content())
-        self.assertIn("<code", html.get_content())
-        self.assertIn("echo $HOME", html.get_content())
-        self.assertIn("<blockquote", html.get_content())
-        self.assertIn("quoted &lt;raw&gt;", html.get_content())
+        self.assertIn("<pre", html.get_content())
+        self.assertNotIn("<ul", html.get_content())
+        self.assertNotIn("<li", html.get_content())
+        self.assertIn("- See [Story](https://example.com/a?b=1&amp;c=2).", html.get_content())
+        self.assertIn("&gt; quoted &lt;raw&gt;", html.get_content())
 
     def test_non_link_markdown_still_gets_html_alternative(self) -> None:
-        msg = email_me.build_message("me@example.com", "hi", "## Tasks\n\n1. first\n2. second\n")
+        msg = email_me.build_message("me@example.com", "hi", "## Tasks\n\nfirst\nsecond\n")
         html = msg.get_body(preferencelist=("html",))
         self.assertIsNotNone(html)
         self.assertIn("<h2", html.get_content())
-        self.assertIn("<ol", html.get_content())
-        self.assertIn("<li", html.get_content())
+        self.assertIn("first<br> second", html.get_content())
 
     def test_markdown_html_keeps_intraword_underscores_literal(self) -> None:
         msg = email_me.build_message("me@example.com", "hi", "work_manager_2026-06-15.md\nhttps://example.com/foo_bar_baz\nsnake_case_identifier\n\n_emphasis_\n")
@@ -133,8 +149,16 @@ class EmailMeTests(unittest.TestCase):
         html = msg.get_body(preferencelist=("html",))
         self.assertIsNotNone(html)
         content = html.get_content()
-        self.assertIn("first line<br> continuation with work_manager_foo.md</li>", content)
-        self.assertEqual(2, content.count("<li"))
+        self.assertIn("- first line\n  continuation with work_manager_foo.md\n- second", content)
+        self.assertNotIn("<li", content)
+
+    def test_nested_bullets_are_source_preserved_in_html(self) -> None:
+        msg = email_me.build_message("me@example.com", "hi", "- first\n  - nested\n    - deeper\n")
+        html = msg.get_body(preferencelist=("html",))
+        self.assertIsNotNone(html)
+        content = html.get_content()
+        self.assertIn("- first\n  - nested\n    - deeper", content)
+        self.assertNotIn("<ul", content)
 
     def test_parse_args_reads_body_from_stdin_by_default(self) -> None:
         with patch.object(sys, "stdin", StringIO(SHELL_SENSITIVE_BODY)):
@@ -168,6 +192,25 @@ class EmailMeTests(unittest.TestCase):
             path.write_text(SHELL_SENSITIVE_BODY, encoding="utf-8")
             args = email_me.parse_args(["hi", "--message-file", str(path)])
         self.assertEqual(SHELL_SENSITIVE_BODY, args.content)
+
+    def test_parse_args_reads_subject_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            subject_path = Path(tmp) / "subject.txt"
+            message_path = Path(tmp) / "body.md"
+            subject_path.write_text("File subject\n", encoding="utf-8")
+            message_path.write_text("body\n", encoding="utf-8")
+            args = email_me.parse_args(["--subject-file", str(subject_path), "--message-file", str(message_path)])
+        self.assertEqual("File subject", args.title)
+        self.assertEqual("body\n", args.content)
+
+    def test_parse_args_rejects_multiline_subject_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            subject_path = Path(tmp) / "subject.txt"
+            subject_path.write_text("one\n\n", encoding="utf-8")
+            with patch("sys.stderr", new_callable=StringIO) as stderr, self.assertRaises(SystemExit) as raised:
+                email_me.parse_args(["--subject-file", str(subject_path)])
+        self.assertEqual(2, raised.exception.code)
+        self.assertIn("exactly one text line", stderr.getvalue())
 
     def test_dry_run_does_not_require_smtp_credentials(self) -> None:
         with patch.object(sys, "stdin", StringIO("body\n")), patch("sys.stdout", new_callable=StringIO) as stdout:

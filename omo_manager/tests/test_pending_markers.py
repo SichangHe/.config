@@ -2845,6 +2845,11 @@ class PendingMarkerTests(unittest.TestCase):
             missing_body = subprocess.run([str(Path.home() / ".config/omo_manager/omo_email_human.sh"), "--subject-file", str(good_subject)], text=True, capture_output=True, timeout=10, env=env, check=False)
             self.assertEqual(2, missing_body.returncode)
             self.assertIn("--message-file", missing_body.stderr)
+            multiline_subject = Path(tmp) / "multiline-subject.txt"
+            multiline_subject.write_text("Real subject\n\n", encoding="utf-8")
+            multiline_result = subprocess.run([str(Path.home() / ".config/omo_manager/omo_email_human.sh"), "--subject-file", str(multiline_subject), "--message-file", str(message_file)], text=True, capture_output=True, timeout=10, env=env, check=False)
+            self.assertEqual(2, multiline_result.returncode)
+            self.assertIn("exactly one text line", multiline_result.stderr)
             inline_subject = subprocess.run([str(Path.home() / ".config/omo_manager/omo_email_human.sh"), "--subject", "Real subject", "--message-file", str(message_file)], text=True, capture_output=True, timeout=10, env=env, check=False)
             self.assertEqual(2, inline_subject.returncode)
             self.assertIn("unknown argument", inline_subject.stderr)
