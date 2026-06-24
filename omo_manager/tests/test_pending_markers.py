@@ -2233,6 +2233,38 @@ class PendingMarkerTests(unittest.TestCase):
                 self.assertTrue(scan_once(args, seen, [path]))
             self.assertIn("origin=human source=email action=ack-human", out.getvalue())
 
+    def test_oversized_pending_task_file_output_includes_continuation_warning(self) -> None:
+        from omo_manager.omo_pending_watch import scan_once
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            lines = ["(pending)", "please route", *["history" for _ in range(1999)]]
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            args = Args(root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=True)
+            out = StringIO()
+            with redirect_stdout(out):
+                self.assertTrue(scan_once(args, {}, [path]))
+            text = out.getvalue()
+            self.assertIn("pending: file=task.md", text)
+            self.assertIn("task-file length warning: this file has 2001 lines", text)
+            self.assertIn("move future content into a linked continuation file and cross-link both files", text)
+
+    def test_normal_size_pending_task_file_output_has_no_continuation_warning(self) -> None:
+        from omo_manager.omo_pending_watch import scan_once
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            path.write_text("(pending)\nplease route\n", encoding="utf-8")
+            args = Args(root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=True)
+            out = StringIO()
+            with redirect_stdout(out):
+                self.assertTrue(scan_once(args, {}, [path]))
+            text = out.getvalue()
+            self.assertIn("pending: file=task.md", text)
+            self.assertNotIn("task-file length warning", text)
+
     def test_seen_pending_markers_do_not_expire_into_repush_loop(self) -> None:
         from omo_manager.omo_pending_watch import expire_seen
 

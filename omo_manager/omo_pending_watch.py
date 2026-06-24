@@ -38,6 +38,7 @@ DEFAULT_POLL_BACKSTOP_INTERVAL_S = float(os.environ.get("OMO_MANAGER_POLL_BACKST
 DEFAULT_TMUX_READY_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_TMUX_READY_TIMEOUT_S", os.environ.get("OMO_DISPATCH_TMUX_READY_TIMEOUT_S", "300")))
 DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_TMUX_SUBMIT_VERIFY_TIMEOUT_S", "5"))
 PENDING_MARKERS = {"(pending)"}
+TASK_FILE_LINE_WARNING_THRESHOLD = 2000
 ROUTED_PREFIXES = ("(manager handled:", "(manager routed:")
 EMAIL_SOURCE_PREFIXES = ("(from email ", "[source: email ")
 AGENT_SOURCE_PREFIXES = ("[omo-message-source: origin=agent ", "(from agent ")
@@ -70,10 +71,14 @@ class Marker:
     digest: str
     origin: str
     source: str
+    file_lines: int
 
     @property
     def ref(self) -> str:
-        return f"pending: file={self.file} line={self.line} origin={self.origin} source={self.source} action={self.action}"
+        text = f"pending: file={self.file} line={self.line} origin={self.origin} source={self.source} action={self.action}"
+        if self.file_lines <= TASK_FILE_LINE_WARNING_THRESHOLD:
+            return text
+        return f"{text}\ntask-file length warning: this file has {self.file_lines} lines; move future content into a linked continuation file and cross-link both files."
 
     @property
     def action(self) -> str:
@@ -381,7 +386,7 @@ def find_markers(root: Path, files: list[Path]) -> list[Marker]:
                     break
             origin, source = marker_origin_source(lines[idx - 1 : end_idx])
             digest = hashlib.sha256(f"{rel}:{idx}:{next_line}".encode("utf-8")).hexdigest()[:16]
-            markers.append(Marker(file=rel, line=idx, digest=digest, origin=origin, source=source))
+            markers.append(Marker(file=rel, line=idx, digest=digest, origin=origin, source=source, file_lines=len(lines)))
     return markers
 
 
