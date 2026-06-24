@@ -124,7 +124,7 @@ def validate_subject(subject: str) -> None:
     if PLACEHOLDER_RE.fullmatch(normalized_subject_key(subject)):
         raise SubjectInputError("subject must be a real subject, not the placeholder SUBJECT")
     if RESERVED_AGENT_TAG_RE.match(subject.strip()):
-        raise SubjectInputError("manager email subject must use [a]; [omo] is reserved for direct regular-agent email")
+        raise SubjectInputError("agent email subject must use [a]; [omo] is deprecated")
 
 
 def starts_w_re(subject: str) -> bool:

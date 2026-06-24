@@ -11,6 +11,31 @@ from omo_manager.omo_pending_watch import find_markers
 
 
 class DigestQueueTests(unittest.TestCase):
+    def test_submit_initializes_header_with_a_tag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            result = subprocess.run(
+                [
+                    str(Path.home() / ".config/omo_manager/omo_digest_queue.py"),
+                    "--root",
+                    str(root),
+                    "submit",
+                    "--source",
+                    "pb-news-watch",
+                    "--title",
+                    "Queued item",
+                    "--summary",
+                    "Non-urgent.",
+                ],
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            text = (root / "MANAGER_DIGEST_QUEUE.md").read_text(encoding="utf-8")
+            self.assertIn("may email the human directly with `[a]`", text)
+
     def test_submit_dedupes_and_pending_watcher_ignores_queue_items(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -274,7 +299,9 @@ class DigestQueueTests(unittest.TestCase):
             args.root = args.root.resolve()
             with patch.object(omo_digest_queue, "now_local", return_value=datetime.fromisoformat("2026-05-25T15:00:00-07:00")):
                 self.assertEqual(0, omo_digest_queue.command_deliver(args))
-            self.assertIn("Queued item", (root / "fake-send.log").read_text(encoding="utf-8"))
+            sent_text = (root / "fake-send.log").read_text(encoding="utf-8")
+            self.assertIn("[a] Non-urgent news digest", sent_text)
+            self.assertIn("Queued item", sent_text)
             queue_text = (root / "MANAGER_DIGEST_QUEUE.md").read_text(encoding="utf-8")
             self.assertIn("status: sent", queue_text)
             self.assertIn("sent-at:", queue_text)

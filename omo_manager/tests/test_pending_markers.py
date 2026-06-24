@@ -2891,7 +2891,7 @@ class PendingMarkerTests(unittest.TestCase):
                 cmd = [str(Path.home() / ".config/omo_manager/omo_email_human.sh"), "--subject-file", str(subject_file), "--message-file", str(message_file)]
                 result = subprocess.run(cmd, text=True, capture_output=True, timeout=10, env=env, check=False)
                 self.assertEqual(2, result.returncode)
-                self.assertIn("[omo] is reserved for direct regular-agent email", result.stderr)
+                self.assertIn("[omo] is deprecated", result.stderr)
             self.assertFalse(sent_log.exists())
 
 

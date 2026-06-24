@@ -92,13 +92,13 @@ class EmailMeTests(unittest.TestCase):
             self.assertEqual("Re: [a] hi", email_me.normalize_subject("Re: [omo_manager] hi"))
             with self.assertRaisesRegex(ValueError, "placeholder SUBJECT"):
                 email_me.normalize_subject("[a] SUBJECT")
-            with self.assertRaisesRegex(ValueError, r"\[omo\] is reserved"):
+            with self.assertRaisesRegex(ValueError, r"\[omo\] is deprecated"):
                 email_me.normalize_subject("Re: Re: [omo] direct")
 
     def test_rejects_non_manager_reply_subject(self) -> None:
-        with self.assertRaisesRegex(ValueError, r"\[omo\] is reserved"):
+        with self.assertRaisesRegex(ValueError, r"\[omo\] is deprecated"):
             email_me.build_message("me@example.com", "Re: [omo] hi", "body")
-        with self.assertRaisesRegex(ValueError, r"\[omo\] is reserved"):
+        with self.assertRaisesRegex(ValueError, r"\[omo\] is deprecated"):
             email_me.build_message("me@example.com", "Re:[omo] hi", "body")
         msg = email_me.build_message("me@example.com", "Re: hi", "body")
         self.assertEqual("Re: [a] hi", msg["Subject"])
@@ -111,11 +111,15 @@ class EmailMeTests(unittest.TestCase):
         self.assertIsNotNone(plain)
         self.assertIsNotNone(html)
         self.assertIn("Story: https://example.com/a?b=1&c=2", plain.get_content())
-        self.assertIn("<pre", html.get_content())
-        self.assertNotIn("<ul", html.get_content())
-        self.assertNotIn("<li", html.get_content())
-        self.assertIn("- See [Story](https://example.com/a?b=1&amp;c=2).", html.get_content())
-        self.assertIn("&gt; quoted &lt;raw&gt;", html.get_content())
+        self.assertIn("<ul", html.get_content())
+        self.assertIn("<li", html.get_content())
+        self.assertIn('href="https://example.com/a?b=1&amp;c=2"', html.get_content())
+        self.assertIn(">Story</a>", html.get_content())
+        self.assertIn("<code", html.get_content())
+        self.assertIn("echo $HOME", html.get_content())
+        self.assertIn("<blockquote", html.get_content())
+        self.assertIn("quoted &lt;raw&gt;", html.get_content())
+        self.assertNotIn("<body style=\"font-family: -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif; line-height: 1.45;\"><pre", html.get_content())
 
     def test_non_link_markdown_still_gets_html_alternative(self) -> None:
         msg = email_me.build_message("me@example.com", "hi", "## Tasks\n\nfirst\nsecond\n")
@@ -149,16 +153,30 @@ class EmailMeTests(unittest.TestCase):
         html = msg.get_body(preferencelist=("html",))
         self.assertIsNotNone(html)
         content = html.get_content()
-        self.assertIn("- first line\n  continuation with work_manager_foo.md\n- second", content)
-        self.assertNotIn("<li", content)
+        self.assertIn("first line<br> continuation with work_manager_foo.md</li>", content)
+        self.assertEqual(2, content.count("<li"))
 
-    def test_nested_bullets_are_source_preserved_in_html(self) -> None:
-        msg = email_me.build_message("me@example.com", "hi", "- first\n  - nested\n    - deeper\n")
+    def test_nested_bullets_keep_inline_rendering_without_whole_body_pre(self) -> None:
+        msg = email_me.build_message("me@example.com", "hi", "- first with [Story](https://example.com/story)\n  - nested with `code`\n    - deeper\n")
         html = msg.get_body(preferencelist=("html",))
         self.assertIsNotNone(html)
         content = html.get_content()
-        self.assertIn("- first\n  - nested\n    - deeper", content)
-        self.assertNotIn("<ul", content)
+        self.assertIn("<ul", content)
+        self.assertIn('href="https://example.com/story"', content)
+        self.assertIn("<code", content)
+        self.assertIn("nested with <code", content)
+        self.assertIn("deeper</li>", content)
+        self.assertNotIn("<body style=\"font-family: -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif; line-height: 1.45;\"><pre", content)
+
+    def test_indented_code_block_is_not_misread_as_list(self) -> None:
+        msg = email_me.build_message("me@example.com", "hi", "```md\n    - not a list\n```\n\n    - still code-like text\n")
+        html = msg.get_body(preferencelist=("html",))
+        self.assertIsNotNone(html)
+        content = html.get_content()
+        self.assertIn("<pre", content)
+        self.assertIn("- not a list", content)
+        self.assertIn("<p style=\"margin: 0 0 12px 0;\">    - still code-like text</p>", content)
+        self.assertNotIn("<li style=\"margin: 0 0 4px 0;\">still code-like text</li>", content)
 
     def test_parse_args_reads_body_from_stdin_by_default(self) -> None:
         with patch.object(sys, "stdin", StringIO(SHELL_SENSITIVE_BODY)):

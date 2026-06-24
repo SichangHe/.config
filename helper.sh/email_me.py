@@ -38,7 +38,6 @@ INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)(?:\s+#+\s*)?$")
 UNORDERED_LIST_RE = re.compile(r"^\s{0,3}[-*+]\s+(.+)$")
 ORDERED_LIST_RE = re.compile(r"^\s{0,3}\d+[.)]\s+(.+)$")
-ANY_LIST_RE = re.compile(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)", re.MULTILINE)
 BLOCKQUOTE_RE = re.compile(r"^\s{0,3}>\s?(.*)$")
 FENCE_RE = re.compile(r"^\s{0,3}(```|~~~)")
 HR_RE = re.compile(r"^\s{0,3}([-*_])(?:\s*\1){2,}\s*$")
@@ -130,7 +129,7 @@ def normalize_subject(title: str) -> str:
     if normalized_placeholder == "subject":
         raise ValueError("subject must be a real subject, not the placeholder SUBJECT")
     if re.match(r"^(?:re:\s*)*\[omo\]\s*", lowered):
-        raise ValueError("manager email subject must use [a]; [omo] is reserved for direct regular-agent email")
+        raise ValueError("agent email subject must use [a]; [omo] is deprecated")
     base = stripped
     reply = False
     while True:
@@ -230,14 +229,21 @@ def blockquote_html(lines: list[str]) -> str:
     return f'<blockquote style="margin: 0 0 12px 0; padding-left: 12px; border-left: 4px solid #d0d7de; color: #57606a;">{inner}</blockquote>'
 
 
-def source_html(text: str) -> str:
-    body = f'<pre style="margin: 0; white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;">{escape(text)}</pre>'
-    return f'<!doctype html><html><body style="font-family: -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif; line-height: 1.45;">{body}</body></html>\n'
+def match_list_item(line: str, in_list: bool) -> tuple[str, str] | None:
+    if (unordered := UNORDERED_LIST_RE.match(line)) is not None:
+        return ("ul", unordered.group(1))
+    if (ordered := ORDERED_LIST_RE.match(line)) is not None:
+        return ("ol", ordered.group(1))
+    if not in_list:
+        return None
+    if (nested_unordered := re.match(r"^\s+[-*+]\s+(.+)$", line)) is not None:
+        return ("ul", nested_unordered.group(1))
+    if (nested_ordered := re.match(r"^\s+\d+[.)]\s+(.+)$", line)) is not None:
+        return ("ol", nested_ordered.group(1))
+    return None
 
 
 def markdown_to_html(text: str) -> str:
-    if ANY_LIST_RE.search(text):
-        return source_html(text)
     blocks: list[str] = []
     paragraph: list[str] = []
     list_kind = ""
@@ -296,16 +302,15 @@ def markdown_to_html(text: str) -> str:
             quote_lines.append(quote.group(1))
             idx += 1
             continue
-        unordered = UNORDERED_LIST_RE.match(line)
-        ordered = ORDERED_LIST_RE.match(line)
-        if unordered is not None or ordered is not None:
+        list_item = match_list_item(line, bool(list_items))
+        if list_item is not None:
             flush_paragraph()
             flush_quote()
-            kind = "ul" if unordered is not None else "ol"
+            kind, item_text = list_item
             if list_kind and list_kind != kind:
                 flush_list()
             list_kind = kind
-            list_items.append((unordered or ordered).group(1))
+            list_items.append(item_text)
             idx += 1
             continue
         if list_items and (line.startswith(" ") or line.startswith("\t")):
