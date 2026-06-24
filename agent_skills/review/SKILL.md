@@ -7,6 +7,8 @@ Focus on the current change. Extend the review scope only when really needed.
 
 Questions to ask:
 
+- What is the current change actually trying to accomplish?
+    Does it address the true root problem?
 - Are there implicit assumptions?
     How best can they be made explicit and be linked to code and docs that
     use them?
