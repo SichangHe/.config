@@ -1,11 +1,20 @@
 #!/usr/bin/env python3
-from os import environ
+from os import environ, fsync, getuid, unlink
 from pathlib import Path
+from stat import S_IMODE, S_ISDIR, S_ISREG
+from tempfile import NamedTemporaryFile, gettempdir
 
-from requests import get
+from requests import RequestException, get
 
 AGENTS_MD_URL = "https://raw.githubusercontent.com/SichangHe/sichanghe.github.io/refs/heads/main/src/notes/automation_software/AGENTS.md"
 ENV_FILE = Path(__file__).resolve().parent / ".env"
+FETCH_TIMEOUT_S = 10
+CACHE_DIR = Path(gettempdir()) / f"getagentsmd-cache-{getuid()}"
+CACHE_FILE = CACHE_DIR / "AGENTS.md"
+FALLBACK_NOTICE = (
+    "Failed to reach remote AGENTS.md; using cached content.\n"
+    "Agent instruction: report that `~/.config/getagentsmd` failed to reach the remote and used cached content."
+)
 
 
 def load_env_var(name: str, env_file: Path = ENV_FILE) -> str | None:
@@ -31,15 +40,90 @@ def load_env_var(name: str, env_file: Path = ENV_FILE) -> str | None:
     return None
 
 
+def rendered_agents_md(remote_text: str) -> str:
+    output = f"{remote_text}\n"
+    notes_dir = load_env_var("NOTES_DIR")
+    if notes_dir:
+        output = f"{output}The human's notes are at {notes_dir}, for you reference\n"
+    return output
+
+
+def write_cache(text: str) -> None:
+    try:
+        CACHE_DIR.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    if not cache_dir_is_private():
+        return
+    with NamedTemporaryFile("w", encoding="utf-8", dir=CACHE_DIR, delete=False) as tmp:
+        tmp_path = Path(tmp.name)
+        tmp.write(text)
+        tmp.flush()
+        fsync(tmp.fileno())
+    try:
+        tmp_path.chmod(0o600)
+        tmp_path.replace(CACHE_FILE)
+    except OSError:
+        try:
+            unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def cache_dir_is_private() -> bool:
+    try:
+        cache_dir_stat = CACHE_DIR.lstat()
+        return (
+            S_ISDIR(cache_dir_stat.st_mode)
+            and cache_dir_stat.st_uid == getuid()
+            and not (S_IMODE(cache_dir_stat.st_mode) & 0o077)
+        )
+    except OSError:
+        return False
+
+
+def read_cache() -> str | None:
+    try:
+        if not cache_dir_is_private():
+            return None
+        cache_file_stat = CACHE_FILE.lstat()
+        if not S_ISREG(cache_file_stat.st_mode) or cache_file_stat.st_uid != getuid():
+            return None
+        if S_IMODE(cache_file_stat.st_mode) & 0o077:
+            return None
+        return CACHE_FILE.read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError, UnicodeDecodeError):
+        return None
+
+
 def main():
-    response = get(AGENTS_MD_URL)
+    try:
+        response = get(AGENTS_MD_URL, timeout=FETCH_TIMEOUT_S)
+    except RequestException as exc:
+        cached = read_cache()
+        if cached is not None:
+            print(FALLBACK_NOTICE)
+            print(cached, end="")
+            return
+        print(f"Failed to fetch AGENTS.md. Report to the user: {type(exc).__name__}")
+        return
+
     if response.status_code == 200:
-        print(response.text)
-        notes_dir = load_env_var("NOTES_DIR")
-        if notes_dir:
-            print(f"The human's notes are at {notes_dir}, for you reference")
+        output = rendered_agents_md(response.text)
+        print(output, end="")
+        try:
+            write_cache(output)
+        except OSError:
+            pass
+        return
+
+    cached = read_cache()
+    if cached is not None:
+        print(FALLBACK_NOTICE)
+        print(cached, end="")
     else:
-        print(f"Failed to fetch AGENTS.md. Report to the user: {response}")
+        print(f"Failed to fetch AGENTS.md. Report to the user: HTTP {response.status_code}")
 
 
 main() if __name__ == "__main__" else None
