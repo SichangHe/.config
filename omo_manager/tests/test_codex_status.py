@@ -139,6 +139,34 @@ class CodexStatusTests(unittest.TestCase):
         lines = ['────', 'Traceback', '  gpt-5.5']
         self.assertEqual('error', status(lines, current_block(lines)))
 
+    def test_status_error_from_api_error_text(self) -> None:
+        for message in ['OpenAI API error: rate limit', 'OpenAI API error: 429 Too Many Requests', 'Error: 429 Too Many Requests']:
+            with self.subTest(message=message):
+                lines = ['────', message, '  gpt-5.5']
+                self.assertEqual('error', report_from_lines(lines).status)
+
+    def test_status_error_from_selected_model_capacity_warning(self) -> None:
+        for warning in ['⚠ Selected model is at capacity. Please try a different model.', '⚠️ Selected model is at capacity. Please try a different model.', 'Selected model is at capacity. Please try a different model.']:
+            with self.subTest(warning=warning):
+                lines = ['────', warning, '› Use /skills to list available skills', '  gpt-5.5']
+                self.assertEqual('error', report_from_lines(lines).status)
+
+    def test_status_stuck_input_when_capacity_warning_text_is_typed(self) -> None:
+        lines = ['────', 'done', '› Selected model is at capacity. Please try a different model.', '  gpt-5.5']
+        self.assertEqual('stuck_input', report_from_lines(lines).status)
+
+    def test_status_stuck_input_when_capacity_warning_text_is_multiline_input(self) -> None:
+        lines = ['────', 'done', '› Note this exact text:', '  Selected model is at capacity. Please try a different model.', '  gpt-5.5']
+        self.assertEqual('stuck_input', report_from_lines(lines).status)
+
+    def test_status_not_codex_for_capacity_warning_without_codex_footer(self) -> None:
+        lines = ['Selected model is at capacity. Please try a different model.']
+        self.assertEqual('not_codex', report_from_lines(lines).status)
+
+    def test_status_output_error_count_does_not_make_pane_error(self) -> None:
+        lines = ['────', 'agent-status: not_codex=0 running=1 error=0 ready=0 stuck_input=0 done-registry-stale=0 pruned=0', 'running: task=active.md evidence=target=cfg:1.0 output=working', '  gpt-5.5']
+        self.assertEqual('running', report_from_lines(lines).status)
+
     def test_inspect_reads_tmux_tail(self) -> None:
         with patch('omo_manager.omo_codex_status.tail', return_value=['────', 'done', '─ Worked for 1s ─', '  gpt-5.5']):
             report = inspect(Args('cfg:1', 20))

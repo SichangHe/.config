@@ -14,7 +14,8 @@ DEFAULT_COMPACTION_WAIT_TIMEOUT_S = float(os.environ.get("OMO_CODEX_COMPACTION_W
 COMPACTION_WAIT_INTERVAL_S = 0.5
 COMPACTION_WAIT_LINES = 2000
 CODEX_RE = re.compile(r"  gpt-")
-ERROR_RE = re.compile(r"\b(error|failed|panic|traceback|exception)\b", re.IGNORECASE)
+ERROR_RE = re.compile(r"\b(failed|panic|traceback|exception)\b|\berror\b(?!\s*=\s*\d)", re.IGNORECASE)
+SELECTED_MODEL_CAPACITY_RE = re.compile(r"^\s*(?:⚠\ufe0f?\s*)?Selected model is at capacity\. Please try a different model\.\s*$")
 SEP_RE = re.compile(r"^─+$")
 WORKED_RE = re.compile(r"^─ Worked for .+ ─+$")
 READY_RE = re.compile(r"^› Use /skills to list available skills$")
@@ -147,6 +148,15 @@ def has_queued_running_input(lines: list[str]) -> bool:
     return has_queued_message_footer(lines) and has_visible_running_indicator(lines)
 
 
+def has_selected_model_capacity_warning(lines: list[str]) -> bool:
+    output_lines: list[str] = []
+    for line in lines:
+        if line.lstrip().startswith("›"):
+            break
+        output_lines.append(line)
+    return any(SELECTED_MODEL_CAPACITY_RE.search(line) is not None for line in output_lines)
+
+
 def is_empty_input_text(lines: list[str], input_text: str) -> bool:
     return input_text in CODEX_EMPTY_INPUT_TEXTS or (has_running_indicator(lines) and input_text in CODEX_RUNNING_EMPTY_INPUT_TEXTS)
 
@@ -199,6 +209,8 @@ def status(lines: list[str], block: Block) -> str:
         return "not_codex"
     if not has_codex_model_footer(lines):
         return "running" if has_queued_running_input(lines) else "not_codex"
+    if has_selected_model_capacity_warning(block.lines or lines[-20:]):
+        return "error"
     if has_queued_running_input(lines):
         return "running"
     input_text = current_input_text(lines)

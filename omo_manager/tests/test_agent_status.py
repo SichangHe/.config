@@ -285,6 +285,36 @@ class AgentStatusTests(unittest.TestCase):
             unstick.assert_not_called()
             self.assertEqual("", out.getvalue())
 
+    def test_problems_only_reports_selected_model_capacity_warning_as_error(self) -> None:
+        pane = ['────', '⚠ Selected model is at capacity. Please try a different model.', '› Use /skills to list available skills', '  gpt-5.5']
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[{"task_file":"active.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
+            _ = (root / "active.md").write_text("runat: cfg:1 codex\n(running)\n", encoding="utf-8")
+            out = StringIO()
+            with patch("omo_manager.omo_codex_status.tail", return_value=pane), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present") as unstick, redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            unstick.assert_not_called()
+            text = out.getvalue()
+            self.assertIn("agent-problems: error=1", text)
+            self.assertIn("error: task=active.md", text)
+            self.assertNotIn("ready: task=active.md", text)
+
+    def test_problems_only_does_not_report_status_output_error_count_as_error(self) -> None:
+        pane = ['────', 'agent-status: not_codex=0 running=1 error=0 ready=0 stuck_input=0 done-registry-stale=0 pruned=0', 'running: task=active.md evidence=target=cfg:1.0 output=working', '  gpt-5.5']
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[{"task_file":"active.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
+            _ = (root / "active.md").write_text("runat: cfg:1 codex\n(running)\n", encoding="utf-8")
+            out = StringIO()
+            with patch("omo_manager.omo_codex_status.tail", return_value=pane), redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertEqual("", out.getvalue())
+
     def test_problems_only_reports_idle_explain_input(self) -> None:
         pane = ['────', 'done', '› Explain this codebase', '  gpt-5.5']
         with tempfile.TemporaryDirectory() as tmp:
