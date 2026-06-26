@@ -13,7 +13,7 @@ Workflow:
 - run `omo_manager_mail_compress.py export --out-dir PRIVATE_DIR`
 - use the exported `manifest.tsv`, `uids.txt`, and `UID.txt` files to group topics and write human-facing summaries
 - keep private bodies in `/tmp` or another owner-only scratch directory
-- send replacement summaries with `omo_email_human.sh --subject-file SUBJECT --message-file BODY`
+- send replacement summaries with `email_me.py --manager-human --subject-file SUBJECT --message-file BODY`
 - after replacements are sent, run `omo_manager_mail_compress.py mark-seen --uid-file /tmp/manager-mail-compress-PRIVATE/uids.txt --yes`
 - verify the helper reports `verify_remaining=0`
 - write a task-linked audit with topics, counts, UID boundary, replacement subjects, and any skipped boundary
@@ -33,7 +33,7 @@ Safety boundary:
 - before changing flags, `mark-seen` rechecks that each still-unread UID is self-addressed manager mail
 - export refuses a non-empty output directory so stale private body files are not mixed into a new run
 - the helper only sets `\Seen`; it never expunges or deletes message bodies
-- use `omo_email_human.sh --subject-file SUBJECT --message-file BODY` for replacement summary text
+- use `email_me.py --manager-human --subject-file SUBJECT --message-file BODY` for replacement summary text
 
 Judgment boundary:
 - the helper does not choose topics or summarize email bodies

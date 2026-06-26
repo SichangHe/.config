@@ -38,7 +38,7 @@ Retain every thread with any of these properties:
 Watcher trigger:
 - `email_idle_watcher.py` queues this workflow when manager-human `[a]` mail, plus old `[omo_manager]` compatibility, within the last `24` hours is more than `64`
 - the `64` threshold is only a trigger scope; it is not deletion eligibility
-- compression/replacement text must go through files, for example `omo_email_human.sh --subject-file SUBJECT --message-file BODY`
+- compression/replacement text must go through files, for example `email_me.py --manager-human --subject-file SUBJECT --message-file BODY`
 - trash movement remains limited to explicit seen stale UIDs after the read-only classification is rerun
 
 Cleanup criteria used in the 2026-06-15 run:

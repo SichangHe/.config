@@ -1,1 +1,0 @@
-../omo_manager/omo_email_human.sh

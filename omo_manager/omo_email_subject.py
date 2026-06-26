@@ -42,6 +42,8 @@ class RecentHeader:
     sender: str
     subject: str
     date: datetime | None
+    message_id: str = ""
+    references: str = ""
 
 
 def parse_env_config(path: Path) -> dict[str, str]:
@@ -151,13 +153,13 @@ def parsed_header_date(raw_date: str) -> datetime | None:
     return parsed.astimezone()
 
 
-def recent_thread_exists(subject_key: str) -> bool:
+def find_recent_thread(subject_key: str) -> RecentHeader | None:
     lookup_s = int(os.environ.get("OMO_MANAGER_EMAIL_THREAD_LOOKUP_S", str(DEFAULT_THREAD_LOOKUP_WINDOW_S)))
     if lookup_s <= 0:
-        return False
+        return None
     config = parse_env_config(Path(os.environ.get("OMO_EMAIL_CONFIG_PATH", CONFIG_PATH)))
     if not {"host", "user", "password"} <= set(config):
-        return False
+        return None
     cutoff = datetime.now().astimezone() - timedelta(seconds=lookup_s)
     timeout_s = float(os.environ.get("OMO_MANAGER_EMAIL_THREAD_LOOKUP_TIMEOUT_S", "10"))
     client = imaplib.IMAP4_SSL(config["host"], timeout=timeout_s)
@@ -166,18 +168,18 @@ def recent_thread_exists(subject_key: str) -> bool:
         client.login(config["user"], config["password"])
         typ, _data = client.select("INBOX", readonly=True)
         if typ != "OK":
-            return False
+            return None
         typ, data = client.uid("search", None, "SINCE", cutoff.strftime("%d-%b-%Y"), "FROM", f'"{config["user"]}"')
         if typ != "OK" or not data or not data[0]:
-            return False
+            return None
         for raw_uid in data[0].split():
             uid = raw_uid.decode() if isinstance(raw_uid, bytes) else str(raw_uid)
             header = fetch_recent_header(client, uid)
             if header is None or header.date is None or header.date < cutoff:
                 continue
             if parseaddr(header.sender)[1].lower() == config["user"].lower() and normalized_subject_key(header.subject) == subject_key:
-                return True
-        return False
+                return header
+        return None
     except SubjectLookupTimeout:
         timed_out = True
         raise
@@ -192,11 +194,15 @@ def recent_thread_exists(subject_key: str) -> bool:
 
 
 def fetch_recent_header(client: imaplib.IMAP4_SSL, uid: str) -> RecentHeader | None:
-    typ, data = client.uid("fetch", uid, "(BODY.PEEK[HEADER.FIELDS (DATE FROM SUBJECT)])")
+    typ, data = client.uid("fetch", uid, "(BODY.PEEK[HEADER.FIELDS (DATE FROM SUBJECT MESSAGE-ID REFERENCES)])")
     if typ != "OK" or not data or not isinstance(data[0], tuple):
         return None
     msg = BytesParser(policy=policy.default).parsebytes(data[0][1])
-    return RecentHeader(str(msg.get("From", "")), str(msg.get("Subject", "")), parsed_header_date(str(msg.get("Date", ""))))
+    return RecentHeader(str(msg.get("From", "")), str(msg.get("Subject", "")), parsed_header_date(str(msg.get("Date", ""))), str(msg.get("Message-ID", "")), str(msg.get("References", "")))
+
+
+def recent_thread_exists(subject_key: str) -> bool:
+    return find_recent_thread(subject_key) is not None
 
 
 @contextmanager
@@ -228,6 +234,43 @@ def has_recent_thread(subject_key: str) -> bool:
     except Exception as exc:
         print(f"omo_email_subject: recent thread lookup skipped: {exc}", file=sys.stderr)
         return False
+
+
+def recent_thread_header(subject_key: str) -> RecentHeader | None:
+    try:
+        deadline_s = float(os.environ.get("OMO_MANAGER_EMAIL_THREAD_LOOKUP_DEADLINE_S", str(DEFAULT_THREAD_LOOKUP_DEADLINE_S)))
+        with recent_thread_lookup_deadline(deadline_s):
+            return find_recent_thread(subject_key)
+    except Exception as exc:
+        print(f"omo_email_subject: recent thread lookup skipped: {exc}", file=sys.stderr)
+        return None
+
+
+def reply_headers_for_subject(subject: str) -> dict[str, str]:
+    header = recent_thread_header(normalized_subject_key(subject))
+    return reply_headers_from_recent_header(header)
+
+
+def reply_headers_from_recent_header(header: RecentHeader | None) -> dict[str, str]:
+    if header is None or not header.message_id.strip():
+        return {}
+    message_id = header.message_id.strip()
+    references = [item for item in header.references.split() if item]
+    if message_id not in references:
+        references.append(message_id)
+    return {"In-Reply-To": message_id, "References": " ".join(references)}
+
+
+def prepare_subject_and_headers(subject: str) -> tuple[str, dict[str, str]]:
+    validate_subject(subject)
+    stripped = subject.strip()
+    base = subject_base(stripped)
+    header = recent_thread_header(normalized_subject_key(stripped))
+    if starts_w_re(stripped) and has_manager_tag(stripped):
+        return canonical_manager_subject(stripped), reply_headers_from_recent_header(header)
+    if starts_w_re(stripped) or header is not None:
+        return manager_reply_subject(base), reply_headers_from_recent_header(header)
+    return manager_subject(base), {}
 
 
 def fallback_subject(subject: str) -> str:

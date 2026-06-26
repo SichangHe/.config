@@ -30,10 +30,13 @@ MANAGER_DIR = Path(__file__).resolve().parents[1] / "omo_manager"
 if MANAGER_DIR.is_dir():
     sys.path.insert(0, str(MANAGER_DIR))
 try:
-    from omo_email_subject import SubjectInputError, prepare_subject
+    from omo_email_subject import SubjectInputError, normalized_subject_key, prepare_subject, prepare_subject_and_headers, reply_headers_for_subject
 except ImportError:
     SubjectInputError = ValueError
+    normalized_subject_key = None
     prepare_subject = None
+    prepare_subject_and_headers = None
+    reply_headers_for_subject = None
 
 MANAGER_PREFIX = "[a]"
 PWD_FOOTER_RE = re.compile(r"(?:^|\n)(?:>\s*)?PWD: [^\n]+\n?\Z")
@@ -344,11 +347,17 @@ def markdown_to_html(text: str) -> str:
     return f'<!doctype html><html><body style="font-family: -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif; line-height: 1.45;">{body}</body></html>\n'
 
 
-def build_message(sender_email: str, title: str, content: str, add_pwd_footer: bool = True) -> EmailMessage:
+def build_message(sender_email: str, title: str, content: str, add_pwd_footer: bool = True, prepared_subject: str | None = None, reply_headers: dict[str, str] | None = None) -> EmailMessage:
     msg = EmailMessage()
-    msg.add_header("Subject", normalize_subject(title))
+    msg.add_header("Subject", prepared_subject or normalize_subject(title))
     msg.add_header("From", sender_email)
     msg.add_header("To", sender_email)
+    if reply_headers is not None:
+        for name, value in reply_headers.items():
+            msg.add_header(name, value)
+    elif reply_headers_for_subject is not None:
+        for name, value in reply_headers_for_subject(title).items():
+            msg.add_header(name, value)
     body = append_pwd_footer(content) if add_pwd_footer else content
     msg.set_content(markdown_links_to_plain(body))
     msg.add_alternative(markdown_to_html(body), subtype="html")
@@ -416,6 +425,10 @@ def manager_state_dir() -> Path:
 
 
 def should_send_manager_email(subject: str, content: str) -> bool:
+    return should_send_manager_email_key(subject, subject, content)
+
+
+def should_send_manager_email_key(dedupe_subject: str, display_subject: str, content: str) -> bool:
     try:
         state_dir = manager_state_dir()
         state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -423,7 +436,7 @@ def should_send_manager_email(subject: str, content: str) -> bool:
         dedupe_s = int(os.environ.get("OMO_MANAGER_EMAIL_DEDUPE_S", "300"))
         dedupe_file = state_dir / "human-email-dedupe.tsv"
         lock_file = state_dir / "human-email-dedupe.lock"
-        digest = hashlib.sha256(subject.encode() + b"\0" + content.encode()).hexdigest()
+        digest = hashlib.sha256(dedupe_subject.encode() + b"\0" + content.encode()).hexdigest()
         now_s = int(time.time())
         fd = os.open(lock_file, os.O_RDWR | os.O_CREAT, 0o600)
         with os.fdopen(fd, "r+", encoding="utf-8") as lock:
@@ -439,7 +452,7 @@ def should_send_manager_email(subject: str, content: str) -> bool:
                 pass
             if any(old_digest == digest for _, old_digest, _ in rows):
                 return False
-            rows.append((now_s, digest, subject.replace("\t", " ").replace("\n", " ")))
+            rows.append((now_s, digest, display_subject.replace("\t", " ").replace("\n", " ")))
             tmp = dedupe_file.with_name(f".{dedupe_file.name}.tmp")
             tmp.write_text("".join(f"{sent_s}\t{old_digest}\t{old_subject}\n" for sent_s, old_digest, old_subject in rows), encoding="utf-8")
             tmp.chmod(0o600)
@@ -470,7 +483,10 @@ def fake_send_log_path() -> Path | None:
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
     try:
-        subject = normalize_subject(args.title)
+        if prepare_subject_and_headers is not None:
+            subject, reply_headers = prepare_subject_and_headers(args.title)
+        else:
+            subject, reply_headers = normalize_subject(args.title), {}
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
@@ -478,7 +494,8 @@ def main(argv: list[str]) -> int:
         body = append_pwd_footer(args.content) if args.add_pwd_footer else args.content
         print(f"dry-run: email not sent; subject={subject}; body-bytes={len(body.encode())}")
         return 0
-    if args.manager_human and not should_send_manager_email(subject, args.content):
+    dedupe_subject = normalized_subject_key(args.title) if args.manager_human and normalized_subject_key is not None else subject
+    if args.manager_human and not should_send_manager_email_key(dedupe_subject, subject, args.content):
         print("Skipped duplicate human email")
         return 0
     if fake_log := fake_send_log_path():
@@ -507,7 +524,12 @@ def main(argv: list[str]) -> int:
 
     try:
         msg = build_message(
-            sender_email=sender_email, title=args.title, content=args.content, add_pwd_footer=args.add_pwd_footer
+            sender_email=sender_email,
+            title=args.title,
+            content=args.content,
+            add_pwd_footer=args.add_pwd_footer,
+            prepared_subject=subject,
+            reply_headers=reply_headers,
         )
     except ValueError as exc:
         print(str(exc), file=sys.stderr)

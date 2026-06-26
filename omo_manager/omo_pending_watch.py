@@ -38,7 +38,7 @@ DEFAULT_AGENT_PROBLEM_TIMEOUT_S = float(
 DEFAULT_POLL_BACKSTOP_INTERVAL_S = float(os.environ.get("OMO_MANAGER_POLL_BACKSTOP_INTERVAL_S", "30"))
 DEFAULT_TMUX_READY_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_TMUX_READY_TIMEOUT_S", os.environ.get("OMO_DISPATCH_TMUX_READY_TIMEOUT_S", "300")))
 DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_TMUX_SUBMIT_VERIFY_TIMEOUT_S", "5"))
-DEFAULT_HUMAN_EMAIL_HELPER = Path(__file__).with_name("omo_email_human.sh")
+DEFAULT_HUMAN_EMAIL_HELPER = Path(__file__).resolve().parents[1] / "helper.sh" / "email_me.py"
 PENDING_MARKERS = {"(pending)"}
 TASK_FILE_LINE_WARNING_THRESHOLD = 2000
 ROUTED_PREFIXES = ("(manager handled:", "(manager routed:")
@@ -585,7 +585,7 @@ def email_human_manager_problem(args: Args, output: str) -> bool:
             subject_file.write_text(subject + "\n", encoding="utf-8")
             body_file.write_text(body, encoding="utf-8")
             result = subprocess.run(
-                [str(DEFAULT_HUMAN_EMAIL_HELPER), "--subject-file", str(subject_file), "--message-file", str(body_file)],
+                [str(DEFAULT_HUMAN_EMAIL_HELPER), "--manager-human", "--subject-file", str(subject_file), "--message-file", str(body_file)],
                 capture_output=True,
                 text=True,
                 timeout=30,

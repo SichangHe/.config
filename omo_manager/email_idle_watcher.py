@@ -612,7 +612,7 @@ def email_human(args: Args, subject: str, body: str) -> None:
     subject_path = write_private_temp(subject.rstrip("\n") + "\n", ".txt")
     body_path = write_private_temp(body, ".md")
     try:
-        result = subprocess.run([str(Path.home() / ".config/omo_manager/omo_email_human.sh"), "--subject-file", str(subject_path), "--message-file", str(body_path)], text=True, check=False)
+        result = subprocess.run([str(Path.home() / ".config/helper.sh/email_me.py"), "--manager-human", "--subject-file", str(subject_path), "--message-file", str(body_path)], text=True, check=False)
         if result.returncode != 0:
             logging.error("recovery human email failed: status=%s", result.returncode)
     finally:

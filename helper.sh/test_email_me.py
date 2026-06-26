@@ -86,6 +86,14 @@ class EmailMeTests(unittest.TestCase):
                 msg = email_me.build_message("me@example.com", subject, "body")
                 self.assertEqual("Re: [a] hi", msg["Subject"])
 
+    def test_manager_reply_subject_adds_thread_headers_when_found(self) -> None:
+        with patch.object(email_me, "reply_headers_for_subject", return_value={"In-Reply-To": "<old@example.test>", "References": "<root@example.test> <old@example.test>"}) as headers:
+            msg = email_me.build_message("me@example.com", "Re: manager_status_email_unification_followup_7872.md status answer", "body")
+        headers.assert_called_once_with("Re: manager_status_email_unification_followup_7872.md status answer")
+        self.assertEqual("Re: [a] manager_status_email_unification_followup_7872.md status answer", msg["Subject"])
+        self.assertEqual("<old@example.test>", msg["In-Reply-To"])
+        self.assertEqual("<root@example.test> <old@example.test>", msg["References"])
+
     def test_fallback_subject_normalizer_matches_manager_basics(self) -> None:
         with patch.object(email_me, "prepare_subject", None):
             self.assertEqual("[a] hi", email_me.normalize_subject("[omo_manager] hi"))
@@ -265,6 +273,88 @@ class EmailMeTests(unittest.TestCase):
             self.assertIn("Skipped duplicate human email", stdout.getvalue())
             self.assertEqual("[a] Manager update\nbody\n", send_log.read_text(encoding="utf-8"))
             self.assertIn("[a] Manager update", (state_dir / "human-email-sent.tsv").read_text(encoding="utf-8"))
+
+    def test_manager_human_mode_reuses_prepared_thread_subject(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp) / "state"
+            send_log = Path(tmp) / "sent.txt"
+            body = Path(tmp) / "body.md"
+            body.write_text("body\n", encoding="utf-8")
+            subject = Path(tmp) / "subject.txt"
+            subject.write_text("manager_status_email_unification_followup_7872.md status answer\n", encoding="utf-8")
+            env = {
+                "EMAIL_ME_FAKE_SEND_LOG": str(send_log),
+                "OMO_MANAGER_STATE_DIR": str(state_dir),
+                "OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "0",
+            }
+            prepared = ("Re: [a] manager_status_email_unification_followup_7872.md status answer", {"In-Reply-To": "<prior@example.test>", "References": "<prior@example.test>"})
+            with patch.dict(os.environ, env, clear=False), patch.object(email_me, "prepare_subject_and_headers", return_value=prepared) as prepare, patch.object(email_me, "reply_headers_for_subject") as headers:
+                result = email_me.main(["--manager-human", "--subject-file", str(subject), "--message-file", str(body)])
+            self.assertEqual(0, result)
+            prepare.assert_called_once_with("manager_status_email_unification_followup_7872.md status answer")
+            headers.assert_not_called()
+            self.assertEqual("Re: [a] manager_status_email_unification_followup_7872.md status answer\nbody\n", send_log.read_text(encoding="utf-8"))
+            self.assertIn("Re: [a] manager_status_email_unification_followup_7872.md status answer", (state_dir / "human-email-sent.tsv").read_text(encoding="utf-8"))
+
+    def test_manager_human_dedupe_survives_thread_subject_transition(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp) / "state"
+            send_log = Path(tmp) / "sent.txt"
+            body = Path(tmp) / "body.md"
+            body.write_text("body\n", encoding="utf-8")
+            subject = Path(tmp) / "subject.txt"
+            subject.write_text("Topic\n", encoding="utf-8")
+            env = {
+                "EMAIL_ME_FAKE_SEND_LOG": str(send_log),
+                "OMO_MANAGER_STATE_DIR": str(state_dir),
+                "OMO_MANAGER_EMAIL_DEDUPE_S": "300",
+                "OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "0",
+            }
+            prepared = [("[a] Topic", {}), ("Re: [a] Topic", {"In-Reply-To": "<prior@example.test>", "References": "<prior@example.test>"})]
+            with patch.dict(os.environ, env, clear=False), patch.object(email_me, "prepare_subject_and_headers", side_effect=prepared):
+                first = email_me.main(["--manager-human", "--subject-file", str(subject), "--message-file", str(body)])
+                second = email_me.main(["--manager-human", "--subject-file", str(subject), "--message-file", str(body)])
+            self.assertEqual(0, first)
+            self.assertEqual(0, second)
+            self.assertEqual("[a] Topic\nbody\n", send_log.read_text(encoding="utf-8"))
+
+    def test_manager_human_smtp_path_uses_prepared_reply_headers(self) -> None:
+        sent_messages = []
+
+        class FakeSmtp:
+            def __init__(self, **_kwargs: object) -> None:
+                return None
+
+            def __enter__(self) -> "FakeSmtp":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def login(self, _sender: str, _password: str) -> None:
+                return None
+
+            def send_message(self, msg: object) -> None:
+                sent_messages.append(msg)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp) / "state"
+            env_file = Path(tmp) / ".env"
+            env_file.write_text("EMAIL_ME_GMAIL_ADDRESS=me@example.test\nEMAIL_ME_GMAIL_APP_PASSWORD=secret\n", encoding="utf-8")
+            body = Path(tmp) / "body.md"
+            body.write_text("body\n", encoding="utf-8")
+            subject = Path(tmp) / "subject.txt"
+            subject.write_text("Topic\n", encoding="utf-8")
+            env = {
+                "OMO_MANAGER_STATE_DIR": str(state_dir),
+                "OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "0",
+            }
+            prepared = ("Re: [a] Topic", {"In-Reply-To": "<prior@example.test>", "References": "<root@example.test> <prior@example.test>"})
+            with patch.dict(os.environ, env, clear=False), patch.object(email_me, "ENV_FILE_PATH", env_file), patch.object(email_me, "prepare_subject_and_headers", return_value=prepared), patch.object(email_me.smtplib, "SMTP_SSL", FakeSmtp), patch.object(email_me.ssl, "create_default_context", return_value=None):
+                self.assertEqual(0, email_me.main(["--manager-human", "--subject-file", str(subject), "--message-file", str(body)]))
+        self.assertEqual("Re: [a] Topic", sent_messages[0]["Subject"])
+        self.assertEqual("<prior@example.test>", sent_messages[0]["In-Reply-To"])
+        self.assertEqual("<root@example.test> <prior@example.test>", sent_messages[0]["References"])
 
 
 if __name__ == "__main__":

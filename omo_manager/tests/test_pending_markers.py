@@ -18,7 +18,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from omo_manager.email_idle_watcher import append_pending, current_manager_file, dated_manager_file, existing_source_pending_line, normalize_human_subject
-from omo_manager.omo_email_subject import normalized_subject_key, prepare_subject
+from omo_manager.omo_email_subject import RecentHeader, fetch_recent_header, normalized_subject_key, prepare_subject, prepare_subject_and_headers, reply_headers_for_subject
 from omo_manager.omo_pending_watch import Args, find_markers
 
 
@@ -292,6 +292,67 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual("Re: [a] Topic", prepare_subject("[a] [omo] Topic"))
         finally:
             subject.recent_thread_exists = old_recent_thread_exists
+
+    def test_email_subject_recent_thread_builds_reply_headers(self) -> None:
+        from omo_manager import omo_email_subject as subject
+
+        old_recent_thread_header = subject.recent_thread_header
+        subject.recent_thread_header = lambda key: RecentHeader("me@example.test", "Topic", datetime.now().astimezone(), "<prior@example.test>", "<root@example.test>")
+        try:
+            self.assertEqual(
+                {"In-Reply-To": "<prior@example.test>", "References": "<root@example.test> <prior@example.test>"},
+                reply_headers_for_subject("Re: [a] Topic"),
+            )
+        finally:
+            subject.recent_thread_header = old_recent_thread_header
+
+    def test_email_subject_prepare_subject_and_headers_uses_one_recent_lookup(self) -> None:
+        from omo_manager import omo_email_subject as subject
+
+        calls: list[str] = []
+        old_recent_thread_header = subject.recent_thread_header
+
+        def recent_thread_header(key: str) -> RecentHeader:
+            calls.append(key)
+            return RecentHeader("me@example.test", "Topic", datetime.now().astimezone(), "<prior@example.test>", "<root@example.test>")
+
+        subject.recent_thread_header = recent_thread_header
+        try:
+            self.assertEqual(
+                ("Re: [a] Topic", {"In-Reply-To": "<prior@example.test>", "References": "<root@example.test> <prior@example.test>"}),
+                prepare_subject_and_headers("Topic"),
+            )
+            self.assertEqual(["topic"], calls)
+        finally:
+            subject.recent_thread_header = old_recent_thread_header
+
+    def test_email_subject_fetch_recent_header_reads_thread_headers(self) -> None:
+        header_date = format_datetime(datetime.now().astimezone())
+
+        class FakeClient:
+            def uid(self, _command: str, *_args: str) -> tuple[str, list[tuple[bytes, bytes]]]:
+                return (
+                    "OK",
+                    [
+                        (
+                            b"1",
+                            (
+                                f"Date: {header_date}\r\n"
+                                "From: me@example.test\r\n"
+                                "Subject: Topic\r\n"
+                                "Message-ID: <prior@example.test>\r\n"
+                                "References: <root@example.test>\r\n"
+                                "\r\n"
+                            ).encode(),
+                        )
+                    ],
+                )
+
+        header = fetch_recent_header(FakeClient(), "1")  # type: ignore[arg-type]
+        self.assertIsNotNone(header)
+        assert header is not None
+        self.assertEqual("<prior@example.test>", header.message_id)
+        self.assertEqual("<root@example.test>", header.references)
 
     def test_email_subject_lookup_error_falls_back_to_new_tag(self) -> None:
         from omo_manager import omo_email_subject as subject
@@ -2442,6 +2503,7 @@ class PendingMarkerTests(unittest.TestCase):
                 "message_file=\n"
                 "while [ \"$#\" -gt 0 ]; do\n"
                 "  case \"$1\" in\n"
+                "    --manager-human) shift ;;\n"
                 "    --subject-file) subject_file=\"$2\"; shift 2 ;;\n"
                 "    --message-file) message_file=\"$2\"; shift 2 ;;\n"
                 "    *) echo \"bad arg: $1\" >&2; exit 2 ;;\n"
@@ -2613,352 +2675,6 @@ class PendingMarkerTests(unittest.TestCase):
             args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/missing-status.py"), False, False, mail_dir=mail_dir, digest_script=script, digest_idle_after_s=3600.0)
             self.assertTrue(watcher.maybe_deliver_idle_digest(args, 0.0, 4600.0))
             self.assertEqual(f"{root} deliver\n", log.read_text(encoding="utf-8"))
-
-    def test_omo_email_human_skips_duplicate_subject_body(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp) / "home"
-            helper_dir = home / ".config" / "helper.sh"
-            helper_dir.mkdir(parents=True)
-            helper = helper_dir / "email_me.py"
-            sent_log = Path(tmp) / "sent.log"
-            _ = helper.write_text(
-                "#!/usr/bin/env python3\n"
-                "from pathlib import Path\n"
-                "import os\n"
-                "import sys\n"
-                "Path(os.environ['SENT_LOG']).open('a', encoding='utf-8').write(sys.argv[1] + '\\n' + sys.stdin.read())\n",
-                encoding="utf-8",
-            )
-            helper.chmod(0o700)
-            env = {
-                **os.environ,
-                "HOME": str(home),
-                "SENT_LOG": str(sent_log),
-                "EMAIL_ME_FAKE_SEND_LOG": str(sent_log),
-                "OMO_MANAGER_STATE_DIR": str(Path(tmp) / "state"),
-                "OMO_MANAGER_EMAIL_DEDUPE_S": "300",
-            }
-            subject_file = Path(tmp) / "subject.txt"
-            subject_file.write_text("Manager update\n", encoding="utf-8")
-            body_file = Path(tmp) / "body.md"
-            body_file.write_text("same body\n", encoding="utf-8")
-            cmd = [
-                str(Path.home() / ".config/omo_manager/omo_email_human.sh"),
-                "--subject-file",
-                str(subject_file),
-                "--message-file",
-                str(body_file),
-            ]
-            first = subprocess.run(cmd, text=True, capture_output=True, timeout=10, env=env, check=False)
-            second = subprocess.run(cmd, text=True, capture_output=True, timeout=10, env=env, check=False)
-            self.assertEqual(0, first.returncode)
-            self.assertEqual("Emailed the human\n", first.stdout)
-            self.assertEqual(0, second.returncode)
-            self.assertEqual("Skipped duplicate human email\n", second.stdout)
-            self.assertEqual("[a] Manager update\nsame body\n", sent_log.read_text(encoding="utf-8"))
-
-    def test_omo_email_human_subject_file_and_file_body_are_literal(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp) / "home"
-            helper_dir = home / ".config" / "helper.sh"
-            helper_dir.mkdir(parents=True)
-            helper = helper_dir / "email_me.py"
-            sent_log = Path(tmp) / "sent.log"
-            _ = helper.write_text(
-                "#!/usr/bin/env python3\n"
-                "from pathlib import Path\n"
-                "import os\n"
-                "import sys\n"
-                "Path(os.environ['SENT_LOG']).open('a', encoding='utf-8').write("
-                "sys.argv[1] + '\\n' + sys.stdin.read() + '\\n--END--\\n')\n",
-                encoding="utf-8",
-            )
-            helper.chmod(0o700)
-            cmd_sentinel = Path(tmp) / "cmd-substitution-ran"
-            backtick_sentinel = Path(tmp) / "backtick-ran"
-            body_text = (
-                "literal $HOME\n"
-                f"literal $(touch {cmd_sentinel})\n"
-                f"literal `touch {backtick_sentinel}`\n"
-                "> quoted markdown line\n"
-            )
-            env = {
-                **os.environ,
-                "HOME": str(home),
-                "SENT_LOG": str(sent_log),
-                "EMAIL_ME_FAKE_SEND_LOG": str(sent_log),
-                "OMO_MANAGER_STATE_DIR": str(Path(tmp) / "state"),
-                "OMO_MANAGER_EMAIL_UNREAD_COMPRESSION_THRESHOLD": "not-an-int",
-            }
-            script = Path.home() / ".config/omo_manager/omo_email_human.sh"
-            subject_file = Path(tmp) / "subject.txt"
-            message_file = Path(tmp) / "body.md"
-            subject_file.write_text("--help $HOME `subject`\n", encoding="utf-8")
-            message_file.write_text(body_text, encoding="utf-8")
-            file_result = subprocess.run(
-                [
-                    str(script),
-                    "--subject-file",
-                    str(subject_file),
-                    "--message-file",
-                    str(message_file),
-                ],
-                text=True,
-                capture_output=True,
-                timeout=10,
-                env=env,
-                check=False,
-            )
-            self.assertEqual(0, file_result.returncode, file_result.stderr)
-            self.assertFalse(cmd_sentinel.exists())
-            self.assertFalse(backtick_sentinel.exists())
-            text = sent_log.read_text(encoding="utf-8")
-            self.assertIn("[a] --help $HOME `subject`\n" + body_text, text)
-
-    def test_omo_email_human_bin_symlink_finds_subject_helper(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp) / "home"
-            helper_dir = home / ".config" / "helper.sh"
-            helper_dir.mkdir(parents=True)
-            helper = helper_dir / "email_me.py"
-            sent_log = Path(tmp) / "sent.log"
-            _ = helper.write_text(
-                "#!/usr/bin/env python3\n"
-                "from pathlib import Path\n"
-                "import os\n"
-                "import sys\n"
-                "Path(os.environ['SENT_LOG']).write_text(sys.argv[1] + '\\n' + sys.stdin.read(), encoding='utf-8')\n",
-                encoding="utf-8",
-            )
-            helper.chmod(0o700)
-            subject_file = Path(tmp) / "subject.txt"
-            subject_file.write_text("Bin symlink subject\n", encoding="utf-8")
-            message_file = Path(tmp) / "body.md"
-            message_file.write_text("body\n", encoding="utf-8")
-            result = subprocess.run(
-                [
-                    str(Path.home() / ".config/bin/omo_email_human.sh"),
-                    "--subject-file",
-                    str(subject_file),
-                    "--message-file",
-                    str(message_file),
-                ],
-                text=True,
-                capture_output=True,
-                timeout=10,
-                env={**os.environ, "HOME": str(home), "SENT_LOG": str(sent_log), "EMAIL_ME_FAKE_SEND_LOG": str(sent_log), "OMO_MANAGER_STATE_DIR": str(Path(tmp) / "state"), "OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "0"},
-                check=False,
-            )
-            self.assertEqual(0, result.returncode, result.stderr)
-            self.assertEqual("[a] Bin symlink subject\nbody\n", sent_log.read_text(encoding="utf-8"))
-
-    def test_omo_email_human_canonicalizes_manager_reply_subject(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp) / "home"
-            helper_dir = home / ".config" / "helper.sh"
-            helper_dir.mkdir(parents=True)
-            helper = helper_dir / "email_me.py"
-            sent_log = Path(tmp) / "sent.log"
-            _ = helper.write_text(
-                "#!/usr/bin/env python3\n"
-                "from contextlib import redirect_stdout\n"
-                "from io import StringIO\n"
-                "from pathlib import Path\n"
-                "import importlib.util\n"
-                "import os\n"
-                "import sys\n"
-                f"spec = importlib.util.spec_from_file_location('email_me_live', {str(Path.home() / '.config/helper.sh/email_me.py')!r})\n"
-                "assert spec and spec.loader\n"
-                "module = importlib.util.module_from_spec(spec)\n"
-                "sys.modules[spec.name] = module\n"
-                "spec.loader.exec_module(module)\n"
-                "stdout = StringIO()\n"
-                "with redirect_stdout(stdout):\n"
-                "    code = module.main(['--dry-run', sys.argv[1]])\n"
-                "Path(os.environ['SENT_LOG']).write_text(stdout.getvalue(), encoding='utf-8')\n"
-                "raise SystemExit(code)\n",
-                encoding="utf-8",
-            )
-            helper.chmod(0o700)
-            env = {
-                **os.environ,
-                "HOME": str(home),
-                "SENT_LOG": str(sent_log),
-                "EMAIL_ME_FAKE_SEND_LOG": str(sent_log),
-                "OMO_MANAGER_STATE_DIR": str(Path(tmp) / "state"),
-            }
-            message_file = Path(tmp) / "body.md"
-            message_file.write_text("ack\n", encoding="utf-8")
-            for subject in ("Re: [omo_manager] existing thread", "Re:[omo_manager] existing thread", "Re:  [omo_manager] existing thread"):
-                with self.subTest(subject=subject):
-                    subject_file = Path(tmp) / "subject.txt"
-                    subject_file.write_text(subject + "\n", encoding="utf-8")
-                    result = subprocess.run(
-                        [
-                            str(Path.home() / ".config/omo_manager/omo_email_human.sh"),
-                            "--subject-file",
-                            str(subject_file),
-                            "--message-file",
-                            str(message_file),
-                        ],
-                        text=True,
-                        capture_output=True,
-                        timeout=10,
-                        env=env,
-                        check=False,
-                    )
-                    self.assertEqual(0, result.returncode, result.stderr)
-                    self.assertEqual("Re: [a] existing thread\nack\n", sent_log.read_text(encoding="utf-8"))
-
-    def test_omo_email_human_sends_bare_reply_subject_with_short_tag(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp) / "home"
-            helper_dir = home / ".config" / "helper.sh"
-            helper_dir.mkdir(parents=True)
-            helper = helper_dir / "email_me.py"
-            sent_log = Path(tmp) / "sent.log"
-            _ = helper.write_text(
-                "#!/usr/bin/env python3\n"
-                "from pathlib import Path\n"
-                "import os\n"
-                "import sys\n"
-                "Path(os.environ['SENT_LOG']).write_text(sys.argv[1], encoding='utf-8')\n",
-                encoding="utf-8",
-            )
-            helper.chmod(0o700)
-            env = {
-                **os.environ,
-                "HOME": str(home),
-                "SENT_LOG": str(sent_log),
-                "EMAIL_ME_FAKE_SEND_LOG": str(sent_log),
-                "OMO_MANAGER_STATE_DIR": str(Path(tmp) / "state"),
-            }
-            subject_file = Path(tmp) / "subject.txt"
-            subject_file.write_text("Re: VL supervisor follow-up vl_supervisor_5410.md\n", encoding="utf-8")
-            message_file = Path(tmp) / "body.md"
-            message_file.write_text("ack\n", encoding="utf-8")
-            result = subprocess.run(
-                [
-                    str(Path.home() / ".config/omo_manager/omo_email_human.sh"),
-                    "--subject-file",
-                    str(subject_file),
-                    "--message-file",
-                    str(message_file),
-                ],
-                text=True,
-                capture_output=True,
-                timeout=10,
-                env=env,
-                check=False,
-            )
-            self.assertEqual(0, result.returncode, result.stderr)
-            self.assertEqual("Re: [a] VL supervisor follow-up vl_supervisor_5410.md\nack\n", sent_log.read_text(encoding="utf-8"))
-
-    def test_omo_email_human_help_shows_safe_body_pattern(self) -> None:
-        script = Path.home() / ".config/omo_manager/omo_email_human.sh"
-        result = subprocess.run([str(script), "--help"], text=True, capture_output=True, timeout=10, check=False)
-        self.assertEqual(0, result.returncode)
-        self.assertIn("Message body accepts Markdown input; plain text is preferred.", result.stdout)
-        self.assertIn('subject_file=$(mktemp "${TMPDIR:-/tmp}/omo-email-subject.XXXXXX")', result.stdout)
-        self.assertIn('body_file=$(mktemp "${TMPDIR:-/tmp}/omo-email-body.XXXXXX")', result.stdout)
-        self.assertIn('chmod 600 "$subject_file" "$body_file"', result.stdout)
-        self.assertIn("Write both files through an editor", result.stdout)
-        self.assertIn('omo_email_human.sh --subject-file "$subject_file" --message-file "$body_file"', result.stdout)
-        self.assertNotIn("omo" + "_text.py", result.stdout)
-
-    def test_omo_email_human_rejects_placeholder_subject_and_empty_body(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp) / "home"
-            helper_dir = home / ".config" / "helper.sh"
-            helper_dir.mkdir(parents=True)
-            helper = helper_dir / "email_me.py"
-            sent_log = Path(tmp) / "sent.log"
-            _ = helper.write_text(
-                "#!/usr/bin/env python3\n"
-                "from pathlib import Path\n"
-                "import os\n"
-                "Path(os.environ['SENT_LOG']).write_text('sent', encoding='utf-8')\n",
-                encoding="utf-8",
-            )
-            helper.chmod(0o700)
-            env = {
-                **os.environ,
-                "HOME": str(home),
-                "SENT_LOG": str(sent_log),
-                "OMO_MANAGER_STATE_DIR": str(Path(tmp) / "state"),
-            }
-            message_file = Path(tmp) / "body.md"
-            message_file.write_text("real body\n", encoding="utf-8")
-            for subject in ("SUBJECT", "SUBJECT\\", "Re: SUBJECT", "[a] SUBJECT\\", "Re: [a] SUBJECT\\", "[omo_manager] SUBJECT\\", "Re: [omo_manager] SUBJECT\\"):
-                subject_file = Path(tmp) / "subject.txt"
-                subject_file.write_text(subject + "\n", encoding="utf-8")
-                cmd = [str(Path.home() / ".config/omo_manager/omo_email_human.sh"), "--subject-file", str(subject_file), "--message-file", str(message_file)]
-                bad_subject = subprocess.run(cmd, text=True, capture_output=True, timeout=10, env=env, check=False)
-                self.assertEqual(2, bad_subject.returncode)
-                self.assertIn("placeholder SUBJECT", bad_subject.stderr)
-            empty_file = Path(tmp) / "empty.md"
-            empty_file.write_text("\n", encoding="utf-8")
-            good_subject = Path(tmp) / "good-subject.txt"
-            good_subject.write_text("Real subject\n", encoding="utf-8")
-            cmd = [str(Path.home() / ".config/omo_manager/omo_email_human.sh"), "--subject-file", str(good_subject), "--message-file", str(empty_file)]
-            empty_body = subprocess.run(cmd, text=True, capture_output=True, timeout=10, env=env, check=False)
-            self.assertEqual(2, empty_body.returncode)
-            self.assertIn("email body must not be empty", empty_body.stderr)
-            missing_body = subprocess.run([str(Path.home() / ".config/omo_manager/omo_email_human.sh"), "--subject-file", str(good_subject)], text=True, capture_output=True, timeout=10, env=env, check=False)
-            self.assertEqual(2, missing_body.returncode)
-            self.assertIn("--message-file", missing_body.stderr)
-            multiline_subject = Path(tmp) / "multiline-subject.txt"
-            multiline_subject.write_text("Real subject\n\n", encoding="utf-8")
-            multiline_result = subprocess.run([str(Path.home() / ".config/omo_manager/omo_email_human.sh"), "--subject-file", str(multiline_subject), "--message-file", str(message_file)], text=True, capture_output=True, timeout=10, env=env, check=False)
-            self.assertEqual(2, multiline_result.returncode)
-            self.assertIn("exactly one text line", multiline_result.stderr)
-            inline_subject = subprocess.run([str(Path.home() / ".config/omo_manager/omo_email_human.sh"), "--subject", "Real subject", "--message-file", str(message_file)], text=True, capture_output=True, timeout=10, env=env, check=False)
-            self.assertEqual(2, inline_subject.returncode)
-            self.assertIn("unknown argument", inline_subject.stderr)
-            self.assertFalse(sent_log.exists())
-
-    def test_omo_email_human_rejects_regular_agent_subjects(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp) / "home"
-            helper_dir = home / ".config" / "helper.sh"
-            helper_dir.mkdir(parents=True)
-            helper = helper_dir / "email_me.py"
-            sent_log = Path(tmp) / "sent.log"
-            _ = helper.write_text(
-                "#!/usr/bin/env python3\n"
-                "from pathlib import Path\n"
-                "import os\n"
-                "Path(os.environ['SENT_LOG']).write_text('sent', encoding='utf-8')\n",
-                encoding="utf-8",
-            )
-            helper.chmod(0o700)
-            env = {
-                **os.environ,
-                "HOME": str(home),
-                "SENT_LOG": str(sent_log),
-                "OMO_MANAGER_STATE_DIR": str(Path(tmp) / "state"),
-            }
-            message_file = Path(tmp) / "body.md"
-            message_file.write_text("real body\n", encoding="utf-8")
-            for subject in (
-                "[omo] agent-only tag",
-                "Re: [omo] agent reply tag",
-                "Re:[omo] agent reply tag",
-                "Re:  [omo] agent reply tag",
-                "RE:\t[omo] agent reply tag",
-                "[OMO] legacy agent tag",
-            ):
-                subject_file = Path(tmp) / "subject.txt"
-                subject_file.write_text(subject + "\n", encoding="utf-8")
-                cmd = [str(Path.home() / ".config/omo_manager/omo_email_human.sh"), "--subject-file", str(subject_file), "--message-file", str(message_file)]
-                result = subprocess.run(cmd, text=True, capture_output=True, timeout=10, env=env, check=False)
-                self.assertEqual(2, result.returncode)
-                if "\t" in subject:
-                    self.assertIn("control characters", result.stderr)
-                else:
-                    self.assertIn("[omo] is deprecated", result.stderr)
-            self.assertFalse(sent_log.exists())
-
 
 if __name__ == "__main__":
     _ = unittest.main()

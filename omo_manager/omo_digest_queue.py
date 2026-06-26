@@ -20,7 +20,7 @@ DEFAULT_STATE_DIR = Path(os.environ.get("OMO_MANAGER_STATE_DIR", Path(os.environ
 DEFAULT_QUEUE_FILE = Path("MANAGER_DIGEST_QUEUE.md")
 DEFAULT_MAIL_DIR = os.environ.get("OMO_MANAGER_MAIL_DIR", "")
 SAFE_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,80}$")
-DEFAULT_SEND_HELPER = Path.home() / ".config/omo_manager/omo_email_human.sh"
+DEFAULT_SEND_HELPER = Path.home() / ".config/helper.sh/email_me.py"
 LOCAL_TZ = datetime.now().astimezone().tzinfo
 BLOCK_RE = re.compile(r"(?ms)^---\n\(digest-item\)\n(?P<body>.*?)(?=^---\n\(digest-item\)\n|\Z)")
 
@@ -352,7 +352,7 @@ def command_deliver(args: argparse.Namespace) -> int:
         subject_file = write_private_temp(args.subject + "\n", ".txt")
         body_file = write_private_temp(body, ".md")
         try:
-            result = subprocess.run([str(args.send_helper), "--subject-file", str(subject_file), "--message-file", str(body_file)], text=True, check=False)
+            result = subprocess.run([str(args.send_helper), "--manager-human", "--subject-file", str(subject_file), "--message-file", str(body_file)], text=True, check=False)
             if result.returncode != 0:
                 return result.returncode
             replace_statuses(path, {item.item_id for item in queued}, iso_now())

@@ -274,6 +274,7 @@ class DigestQueueTests(unittest.TestCase):
                 f"#!/usr/bin/env bash\n"
                 "while [ \"$#\" -gt 0 ]; do\n"
                 "  case \"$1\" in\n"
+                "    --manager-human) shift ;;\n"
                 "    --subject-file) subject_file=\"$2\"; shift 2 ;;\n"
                 "    --message-file) message_file=\"$2\"; shift 2 ;;\n"
                 "    *) echo \"bad arg: $1\" >&2; exit 2 ;;\n"
@@ -307,14 +308,9 @@ class DigestQueueTests(unittest.TestCase):
             self.assertIn("sent-at:", queue_text)
             self.assertNotIn("status: queued", queue_text)
 
-    def test_omo_email_human_post_send_log_failure_still_exits_success(self) -> None:
+    def test_email_me_manager_human_post_send_log_failure_still_exits_success(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "home"
-            helper_dir = home / ".config" / "helper.sh"
-            helper_dir.mkdir(parents=True)
-            email_helper = helper_dir / "email_me.py"
-            email_helper.write_text(f"#!/usr/bin/env python3\nfrom pathlib import Path\nPath({str(Path(tmp) / 'sent.txt')!r}).write_text('sent')\n", encoding="utf-8")
-            email_helper.chmod(0o755)
             msg = Path(tmp) / "msg.md"
             msg.write_text("body\n", encoding="utf-8")
             subject = Path(tmp) / "subject.txt"
@@ -322,7 +318,7 @@ class DigestQueueTests(unittest.TestCase):
             bad_state = Path(tmp) / "not-a-dir"
             bad_state.write_text("file blocks mkdir\n", encoding="utf-8")
             result = subprocess.run(
-                [str(Path.home() / ".config/omo_manager/omo_email_human.sh"), "--subject-file", str(subject), "--message-file", str(msg)],
+                [str(Path.home() / ".config/helper.sh/email_me.py"), "--manager-human", "--subject-file", str(subject), "--message-file", str(msg)],
                 cwd=tmp,
                 env={"HOME": str(home), "EMAIL_ME_FAKE_SEND_LOG": str(Path(tmp) / "sent.txt"), "OMO_MANAGER_STATE_DIR": str(bad_state), "PATH": "/usr/bin:/bin"},
                 text=True,
