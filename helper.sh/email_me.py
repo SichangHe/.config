@@ -9,12 +9,16 @@ Credentials are loaded from `~/.config/.env`:
 from __future__ import annotations
 
 import argparse
+import fcntl
+import hashlib
 import os
 import re
 import smtplib
 import ssl
 import sys
+import time
 from dataclasses import dataclass
+from datetime import datetime
 from email.message import EmailMessage
 from html import escape
 from pathlib import Path
@@ -49,6 +53,7 @@ class CliArgs:
     content: str
     dry_run: bool
     add_pwd_footer: bool
+    manager_human: bool
 
 
 class ParsedArgs(argparse.Namespace):
@@ -58,6 +63,7 @@ class ParsedArgs(argparse.Namespace):
     message_file: Path | None = None
     dry_run: bool = False
     no_pwd_footer: bool = False
+    manager_human: bool = False
 
 
 def parse_args(argv: list[str]) -> CliArgs:
@@ -75,6 +81,7 @@ def parse_args(argv: list[str]) -> CliArgs:
     _ = parser.add_argument("--message-file", type=Path, help="Read the email body from this file instead of stdin.")
     _ = parser.add_argument("--dry-run", action="store_true", help="Validate without sending.")
     _ = parser.add_argument("--no-pwd-footer", action="store_true", help="Send the body exactly as provided, without appending a PWD footer.")
+    _ = parser.add_argument("--manager-human", action="store_true", help=argparse.SUPPRESS)
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     if parsed.title is not None and parsed.subject_file is not None:
         parser.error("pass email subject by argument or --subject-file, not both.")
@@ -114,7 +121,9 @@ def parse_args(argv: list[str]) -> CliArgs:
         codepoint = ord(ch)
         if codepoint < 32 or codepoint == 127:
             parser.error("`title` must not contain control characters.")
-    return CliArgs(title=title, content=content, dry_run=parsed.dry_run, add_pwd_footer=not parsed.no_pwd_footer)
+    if parsed.manager_human and not content.strip():
+        parser.error("email body must not be empty.")
+    return CliArgs(title=title, content=content, dry_run=parsed.dry_run, add_pwd_footer=not parsed.no_pwd_footer, manager_human=parsed.manager_human)
 
 
 def normalize_subject(title: str) -> str:
@@ -402,16 +411,84 @@ def parse_env_file(file_path: Path) -> dict[str, str]:
     return values
 
 
+def manager_state_dir() -> Path:
+    return Path(os.environ.get("OMO_MANAGER_STATE_DIR", Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "omo-manager"))
+
+
+def should_send_manager_email(subject: str, content: str) -> bool:
+    try:
+        state_dir = manager_state_dir()
+        state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        state_dir.chmod(0o700)
+        dedupe_s = int(os.environ.get("OMO_MANAGER_EMAIL_DEDUPE_S", "300"))
+        dedupe_file = state_dir / "human-email-dedupe.tsv"
+        lock_file = state_dir / "human-email-dedupe.lock"
+        digest = hashlib.sha256(subject.encode() + b"\0" + content.encode()).hexdigest()
+        now_s = int(time.time())
+        fd = os.open(lock_file, os.O_RDWR | os.O_CREAT, 0o600)
+        with os.fdopen(fd, "r+", encoding="utf-8") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            rows: list[tuple[int, str, str]] = []
+            try:
+                for line in dedupe_file.read_text(encoding="utf-8").splitlines():
+                    raw_s, old_digest, old_subject = line.split("\t", 2)
+                    sent_s = int(raw_s)
+                    if now_s - sent_s <= max(dedupe_s, 0):
+                        rows.append((sent_s, old_digest, old_subject))
+            except (OSError, ValueError):
+                pass
+            if any(old_digest == digest for _, old_digest, _ in rows):
+                return False
+            rows.append((now_s, digest, subject.replace("\t", " ").replace("\n", " ")))
+            tmp = dedupe_file.with_name(f".{dedupe_file.name}.tmp")
+            tmp.write_text("".join(f"{sent_s}\t{old_digest}\t{old_subject}\n" for sent_s, old_digest, old_subject in rows), encoding="utf-8")
+            tmp.chmod(0o600)
+            tmp.replace(dedupe_file)
+    except (OSError, ValueError):
+        return True
+    return True
+
+
+def log_manager_email(subject: str) -> None:
+    try:
+        state_dir = manager_state_dir()
+        state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        state_dir.chmod(0o700)
+        log_file = state_dir / "human-email-sent.tsv"
+        safe_subject = subject.replace("\t", " ").replace("\n", " ")
+        with log_file.open("a", encoding="utf-8") as handle:
+            handle.write(f"{datetime.now().astimezone().isoformat(timespec='seconds')}\t{safe_subject}\n")
+    except OSError:
+        pass
+
+
+def fake_send_log_path() -> Path | None:
+    value = os.environ.get("EMAIL_ME_FAKE_SEND_LOG", "")
+    return Path(value) if value else None
+
+
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
+    try:
+        subject = normalize_subject(args.title)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     if args.dry_run:
-        try:
-            subject = normalize_subject(args.title)
-        except ValueError as exc:
-            print(str(exc), file=sys.stderr)
-            return 2
         body = append_pwd_footer(args.content) if args.add_pwd_footer else args.content
         print(f"dry-run: email not sent; subject={subject}; body-bytes={len(body.encode())}")
+        return 0
+    if args.manager_human and not should_send_manager_email(subject, args.content):
+        print("Skipped duplicate human email")
+        return 0
+    if fake_log := fake_send_log_path():
+        fake_log.parent.mkdir(parents=True, exist_ok=True)
+        fake_log.write_text(f"{subject}\n{args.content}", encoding="utf-8")
+        if args.manager_human:
+            log_manager_email(subject)
+            print("Emailed the human")
+        else:
+            print("Email sent.")
         return 0
     env_values = parse_env_file(ENV_FILE_PATH)
     sender_email = env_values.get("EMAIL_ME_GMAIL_ADDRESS", "")
@@ -435,7 +512,6 @@ def main(argv: list[str]) -> int:
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
-
     try:
         ssl_context = ssl.create_default_context()
         with smtplib.SMTP_SSL(
@@ -456,7 +532,11 @@ def main(argv: list[str]) -> int:
         print(f"Email send failed: {exc}", file=sys.stderr)
         return 1
 
-    print("Email sent.")
+    if args.manager_human:
+        log_manager_email(subject)
+        print("Emailed the human")
+    else:
+        print("Email sent.")
     return 0
 
 

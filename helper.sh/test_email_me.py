@@ -242,6 +242,30 @@ class EmailMeTests(unittest.TestCase):
         self.assertEqual(0, result)
         self.assertIn("body-bytes=5", stdout.getvalue())
 
+    def test_manager_human_mode_dedupes_and_logs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp) / "state"
+            send_log = Path(tmp) / "sent.txt"
+            body = Path(tmp) / "body.md"
+            body.write_text("body\n", encoding="utf-8")
+            subject = Path(tmp) / "subject.txt"
+            subject.write_text("Manager update\n", encoding="utf-8")
+            env = {
+                "EMAIL_ME_FAKE_SEND_LOG": str(send_log),
+                "OMO_MANAGER_STATE_DIR": str(state_dir),
+                "OMO_MANAGER_EMAIL_DEDUPE_S": "300",
+                "OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "0",
+            }
+            with patch.dict(os.environ, env, clear=False), patch("sys.stdout", new_callable=StringIO) as stdout:
+                first = email_me.main(["--manager-human", "--subject-file", str(subject), "--message-file", str(body)])
+                second = email_me.main(["--manager-human", "--subject-file", str(subject), "--message-file", str(body)])
+            self.assertEqual(0, first)
+            self.assertEqual(0, second)
+            self.assertIn("Emailed the human", stdout.getvalue())
+            self.assertIn("Skipped duplicate human email", stdout.getvalue())
+            self.assertEqual("[a] Manager update\nbody\n", send_log.read_text(encoding="utf-8"))
+            self.assertIn("[a] Manager update", (state_dir / "human-email-sent.tsv").read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     _ = unittest.main()

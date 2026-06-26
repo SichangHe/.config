@@ -13,6 +13,7 @@ import select
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,6 +38,7 @@ DEFAULT_AGENT_PROBLEM_TIMEOUT_S = float(
 DEFAULT_POLL_BACKSTOP_INTERVAL_S = float(os.environ.get("OMO_MANAGER_POLL_BACKSTOP_INTERVAL_S", "30"))
 DEFAULT_TMUX_READY_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_TMUX_READY_TIMEOUT_S", os.environ.get("OMO_DISPATCH_TMUX_READY_TIMEOUT_S", "300")))
 DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_TMUX_SUBMIT_VERIFY_TIMEOUT_S", "5"))
+DEFAULT_HUMAN_EMAIL_HELPER = Path(__file__).with_name("omo_email_human.sh")
 PENDING_MARKERS = {"(pending)"}
 TASK_FILE_LINE_WARNING_THRESHOLD = 2000
 ROUTED_PREFIXES = ("(manager handled:", "(manager routed:")
@@ -508,6 +510,14 @@ def manager_self_problem_line(line: str, manager_target: str = "") -> bool:
     return same_tmux_target(evidence_target(line), manager_target)
 
 
+def manager_human_email_problem_line(line: str, manager_target: str = "") -> bool:
+    if re.match(r"^(?:error|not_codex): task=manager evidence=.*\brole=manager\b", line):
+        return True
+    if re.match(r"^(?:error|not_codex): task=\S+ evidence=target=", line) is None:
+        return False
+    return same_tmux_target(evidence_target(line), manager_target)
+
+
 def manager_self_unstuck_line(line: str, manager_target: str = "") -> bool:
     if re.match(r"^unstuck: target=\S+ task=manager action=sent_enter$", line):
         return True
@@ -538,6 +548,58 @@ def filter_manager_self_problem_output(output: str, manager_target: str = "") ->
     return "\n".join([f"agent-problems: {' '.join(parts)}", *kept])
 
 
+def manager_human_email_problem_output(output: str, manager_target: str = "") -> str:
+    lines = output.splitlines()
+    if not lines or not lines[0].startswith("agent-problems:"):
+        return ""
+    kept = [line for line in lines[1:] if manager_human_email_problem_line(line, manager_target)]
+    if not kept:
+        return ""
+    counts = {"not_codex": 0, "error": 0}
+    for line in kept:
+        problem_match = re.match(r"^(not_codex|error): ", line)
+        if problem_match is not None:
+            counts[problem_match.group(1)] += 1
+    parts = [f"{status}={counts[status]}" for status in ("not_codex", "error") if counts[status]]
+    return "\n".join([f"manager-problems: {' '.join(parts)}", *kept])
+
+
+def email_human_manager_problem(args: Args, output: str) -> bool:
+    if not output:
+        return False
+    subject = "manager watcher detected manager error"
+    body = (
+        "The manager watcher detected a manager pane problem that may prevent normal manager delivery.\n\n"
+        f"root: {args.root}\n"
+        f"manager_target: {args.manager_target or 'unset'}\n\n"
+        f"{output}\n"
+    )
+    if args.dry_run:
+        print(f"manager human email due: {subject}\n{body}", flush=True)
+        return True
+    try:
+        with tempfile.TemporaryDirectory(prefix="omo-manager-problem-email.") as tmp:
+            tmp_path = Path(tmp)
+            subject_file = tmp_path / "subject.txt"
+            body_file = tmp_path / "body.md"
+            subject_file.write_text(subject + "\n", encoding="utf-8")
+            body_file.write_text(body, encoding="utf-8")
+            result = subprocess.run(
+                [str(DEFAULT_HUMAN_EMAIL_HELPER), "--subject-file", str(subject_file), "--message-file", str(body_file)],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"omo_pending_watch: manager problem human email failed: {exc}", file=sys.stderr)
+        return False
+    if result.returncode != 0:
+        print(f"omo_pending_watch: manager problem human email exited status={result.returncode}: {result.stderr.strip()}", file=sys.stderr)
+        return False
+    return True
+
+
 def maybe_push_agent_problems(args: Args, seen: dict[str, float], now_wall_s: float) -> bool:
     command = status_command(args, True)
     try:
@@ -562,17 +624,19 @@ def handle_agent_problem_result(args: Args, seen: dict[str, float], result: Comm
         return False
     if result.stderr.strip():
         output = f"{output}\nstderr:\n{result.stderr.strip()}".strip()
+    manager_email_output = manager_human_email_problem_output(output, args.manager_target)
+    manager_email_sent = email_human_manager_problem(args, manager_email_output)
     output = filter_manager_self_problem_output(output, args.manager_target) or ""
     if not output:
-        return False
+        return manager_email_sent
     has_unstuck = any(line.startswith("unstuck: ") for line in output.splitlines())
     digest = hashlib.sha256(output.encode("utf-8")).hexdigest()[:16]
     key = f"agent-problem:{digest}"
     if not has_unstuck and now_wall_s - seen.get(key, 0.0) < args.agent_problem_repeat_s:
-        return False
+        return manager_email_sent
     text = f"{AGENT_PROBLEM_SOURCE_LINE}\nmanager agent problem: running task marker needs attention.\n{output}"
     if push_manager_text(args, text) not in {0, 2}:
-        return False
+        return manager_email_sent
     seen[key] = now_wall_s
     return True
 

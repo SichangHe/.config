@@ -2408,6 +2408,64 @@ class PendingMarkerTests(unittest.TestCase):
         self.assertNotIn("manager agent problem: running task marker needs attention.", text)
         self.assertNotIn("unstuck:", text)
 
+    def test_agent_problem_check_emails_human_for_manager_error(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, True, manager_target="wl:1.0", agent_problem_repeat_s=300.0)
+        result = watcher.CommandOutput(
+            "agent-problems",
+            3,
+            "agent-problems: error=1\nerror: task=manager evidence=target=wl:1.0 role=manager output=Selected model is at capacity\n",
+            "",
+        )
+        out = StringIO()
+        with redirect_stdout(out):
+            self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
+        text = out.getvalue()
+        self.assertIn("manager human email due: manager watcher detected manager error", text)
+        self.assertIn("manager-problems: error=1", text)
+        self.assertIn("error: task=manager evidence=target=wl:1.0 role=manager", text)
+        self.assertIn("suppressed manager self-problem report", text)
+        self.assertNotIn("manager agent problem: running task marker needs attention.", text)
+
+    def test_agent_problem_check_invokes_human_email_helper_for_manager_error(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            helper = root / "fake-email.sh"
+            log = root / "email.log"
+            helper.write_text(
+                "#!/usr/bin/env bash\n"
+                "set -euo pipefail\n"
+                "subject_file=\n"
+                "message_file=\n"
+                "while [ \"$#\" -gt 0 ]; do\n"
+                "  case \"$1\" in\n"
+                "    --subject-file) subject_file=\"$2\"; shift 2 ;;\n"
+                "    --message-file) message_file=\"$2\"; shift 2 ;;\n"
+                "    *) echo \"bad arg: $1\" >&2; exit 2 ;;\n"
+                "  esac\n"
+                "done\n"
+                f"{{ printf 'subject:\\n'; cat \"$subject_file\"; printf 'body:\\n'; cat \"$message_file\"; }} > {str(log)!r}\n",
+                encoding="utf-8",
+            )
+            helper.chmod(0o700)
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, root / "status.py", False, False, manager_target="wl:1.0", agent_problem_repeat_s=300.0)
+            result = watcher.CommandOutput(
+                "agent-problems",
+                3,
+                "agent-problems: error=1\nerror: task=manager evidence=target=wl:1.0 role=manager output=Selected model is at capacity\n",
+                "",
+            )
+            with patch.object(watcher, "DEFAULT_HUMAN_EMAIL_HELPER", helper):
+                self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
+            text = log.read_text(encoding="utf-8")
+            self.assertIn("subject:\nmanager watcher detected manager error\n", text)
+            self.assertIn("body:\nThe manager watcher detected a manager pane problem", text)
+            self.assertIn("manager-problems: error=1", text)
+            self.assertIn("error: task=manager evidence=target=wl:1.0 role=manager", text)
+
     def test_agent_problem_check_suppresses_manager_target_alias_prompt(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
@@ -2576,6 +2634,7 @@ class PendingMarkerTests(unittest.TestCase):
                 **os.environ,
                 "HOME": str(home),
                 "SENT_LOG": str(sent_log),
+                "EMAIL_ME_FAKE_SEND_LOG": str(sent_log),
                 "OMO_MANAGER_STATE_DIR": str(Path(tmp) / "state"),
                 "OMO_MANAGER_EMAIL_DEDUPE_S": "300",
             }
@@ -2627,6 +2686,7 @@ class PendingMarkerTests(unittest.TestCase):
                 **os.environ,
                 "HOME": str(home),
                 "SENT_LOG": str(sent_log),
+                "EMAIL_ME_FAKE_SEND_LOG": str(sent_log),
                 "OMO_MANAGER_STATE_DIR": str(Path(tmp) / "state"),
                 "OMO_MANAGER_EMAIL_UNREAD_COMPRESSION_THRESHOLD": "not-an-int",
             }
@@ -2653,7 +2713,7 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertFalse(cmd_sentinel.exists())
             self.assertFalse(backtick_sentinel.exists())
             text = sent_log.read_text(encoding="utf-8")
-            self.assertIn("[a] --help $HOME `subject`\n" + body_text + "\n--END--\n", text)
+            self.assertIn("[a] --help $HOME `subject`\n" + body_text, text)
 
     def test_omo_email_human_bin_symlink_finds_subject_helper(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2686,7 +2746,7 @@ class PendingMarkerTests(unittest.TestCase):
                 text=True,
                 capture_output=True,
                 timeout=10,
-                env={**os.environ, "HOME": str(home), "SENT_LOG": str(sent_log), "OMO_MANAGER_STATE_DIR": str(Path(tmp) / "state"), "OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "0"},
+                env={**os.environ, "HOME": str(home), "SENT_LOG": str(sent_log), "EMAIL_ME_FAKE_SEND_LOG": str(sent_log), "OMO_MANAGER_STATE_DIR": str(Path(tmp) / "state"), "OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "0"},
                 check=False,
             )
             self.assertEqual(0, result.returncode, result.stderr)
@@ -2724,6 +2784,7 @@ class PendingMarkerTests(unittest.TestCase):
                 **os.environ,
                 "HOME": str(home),
                 "SENT_LOG": str(sent_log),
+                "EMAIL_ME_FAKE_SEND_LOG": str(sent_log),
                 "OMO_MANAGER_STATE_DIR": str(Path(tmp) / "state"),
             }
             message_file = Path(tmp) / "body.md"
@@ -2747,7 +2808,7 @@ class PendingMarkerTests(unittest.TestCase):
                         check=False,
                     )
                     self.assertEqual(0, result.returncode, result.stderr)
-                    self.assertIn("subject=Re: [a] existing thread;", sent_log.read_text(encoding="utf-8"))
+                    self.assertEqual("Re: [a] existing thread\nack\n", sent_log.read_text(encoding="utf-8"))
 
     def test_omo_email_human_sends_bare_reply_subject_with_short_tag(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2769,6 +2830,7 @@ class PendingMarkerTests(unittest.TestCase):
                 **os.environ,
                 "HOME": str(home),
                 "SENT_LOG": str(sent_log),
+                "EMAIL_ME_FAKE_SEND_LOG": str(sent_log),
                 "OMO_MANAGER_STATE_DIR": str(Path(tmp) / "state"),
             }
             subject_file = Path(tmp) / "subject.txt"
@@ -2790,7 +2852,7 @@ class PendingMarkerTests(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(0, result.returncode, result.stderr)
-            self.assertEqual("Re: [a] VL supervisor follow-up vl_supervisor_5410.md", sent_log.read_text(encoding="utf-8"))
+            self.assertEqual("Re: [a] VL supervisor follow-up vl_supervisor_5410.md\nack\n", sent_log.read_text(encoding="utf-8"))
 
     def test_omo_email_human_help_shows_safe_body_pattern(self) -> None:
         script = Path.home() / ".config/omo_manager/omo_email_human.sh"
@@ -2891,7 +2953,10 @@ class PendingMarkerTests(unittest.TestCase):
                 cmd = [str(Path.home() / ".config/omo_manager/omo_email_human.sh"), "--subject-file", str(subject_file), "--message-file", str(message_file)]
                 result = subprocess.run(cmd, text=True, capture_output=True, timeout=10, env=env, check=False)
                 self.assertEqual(2, result.returncode)
-                self.assertIn("[omo] is deprecated", result.stderr)
+                if "\t" in subject:
+                    self.assertIn("control characters", result.stderr)
+                else:
+                    self.assertIn("[omo] is deprecated", result.stderr)
             self.assertFalse(sent_log.exists())
 
 

@@ -324,7 +324,7 @@ class DigestQueueTests(unittest.TestCase):
             result = subprocess.run(
                 [str(Path.home() / ".config/omo_manager/omo_email_human.sh"), "--subject-file", str(subject), "--message-file", str(msg)],
                 cwd=tmp,
-                env={"HOME": str(home), "OMO_MANAGER_STATE_DIR": str(bad_state), "PATH": "/usr/bin:/bin"},
+                env={"HOME": str(home), "EMAIL_ME_FAKE_SEND_LOG": str(Path(tmp) / "sent.txt"), "OMO_MANAGER_STATE_DIR": str(bad_state), "PATH": "/usr/bin:/bin"},
                 text=True,
                 capture_output=True,
                 timeout=10,
@@ -332,7 +332,7 @@ class DigestQueueTests(unittest.TestCase):
             )
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertEqual("Emailed the human\n", result.stdout)
-            self.assertEqual("sent", (Path(tmp) / "sent.txt").read_text(encoding="utf-8"))
+            self.assertEqual("[a] test\nbody\n", (Path(tmp) / "sent.txt").read_text(encoding="utf-8"))
 
     def test_first_use_concurrent_submit_and_deliver_preserves_item(self) -> None:
         for _ in range(10):
