@@ -12,7 +12,7 @@ root="${OMO_WORK_LOGS_ROOT:-$HOME/work_logs}"
 state_dir="${OMO_MANAGER_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/omo-manager}"
 workdir="${OMO_MANAGER_WORKDIR:-$HOME/.config}"
 tmux_target="${OMO_MANAGER_TMUX_TARGET:-}"
-manager_model="${OMO_MANAGER_MODEL:-openai/gpt-5.4}"
+manager_model="${OMO_MANAGER_MODEL:-openai/gpt-5.5}"
 
 usage() {
   cat <<'EOF'

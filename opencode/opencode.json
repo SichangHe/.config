@@ -123,12 +123,6 @@
         "claude-opus-4-7-thinking-high": {
           "name": "Opus 4.7 1M High Thinking"
         },
-        "gpt-5.4-high": {
-          "name": "GPT-5.4 1M High"
-        },
-        "gpt-5.4-high-fast": {
-          "name": "GPT-5.4 High Fast"
-        },
         "claude-4.6-opus-high-thinking": {
           "name": "Opus 4.6 1M Thinking"
         },
@@ -183,21 +177,6 @@
         },
         "claude-opus-4-7-thinking-max": {
           "name": "Opus 4.7 1M Max Thinking"
-        },
-        "gpt-5.4-low": {
-          "name": "GPT-5.4 1M Low"
-        },
-        "gpt-5.4-medium": {
-          "name": "GPT-5.4 1M"
-        },
-        "gpt-5.4-medium-fast": {
-          "name": "GPT-5.4 Fast"
-        },
-        "gpt-5.4-xhigh": {
-          "name": "GPT-5.4 1M Extra High"
-        },
-        "gpt-5.4-xhigh-fast": {
-          "name": "GPT-5.4 Extra High Fast"
         },
         "claude-4.6-opus-high": {
           "name": "Opus 4.6 1M"
@@ -255,21 +234,6 @@
         },
         "gpt-5.4-mini-xhigh": {
           "name": "GPT-5.4 Mini Extra High"
-        },
-        "gpt-5.4-nano-none": {
-          "name": "GPT-5.4 Nano None"
-        },
-        "gpt-5.4-nano-low": {
-          "name": "GPT-5.4 Nano Low"
-        },
-        "gpt-5.4-nano-medium": {
-          "name": "GPT-5.4 Nano"
-        },
-        "gpt-5.4-nano-high": {
-          "name": "GPT-5.4 Nano High"
-        },
-        "gpt-5.4-nano-xhigh": {
-          "name": "GPT-5.4 Nano Extra High"
         },
         "grok-4-20": {
           "name": "Grok 4.20"
