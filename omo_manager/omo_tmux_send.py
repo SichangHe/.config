@@ -176,7 +176,11 @@ def wait_ready(args: Args) -> None:
     while True:
         lines = tail(args.target, 80)
         last_status = status(lines, current_block(lines))
-        if last_status in {"ready", "not_codex"}:
+        if last_status == "not_codex":
+            raise RuntimeError(f"target is not a Codex pane: {args.target}")
+        if last_status == "error":
+            raise RuntimeError(f"target is in Codex error state: {args.target}")
+        if last_status == "ready":
             return
         if last_status == "stuck_input":
             return
@@ -244,6 +248,15 @@ def wait_compaction_over_before_send(args: Args, n_lines: int = COMPACTION_WAIT_
         _ = wait_while_compacting(args.target, n_lines, compaction_wait_timeout_s(args))
     except TimeoutError as exc:
         raise RuntimeError(str(exc)) from exc
+
+
+def require_codex_target(args: Args, n_lines: int = 80) -> None:
+    lines = tail(args.target, n_lines)
+    current_status = status(lines, current_block(lines))
+    if current_status == "not_codex":
+        raise RuntimeError(f"target is not a Codex pane: {args.target}")
+    if current_status == "error":
+        raise RuntimeError(f"target is in Codex error state: {args.target}")
 
 
 def send_literal(target: str, text: str) -> None:
@@ -399,6 +412,7 @@ def run_tmux(args: Args, message: str) -> None:
         clear_result = clear_stuck_input_before_send(args)
         if clear_result in {"compacting", "failed"} or clear_result.startswith("not_safe:"):
             raise RuntimeError(f"target stuck input not cleared before tmux paste: {clear_result}")
+        require_codex_target(args, inspect_lines_for_message(message))
         if args.enter_count:
             _ = subprocess.run(["tmux", "send-keys", "-t", args.target, "C-u"], timeout=5, check=True)
         _ = subprocess.run(["tmux", "load-buffer", "-b", buffer_name, str(temp_path)], timeout=5, check=True)

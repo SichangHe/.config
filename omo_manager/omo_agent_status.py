@@ -360,6 +360,62 @@ def classify_task(task: TaskLine, record: SessionRecord | None, auto_unstick: bo
     return classify_target(task.task_file, target, task.persistent_role, task.status, auto_unstick, unstick_by_target=unstick_by_target, auto_unstick_disabled_reason=auto_unstick_disabled_reason)
 
 
+def registry_unmanaged_task(record: SessionRecord, root: Path) -> TaskLine:
+    path = resolve_task_path(root, record.task_file)
+    state = scan_task_state(path) if path is not None else None
+    target = record.target or (state.target if state is not None else "")
+    port = record.port if record.port is not None or state is None else state.port
+    task_status = state.status if state is not None else "unlinked"
+    return TaskLine(record.task_file, "registry-unmanaged", "", target, port, task_status, state.persistent_role if state is not None else False)
+
+
+def registry_unmanaged_problem_rows(args: Args, records: list[SessionRecord], skip_targets: set[str], auto_unstick: bool, unstick_by_target: dict[str, str], auto_unstick_disabled_reason: str) -> list[StatusRow]:
+    rows: list[StatusRow] = []
+    seen_targets = {canonical_target(target) for target in skip_targets if target}
+    for record in records:
+        target = canonical_target(record.target)
+        if not target or target in seen_targets:
+            continue
+        task = registry_unmanaged_task(record, args.root)
+        row = classify_target(task.task_file, task.target, task.persistent_role, task.status, auto_unstick, role="registry_unmanaged", unstick_by_target=unstick_by_target, auto_unstick_disabled_reason=auto_unstick_disabled_reason)
+        if row.status in {"error", "not_codex", "stuck_input"}:
+            rows.append(row)
+            seen_targets.add(target)
+    return rows
+
+
+def todo_unmanaged_task(root: Path, task: TaskLine) -> TaskLine | None:
+    if not task.target:
+        return None
+    path = resolve_task_path(root, task.task_file)
+    state = scan_task_state(path) if path is not None else None
+    target = task.target
+    port = task.port
+    task_status = "unlinked"
+    persistent_role = False
+    if state is not None:
+        task_status = state.status
+        persistent_role = state.persistent_role
+    return TaskLine(task.task_file, "todo-unmanaged", task.line, target, port, task_status, persistent_role)
+
+
+def todo_unmanaged_problem_rows(args: Args, skip_targets: set[str], auto_unstick: bool, unstick_by_target: dict[str, str], auto_unstick_disabled_reason: str) -> list[StatusRow]:
+    rows: list[StatusRow] = []
+    seen_targets = {canonical_target(target) for target in skip_targets if target}
+    for task in parse_task_lines(args.root / "TODO.md"):
+        unmanaged = todo_unmanaged_task(args.root, task)
+        if unmanaged is None:
+            continue
+        target = canonical_target(unmanaged.target)
+        if not target or target in seen_targets:
+            continue
+        row = classify_target(unmanaged.task_file, unmanaged.target, unmanaged.persistent_role, unmanaged.status, auto_unstick, role="todo_unmanaged", unstick_by_target=unstick_by_target, auto_unstick_disabled_reason=auto_unstick_disabled_reason)
+        if row.status in {"error", "stuck_input"} or (row.status == "not_codex" and " output=" in row.evidence):
+            rows.append(row)
+            seen_targets.add(target)
+    return rows
+
+
 def manager_problem_row(args: Args, skip_targets: set[str], unstick_by_target: dict[str, str]) -> StatusRow | None:
     if not args.manager_target or any(same_tmux_target(args.manager_target, target) for target in skip_targets):
         return None
@@ -408,7 +464,7 @@ PROBLEM_STATUSES = {"error", "not_codex", "ready", "stuck_input"}
 
 
 def is_parked_persistent_blocked_row(row: StatusRow) -> bool:
-    return row.persistent_role and row.task_status == "blocked" and row.status in {"not_codex", "ready"}
+    return row.persistent_role and row.task_status == "blocked" and row.status == "ready"
 
 
 def format_problem_summary(rows: list[StatusRow], completed_stale: set[str]) -> str:
@@ -450,7 +506,15 @@ def main(argv: list[str]) -> int:
         if args.problems_only:
             standby_tasks = persistent_blocked_task_lines(args.root)
             rows.extend(classify_task(task, choose_session(task, records), auto_unstick, unstick_by_target, args.manager_target, auto_unstick_disabled_reason) for task in standby_tasks)
-            manager_row = manager_problem_row(args, {display_target(task, choose_session(task, records)) for task in [*tasks, *standby_tasks]}, unstick_by_target)
+            inspected_tasks = [*tasks, *standby_tasks]
+            inspected_targets = {display_target(task, choose_session(task, records)) for task in inspected_tasks}
+            unmanaged_rows = registry_unmanaged_problem_rows(args, records, inspected_targets, auto_unstick, unstick_by_target, auto_unstick_disabled_reason)
+            rows.extend(unmanaged_rows)
+            inspected_targets.update(row.target for row in unmanaged_rows if row.target)
+            todo_rows = todo_unmanaged_problem_rows(args, inspected_targets, auto_unstick, unstick_by_target, auto_unstick_disabled_reason)
+            rows.extend(todo_rows)
+            inspected_targets.update(row.target for row in todo_rows if row.target)
+            manager_row = manager_problem_row(args, inspected_targets, unstick_by_target)
             if manager_row is not None:
                 rows.append(manager_row)
         completed_stale = {record.task_file for record in records if record.task_file in done}

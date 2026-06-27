@@ -20,6 +20,7 @@ from omo_manager.omo_tmux_send import (
     parse_args,
     pending_marker_present,
     read_message,
+    require_codex_target,
     run_async_worker,
     run_tmux,
     verify_submit,
@@ -115,7 +116,7 @@ class TmuxSendTests(unittest.TestCase):
             calls.append(command)
             return subprocess.CompletedProcess(command, 0)
 
-        with patch("omo_manager.omo_tmux_send.wait_compaction_over_before_send"), patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
+        with patch("omo_manager.omo_tmux_send.wait_compaction_over_before_send"), patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.require_codex_target"), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
             run_tmux(Args("cfg:1.0", None, 1, 0.15, 0, False), "literal C-c $(bad)\n")
 
         self.assertEqual("tmux", calls[0][0])
@@ -137,7 +138,7 @@ class TmuxSendTests(unittest.TestCase):
             events.append(command[1])
             return subprocess.CompletedProcess(command, 0)
 
-        with patch("omo_manager.omo_tmux_send.wait_compaction_over_before_send", side_effect=fake_wait), patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
+        with patch("omo_manager.omo_tmux_send.wait_compaction_over_before_send", side_effect=fake_wait), patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.require_codex_target"), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
             run_tmux(Args("cfg:1.0", None, 1, 0.15, 0, False), "prompt")
 
         load_idx = events.index("load-buffer")
@@ -154,7 +155,7 @@ class TmuxSendTests(unittest.TestCase):
             calls.append(command)
             return subprocess.CompletedProcess(command, 0)
 
-        with patch("omo_manager.omo_tmux_send.wait_compaction_over_before_send") as wait_compaction, patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.time.sleep") as sleep, patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
+        with patch("omo_manager.omo_tmux_send.wait_compaction_over_before_send") as wait_compaction, patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.require_codex_target"), patch("omo_manager.omo_tmux_send.time.sleep") as sleep, patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
             run_tmux(Args("cfg:1.0", None, 2, 0.15, 0, False), "prompt")
 
         self.assertEqual(4, wait_compaction.call_count)
@@ -273,6 +274,40 @@ class TmuxSendTests(unittest.TestCase):
             wait_ready(Args("cfg:1.0", None, 1, 0.15, 1, False))
 
         self.assertEqual(2, len(seen))
+
+    def test_wait_ready_rejects_not_codex_target(self) -> None:
+        with patch("omo_manager.omo_tmux_send.tail", return_value=["fish prompt"]):
+            with self.assertRaisesRegex(RuntimeError, "not a Codex pane"):
+                wait_ready(Args("vl:20.0", None, 1, 0.15, 1, False))
+
+    def test_wait_ready_rejects_error_target(self) -> None:
+        lines = ["────", "Selected model is at capacity. Please try a different model.", "› Use /skills to list available skills", "  gpt-5.5"]
+        with patch("omo_manager.omo_tmux_send.tail", return_value=lines):
+            with self.assertRaisesRegex(RuntimeError, "Codex error state"):
+                wait_ready(Args("vl:7.0", None, 1, 0.15, 1, False))
+
+    def test_require_codex_target_rejects_not_codex_before_paste(self) -> None:
+        with patch("omo_manager.omo_tmux_send.tail", return_value=["fish prompt"]):
+            with self.assertRaisesRegex(RuntimeError, "not a Codex pane"):
+                require_codex_target(Args("vl:20.0", None, 1, 0.15, 0, False))
+
+    def test_require_codex_target_rejects_error_before_paste(self) -> None:
+        lines = ["────", "Selected model is at capacity. Please try a different model.", "› Use /skills to list available skills", "  gpt-5.5"]
+        with patch("omo_manager.omo_tmux_send.tail", return_value=lines):
+            with self.assertRaisesRegex(RuntimeError, "Codex error state"):
+                require_codex_target(Args("vl:7.0", None, 1, 0.15, 0, False))
+
+    def test_run_tmux_rejects_not_codex_before_paste(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch("omo_manager.omo_tmux_send.wait_compaction_over_before_send"), patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.tail", return_value=["fish prompt"]), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
+            with self.assertRaisesRegex(RuntimeError, "not a Codex pane"):
+                run_tmux(Args("vl:20.0", None, 1, 0.15, 0, False), "VL deterministic watchdog\n")
+        self.assertEqual([], [call for call in calls if call[:2] != ["tmux", "delete-buffer"]])
 
     def test_input_probe_matches_codex_input_only(self) -> None:
         self.assertEqual("Read the dispatch prompt", message_probe("\nRead the dispatch prompt\nmore"))
@@ -484,7 +519,7 @@ class TmuxSendTests(unittest.TestCase):
             calls.append("clear")
             return "sent_enter" if len(calls) == 2 else ""
 
-        with patch("omo_manager.omo_tmux_send.wait_compaction_over_before_send"), patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", side_effect=fake_clear), patch("omo_manager.omo_tmux_send.wait_ready") as wait, patch("omo_manager.omo_tmux_send.subprocess.run", return_value=subprocess.CompletedProcess(["tmux"], 0)):
+        with patch("omo_manager.omo_tmux_send.wait_compaction_over_before_send"), patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", side_effect=fake_clear), patch("omo_manager.omo_tmux_send.wait_ready") as wait, patch("omo_manager.omo_tmux_send.require_codex_target"), patch("omo_manager.omo_tmux_send.subprocess.run", return_value=subprocess.CompletedProcess(["tmux"], 0)):
             run_tmux(Args("cfg:1.0", None, 0, 0.15, 0, False), "prompt")
 
         wait.assert_called_once()
@@ -497,7 +532,7 @@ class TmuxSendTests(unittest.TestCase):
             calls.append(command)
             return subprocess.CompletedProcess(command, 0)
 
-        with patch("omo_manager.omo_tmux_send.wait_compaction_over_before_send"), patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", side_effect=["", "not_safe:compacting"]), patch("omo_manager.omo_tmux_send.wait_ready"), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
+        with patch("omo_manager.omo_tmux_send.wait_compaction_over_before_send"), patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", side_effect=["", "not_safe:compacting"]), patch("omo_manager.omo_tmux_send.wait_ready"), patch("omo_manager.omo_tmux_send.require_codex_target"), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
             with self.assertRaisesRegex(RuntimeError, "not_safe:compacting"):
                 run_tmux(Args("cfg:1.0", None, 1, 0.15, 0, False), "prompt")
 
@@ -510,7 +545,7 @@ class TmuxSendTests(unittest.TestCase):
             calls.append(command)
             return subprocess.CompletedProcess(command, 0)
 
-        with patch("omo_manager.omo_tmux_send.wait_compaction_over_before_send"), patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", return_value="failed"), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
+        with patch("omo_manager.omo_tmux_send.wait_compaction_over_before_send"), patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", return_value="failed"), patch("omo_manager.omo_tmux_send.require_codex_target"), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
             with self.assertRaisesRegex(RuntimeError, "failed"):
                 run_tmux(Args("cfg:1.0", None, 0, 0.15, 0, False), "prompt")
 
@@ -559,7 +594,7 @@ class TmuxSendTests(unittest.TestCase):
             calls.append(command)
             return subprocess.CompletedProcess(command, 0)
 
-        with patch("omo_manager.omo_tmux_send.wait_compaction_over_before_send"), patch("omo_manager.omo_tmux_send.uuid.uuid4", return_value=Uuid()), patch("omo_manager.omo_tmux_send.tail", side_effect=fake_tail), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
+        with patch("omo_manager.omo_tmux_send.wait_compaction_over_before_send"), patch("omo_manager.omo_tmux_send.require_codex_target"), patch("omo_manager.omo_tmux_send.uuid.uuid4", return_value=Uuid()), patch("omo_manager.omo_tmux_send.tail", side_effect=fake_tail), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
             run_tmux(Args("cfg:1.0", None, 1, 0.15, 0, False, submit_verify_timeout_s=1), "Summarize recent commits\n")
 
         self.assertIn(["tmux", "send-keys", "-l", "-t", "cfg:1.0", sentinel], calls)
