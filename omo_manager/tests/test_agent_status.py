@@ -674,6 +674,34 @@ class AgentStatusTests(unittest.TestCase):
             self.assertIn("error: task=stale.md evidence=target=vl:9 role=todo_unmanaged task_status=done", text)
             self.assertNotIn("target=vl:10 role=todo_unmanaged", text)
 
+    def test_problems_only_reports_live_vl_panes_without_todo_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("previous:\nvl_supervisor_5410.md\nvl_old_review.md\n", encoding="utf-8")
+            _ = (root / "vl_supervisor_5410.md").write_text("runat: vl:20 codex\n(done)\n", encoding="utf-8")
+            _ = (root / "vl_old_review.md").write_text("(done)\n", encoding="utf-8")
+
+            def fake_inspect(args: object) -> Report:
+                target = getattr(args, "target")
+                if target == "vl:20":
+                    return Report("not_codex", ["fish prompt"])
+                if target == "vl:15":
+                    return Report("stuck_input", ["› pasted prompt"], "pasted prompt", True)
+                if target == "vl:0":
+                    return Report("not_codex", ["editor shell"])
+                return Report("running", ["working"])
+
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.tmux_list_panes", return_value=["vl:0", "vl:15", "vl:20", "wl:2"]), patch("omo_manager.omo_agent_status.inspect", side_effect=fake_inspect), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present", return_value="sent_enter"), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            text = out.getvalue()
+            self.assertIn("not_codex: task=vl_supervisor_5410.md evidence=target=vl:20 role=todo_unmanaged", text)
+            self.assertIn("stuck_input: task=tmux:vl:15 evidence=target=vl:15 role=tmux_unmanaged", text)
+            self.assertNotIn("tmux:vl:0", text)
+            self.assertNotIn("wl:2", text)
+
     def test_problems_only_reports_stale_done_registry_even_with_ready_persistent_role(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

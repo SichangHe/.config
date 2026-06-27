@@ -157,8 +157,27 @@ def has_selected_model_capacity_warning(lines: list[str]) -> bool:
     return any(SELECTED_MODEL_CAPACITY_RE.search(line) is not None for line in output_lines)
 
 
+def current_input_follows_running_indicator(lines: list[str]) -> bool:
+    body = lines[:-1] if has_codex_model_footer(lines) else lines[:]
+    input_idx = -1
+    for idx in range(len(body) - 1, -1, -1):
+        if body[idx].lstrip().startswith("›"):
+            input_idx = idx
+            break
+    if input_idx < 0:
+        return False
+    for line in reversed(body[:input_idx]):
+        if SEP_RE.match(line):
+            return False
+        if BUSY_RE.search(line) is not None or BACKGROUND_RUNNING_RE.search(line) is not None or COMPACTING_RE.search(line) is not None:
+            return True
+        if WORKED_RE.match(line):
+            return False
+    return False
+
+
 def is_empty_input_text(lines: list[str], input_text: str) -> bool:
-    return input_text in CODEX_EMPTY_INPUT_TEXTS or (has_running_indicator(lines) and input_text in CODEX_RUNNING_EMPTY_INPUT_TEXTS)
+    return input_text in CODEX_EMPTY_INPUT_TEXTS or (input_text in CODEX_RUNNING_EMPTY_INPUT_TEXTS and current_input_follows_running_indicator(lines))
 
 
 def is_stock_placeholder_input_text(input_text: str) -> bool:
@@ -210,12 +229,17 @@ def status(lines: list[str], block: Block) -> str:
     if not has_codex_model_footer(lines):
         return "running" if has_queued_running_input(lines) else "not_codex"
     if has_selected_model_capacity_warning(block.lines or lines[-20:]):
+        input_text = current_input_text(lines)
+        if input_text and not is_empty_input_text(lines, input_text):
+            return "stuck_input"
         return "error"
     if has_queued_running_input(lines):
         return "running"
     input_text = current_input_text(lines)
     if input_text and not is_empty_input_text(lines, input_text):
         return "stuck_input"
+    if input_text in CODEX_RUNNING_EMPTY_INPUT_TEXTS and current_input_follows_running_indicator(lines):
+        return "running"
     if has_running_indicator(lines):
         return "running"
     if block.has_footer or any(READY_RE.match(line) is not None or INPUT_RE.match(line) is not None for line in lines[-10:]):

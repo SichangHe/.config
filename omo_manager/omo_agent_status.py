@@ -50,6 +50,7 @@ DEFAULT_REGISTRY = Path(LOCAL_ENV.get("OMO_MANAGER_SESSION_REGISTRY", str(defaul
 DEFAULT_MANAGER_TARGET = ""
 TASK_RE = re.compile(r"`?([A-Za-z0-9_./-]+\.md)`?")
 TARGET_RE = re.compile(r"\b([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\b")
+TARGET_SESSION_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*):")
 LOOSE_TARGET_RE = re.compile(r"\b([a-z][A-Za-z0-9_-]*)\s+(\d+)\b")
 PORT_RE = re.compile(r"\bport [`']?(\d{2,5})[`']?")
 STATUS_RE = re.compile(r"^\((pending|running|done|blocked)(?::[^)]*)?\)(?:\s+\([^)]*\))?$")
@@ -140,6 +141,11 @@ def same_tmux_target(left: str, right: str) -> bool:
 
 def canonical_target(target: str) -> str:
     return target[:-2] if target.endswith(".0") else target
+
+
+def target_session(target: str) -> str:
+    match = TARGET_SESSION_RE.match(target)
+    return match.group(1) if match is not None else ""
 
 
 def section_name(line: str, current: str) -> str:
@@ -385,8 +391,6 @@ def registry_unmanaged_problem_rows(args: Args, records: list[SessionRecord], sk
 
 
 def todo_unmanaged_task(root: Path, task: TaskLine) -> TaskLine | None:
-    if not task.target:
-        return None
     path = resolve_task_path(root, task.task_file)
     state = scan_task_state(path) if path is not None else None
     target = task.target
@@ -394,8 +398,12 @@ def todo_unmanaged_task(root: Path, task: TaskLine) -> TaskLine | None:
     task_status = "unlinked"
     persistent_role = False
     if state is not None:
+        target = target or state.target
+        port = port if port is not None else state.port
         task_status = state.status
         persistent_role = state.persistent_role
+    if not target:
+        return None
     return TaskLine(task.task_file, "todo-unmanaged", task.line, target, port, task_status, persistent_role)
 
 
@@ -411,6 +419,40 @@ def todo_unmanaged_problem_rows(args: Args, skip_targets: set[str], auto_unstick
             continue
         row = classify_target(unmanaged.task_file, unmanaged.target, unmanaged.persistent_role, unmanaged.status, auto_unstick, role="todo_unmanaged", unstick_by_target=unstick_by_target, auto_unstick_disabled_reason=auto_unstick_disabled_reason)
         if row.status in {"error", "stuck_input"} or (row.status == "not_codex" and " output=" in row.evidence):
+            rows.append(row)
+            seen_targets.add(target)
+    return rows
+
+
+def tmux_list_panes() -> list[str]:
+    try:
+        out = subprocess.run(["tmux", "list-panes", "-a", "-F", "#{session_name}:#{window_index}.#{pane_index}"], capture_output=True, text=True, timeout=5, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if out.returncode != 0:
+        return []
+    return [canonical_target(line.strip()) for line in out.stdout.splitlines() if line.strip()]
+
+
+def unmanaged_session_names(root: Path) -> set[str]:
+    names: set[str] = set()
+    for task in parse_task_lines(root / "TODO.md"):
+        if task.task_file.startswith("vl_") or "/vl_" in task.task_file:
+            names.add("vl")
+    return names
+
+
+def tmux_unmanaged_problem_rows(args: Args, skip_targets: set[str], auto_unstick: bool, unstick_by_target: dict[str, str], auto_unstick_disabled_reason: str) -> list[StatusRow]:
+    session_names = unmanaged_session_names(args.root)
+    if not session_names:
+        return []
+    rows: list[StatusRow] = []
+    seen_targets = {canonical_target(target) for target in skip_targets if target}
+    for target in tmux_list_panes():
+        if target in seen_targets or target_session(target) not in session_names:
+            continue
+        row = classify_target(f"tmux:{target}", target, auto_unstick=auto_unstick, role="tmux_unmanaged", unstick_by_target=unstick_by_target, auto_unstick_disabled_reason=auto_unstick_disabled_reason)
+        if row.status in {"error", "stuck_input"}:
             rows.append(row)
             seen_targets.add(target)
     return rows
@@ -514,6 +556,9 @@ def main(argv: list[str]) -> int:
             todo_rows = todo_unmanaged_problem_rows(args, inspected_targets, auto_unstick, unstick_by_target, auto_unstick_disabled_reason)
             rows.extend(todo_rows)
             inspected_targets.update(row.target for row in todo_rows if row.target)
+            tmux_rows = tmux_unmanaged_problem_rows(args, inspected_targets, auto_unstick, unstick_by_target, auto_unstick_disabled_reason)
+            rows.extend(tmux_rows)
+            inspected_targets.update(row.target for row in tmux_rows if row.target)
             manager_row = manager_problem_row(args, inspected_targets, unstick_by_target)
             if manager_row is not None:
                 rows.append(manager_row)

@@ -151,6 +151,62 @@ class CodexStatusTests(unittest.TestCase):
                 lines = ['────', warning, '› Use /skills to list available skills', '  gpt-5.5']
                 self.assertEqual('error', report_from_lines(lines).status)
 
+    def test_status_stuck_input_when_capacity_warning_has_real_input(self) -> None:
+        lines = ['────', '⚠ Selected model is at capacity. Please try a different model.', '', '› Continue the private manager task', '  gpt-5.5']
+        report = report_from_lines(lines)
+        self.assertEqual('stuck_input', report.status)
+        self.assertEqual('Continue the private manager task', report.input_text)
+
+    def test_status_stuck_input_for_running_placeholder_left_after_completed_turn(self) -> None:
+        lines = [
+            '• Working (2m 13s • esc to interrupt)',
+            '',
+            '• Done.',
+            '',
+            '─ Worked for 5m 17s ─────────────────',
+            '',
+            '',
+            '› Implement {feature}',
+            '',
+            '  gpt-5.5 medium · /ssd1/sichangheagent/VeruLaw',
+        ]
+        report = report_from_lines(lines)
+        self.assertEqual('stuck_input', report.status)
+        self.assertEqual('Implement {feature}', report.input_text)
+
+    def test_status_running_when_running_indicator_is_newer_than_completed_turn(self) -> None:
+        lines = [
+            '• Done.',
+            '',
+            '─ Worked for 5m 17s ─────────────────',
+            '',
+            '• Working (2m 13s • esc to interrupt)',
+            '',
+            '› Implement {feature}',
+            '',
+            '  gpt-5.5 medium · /ssd1/sichangheagent/VeruLaw',
+        ]
+        report = report_from_lines(lines)
+        self.assertEqual('running', report.status)
+        self.assertEqual('Implement {feature}', report.input_text)
+
+    def test_status_running_when_newer_running_indicator_is_far_above_input(self) -> None:
+        lines = [
+            '• Done.',
+            '',
+            '─ Worked for 5m 17s ─────────────────',
+            '',
+            '• Working (2m 13s • esc to interrupt)',
+            *[f'log line {idx}' for idx in range(30)],
+            '',
+            '› Implement {feature}',
+            '',
+            '  gpt-5.5 medium · /ssd1/sichangheagent/VeruLaw',
+        ]
+        report = report_from_lines(lines)
+        self.assertEqual('running', report.status)
+        self.assertEqual('Implement {feature}', report.input_text)
+
     def test_status_stuck_input_when_capacity_warning_text_is_typed(self) -> None:
         lines = ['────', 'done', '› Selected model is at capacity. Please try a different model.', '  gpt-5.5']
         self.assertEqual('stuck_input', report_from_lines(lines).status)
