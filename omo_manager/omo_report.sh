@@ -82,7 +82,7 @@ raise SystemExit(2)
 PY
 if [ ! -f "$message_file" ]; then echo "message file not found" >&2; exit 2; fi
 mkdir -p "$(dirname "$path_real")"
-stamp=$(date '+%Y-%m-%d %H:%M')
+stamp=$(date '+%H:%M')
 append_kv() {
   python3 - "$1" "$2" <<'PY'
 from __future__ import annotations
@@ -93,10 +93,8 @@ if value:
     print(f" {key}={quote(value, safe=':@._/-%')}", end="")
 PY
 }
-legacy_source_line="(from agent ${agent} via omo_report.sh status=${status})"
 old_legacy_source_line="(from agent ${agent} via omo_report.sh status=${status})"
-source_line="[omo-message-source: origin=agent agent=${agent} via=omo_report.sh status=${status}"
-old_source_prefix="${source_line}"
+old_source_prefix="[omo-message-source: origin=agent agent=${agent} via=omo_report.sh status=${status}"
 old_source_line="${old_source_prefix}"
 tmux_target="${TMUX_PANE:-}"
 pointer_label="$agent"
@@ -112,16 +110,11 @@ if [ -n "$tmux_info" ]; then
   IFS=$'\t' read -r tmux_session tmux_window_index tmux_pane_index tmux_pane_id tmux_window_name <<EOF
 $tmux_info
 EOF
-  source_line="${source_line}$(append_kv tmux_session "$tmux_session")"
   old_source_line="${old_source_line}$(append_kv tmux_session "$tmux_session")"
-  source_line="${source_line}$(append_kv tmux_window_index "$tmux_window_index")"
   old_source_line="${old_source_line}$(append_kv tmux_window_index "$tmux_window_index")"
-  source_line="${source_line}$(append_kv tmux_pane_index "$tmux_pane_index")"
   old_source_line="${old_source_line}$(append_kv tmux_pane_index "$tmux_pane_index")"
-  source_line="${source_line}$(append_kv tmux_pane_id "$tmux_pane_id")"
   old_source_line="${old_source_line}$(append_kv tmux_pane_id "$tmux_pane_id")"
   if [ -n "$tmux_session" ] && [ -n "$tmux_window_index" ] && [ -n "$tmux_pane_index" ]; then
-    source_line="${source_line}$(append_kv tmux_target "${tmux_session}:${tmux_window_index}.${tmux_pane_index}")"
     old_source_line="${old_source_line}$(append_kv tmux_target "${tmux_session}:${tmux_window_index}.${tmux_pane_index}")"
   fi
   if [ -n "$tmux_session" ] && [ -n "$tmux_window_index" ]; then
@@ -130,20 +123,17 @@ EOF
       pointer_label="${pointer_label}.${tmux_pane_index}"
     fi
   fi
-  source_line="${source_line}$(append_kv tmux_window_name "$tmux_window_name")"
   old_source_line="${old_source_line}$(append_kv tmux_window_name "$tmux_window_name")"
 elif [ -n "$tmux_target" ]; then
-  source_line="${source_line}$(append_kv tmux_pane_id "$tmux_target")"
   old_source_line="${old_source_line}$(append_kv tmux_pane_id "$tmux_target")"
   pointer_label="$tmux_target"
 fi
-source_line="${source_line}]"
 old_source_line="${old_source_line}]"
 old_legacy_source_match="$old_legacy_source_line"
 if [ "$old_source_line" != "${old_source_prefix}]" ]; then
   old_legacy_source_match=""
 fi
-pointer_info=$(python3 - "$message_file" "$agent" "$status" "$stamp" "$path_real" "$source_line" "$legacy_source_line" "$pointer_label" <<'PY'
+pointer_info=$(python3 - "$message_file" "$agent" "$status" "$stamp" "$path_real" "$pointer_label" <<'PY'
 from __future__ import annotations
 import hashlib
 import os
@@ -154,7 +144,7 @@ from pathlib import Path
 message_path = Path(sys.argv[1])
 agent, status, stamp = sys.argv[2:5]
 task_path = Path(sys.argv[5])
-source_line, legacy_source_line, pointer_label = sys.argv[6:9]
+pointer_label = sys.argv[6]
 message_bytes = message_path.read_bytes()
 message_hash = hashlib.sha256(message_bytes).hexdigest()
 
@@ -167,21 +157,18 @@ def safe_label(value: str) -> str:
     return part[:80] or "unknown"
 
 label = safe_label(pointer_label)
+task_basename = safe_label(task_path.name)
 reports_dir = Path("/tmp") / f"omo-agent-messages-{os.getuid()}"
 reports_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
 reports_dir.chmod(0o700)
 report_key = hashlib.sha256(b"\0".join([message_bytes, agent.encode(), status.encode(), label.encode(), str(task_path).encode()])).hexdigest()
 report_path = reports_dir / f"{safe_part(agent)}_{safe_part(status)}_{report_key}.md"
 pointer_line = f"(from agent {label} {report_path})"
+sent_line = f"(sent from {agent} via omo_report.sh tmux={label} time={stamp} task-file={task_basename})"
 header = "\n".join(
     [
-        source_line,
-        legacy_source_line,
-        f"(report manager {stamp} agent={agent} status={status} report-file={report_path})",
+        sent_line,
         f"[message-sha256: {message_hash}]",
-        f"message-file: {report_path}",
-        f"task-file: {task_path}",
-        f"task-pointer: {pointer_line}",
         "message:",
     ]
 ).encode("utf-8") + b"\n"
@@ -195,9 +182,6 @@ if report_path.exists():
         raise RuntimeError(f"stale or corrupt report file: {report_path}") from exc
     stable_expected_lines = [
         f"[message-sha256: {message_hash}]",
-        f"message-file: {report_path}",
-        f"task-file: {task_path}",
-        f"task-pointer: {pointer_line}",
     ]
     current_header_lines = current_header_text.splitlines()
     if current_message != message_bytes or any(line not in current_header_lines for line in stable_expected_lines):
@@ -244,6 +228,11 @@ def without_old_report_file(line: str) -> str:
     line = re.sub(r" report-file=[^ )]+", "", line)
     return line
 
+def without_volatile_tmux(line: str) -> str:
+    line = re.sub(r" tmux_pane_id=[^ \]]+", "", line)
+    line = re.sub(r" tmux_window_name=[^ \]]+", "", line)
+    return line
+
 for idx, line in enumerate(lines):
     if line.strip() != "(pending)":
         continue
@@ -256,10 +245,12 @@ for idx, line in enumerate(lines):
         continue
     stripped_block = [block_line.strip() for block_line in block]
     normalized_block = [without_old_report_file(block_line) for block_line in stripped_block]
+    stable_source_block = [without_volatile_tmux(block_line) for block_line in normalized_block]
+    stable_old_source_line = without_volatile_tmux(old_source_line)
     if pointer_line in stripped_block:
         raise SystemExit(0)
     if hash_line in stripped_block and (
-        old_source_line in normalized_block
+        stable_old_source_line in stable_source_block
         or (old_legacy_source_match and old_legacy_source_match in normalized_block)
     ):
         raise SystemExit(0)

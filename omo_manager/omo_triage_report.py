@@ -29,14 +29,24 @@ def parse_args(argv: list[str]) -> Args:
     return Args(parsed.report_file)
 
 
-def find_status(text: str) -> str:
-    match = re.search(r"status=([^\s)]+)", text)
+def report_body(text: str) -> str:
+    _, sep, body = text.partition("message:\n")
+    return body if sep else text
+
+
+def find_status(text: str, report_file: Path | None = None) -> str:
+    if report_file is not None:
+        name_match = re.search(r"_([^_]+)_[0-9a-f]{64}\.md$", report_file.name)
+        if name_match:
+            return name_match.group(1).lower()
+    header, _sep, _body = text.partition("message:\n")
+    match = re.search(r"status=([^\s)\]]+)", header)
     return match.group(1).lower() if match else "unknown"
 
 
-def decision(text: str) -> str:
-    lowered = text.lower()
-    status = find_status(text)
+def decision(text: str, report_file: Path | None = None) -> str:
+    lowered = report_body(text).lower()
+    status = find_status(text, report_file)
     if status in STATUS_NEEDS_HUMAN and "?" in text:
         return "ask-agent-clarify"
     if any(pattern in lowered for pattern in TRIVIAL_PATTERNS):
@@ -57,8 +67,8 @@ def main(argv: list[str]) -> int:
     try:
         args = parse_args(argv)
         text = args.report_file.read_text(encoding="utf-8")
-        print(f"status={find_status(text)}")
-        print(f"manager-action={decision(text)}")
+        print(f"status={find_status(text, args.report_file)}")
+        print(f"manager-action={decision(text, args.report_file)}")
         print("excerpt:")
         print(excerpt(text))
     except Exception as exc:
