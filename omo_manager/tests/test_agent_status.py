@@ -587,6 +587,107 @@ class AgentStatusTests(unittest.TestCase):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             self.assertIn("not_codex: task=role.md", out.getvalue())
 
+    def test_problems_only_reports_blocked_idle_vl_supervisor_dependency(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text(
+                "current:\nmanager_vl_watchdog.md wl 5\n\nprevious:\nvl_supervisor_current_7404.md vl 7\nvl_worker.md vl 9\n",
+                encoding="utf-8",
+            )
+            _ = (root / "manager_vl_watchdog.md").write_text("runat: wl:5 codex\n(running)\n", encoding="utf-8")
+            _ = (root / "vl_supervisor_current_7404.md").write_text(
+                "runat: vl:7 codex\n(blocked: persistent supervisor waiting on `vl_worker.md`; image lacks codex)\n",
+                encoding="utf-8",
+            )
+            _ = (root / "vl_worker.md").write_text(
+                "runat: vl:9 codex\n(blocked: Docker image lacks codex; no worker output was produced)\n",
+                encoding="utf-8",
+            )
+            def fake_inspect(args: object) -> Report:
+                return Report("running", ["working"]) if getattr(args, "target") == "wl:5" else Report("ready", ["idle"])
+
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", side_effect=fake_inspect), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            text = out.getvalue()
+            self.assertIn("agent-problems: blocked_idle=2", text)
+            self.assertIn("manager-action: blocked_idle>0 inspect blocked agents", text)
+            self.assertIn("blocked_idle: task=vl_supervisor_current_7404.md evidence=target=vl:7 role=blocked_idle_vl", text)
+            self.assertIn("blocked_idle: task=vl_worker.md evidence=target=vl:9 role=blocked_idle_vl_dependency", text)
+            self.assertIn("image lacks codex", text)
+
+    def test_problems_only_does_not_count_running_blocked_vl_target_as_idle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nvl_worker.md vl 9\n", encoding="utf-8")
+            _ = (root / "vl_worker.md").write_text("runat: vl:9 codex\n(blocked: image lacks codex)\n", encoding="utf-8")
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("running", ["working"])), redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertEqual("", out.getvalue())
+
+    def test_status_summary_reports_blocked_idle_vl_rows_and_untracked_running_current_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nvl_untracked.md vl 8\n\nprevious:\nvl_supervisor_current_7404.md vl 7\n", encoding="utf-8")
+            _ = (root / "vl_untracked.md").write_text("runat: vl:8 codex\n", encoding="utf-8")
+            _ = (root / "vl_supervisor_current_7404.md").write_text("runat: vl:7 codex\n(blocked: image lacks codex)\n", encoding="utf-8")
+            def fake_inspect(args: object) -> Report:
+                return Report("running", ["working"]) if getattr(args, "target") == "vl:8" else Report("ready", ["idle"])
+
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", side_effect=fake_inspect), redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry)]))
+            text = out.getvalue()
+            self.assertIn("agent-status: not_codex=0 running=1 blocked_idle=1", text)
+            self.assertIn("running: task=vl_untracked.md", text)
+            self.assertIn("blocked_idle: task=vl_supervisor_current_7404.md", text)
+
+    def test_problems_only_does_not_duplicate_blocked_idle_target_as_unmanaged_problem(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nvl_worker.md vl 9\n", encoding="utf-8")
+            _ = (root / "vl_worker.md").write_text("runat: vl:9 codex\n(blocked: image lacks codex)\n", encoding="utf-8")
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("error", ["Selected model is at capacity"])), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            text = out.getvalue()
+            self.assertIn("blocked_idle: task=vl_worker.md", text)
+            self.assertNotIn("role=todo_unmanaged", text)
+
+    def test_blocked_idle_deduplicates_same_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nvl_one.md vl 9\nvl_two.md vl 9\n", encoding="utf-8")
+            _ = (root / "vl_one.md").write_text("runat: vl:9 codex\n(blocked: first blocker)\n", encoding="utf-8")
+            _ = (root / "vl_two.md").write_text("runat: vl:9.0 codex\n(blocked: second blocker)\n", encoding="utf-8")
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            text = out.getvalue()
+            self.assertIn("agent-problems: blocked_idle=1", text)
+            self.assertEqual(1, text.count("blocked_idle: task="))
+
+    def test_exit_code_if_active_ignores_blocked_idle_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nvl_worker.md vl 9\n", encoding="utf-8")
+            _ = (root / "vl_worker.md").write_text("runat: vl:9 codex\n(blocked: image lacks codex)\n", encoding="utf-8")
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--exit-code-if-active"]))
+
     def test_problems_only_reports_registry_unmanaged_capacity_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

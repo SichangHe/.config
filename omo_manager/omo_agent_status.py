@@ -53,7 +53,7 @@ TARGET_RE = re.compile(r"\b([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\b")
 TARGET_SESSION_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*):")
 LOOSE_TARGET_RE = re.compile(r"\b([a-z][A-Za-z0-9_-]*)\s+(\d+)\b")
 PORT_RE = re.compile(r"\bport [`']?(\d{2,5})[`']?")
-STATUS_RE = re.compile(r"^\((pending|running|done|blocked)(?::[^)]*)?\)(?:\s+\([^)]*\))?$")
+STATUS_DETAIL_RE = re.compile(r"^\((pending|running|done|blocked)(?::\s*([^)]*))?\)(?:\s+\(([^)]*)\))?$")
 RUNAT_RE = re.compile(r"^runat:\s+([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\b")
 CLOSE_TARGET_RE = re.compile(r"\btmux target [`']?([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)[`']?")
 PERSISTENT_ROLE_RE = re.compile(r"\bpersistent\b.*\brole\b")
@@ -106,6 +106,7 @@ class TaskState:
     target: str
     port: int | None
     persistent_role: bool = False
+    reason: str = ""
 
 
 class ParsedArgs(argparse.Namespace):
@@ -137,6 +138,19 @@ def target_aliases(target: str) -> set[str]:
 
 def same_tmux_target(left: str, right: str) -> bool:
     return bool(target_aliases(left) & target_aliases(right))
+
+
+def is_vl_task_file(task_file: str) -> bool:
+    name = Path(task_file).name
+    return name.startswith("vl_") or "/vl_" in task_file
+
+
+def task_line_is_vl(task: TaskLine) -> bool:
+    return is_vl_task_file(task.task_file) or target_session(task.target) == "vl"
+
+
+def is_current_vl_supervisor(task_file: str) -> bool:
+    return Path(task_file).name.startswith("vl_supervisor_current_")
 
 
 def canonical_target(target: str) -> str:
@@ -213,6 +227,7 @@ def scan_task_state(path: Path) -> TaskState | None:
     except OSError:
         return None
     status = ""
+    reason = ""
     target = ""
     port: int | None = None
     persistent_role = False
@@ -220,9 +235,10 @@ def scan_task_state(path: Path) -> TaskState | None:
     for line in reversed(lines):
         stripped = line.strip()
         if not status:
-            status_match = STATUS_RE.match(stripped)
+            status_match = STATUS_DETAIL_RE.match(stripped)
             if status_match is not None:
                 status = status_match.group(1)
+                reason = (status_match.group(2) or status_match.group(3) or "").strip()
                 persistent_role = persistent_role_note_seen or PERSISTENT_ROLE_RE.search(stripped.lower()) is not None
             elif stripped.startswith("(") and stripped.endswith(")") and PERSISTENT_ROLE_RE.search(stripped.lower()) is not None:
                 persistent_role_note_seen = True
@@ -242,7 +258,7 @@ def scan_task_state(path: Path) -> TaskState | None:
                 port = int(port_match.group(1))
         if status and target and port is not None:
             break
-    return TaskState(status, target, port, persistent_role) if status else None
+    return TaskState(status, target, port, persistent_role, reason) if status else None
 
 
 def load_task_state(root: Path) -> tuple[dict[str, TaskLine], set[str], set[str]]:
@@ -284,6 +300,71 @@ def persistent_blocked_task_lines(root: Path) -> list[TaskLine]:
         tasks.append(TaskLine(task.task_file, "task-file", task.line, target, port, state.status, True))
         seen.add(task.task_file)
     return tasks
+
+
+def current_untracked_task_rows(args: Args, skip_targets: set[str], auto_unstick: bool, unstick_by_target: dict[str, str], auto_unstick_disabled_reason: str) -> list[StatusRow]:
+    rows: list[StatusRow] = []
+    seen_targets = {canonical_target(target) for target in skip_targets if target}
+    for task in parse_task_lines(args.root / "TODO.md"):
+        if task.task_file == "TODO.md" or task.section != "todo:current" or not task.target:
+            continue
+        target = canonical_target(task.target)
+        if target in seen_targets:
+            continue
+        state_path = resolve_task_path(args.root, task.task_file)
+        state = scan_task_state(state_path) if state_path is not None else None
+        if state is not None:
+            continue
+        row = classify_target(task.task_file, task.target, task_status="unlinked", auto_unstick=auto_unstick, role="todo_current_untracked", unstick_by_target=unstick_by_target, auto_unstick_disabled_reason=auto_unstick_disabled_reason)
+        rows.append(row)
+        seen_targets.add(target)
+    return rows
+
+
+def blocked_idle_vl_task_rows(root: Path) -> list[StatusRow]:
+    todo_tasks = parse_task_lines(root / "TODO.md")
+    candidates: list[TaskLine] = []
+    for task in todo_tasks:
+        if task.task_file == "TODO.md":
+            continue
+        if task.section == "todo:current" and task_line_is_vl(task):
+            candidates.append(task)
+        elif is_current_vl_supervisor(task.task_file):
+            candidates.append(task)
+    rows: list[StatusRow] = []
+    seen: set[str] = set()
+    index = {Path(task.task_file).name: task for task in todo_tasks}
+    for task in candidates:
+        add_blocked_idle_vl_row(root, task, "blocked_idle_vl", rows, seen)
+        state_path = resolve_task_path(root, task.task_file)
+        state = scan_task_state(state_path) if state_path is not None else None
+        if state is None or state.status != "blocked" or not is_current_vl_supervisor(task.task_file):
+            continue
+        for match in TASK_RE.finditer(state.reason):
+            mentioned = index.get(Path(match.group(1)).name)
+            if mentioned is not None:
+                add_blocked_idle_vl_row(root, mentioned, "blocked_idle_vl_dependency", rows, seen)
+    return rows
+
+
+def add_blocked_idle_vl_row(root: Path, task: TaskLine, role: str, rows: list[StatusRow], seen: set[str]) -> None:
+    state_path = resolve_task_path(root, task.task_file)
+    state = scan_task_state(state_path) if state_path is not None else None
+    if state is None or state.status != "blocked":
+        return
+    target = state.target or task.target
+    seen_key = f"target:{canonical_target(target)}" if target else f"task:{task.task_file}"
+    if seen_key in seen:
+        return
+    idle_status = "not_codex"
+    if target:
+        idle_status = classify_target(task.task_file, target, auto_unstick=False).status
+        if idle_status == "running":
+            return
+    reason = state.reason or "blocked with no reason in latest status line"
+    evidence = f"target={target} role={role} task_status=blocked idle_status={idle_status} reason={reason}"
+    rows.append(StatusRow(task.task_file, "blocked_idle", evidence, state.persistent_role, state.status, target))
+    seen.add(seen_key)
 
 
 def session_records(registry: Path) -> list[SessionRecord]:
@@ -491,18 +572,18 @@ def registry_prune(args: Args, completed: set[str]) -> int:
 
 
 def format_summary(rows: list[StatusRow], completed_stale_count: int, pruned_count: int) -> str:
-    counts: dict[str, int] = {"not_codex": 0, "running": 0, "error": 0, "ready": 0, "stuck_input": 0}
+    counts: dict[str, int] = {"not_codex": 0, "running": 0, "blocked_idle": 0, "error": 0, "ready": 0, "stuck_input": 0}
     for row in rows:
         counts[row.status] = counts.get(row.status, 0) + 1
     lines = [
-        f"agent-status: not_codex={counts['not_codex']} running={counts['running']} error={counts['error']} ready={counts['ready']} stuck_input={counts['stuck_input']} done-registry-stale={completed_stale_count} pruned={pruned_count}",
+        f"agent-status: not_codex={counts['not_codex']} running={counts['running']} blocked_idle={counts['blocked_idle']} error={counts['error']} ready={counts['ready']} stuck_input={counts['stuck_input']} done-registry-stale={completed_stale_count} pruned={pruned_count}",
     ]
     for row in sorted(rows, key=lambda item: (item.status != "error", item.status, item.task_file)):
         lines.append(f"{row.status}: task={row.task_file} evidence={row.evidence}")
     return "\n".join(lines)
 
 
-PROBLEM_STATUSES = {"error", "not_codex", "ready", "stuck_input"}
+PROBLEM_STATUSES = {"blocked_idle", "error", "not_codex", "ready", "stuck_input"}
 
 
 def is_parked_persistent_blocked_row(row: StatusRow) -> bool:
@@ -513,13 +594,15 @@ def format_problem_summary(rows: list[StatusRow], completed_stale: set[str]) -> 
     problem_rows = [row for row in rows if row.status in PROBLEM_STATUSES and not is_parked_persistent_blocked_row(row)]
     if not problem_rows and not completed_stale:
         return ""
-    counts: dict[str, int] = {"not_codex": 0, "error": 0, "ready": 0, "stuck_input": 0}
+    counts: dict[str, int] = {"not_codex": 0, "blocked_idle": 0, "error": 0, "ready": 0, "stuck_input": 0}
     for row in problem_rows:
         counts[row.status] = counts.get(row.status, 0) + 1
-    parts = [f"{status}={counts[status]}" for status in ("not_codex", "error", "ready", "stuck_input") if counts[status]]
+    parts = [f"{status}={counts[status]}" for status in ("not_codex", "blocked_idle", "error", "ready", "stuck_input") if counts[status]]
     if completed_stale:
         parts.append(f"done-registry-stale={len(completed_stale)}")
     lines = [f"agent-problems: {' '.join(parts)}"]
+    if counts["blocked_idle"]:
+        lines.append("manager-action: blocked_idle>0 inspect blocked agents, unblock if possible, or route the exact blocker")
     for row in sorted(problem_rows, key=lambda item: (item.status, item.task_file)):
         lines.append(f"{row.status}: task={row.task_file} evidence={row.evidence}")
     unstuck: dict[str, str] = {}
@@ -545,11 +628,18 @@ def main(argv: list[str]) -> int:
         auto_unstick_disabled_reason = "no_auto_unstick" if args.problems_only and not args.auto_unstick else "not_problems_only"
         unstick_by_target: dict[str, str] = {}
         rows = [classify_task(task, choose_session(task, records), auto_unstick, unstick_by_target, args.manager_target, auto_unstick_disabled_reason) for task in tasks]
+        inspected_targets = {display_target(task, choose_session(task, records)) for task in tasks}
+        untracked_rows = current_untracked_task_rows(args, inspected_targets, auto_unstick, unstick_by_target, auto_unstick_disabled_reason)
+        rows.extend(untracked_rows)
+        inspected_targets.update(row.target for row in untracked_rows if row.target)
         if args.problems_only:
+            blocked_idle_rows = blocked_idle_vl_task_rows(args.root)
+            rows.extend(blocked_idle_rows)
+            inspected_targets.update(row.target for row in blocked_idle_rows if row.target)
             standby_tasks = persistent_blocked_task_lines(args.root)
             rows.extend(classify_task(task, choose_session(task, records), auto_unstick, unstick_by_target, args.manager_target, auto_unstick_disabled_reason) for task in standby_tasks)
             inspected_tasks = [*tasks, *standby_tasks]
-            inspected_targets = {display_target(task, choose_session(task, records)) for task in inspected_tasks}
+            inspected_targets.update(display_target(task, choose_session(task, records)) for task in inspected_tasks)
             unmanaged_rows = registry_unmanaged_problem_rows(args, records, inspected_targets, auto_unstick, unstick_by_target, auto_unstick_disabled_reason)
             rows.extend(unmanaged_rows)
             inspected_targets.update(row.target for row in unmanaged_rows if row.target)
@@ -562,6 +652,8 @@ def main(argv: list[str]) -> int:
             manager_row = manager_problem_row(args, inspected_targets, unstick_by_target)
             if manager_row is not None:
                 rows.append(manager_row)
+        else:
+            rows.extend(blocked_idle_vl_task_rows(args.root))
         completed_stale = {record.task_file for record in records if record.task_file in done}
         pruned_count = registry_prune(args, completed_stale) if args.prune_completed else 0
         if args.problems_only:
@@ -571,7 +663,7 @@ def main(argv: list[str]) -> int:
             print(text)
             return 3
         print(format_summary(rows, len(completed_stale), pruned_count))
-        if args.exit_code_if_active and rows:
+        if args.exit_code_if_active and any(row.status != "blocked_idle" for row in rows):
             return 3
     except Exception as exc:
         print(f"omo_agent_status: {exc}", file=sys.stderr)

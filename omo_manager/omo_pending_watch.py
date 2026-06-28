@@ -503,9 +503,9 @@ def evidence_target(line: str) -> str:
 
 
 def manager_self_problem_line(line: str, manager_target: str = "") -> bool:
-    if re.match(r"^(?:error|not_codex|ready|stuck_input): task=manager evidence=.*\brole=manager\b", line):
+    if re.match(r"^(?:blocked_idle|error|not_codex|ready|stuck_input): task=manager evidence=.*\brole=manager\b", line):
         return True
-    if re.match(r"^(?:error|not_codex|ready|stuck_input): task=\S+ evidence=target=", line) is None:
+    if re.match(r"^(?:blocked_idle|error|not_codex|ready|stuck_input): task=\S+ evidence=target=", line) is None:
         return False
     return same_tmux_target(evidence_target(line), manager_target)
 
@@ -532,14 +532,14 @@ def filter_manager_self_problem_output(output: str, manager_target: str = "") ->
     kept = [line for line in lines[1:] if not manager_self_problem_line(line, manager_target) and not manager_self_unstuck_line(line, manager_target)]
     if len(kept) == len(lines) - 1:
         return output
-    counts = {"not_codex": 0, "error": 0, "ready": 0, "stuck_input": 0, "done-registry-stale": 0}
+    counts = {"not_codex": 0, "blocked_idle": 0, "error": 0, "ready": 0, "stuck_input": 0, "done-registry-stale": 0}
     for line in kept:
-        problem_match = re.match(r"^(not_codex|error|ready|stuck_input): ", line)
+        problem_match = re.match(r"^(not_codex|blocked_idle|error|ready|stuck_input): ", line)
         if problem_match is not None:
             counts[problem_match.group(1)] += 1
         elif line.startswith("done-stale: "):
             counts["done-registry-stale"] += 1
-    parts = [f"{status}={counts[status]}" for status in ("not_codex", "error", "ready", "stuck_input") if counts[status]]
+    parts = [f"{status}={counts[status]}" for status in ("not_codex", "blocked_idle", "error", "ready", "stuck_input") if counts[status]]
     if counts["done-registry-stale"]:
         parts.append(f"done-registry-stale={counts['done-registry-stale']}")
     if not parts:

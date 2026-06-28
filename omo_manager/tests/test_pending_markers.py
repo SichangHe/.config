@@ -2578,6 +2578,24 @@ class PendingMarkerTests(unittest.TestCase):
         self.assertEqual(2, out.getvalue().count("unstuck: target=cfg:1"))
         self.assertEqual(2, out.getvalue().count("[omo-message-source: origin=agent source=agent action=no-human-ack agent=omo_pending_watch via=omo_pending_watch.py status=agent-problem]"))
 
+    def test_agent_problem_check_pushes_blocked_idle_reports(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, True, agent_problem_repeat_s=300.0)
+        result = watcher.CommandOutput(
+            "agent-problems",
+            3,
+            "agent-problems: blocked_idle=1\nmanager-action: blocked_idle>0 inspect blocked agents, unblock if possible, or route the exact blocker\nblocked_idle: task=vl_worker.md evidence=target=vl:9 role=blocked_idle_vl task_status=blocked idle_status=ready reason=image lacks codex\n",
+            "",
+        )
+        out = StringIO()
+        with redirect_stdout(out):
+            self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
+        text = out.getvalue()
+        self.assertIn("agent-problems: blocked_idle=1", text)
+        self.assertIn("manager-action: blocked_idle>0 inspect blocked agents", text)
+        self.assertIn("blocked_idle: task=vl_worker.md", text)
+
     def test_agent_problem_check_suppresses_manager_self_stuck_prompt(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
