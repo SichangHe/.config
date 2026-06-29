@@ -16,9 +16,11 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from omo_manager.omo_codex_status import Args as StatusArgs
+from omo_manager.omo_codex_status import Report
 from omo_manager.omo_codex_status import inspect
 from omo_manager.omo_codex_status import is_stock_placeholder_input_text
 from omo_manager.omo_codex_status import submit_stuck_input_if_present
+from omo_manager.omo_codex_status import visible_error_lines
 from omo_manager.omo_stuck_watch import read_json, write_json_private
 
 
@@ -57,6 +59,21 @@ STATUS_DETAIL_RE = re.compile(r"^\((pending|running|done|blocked)(?::\s*([^)]*))
 RUNAT_RE = re.compile(r"^runat:\s+([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\b")
 CLOSE_TARGET_RE = re.compile(r"\btmux target [`']?([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)[`']?")
 PERSISTENT_ROLE_RE = re.compile(r"\bpersistent\b.*\brole\b")
+
+
+def report_output_evidence(report: Report) -> str:
+    if not report.lines:
+        return ""
+    tail = report.lines[-3:]
+    if report.status != "error":
+        return " output=" + " / ".join(tail)
+    errors = visible_error_lines(report.lines, include_unmarked=False) or visible_error_lines(report.lines)
+    if not errors:
+        return " output=" + " / ".join(tail)
+    evidence = " output=" + " / ".join(errors[-3:])
+    if tail != errors[-3:]:
+        evidence += " output_tail=" + " / ".join(tail)
+    return evidence
 
 
 @dataclass(frozen=True)
@@ -423,8 +440,7 @@ def classify_target(task_file: str, target: str, persistent_role: bool = False, 
         evidence += " persistent_role=true"
     if task_status:
         evidence += f" task_status={task_status}"
-    if report.lines:
-        evidence += " output=" + " / ".join(report.lines[-3:])
+    evidence += report_output_evidence(report)
     if report.status == "stuck_input" and persistent_role and task_status == "blocked" and is_stock_placeholder_input_text(report.input_text):
         return StatusRow(task_file, "ready", evidence, persistent_role, task_status, target)
     if report.status == "stuck_input":

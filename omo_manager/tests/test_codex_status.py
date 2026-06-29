@@ -2,7 +2,7 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from omo_manager.omo_codex_status import Args, Report, can_submit_stuck_input, current_block, current_input_text, has_compacting_indicator, inspect, last_output, report_from_lines, status, submit_stuck_input_if_present
+from omo_manager.omo_codex_status import Args, Report, can_submit_stuck_input, current_block, current_input_text, has_compacting_indicator, has_terminal_enter_prompt_after_codex_footer, inspect, last_output, report_from_lines, status, submit_stuck_input_if_present, visible_error_lines
 
 
 class CodexStatusTests(unittest.TestCase):
@@ -85,6 +85,34 @@ class CodexStatusTests(unittest.TestCase):
         lines = ['• Working (19m 47s • esc to interrupt)', '  tab to queue message                                                                                    28% context left', '$ shell prompt']
         self.assertEqual('not_codex', status(lines, current_block(lines)))
 
+    def test_status_stuck_input_for_terminal_enter_prompt_after_codex_footer(self) -> None:
+        lines = ['────', 'done', '─ Worked for 1s ─', '  gpt-5.5', 'Press Enter to continue...']
+        report = report_from_lines(lines)
+        self.assertTrue(has_terminal_enter_prompt_after_codex_footer(lines))
+        self.assertEqual('stuck_input', report.status)
+        self.assertTrue(report.can_submit_input)
+
+    def test_status_not_codex_for_terminal_enter_prompt_not_after_codex_footer(self) -> None:
+        lines = ['shell command output', 'Press Enter to continue...']
+        report = report_from_lines(lines)
+        self.assertFalse(has_terminal_enter_prompt_after_codex_footer(lines))
+        self.assertEqual('not_codex', report.status)
+        self.assertFalse(report.can_submit_input)
+
+    def test_status_not_codex_when_terminal_enter_prompt_follows_text_mentioning_model(self) -> None:
+        lines = ['tool output mentions  gpt-5.5', 'Press Enter to continue...']
+        report = report_from_lines(lines)
+        self.assertFalse(has_terminal_enter_prompt_after_codex_footer(lines))
+        self.assertEqual('not_codex', report.status)
+        self.assertFalse(report.can_submit_input)
+
+    def test_status_not_codex_when_terminal_enter_prompt_follows_busy_footer_without_completed_turn(self) -> None:
+        lines = ['• Working (19m 47s • esc to interrupt)', '  gpt-5.5', 'Press Enter to continue...']
+        report = report_from_lines(lines)
+        self.assertFalse(has_terminal_enter_prompt_after_codex_footer(lines))
+        self.assertEqual('not_codex', report.status)
+        self.assertFalse(report.can_submit_input)
+
     def test_status_stuck_input_for_user_entered_explain_on_idle_worker(self) -> None:
         lines = ['────', 'done', '› Explain this codebase', '  gpt-5.5']
         self.assertEqual('stuck_input', status(lines, current_block(lines)))
@@ -150,6 +178,20 @@ class CodexStatusTests(unittest.TestCase):
             with self.subTest(warning=warning):
                 lines = ['────', warning, '› Use /skills to list available skills', '  gpt-5.5']
                 self.assertEqual('error', report_from_lines(lines).status)
+
+    def test_visible_error_lines_include_warning_and_square_marker_above_input(self) -> None:
+        lines = ['────', '■ Error: 429 Too Many Requests', 'detail', '› Explain this codebase', '  gpt-5.5']
+        self.assertEqual(['■ Error: 429 Too Many Requests'], visible_error_lines(current_block(lines).lines))
+        warning = ['────', '⚠ Selected model is at capacity. Please try a different model.', '› Explain this codebase', '  gpt-5.5']
+        self.assertEqual(['⚠ Selected model is at capacity. Please try a different model.'], visible_error_lines(current_block(warning).lines))
+
+    def test_ready_input_stays_ready_after_benign_error_text(self) -> None:
+        lines = ['────', 'No error found', '› Use /skills to list available skills', '  gpt-5.5']
+        self.assertEqual('ready', report_from_lines(lines).status)
+
+    def test_non_error_marker_above_input_stays_ready(self) -> None:
+        lines = ['────', '■ Build summary complete', '› Use /skills to list available skills', '  gpt-5.5']
+        self.assertEqual('ready', report_from_lines(lines).status)
 
     def test_status_stuck_input_when_capacity_warning_has_real_input(self) -> None:
         lines = ['────', '⚠ Selected model is at capacity. Please try a different model.', '', '› Continue the private manager task', '  gpt-5.5']
@@ -232,6 +274,12 @@ class CodexStatusTests(unittest.TestCase):
     def test_submit_stuck_input_if_present_sends_enter_for_stuck_input(self) -> None:
         report = Report('stuck_input', ['› Continue task'], 'Continue task', True)
         with patch('omo_manager.omo_codex_status.tail', return_value=['› Continue task', '  gpt-5.5']), patch('omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)) as run:
+            self.assertEqual('sent_enter', submit_stuck_input_if_present('cfg:1.0', report))
+        run.assert_called_once_with(['tmux', 'send-keys', '-t', 'cfg:1.0', 'Enter'], capture_output=True, text=True, timeout=5, check=False)
+
+    def test_submit_stuck_input_if_present_sends_enter_for_terminal_enter_prompt(self) -> None:
+        report = Report('stuck_input', ['Press Enter to continue...'], '', True)
+        with patch('omo_manager.omo_codex_status.tail', return_value=['────', 'done', '─ Worked for 1s ─', '  gpt-5.5', 'Press Enter to continue...']), patch('omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)) as run:
             self.assertEqual('sent_enter', submit_stuck_input_if_present('cfg:1.0', report))
         run.assert_called_once_with(['tmux', 'send-keys', '-t', 'cfg:1.0', 'Enter'], capture_output=True, text=True, timeout=5, check=False)
 

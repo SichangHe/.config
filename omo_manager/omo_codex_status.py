@@ -14,8 +14,10 @@ DEFAULT_COMPACTION_WAIT_TIMEOUT_S = float(os.environ.get("OMO_CODEX_COMPACTION_W
 COMPACTION_WAIT_INTERVAL_S = 0.5
 COMPACTION_WAIT_LINES = 2000
 CODEX_RE = re.compile(r"  gpt-")
+CODEX_FOOTER_RE = re.compile(r"^  gpt-")
 ERROR_RE = re.compile(r"\b(failed|panic|traceback|exception)\b|\berror\b(?!\s*=\s*\d)", re.IGNORECASE)
 SELECTED_MODEL_CAPACITY_RE = re.compile(r"^\s*(?:⚠\ufe0f?\s*)?Selected model is at capacity\. Please try a different model\.\s*$")
+VISIBLE_ERROR_MARKER_RE = re.compile(r"^\s*(?:[■□▢▣▪▫◼◻▰▱▮▯]\s*|⚠\ufe0f?\s*)")
 SEP_RE = re.compile(r"^─+$")
 WORKED_RE = re.compile(r"^─ Worked for .+ ─+$")
 READY_RE = re.compile(r"^› Use /skills to list available skills$")
@@ -24,6 +26,7 @@ BUSY_RE = re.compile(r"^• (?:Working|Messages to be submitted after next tool 
 COMPACTING_RE = re.compile(r"^• Compacting\b", re.IGNORECASE)
 BACKGROUND_RUNNING_RE = re.compile(r"^• .*?\b(?:Waiting for background terminal|[1-9][0-9]* background terminals? running)\b")
 QUEUE_MESSAGE_FOOTER_RE = re.compile(r"\btab to queue message\b")
+TERMINAL_ENTER_PROMPT_RE = re.compile(r"^\s*\[?press enter(?:/return)?(?: to continue)?(?:\.\.\.)?\]?\s*$", re.IGNORECASE)
 CODEX_EMPTY_INPUT_TEXTS = {
     "Use /skills to list available skills",
     "Find and fix a bug in @filename",
@@ -86,6 +89,16 @@ def tail(target: str, n_lines: int) -> list[str]:
 
 def has_codex_model_footer(lines: list[str]) -> bool:
     return bool(lines and CODEX_RE.search(lines[-1]) is not None)
+
+
+def has_terminal_enter_prompt_after_codex_footer(lines: list[str]) -> bool:
+    visible = [line.rstrip() for line in lines if line.strip()]
+    return (
+        len(visible) >= 3
+        and TERMINAL_ENTER_PROMPT_RE.match(visible[-1]) is not None
+        and CODEX_FOOTER_RE.match(visible[-2]) is not None
+        and WORKED_RE.match(visible[-3]) is not None
+    )
 
 
 def current_block(lines: list[str]) -> Block:
@@ -157,6 +170,17 @@ def has_selected_model_capacity_warning(lines: list[str]) -> bool:
     return any(SELECTED_MODEL_CAPACITY_RE.search(line) is not None for line in output_lines)
 
 
+def visible_error_lines(lines: list[str], include_unmarked: bool = True) -> list[str]:
+    found: list[str] = []
+    for line in lines:
+        if line.lstrip().startswith("›"):
+            break
+        marked = VISIBLE_ERROR_MARKER_RE.search(line) is not None
+        if SELECTED_MODEL_CAPACITY_RE.search(line) is not None or (ERROR_RE.search(line) is not None and (include_unmarked or marked)):
+            found.append(line.strip())
+    return found
+
+
 def current_input_follows_running_indicator(lines: list[str]) -> bool:
     body = lines[:-1] if has_codex_model_footer(lines) else lines[:]
     input_idx = -1
@@ -185,6 +209,8 @@ def is_stock_placeholder_input_text(input_text: str) -> bool:
 
 
 def can_submit_stuck_input(lines: list[str]) -> bool:
+    if has_terminal_enter_prompt_after_codex_footer(lines):
+        return True
     if has_queued_running_input(lines) or has_compacting_indicator(lines):
         return False
     input_text = current_input_text(lines)
@@ -192,6 +218,8 @@ def can_submit_stuck_input(lines: list[str]) -> bool:
 
 
 def stuck_input_blocker(lines: list[str], input_text: str) -> str:
+    if has_terminal_enter_prompt_after_codex_footer(lines):
+        return ""
     if not has_codex_model_footer(lines):
         return "no_codex_footer"
     if has_compacting_indicator(lines):
@@ -227,15 +255,19 @@ def status(lines: list[str], block: Block) -> str:
     if not lines:
         return "not_codex"
     if not has_codex_model_footer(lines):
+        if has_terminal_enter_prompt_after_codex_footer(lines):
+            return "stuck_input"
         return "running" if has_queued_running_input(lines) else "not_codex"
     if has_selected_model_capacity_warning(block.lines or lines[-20:]):
         input_text = current_input_text(lines)
-        if input_text and not is_empty_input_text(lines, input_text):
+        if input_text and not is_stock_placeholder_input_text(input_text):
             return "stuck_input"
         return "error"
     if has_queued_running_input(lines):
         return "running"
     input_text = current_input_text(lines)
+    if visible_error_lines(block.lines or lines[-20:], include_unmarked=False):
+        return "error"
     if input_text and not is_empty_input_text(lines, input_text):
         return "stuck_input"
     if input_text in CODEX_RUNNING_EMPTY_INPUT_TEXTS and current_input_follows_running_indicator(lines):
@@ -244,8 +276,7 @@ def status(lines: list[str], block: Block) -> str:
         return "running"
     if block.has_footer or any(READY_RE.match(line) is not None or INPUT_RE.match(line) is not None for line in lines[-10:]):
         return "ready"
-    text = "\n".join(block.lines or lines[-20:])
-    if ERROR_RE.search(text) is not None:
+    if visible_error_lines(block.lines or lines[-20:]):
         return "error"
     return "running"
 
