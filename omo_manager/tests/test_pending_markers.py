@@ -63,6 +63,8 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual("human", markers[0].origin)
             self.assertEqual("email", markers[0].source)
             self.assertIn("origin=human source=email action=ack-human", markers[0].ref)
+            self.assertIn("(delegate manager_mail/4002.txt)", markers[0].ref)
+            self.assertNotIn("(from email manager_mail/4002.txt)", markers[0].ref)
 
     def test_manual_pending_block_is_human_origin(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2484,7 +2486,10 @@ class PendingMarkerTests(unittest.TestCase):
             out = StringIO()
             with redirect_stdout(out):
                 self.assertTrue(scan_once(args, seen, [path]))
-            self.assertIn("origin=human source=email action=ack-human", out.getvalue())
+            text = out.getvalue()
+            self.assertIn("origin=human source=email action=ack-human", text)
+            self.assertIn("(delegate manager_mail/4002.txt)", text)
+            self.assertNotIn("(from email manager_mail/4002.txt)", text)
 
     def test_pending_watch_can_add_manager_policy_reminder(self) -> None:
         from omo_manager.omo_pending_watch import scan_once

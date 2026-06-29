@@ -86,11 +86,14 @@ class Marker:
     digest: str
     origin: str
     source: str
+    delegate_source: str
     file_lines: int
 
     @property
     def ref(self) -> str:
         text = f"pending: file={self.file} line={self.line} origin={self.origin} source={self.source} action={self.action}"
+        if self.delegate_source:
+            text = f"{text}\n(delegate {self.delegate_source})"
         if self.file_lines <= TASK_FILE_LINE_WARNING_THRESHOLD:
             return text
         return f"{text}\ntask-file length warning: this file has {self.file_lines} lines; move future content into a linked continuation file and cross-link both files."
@@ -374,6 +377,16 @@ def marker_origin_source(block_lines: list[str]) -> tuple[str, str]:
     return "human", "manual"
 
 
+def delegate_source(block_lines: list[str]) -> str:
+    for line in block_lines:
+        stripped = line.strip()
+        if stripped.startswith("(from email ") and stripped.endswith(")"):
+            return stripped[len("(from email ") : -1]
+        if stripped.startswith("[source: email ") and stripped.endswith("]"):
+            return stripped[len("[source: email ") : -1]
+    return ""
+
+
 def find_markers(root: Path, files: list[Path]) -> list[Marker]:
     markers: list[Marker] = []
     for path in files:
@@ -402,9 +415,10 @@ def find_markers(root: Path, files: list[Path]) -> list[Marker]:
                 if block_idx != idx - 1 and lines[block_idx].strip() in PENDING_MARKERS:
                     end_idx = block_idx
                     break
-            origin, source = marker_origin_source(lines[idx - 1 : end_idx])
+            block_lines = lines[idx - 1 : end_idx]
+            origin, source = marker_origin_source(block_lines)
             digest = hashlib.sha256(f"{rel}:{idx}:{next_line}".encode("utf-8")).hexdigest()[:16]
-            markers.append(Marker(file=rel, line=idx, digest=digest, origin=origin, source=source, file_lines=len(lines)))
+            markers.append(Marker(file=rel, line=idx, digest=digest, origin=origin, source=source, delegate_source=delegate_source(block_lines), file_lines=len(lines)))
     return markers
 
 
