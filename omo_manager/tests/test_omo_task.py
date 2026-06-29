@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from omo_manager.omo_task import Args, DEFAULT_TOOL, DEFAULT_WORKER_INSTRUCTIONS, VL_WORKER_INSTRUCTIONS, codex_cmd, effective_tool, ensure_task_file, is_vl_agent, link_todo, main, new_window, parse_args, runat_goal_tree_error, start_codex, validate_runat_goal_tree, wait_command_started
+from omo_manager.omo_task import Args, DEFAULT_TOOL, DEFAULT_WORKER_INSTRUCTIONS, PCODX_WRAPPER, VL_WORKER_INSTRUCTIONS, codex_cmd, effective_tool, ensure_task_file, is_vl_agent, link_todo, main, new_window, parse_args, runat_goal_tree_error, start_codex, validate_runat_goal_tree, wait_command_started
 
 
 VALID_GOAL_TREE = "implement manager check\n- reject missing task goal tree\n"
@@ -77,14 +77,14 @@ class OmoTaskTests(unittest.TestCase):
             start_codex_mock.assert_called_once_with('cfg:7', args)
 
     def test_codex_cmd_resumes_quoted_session(self) -> None:
-        self.assertEqual("pcodx resume abc", codex_cmd("abc"))
-        self.assertEqual("pcodx resume 'abc def'", codex_cmd("abc def"))
+        self.assertEqual(f"{PCODX_WRAPPER} resume abc", codex_cmd("abc"))
+        self.assertEqual(f"{PCODX_WRAPPER} resume 'abc def'", codex_cmd("abc def"))
         self.assertEqual("bunx @openai/codex --dangerously-bypass-approvals-and-sandbox resume abc", codex_cmd("abc", tool="codex"))
 
     def test_codex_cmd_uses_prompt_argument_from_file(self) -> None:
         expected_paths = f"{DEFAULT_WORKER_INSTRUCTIONS} /tmp/prompt.md"
         self.assertEqual(
-            f'pcodx "$(cat -- {expected_paths})"',
+            f'{PCODX_WRAPPER} "$(cat -- {expected_paths})"',
             codex_cmd(prompt_file=Path("/tmp/prompt.md")),
         )
 
@@ -94,12 +94,12 @@ class OmoTaskTests(unittest.TestCase):
     def test_codex_cmd_adds_vl_worker_defaults_only_for_vl_agents(self) -> None:
         self.assertNotIn(str(VL_WORKER_INSTRUCTIONS), codex_cmd(prompt_file=Path("/tmp/prompt.md")))
         self.assertEqual(
-            f'pcodx "$(cat -- {DEFAULT_WORKER_INSTRUCTIONS} {VL_WORKER_INSTRUCTIONS} /tmp/prompt.md)"',
+            f'{PCODX_WRAPPER} "$(cat -- {DEFAULT_WORKER_INSTRUCTIONS} {VL_WORKER_INSTRUCTIONS} /tmp/prompt.md)"',
             codex_cmd(prompt_file=Path("/tmp/prompt.md"), vl_agent=True),
         )
 
     def test_codex_cmd_does_not_add_context_free_vl_guidance(self) -> None:
-        self.assertEqual("pcodx", codex_cmd(vl_agent=True))
+        self.assertEqual(str(PCODX_WRAPPER), codex_cmd(vl_agent=True))
 
     def test_vl_agent_scope_uses_task_file_or_tmux_session(self) -> None:
         self.assertTrue(is_vl_agent("vl_worker.md", "cfg:2"))
@@ -111,7 +111,7 @@ class OmoTaskTests(unittest.TestCase):
 
     def test_codex_cmd_adds_reasoning_effort_and_extra_flags(self) -> None:
         self.assertEqual(
-            "pcodx --config 'model_reasoning_effort=\"xhigh\"' --profile deep-review",
+            f"{PCODX_WRAPPER} --config 'model_reasoning_effort=\"xhigh\"' --profile deep-review",
             codex_cmd(reasoning_effort="xhigh", codex_flags=("--profile", "deep-review")),
         )
         self.assertEqual(
@@ -120,8 +120,10 @@ class OmoTaskTests(unittest.TestCase):
         )
 
     def test_pcodx_tool_uses_wrapper_command(self) -> None:
+        self.assertTrue(PCODX_WRAPPER.is_absolute())
+        self.assertEqual(Path(__file__).resolve().parents[1] / "pcodx", PCODX_WRAPPER)
         self.assertEqual(
-            "pcodx --config 'model_reasoning_effort=\"xhigh\"' --profile deep-review",
+            f"{PCODX_WRAPPER} --config 'model_reasoning_effort=\"xhigh\"' --profile deep-review",
             codex_cmd(reasoning_effort="xhigh", codex_flags=("--profile", "deep-review"), tool="pcodx"),
         )
 

@@ -19,9 +19,10 @@ except ModuleNotFoundError:
 DEFAULT_ROOT = Path(os.environ.get("OMO_WORK_LOGS_ROOT", Path.home() / "work_logs"))
 DEFAULT_WORKER_INSTRUCTIONS = Path(__file__).with_name("WORKER_DEFAULTS.md")
 VL_WORKER_INSTRUCTIONS = Path(__file__).with_name("VL_WORKER_DEFAULTS.md")
+PCODX_WRAPPER = Path(__file__).resolve().with_name("pcodx")
 COMMAND_BY_TOOL = {
     "codex": ("bunx", "@openai/codex", "--dangerously-bypass-approvals-and-sandbox"),
-    "pcodx": ("pcodx",),
+    "pcodx": (str(PCODX_WRAPPER),),
 }
 DEFAULT_TOOL = "pcodx"
 SHELL_COMMANDS = {"bash", "dash", "fish", "sh", "zsh"}
