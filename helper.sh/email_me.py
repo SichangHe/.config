@@ -15,6 +15,7 @@ import os
 import re
 import smtplib
 import ssl
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -40,6 +41,8 @@ except ImportError:
 
 MANAGER_PREFIX = "[a]"
 PWD_FOOTER_RE = re.compile(r"(?:^|\n)(?:>\s*)?PWD: [^\n]+\n?\Z")
+TMUX_WINDOW_RE = re.compile(r"[^:\n]+:\d+\Z")
+TMUX_FOOTER_RE = re.compile(r"(?:^|\n)tmux: [^:\n]+:\d+\r?\n?\Z", re.IGNORECASE)
 MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
 INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)(?:\s+#+\s*)?$")
@@ -173,10 +176,35 @@ def current_pwd() -> str:
     return str(cwd)
 
 
+def current_tmux_window() -> str | None:
+    if not os.environ.get("TMUX"):
+        return None
+    try:
+        result = subprocess.run(
+            ["tmux", "display-message", "-p", "#S:#I"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    target = result.stdout.strip()
+    if not TMUX_WINDOW_RE.fullmatch(target):
+        return None
+    return target
+
+
 def append_pwd_footer(content: str, cwd: str | Path | None = None) -> str:
-    if PWD_FOOTER_RE.search(content):
+    if PWD_FOOTER_RE.search(content) or TMUX_FOOTER_RE.search(content):
         return content
-    footer = f"PWD: {short_pwd(cwd or current_pwd())}"
+    tmux_window = current_tmux_window()
+    if tmux_window is not None:
+        footer = f"tmux: {tmux_window}"
+    else:
+        footer = f"PWD: {short_pwd(cwd or current_pwd())}"
     body = content.rstrip("\n")
     return f"{body}\n\n{footer}\n"
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -25,7 +26,7 @@ literal `touch /tmp/email-me-should-not-run-backtick`
 
 class EmailMeTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.env_patch = patch.dict(os.environ, {"OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "0"})
+        self.env_patch = patch.dict(os.environ, {"OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "0", "TMUX": ""})
         self.env_patch.start()
 
     def tearDown(self) -> None:
@@ -43,12 +44,91 @@ class EmailMeTests(unittest.TestCase):
         self.assertIsNotNone(plain)
         self.assertEqual(f"body\n\nPWD: {Path(tmp).name}\n", plain.get_content())
 
+    def test_appends_tmux_footer_to_body(self) -> None:
+        result = subprocess.CompletedProcess(["tmux"], 0, stdout="wl:2\n", stderr="")
+        with (
+            patch.dict(os.environ, {"TMUX": "/tmp/tmux-session"}, clear=False),
+            patch.object(email_me.subprocess, "run", return_value=result) as run,
+        ):
+            msg = email_me.build_message("me@example.com", "hi", "body\n")
+        plain = msg.get_body(preferencelist=("plain",))
+        self.assertIsNotNone(plain)
+        self.assertEqual("body\n\ntmux: wl:2\n", plain.get_content())
+        run.assert_called_once_with(
+            ["tmux", "display-message", "-p", "#S:#I"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+
+    def test_tmux_lookup_failure_falls_back_to_pwd_footer(self) -> None:
+        result = subprocess.CompletedProcess(["tmux"], 1, stdout="", stderr="not attached")
+        with tempfile.TemporaryDirectory() as tmp:
+            old_cwd = Path.cwd()
+            try:
+                os.chdir(tmp)
+                with (
+                    patch.dict(os.environ, {"TMUX": "/tmp/tmux-session"}, clear=False),
+                    patch.object(email_me.subprocess, "run", return_value=result),
+                ):
+                    msg = email_me.build_message("me@example.com", "hi", "body\n")
+            finally:
+                os.chdir(old_cwd)
+        plain = msg.get_body(preferencelist=("plain",))
+        self.assertIsNotNone(plain)
+        self.assertEqual(f"body\n\nPWD: {Path(tmp).name}\n", plain.get_content())
+
+    def test_malformed_tmux_target_falls_back_to_pwd_footer(self) -> None:
+        result = subprocess.CompletedProcess(["tmux"], 0, stdout="notes\n", stderr="")
+        with tempfile.TemporaryDirectory() as tmp:
+            old_cwd = Path.cwd()
+            try:
+                os.chdir(tmp)
+                with (
+                    patch.dict(os.environ, {"TMUX": "/tmp/tmux-session"}, clear=False),
+                    patch.object(email_me.subprocess, "run", return_value=result),
+                ):
+                    msg = email_me.build_message("me@example.com", "hi", "body\n")
+            finally:
+                os.chdir(old_cwd)
+        plain = msg.get_body(preferencelist=("plain",))
+        self.assertIsNotNone(plain)
+        self.assertEqual(f"body\n\nPWD: {Path(tmp).name}\n", plain.get_content())
+
     def test_keeps_existing_pwd_footer(self) -> None:
         content = "body\n\nPWD: /already-there\n"
         msg = email_me.build_message("me@example.com", "hi", content)
         plain = msg.get_body(preferencelist=("plain",))
         self.assertIsNotNone(plain)
         self.assertEqual(content, plain.get_content())
+
+    def test_keeps_existing_tmux_footer(self) -> None:
+        content = "body\n\ntmux: wl:2\n"
+        msg = email_me.build_message("me@example.com", "hi", content)
+        plain = msg.get_body(preferencelist=("plain",))
+        self.assertIsNotNone(plain)
+        self.assertEqual(content, plain.get_content())
+
+    def test_keeps_existing_tmux_footer_with_crlf(self) -> None:
+        content = "body\r\n\r\ntmux: wl:2\r\n"
+        msg = email_me.build_message("me@example.com", "hi", content)
+        plain = msg.get_body(preferencelist=("plain",))
+        self.assertIsNotNone(plain)
+        self.assertEqual("body\n\ntmux: wl:2\n", plain.get_content())
+
+    def test_quoted_tmux_text_gets_current_footer(self) -> None:
+        content = "body\n\n> tmux: wl:2\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            old_cwd = Path.cwd()
+            try:
+                os.chdir(tmp)
+                msg = email_me.build_message("me@example.com", "hi", content)
+            finally:
+                os.chdir(old_cwd)
+        plain = msg.get_body(preferencelist=("plain",))
+        self.assertIsNotNone(plain)
+        self.assertEqual(f"body\n\n> tmux: wl:2\n\nPWD: {Path(tmp).name}\n", plain.get_content())
 
     def test_keeps_existing_quoted_pwd_footer(self) -> None:
         content = "body\n\n> PWD: /already-there\n"
@@ -69,6 +149,17 @@ class EmailMeTests(unittest.TestCase):
         plain = msg.get_body(preferencelist=("plain",))
         self.assertIsNotNone(plain)
         self.assertEqual("body\n", plain.get_content())
+
+    def test_can_omit_footer_inside_tmux_when_explicitly_requested(self) -> None:
+        with (
+            patch.dict(os.environ, {"TMUX": "/tmp/tmux-session"}, clear=False),
+            patch.object(email_me.subprocess, "run") as run,
+        ):
+            msg = email_me.build_message("me@example.com", "hi", "body\n", add_pwd_footer=False)
+        plain = msg.get_body(preferencelist=("plain",))
+        self.assertIsNotNone(plain)
+        self.assertEqual("body\n", plain.get_content())
+        run.assert_not_called()
 
     def test_preserves_manager_subject_prefix(self) -> None:
         for subject in ("[a] hi", "[omo_manager] hi"):

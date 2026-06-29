@@ -46,6 +46,7 @@ MANAGER_REPLY_SEARCH_PREFIXES = (MANAGER_REPLY_PREFIX, "Re:[a]", "Re: [omo_manag
 NORMAL_REPLY_SEARCH_PREFIXES = MANAGER_REPLY_SEARCH_PREFIXES
 MANAGER_REPLY_SUBJECT_RE = re.compile(r"^re:\s*(?:\[a\]|\[omo_manager\])\s*", re.IGNORECASE)
 PWD_FOOTER_RE = re.compile(r"(?:^|\n)PWD: [^\n]+\n?\Z")
+TMUX_FOOTER_RE = re.compile(r"(?:^|\n)tmux: [^:\n]+:\d+\r?\n?\Z", re.IGNORECASE)
 RECOVERY_SUBJECTS = {"[omo_manager_recover]", "Re: [omo_manager_recover]"}
 # Fail closed by default: raw email can contain sender-injected Authentication-Results.
 # This opt-in is an operator/admin-trusted escape hatch for mailbox/provider setups
@@ -263,8 +264,8 @@ def is_recovery_subject(subject: str) -> bool:
     return " ".join(subject.split()) in RECOVERY_SUBJECTS
 
 
-def has_pwd_footer(text: str) -> bool:
-    return PWD_FOOTER_RE.search(text) is not None
+def has_agent_footer(text: str) -> bool:
+    return PWD_FOOTER_RE.search(text) is not None or TMUX_FOOTER_RE.search(text) is not None
 
 
 def manager_url_is_loopback(manager_url: str) -> bool:
@@ -952,7 +953,7 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
             logging.warning("email candidate rejected after fetch: uid=%s subject=%r from_self=%s", uid, subject, from_self(sender, args.self_email))
             continue
         body = message_text(msg)
-        if is_manager_subject(subject) and has_pwd_footer(body):
+        if is_manager_subject(subject) and has_agent_footer(body):
             logging.info("email candidate ignored as manager-authored echo: uid=%s subject=%r", uid, subject)
             ignored_uids.add(uid)
             ignored_changed = True

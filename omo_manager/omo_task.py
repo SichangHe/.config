@@ -18,6 +18,7 @@ except ModuleNotFoundError:
 
 DEFAULT_ROOT = Path(os.environ.get("OMO_WORK_LOGS_ROOT", Path.home() / "work_logs"))
 DEFAULT_WORKER_INSTRUCTIONS = Path(__file__).with_name("WORKER_DEFAULTS.md")
+VL_WORKER_INSTRUCTIONS = Path(__file__).with_name("VL_WORKER_DEFAULTS.md")
 COMMAND_BY_TOOL = {
     "codex": ("bunx", "@openai/codex", "--dangerously-bypass-approvals-and-sandbox"),
     "pcodx": ("pcodx",),
@@ -101,6 +102,18 @@ def target(args: Args) -> str:
     if args.tmux_session and args.tmux_window:
         return f"{args.tmux_session}:{args.tmux_window}"
     return args.tmux_session
+
+
+def target_session(tmux_target: str) -> str:
+    return tmux_target.split(":", 1)[0]
+
+
+def is_vl_task_file(task_file: str) -> bool:
+    return Path(task_file).name.startswith("vl_")
+
+
+def is_vl_agent(task_file: str, tmux_target: str) -> bool:
+    return is_vl_task_file(task_file) or target_session(tmux_target) == "vl"
 
 
 def header(tmux_target: str, tool: str) -> str:
@@ -194,17 +207,23 @@ def effective_tool(args: Args) -> str:
     return args.tool
 
 
-def prompt_input(prompt_file: Path | None) -> str:
+def prompt_input(prompt_file: Path | None, vl_agent: bool = False) -> str:
     if prompt_file is None:
         return ""
     if not DEFAULT_WORKER_INSTRUCTIONS.is_file():
         raise FileNotFoundError(f"worker defaults file not found: {DEFAULT_WORKER_INSTRUCTIONS}")
-    paths = [DEFAULT_WORKER_INSTRUCTIONS, prompt_file]
+    paths = [DEFAULT_WORKER_INSTRUCTIONS]
+    if vl_agent:
+        if not VL_WORKER_INSTRUCTIONS.is_file():
+            raise FileNotFoundError(f"VL worker defaults file not found: {VL_WORKER_INSTRUCTIONS}")
+        paths.append(VL_WORKER_INSTRUCTIONS)
+    if prompt_file is not None:
+        paths.append(prompt_file)
     quoted_paths = " ".join(shlex.quote(str(path)) for path in paths)
     return f"\"$(cat -- {quoted_paths})\""
 
 
-def codex_cmd(session_id: str = "", reasoning_effort: str = "", codex_flags: tuple[str, ...] = (), prompt_file: Path | None = None, tool: str = DEFAULT_TOOL) -> str:
+def codex_cmd(session_id: str = "", reasoning_effort: str = "", codex_flags: tuple[str, ...] = (), prompt_file: Path | None = None, tool: str = DEFAULT_TOOL, vl_agent: bool = False) -> str:
     try:
         args = list(COMMAND_BY_TOOL[tool])
     except KeyError as exc:
@@ -215,7 +234,7 @@ def codex_cmd(session_id: str = "", reasoning_effort: str = "", codex_flags: tup
     if session_id:
         args.extend(("resume", session_id))
     parts = [shlex.quote(arg) for arg in args]
-    prompt = prompt_input(prompt_file)
+    prompt = prompt_input(prompt_file, vl_agent)
     if prompt:
         parts.append(prompt)
     return " ".join(parts)
@@ -264,7 +283,10 @@ def new_window_command(args: Args) -> list[str]:
 
 
 def start_codex(target: str, args: Args) -> None:
-    command = shell_cmd(codex_cmd(args.session_id, args.reasoning_effort, args.codex_flags, args.prompt_file, effective_tool(args)))
+    vl_agent = is_vl_agent(args.task_file, target)
+    if vl_agent and args.prompt_file is None:
+        raise ValueError("VL launches require --prompt-file so the end-goal and reviewer guidance has task-local context.")
+    command = shell_cmd(codex_cmd(args.session_id, args.reasoning_effort, args.codex_flags, args.prompt_file, effective_tool(args), vl_agent))
     _ = tmux(["send-keys", "-t", target, command, "Enter"], check=True)
     wait_command_started(target)
 
@@ -330,7 +352,7 @@ def dry_run(args: Args) -> None:
         command = ["tmux", *new_window_command(args)]
         print("tmux: " + " ".join(shlex.quote(part) for part in command))
         launch_target = f"{args.tmux_session}:DRYRUN"
-        launch = ["tmux", "send-keys", "-t", launch_target, shell_cmd(codex_cmd(args.session_id, args.reasoning_effort, args.codex_flags, args.prompt_file, effective_tool(args))), "Enter"]
+        launch = ["tmux", "send-keys", "-t", launch_target, shell_cmd(codex_cmd(args.session_id, args.reasoning_effort, args.codex_flags, args.prompt_file, effective_tool(args), is_vl_agent(args.task_file, launch_target))), "Enter"]
         print("tmux: " + " ".join(shlex.quote(part) for part in launch))
 
 
@@ -339,6 +361,8 @@ def validate_inputs(args: Args) -> None:
         raise ValueError(f"prompt file not found: {args.prompt_file}")
     if any(not flag or "\0" in flag or "\n" in flag for flag in args.codex_flags):
         raise ValueError("codex flags must be non-empty single-line argv tokens.")
+    if args.workdir is not None and args.prompt_file is None and is_vl_agent(args.task_file, target(args)):
+        raise ValueError("VL launches require --prompt-file so the end-goal and reviewer guidance has task-local context.")
     path = task_path(args.root, args.task_file)
     if path.exists():
         return

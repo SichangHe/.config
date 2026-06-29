@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from omo_manager.omo_task import Args, DEFAULT_TOOL, DEFAULT_WORKER_INSTRUCTIONS, codex_cmd, effective_tool, ensure_task_file, link_todo, main, new_window, parse_args, runat_goal_tree_error, start_codex, validate_runat_goal_tree, wait_command_started
+from omo_manager.omo_task import Args, DEFAULT_TOOL, DEFAULT_WORKER_INSTRUCTIONS, VL_WORKER_INSTRUCTIONS, codex_cmd, effective_tool, ensure_task_file, is_vl_agent, link_todo, main, new_window, parse_args, runat_goal_tree_error, start_codex, validate_runat_goal_tree, wait_command_started
 
 
 VALID_GOAL_TREE = "implement manager check\n- reject missing task goal tree\n"
@@ -91,6 +91,24 @@ class OmoTaskTests(unittest.TestCase):
     def test_codex_cmd_prepends_worker_defaults_to_prompt_file(self) -> None:
         self.assertIn(str(DEFAULT_WORKER_INSTRUCTIONS), codex_cmd(prompt_file=Path("/tmp/prompt.md")))
 
+    def test_codex_cmd_adds_vl_worker_defaults_only_for_vl_agents(self) -> None:
+        self.assertNotIn(str(VL_WORKER_INSTRUCTIONS), codex_cmd(prompt_file=Path("/tmp/prompt.md")))
+        self.assertEqual(
+            f'pcodx "$(cat -- {DEFAULT_WORKER_INSTRUCTIONS} {VL_WORKER_INSTRUCTIONS} /tmp/prompt.md)"',
+            codex_cmd(prompt_file=Path("/tmp/prompt.md"), vl_agent=True),
+        )
+
+    def test_codex_cmd_does_not_add_context_free_vl_guidance(self) -> None:
+        self.assertEqual("pcodx", codex_cmd(vl_agent=True))
+
+    def test_vl_agent_scope_uses_task_file_or_tmux_session(self) -> None:
+        self.assertTrue(is_vl_agent("vl_worker.md", "cfg:2"))
+        self.assertTrue(is_vl_agent("nested/vl_worker.md", "cfg:2"))
+        self.assertTrue(is_vl_agent("worker.md", "vl:2.0"))
+        self.assertFalse(is_vl_agent("archive/vl_notes/task.md", "cfg:2"))
+        self.assertFalse(is_vl_agent("worker.md", "vl.dev:2"))
+        self.assertFalse(is_vl_agent("worker.md", "cfg:2"))
+
     def test_codex_cmd_adds_reasoning_effort_and_extra_flags(self) -> None:
         self.assertEqual(
             "pcodx --config 'model_reasoning_effort=\"xhigh\"' --profile deep-review",
@@ -171,6 +189,21 @@ class OmoTaskTests(unittest.TestCase):
             self.assertEqual('Enter', command[4])
             wait_command_started_mock.assert_called_once_with('cfg:7')
 
+    def test_start_codex_adds_vl_guidance_for_vl_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            prompt = Path(tmp) / "prompt.md"
+            args = Args(Path(tmp), "x.md", "vl", "", "pcodx", Path(tmp), "x", prompt, False, False, "", "", ())
+            with patch("omo_manager.omo_task.tmux") as tmux, patch("omo_manager.omo_task.wait_command_started"):
+                start_codex("vl:7", args)
+            command = tmux.call_args_list[0].args[0]
+            self.assertIn(str(VL_WORKER_INSTRUCTIONS), command[3])
+
+    def test_start_codex_rejects_context_free_vl_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = Args(Path(tmp), "x.md", "vl", "", "pcodx", Path(tmp), "x", None, False, False, "", "", ())
+            with self.assertRaisesRegex(ValueError, "VL launches require --prompt-file"):
+                start_codex("vl:7", args)
+
     def test_wait_command_started_accepts_visible_codex_status(self) -> None:
         with patch('omo_manager.omo_task.tail', return_value=['› Use /skills to list available skills', '  gpt-5.5']), patch('omo_manager.omo_task.current_command', return_value='bash'), patch('omo_manager.omo_task.time.sleep') as sleep:
             wait_command_started('cfg:7')
@@ -220,6 +253,14 @@ class OmoTaskTests(unittest.TestCase):
             with contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(1, main(["--root", str(root), "--task-file", "x.md", "--prompt-file", str(prompt), "--dry-run"]))
             self.assertFalse((root / "x.md").exists())
+            self.assertFalse((root / "TODO.md").exists())
+
+    def test_main_dry_run_rejects_vl_launch_without_prompt_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(1, main(["--root", str(root), "--task-file", "vl_worker.md", "--tmux-session", "vl", "--workdir", str(root), "--dry-run"]))
+            self.assertFalse((root / "vl_worker.md").exists())
             self.assertFalse((root / "TODO.md").exists())
 
     def test_main_dry_run_validates_prompt_file_before_mutation(self) -> None:
