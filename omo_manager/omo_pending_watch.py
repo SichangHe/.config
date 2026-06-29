@@ -8,6 +8,7 @@ import ctypes.util
 import errno
 import os
 import hashlib
+import random
 import re
 import select
 import struct
@@ -15,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -45,6 +47,15 @@ ROUTED_PREFIXES = ("(manager handled:", "(manager routed:")
 EMAIL_SOURCE_PREFIXES = ("(from email ", "[source: email ")
 AGENT_SOURCE_PREFIXES = ("[omo-message-source: origin=agent ", "(from agent ")
 AGENT_PROBLEM_SOURCE_LINE = "[omo-message-source: origin=agent source=agent action=no-human-ack agent=omo_pending_watch via=omo_pending_watch.py status=agent-problem]"
+MANAGER_POLICY_REMINDER_RATE = 0.125
+MANAGER_POLICY_REMINDERS = (
+    "Reminder: delegate work; do not do worker work in the manager.",
+    "Reminder: stay high level; route concrete work to agents.",
+)
+MANAGER_EMAIL_POLICY_REMINDERS = (
+    *MANAGER_POLICY_REMINDERS,
+    "Reminder: acknowledge human email first, then delegate.",
+)
 IGNORE_PARTS = {".git", ".venv", "__pycache__"}
 FENCE_PREFIXES = ("```", "~~~")
 INOTIFY_EVENT = struct.Struct("iIII")
@@ -105,6 +116,8 @@ class Args:
     agent_problem_interval_s: float = DEFAULT_AGENT_PROBLEM_INTERVAL_S
     agent_problem_repeat_s: float = DEFAULT_AGENT_PROBLEM_REPEAT_S
     poll_backstop_interval_s: float = DEFAULT_POLL_BACKSTOP_INTERVAL_S
+    reminder_random: Callable[[], float] | None = None
+    reminder_choice: Callable[[Sequence[str]], str] = random.choice
 
 
 @dataclass
@@ -296,6 +309,7 @@ def parse_args(argv: list[str]) -> Args:
         parsed.agent_problem_interval_s,
         parsed.agent_problem_repeat_s,
         parsed.poll_backstop_interval_s,
+        random.random,
     )
 
 
@@ -392,8 +406,15 @@ def find_markers(root: Path, files: list[Path]) -> list[Marker]:
     return markers
 
 
+def with_manager_policy_reminder(args: Args, text: str, reminders: Sequence[str] = MANAGER_POLICY_REMINDERS) -> str:
+    if args.reminder_random is None or args.reminder_random() >= MANAGER_POLICY_REMINDER_RATE:
+        return text
+    return f"{text}\n{args.reminder_choice(reminders)}"
+
+
 def push_ref(args: Args, marker: Marker) -> int:
-    text = marker.ref
+    reminders = MANAGER_EMAIL_POLICY_REMINDERS if marker.source == "email" else MANAGER_POLICY_REMINDERS
+    text = with_manager_policy_reminder(args, marker.ref, reminders)
     if args.dry_run:
         print(text)
         return 0
@@ -634,7 +655,7 @@ def handle_agent_problem_result(args: Args, seen: dict[str, float], result: Comm
     key = f"agent-problem:{digest}"
     if not has_unstuck and now_wall_s - seen.get(key, 0.0) < args.agent_problem_repeat_s:
         return manager_email_sent
-    text = f"{AGENT_PROBLEM_SOURCE_LINE}\nmanager agent problem: running task marker needs attention.\n{output}"
+    text = with_manager_policy_reminder(args, f"{AGENT_PROBLEM_SOURCE_LINE}\nmanager agent problem: running task marker needs attention.\n{output}")
     if push_manager_text(args, text) not in {0, 2}:
         return manager_email_sent
     seen[key] = now_wall_s

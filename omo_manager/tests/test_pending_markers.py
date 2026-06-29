@@ -2421,6 +2421,84 @@ class PendingMarkerTests(unittest.TestCase):
                 self.assertTrue(scan_once(args, seen, [path]))
             self.assertIn("origin=human source=email action=ack-human", out.getvalue())
 
+    def test_pending_watch_can_add_manager_policy_reminder(self) -> None:
+        from omo_manager.omo_pending_watch import scan_once
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = dated_manager_file(root)
+            path.write_text("(pending)\n(from email manager_mail/4002.txt)\n", encoding="utf-8")
+            args = Args(
+                root=root,
+                manager_url="",
+                state=root / "seen.tsv",
+                interval_s=1.0,
+                full_scan_interval_s=1.0,
+                idle_status_interval_s=1800.0,
+                status_script=Path("/bin/false"),
+                once=True,
+                dry_run=True,
+                reminder_random=lambda: 0.0,
+                reminder_choice=lambda reminders: reminders[1],
+            )
+            out = StringIO()
+            with redirect_stdout(out):
+                self.assertTrue(scan_once(args, {}, [path]))
+            text = out.getvalue()
+            self.assertIn("origin=human source=email action=ack-human", text)
+            self.assertIn("Reminder: stay high level; route concrete work to agents.", text)
+
+    def test_pending_watch_skips_manager_policy_reminder_when_not_selected(self) -> None:
+        from omo_manager.omo_pending_watch import scan_once
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            path.write_text("(pending)\nplease route\n", encoding="utf-8")
+            args = Args(
+                root=root,
+                manager_url="",
+                state=root / "seen.tsv",
+                interval_s=1.0,
+                full_scan_interval_s=1.0,
+                idle_status_interval_s=1800.0,
+                status_script=Path("/bin/false"),
+                once=True,
+                dry_run=True,
+                reminder_random=lambda: 1.0,
+            )
+            out = StringIO()
+            with redirect_stdout(out):
+                self.assertTrue(scan_once(args, {}, [path]))
+            text = out.getvalue()
+            self.assertIn("pending: file=task.md", text)
+            self.assertNotIn("Reminder:", text)
+
+    def test_email_pending_ref_can_add_email_policy_reminder(self) -> None:
+        from omo_manager.omo_pending_watch import scan_once
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = dated_manager_file(root)
+            path.write_text("(pending)\n(from email manager_mail/4002.txt)\n", encoding="utf-8")
+            args = Args(
+                root=root,
+                manager_url="",
+                state=root / "seen.tsv",
+                interval_s=1.0,
+                full_scan_interval_s=1.0,
+                idle_status_interval_s=1800.0,
+                status_script=Path("/bin/false"),
+                once=True,
+                dry_run=True,
+                reminder_random=lambda: 0.0,
+                reminder_choice=lambda reminders: reminders[-1],
+            )
+            out = StringIO()
+            with redirect_stdout(out):
+                self.assertTrue(scan_once(args, {}, [path]))
+            self.assertIn("Reminder: acknowledge human email first, then delegate.", out.getvalue())
+
     def test_oversized_pending_task_file_output_includes_continuation_warning(self) -> None:
         from omo_manager.omo_pending_watch import scan_once
 
@@ -2595,6 +2673,36 @@ class PendingMarkerTests(unittest.TestCase):
         self.assertIn("agent-problems: blocked_idle=1", text)
         self.assertIn("manager-action: blocked_idle>0 inspect blocked agents", text)
         self.assertIn("blocked_idle: task=vl_worker.md", text)
+
+    def test_agent_problem_check_can_add_manager_policy_reminder(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(
+            Path("/tmp"),
+            "",
+            Path("/tmp/seen.tsv"),
+            1.0,
+            1.0,
+            30.0,
+            Path("/status.py"),
+            False,
+            True,
+            agent_problem_repeat_s=300.0,
+            reminder_random=lambda: 0.0,
+            reminder_choice=lambda reminders: reminders[0],
+        )
+        result = watcher.CommandOutput(
+            "agent-problems",
+            3,
+            "agent-problems: blocked_idle=1\nblocked_idle: task=vl_worker.md evidence=target=vl:9 role=blocked_idle_vl task_status=blocked idle_status=ready reason=image lacks codex\n",
+            "",
+        )
+        out = StringIO()
+        with redirect_stdout(out):
+            self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
+        text = out.getvalue()
+        self.assertIn("manager agent problem: running task marker needs attention.", text)
+        self.assertIn("Reminder: delegate work; do not do worker work in the manager.", text)
 
     def test_agent_problem_check_suppresses_manager_self_stuck_prompt(self) -> None:
         from omo_manager import omo_pending_watch as watcher
