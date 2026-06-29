@@ -508,6 +508,96 @@ class AgentStatusTests(unittest.TestCase):
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "mgr:1.0"]))
             self.assertEqual("", out.getvalue())
 
+    def test_problems_only_reports_manager_compaction_reread_needed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\n", encoding="utf-8")
+            out = StringIO()
+            report = Report("running", ["• Compacting conversation", "", "› Continue managing"], "Continue managing", False, "compacting")
+            with patch("omo_manager.omo_agent_status.inspect", return_value=report), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "mgr:1.0"]))
+            text = out.getvalue()
+            self.assertIn("agent-problems: manager_compaction=1", text)
+            self.assertIn("manager-action: manager_compaction>0 reread MANAGER.md", text)
+            self.assertIn("manager_compaction: task=manager evidence=target=mgr:1.0 role=manager", text)
+
+    def test_problems_only_skips_manager_compaction_when_reread_visible(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\n", encoding="utf-8")
+            out = StringIO()
+            report = Report("running", ["• Compacting conversation", "Will reread MANAGER.md after compacting"], "", False, "compacting")
+            with patch("omo_manager.omo_agent_status.inspect", return_value=report), redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "mgr:1.0"]))
+            self.assertEqual("", out.getvalue())
+
+    def test_problems_only_reports_manager_compaction_even_when_manager_target_is_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[{"task_file":"active.md","tmux_target":"mgr:1.0","started_at_s":1}]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nactive.md mgr 1\n", encoding="utf-8")
+            _ = (root / "active.md").write_text("runat: mgr:1.0 codex\n(running)\n", encoding="utf-8")
+            out = StringIO()
+            report = Report("running", ["• Compacting conversation", "", "› Continue managing"], "Continue managing", False, "compacting")
+            with patch("omo_manager.omo_agent_status.inspect", return_value=report), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "mgr:1.0"]))
+            self.assertIn("manager_compaction: task=manager evidence=target=mgr:1.0 role=manager", out.getvalue())
+
+    def test_problems_only_does_not_treat_negative_reread_text_as_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\n", encoding="utf-8")
+            out = StringIO()
+            report = Report("running", ["• Compacting conversation", "did not reread MANAGER.md yet"], "", False, "compacting")
+            with patch("omo_manager.omo_agent_status.inspect", return_value=report), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "mgr:1.0"]))
+            self.assertIn("manager_compaction: task=manager evidence=target=mgr:1.0 role=manager", out.getvalue())
+
+    def test_problems_only_does_not_treat_passive_negative_reread_text_as_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\n", encoding="utf-8")
+            for line in ("MANAGER.md was not reread after compaction", "MANAGER.md is not reread yet", "No need to reread MANAGER.md after compaction"):
+                with self.subTest(line=line):
+                    out = StringIO()
+                    report = Report("running", ["• Compacting conversation", line], "", False, "compacting")
+                    with patch("omo_manager.omo_agent_status.inspect", return_value=report), redirect_stdout(out):
+                        self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "mgr:1.0"]))
+                    self.assertIn("manager_compaction: task=manager evidence=target=mgr:1.0 role=manager", out.getvalue())
+
+    def test_problems_only_does_not_treat_question_reread_text_as_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\n", encoding="utf-8")
+            out = StringIO()
+            report = Report("running", ["• Compacting conversation", "should I reread MANAGER.md?"], "", False, "compacting")
+            with patch("omo_manager.omo_agent_status.inspect", return_value=report), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "mgr:1.0"]))
+            self.assertIn("manager_compaction: task=manager evidence=target=mgr:1.0 role=manager", out.getvalue())
+
+    def test_problems_only_accepts_first_person_completed_reread_as_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\n", encoding="utf-8")
+            out = StringIO()
+            report = Report("running", ["• Compacting conversation", "I reread MANAGER.md after compaction"], "", False, "compacting")
+            with patch("omo_manager.omo_agent_status.inspect", return_value=report), redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "mgr:1.0"]))
+            self.assertEqual("", out.getvalue())
+
     def test_problems_only_reports_ready_running_marker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

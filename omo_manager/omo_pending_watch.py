@@ -47,6 +47,8 @@ ROUTED_PREFIXES = ("(manager handled:", "(manager routed:")
 EMAIL_SOURCE_PREFIXES = ("(from email ", "[source: email ")
 AGENT_SOURCE_PREFIXES = ("[omo-message-source: origin=agent ", "(from agent ")
 AGENT_PROBLEM_SOURCE_LINE = "[omo-message-source: origin=agent source=agent action=no-human-ack agent=omo_pending_watch via=omo_pending_watch.py status=agent-problem]"
+MANAGER_COMPACTION_SOURCE_LINE = "[omo-message-source: origin=agent source=agent action=no-human-ack agent=omo_pending_watch via=omo_pending_watch.py status=manager-compaction-reread]"
+MANAGER_COMPACTION_REMINDER = "Manager compaction observed. Reread MANAGER.md now unless the compaction summary already included it, then continue from the current manager task state."
 MANAGER_POLICY_REMINDER_RATE = 0.125
 MANAGER_POLICY_REMINDERS = (
     "Reminder: delegate work; do not do worker work in the manager.",
@@ -546,6 +548,57 @@ def manager_self_unstuck_line(line: str, manager_target: str = "") -> bool:
     return bool(match is not None and same_tmux_target(match.group(1), manager_target))
 
 
+def manager_compaction_line(line: str, manager_target: str = "") -> bool:
+    if re.match(r"^manager_compaction: task=manager evidence=.*\brole=manager\b", line):
+        return True
+    match = re.match(r"^manager_compaction: task=\S+ evidence=target=(\S+)", line)
+    return bool(match is not None and same_tmux_target(match.group(1), manager_target))
+
+
+def manager_compaction_active_key(args: Args) -> str:
+    return f"manager-compaction-active:{args.root}:{args.manager_target or 'unset'}"
+
+
+def clear_manager_compaction_active(args: Args, seen: dict[str, float]) -> bool:
+    return seen.pop(manager_compaction_active_key(args), None) is not None
+
+
+def maybe_push_manager_compaction_reminder(args: Args, seen: dict[str, float], output: str, now_wall_s: float) -> bool:
+    lines = output.splitlines()
+    if not any(manager_compaction_line(line, args.manager_target) for line in lines[1:]):
+        return clear_manager_compaction_active(args, seen)
+    key = manager_compaction_active_key(args)
+    if key in seen:
+        return False
+    text = f"{MANAGER_COMPACTION_SOURCE_LINE}\n{MANAGER_COMPACTION_REMINDER}"
+    if push_manager_text(args, text) not in {0, 2}:
+        return False
+    seen[key] = now_wall_s
+    return True
+
+
+def filter_manager_compaction_output(output: str, manager_target: str = "") -> str | None:
+    lines = output.splitlines()
+    if not lines or not lines[0].startswith("agent-problems:"):
+        return output
+    kept = [line for line in lines[1:] if not manager_compaction_line(line, manager_target) and not line.startswith("manager-action: manager_compaction>0 ")]
+    if len(kept) == len(lines) - 1:
+        return output
+    counts = {"not_codex": 0, "blocked_idle": 0, "error": 0, "manager_compaction": 0, "ready": 0, "stuck_input": 0, "done-registry-stale": 0}
+    for line in kept:
+        problem_match = re.match(r"^(not_codex|blocked_idle|error|manager_compaction|ready|stuck_input): ", line)
+        if problem_match is not None:
+            counts[problem_match.group(1)] += 1
+        elif line.startswith("done-stale: "):
+            counts["done-registry-stale"] += 1
+    parts = [f"{status}={counts[status]}" for status in ("not_codex", "blocked_idle", "error", "manager_compaction", "ready", "stuck_input") if counts[status]]
+    if counts["done-registry-stale"]:
+        parts.append(f"done-registry-stale={counts['done-registry-stale']}")
+    if not parts:
+        return None
+    return "\n".join([f"agent-problems: {' '.join(parts)}", *kept])
+
+
 def filter_manager_self_problem_output(output: str, manager_target: str = "") -> str | None:
     lines = output.splitlines()
     if not lines or not lines[0].startswith("agent-problems:"):
@@ -553,14 +606,14 @@ def filter_manager_self_problem_output(output: str, manager_target: str = "") ->
     kept = [line for line in lines[1:] if not manager_self_problem_line(line, manager_target) and not manager_self_unstuck_line(line, manager_target)]
     if len(kept) == len(lines) - 1:
         return output
-    counts = {"not_codex": 0, "blocked_idle": 0, "error": 0, "ready": 0, "stuck_input": 0, "done-registry-stale": 0}
+    counts = {"not_codex": 0, "blocked_idle": 0, "error": 0, "manager_compaction": 0, "ready": 0, "stuck_input": 0, "done-registry-stale": 0}
     for line in kept:
-        problem_match = re.match(r"^(not_codex|blocked_idle|error|ready|stuck_input): ", line)
+        problem_match = re.match(r"^(not_codex|blocked_idle|error|manager_compaction|ready|stuck_input): ", line)
         if problem_match is not None:
             counts[problem_match.group(1)] += 1
         elif line.startswith("done-stale: "):
             counts["done-registry-stale"] += 1
-    parts = [f"{status}={counts[status]}" for status in ("not_codex", "blocked_idle", "error", "ready", "stuck_input") if counts[status]]
+    parts = [f"{status}={counts[status]}" for status in ("not_codex", "blocked_idle", "error", "manager_compaction", "ready", "stuck_input") if counts[status]]
     if counts["done-registry-stale"]:
         parts.append(f"done-registry-stale={counts['done-registry-stale']}")
     if not parts:
@@ -636,7 +689,7 @@ def handle_agent_problem_result(args: Args, seen: dict[str, float], result: Comm
         print("omo_pending_watch: agent problem check timed out", file=sys.stderr)
         return False
     if result.returncode == 0:
-        return False
+        return clear_manager_compaction_active(args, seen)
     if result.returncode != 3:
         print(f"omo_pending_watch: agent problem check exited status={result.returncode}: {result.stderr.strip()}", file=sys.stderr)
         return False
@@ -645,19 +698,23 @@ def handle_agent_problem_result(args: Args, seen: dict[str, float], result: Comm
         return False
     if result.stderr.strip():
         output = f"{output}\nstderr:\n{result.stderr.strip()}".strip()
+    compaction_changed = maybe_push_manager_compaction_reminder(args, seen, output, now_wall_s)
+    output = filter_manager_compaction_output(output, args.manager_target) or ""
+    if not output:
+        return compaction_changed
     manager_email_output = manager_human_email_problem_output(output, args.manager_target)
     manager_email_sent = email_human_manager_problem(args, manager_email_output)
     output = filter_manager_self_problem_output(output, args.manager_target) or ""
     if not output:
-        return manager_email_sent
+        return manager_email_sent or compaction_changed
     has_unstuck = any(line.startswith("unstuck: ") for line in output.splitlines())
     digest = hashlib.sha256(output.encode("utf-8")).hexdigest()[:16]
     key = f"agent-problem:{digest}"
     if not has_unstuck and now_wall_s - seen.get(key, 0.0) < args.agent_problem_repeat_s:
-        return manager_email_sent
+        return manager_email_sent or compaction_changed
     text = with_manager_policy_reminder(args, f"{AGENT_PROBLEM_SOURCE_LINE}\nmanager agent problem: running task marker needs attention.\n{output}")
     if push_manager_text(args, text) not in {0, 2}:
-        return manager_email_sent
+        return manager_email_sent or compaction_changed
     seen[key] = now_wall_s
     return True
 

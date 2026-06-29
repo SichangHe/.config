@@ -2722,6 +2722,51 @@ class PendingMarkerTests(unittest.TestCase):
         self.assertNotIn("manager agent problem: running task marker needs attention.", text)
         self.assertNotIn("unstuck:", text)
 
+    def test_agent_problem_check_reminds_manager_after_compaction_once(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, True, manager_target="wl:1.0", agent_problem_repeat_s=300.0)
+        result = watcher.CommandOutput(
+            "agent-problems",
+            3,
+            "agent-problems: manager_compaction=1\nmanager-action: manager_compaction>0 reread MANAGER.md after compaction unless the compaction summary already included it\nmanager_compaction: task=manager evidence=target=wl:1.0 role=manager output=• Compacting conversation / › Continue managing\n",
+            "",
+        )
+        seen: dict[str, float] = {}
+        out = StringIO()
+        with redirect_stdout(out):
+            self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 1000.0))
+            self.assertFalse(watcher.handle_agent_problem_result(args, seen, result, 1001.0))
+        text = out.getvalue()
+        self.assertEqual(1, text.count("Manager compaction observed. Reread MANAGER.md now"))
+        self.assertNotIn("manager agent problem: running task marker needs attention.", text)
+
+    def test_agent_problem_check_clears_manager_compaction_active_when_gone(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, True, manager_target="wl:1.0", agent_problem_repeat_s=300.0)
+        seen = {watcher.manager_compaction_active_key(args): 1000.0}
+        result = watcher.CommandOutput("agent-problems", 0, "", "")
+        self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 1010.0))
+        self.assertNotIn(watcher.manager_compaction_active_key(args), seen)
+
+    def test_agent_problem_check_clears_manager_compaction_active_when_other_problem_remains(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, True, manager_target="wl:1.0", agent_problem_repeat_s=300.0)
+        seen = {watcher.manager_compaction_active_key(args): 1000.0}
+        result = watcher.CommandOutput(
+            "agent-problems",
+            3,
+            "agent-problems: ready=1\nready: task=active.md evidence=target=cfg:1.0 output=› Use /skills to list available skills\n",
+            "",
+        )
+        out = StringIO()
+        with redirect_stdout(out):
+            self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 1010.0))
+        self.assertNotIn(watcher.manager_compaction_active_key(args), seen)
+        self.assertIn("manager agent problem: running task marker needs attention.", out.getvalue())
+
     def test_agent_problem_check_emails_human_for_manager_error(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 

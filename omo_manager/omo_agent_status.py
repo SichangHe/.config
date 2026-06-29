@@ -16,6 +16,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from omo_manager.omo_codex_status import Args as StatusArgs
+from omo_manager.omo_codex_status import COMPACTING_RE
 from omo_manager.omo_codex_status import Report
 from omo_manager.omo_codex_status import inspect
 from omo_manager.omo_codex_status import is_stock_placeholder_input_text
@@ -59,6 +60,12 @@ STATUS_DETAIL_RE = re.compile(r"^\((pending|running|done|blocked)(?::\s*([^)]*))
 RUNAT_RE = re.compile(r"^runat:\s+([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\b")
 CLOSE_TARGET_RE = re.compile(r"\btmux target [`']?([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)[`']?")
 PERSISTENT_ROLE_RE = re.compile(r"\bpersistent\b.*\brole\b")
+MANAGER_MD_REREAD_RE = re.compile(r"\b(?:re-?read|read)\b[^.\n?!;]{0,80}\bMANAGER\.md\b|\bMANAGER\.md\b[^.\n?!;]{0,80}\b(?:re-?read|read)\b", re.IGNORECASE)
+MANAGER_MD_REREAD_NEGATIVE_RE = re.compile(
+    r"\b(?:did not|didn't|not|never|without|failed to|fails to|hasn't|haven't|hadn't|no need to|no need)\b[^.\n?!;]{0,80}\b(?:re-?read|read)\b[^.\n?!;]{0,80}\bMANAGER\.md\b|"
+    r"\bMANAGER\.md\b[^.\n?!;]{0,80}\b(?:was|is|has been|will be)?\s*(?:not|never)\b[^.\n?!;]{0,80}\b(?:re-?read|read)\b",
+    re.IGNORECASE,
+)
 
 
 def report_output_evidence(report: Report) -> str:
@@ -74,6 +81,12 @@ def report_output_evidence(report: Report) -> str:
     if tail != errors[-3:]:
         evidence += " output_tail=" + " / ".join(tail)
     return evidence
+
+
+def manager_compaction_needs_reread(report: Report) -> bool:
+    if not any(COMPACTING_RE.search(line) is not None for line in report.lines):
+        return False
+    return not any("?" not in line and MANAGER_MD_REREAD_RE.search(line) is not None and MANAGER_MD_REREAD_NEGATIVE_RE.search(line) is None for line in report.lines)
 
 
 @dataclass(frozen=True)
@@ -428,10 +441,10 @@ def display_target(task: TaskLine, record: SessionRecord | None) -> str:
     return task.target
 
 
-def classify_target(task_file: str, target: str, persistent_role: bool = False, task_status: str = "", auto_unstick: bool = False, role: str = "", unstick_by_target: dict[str, str] | None = None, auto_unstick_disabled_reason: str = "not_problems_only") -> StatusRow:
+def classify_target(task_file: str, target: str, persistent_role: bool = False, task_status: str = "", auto_unstick: bool = False, role: str = "", unstick_by_target: dict[str, str] | None = None, auto_unstick_disabled_reason: str = "not_problems_only", report: Report | None = None) -> StatusRow:
     if not target:
         return StatusRow(task_file, "not_codex", "target=", persistent_role, task_status)
-    report = inspect(StatusArgs(target, 80))
+    report = report or inspect(StatusArgs(target, 80))
     evidence = f"target={target}"
     unstick = ""
     if role:
@@ -556,10 +569,16 @@ def tmux_unmanaged_problem_rows(args: Args, skip_targets: set[str], auto_unstick
 
 
 def manager_problem_row(args: Args, skip_targets: set[str], unstick_by_target: dict[str, str]) -> StatusRow | None:
-    if not args.manager_target or any(same_tmux_target(args.manager_target, target) for target in skip_targets):
+    if not args.manager_target:
+        return None
+    report = inspect(StatusArgs(args.manager_target, 80))
+    evidence = f"target={args.manager_target} role=manager" + report_output_evidence(report)
+    if manager_compaction_needs_reread(report):
+        return StatusRow("manager", "manager_compaction", evidence, target=args.manager_target)
+    if any(same_tmux_target(args.manager_target, target) for target in skip_targets):
         return None
     disabled_reason = "no_auto_unstick" if not args.auto_unstick else "not_problems_only"
-    row = classify_target("manager", args.manager_target, auto_unstick=args.auto_unstick, role="manager", unstick_by_target=unstick_by_target, auto_unstick_disabled_reason=disabled_reason)
+    row = classify_target("manager", args.manager_target, auto_unstick=args.auto_unstick, role="manager", unstick_by_target=unstick_by_target, auto_unstick_disabled_reason=disabled_reason, report=report)
     return row if row.status in {"error", "not_codex", "stuck_input"} else None
 
 def registry_prune(args: Args, completed: set[str]) -> int:
@@ -599,7 +618,7 @@ def format_summary(rows: list[StatusRow], completed_stale_count: int, pruned_cou
     return "\n".join(lines)
 
 
-PROBLEM_STATUSES = {"blocked_idle", "error", "not_codex", "ready", "stuck_input"}
+PROBLEM_STATUSES = {"blocked_idle", "error", "manager_compaction", "not_codex", "ready", "stuck_input"}
 
 
 def is_parked_persistent_blocked_row(row: StatusRow) -> bool:
@@ -610,15 +629,17 @@ def format_problem_summary(rows: list[StatusRow], completed_stale: set[str]) -> 
     problem_rows = [row for row in rows if row.status in PROBLEM_STATUSES and not is_parked_persistent_blocked_row(row)]
     if not problem_rows and not completed_stale:
         return ""
-    counts: dict[str, int] = {"not_codex": 0, "blocked_idle": 0, "error": 0, "ready": 0, "stuck_input": 0}
+    counts: dict[str, int] = {"not_codex": 0, "blocked_idle": 0, "error": 0, "manager_compaction": 0, "ready": 0, "stuck_input": 0}
     for row in problem_rows:
         counts[row.status] = counts.get(row.status, 0) + 1
-    parts = [f"{status}={counts[status]}" for status in ("not_codex", "blocked_idle", "error", "ready", "stuck_input") if counts[status]]
+    parts = [f"{status}={counts[status]}" for status in ("not_codex", "blocked_idle", "error", "manager_compaction", "ready", "stuck_input") if counts[status]]
     if completed_stale:
         parts.append(f"done-registry-stale={len(completed_stale)}")
     lines = [f"agent-problems: {' '.join(parts)}"]
     if counts["blocked_idle"]:
         lines.append("manager-action: blocked_idle>0 inspect blocked agents, unblock if possible, or route the exact blocker")
+    if counts["manager_compaction"]:
+        lines.append("manager-action: manager_compaction>0 reread MANAGER.md after compaction unless the compaction summary already included it")
     for row in sorted(problem_rows, key=lambda item: (item.status, item.task_file)):
         lines.append(f"{row.status}: task={row.task_file} evidence={row.evidence}")
     unstuck: dict[str, str] = {}
