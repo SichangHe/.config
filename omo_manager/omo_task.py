@@ -24,7 +24,7 @@ COMMAND_BY_TOOL = {
     "codex": ("bunx", "@openai/codex", "--dangerously-bypass-approvals-and-sandbox"),
     "pcodx": (str(PCODX_WRAPPER),),
 }
-DEFAULT_TOOL = "pcodx"
+DEFAULT_TOOL = "codex"
 SHELL_COMMANDS = {"bash", "dash", "fish", "sh", "zsh"}
 BULLET_MARKERS = ("- ", "* ")
 
@@ -64,7 +64,7 @@ class ParsedArgs(argparse.Namespace):
 
 
 def parse_args(argv: list[str]) -> Args:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     _ = parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     _ = parser.add_argument("--task-file", required=True)
     _ = parser.add_argument("--tmux-session", default="")
@@ -204,11 +204,6 @@ def task_file_tool(text: str, tmux_target: str) -> str:
 
 
 def effective_tool(args: Args) -> str:
-    if args.tool_explicit or not args.session_id:
-        return args.tool
-    path = task_path(args.root, args.task_file)
-    if path.exists() and (tool := task_file_tool(path.read_text(encoding="utf-8"), target(args))):
-        return tool
     return args.tool
 
 
@@ -381,6 +376,8 @@ def validate_inputs(args: Args) -> None:
         raise ValueError(f"prompt file not found: {args.prompt_file}")
     if any(not flag or "\0" in flag or "\n" in flag for flag in args.codex_flags):
         raise ValueError("codex flags must be non-empty single-line argv tokens.")
+    if args.tool != "pcodx" and any("mcp_servers." in flag for flag in args.codex_flags):
+        raise ValueError("MCP server config requires --tool pcodx.")
     if args.workdir is not None and args.prompt_file is None and is_vl_agent(args.task_file, target(args)):
         raise ValueError("VL launches require --prompt-file so the end-goal and reviewer guidance has task-local context.")
     path = task_path(args.root, args.task_file)

@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from omo_manager.omo_task import Args, DEFAULT_TOOL, DEFAULT_WORKER_INSTRUCTIONS, PCODX_WRAPPER, VL_WORKER_INSTRUCTIONS, codex_cmd, effective_tool, ensure_task_file, is_vl_agent, link_todo, main, new_window, parse_args, runat_goal_tree_error, start_codex, validate_runat_goal_tree, wait_command_started
+from omo_manager.omo_task import Args, DEFAULT_TOOL, DEFAULT_WORKER_INSTRUCTIONS, PCODX_WRAPPER, VL_WORKER_INSTRUCTIONS, codex_cmd, effective_tool, ensure_task_file, is_vl_agent, link_todo, main, new_window, parse_args, runat_goal_tree_error, start_codex, validate_inputs, validate_runat_goal_tree, wait_command_started
 
 
 VALID_GOAL_TREE = "implement manager check\n- reject missing task goal tree\n"
@@ -112,14 +112,14 @@ class OmoTaskTests(unittest.TestCase):
             start_codex_mock.assert_called_once_with('cfg:7', args)
 
     def test_codex_cmd_resumes_quoted_session(self) -> None:
-        self.assertEqual(f"{PCODX_WRAPPER} resume abc", codex_cmd("abc"))
-        self.assertEqual(f"{PCODX_WRAPPER} resume 'abc def'", codex_cmd("abc def"))
-        self.assertEqual("bunx @openai/codex --dangerously-bypass-approvals-and-sandbox resume abc", codex_cmd("abc", tool="codex"))
+        self.assertEqual("bunx @openai/codex --dangerously-bypass-approvals-and-sandbox resume abc", codex_cmd("abc"))
+        self.assertEqual("bunx @openai/codex --dangerously-bypass-approvals-and-sandbox resume 'abc def'", codex_cmd("abc def"))
+        self.assertEqual(f"{PCODX_WRAPPER} resume abc", codex_cmd("abc", tool="pcodx"))
 
     def test_codex_cmd_uses_prompt_argument_from_file(self) -> None:
         expected_paths = f"{DEFAULT_WORKER_INSTRUCTIONS} /tmp/prompt.md"
         self.assertEqual(
-            f'{PCODX_WRAPPER} "$(cat -- {expected_paths})"',
+            f'bunx @openai/codex --dangerously-bypass-approvals-and-sandbox "$(cat -- {expected_paths})"',
             codex_cmd(prompt_file=Path("/tmp/prompt.md")),
         )
 
@@ -129,12 +129,12 @@ class OmoTaskTests(unittest.TestCase):
     def test_codex_cmd_adds_vl_worker_defaults_only_for_vl_agents(self) -> None:
         self.assertNotIn(str(VL_WORKER_INSTRUCTIONS), codex_cmd(prompt_file=Path("/tmp/prompt.md")))
         self.assertEqual(
-            f'{PCODX_WRAPPER} "$(cat -- {DEFAULT_WORKER_INSTRUCTIONS} {VL_WORKER_INSTRUCTIONS} /tmp/prompt.md)"',
+            f'bunx @openai/codex --dangerously-bypass-approvals-and-sandbox "$(cat -- {DEFAULT_WORKER_INSTRUCTIONS} {VL_WORKER_INSTRUCTIONS} /tmp/prompt.md)"',
             codex_cmd(prompt_file=Path("/tmp/prompt.md"), vl_agent=True),
         )
 
     def test_codex_cmd_does_not_add_context_free_vl_guidance(self) -> None:
-        self.assertEqual(str(PCODX_WRAPPER), codex_cmd(vl_agent=True))
+        self.assertEqual("bunx @openai/codex --dangerously-bypass-approvals-and-sandbox", codex_cmd(vl_agent=True))
 
     def test_vl_agent_scope_uses_task_file_or_tmux_session(self) -> None:
         self.assertTrue(is_vl_agent("vl_worker.md", "cfg:2"))
@@ -146,7 +146,7 @@ class OmoTaskTests(unittest.TestCase):
 
     def test_codex_cmd_adds_reasoning_effort_and_extra_flags(self) -> None:
         self.assertEqual(
-            f"{PCODX_WRAPPER} --config 'model_reasoning_effort=\"xhigh\"' --profile deep-review",
+            "bunx @openai/codex --dangerously-bypass-approvals-and-sandbox --config 'model_reasoning_effort=\"xhigh\"' --profile deep-review",
             codex_cmd(reasoning_effort="xhigh", codex_flags=("--profile", "deep-review")),
         )
         self.assertEqual(
@@ -173,26 +173,26 @@ class OmoTaskTests(unittest.TestCase):
         self.assertEqual("pcodx", args.tool)
         self.assertTrue(args.tool_explicit)
 
-    def test_session_resume_preserves_existing_codex_task_tool_by_default(self) -> None:
+    def test_session_resume_ignores_existing_pcodx_task_tool_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             path = root / "x.md"
-            path.write_text("runat: cfg:2 codex\n\nold body\n", encoding="utf-8")
-            args = Args(root, "x.md", "cfg", "2", "pcodx", root, "", None, False, False, "11111111-1111-1111-1111-111111111111", "", ())
+            path.write_text("runat: cfg:2 pcodx\n\nold body\n", encoding="utf-8")
+            args = Args(root, "x.md", "cfg", "2", "codex", root, "", None, False, False, "11111111-1111-1111-1111-111111111111", "", ())
             self.assertEqual("codex", effective_tool(args))
             ensure_task_file(args, "cfg:2")
             self.assertEqual("runat: cfg:2 codex\n\nold body\n", path.read_text(encoding="utf-8"))
 
-    def test_session_resume_uses_legacy_runat_tool_without_top_header(self) -> None:
+    def test_session_resume_ignores_legacy_runat_pcodx_tool_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             path = root / "x.md"
-            path.write_text("old notes\nrunat: cfg:2 codex\n", encoding="utf-8")
-            args = Args(root, "x.md", "cfg", "2", "pcodx", root, "", None, False, False, "11111111-1111-1111-1111-111111111111", "", ())
+            path.write_text("old notes\nrunat: cfg:2 pcodx\n", encoding="utf-8")
+            args = Args(root, "x.md", "cfg", "2", "codex", root, "", None, False, False, "11111111-1111-1111-1111-111111111111", "", ())
 
             self.assertEqual("codex", effective_tool(args))
             ensure_task_file(args, "cfg:2")
-            self.assertEqual("runat: cfg:2 codex\n\nold notes\nrunat: cfg:2 codex\n", path.read_text(encoding="utf-8"))
+            self.assertEqual("runat: cfg:2 codex\n\nold notes\nrunat: cfg:2 pcodx\n", path.read_text(encoding="utf-8"))
 
     def test_session_resume_explicit_tool_overrides_existing_task_tool(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -317,6 +317,15 @@ class OmoTaskTests(unittest.TestCase):
                 self.assertEqual(1, main(["--root", str(root), "--task-file", "x.md", "--tmux-session", "cfg", "--workdir", str(root), "--codex-flag", "bad\nflag", "--dry-run"]))
             self.assertFalse((root / "x.md").exists())
             self.assertFalse((root / "TODO.md").exists())
+
+    def test_rejects_raw_mcp_server_config_without_pcodx_tool(self) -> None:
+        args = parse_args(["--task-file", "x.md", "--codex-flag=--config=mcp_servers.pcodx_partial_compact.command=\"bun\""])
+        with self.assertRaisesRegex(ValueError, "MCP server config requires --tool pcodx"):
+            validate_inputs(args)
+
+    def test_allows_raw_mcp_server_config_for_explicit_pcodx_tool(self) -> None:
+        args = parse_args(["--task-file", "x.md", "--tool", "pcodx", "--codex-flag=--config=mcp_servers.pcodx_partial_compact.command=\"bun\""])
+        validate_inputs(args)
 
     def test_rejects_non_codex_tool(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
