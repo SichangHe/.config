@@ -46,6 +46,7 @@ TASK_FILE_LINE_WARNING_THRESHOLD = 2000
 ROUTED_PREFIXES = ("(manager handled:", "(manager routed:")
 EMAIL_SOURCE_PREFIXES = ("(from email ", "[source: email ")
 AGENT_SOURCE_PREFIXES = ("[omo-message-source: origin=agent ", "(from agent ")
+STATUS_DETAIL_RE = re.compile(r"^\((pending|running|done|blocked)(?::\s*([^)]*))?\)(?:\s+\(([^)]*)\))?$")
 AGENT_PROBLEM_SOURCE_LINE = "[omo-message-source: origin=agent source=agent action=no-human-ack agent=omo_pending_watch via=omo_pending_watch.py status=agent-problem]"
 MANAGER_COMPACTION_SOURCE_LINE = "[omo-message-source: origin=agent source=agent action=no-human-ack agent=omo_pending_watch via=omo_pending_watch.py status=manager-compaction-reread]"
 MANAGER_COMPACTION_REMINDER = "Manager compaction observed. Reread MANAGER.md now unless the compaction summary already included it, then continue from the current manager task state."
@@ -88,12 +89,15 @@ class Marker:
     source: str
     delegate_source: str
     file_lines: int
+    blocked_reason: str
 
     @property
     def ref(self) -> str:
         text = f"pending: file={self.file} line={self.line} origin={self.origin} source={self.source} action={self.action}"
         if self.delegate_source:
             text = f"{text}\n(delegate {self.delegate_source})"
+        if self.blocked_reason:
+            text = f"{text}\nblocked-context: latest prior status is blocked; reason={self.blocked_reason}"
         if self.file_lines <= TASK_FILE_LINE_WARNING_THRESHOLD:
             return text
         return f"{text}\ntask-file length warning: this file has {self.file_lines} lines; move future content into a linked continuation file and cross-link both files."
@@ -387,6 +391,17 @@ def delegate_source(block_lines: list[str]) -> str:
     return ""
 
 
+def blocked_reason_before_pending(lines: list[str], pending_line: int) -> str:
+    for line in reversed(lines[: pending_line - 1]):
+        match = STATUS_DETAIL_RE.match(line.strip())
+        if match is None:
+            continue
+        if match.group(1) != "blocked":
+            return ""
+        return (match.group(2) or match.group(3) or "blocked with no reason in latest status line").strip()
+    return ""
+
+
 def find_markers(root: Path, files: list[Path]) -> list[Marker]:
     markers: list[Marker] = []
     for path in files:
@@ -418,7 +433,18 @@ def find_markers(root: Path, files: list[Path]) -> list[Marker]:
             block_lines = lines[idx - 1 : end_idx]
             origin, source = marker_origin_source(block_lines)
             digest = hashlib.sha256(f"{rel}:{idx}:{next_line}".encode("utf-8")).hexdigest()[:16]
-            markers.append(Marker(file=rel, line=idx, digest=digest, origin=origin, source=source, delegate_source=delegate_source(block_lines), file_lines=len(lines)))
+            markers.append(
+                Marker(
+                    file=rel,
+                    line=idx,
+                    digest=digest,
+                    origin=origin,
+                    source=source,
+                    delegate_source=delegate_source(block_lines),
+                    file_lines=len(lines),
+                    blocked_reason=blocked_reason_before_pending(lines, idx),
+                )
+            )
     return markers
 
 
