@@ -103,7 +103,7 @@ class OmoTaskTests(unittest.TestCase):
             self.assertEqual(1, lines.count(PENDING_TASK_ITEMS_MARKER))
             self.assertEqual(PENDING_TASK_ITEMS_MARKER, lines[-1])
 
-    def test_prompt_containing_exact_pending_marker_still_gets_final_marker(self) -> None:
+    def test_prompt_containing_exact_pending_marker_is_preserved(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             prompt = root / "prompt.md"
@@ -117,7 +117,35 @@ class OmoTaskTests(unittest.TestCase):
             args = Args(root, "x.md", "cfg", "2", "codex", None, "", prompt, False, False, "", "", ())
             path = ensure_task_file(args, "cfg:2")
             lines = path.read_text(encoding="utf-8").splitlines()
-            self.assertEqual(PENDING_TASK_ITEMS_MARKER, lines[-1])
+            self.assertEqual(1, lines.count(PENDING_TASK_ITEMS_MARKER))
+            self.assertEqual("- keep this human item pending", lines[-1])
+
+    def test_new_task_file_places_pending_marker_before_context_bullets(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.md"
+            prompt.write_text(
+                "route cleanup\n"
+                "- preserve human wording\n"
+                "\n"
+                "Human sources:\n"
+                "\n"
+                "- manager_mail/8649.txt\n",
+                encoding="utf-8",
+            )
+            args = Args(root, "x.md", "cfg", "2", "codex", None, "", prompt, False, False, "", "", ())
+            path = ensure_task_file(args, "cfg:2")
+            self.assertEqual(
+                "runat: cfg:2 codex\n"
+                "route cleanup\n"
+                "- preserve human wording\n"
+                "(above are pending task items)\n"
+                "\n"
+                "Human sources:\n"
+                "\n"
+                "- manager_mail/8649.txt\n",
+                path.read_text(encoding="utf-8"),
+            )
 
     def test_new_task_file_requires_goal_tree(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

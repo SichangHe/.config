@@ -161,8 +161,21 @@ def is_runat_header(line: str) -> bool:
     return line.strip().split(maxsplit=1)[0:1] == ["runat:"]
 
 
-def ends_with_pending_task_items_marker(text: str) -> bool:
-    return next((line.strip() for line in reversed(text.splitlines()) if line.strip()), "") == PENDING_TASK_ITEMS_MARKER
+def has_pending_task_items_marker(text: str) -> bool:
+    return any(line.strip() == PENDING_TASK_ITEMS_MARKER for line in text.splitlines())
+
+
+def insert_pending_task_items_marker(text: str) -> str:
+    if has_pending_task_items_marker(text):
+        return text
+
+    lines = text.splitlines(keepends=True)
+    goal_idx = first_goal_line_index([line.rstrip("\n") for line in lines])
+    insert_idx = min(goal_idx + 1, len(lines))
+    while insert_idx < len(lines) and is_bullet(lines[insert_idx]):
+        insert_idx += 1
+    lines.insert(insert_idx, f"{PENDING_TASK_ITEMS_MARKER}\n")
+    return "".join(lines)
 
 
 def first_goal_line_index(lines: list[str]) -> int:
@@ -334,10 +347,8 @@ def ensure_task_file(args: Args, tmux_target: str) -> Path:
     if args.prompt_file is not None:
         sep = "" if not text or text.endswith("\n") else "\n"
         text += sep + args.prompt_file.read_text(encoding="utf-8").rstrip() + "\n"
-    if not existed and not ends_with_pending_task_items_marker(text):
-        sep = "" if not text or text.endswith("\n") else "\n"
-        text += sep + PENDING_TASK_ITEMS_MARKER + "\n"
     if not existed:
+        text = insert_pending_task_items_marker(text)
         validate_runat_goal_tree(text)
     if text != existing or not existed:
         _ = path.write_text(text, encoding="utf-8")
@@ -410,7 +421,8 @@ def validate_inputs(args: Args) -> None:
     first = header(tmux_target, effective_tool(args))
     prompt = args.prompt_file.read_text(encoding="utf-8").rstrip() if args.prompt_file is not None else ""
     manager_line = f"managerat: {args.manager_target}\n" if args.manager_target else ""
-    text = f"{first}\n{manager_line}{prompt}\n{PENDING_TASK_ITEMS_MARKER}\n" if first else f"{manager_line}{prompt}\n{PENDING_TASK_ITEMS_MARKER}\n"
+    text = f"{first}\n{manager_line}{prompt}\n" if first else f"{manager_line}{prompt}\n"
+    text = insert_pending_task_items_marker(text)
     validate_runat_goal_tree(text)
 
 
