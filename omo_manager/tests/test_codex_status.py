@@ -64,6 +64,26 @@ class CodexStatusTests(unittest.TestCase):
         self.assertEqual('running', status(lines, current_block(lines)))
         self.assertFalse(can_submit_stuck_input(lines))
 
+    def test_status_stuck_input_with_idle_queued_pasted_content_footer(self) -> None:
+        lines = [
+            '› [Pasted Content 1024 chars][Pasted Content 1024 chars] #2[Pasted Content 1024 chars] #3',
+            '  tab to queue message                                                                                    26% context left',
+        ]
+        report = report_from_lines(lines)
+        self.assertEqual('stuck_input', report.status)
+        self.assertEqual('[Pasted Content 1024 chars][Pasted Content 1024 chars] #2[Pasted Content 1024 chars] #3', report.input_text)
+        self.assertTrue(report.can_submit_input)
+
+    def test_status_ready_with_idle_queued_placeholder_footer(self) -> None:
+        lines = [
+            '› Summarize recent commits',
+            '  tab to queue message                                                                                    26% context left',
+        ]
+        report = report_from_lines(lines)
+        self.assertEqual('ready', report.status)
+        self.assertEqual('Summarize recent commits', report.input_text)
+        self.assertFalse(report.can_submit_input)
+
     def test_status_stuck_input_while_compacting_but_not_safe_to_submit_immediately(self) -> None:
         lines = ['• Compacting conversation', '', '› Continue task', '  gpt-5.5']
         self.assertEqual('Continue task', current_input_text(lines))

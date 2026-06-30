@@ -124,7 +124,7 @@ def last_output(lines: list[str]) -> list[str]:
 
 
 def current_input_text(lines: list[str]) -> str:
-    body = lines[:-1] if has_codex_model_footer(lines) else lines[:]
+    body = lines[:-1] if has_codex_model_footer(lines) or has_queued_message_footer(lines) else lines[:]
     while body and not body[-1].strip():
         body.pop()
     for idx in range(len(body) - 1, -1, -1):
@@ -159,6 +159,10 @@ def has_queued_message_footer(lines: list[str]) -> bool:
 
 def has_queued_running_input(lines: list[str]) -> bool:
     return has_queued_message_footer(lines) and has_visible_running_indicator(lines)
+
+
+def has_idle_queued_input(lines: list[str], input_text: str) -> bool:
+    return has_queued_message_footer(lines) and bool(input_text) and not has_visible_running_indicator(lines)
 
 
 def has_selected_model_capacity_warning(lines: list[str]) -> bool:
@@ -214,13 +218,13 @@ def can_submit_stuck_input(lines: list[str]) -> bool:
     if has_queued_running_input(lines) or has_compacting_indicator(lines):
         return False
     input_text = current_input_text(lines)
-    return bool(has_codex_model_footer(lines) and input_text and not is_empty_input_text(lines, input_text))
+    return bool((has_codex_model_footer(lines) or has_idle_queued_input(lines, input_text)) and input_text and not is_empty_input_text(lines, input_text))
 
 
 def stuck_input_blocker(lines: list[str], input_text: str) -> str:
     if has_terminal_enter_prompt_after_codex_footer(lines):
         return ""
-    if not has_codex_model_footer(lines):
+    if not has_codex_model_footer(lines) and not has_idle_queued_input(lines, input_text):
         return "no_codex_footer"
     if has_compacting_indicator(lines):
         return "compacting"
@@ -257,7 +261,12 @@ def status(lines: list[str], block: Block) -> str:
     if not has_codex_model_footer(lines):
         if has_terminal_enter_prompt_after_codex_footer(lines):
             return "stuck_input"
-        return "running" if has_queued_running_input(lines) else "not_codex"
+        if has_queued_running_input(lines):
+            return "running"
+        input_text = current_input_text(lines)
+        if has_idle_queued_input(lines, input_text):
+            return "ready" if is_stock_placeholder_input_text(input_text) else "stuck_input"
+        return "not_codex"
     if has_selected_model_capacity_warning(block.lines or lines[-20:]):
         input_text = current_input_text(lines)
         if input_text and not is_stock_placeholder_input_text(input_text):
