@@ -221,6 +221,7 @@ class OmoTaskTests(unittest.TestCase):
             command = tmux.call_args_list[0].args[0]
             self.assertEqual(['send-keys', '-t', 'cfg:7'], command[:3])
             self.assertIn('bash -lc', command[3])
+            self.assertIn('export OMO_AGENT_TMUX_TARGET=cfg:7', command[3])
             self.assertIn('resume 11111111-1111-1111-1111-111111111111', command[3])
             self.assertIn('$(cat --', command[3])
             self.assertEqual('Enter', command[4])
@@ -261,6 +262,7 @@ class OmoTaskTests(unittest.TestCase):
                 self.assertEqual(0, main(["--root", str(root), "--task-file", "x.md", "--tmux-session", "cfg", "--workdir", str(root), "--prompt-file", str(prompt), "--dry-run"]))
             self.assertIn("tmux new-window", out.getvalue())
             self.assertIn("tmux send-keys", out.getvalue())
+            self.assertIn("export OMO_AGENT_TMUX_TARGET=cfg:DRYRUN", out.getvalue())
             self.assertFalse((root / "x.md").exists())
             self.assertFalse((root / "TODO.md").exists())
 

@@ -60,6 +60,7 @@ class CliArgs:
     dry_run: bool
     add_pwd_footer: bool
     manager_human: bool
+    tmux_target: str | None
 
 
 class ParsedArgs(argparse.Namespace):
@@ -70,6 +71,7 @@ class ParsedArgs(argparse.Namespace):
     dry_run: bool = False
     no_pwd_footer: bool = False
     manager_human: bool = False
+    tmux_target: str | None = None
 
 
 def parse_args(argv: list[str]) -> CliArgs:
@@ -87,6 +89,7 @@ def parse_args(argv: list[str]) -> CliArgs:
     _ = parser.add_argument("--message-file", type=Path, help="Read the email body from this file instead of stdin.")
     _ = parser.add_argument("--dry-run", action="store_true", help="Validate without sending.")
     _ = parser.add_argument("--no-pwd-footer", action="store_true", help="Send the body exactly as provided, without appending a PWD footer.")
+    _ = parser.add_argument("--tmux-target", help="Use this producer tmux target for the footer instead of the caller pane.")
     _ = parser.add_argument("--manager-human", action="store_true", help=argparse.SUPPRESS)
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     if parsed.title is not None and parsed.subject_file is not None:
@@ -129,7 +132,9 @@ def parse_args(argv: list[str]) -> CliArgs:
             parser.error("`title` must not contain control characters.")
     if parsed.manager_human and not content.strip():
         parser.error("email body must not be empty.")
-    return CliArgs(title=title, content=content, dry_run=parsed.dry_run, add_pwd_footer=not parsed.no_pwd_footer, manager_human=parsed.manager_human)
+    if parsed.tmux_target is not None and not valid_tmux_target(parsed.tmux_target):
+        parser.error("--tmux-target must have shape session:window, for example wl:4.")
+    return CliArgs(title=title, content=content, dry_run=parsed.dry_run, add_pwd_footer=not parsed.no_pwd_footer, manager_human=parsed.manager_human, tmux_target=parsed.tmux_target)
 
 
 def normalize_subject(title: str) -> str:
@@ -197,10 +202,29 @@ def current_tmux_window() -> str | None:
     return target
 
 
-def append_pwd_footer(content: str, cwd: str | Path | None = None) -> str:
+def valid_tmux_target(target: str) -> bool:
+    return bool(TMUX_WINDOW_RE.fullmatch(target))
+
+
+def env_tmux_target() -> str | None:
+    target = os.environ.get("OMO_AGENT_TMUX_TARGET", "").strip()
+    if valid_tmux_target(target):
+        return target
+    return None
+
+
+def footer_tmux_target(explicit_tmux_target: str | None = None) -> str | None:
+    if explicit_tmux_target is not None:
+        if not valid_tmux_target(explicit_tmux_target):
+            raise ValueError("tmux target must have shape session:window.")
+        return explicit_tmux_target
+    return env_tmux_target() or current_tmux_window()
+
+
+def append_pwd_footer(content: str, cwd: str | Path | None = None, tmux_target: str | None = None) -> str:
     if PWD_FOOTER_RE.search(content) or TMUX_FOOTER_RE.search(content):
         return content
-    tmux_window = current_tmux_window()
+    tmux_window = footer_tmux_target(tmux_target)
     if tmux_window is not None:
         footer = f"tmux: {tmux_window}"
     else:
@@ -375,7 +399,7 @@ def markdown_to_html(text: str) -> str:
     return f'<!doctype html><html><body style="font-family: -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif; line-height: 1.45;">{body}</body></html>\n'
 
 
-def build_message(sender_email: str, title: str, content: str, add_pwd_footer: bool = True, prepared_subject: str | None = None, reply_headers: dict[str, str] | None = None) -> EmailMessage:
+def build_message(sender_email: str, title: str, content: str, add_pwd_footer: bool = True, prepared_subject: str | None = None, reply_headers: dict[str, str] | None = None, tmux_target: str | None = None) -> EmailMessage:
     msg = EmailMessage()
     msg.add_header("Subject", prepared_subject or normalize_subject(title))
     msg.add_header("From", sender_email)
@@ -386,7 +410,7 @@ def build_message(sender_email: str, title: str, content: str, add_pwd_footer: b
     elif reply_headers_for_subject is not None:
         for name, value in reply_headers_for_subject(title).items():
             msg.add_header(name, value)
-    body = append_pwd_footer(content) if add_pwd_footer else content
+    body = append_pwd_footer(content, tmux_target=tmux_target) if add_pwd_footer else content
     msg.set_content(markdown_links_to_plain(body))
     msg.add_alternative(markdown_to_html(body), subtype="html")
     return msg
@@ -519,7 +543,7 @@ def main(argv: list[str]) -> int:
         print(str(exc), file=sys.stderr)
         return 2
     if args.dry_run:
-        body = append_pwd_footer(args.content) if args.add_pwd_footer else args.content
+        body = append_pwd_footer(args.content, tmux_target=args.tmux_target) if args.add_pwd_footer else args.content
         print(f"dry-run: email not sent; subject={subject}; body-bytes={len(body.encode())}")
         return 0
     dedupe_subject = normalized_subject_key(args.title) if args.manager_human and normalized_subject_key is not None else subject
@@ -558,6 +582,7 @@ def main(argv: list[str]) -> int:
             add_pwd_footer=args.add_pwd_footer,
             prepared_subject=subject,
             reply_headers=reply_headers,
+            tmux_target=args.tmux_target,
         )
     except ValueError as exc:
         print(str(exc), file=sys.stderr)

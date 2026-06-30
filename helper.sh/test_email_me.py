@@ -26,7 +26,7 @@ literal `touch /tmp/email-me-should-not-run-backtick`
 
 class EmailMeTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.env_patch = patch.dict(os.environ, {"OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "0", "TMUX": ""})
+        self.env_patch = patch.dict(os.environ, {"OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "0", "TMUX": "", "OMO_AGENT_TMUX_TARGET": ""})
         self.env_patch.start()
 
     def tearDown(self) -> None:
@@ -61,6 +61,42 @@ class EmailMeTests(unittest.TestCase):
             text=True,
             timeout=2,
         )
+
+    def test_explicit_tmux_target_overrides_caller_tmux_footer(self) -> None:
+        result = subprocess.CompletedProcess(["tmux"], 0, stdout="wl:0\n", stderr="")
+        with (
+            patch.dict(os.environ, {"TMUX": "/tmp/tmux-session"}, clear=False),
+            patch.object(email_me.subprocess, "run", return_value=result) as run,
+        ):
+            msg = email_me.build_message("me@example.com", "hi", "body\n", tmux_target="wl:7")
+        plain = msg.get_body(preferencelist=("plain",))
+        self.assertIsNotNone(plain)
+        self.assertEqual("body\n\ntmux: wl:7\n", plain.get_content())
+        run.assert_not_called()
+
+    def test_env_tmux_target_overrides_caller_tmux_footer(self) -> None:
+        result = subprocess.CompletedProcess(["tmux"], 0, stdout="wl:0\n", stderr="")
+        with (
+            patch.dict(os.environ, {"TMUX": "/tmp/tmux-session", "OMO_AGENT_TMUX_TARGET": "wl:4"}, clear=False),
+            patch.object(email_me.subprocess, "run", return_value=result) as run,
+        ):
+            msg = email_me.build_message("me@example.com", "hi", "body\n")
+        plain = msg.get_body(preferencelist=("plain",))
+        self.assertIsNotNone(plain)
+        self.assertEqual("body\n\ntmux: wl:4\n", plain.get_content())
+        run.assert_not_called()
+
+    def test_malformed_env_tmux_target_falls_back_to_caller_tmux(self) -> None:
+        result = subprocess.CompletedProcess(["tmux"], 0, stdout="wl:2\n", stderr="")
+        with (
+            patch.dict(os.environ, {"TMUX": "/tmp/tmux-session", "OMO_AGENT_TMUX_TARGET": "wl:bad"}, clear=False),
+            patch.object(email_me.subprocess, "run", return_value=result) as run,
+        ):
+            msg = email_me.build_message("me@example.com", "hi", "body\n")
+        plain = msg.get_body(preferencelist=("plain",))
+        self.assertIsNotNone(plain)
+        self.assertEqual("body\n\ntmux: wl:2\n", plain.get_content())
+        run.assert_called_once()
 
     def test_tmux_lookup_failure_falls_back_to_pwd_footer(self) -> None:
         result = subprocess.CompletedProcess(["tmux"], 1, stdout="", stderr="not attached")
@@ -288,6 +324,17 @@ class EmailMeTests(unittest.TestCase):
         with patch.object(sys, "stdin", StringIO("body\n")):
             args = email_me.parse_args(["--no-pwd-footer", "hi"])
         self.assertFalse(args.add_pwd_footer)
+
+    def test_parse_args_accepts_explicit_tmux_target(self) -> None:
+        with patch.object(sys, "stdin", StringIO("body\n")):
+            args = email_me.parse_args(["--tmux-target", "wl:7", "hi"])
+        self.assertEqual("wl:7", args.tmux_target)
+
+    def test_parse_args_rejects_malformed_tmux_target(self) -> None:
+        with patch.object(sys, "stdin", StringIO("body\n")), patch("sys.stderr", new_callable=StringIO) as stderr, self.assertRaises(SystemExit) as raised:
+            email_me.parse_args(["--tmux-target", "wl:bad", "hi"])
+        self.assertEqual(2, raised.exception.code)
+        self.assertIn("session:window", stderr.getvalue())
 
     def test_help_mentions_markdown_but_prefers_plain_text(self) -> None:
         with patch("sys.stdout", new_callable=StringIO) as stdout, self.assertRaises(SystemExit) as raised:
