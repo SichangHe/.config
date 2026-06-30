@@ -26,6 +26,14 @@ from email.parser import BytesParser
 from pathlib import Path
 from urllib.parse import urlparse
 
+try:
+    from .omo_email_subject import subject_base
+except ImportError:
+    try:
+        from omo_email_subject import subject_base
+    except ImportError:
+        subject_base = None
+
 
 def default_state_dir() -> Path:
     return Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "omo-manager"
@@ -268,7 +276,16 @@ def is_manager_subject(subject: str) -> bool:
 
 
 def normalize_human_subject(subject: str) -> str:
-    return MANAGER_REPLY_SUBJECT_RE.sub("Re: ", subject, count=1)
+    if subject_base is not None:
+        base = subject_base(subject)
+    else:
+        base = MANAGER_REPLY_SUBJECT_RE.sub("", subject, count=1).strip()
+        while True:
+            next_base = re.sub(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?(?:\s+|$)", "", base, count=1).strip()
+            if next_base == base:
+                break
+            base = next_base
+    return f"Re: {base}" if re.match(r"^\s*re:\s*", subject, flags=re.IGNORECASE) else base
 
 
 def subject_manager_target(subject: str) -> str:

@@ -18,7 +18,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from omo_manager.email_idle_watcher import append_pending, current_manager_file, dated_manager_file, existing_source_pending_line, normalize_human_subject
-from omo_manager.omo_email_subject import RecentHeader, fetch_recent_header, manager_subject_w_target, normalized_subject_key, prepare_subject, prepare_subject_and_headers, reply_headers_for_subject
+from omo_manager.omo_email_subject import RecentHeader, fetch_recent_header, manager_subject_w_target, normalized_subject_key, prepare_subject, prepare_subject_and_headers, reply_headers_for_subject, strip_leading_tmux_tags
 from omo_manager.omo_pending_watch import Args, find_markers
 
 
@@ -562,7 +562,9 @@ class PendingMarkerTests(unittest.TestCase):
     def test_email_watcher_normalizes_manager_reply_subjects_for_storage(self) -> None:
         self.assertEqual("Re: Book demo regression fixed pb_book_demo_regression_5818.md", normalize_human_subject("Re: [omo_manager] Book demo regression fixed pb_book_demo_regression_5818.md"))
         self.assertEqual("Re: Book demo regression fixed pb_book_demo_regression_5818.md", normalize_human_subject("Re: [a] Book demo regression fixed pb_book_demo_regression_5818.md"))
-        self.assertEqual("Re: Re: VL supervisor follow-up vl_supervisor_5410.md", normalize_human_subject("Re:[omo_manager] Re: VL supervisor follow-up vl_supervisor_5410.md"))
+        self.assertEqual("Re: VL supervisor follow-up vl_supervisor_5410.md", normalize_human_subject("Re:[omo_manager] Re: VL supervisor follow-up vl_supervisor_5410.md"))
+        self.assertEqual("Re: PB urgent", normalize_human_subject("Re: wl:9 wl:6 wl:7 PB urgent"))
+        self.assertEqual("Re: PB urgent", normalize_human_subject("Re: [a] wl:9 pb:1 vl:2 PB urgent"))
 
     def test_email_watcher_accepts_no_space_manager_reply_subject(self) -> None:
         from omo_manager import email_idle_watcher as watcher
@@ -581,6 +583,9 @@ class PendingMarkerTests(unittest.TestCase):
         self.assertEqual("topic", normalized_subject_key("Re: Re: [a] Topic"))
         self.assertEqual("topic", normalized_subject_key("Re:[omo_manager] Topic"))
         self.assertEqual("topic", normalized_subject_key("[omo] Re: topic"))
+        self.assertEqual("topic", normalized_subject_key("Re: wl:9 wl:6 Topic"))
+        self.assertEqual("topic", normalized_subject_key("Re: [a] wl:9 pb:1 vl:2 Topic"))
+        self.assertEqual("Topic", strip_leading_tmux_tags("wl:9 wl:6 Topic"))
 
     def test_email_subject_recent_thread_uses_reply_subject(self) -> None:
         from omo_manager import omo_email_subject as subject
@@ -633,6 +638,8 @@ class PendingMarkerTests(unittest.TestCase):
         self.assertEqual("[a] wl:7 Topic", manager_subject_w_target("Topic", "wl:7"))
         self.assertEqual("Re: [a] wl:7 Topic", manager_subject_w_target("Topic", "wl:7", True))
         self.assertEqual("Re: [a] wl:7 Topic", prepare_subject("Re: [a] Topic", "wl:7"))
+        self.assertEqual("Re: [a] wl:7 Topic", prepare_subject("Re: wl:9 wl:6 Topic", "wl:7"))
+        self.assertEqual("Re: [a] wl:7 Topic", prepare_subject("Re: [a] wl:9 pb:1 vl:2 Topic", "wl:7"))
         self.assertEqual("[a] Topic", prepare_subject("Topic", "not-a-target"))
 
     def test_email_subject_target_keeps_recent_thread_lookup_key_untargeted(self) -> None:

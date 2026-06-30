@@ -26,7 +26,7 @@ literal `touch /tmp/email-me-should-not-run-backtick`
 
 class EmailMeTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.env_patch = patch.dict(os.environ, {"OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "0", "TMUX": "", "OMO_AGENT_TMUX_TARGET": ""})
+        self.env_patch = patch.dict(os.environ, {"OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "0", "TMUX": "", "OMO_AGENT_TMUX_TARGET": "", "OMO_MANAGER_TMUX_TARGET": ""})
         self.env_patch.start()
 
     def tearDown(self) -> None:
@@ -459,6 +459,28 @@ class EmailMeTests(unittest.TestCase):
             self.assertEqual(0, result)
             prepare.assert_called_once_with("Topic", "wl:7")
             self.assertEqual("[a] wl:7 Topic\nbody\n", send_log.read_text(encoding="utf-8"))
+
+    def test_manager_human_mode_prefers_configured_manager_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp) / "state"
+            send_log = Path(tmp) / "sent.txt"
+            body = Path(tmp) / "body.md"
+            body.write_text("body\n", encoding="utf-8")
+            subject = Path(tmp) / "subject.txt"
+            subject.write_text("Re: wl:9 wl:6 Topic\n", encoding="utf-8")
+            env = {
+                "EMAIL_ME_FAKE_SEND_LOG": str(send_log),
+                "OMO_MANAGER_STATE_DIR": str(state_dir),
+                "OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "0",
+                "OMO_MANAGER_TMUX_TARGET": "wl:1.0",
+                "TMUX": "/tmp/tmux-session",
+                "OMO_AGENT_TMUX_TARGET": "vl:2",
+            }
+            with patch.dict(os.environ, env, clear=False), patch.object(email_me.subprocess, "run") as run:
+                result = email_me.main(["--manager-human", "--subject-file", str(subject), "--message-file", str(body)])
+            self.assertEqual(0, result)
+            self.assertEqual("Re: [a] wl:1.0 Topic\nbody\n", send_log.read_text(encoding="utf-8"))
+            run.assert_not_called()
 
     def test_shared_sender_mode_passes_tmux_target_to_subject_preparation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

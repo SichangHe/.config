@@ -31,18 +31,20 @@ MANAGER_DIR = Path(__file__).resolve().parents[1] / "omo_manager"
 if MANAGER_DIR.is_dir():
     sys.path.insert(0, str(MANAGER_DIR))
 try:
-    from omo_email_subject import SubjectInputError, normalized_subject_key, prepare_subject, prepare_subject_and_headers, reply_headers_for_subject
+    from omo_email_subject import SubjectInputError, normalized_subject_key, prepare_subject, prepare_subject_and_headers, reply_headers_for_subject, strip_leading_tmux_tags
 except ImportError:
     SubjectInputError = ValueError
     normalized_subject_key = None
     prepare_subject = None
     prepare_subject_and_headers = None
     reply_headers_for_subject = None
+    strip_leading_tmux_tags = None
 
 MANAGER_PREFIX = "[a]"
 PWD_FOOTER_RE = re.compile(r"(?:^|\n)(?:>\s*)?PWD: [^\n]+\n?\Z")
-TMUX_WINDOW_RE = re.compile(r"[^:\n]+:\d+\Z")
-TMUX_FOOTER_RE = re.compile(r"(?:^|\n)tmux: [^:\n]+:\d+\r?\n?\Z", re.IGNORECASE)
+TMUX_WINDOW_RE = re.compile(r"[^:\n]+:\d+(?:\.\d+)?\Z")
+TMUX_SUBJECT_TAG_RE = re.compile(r"^\s*[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?(?:\s+|$)")
+TMUX_FOOTER_RE = re.compile(r"(?:^|\n)tmux: [^:\n]+:\d+(?:\.\d+)?\r?\n?\Z", re.IGNORECASE)
 MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
 INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)(?:\s+#+\s*)?$")
@@ -133,7 +135,7 @@ def parse_args(argv: list[str]) -> CliArgs:
     if parsed.manager_human and not content.strip():
         parser.error("email body must not be empty.")
     if parsed.tmux_target is not None and not valid_tmux_target(parsed.tmux_target):
-        parser.error("--tmux-target must have shape session:window, for example wl:4.")
+        parser.error("--tmux-target must have shape session:window or session:window.pane, for example wl:4.")
     return CliArgs(title=title, content=content, dry_run=parsed.dry_run, add_pwd_footer=not parsed.no_pwd_footer, manager_human=parsed.manager_human, tmux_target=parsed.tmux_target)
 
 
@@ -158,11 +160,13 @@ def normalize_subject(title: str, tmux_target: str = "") -> str:
             reply = True
             base = re.sub(r"^\s*re:\s*", "", base, count=1, flags=re.IGNORECASE).strip()
         base = re.sub(r"^\s*(?:\[a\]|\[omo_manager\]|\[omo_manager_recover\])\s*", "", base, count=1, flags=re.IGNORECASE).strip()
+        base = clean_subject_tmux_tags(base)
         if base == before:
             break
     if re.sub(r"\W+", "", base).casefold() == "subject":
         raise ValueError("subject must be a real subject, not the placeholder SUBJECT")
     clean_target = tmux_target.strip()
+    base = clean_subject_tmux_tags(base)
     if clean_target and valid_tmux_target(clean_target) and not base.startswith(f"{clean_target} "):
         base = f"{clean_target} {base}"
     if lowered.startswith("re:"):
@@ -216,12 +220,32 @@ def env_tmux_target() -> str | None:
     return None
 
 
-def footer_tmux_target(explicit_tmux_target: str | None = None) -> str | None:
+def env_manager_tmux_target() -> str | None:
+    target = os.environ.get("OMO_MANAGER_TMUX_TARGET", "").strip()
+    if valid_tmux_target(target):
+        return target
+    return None
+
+
+def footer_tmux_target(explicit_tmux_target: str | None = None, manager_human: bool = False) -> str | None:
     if explicit_tmux_target is not None:
         if not valid_tmux_target(explicit_tmux_target):
-            raise ValueError("tmux target must have shape session:window.")
+            raise ValueError("tmux target must have shape session:window or session:window.pane.")
         return explicit_tmux_target
+    if manager_human:
+        return env_manager_tmux_target() or env_tmux_target() or current_tmux_window()
     return env_tmux_target() or current_tmux_window()
+
+
+def clean_subject_tmux_tags(subject: str) -> str:
+    if strip_leading_tmux_tags is not None:
+        return strip_leading_tmux_tags(subject)
+    text = subject.strip()
+    while True:
+        next_text = TMUX_SUBJECT_TAG_RE.sub("", text, count=1).strip()
+        if next_text == text:
+            return text
+        text = next_text
 
 
 def append_pwd_footer(content: str, cwd: str | Path | None = None, tmux_target: str | None = None) -> str:
@@ -539,7 +563,7 @@ def fake_send_log_path() -> Path | None:
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
     try:
-        subject_tmux_target = footer_tmux_target(args.tmux_target)
+        subject_tmux_target = footer_tmux_target(args.tmux_target, args.manager_human)
         if prepare_subject_and_headers is not None:
             subject, reply_headers = prepare_subject_and_headers(args.title, subject_tmux_target or "")
         else:
