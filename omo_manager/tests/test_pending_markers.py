@@ -3123,6 +3123,35 @@ class PendingMarkerTests(unittest.TestCase):
                 self.assertTrue(watcher.scan_once(args, seen, changed))
             self.assertIn("pending: file=task.md", out.getvalue())
 
+    def test_pending_watch_reminds_when_todo_exceeds_200_lines(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            todo = root / "TODO.md"
+            todo.write_text("\n".join(f"line {idx}" for idx in range(201)) + "\n", encoding="utf-8")
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/missing-status.py"), False, True)
+            seen: dict[str, float] = {}
+            out = StringIO()
+            with redirect_stdout(out):
+                self.assertTrue(watcher.scan_once(args, seen, [todo]))
+            text = out.getvalue()
+            self.assertIn("TODO.md length reminder: TODO.md has 201 lines.", text)
+            self.assertIn("Move done material to YYYYMM/old_todos.md", text)
+            todo.write_text(todo.read_text(encoding="utf-8") + "another line\n", encoding="utf-8")
+            out = StringIO()
+            with redirect_stdout(out):
+                self.assertFalse(watcher.scan_once(args, seen, [todo]))
+            self.assertEqual("", out.getvalue())
+            todo.write_text("\n".join(f"line {idx}" for idx in range(200)) + "\n", encoding="utf-8")
+            with redirect_stdout(StringIO()):
+                self.assertTrue(watcher.scan_once(args, seen, [todo]))
+            todo.write_text(todo.read_text(encoding="utf-8") + "over threshold\n", encoding="utf-8")
+            out = StringIO()
+            with redirect_stdout(out):
+                self.assertTrue(watcher.scan_once(args, seen, [todo]))
+            self.assertIn("TODO.md length reminder: TODO.md has 201 lines.", out.getvalue())
+
     def test_background_agent_problem_check_does_not_block_pending_scan(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 

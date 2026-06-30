@@ -43,6 +43,7 @@ DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_TMUX_SU
 DEFAULT_HUMAN_EMAIL_HELPER = Path(__file__).resolve().parents[1] / "helper.sh" / "email_me.py"
 PENDING_MARKERS = {"(pending)"}
 TASK_FILE_LINE_WARNING_THRESHOLD = 2000
+TODO_LINE_WARNING_THRESHOLD = 200
 ROUTED_PREFIXES = ("(manager handled:", "(manager routed:")
 EMAIL_SOURCE_PREFIXES = ("(from email ", "[source: email ")
 AGENT_SOURCE_PREFIXES = ("[omo-message-source: origin=agent ", "(from agent ")
@@ -50,6 +51,7 @@ STATUS_DETAIL_RE = re.compile(r"^\((pending|running|done|blocked)(?::\s*([^)]*))
 AGENT_PROBLEM_SOURCE_LINE = "[omo-message-source: origin=agent source=agent action=no-human-ack agent=omo_pending_watch via=omo_pending_watch.py status=agent-problem]"
 MANAGER_COMPACTION_SOURCE_LINE = "[omo-message-source: origin=agent source=agent action=no-human-ack agent=omo_pending_watch via=omo_pending_watch.py status=manager-compaction-reread]"
 MANAGER_COMPACTION_REMINDER = "Manager compaction observed. Reread MANAGER.md now unless the compaction summary already included it, then continue from the current manager task state."
+TODO_LENGTH_REMINDER = "TODO.md length reminder: TODO.md has {n_lines} lines. Move done material to YYYYMM/old_todos.md and keep TODO.md under 200 lines."
 MANAGER_POLICY_REMINDER_RATE = 0.125
 MANAGER_POLICY_REMINDERS = (
     "Reminder: delegate work; do not do worker work in the manager.",
@@ -841,6 +843,17 @@ def expire_seen(seen: dict[str, float], now_s: float) -> dict[str, float]:
 def scan_once(args: Args, seen: dict[str, float], files: list[Path]) -> bool:
     changed = False
     now_s = time.time()
+    todo = args.root / "TODO.md"
+    if todo in files or not files:
+        n_todo_lines = markdown_line_count(todo)
+        key = f"{args.root}:TODO.md:line-warning"
+        if n_todo_lines <= TODO_LINE_WARNING_THRESHOLD and key in seen:
+            del seen[key]
+            changed = True
+        elif n_todo_lines > TODO_LINE_WARNING_THRESHOLD and key not in seen:
+            if push_manager_text(args, TODO_LENGTH_REMINDER.format(n_lines=n_todo_lines)) in {0, 2}:
+                seen[key] = now_s
+                changed = True
     for marker in find_markers(args.root, files):
         key = f"{args.root}:{marker.file}:{marker.line}:{marker.digest}"
         if key in seen:
@@ -849,6 +862,13 @@ def scan_once(args: Args, seen: dict[str, float], files: list[Path]) -> bool:
             seen[key] = now_s
             changed = True
     return changed
+
+
+def markdown_line_count(path: Path) -> int:
+    try:
+        return len(path.read_text(encoding="utf-8").splitlines())
+    except OSError:
+        return 0
 
 
 def main(argv: list[str]) -> int:
