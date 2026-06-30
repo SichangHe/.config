@@ -180,6 +180,10 @@ def task_path(root: Path, task_file: str) -> Path:
     return path
 
 
+def task_ref(root: Path, task_file: str) -> str:
+    return task_path(root, task_file).relative_to(root.resolve()).as_posix()
+
+
 def target_aliases(target: str) -> set[str]:
     aliases = {target}
     window_target, dot, _pane = target.rpartition(".")
@@ -280,6 +284,8 @@ def move_todo_to_previous(root: Path, task_file: str) -> None:
     todo = root / "TODO.md"
     if not todo.exists():
         return
+    ref = task_ref(root, task_file)
+    aliases = {task_file, ref, str(task_path(root, task_file))}
     lines = todo.read_text(encoding="utf-8").splitlines()
     current = section_bounds(lines, "current")
     if current is None:
@@ -288,12 +294,15 @@ def move_todo_to_previous(root: Path, task_file: str) -> None:
     source_idx = -1
     for idx in range(current_start + 1, current_end):
         stripped = lines[idx].strip()
-        if stripped and stripped.split(maxsplit=1)[0] == task_file:
+        if stripped and stripped.split(maxsplit=1)[0] in aliases:
             source_idx = idx
             break
     if source_idx < 0:
         return
     moved = lines.pop(source_idx).strip()
+    moved_token = moved.split(maxsplit=1)[0]
+    if moved_token != ref:
+        moved = moved.replace(moved_token, ref, 1)
     previous = section_bounds(lines, "previous")
     if previous is None:
         if lines and lines[-1].strip():
@@ -303,7 +312,12 @@ def move_todo_to_previous(root: Path, task_file: str) -> None:
     previous_start, previous_end = previous
     for idx in range(previous_start + 1, previous_end):
         stripped = lines[idx].strip()
-        if stripped and stripped.split(maxsplit=1)[0] == task_file:
+        if not stripped:
+            continue
+        token = stripped.split(maxsplit=1)[0]
+        if token in aliases:
+            if token != ref:
+                lines[idx] = lines[idx].replace(token, ref, 1)
             _ = todo.write_text("\n".join(lines) + "\n", encoding="utf-8")
             return
     lines.insert(previous_start + 1, moved)

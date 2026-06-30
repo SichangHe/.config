@@ -23,6 +23,41 @@ class OmoTaskTests(unittest.TestCase):
             self.assertEqual('runat: cfg:2 codex', path.read_text(encoding='utf-8').splitlines()[0])
             self.assertIn('x.md cfg:2', (root / 'TODO.md').read_text(encoding='utf-8'))
 
+    def test_absolute_task_file_writes_relative_todo_link(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "nested" / "x.md"
+            prompt = root / "prompt.md"
+            prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
+            args = Args(root, str(task), "cfg", "2", "codex", None, "", prompt, False, False, "", "", ())
+            _ = ensure_task_file(args, "cfg:2")
+            link_todo(args, "cfg:2")
+            text = (root / "TODO.md").read_text(encoding="utf-8")
+            self.assertIn("nested/x.md cfg:2", text)
+            self.assertNotIn(str(root), text)
+
+    def test_link_todo_normalizes_existing_absolute_task_ref(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "x.md"
+            _ = (root / "TODO.md").write_text(f"current:\n{task} cfg:1\n", encoding="utf-8")
+            prompt = root / "prompt.md"
+            prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
+            args = Args(root, str(task), "cfg", "1", "codex", None, "", prompt, False, False, "", "", ())
+            link_todo(args, "cfg:1")
+            self.assertEqual("current:\nx.md cfg:1\n", (root / "TODO.md").read_text(encoding="utf-8"))
+
+    def test_link_todo_normalizes_absolute_entry_when_called_with_relative_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "x.md"
+            _ = (root / "TODO.md").write_text(f"current:\n{task} cfg:1\n", encoding="utf-8")
+            prompt = root / "prompt.md"
+            prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
+            args = Args(root, "x.md", "cfg", "1", "codex", None, "", prompt, False, False, "", "", ())
+            link_todo(args, "cfg:1")
+            self.assertEqual("current:\nx.md cfg:1\n", (root / "TODO.md").read_text(encoding="utf-8"))
+
     def test_creates_pcodx_task_header(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

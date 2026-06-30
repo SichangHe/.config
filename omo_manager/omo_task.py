@@ -99,6 +99,10 @@ def task_path(root: Path, task_file: str) -> Path:
     return path
 
 
+def task_ref(root: Path, task_file: str) -> str:
+    return task_path(root, task_file).relative_to(root.resolve()).as_posix()
+
+
 def target(args: Args) -> str:
     if args.tmux_session and args.tmux_window:
         return f"{args.tmux_session}:{args.tmux_window}"
@@ -319,7 +323,7 @@ def ensure_task_file(args: Args, tmux_target: str) -> Path:
 
 
 def todo_line(args: Args, tmux_target: str) -> str:
-    parts = [args.task_file]
+    parts = [task_ref(args.root, args.task_file)]
     if tmux_target:
         parts.append(tmux_target)
     return " ".join(parts)
@@ -329,7 +333,18 @@ def link_todo(args: Args, tmux_target: str) -> None:
     todo = args.root / "TODO.md"
     line = todo_line(args, tmux_target)
     lines = todo.read_text(encoding="utf-8").splitlines() if todo.exists() else ["current:", ""]
-    if any(existing.split(maxsplit=1)[0] == args.task_file for existing in lines if existing.strip()):
+    ref = task_ref(args.root, args.task_file)
+    aliases = {args.task_file, ref, str(task_path(args.root, args.task_file))}
+    for idx, existing in enumerate(lines):
+        stripped = existing.strip()
+        if not stripped:
+            continue
+        token = stripped.split(maxsplit=1)[0]
+        if token not in aliases:
+            continue
+        if token != ref:
+            lines[idx] = existing.replace(token, ref, 1)
+            _ = todo.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return
     try:
         current_idx = next(idx for idx, existing in enumerate(lines) if existing.strip() == "current:")

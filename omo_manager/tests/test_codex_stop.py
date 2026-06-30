@@ -102,6 +102,51 @@ class CodexStopTests(unittest.TestCase):
             todo = (root / "TODO.md").read_text(encoding="utf-8")
         self.assertIn("current:\n\nother.md cfg:2\n\nprevious:\ntask.md cfg:1\nold.md cfg:0 (done)\n", todo)
 
+    def test_record_close_moves_absolute_todo_entry_as_relative(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "nested" / "task.md"
+            task.parent.mkdir()
+            _ = task.write_text("runat: cfg:1 codex\n", encoding="utf-8")
+            _ = (root / "TODO.md").write_text(f"current:\n{task} cfg:1\n", encoding="utf-8")
+            record_close(
+                Args("cfg:1.0", 0.0, 10, False, False, root, str(task)),
+                "11111111-2222-3333-4444-555555555555",
+            )
+            todo = (root / "TODO.md").read_text(encoding="utf-8")
+        self.assertIn("previous:\nnested/task.md cfg:1\n", todo)
+        self.assertNotIn(str(root), todo)
+
+    def test_record_close_normalizes_absolute_todo_entry_when_called_with_relative_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "nested" / "task.md"
+            task.parent.mkdir()
+            _ = task.write_text("runat: cfg:1 codex\n", encoding="utf-8")
+            _ = (root / "TODO.md").write_text(f"current:\n{task} cfg:1\n", encoding="utf-8")
+            record_close(
+                Args("cfg:1.0", 0.0, 10, False, False, root, "nested/task.md"),
+                "11111111-2222-3333-4444-555555555555",
+            )
+            todo = (root / "TODO.md").read_text(encoding="utf-8")
+        self.assertIn("previous:\nnested/task.md cfg:1\n", todo)
+        self.assertNotIn(str(root), todo)
+
+    def test_record_close_normalizes_existing_absolute_previous_duplicate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "nested" / "task.md"
+            task.parent.mkdir()
+            _ = task.write_text("runat: cfg:1 codex\n", encoding="utf-8")
+            _ = (root / "TODO.md").write_text(f"current:\nnested/task.md cfg:1\n\nprevious:\n{task} cfg:1 old\n", encoding="utf-8")
+            record_close(
+                Args("cfg:1.0", 0.0, 10, False, False, root, "nested/task.md"),
+                "11111111-2222-3333-4444-555555555555",
+            )
+            todo = (root / "TODO.md").read_text(encoding="utf-8")
+        self.assertIn("previous:\nnested/task.md cfg:1 old\n", todo)
+        self.assertNotIn(str(root), todo)
+
     def test_close_note_omits_year(self) -> None:
         text = close_note("cfg:1.0", "11111111-2222-3333-4444-555555555555", datetime(2026, 6, 6, 11, 18, tzinfo=timezone.utc))
         self.assertIn("06-06 11:18 UTC", text)

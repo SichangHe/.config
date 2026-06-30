@@ -45,9 +45,13 @@ MANAGER_SUBJECT_TOKENS = (MANAGER_SUBJECT_TOKEN, "[omo_manager]")
 MANAGER_REPLY_SEARCH_PREFIXES = (MANAGER_REPLY_PREFIX, "Re:[a]", "Re: [omo_manager]", "Re:[omo_manager]")
 NORMAL_REPLY_SEARCH_PREFIXES = MANAGER_REPLY_SEARCH_PREFIXES
 MANAGER_REPLY_SUBJECT_RE = re.compile(r"^re:\s*(?:\[a\]|\[omo_manager\])\s*", re.IGNORECASE)
+MANAGER_TARGET_SUBJECT_RE = re.compile(r"^(?:re:\s*)*(?:\[a\]|\[omo_manager\])\s+([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)(?:\s+|$)", re.IGNORECASE)
+TMUX_TARGET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?$")
 PWD_FOOTER_RE = re.compile(r"(?:^|\n)PWD: [^\n]+\n?\Z")
 TMUX_FOOTER_RE = re.compile(r"(?:^|\n)tmux: [^:\n]+:\d+\r?\n?\Z", re.IGNORECASE)
 RECOVERY_SUBJECTS = {"[omo_manager_recover]", "Re: [omo_manager_recover]"}
+ROUTED_PREFIXES = ("(manager handled:", "(manager routed:")
+IGNORE_PARTS = {".git", ".venv", "__pycache__", "manager_mail"}
 # Fail closed by default: raw email can contain sender-injected Authentication-Results.
 # This opt-in is an operator/admin-trusted escape hatch for mailbox/provider setups
 # known to strip or control forged Authentication-Results before delivery; it is
@@ -89,6 +93,13 @@ class ManagerMailCounts:
     recent_window_s: float
     recent_total: int
     recent_exact: bool
+
+
+@dataclass(frozen=True)
+class EmailRoute:
+    manager_file: Path
+    manager_target: str
+    routed_target: str = ""
 
 
 _email_push_queue: queue.Queue[EmailPush] = queue.Queue()
@@ -260,6 +271,135 @@ def normalize_human_subject(subject: str) -> str:
     return MANAGER_REPLY_SUBJECT_RE.sub("Re: ", subject, count=1)
 
 
+def subject_manager_target(subject: str) -> str:
+    match = MANAGER_TARGET_SUBJECT_RE.match(subject.strip())
+    return match.group(1) if match is not None else ""
+
+
+def target_aliases(target: str) -> set[str]:
+    if not target:
+        return set()
+    aliases = {target}
+    window_target, dot, _pane = target.rpartition(".")
+    if dot and ":" in window_target:
+        aliases.add(window_target)
+    elif not dot:
+        aliases.add(f"{target}.0")
+    return aliases
+
+
+def runat_targets(text: str) -> list[str]:
+    targets: list[str] = []
+    for line in text.splitlines():
+        parts = line.strip().split()
+        if len(parts) >= 2 and parts[0] == "runat:":
+            targets.append(parts[1])
+    return targets
+
+
+def top_runat_target(path: Path) -> str:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+    if not lines:
+        return ""
+    parts = lines[0].strip().split()
+    return parts[1] if len(parts) >= 2 and parts[0] == "runat:" else ""
+
+
+def is_ignored(path: Path) -> bool:
+    return bool(set(path.parts) & IGNORE_PARTS)
+
+
+def todo_task_candidates(root: Path) -> list[Path]:
+    todo = root / "TODO.md"
+    if not todo.exists():
+        return []
+    resolved_root = root.resolve()
+    try:
+        text = todo.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+    for match in re.findall(r"`?([A-Za-z0-9_./-]+\.md)`?", text):
+        path = (root / match).resolve(strict=False)
+        if path in seen or path == todo.resolve(strict=False) or (path != resolved_root and resolved_root not in path.parents):
+            continue
+        seen.add(path)
+        candidates.append(path)
+    return candidates
+
+
+def markdown_task_files(root: Path) -> list[Path]:
+    paths: list[Path] = []
+    for path in root.rglob("*.md"):
+        try:
+            rel = path.relative_to(root)
+        except ValueError:
+            continue
+        if is_ignored(rel) or path.name == "TODO.md" or path.name.startswith("work_manager_"):
+            continue
+        paths.append(path)
+    return sorted(paths, key=lambda path: path.stat().st_mtime_ns if path.exists() else 0, reverse=True)
+
+
+def task_file_for_target(root: Path, tmux_target: str) -> Path | None:
+    aliases = target_aliases(tmux_target)
+    seen: set[Path] = set()
+    for path in todo_task_candidates(root):
+        resolved = path.resolve(strict=False)
+        if resolved in seen or not path.is_file():
+            continue
+        seen.add(resolved)
+        try:
+            targets = runat_targets(path.read_text(encoding="utf-8"))
+        except OSError:
+            continue
+        if any(target in aliases for target in targets):
+            return path
+    return None
+
+
+def email_route(args: Args, subject: str) -> EmailRoute:
+    tmux_target = subject_manager_target(subject)
+    if not tmux_target:
+        return EmailRoute(current_manager_file(args), args.manager_target)
+    manager_file = task_file_for_target(args.root, tmux_target)
+    if manager_file is None:
+        logging.warning("sub-manager email target did not map to a task file; using default manager: target=%s", tmux_target)
+        return EmailRoute(current_manager_file(args), args.manager_target)
+    return EmailRoute(manager_file, tmux_target, tmux_target)
+
+
+def manager_target_for_file(args: Args, manager_file: Path) -> str:
+    current = current_manager_file(args)
+    if manager_file == current or manager_file.name.startswith("work_manager_"):
+        return args.manager_target
+    return top_runat_target(manager_file) or args.manager_target
+
+
+def routed_target_for_pending_line(path: Path, line_no: int) -> str:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+    for line in lines[line_no:]:
+        stripped = line.strip()
+        if stripped == "(pending)":
+            return ""
+        if stripped.startswith("(manager routed: ") and stripped.endswith(")"):
+            target = stripped[len("(manager routed: ") : -1].strip()
+            return target if TMUX_TARGET_RE.fullmatch(target) else ""
+    return ""
+
+
+def args_for_manager_file(args: Args, manager_file: Path, pending_line: int = 0) -> Args:
+    routed_target = routed_target_for_pending_line(manager_file, pending_line) if pending_line > 0 else ""
+    return replace(args, manager_file=manager_file, manager_target=routed_target or manager_target_for_file(args, manager_file))
+
+
 def is_recovery_subject(subject: str) -> bool:
     return " ".join(subject.split()) in RECOVERY_SUBJECTS
 
@@ -360,6 +500,19 @@ def email_source_lines(root: Path, txt_path: Path) -> tuple[str, str]:
     return f"(from email {ref})", f"[source: email {ref}]"
 
 
+def source_search_files(root: Path, manager_file: Path | None = None) -> list[Path]:
+    candidates = [manager_file or dated_manager_file(root), *sorted(root.glob("work_manager_*.md")), *todo_task_candidates(root)]
+    files: list[Path] = []
+    seen: set[Path] = set()
+    for path in candidates:
+        resolved = path.resolve(strict=False)
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        files.append(path)
+    return files
+
+
 def existing_source_line(root: Path, txt_path: Path, manager_file: Path | None = None) -> int | None:
     manager_file = manager_file or dated_manager_file(root)
     if not manager_file.exists():
@@ -373,12 +526,7 @@ def existing_source_line(root: Path, txt_path: Path, manager_file: Path | None =
 
 
 def existing_source_line_in_root(root: Path, txt_path: Path, manager_file: Path | None = None) -> int | None:
-    source_line = existing_source_line(root, txt_path, manager_file)
-    if source_line is not None:
-        return source_line
-    for path in sorted(root.glob("work_manager_*.md")):
-        if manager_file is not None and path == manager_file:
-            continue
+    for path in source_search_files(root, manager_file):
         source_line = existing_source_line(root, txt_path, path)
         if source_line is not None:
             return source_line
@@ -395,18 +543,15 @@ def existing_source_pending_line(root: Path, txt_path: Path, manager_file: Path 
         stripped = lines[pending_idx].strip()
         if stripped == "(pending)":
             return pending_idx + 1
+        if stripped.startswith(ROUTED_PREFIXES):
+            continue
         if stripped.startswith(("(", "#")) and stripped != "(pending)":
             break
     return None
 
 
 def existing_source_pending_line_in_root(root: Path, txt_path: Path, manager_file: Path | None = None) -> int | None:
-    pending_line = existing_source_pending_line(root, txt_path, manager_file)
-    if pending_line is not None:
-        return pending_line
-    for path in sorted(root.glob("work_manager_*.md")):
-        if manager_file is not None and path == manager_file:
-            continue
+    for path in source_search_files(root, manager_file):
         pending_line = existing_source_pending_line(root, txt_path, path)
         if pending_line is not None:
             return pending_line
@@ -414,20 +559,14 @@ def existing_source_pending_line_in_root(root: Path, txt_path: Path, manager_fil
 
 
 def existing_source_pending_path_line_in_root(root: Path, txt_path: Path, manager_file: Path | None = None) -> tuple[Path, int] | None:
-    manager_file = manager_file or dated_manager_file(root)
-    pending_line = existing_source_pending_line(root, txt_path, manager_file)
-    if pending_line is not None:
-        return manager_file, pending_line
-    for path in sorted(root.glob("work_manager_*.md")):
-        if path == manager_file:
-            continue
+    for path in source_search_files(root, manager_file):
         pending_line = existing_source_pending_line(root, txt_path, path)
         if pending_line is not None:
             return path, pending_line
     return None
 
 
-def append_pending(root: Path, txt_path: Path, manager_file: Path | None = None) -> int:
+def append_pending(root: Path, txt_path: Path, manager_file: Path | None = None, routed_target: str = "") -> int:
     manager_file = manager_file or dated_manager_file(root)
     existing_line = existing_source_pending_line(root, txt_path, manager_file)
     if existing_line is not None:
@@ -436,6 +575,8 @@ def append_pending(root: Path, txt_path: Path, manager_file: Path | None = None)
     line_no = len(lines) + 1
     from_line, _legacy_source_line = email_source_lines(root, txt_path)
     block = ["", "(pending)", from_line]
+    if routed_target:
+        block.insert(2, f"(manager routed: {routed_target})")
     manager_file.write_text("\n".join(lines + block) + "\n", encoding="utf-8")
     return line_no + 1
 
@@ -869,7 +1010,7 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
     unaccepted_changed = False
     handled = False
     manager_file = current_manager_file(args)
-    push_args = args_w_manager_file(args, manager_file)
+    push_args = args_for_manager_file(args, manager_file)
     candidate_uids: set[bytes] = set()
     for subject_prefix in NORMAL_REPLY_SEARCH_PREFIXES:
         candidate_uids.update(search_uids(client, subject_prefix, args.self_email, processed_uids))
@@ -895,7 +1036,7 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
         pending_ref = existing_source_pending_path_line_in_root(args.root, expected_txt_path, manager_file) if uid in unaccepted_pending_uids else None
         if pending_ref is not None:
             pending_file, pending_line = pending_ref
-            if push_email_ref(args_w_manager_file(args, pending_file), pending_line):
+            if push_email_ref(args_for_manager_file(args, pending_file, pending_line), pending_line):
                 unaccepted_pending_uids.discard(uid)
                 unaccepted_changed = True
                 processed_uids.add(uid)
@@ -970,8 +1111,10 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
             mark_seen(client, uid)
             handled = True
         else:
-            pending_line = append_pending(args.root, txt_path, manager_file)
-            if push_email_ref(push_args, pending_line):
+            route = email_route(args, subject)
+            route_args = replace(args, manager_file=route.manager_file, manager_target=route.manager_target)
+            pending_line = append_pending(args.root, txt_path, route.manager_file, route.routed_target)
+            if push_email_ref(route_args, pending_line):
                 unaccepted_pending_uids.discard(uid)
                 unaccepted_changed = True
                 processed_uids.add(uid)
