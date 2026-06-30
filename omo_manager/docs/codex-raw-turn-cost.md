@@ -1,0 +1,34 @@
+# codex raw-turn cost helper
+
+- helper
+  - `omo_codex_cost.py`
+  - reads Codex raw session JSONL files
+  - consumes only `token_count` events
+- aggregation
+  - each `token_count` event carries `total_token_usage`
+  - snapshots are sorted by timestamp
+  - per logical session key, only positive cumulative deltas are added
+  - duplicate snapshots add zero
+  - all-counter decreases start a new counter segment
+  - mixed decreases add only positive field deltas
+  - `last_token_usage` is ignored because repeated or resumed JSONL files can double-count it
+- tokens
+  - `input_tokens`
+  - `cached_input_tokens`
+  - `output_tokens`
+  - `reasoning_output_tokens`
+- pricing
+  - cached input tokens are treated as a subset of input tokens
+  - cost uses `(input_tokens - cached_input_tokens) * input_rate + cached_input_tokens * cached_rate + output_tokens * output_rate`
+  - default table is bundled in the script
+  - override with `--prices prices.json`
+  - export the bundled editable shape with `--dump-default-prices`
+  - default source is `https://openai.com/api/pricing/`, accessed 2026-06-30
+  - local direct Python fetch hit HTTP 403, so the current default came from browser-tool access
+  - page text used: `GPT-5.5`, `Input $5.00`, `Cached input $0.50`, `Output $30.00`
+  - unit is USD per 1M tokens
+  - reasoning output is counted separately but is not priced separately because it is already part of output tokens
+- example
+  - `uv run python omo_codex_cost.py ~/.codex/sessions/2026/06/29/*.jsonl`
+  - `uv run python omo_codex_cost.py --json session.jsonl`
+  - `uv run python omo_codex_cost.py --dump-default-prices > prices.json`
