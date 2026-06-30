@@ -18,6 +18,8 @@ except ModuleNotFoundError:
     from omo_codex_status import current_block, status, tail
 
 SHELL_COMMANDS = {"bash", "dash", "fish", "sh", "zsh"}
+EXIT_INTERRUPT_DELAY_S = 0.75
+EXIT_INTERRUPT_ATTEMPTS = 4
 DEFAULT_ROOT = Path(os.environ.get("OMO_WORK_LOGS_ROOT", Path.home() / "work_logs"))
 DEFAULT_RESUME_TOOL = "pcodx"
 RESUME_TOOLS = {"codex", "pcodx"}
@@ -348,10 +350,11 @@ def query_status_session_id(target: str, n_lines: int, wait_s: float) -> tuple[s
 
 
 def send_exit_keys(target: str) -> None:
-    _ = tmux(["send-keys", "-t", target, "C-c"], check=True)
-    time.sleep(0.5)
-    if current_command(target) not in SHELL_COMMANDS:
+    for _attempt in range(EXIT_INTERRUPT_ATTEMPTS):
         _ = tmux(["send-keys", "-t", target, "C-c"], check=True)
+        time.sleep(EXIT_INTERRUPT_DELAY_S)
+        if current_command(target) in SHELL_COMMANDS:
+            return
 
 
 def close_tmux_target(target: str) -> None:

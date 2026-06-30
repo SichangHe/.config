@@ -276,11 +276,37 @@ class CodexStopTests(unittest.TestCase):
             [call.args[0] for call in tmux.call_args_list],
         )
 
-    def test_send_exit_keys_sends_second_ctrl_c_when_codex_still_running(self) -> None:
-        with patch("omo_manager.omo_codex_stop.tmux") as tmux, patch("omo_manager.omo_codex_stop.current_command", return_value="bunx"):
+    def test_send_exit_keys_retries_ctrl_c_until_shell(self) -> None:
+        with (
+            patch("omo_manager.omo_codex_stop.tmux") as tmux,
+            patch("omo_manager.omo_codex_stop.current_command", side_effect=["bunx", "bunx", "zsh"]),
+            patch("omo_manager.omo_codex_stop.time.sleep") as sleep,
+        ):
             send_exit_keys("cfg:1.0")
         self.assertEqual(
-            [["send-keys", "-t", "cfg:1.0", "C-c"], ["send-keys", "-t", "cfg:1.0", "C-c"]],
+            [
+                ["send-keys", "-t", "cfg:1.0", "C-c"],
+                ["send-keys", "-t", "cfg:1.0", "C-c"],
+                ["send-keys", "-t", "cfg:1.0", "C-c"],
+            ],
+            [call.args[0] for call in tmux.call_args_list],
+        )
+        self.assertEqual(3, sleep.call_count)
+
+    def test_send_exit_keys_stops_after_bounded_ctrl_c_attempts(self) -> None:
+        with (
+            patch("omo_manager.omo_codex_stop.tmux") as tmux,
+            patch("omo_manager.omo_codex_stop.current_command", return_value="bunx"),
+            patch("omo_manager.omo_codex_stop.time.sleep"),
+        ):
+            send_exit_keys("cfg:1.0")
+        self.assertEqual(
+            [
+                ["send-keys", "-t", "cfg:1.0", "C-c"],
+                ["send-keys", "-t", "cfg:1.0", "C-c"],
+                ["send-keys", "-t", "cfg:1.0", "C-c"],
+                ["send-keys", "-t", "cfg:1.0", "C-c"],
+            ],
             [call.args[0] for call in tmux.call_args_list],
         )
 
