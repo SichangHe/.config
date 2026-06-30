@@ -406,7 +406,14 @@ def directive_target(path: Path, name: str) -> str:
     return ""
 
 
+def is_submanager_task_file(path: Path) -> bool:
+    name = path.name
+    return "submanager" in name or name.startswith("vl_supervisor_current_")
+
+
 def marker_manager_target(args: Args, marker: Marker) -> str:
+    if marker.origin == "agent" and is_submanager_task_file(marker.file):
+        return args.manager_target
     target = directive_target(args.root / marker.file, "managerat")
     return target or args.manager_target
 

@@ -164,6 +164,41 @@ class PendingMarkerTests(unittest.TestCase):
                 self.assertTrue(scan_once(args, {}, [path]))
             self.assertEqual("main:0.0", calls[0][calls[0].index("--manager-target") + 1])
 
+    def test_agent_report_in_vl_submanager_file_routes_to_upper_manager(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "vl_submanager_current_8653.md"
+            _ = (root / "TODO.md").write_text("current:\nvl_submanager_current_8653.md vl:15\n", encoding="utf-8")
+            _ = task.write_text(
+                "runat: vl:15 codex\nmanagerat: vl:15\n(pending)\n(from agent vl:15 /tmp/report.md)\n",
+                encoding="utf-8",
+            )
+            markers = find_markers(root, [task])
+            self.assertEqual(1, len(markers))
+            self.assertEqual("agent", markers[0].origin)
+            args = Args(
+                root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=False, manager_target="main:0.0"
+            )
+            self.assertEqual("main:0.0", watcher.marker_manager_target(args, markers[0]))
+
+    def test_human_pending_in_vl_submanager_file_still_routes_to_submanager(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "vl_submanager_current_8653.md"
+            _ = (root / "TODO.md").write_text("current:\nvl_submanager_current_8653.md vl:15\n", encoding="utf-8")
+            _ = task.write_text("runat: vl:15 codex\nmanagerat: vl:15\n(pending)\nplease handle this locally\n", encoding="utf-8")
+            markers = find_markers(root, [task])
+            self.assertEqual(1, len(markers))
+            self.assertEqual("human", markers[0].origin)
+            args = Args(
+                root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=False, manager_target="main:0.0"
+            )
+            self.assertEqual("vl:15", watcher.marker_manager_target(args, markers[0]))
+
     def test_agent_source_marker_is_agent_origin(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
