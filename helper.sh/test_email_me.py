@@ -71,6 +71,7 @@ class EmailMeTests(unittest.TestCase):
             msg = email_me.build_message("me@example.com", "hi", "body\n", tmux_target="wl:7")
         plain = msg.get_body(preferencelist=("plain",))
         self.assertIsNotNone(plain)
+        self.assertEqual("[a] wl:7 hi", msg["Subject"])
         self.assertEqual("body\n\ntmux: wl:7\n", plain.get_content())
         run.assert_not_called()
 
@@ -83,6 +84,7 @@ class EmailMeTests(unittest.TestCase):
             msg = email_me.build_message("me@example.com", "hi", "body\n")
         plain = msg.get_body(preferencelist=("plain",))
         self.assertIsNotNone(plain)
+        self.assertEqual("[a] wl:4 hi", msg["Subject"])
         self.assertEqual("body\n\ntmux: wl:4\n", plain.get_content())
         run.assert_not_called()
 
@@ -187,15 +189,17 @@ class EmailMeTests(unittest.TestCase):
         self.assertEqual("body\n", plain.get_content())
 
     def test_can_omit_footer_inside_tmux_when_explicitly_requested(self) -> None:
+        result = subprocess.CompletedProcess(["tmux"], 0, stdout="wl:2\n", stderr="")
         with (
             patch.dict(os.environ, {"TMUX": "/tmp/tmux-session"}, clear=False),
-            patch.object(email_me.subprocess, "run") as run,
+            patch.object(email_me.subprocess, "run", return_value=result) as run,
         ):
             msg = email_me.build_message("me@example.com", "hi", "body\n", add_pwd_footer=False)
         plain = msg.get_body(preferencelist=("plain",))
         self.assertIsNotNone(plain)
+        self.assertEqual("[a] wl:2 hi", msg["Subject"])
         self.assertEqual("body\n", plain.get_content())
-        run.assert_not_called()
+        run.assert_called_once()
 
     def test_preserves_manager_subject_prefix(self) -> None:
         for subject in ("[a] hi", "[omo_manager] hi"):
@@ -225,6 +229,8 @@ class EmailMeTests(unittest.TestCase):
         with patch.object(email_me, "prepare_subject", None):
             self.assertEqual("[a] hi", email_me.normalize_subject("[omo_manager] hi"))
             self.assertEqual("Re: [a] hi", email_me.normalize_subject("Re: [omo_manager] hi"))
+            self.assertEqual("[a] wl:7 hi", email_me.normalize_subject("[omo_manager] hi", "wl:7"))
+            self.assertEqual("Re: [a] wl:7 hi", email_me.normalize_subject("Re: [omo_manager] hi", "wl:7"))
             with self.assertRaisesRegex(ValueError, "placeholder SUBJECT"):
                 email_me.normalize_subject("[a] SUBJECT")
             with self.assertRaisesRegex(ValueError, r"\[omo\] is deprecated"):
@@ -429,10 +435,66 @@ class EmailMeTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=False), patch.object(email_me, "prepare_subject_and_headers", return_value=prepared) as prepare, patch.object(email_me, "reply_headers_for_subject") as headers:
                 result = email_me.main(["--manager-human", "--subject-file", str(subject), "--message-file", str(body)])
             self.assertEqual(0, result)
-            prepare.assert_called_once_with("manager_status_email_unification_followup_7872.md status answer")
+            prepare.assert_called_once_with("manager_status_email_unification_followup_7872.md status answer", "")
             headers.assert_not_called()
             self.assertEqual("Re: [a] manager_status_email_unification_followup_7872.md status answer\nbody\n", send_log.read_text(encoding="utf-8"))
             self.assertIn("Re: [a] manager_status_email_unification_followup_7872.md status answer", (state_dir / "human-email-sent.tsv").read_text(encoding="utf-8"))
+
+    def test_manager_human_mode_passes_tmux_target_to_subject_preparation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp) / "state"
+            send_log = Path(tmp) / "sent.txt"
+            body = Path(tmp) / "body.md"
+            body.write_text("body\n", encoding="utf-8")
+            subject = Path(tmp) / "subject.txt"
+            subject.write_text("Topic\n", encoding="utf-8")
+            env = {
+                "EMAIL_ME_FAKE_SEND_LOG": str(send_log),
+                "OMO_MANAGER_STATE_DIR": str(state_dir),
+                "OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "0",
+            }
+            prepared = ("[a] wl:7 Topic", {})
+            with patch.dict(os.environ, env, clear=False), patch.object(email_me, "prepare_subject_and_headers", return_value=prepared) as prepare:
+                result = email_me.main(["--manager-human", "--tmux-target", "wl:7", "--subject-file", str(subject), "--message-file", str(body)])
+            self.assertEqual(0, result)
+            prepare.assert_called_once_with("Topic", "wl:7")
+            self.assertEqual("[a] wl:7 Topic\nbody\n", send_log.read_text(encoding="utf-8"))
+
+    def test_shared_sender_mode_passes_tmux_target_to_subject_preparation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            send_log = Path(tmp) / "sent.txt"
+            body = Path(tmp) / "body.md"
+            body.write_text("body\n", encoding="utf-8")
+            subject = Path(tmp) / "subject.txt"
+            subject.write_text("Topic\n", encoding="utf-8")
+            env = {
+                "EMAIL_ME_FAKE_SEND_LOG": str(send_log),
+                "OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "0",
+            }
+            prepared = ("[a] wl:7 Topic", {})
+            with patch.dict(os.environ, env, clear=False), patch.object(email_me, "prepare_subject_and_headers", return_value=prepared) as prepare:
+                result = email_me.main(["--tmux-target", "wl:7", "--subject-file", str(subject), "--message-file", str(body)])
+            self.assertEqual(0, result)
+            prepare.assert_called_once_with("Topic", "wl:7")
+            self.assertEqual("[a] wl:7 Topic\nbody\n", send_log.read_text(encoding="utf-8"))
+
+    def test_no_pwd_footer_still_passes_tmux_target_to_subject_preparation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            send_log = Path(tmp) / "sent.txt"
+            body = Path(tmp) / "body.md"
+            body.write_text("body\n", encoding="utf-8")
+            subject = Path(tmp) / "subject.txt"
+            subject.write_text("Topic\n", encoding="utf-8")
+            env = {
+                "EMAIL_ME_FAKE_SEND_LOG": str(send_log),
+                "OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "0",
+            }
+            prepared = ("[a] wl:7 Topic", {})
+            with patch.dict(os.environ, env, clear=False), patch.object(email_me, "prepare_subject_and_headers", return_value=prepared) as prepare:
+                result = email_me.main(["--no-pwd-footer", "--tmux-target", "wl:7", "--subject-file", str(subject), "--message-file", str(body)])
+            self.assertEqual(0, result)
+            prepare.assert_called_once_with("Topic", "wl:7")
+            self.assertEqual("[a] wl:7 Topic\nbody\n", send_log.read_text(encoding="utf-8"))
 
     def test_manager_human_dedupe_survives_thread_subject_transition(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

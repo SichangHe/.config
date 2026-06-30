@@ -24,6 +24,7 @@ SUBJECT_TAG_RE = re.compile(r"^\s*\[(?:a|omo_manager|omo)\]\s*", re.IGNORECASE)
 MANAGER_TAG_RE = re.compile(r"^\s*(?:\[a\]|\[omo_manager\])\s*", re.IGNORECASE)
 RESERVED_AGENT_TAG_RE = re.compile(r"^(?:re:\s*)*\[omo\]\s*", re.IGNORECASE)
 RE_PREFIX_RE = re.compile(r"^\s*re:\s*", re.IGNORECASE)
+TMUX_TARGET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?$")
 PLACEHOLDER_RE = re.compile(r"subject\W*", re.IGNORECASE)
 DEFAULT_THREAD_LOOKUP_WINDOW_S = 3 * 24 * 60 * 60
 DEFAULT_THREAD_LOOKUP_DEADLINE_S = 5.0
@@ -139,6 +140,14 @@ def manager_reply_subject(base: str) -> str:
 
 def manager_subject(base: str) -> str:
     return f"{SHORT_MANAGER_TAG} {base.strip()}"
+
+
+def manager_subject_w_target(base: str, tmux_target: str = "", reply: bool = False) -> str:
+    clean_base = base.strip()
+    clean_target = tmux_target.strip()
+    if clean_target and TMUX_TARGET_RE.fullmatch(clean_target) and not clean_base.startswith(f"{clean_target} "):
+        clean_base = f"{clean_target} {clean_base}"
+    return manager_reply_subject(clean_base) if reply else manager_subject(clean_base)
 
 
 def parsed_header_date(raw_date: str) -> datetime | None:
@@ -261,35 +270,35 @@ def reply_headers_from_recent_header(header: RecentHeader | None) -> dict[str, s
     return {"In-Reply-To": message_id, "References": " ".join(references)}
 
 
-def prepare_subject_and_headers(subject: str) -> tuple[str, dict[str, str]]:
+def prepare_subject_and_headers(subject: str, tmux_target: str = "") -> tuple[str, dict[str, str]]:
     validate_subject(subject)
     stripped = subject.strip()
     base = subject_base(stripped)
     header = recent_thread_header(normalized_subject_key(stripped))
     if starts_w_re(stripped) and has_manager_tag(stripped):
-        return canonical_manager_subject(stripped), reply_headers_from_recent_header(header)
+        return manager_subject_w_target(subject_base(stripped), tmux_target, True), reply_headers_from_recent_header(header)
     if starts_w_re(stripped) or header is not None:
-        return manager_reply_subject(base), reply_headers_from_recent_header(header)
-    return manager_subject(base), {}
+        return manager_subject_w_target(base, tmux_target, True), reply_headers_from_recent_header(header)
+    return manager_subject_w_target(base, tmux_target), {}
 
 
-def fallback_subject(subject: str) -> str:
+def fallback_subject(subject: str, tmux_target: str = "") -> str:
     if has_manager_tag(subject):
-        return canonical_manager_subject(subject)
+        return manager_subject_w_target(subject_base(subject), tmux_target, starts_w_re(subject))
     if starts_w_re(subject):
-        return manager_reply_subject(subject_base(subject))
-    return manager_subject(subject_base(subject))
+        return manager_subject_w_target(subject_base(subject), tmux_target, True)
+    return manager_subject_w_target(subject_base(subject), tmux_target)
 
 
-def prepare_subject(subject: str) -> str:
+def prepare_subject(subject: str, tmux_target: str = "") -> str:
     validate_subject(subject)
     stripped = subject.strip()
     if starts_w_re(stripped) and has_manager_tag(stripped):
-        return canonical_manager_subject(stripped)
+        return manager_subject_w_target(subject_base(stripped), tmux_target, True)
     base = subject_base(stripped)
     if starts_w_re(stripped) or has_recent_thread(normalized_subject_key(stripped)):
-        return manager_reply_subject(base)
-    return manager_subject(base)
+        return manager_subject_w_target(base, tmux_target, True)
+    return manager_subject_w_target(base, tmux_target)
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:

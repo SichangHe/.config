@@ -137,10 +137,10 @@ def parse_args(argv: list[str]) -> CliArgs:
     return CliArgs(title=title, content=content, dry_run=parsed.dry_run, add_pwd_footer=not parsed.no_pwd_footer, manager_human=parsed.manager_human, tmux_target=parsed.tmux_target)
 
 
-def normalize_subject(title: str) -> str:
+def normalize_subject(title: str, tmux_target: str = "") -> str:
     if prepare_subject is not None:
         try:
-            return prepare_subject(title)
+            return prepare_subject(title, tmux_target)
         except SubjectInputError as exc:
             raise ValueError(str(exc)) from exc
     stripped = title.strip()
@@ -162,6 +162,9 @@ def normalize_subject(title: str) -> str:
             break
     if re.sub(r"\W+", "", base).casefold() == "subject":
         raise ValueError("subject must be a real subject, not the placeholder SUBJECT")
+    clean_target = tmux_target.strip()
+    if clean_target and valid_tmux_target(clean_target) and not base.startswith(f"{clean_target} "):
+        base = f"{clean_target} {base}"
     if lowered.startswith("re:"):
         return f"Re: {MANAGER_PREFIX} {base}"
     if reply:
@@ -400,8 +403,9 @@ def markdown_to_html(text: str) -> str:
 
 
 def build_message(sender_email: str, title: str, content: str, add_pwd_footer: bool = True, prepared_subject: str | None = None, reply_headers: dict[str, str] | None = None, tmux_target: str | None = None) -> EmailMessage:
+    source_target = footer_tmux_target(tmux_target)
     msg = EmailMessage()
-    msg.add_header("Subject", prepared_subject or normalize_subject(title))
+    msg.add_header("Subject", prepared_subject or normalize_subject(title, source_target or ""))
     msg.add_header("From", sender_email)
     msg.add_header("To", sender_email)
     if reply_headers is not None:
@@ -410,7 +414,7 @@ def build_message(sender_email: str, title: str, content: str, add_pwd_footer: b
     elif reply_headers_for_subject is not None:
         for name, value in reply_headers_for_subject(title).items():
             msg.add_header(name, value)
-    body = append_pwd_footer(content, tmux_target=tmux_target) if add_pwd_footer else content
+    body = append_pwd_footer(content, tmux_target=source_target) if add_pwd_footer else content
     msg.set_content(markdown_links_to_plain(body))
     msg.add_alternative(markdown_to_html(body), subtype="html")
     return msg
@@ -535,15 +539,16 @@ def fake_send_log_path() -> Path | None:
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
     try:
+        subject_tmux_target = footer_tmux_target(args.tmux_target)
         if prepare_subject_and_headers is not None:
-            subject, reply_headers = prepare_subject_and_headers(args.title)
+            subject, reply_headers = prepare_subject_and_headers(args.title, subject_tmux_target or "")
         else:
-            subject, reply_headers = normalize_subject(args.title), {}
+            subject, reply_headers = normalize_subject(args.title, subject_tmux_target or ""), {}
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
     if args.dry_run:
-        body = append_pwd_footer(args.content, tmux_target=args.tmux_target) if args.add_pwd_footer else args.content
+        body = append_pwd_footer(args.content, tmux_target=subject_tmux_target) if args.add_pwd_footer else args.content
         print(f"dry-run: email not sent; subject={subject}; body-bytes={len(body.encode())}")
         return 0
     dedupe_subject = normalized_subject_key(args.title) if args.manager_human and normalized_subject_key is not None else subject
@@ -582,7 +587,7 @@ def main(argv: list[str]) -> int:
             add_pwd_footer=args.add_pwd_footer,
             prepared_subject=subject,
             reply_headers=reply_headers,
-            tmux_target=args.tmux_target,
+            tmux_target=subject_tmux_target,
         )
     except ValueError as exc:
         print(str(exc), file=sys.stderr)

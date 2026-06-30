@@ -18,7 +18,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from omo_manager.email_idle_watcher import append_pending, current_manager_file, dated_manager_file, existing_source_pending_line, normalize_human_subject
-from omo_manager.omo_email_subject import RecentHeader, fetch_recent_header, normalized_subject_key, prepare_subject, prepare_subject_and_headers, reply_headers_for_subject
+from omo_manager.omo_email_subject import RecentHeader, fetch_recent_header, manager_subject_w_target, normalized_subject_key, prepare_subject, prepare_subject_and_headers, reply_headers_for_subject
 from omo_manager.omo_pending_watch import Args, find_markers
 
 
@@ -123,6 +123,46 @@ class PendingMarkerTests(unittest.TestCase):
             text = out.getvalue()
             self.assertIn("pending: file=task.md", text)
             self.assertIn("blocked-context: latest prior status is blocked; reason=waiting on API approval", text)
+
+    def test_pending_push_uses_managerat_target_for_task_file(self) -> None:
+        from omo_manager.omo_pending_watch import scan_once
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "worker.md"
+            path.write_text("runat: wl:2 codex\nmanagerat: wl:1\n\n(pending)\nplease route\n", encoding="utf-8")
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(command)
+                return subprocess.CompletedProcess(command, 0)
+
+            args = Args(
+                root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=False, manager_target="main:0.0"
+            )
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+                self.assertTrue(scan_once(args, {}, [path]))
+            self.assertEqual("wl:1", calls[0][calls[0].index("--manager-target") + 1])
+
+    def test_pending_push_keeps_default_target_without_managerat(self) -> None:
+        from omo_manager.omo_pending_watch import scan_once
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "worker.md"
+            path.write_text("runat: wl:2 codex\n\n(pending)\nplease route\n", encoding="utf-8")
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(command)
+                return subprocess.CompletedProcess(command, 0)
+
+            args = Args(
+                root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=False, manager_target="main:0.0"
+            )
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+                self.assertTrue(scan_once(args, {}, [path]))
+            self.assertEqual("main:0.0", calls[0][calls[0].index("--manager-target") + 1])
 
     def test_agent_source_marker_is_agent_origin(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -239,6 +279,55 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual(submanager, route.manager_file)
             self.assertEqual("wl:1", route.manager_target)
             self.assertEqual("wl:1", route.routed_target)
+
+    def test_email_watcher_dispatches_targeted_reply_to_task_file(self) -> None:
+        from email.message import EmailMessage
+        from omo_manager import email_idle_watcher as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            submanager = root / "submanager.md"
+            worker = root / "worker.md"
+            _ = submanager.write_text("runat: wl:1 pcodx\n", encoding="utf-8")
+            _ = worker.write_text("runat: wl:2 codex\nmanagerat: wl:1\n", encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nsubmanager.md wl 1\nworker.md wl 2\n", encoding="utf-8")
+            msg = EmailMessage()
+            msg["From"] = "Human <me@example.com>"
+            msg["Subject"] = "Re: [a] wl:2 manager update"
+            msg.set_content("body\n")
+            pushes: list[tuple[Path | None, str, int]] = []
+
+            class Client:
+                stores: list[tuple[object, ...]] = []
+
+                def uid(self, command: str, *args: object) -> tuple[str, list[object]]:
+                    if command == "search":
+                        if "SINCE" in args:
+                            return "OK", [b""]
+                        return "OK", [b"22"]
+                    if command == "fetch":
+                        return "OK", [(b"RFC822", msg.as_bytes())]
+                    if command == "store":
+                        self.stores.append(args)
+                        return "OK", [b""]
+                    raise AssertionError(command)
+
+            old_push = watcher.push_email_ref
+
+            def push(push_args: watcher.Args, line_no: int) -> bool:
+                pushes.append((push_args.manager_file, push_args.manager_target, line_no))
+                return True
+
+            watcher.push_email_ref = push
+            try:
+                args = watcher.Args(root, "", root / "manager_mail", state, root / "work_manager_today.md", True, "me@example.com", 0, Path("/bin/false"), manager_target="main:0.0")
+                watcher.handle_unseen(Client(), args)
+            finally:
+                watcher.push_email_ref = old_push
+            self.assertEqual([(submanager, "wl:1", 3)], pushes)
+            self.assertIn("(manager routed: wl:1)", submanager.read_text(encoding="utf-8"))
+            self.assertFalse((root / "work_manager_today.md").exists())
 
     def test_managerat_can_route_addressed_worker_mail_to_main_manager(self) -> None:
         from omo_manager import email_idle_watcher as watcher
@@ -536,6 +625,29 @@ class PendingMarkerTests(unittest.TestCase):
                 ("Re: [a] Topic", {"In-Reply-To": "<prior@example.test>", "References": "<root@example.test> <prior@example.test>"}),
                 prepare_subject_and_headers("Topic"),
             )
+            self.assertEqual(["topic"], calls)
+        finally:
+            subject.recent_thread_header = old_recent_thread_header
+
+    def test_email_subject_prepends_tmux_target_after_manager_tag(self) -> None:
+        self.assertEqual("[a] wl:7 Topic", manager_subject_w_target("Topic", "wl:7"))
+        self.assertEqual("Re: [a] wl:7 Topic", manager_subject_w_target("Topic", "wl:7", True))
+        self.assertEqual("Re: [a] wl:7 Topic", prepare_subject("Re: [a] Topic", "wl:7"))
+        self.assertEqual("[a] Topic", prepare_subject("Topic", "not-a-target"))
+
+    def test_email_subject_target_keeps_recent_thread_lookup_key_untargeted(self) -> None:
+        from omo_manager import omo_email_subject as subject
+
+        calls: list[str] = []
+        old_recent_thread_header = subject.recent_thread_header
+
+        def recent_thread_header(key: str) -> None:
+            calls.append(key)
+            return None
+
+        subject.recent_thread_header = recent_thread_header
+        try:
+            self.assertEqual(("[a] wl:7 Topic", {}), prepare_subject_and_headers("Topic", "wl:7"))
             self.assertEqual(["topic"], calls)
         finally:
             subject.recent_thread_header = old_recent_thread_header

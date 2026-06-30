@@ -48,6 +48,7 @@ ROUTED_PREFIXES = ("(manager handled:", "(manager routed:")
 EMAIL_SOURCE_PREFIXES = ("(from email ", "[source: email ")
 AGENT_SOURCE_PREFIXES = ("[omo-message-source: origin=agent ", "(from agent ")
 STATUS_DETAIL_RE = re.compile(r"^\((pending|running|done|blocked)(?::\s*([^)]*))?\)(?:\s+\(([^)]*)\))?$")
+TMUX_TARGET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?$")
 AGENT_PROBLEM_SOURCE_LINE = "[omo-message-source: origin=agent source=agent action=no-human-ack agent=omo_pending_watch via=omo_pending_watch.py status=agent-problem]"
 MANAGER_COMPACTION_SOURCE_LINE = "[omo-message-source: origin=agent source=agent action=no-human-ack agent=omo_pending_watch via=omo_pending_watch.py status=manager-compaction-reread]"
 MANAGER_COMPACTION_REMINDER = "Manager compaction observed. Reread MANAGER.md now unless the compaction summary already included it, then continue from the current manager task state."
@@ -393,6 +394,23 @@ def delegate_source(block_lines: list[str]) -> str:
     return ""
 
 
+def directive_target(path: Path, name: str) -> str:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+    for line in lines:
+        parts = line.strip().split()
+        if len(parts) >= 2 and parts[0] == f"{name}:" and TMUX_TARGET_RE.fullmatch(parts[1]):
+            return parts[1]
+    return ""
+
+
+def marker_manager_target(args: Args, marker: Marker) -> str:
+    target = directive_target(args.root / marker.file, "managerat")
+    return target or args.manager_target
+
+
 def blocked_reason_before_pending(lines: list[str], pending_line: int) -> str:
     for line in reversed(lines[: pending_line - 1]):
         match = STATUS_DETAIL_RE.match(line.strip())
@@ -465,10 +483,11 @@ def push_ref(args: Args, marker: Marker) -> int:
     if not args.manager_url and not args.manager_target:
         print("omo_pending_watch: --manager-target or --manager-url is required outside --dry-run", file=sys.stderr)
         return 1
+    manager_target = marker_manager_target(args, marker)
     command = ["omo_push_to_manager.py", text, "--root", str(args.root), "--submit"]
     command.extend(["--pending-file", str(marker.file), "--pending-line", str(marker.line), "--pending-digest", marker.digest])
-    if args.manager_target:
-        command.extend(["--manager-target", args.manager_target])
+    if manager_target:
+        command.extend(["--manager-target", manager_target])
     if args.manager_url:
         command.extend(["--manager-url", args.manager_url])
     return subprocess.run(command, check=False).returncode
