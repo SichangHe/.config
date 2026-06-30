@@ -224,6 +224,38 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual("wl:1.1", route.manager_target)
             self.assertEqual("wl:1.1", route.routed_target)
 
+    def test_managerat_routes_addressed_worker_mail_to_submanager(self) -> None:
+        from omo_manager import email_idle_watcher as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            submanager = root / "submanager.md"
+            worker = root / "worker.md"
+            _ = submanager.write_text("runat: wl:1 pcodx\n", encoding="utf-8")
+            _ = worker.write_text("runat: wl:2 codex\nmanagerat: wl:1\n", encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nsubmanager.md wl 1\nworker.md wl 2\n", encoding="utf-8")
+            args = watcher.Args(root, "", root / "manager_mail", root / "state", root / "work_manager_today.md", True, "self@example.test", 900, Path("/bin/false"), manager_target="main:0.0")
+            route = watcher.email_route(args, "Re: [a] wl:2 manager update")
+            self.assertEqual(submanager, route.manager_file)
+            self.assertEqual("wl:1", route.manager_target)
+            self.assertEqual("wl:1", route.routed_target)
+
+    def test_managerat_can_route_addressed_worker_mail_to_main_manager(self) -> None:
+        from omo_manager import email_idle_watcher as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            worker = root / "worker.md"
+            other = root / "other.md"
+            _ = worker.write_text("runat: wl:2 codex\nmanagerat: main:0.0\n", encoding="utf-8")
+            _ = other.write_text("runat: main:0.0 codex\n", encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nworker.md wl 2\nother.md main 0\n", encoding="utf-8")
+            args = watcher.Args(root, "", root / "manager_mail", root / "state", root / "work_manager_today.md", True, "self@example.test", 900, Path("/bin/false"), manager_target="main:0.0")
+            route = watcher.email_route(args, "Re: [a] wl:2 manager update")
+            self.assertEqual(root / "work_manager_today.md", route.manager_file)
+            self.assertEqual("main:0.0", route.manager_target)
+            self.assertEqual("main:0.0", route.routed_target)
+
     def test_submanager_email_retry_push_uses_task_runat_target(self) -> None:
         from omo_manager import email_idle_watcher as watcher
 

@@ -297,6 +297,14 @@ def runat_targets(text: str) -> list[str]:
     return targets
 
 
+def managerat_target(text: str) -> str:
+    for line in text.splitlines():
+        parts = line.strip().split()
+        if len(parts) >= 2 and parts[0] == "managerat:" and TMUX_TARGET_RE.fullmatch(parts[1]):
+            return parts[1]
+    return ""
+
+
 def top_runat_target(path: Path) -> str:
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
@@ -370,6 +378,18 @@ def email_route(args: Args, subject: str) -> EmailRoute:
     if manager_file is None:
         logging.warning("sub-manager email target did not map to a task file; using default manager: target=%s", tmux_target)
         return EmailRoute(current_manager_file(args), args.manager_target)
+    try:
+        owner_target = managerat_target(manager_file.read_text(encoding="utf-8"))
+    except OSError:
+        owner_target = ""
+    if owner_target and owner_target not in target_aliases(tmux_target):
+        if owner_target in target_aliases(args.manager_target):
+            return EmailRoute(current_manager_file(args), args.manager_target, args.manager_target)
+        owner_file = task_file_for_target(args.root, owner_target)
+        if owner_file is None:
+            logging.warning("managerat target did not map to a task file; using default manager: task=%s managerat=%s", manager_file, owner_target)
+            return EmailRoute(current_manager_file(args), args.manager_target)
+        return EmailRoute(owner_file, owner_target, owner_target)
     return EmailRoute(manager_file, tmux_target, tmux_target)
 
 
