@@ -1340,26 +1340,79 @@ class PendingMarkerTests(unittest.TestCase):
         from email.message import EmailMessage
         from omo_manager import email_idle_watcher as watcher
 
+        for uid, footer in (("51", "tmux: wl:7\n"), ("52", "tmux: pb-watch-loop:0\n")):
+            with self.subTest(footer=footer):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp) / "logs"
+                    root.mkdir()
+                    state = Path(tmp) / "state"
+                    msg = EmailMessage()
+                    msg["From"] = "Manager <me@example.com>"
+                    msg["Subject"] = "Re: [a] Update on manager_email_watcher_read_after_forward_6901.md"
+                    msg.set_content(f"Acknowledged. I will route this to a separate worker now.\n\n{footer}")
+
+                    class Client:
+                        fetches = 0
+                        stores: list[tuple[object, ...]] = []
+
+                        def uid(self, command: str, *args: object) -> tuple[str, list[object]]:
+                            if command == "search":
+                                if "SINCE" in args:
+                                    return "OK", [b""]
+                                return "OK", [uid.encode()]
+                            if command == "fetch":
+                                self.fetches += 1
+                                return "OK", [(b"RFC822", msg.as_bytes())]
+                            if command == "store":
+                                self.stores.append(args)
+                                return "OK", [b""]
+                            raise AssertionError(command)
+
+                    client = Client()
+                    manager_file = root / "work_manager_today.md"
+                    args = watcher.Args(
+                        root,
+                        "",
+                        root / "manager_mail",
+                        state,
+                        manager_file,
+                        True,
+                        "me@example.com",
+                        0,
+                        Path("/bin/false"),
+                        manager_target="wl:1.0",
+                    )
+                    watcher.handle_unseen(client, args)
+                    watcher.handle_unseen(client, args)
+                    self.assertEqual(1, client.fetches)
+                    self.assertFalse(manager_file.exists())
+                    self.assertFalse((root / "manager_mail" / f"{uid}.txt").exists())
+                    self.assertEqual(client.stores, [])
+                    self.assertFalse((state / "email-processed-uids.tsv").exists())
+                    self.assertIn(f"{uid}\t", (state / "email-ignored-uids.tsv").read_text(encoding="utf-8"))
+
+    def test_email_watcher_does_not_ignore_quoted_tmux_footer(self) -> None:
+        from email.message import EmailMessage
+        from omo_manager import email_idle_watcher as watcher
+
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "logs"
             root.mkdir()
             state = Path(tmp) / "state"
             msg = EmailMessage()
-            msg["From"] = "Manager <me@example.com>"
+            msg["From"] = "Human <me@example.com>"
             msg["Subject"] = "Re: [a] Update on manager_email_watcher_read_after_forward_6901.md"
-            msg.set_content("Acknowledged. I will route this to a separate worker now.\n\ntmux: wl:2\n")
+            msg.set_content("Human reply quoting prior footer.\n\n> tmux: wl:7\n")
 
             class Client:
-                fetches = 0
                 stores: list[tuple[object, ...]] = []
 
                 def uid(self, command: str, *args: object) -> tuple[str, list[object]]:
                     if command == "search":
                         if "SINCE" in args:
                             return "OK", [b""]
-                        return "OK", [b"51"]
+                        return "OK", [b"53"]
                     if command == "fetch":
-                        self.fetches += 1
                         return "OK", [(b"RFC822", msg.as_bytes())]
                     if command == "store":
                         self.stores.append(args)
@@ -1368,6 +1421,7 @@ class PendingMarkerTests(unittest.TestCase):
 
             client = Client()
             manager_file = root / "work_manager_today.md"
+            calls = []
             args = watcher.Args(
                 root,
                 "",
@@ -1380,22 +1434,30 @@ class PendingMarkerTests(unittest.TestCase):
                 Path("/bin/false"),
                 manager_target="wl:1.0",
             )
-            watcher.handle_unseen(client, args)
-            watcher.handle_unseen(client, args)
-            self.assertEqual(1, client.fetches)
-            self.assertFalse(manager_file.exists())
-            self.assertFalse((root / "manager_mail" / "51.txt").exists())
-            self.assertEqual(client.stores, [])
-            self.assertFalse((state / "email-processed-uids.tsv").exists())
-            self.assertIn("51\t", (state / "email-ignored-uids.tsv").read_text(encoding="utf-8"))
+            old_push = watcher.push_email_ref
+
+            def push(_args: watcher.Args, line_no: int) -> bool:
+                calls.append(line_no)
+                return False
+
+            watcher.push_email_ref = push
+            try:
+                watcher.handle_unseen(client, args)
+            finally:
+                watcher.push_email_ref = old_push
+            self.assertIn("(pending)\n(from email manager_mail/53.txt)\n", manager_file.read_text(encoding="utf-8"))
+            self.assertEqual(calls, [2])
+            self.assertFalse((state / "email-ignored-uids.tsv").exists())
 
     def test_email_watcher_agent_footer_recognition_is_parseable(self) -> None:
         from omo_manager import email_idle_watcher as watcher
 
         self.assertTrue(watcher.has_agent_footer("body\n\ntmux: wl:2\n"))
+        self.assertTrue(watcher.has_agent_footer("body\n\ntmux: wl:7\n"))
+        self.assertTrue(watcher.has_agent_footer("body\n\ntmux: pb-watch-loop:0\n"))
         self.assertTrue(watcher.has_agent_footer("body\r\n\r\ntmux: wl:2\r\n"))
         self.assertTrue(watcher.has_agent_footer("body\n\nTMUX: wl:2\n"))
-        self.assertFalse(watcher.has_agent_footer("body\n\ntmux: notes\n"))
+        self.assertTrue(watcher.has_agent_footer("body\n\ntmux: notes\n"))
         self.assertFalse(watcher.has_agent_footer("body\n\n> tmux: wl:2\n"))
 
     def test_email_watcher_recovers_processed_uid_without_current_source(self) -> None:
