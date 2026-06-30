@@ -27,6 +27,8 @@ COMMAND_BY_TOOL = {
 DEFAULT_TOOL = "codex"
 SHELL_COMMANDS = {"bash", "dash", "fish", "sh", "zsh"}
 BULLET_MARKERS = ("- ", "* ")
+PENDING_TASK_ITEMS_MARKER = "(above are pending task items)"
+TASK_METADATA_PREFIXES = ("managerat:",)
 
 
 @dataclass(frozen=True)
@@ -45,6 +47,7 @@ class Args:
     reasoning_effort: str
     codex_flags: tuple[str, ...]
     tool_explicit: bool = False
+    manager_target: str = ""
 
 
 class ParsedArgs(argparse.Namespace):
@@ -61,6 +64,7 @@ class ParsedArgs(argparse.Namespace):
     session_id: str = ""
     reasoning_effort: str = ""
     codex_flag: list[str] | None = None
+    manager_target: str = ""
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -79,6 +83,7 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--session-id", default="", help="Codex session id to resume in a new worker window.")
     _ = parser.add_argument("--reasoning-effort", choices=("low", "medium", "high", "xhigh"), default="", help="Start Codex with `model_reasoning_effort` for this worker.")
     _ = parser.add_argument("--codex-flag", action="append", help="Extra raw Codex argv token. Repeat for flags and values; use `--codex-flag=--flag` when the token starts with `--`.")
+    _ = parser.add_argument("--manager-target", default="", help="Optional manager owner target to write as `managerat:` task metadata.")
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     if not parsed.task_file.endswith(".md"):
         parser.error("--task-file must end with `.md`.")
@@ -89,7 +94,7 @@ def parse_args(argv: list[str]) -> Args:
     if parsed.tool not in COMMAND_BY_TOOL:
         parser.error("only --tool codex or --tool pcodx is supported.")
     tool_explicit = any(arg == "--tool" or arg.startswith("--tool=") for arg in argv)
-    return Args(parsed.root.resolve(), parsed.task_file, parsed.tmux_session, parsed.tmux_window, parsed.tool, parsed.workdir, parsed.window_name, parsed.prompt_file, parsed.no_link, parsed.dry_run, parsed.session_id, parsed.reasoning_effort, tuple(parsed.codex_flag or ()), tool_explicit)
+    return Args(parsed.root.resolve(), parsed.task_file, parsed.tmux_session, parsed.tmux_window, parsed.tool, parsed.workdir, parsed.window_name, parsed.prompt_file, parsed.no_link, parsed.dry_run, parsed.session_id, parsed.reasoning_effort, tuple(parsed.codex_flag or ()), tool_explicit, parsed.manager_target)
 
 
 def task_path(root: Path, task_file: str) -> Path:
@@ -156,15 +161,27 @@ def is_runat_header(line: str) -> bool:
     return line.strip().split(maxsplit=1)[0:1] == ["runat:"]
 
 
+def ends_with_pending_task_items_marker(text: str) -> bool:
+    return next((line.strip() for line in reversed(text.splitlines()) if line.strip()), "") == PENDING_TASK_ITEMS_MARKER
+
+
+def first_goal_line_index(lines: list[str]) -> int:
+    idx = 1
+    while idx < len(lines) and any(lines[idx].strip().startswith(prefix) for prefix in TASK_METADATA_PREFIXES):
+        idx += 1
+    return idx
+
+
 def runat_goal_tree_error(text: str) -> str:
     lines = text.splitlines()
     if not lines or not is_runat_header(lines[0]):
         return ""
-    if len(lines) < 2 or not lines[1].strip():
+    goal_idx = first_goal_line_index(lines)
+    if len(lines) <= goal_idx or not lines[goal_idx].strip():
         return "task files starting with `runat:` must put a high-level goal directly after the `runat:` line."
-    if is_bullet(lines[1]):
+    if is_bullet(lines[goal_idx]):
         return "task files starting with `runat:` must use a plain high-level goal line before bullet subgoals."
-    if len(lines) < 3 or not is_bullet(lines[2]):
+    if len(lines) <= goal_idx + 1 or not is_bullet(lines[goal_idx + 1]):
         return "task files starting with `runat:` must put at least one concrete bullet subgoal directly under the high-level goal."
     return ""
 
@@ -311,9 +328,15 @@ def ensure_task_file(args: Args, tmux_target: str) -> Path:
     existed = path.exists()
     existing = path.read_text(encoding="utf-8") if existed else ""
     text = upsert_header(existing, header(tmux_target, effective_tool(args))) if args.workdir is not None or not existed else existing
+    if not existed and args.manager_target:
+        sep = "" if not text or text.endswith("\n") else "\n"
+        text += sep + f"managerat: {args.manager_target}\n"
     if args.prompt_file is not None:
         sep = "" if not text or text.endswith("\n") else "\n"
         text += sep + args.prompt_file.read_text(encoding="utf-8").rstrip() + "\n"
+    if not existed and not ends_with_pending_task_items_marker(text):
+        sep = "" if not text or text.endswith("\n") else "\n"
+        text += sep + PENDING_TASK_ITEMS_MARKER + "\n"
     if not existed:
         validate_runat_goal_tree(text)
     if text != existing or not existed:
@@ -386,7 +409,8 @@ def validate_inputs(args: Args) -> None:
     tmux_target = "target" if args.workdir is not None else target(args)
     first = header(tmux_target, effective_tool(args))
     prompt = args.prompt_file.read_text(encoding="utf-8").rstrip() if args.prompt_file is not None else ""
-    text = f"{first}\n{prompt}\n" if first else f"{prompt}\n"
+    manager_line = f"managerat: {args.manager_target}\n" if args.manager_target else ""
+    text = f"{first}\n{manager_line}{prompt}\n{PENDING_TASK_ITEMS_MARKER}\n" if first else f"{manager_line}{prompt}\n{PENDING_TASK_ITEMS_MARKER}\n"
     validate_runat_goal_tree(text)
 
 

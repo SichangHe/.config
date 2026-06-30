@@ -966,6 +966,58 @@ class AgentStatusTests(unittest.TestCase):
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             self.assertEqual("", out.getvalue())
 
+    def test_problems_only_reports_pending_task_item_after_done(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("previous:\ndone.md cfg 1\n", encoding="utf-8")
+            _ = (root / "done.md").write_text("runat: cfg:1 codex\nship feature\n- preserve human request\n(above are pending task items)\n(done)\n", encoding="utf-8")
+            out = StringIO()
+            with redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            text = out.getvalue()
+            self.assertIn("agent-problems: human_request=1", text)
+            self.assertIn("human_request: task=done.md evidence=pending_item=preserve human request", text)
+
+    def test_pending_task_item_after_done_does_not_make_default_status_active(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("previous:\ndone.md cfg 1\n", encoding="utf-8")
+            _ = (root / "done.md").write_text("runat: cfg:1 codex\nship feature\n- preserve human request\n(above are pending task items)\n(done)\n", encoding="utf-8")
+            out = StringIO()
+            with redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--exit-code-if-active"]))
+            self.assertIn("human_request=0", out.getvalue())
+            self.assertNotIn("human_request: task=done.md", out.getvalue())
+
+    def test_problems_only_ignores_pending_task_items_while_running_pending_or_blocked(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nrunning.md cfg 1\npending.md cfg 2\nhuman pending:\nblocked.md cfg 3\n", encoding="utf-8")
+            for name, status in (("running.md", "running"), ("pending.md", "pending"), ("blocked.md", "blocked")):
+                _ = (root / name).write_text(f"runat: cfg:1 codex\nwork\n- keep item\n(above are pending task items)\n({status})\n", encoding="utf-8")
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("running", ["working"])), redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertEqual("", out.getvalue())
+
+    def test_problems_only_ignores_pending_task_items_without_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nnew.md cfg 1\n", encoding="utf-8")
+            _ = (root / "new.md").write_text("runat: cfg:1 codex\nwork\n- keep item\n(above are pending task items)\n", encoding="utf-8")
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("running", ["working"])), redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertEqual("", out.getvalue())
+
     def test_exit_code_if_active_returns_distinct_code(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

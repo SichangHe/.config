@@ -51,6 +51,7 @@ LOCAL_ENV = load_local_env()
 DEFAULT_ROOT = Path(LOCAL_ENV.get("OMO_WORK_LOGS_ROOT", str(Path.home() / "work_logs")))
 DEFAULT_REGISTRY = Path(LOCAL_ENV.get("OMO_MANAGER_SESSION_REGISTRY", str(default_state_dir() / "sessions.json")))
 DEFAULT_MANAGER_TARGET = ""
+PENDING_TASK_ITEMS_MARKER = "(above are pending task items)"
 TASK_RE = re.compile(r"`?([A-Za-z0-9_./-]+\.md)`?")
 TARGET_RE = re.compile(r"\b([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\b")
 TARGET_SESSION_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*):")
@@ -289,6 +290,39 @@ def scan_task_state(path: Path) -> TaskState | None:
         if status and target and port is not None:
             break
     return TaskState(status, target, port, persistent_role, reason) if status else None
+
+
+def pending_task_items(path: Path) -> list[str]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    items: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped == PENDING_TASK_ITEMS_MARKER:
+            return items
+        if stripped.startswith(("- ", "* ")):
+            items.append(stripped[2:].strip())
+    return []
+
+
+def pending_task_item_rows(root: Path) -> list[StatusRow]:
+    rows: list[StatusRow] = []
+    seen: set[str] = set()
+    for task in parse_task_lines(root / "TODO.md"):
+        if task.task_file == "TODO.md" or task.task_file in seen:
+            continue
+        seen.add(task.task_file)
+        state_path = resolve_task_path(root, task.task_file)
+        if state_path is None:
+            continue
+        state = scan_task_state(state_path)
+        if state is None or state.status in {"running", "pending", "blocked"}:
+            continue
+        for item in pending_task_items(state_path):
+            rows.append(StatusRow(task.task_file, "human_request", f"pending_item={item}", task_status=state.status if state is not None else "missing"))
+    return rows
 
 
 def load_task_state(root: Path) -> tuple[dict[str, TaskLine], set[str], set[str]]:
@@ -607,18 +641,18 @@ def registry_prune(args: Args, completed: set[str]) -> int:
 
 
 def format_summary(rows: list[StatusRow], completed_stale_count: int, pruned_count: int) -> str:
-    counts: dict[str, int] = {"not_codex": 0, "running": 0, "blocked_idle": 0, "error": 0, "ready": 0, "stuck_input": 0}
+    counts: dict[str, int] = {"not_codex": 0, "running": 0, "blocked_idle": 0, "error": 0, "ready": 0, "stuck_input": 0, "human_request": 0}
     for row in rows:
         counts[row.status] = counts.get(row.status, 0) + 1
     lines = [
-        f"agent-status: not_codex={counts['not_codex']} running={counts['running']} blocked_idle={counts['blocked_idle']} error={counts['error']} ready={counts['ready']} stuck_input={counts['stuck_input']} done-registry-stale={completed_stale_count} pruned={pruned_count}",
+        f"agent-status: not_codex={counts['not_codex']} running={counts['running']} blocked_idle={counts['blocked_idle']} error={counts['error']} ready={counts['ready']} stuck_input={counts['stuck_input']} human_request={counts['human_request']} done-registry-stale={completed_stale_count} pruned={pruned_count}",
     ]
     for row in sorted(rows, key=lambda item: (item.status != "error", item.status, item.task_file)):
         lines.append(f"{row.status}: task={row.task_file} evidence={row.evidence}")
     return "\n".join(lines)
 
 
-PROBLEM_STATUSES = {"blocked_idle", "error", "manager_compaction", "not_codex", "ready", "stuck_input"}
+PROBLEM_STATUSES = {"blocked_idle", "error", "human_request", "manager_compaction", "not_codex", "ready", "stuck_input"}
 
 
 def is_parked_persistent_blocked_row(row: StatusRow) -> bool:
@@ -629,10 +663,10 @@ def format_problem_summary(rows: list[StatusRow], completed_stale: set[str]) -> 
     problem_rows = [row for row in rows if row.status in PROBLEM_STATUSES and not is_parked_persistent_blocked_row(row)]
     if not problem_rows and not completed_stale:
         return ""
-    counts: dict[str, int] = {"not_codex": 0, "blocked_idle": 0, "error": 0, "manager_compaction": 0, "ready": 0, "stuck_input": 0}
+    counts: dict[str, int] = {"not_codex": 0, "blocked_idle": 0, "error": 0, "human_request": 0, "manager_compaction": 0, "ready": 0, "stuck_input": 0}
     for row in problem_rows:
         counts[row.status] = counts.get(row.status, 0) + 1
-    parts = [f"{status}={counts[status]}" for status in ("not_codex", "blocked_idle", "error", "manager_compaction", "ready", "stuck_input") if counts[status]]
+    parts = [f"{status}={counts[status]}" for status in ("not_codex", "blocked_idle", "error", "human_request", "manager_compaction", "ready", "stuck_input") if counts[status]]
     if completed_stale:
         parts.append(f"done-registry-stale={len(completed_stale)}")
     lines = [f"agent-problems: {' '.join(parts)}"]
@@ -670,6 +704,7 @@ def main(argv: list[str]) -> int:
         rows.extend(untracked_rows)
         inspected_targets.update(row.target for row in untracked_rows if row.target)
         if args.problems_only:
+            rows.extend(pending_task_item_rows(args.root))
             blocked_idle_rows = blocked_idle_vl_task_rows(args.root)
             rows.extend(blocked_idle_rows)
             inspected_targets.update(row.target for row in blocked_idle_rows if row.target)

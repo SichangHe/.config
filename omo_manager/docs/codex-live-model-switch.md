@@ -13,6 +13,7 @@ Why this is documented instead of automated:
 - `/model` is rejected while a task is in progress unless the interactive picker path is used
 - picker contents and key order vary with the live Codex UI
 - supported model ids vary by account and environment, so a script would need brittle UI scraping and retries
+- No helper script is shipped for this path; prefer a fresh launch over live mutation unless continuity matters
 
 Fallback path:
 - if `/model` is rejected, stop after the interrupt and keep the current supported model running

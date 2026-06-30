@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from omo_manager.omo_task import Args, DEFAULT_TOOL, DEFAULT_WORKER_INSTRUCTIONS, PCODX_WRAPPER, VL_WORKER_INSTRUCTIONS, codex_cmd, effective_tool, ensure_task_file, is_vl_agent, link_todo, main, new_window, parse_args, runat_goal_tree_error, start_codex, validate_inputs, validate_runat_goal_tree, wait_command_started
+from omo_manager.omo_task import Args, DEFAULT_TOOL, DEFAULT_WORKER_INSTRUCTIONS, PCODX_WRAPPER, PENDING_TASK_ITEMS_MARKER, VL_WORKER_INSTRUCTIONS, codex_cmd, effective_tool, ensure_task_file, is_vl_agent, link_todo, main, new_window, parse_args, runat_goal_tree_error, start_codex, validate_inputs, validate_runat_goal_tree, wait_command_started
 
 
 VALID_GOAL_TREE = "implement manager check\n- reject missing task goal tree\n"
@@ -21,6 +21,7 @@ class OmoTaskTests(unittest.TestCase):
             path = ensure_task_file(args, 'cfg:2')
             link_todo(args, 'cfg:2')
             self.assertEqual('runat: cfg:2 codex', path.read_text(encoding='utf-8').splitlines()[0])
+            self.assertIn(PENDING_TASK_ITEMS_MARKER, path.read_text(encoding="utf-8"))
             self.assertIn('x.md cfg:2', (root / 'TODO.md').read_text(encoding='utf-8'))
 
     def test_absolute_task_file_writes_relative_todo_link(self) -> None:
@@ -69,10 +70,54 @@ class OmoTaskTests(unittest.TestCase):
 
     def test_validates_runat_goal_tree(self) -> None:
         validate_runat_goal_tree("runat: cfg:2 pcodx\nimplement manager check\n- reject missing task goal tree\n")
+        validate_runat_goal_tree("runat: cfg:2 pcodx\nmanagerat: wl:1\nimplement manager check\n- reject missing task goal tree\n")
         self.assertIn("high-level goal", runat_goal_tree_error("runat: cfg:2 pcodx\n\n- reject missing task goal tree\n"))
         self.assertIn("plain high-level", runat_goal_tree_error("runat: cfg:2 pcodx\n- implement manager check\n- reject missing task goal tree\n"))
         self.assertIn("concrete bullet subgoal", runat_goal_tree_error("runat: cfg:2 pcodx\nimplement manager check\n"))
         self.assertIn("concrete bullet subgoal", runat_goal_tree_error("runat:\tcfg:2 pcodx\nimplement manager check\n"))
+
+    def test_new_task_file_writes_managerat_before_pending_items_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.md"
+            prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
+            args = Args(root, "x.md", "cfg", "2", "codex", None, "", prompt, False, False, "", "", (), False, "wl:1")
+            path = ensure_task_file(args, "cfg:2")
+            self.assertEqual(
+                "runat: cfg:2 codex\nmanagerat: wl:1\nimplement manager check\n- reject missing task goal tree\n(above are pending task items)\n",
+                path.read_text(encoding="utf-8"),
+            )
+
+    def test_prompt_mentioning_pending_marker_still_gets_marker_line(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.md"
+            prompt.write_text(
+                "review task boilerplate\n"
+                "- check whether any created task is missing `(above are pending task items)`\n",
+                encoding="utf-8",
+            )
+            args = Args(root, "x.md", "cfg", "2", "codex", None, "", prompt, False, False, "", "", ())
+            path = ensure_task_file(args, "cfg:2")
+            lines = path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(1, lines.count(PENDING_TASK_ITEMS_MARKER))
+            self.assertEqual(PENDING_TASK_ITEMS_MARKER, lines[-1])
+
+    def test_prompt_containing_exact_pending_marker_still_gets_final_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.md"
+            prompt.write_text(
+                "review task boilerplate\n"
+                "- check marker handling\n"
+                "(above are pending task items)\n"
+                "- keep this human item pending\n",
+                encoding="utf-8",
+            )
+            args = Args(root, "x.md", "cfg", "2", "codex", None, "", prompt, False, False, "", "", ())
+            path = ensure_task_file(args, "cfg:2")
+            lines = path.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(PENDING_TASK_ITEMS_MARKER, lines[-1])
 
     def test_new_task_file_requires_goal_tree(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
