@@ -3186,14 +3186,35 @@ class PendingMarkerTests(unittest.TestCase):
         self.assertIn("manager agent problem: running task marker needs attention.", text)
         self.assertIn("Reminder: delegate work; do not do worker work in the manager.", text)
 
-    def test_agent_problem_check_suppresses_manager_self_stuck_prompt(self) -> None:
+    def test_agent_problem_check_emails_human_for_manager_self_stuck_prompt(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
-        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, True, agent_problem_repeat_s=300.0)
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, True, manager_target="wl:1.0", agent_problem_repeat_s=300.0)
         result = watcher.CommandOutput(
             "agent-problems",
             3,
-            "agent-problems: stuck_input=1\nstuck_input: task=manager evidence=target=wl:1.0 role=manager unstick=sent_enter\nunstuck: target=wl:1.0 task=manager action=sent_enter\n",
+            "agent-problems: stuck_input=1\nstuck_input: task=manager evidence=target=wl:1.0 role=manager output=Create a plan? shift + tab use Plan mode esc dismiss unstick=not_safe:plan_prompt\n",
+            "",
+        )
+        out = StringIO()
+        with redirect_stdout(out):
+            self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
+        text = out.getvalue()
+        self.assertIn("manager human email due: manager watcher detected manager error", text)
+        self.assertIn("manager-problems: stuck_input=1", text)
+        self.assertIn("stuck_input: task=manager evidence=target=wl:1.0 role=manager", text)
+        self.assertIn("not_safe:plan_prompt", text)
+        self.assertIn("suppressed manager self-problem report", text)
+        self.assertNotIn("manager agent problem: running task marker needs attention.", text)
+
+    def test_agent_problem_check_suppresses_resolved_manager_self_stuck_prompt(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, True, manager_target="wl:1.0", agent_problem_repeat_s=300.0)
+        result = watcher.CommandOutput(
+            "agent-problems",
+            3,
+            "agent-problems: stuck_input=1\nstuck_input: task=manager evidence=target=wl:1.0 role=manager output=Create a plan? shift + tab use Plan mode esc dismiss unstick=not_stuck\n",
             "",
         )
         out = StringIO()
@@ -3201,8 +3222,28 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertFalse(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
         text = out.getvalue()
         self.assertIn("suppressed manager self-problem report", text)
+        self.assertNotIn("manager human email due: manager watcher detected manager error", text)
         self.assertNotIn("manager agent problem: running task marker needs attention.", text)
-        self.assertNotIn("unstuck:", text)
+
+    def test_agent_problem_check_emails_human_for_manager_target_alias_stuck_prompt(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, True, manager_target="wl:1.0", agent_problem_repeat_s=300.0)
+        result = watcher.CommandOutput(
+            "agent-problems",
+            3,
+            "agent-problems: stuck_input=1\nstuck_input: task=active.md evidence=target=wl:1 output=Create a plan? shift + tab use Plan mode esc dismiss unstick=not_safe:plan_prompt\n",
+            "",
+        )
+        out = StringIO()
+        with redirect_stdout(out):
+            self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
+        text = out.getvalue()
+        self.assertIn("manager human email due: manager watcher detected manager error", text)
+        self.assertIn("manager-problems: stuck_input=1", text)
+        self.assertIn("stuck_input: task=active.md evidence=target=wl:1", text)
+        self.assertIn("suppressed manager self-problem report", text)
+        self.assertNotIn("manager agent problem: running task marker needs attention.", text)
 
     def test_agent_problem_check_reminds_manager_after_compaction_once(self) -> None:
         from omo_manager import omo_pending_watch as watcher

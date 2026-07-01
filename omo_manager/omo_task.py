@@ -122,6 +122,11 @@ def is_vl_task_file(task_file: str) -> bool:
     return Path(task_file).name.startswith("vl_")
 
 
+def is_vl_submanager_task_file(task_file: str) -> bool:
+    name = Path(task_file).name
+    return name.startswith("vl_submanager_current_") or name.startswith("vl_supervisor_current_")
+
+
 def is_vl_agent(task_file: str, tmux_target: str) -> bool:
     return is_vl_task_file(task_file) or target_session(tmux_target) == "vl"
 
@@ -146,10 +151,67 @@ def upsert_header(existing: str, first: str) -> str:
     if not existing:
         return f"{first}\n"
     lines = existing.splitlines(keepends=True)
-    if lines and lines[0].startswith("runat: "):
+    if lines and is_runat_header(lines[0]):
         lines[0] = f"{first}\n"
         return "".join(lines)
     return f"{first}\n\n{existing}"
+
+
+def first_non_metadata_index(lines: list[str]) -> int:
+    idx = 1 if lines and is_runat_header(lines[0]) else 0
+    while idx < len(lines):
+        stripped = lines[idx].strip()
+        if not stripped:
+            idx += 1
+            continue
+        if any(stripped.startswith(prefix) for prefix in TASK_METADATA_PREFIXES):
+            idx += 1
+            continue
+        break
+    return idx
+
+
+def managerat_line_error(line: str) -> str:
+    stripped = line.strip()
+    parts = stripped.split()
+    if stripped.startswith("managerat:") and (len(parts) != 2 or parts[0] != "managerat:"):
+        return "task `managerat:` metadata must be exactly `managerat: TARGET`."
+    return ""
+
+
+def managerat_value(text: str) -> str:
+    lines = text.splitlines()
+    for line in lines[:first_non_metadata_index(lines)]:
+        parts = line.strip().split()
+        if len(parts) == 2 and parts[0] == "managerat:":
+            return parts[1]
+    return ""
+
+
+def validate_managerat_metadata(text: str) -> None:
+    lines = text.splitlines()
+    for line in lines[:first_non_metadata_index(lines)]:
+        if error := managerat_line_error(line):
+            raise ValueError(error)
+
+
+def upsert_managerat(text: str, manager_target: str) -> str:
+    if not manager_target:
+        return text
+    lines = text.splitlines(keepends=True)
+    metadata_end = first_non_metadata_index([line.rstrip("\n") for line in lines])
+    for idx, line in enumerate(lines[:metadata_end]):
+        if error := managerat_line_error(line):
+            raise ValueError(error)
+        parts = line.strip().split()
+        if len(parts) == 2 and parts[0] == "managerat:":
+            lines[idx] = f"managerat: {manager_target}\n"
+            return "".join(lines)
+    insert_at = 1 if lines and is_runat_header(lines[0]) else 0
+    if insert_at > 0 and not lines[insert_at - 1].endswith("\n"):
+        lines[insert_at - 1] = f"{lines[insert_at - 1]}\n"
+    lines.insert(insert_at, f"managerat: {manager_target}\n")
+    return "".join(lines)
 
 
 def is_bullet(line: str) -> bool:
@@ -159,6 +221,21 @@ def is_bullet(line: str) -> bool:
 
 def is_runat_header(line: str) -> bool:
     return line.strip().split(maxsplit=1)[0:1] == ["runat:"]
+
+
+def runat_header_error(text: str) -> str:
+    lines = text.splitlines()
+    if not lines or not is_runat_header(lines[0]):
+        return ""
+    parts = lines[0].strip().split()
+    if len(parts) != 3 or parts[2] not in COMMAND_BY_TOOL:
+        return "task files starting with `runat:` must keep the first line exactly `runat: TARGET TOOL`."
+    return ""
+
+
+def validate_runat_header(text: str) -> None:
+    if error := runat_header_error(text):
+        raise ValueError(error)
 
 
 def has_pending_task_items_marker(text: str) -> bool:
@@ -341,16 +418,19 @@ def ensure_task_file(args: Args, tmux_target: str) -> Path:
     existed = path.exists()
     existing = path.read_text(encoding="utf-8") if existed else ""
     text = upsert_header(existing, header(tmux_target, effective_tool(args))) if args.workdir is not None or not existed else existing
-    if not existed and args.manager_target:
-        sep = "" if not text or text.endswith("\n") else "\n"
-        text += sep + f"managerat: {args.manager_target}\n"
+    if args.manager_target:
+        text = upsert_managerat(text, args.manager_target)
     if args.prompt_file is not None:
         sep = "" if not text or text.endswith("\n") else "\n"
         text += sep + args.prompt_file.read_text(encoding="utf-8").rstrip() + "\n"
     if not existed:
         text = insert_pending_task_items_marker(text)
+        validate_runat_header(text)
+        validate_managerat_metadata(text)
         validate_runat_goal_tree(text)
     if text != existing or not existed:
+        validate_runat_header(text)
+        validate_managerat_metadata(text)
         _ = path.write_text(text, encoding="utf-8")
     return path
 
@@ -414,7 +494,20 @@ def validate_inputs(args: Args) -> None:
         raise ValueError("MCP server config requires --tool pcodx.")
     if args.workdir is not None and args.prompt_file is None and is_vl_agent(args.task_file, target(args)):
         raise ValueError("VL launches require --prompt-file so the end-goal and reviewer guidance has task-local context.")
+    if args.workdir is not None and is_vl_agent(args.task_file, target(args)) and not is_vl_submanager_task_file(args.task_file) and not args.manager_target:
+        raise ValueError("VL worker launches require --manager-target for the owning submanager.")
     path = task_path(args.root, args.task_file)
+    if path.exists() and args.manager_target:
+        existing_text = path.read_text(encoding="utf-8")
+        validate_runat_header(existing_text)
+        validate_managerat_metadata(existing_text)
+        existing_manager_target = managerat_value(existing_text)
+        if existing_manager_target and existing_manager_target != args.manager_target:
+            raise ValueError(f"existing managerat {existing_manager_target} does not match --manager-target {args.manager_target}.")
+    elif path.exists():
+        existing_text = path.read_text(encoding="utf-8")
+        validate_runat_header(existing_text)
+        validate_managerat_metadata(existing_text)
     if path.exists():
         return
     tmux_target = "target" if args.workdir is not None else target(args)
@@ -423,6 +516,8 @@ def validate_inputs(args: Args) -> None:
     manager_line = f"managerat: {args.manager_target}\n" if args.manager_target else ""
     text = f"{first}\n{manager_line}{prompt}\n" if first else f"{manager_line}{prompt}\n"
     text = insert_pending_task_items_marker(text)
+    validate_runat_header(text)
+    validate_managerat_metadata(text)
     validate_runat_goal_tree(text)
 
 

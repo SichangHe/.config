@@ -602,9 +602,13 @@ def manager_self_problem_line(line: str, manager_target: str = "") -> bool:
 
 
 def manager_human_email_problem_line(line: str, manager_target: str = "") -> bool:
-    if re.match(r"^(?:error|not_codex): task=manager evidence=.*\brole=manager\b", line):
+    if line.startswith("stuck_input: "):
+        unstick_match = re.search(r"\bunstick=(\S+)$", line)
+        if unstick_match is not None and not unstick_match.group(1).startswith("not_safe:"):
+            return False
+    if re.match(r"^(?:error|not_codex|stuck_input): task=manager evidence=.*\brole=manager\b", line):
         return True
-    if re.match(r"^(?:error|not_codex): task=\S+ evidence=target=", line) is None:
+    if re.match(r"^(?:error|not_codex|stuck_input): task=\S+ evidence=target=", line) is None:
         return False
     return same_tmux_target(evidence_target(line), manager_target)
 
@@ -697,12 +701,12 @@ def manager_human_email_problem_output(output: str, manager_target: str = "") ->
     kept = [line for line in lines[1:] if manager_human_email_problem_line(line, manager_target)]
     if not kept:
         return ""
-    counts = {"not_codex": 0, "error": 0}
+    counts = {"not_codex": 0, "error": 0, "stuck_input": 0}
     for line in kept:
-        problem_match = re.match(r"^(not_codex|error): ", line)
+        problem_match = re.match(r"^(not_codex|error|stuck_input): ", line)
         if problem_match is not None:
             counts[problem_match.group(1)] += 1
-    parts = [f"{status}={counts[status]}" for status in ("not_codex", "error") if counts[status]]
+    parts = [f"{status}={counts[status]}" for status in ("not_codex", "error", "stuck_input") if counts[status]]
     return "\n".join([f"manager-problems: {' '.join(parts)}", *kept])
 
 

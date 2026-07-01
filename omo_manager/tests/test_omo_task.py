@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from omo_manager.omo_task import Args, DEFAULT_TOOL, DEFAULT_WORKER_INSTRUCTIONS, PCODX_WRAPPER, PENDING_TASK_ITEMS_MARKER, VL_WORKER_INSTRUCTIONS, codex_cmd, effective_tool, ensure_task_file, is_vl_agent, link_todo, main, new_window, parse_args, runat_goal_tree_error, start_codex, validate_inputs, validate_runat_goal_tree, wait_command_started
+from omo_manager.omo_task import Args, DEFAULT_TOOL, DEFAULT_WORKER_INSTRUCTIONS, PCODX_WRAPPER, PENDING_TASK_ITEMS_MARKER, VL_WORKER_INSTRUCTIONS, codex_cmd, effective_tool, ensure_task_file, is_vl_agent, link_todo, main, new_window, parse_args, runat_goal_tree_error, runat_header_error, start_codex, validate_inputs, validate_runat_goal_tree, wait_command_started
 
 
 VALID_GOAL_TREE = "implement manager check\n- reject missing task goal tree\n"
@@ -76,6 +76,128 @@ class OmoTaskTests(unittest.TestCase):
         self.assertIn("concrete bullet subgoal", runat_goal_tree_error("runat: cfg:2 pcodx\nimplement manager check\n"))
         self.assertIn("concrete bullet subgoal", runat_goal_tree_error("runat:\tcfg:2 pcodx\nimplement manager check\n"))
 
+
+    def test_rejects_collapsed_runat_header(self) -> None:
+        text = (
+            "runat: vl:13 codex managerat: vl:15 Guide the human step by step through\n"
+            "failing VL experiments. (above are pending task items)\n"
+        )
+        self.assertIn("exactly `runat: TARGET TOOL`", runat_header_error(text))
+
+    def test_existing_task_rejects_collapsed_header_before_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.md"
+            prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
+            path = root / "vl_worker.md"
+            original = (
+                "runat: vl:1 codex managerat: vl:15 collapsed goal\n"
+                "work\n"
+                "- route\n"
+                "(above are pending task items)\n"
+            )
+            path.write_text(original, encoding="utf-8")
+            args = Args(root, "vl_worker.md", "vl", "1", "codex", root, "", prompt, False, False, "", "", (), False, "vl:15")
+            with self.assertRaisesRegex(ValueError, "exactly `runat: TARGET TOOL`"):
+                validate_inputs(args)
+            self.assertEqual(original, path.read_text(encoding="utf-8"))
+
+    def test_existing_one_line_task_inserts_managerat_on_new_line(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "vl_worker.md"
+            path.write_text("runat: vl:1 codex", encoding="utf-8")
+            args = Args(root, "vl_worker.md", "vl", "1", "codex", None, "", None, False, False, "", "", (), False, "vl:15")
+            validate_inputs(args)
+            ensure_task_file(args, "vl:1")
+            self.assertEqual("runat: vl:1 codex\nmanagerat: vl:15\n", path.read_text(encoding="utf-8"))
+
+    def test_existing_task_rejects_malformed_managerat_before_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "vl_worker.md"
+            original = (
+                "runat: vl:1 codex\n"
+                "managerat: vl:15 Guide the human\n"
+                "work\n"
+                "- route\n"
+            )
+            path.write_text(original, encoding="utf-8")
+            args = Args(root, "vl_worker.md", "vl", "1", "codex", None, "", None, False, False, "", "", (), False, "vl:15")
+            with self.assertRaisesRegex(ValueError, "managerat: TARGET"):
+                validate_inputs(args)
+            self.assertEqual(original, path.read_text(encoding="utf-8"))
+
+    def test_new_task_rejects_prompt_started_malformed_managerat(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.md"
+            prompt.write_text(
+                "managerat: vl:15 extra\n"
+                "Goal\n"
+                "- item\n",
+                encoding="utf-8",
+            )
+            args = Args(root, "x.md", "cfg", "2", "codex", None, "", prompt, False, False, "", "", ())
+            with self.assertRaisesRegex(ValueError, "managerat: TARGET"):
+                validate_inputs(args)
+            self.assertFalse((root / "x.md").exists())
+
+    def test_new_task_rejects_prompt_started_malformed_managerat_with_manager_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.md"
+            prompt.write_text(
+                "managerat: vl:15 extra\n"
+                "Goal\n"
+                "- item\n",
+                encoding="utf-8",
+            )
+            args = Args(root, "x.md", "cfg", "2", "codex", None, "", prompt, False, False, "", "", (), False, "vl:15")
+            with self.assertRaisesRegex(ValueError, "managerat: TARGET"):
+                validate_inputs(args)
+            self.assertFalse((root / "x.md").exists())
+
+    def test_new_task_rejects_prompt_started_no_space_managerat(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.md"
+            prompt.write_text(
+                "managerat:vl:15 extra\n"
+                "Goal\n"
+                "- item\n",
+                encoding="utf-8",
+            )
+            args = Args(root, "x.md", "cfg", "2", "codex", None, "", prompt, False, False, "", "", ())
+            with self.assertRaisesRegex(ValueError, "managerat: TARGET"):
+                validate_inputs(args)
+            self.assertFalse((root / "x.md").exists())
+
+    def test_new_task_rejects_prompt_started_collapsed_header(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.md"
+            prompt.write_text(
+                "runat: cfg:2 codex managerat: wl:1 collapsed\n"
+                "Goal\n"
+                "- item\n",
+                encoding="utf-8",
+            )
+            args = Args(root, "x.md", "", "", "codex", None, "", prompt, False, False, "", "", ())
+            with self.assertRaisesRegex(ValueError, "exactly `runat: TARGET TOOL`"):
+                validate_inputs(args)
+            self.assertFalse((root / "x.md").exists())
+
+    def test_existing_tabbed_runat_header_is_replaced_not_duplicated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "x.md"
+            path.write_text("runat:\tcfg:2 codex\nold goal\n- item\n", encoding="utf-8")
+            args = Args(root, "x.md", "cfg", "2", "pcodx", root, "", None, False, False, "", "", ())
+            validate_inputs(args)
+            ensure_task_file(args, "cfg:2")
+            self.assertEqual("runat: cfg:2 pcodx\nold goal\n- item\n", path.read_text(encoding="utf-8"))
+
     def test_new_task_file_writes_managerat_before_pending_items_marker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -87,6 +209,47 @@ class OmoTaskTests(unittest.TestCase):
                 "runat: cfg:2 codex\nmanagerat: wl:1\nimplement manager check\n- reject missing task goal tree\n(above are pending task items)\n",
                 path.read_text(encoding="utf-8"),
             )
+
+
+    def test_vl_worker_launch_requires_manager_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.md"
+            prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
+            args = Args(root, "vl_worker.md", "vl", "1", "codex", root, "", prompt, False, False, "", "", ())
+            with self.assertRaisesRegex(ValueError, "require --manager-target"):
+                validate_inputs(args)
+
+    def test_vl_submanager_launch_does_not_require_manager_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.md"
+            prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
+            args = Args(root, "vl_submanager_current_8653.md", "vl", "15", "codex", root, "", prompt, False, False, "", "", ())
+            validate_inputs(args)
+
+    def test_existing_vl_worker_launch_writes_missing_managerat(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.md"
+            prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
+            path = root / "vl_worker.md"
+            path.write_text("runat: vl:1 codex\nwork\n- route\n(above are pending task items)\n", encoding="utf-8")
+            args = Args(root, "vl_worker.md", "vl", "1", "codex", root, "", prompt, False, False, "", "", (), False, "vl:15")
+            validate_inputs(args)
+            ensure_task_file(args, "vl:1")
+            self.assertIn("managerat: vl:15\n", path.read_text(encoding="utf-8"))
+
+    def test_existing_vl_worker_launch_rejects_conflicting_managerat(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.md"
+            prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
+            path = root / "vl_worker.md"
+            path.write_text("runat: vl:1 codex\nmanagerat: vl:14\nwork\n- route\n(above are pending task items)\n", encoding="utf-8")
+            args = Args(root, "vl_worker.md", "vl", "1", "codex", root, "", prompt, False, False, "", "", (), False, "vl:15")
+            with self.assertRaisesRegex(ValueError, "does not match --manager-target"):
+                validate_inputs(args)
 
     def test_prompt_mentioning_pending_marker_still_gets_marker_line(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
