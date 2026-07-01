@@ -315,6 +315,84 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual("wl:1", route.manager_target)
             self.assertEqual("wl:1", route.routed_target)
 
+    def test_managerat_routes_inactive_addressed_worker_mail_to_active_submanager(self) -> None:
+        from omo_manager import email_idle_watcher as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            submanager = root / "vl_submanager_current_8653.md"
+            worker = root / "vl_late_walk_8951.md"
+            _ = submanager.write_text("runat: vl:15 codex\nmanagerat: vl:15\n", encoding="utf-8")
+            _ = worker.write_text("runat: vl:17 codex\nmanagerat: vl:15\n", encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nvl_submanager_current_8653.md vl:15\n\nhuman pending:\nvl_late_walk_8951.md vl:17\n", encoding="utf-8")
+            args = watcher.Args(root, "", root / "manager_mail", root / "state", root / "work_manager_today.md", True, "self@example.test", 900, Path("/bin/false"), manager_target="wl:16.0")
+            route = watcher.email_route(args, "Re: [a] vl:17 Later VL failures were more subtle")
+            self.assertEqual(submanager, route.manager_file)
+            self.assertEqual("vl:15", route.manager_target)
+            self.assertEqual("vl:15", route.routed_target)
+
+    def test_managerat_ignores_inactive_worker_owner_only_in_previous_todo(self) -> None:
+        from omo_manager import email_idle_watcher as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            owner = root / "old_owner.md"
+            worker = root / "old_worker.md"
+            _ = owner.write_text("runat: wl:1 codex\n", encoding="utf-8")
+            _ = worker.write_text("runat: wl:2 codex\nmanagerat: wl:1\n", encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\n\nprevious:\nold_owner.md wl:1 (done)\n", encoding="utf-8")
+            args = watcher.Args(root, "", root / "manager_mail", root / "state", root / "work_manager_today.md", True, "self@example.test", 900, Path("/bin/false"), manager_target="main:0.0")
+            route = watcher.email_route(args, "Re: [a] wl:2 manager update")
+            self.assertEqual(root / "work_manager_today.md", route.manager_file)
+            self.assertEqual("main:0.0", route.manager_target)
+            self.assertEqual("", route.routed_target)
+
+    def test_managerat_ignores_previous_todo_worker_and_owner(self) -> None:
+        from omo_manager import email_idle_watcher as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            owner = root / "old_owner.md"
+            worker = root / "old_worker.md"
+            _ = owner.write_text("runat: wl:1 codex\n", encoding="utf-8")
+            _ = worker.write_text("runat: wl:2 codex\nmanagerat: wl:1\n", encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\n\nprevious:\nold_worker.md wl:2 (done)\nold_owner.md wl:1 (done)\n", encoding="utf-8")
+            args = watcher.Args(root, "", root / "manager_mail", root / "state", root / "work_manager_today.md", True, "self@example.test", 900, Path("/bin/false"), manager_target="main:0.0")
+            route = watcher.email_route(args, "Re: [a] wl:2 manager update")
+            self.assertEqual(root / "work_manager_today.md", route.manager_file)
+            self.assertEqual("main:0.0", route.manager_target)
+            self.assertEqual("", route.routed_target)
+
+    def test_managerat_ignores_inactive_worker_owned_by_current_watcher_without_current_owner(self) -> None:
+        from omo_manager import email_idle_watcher as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            worker = root / "old_worker.md"
+            _ = worker.write_text("runat: vl:17 codex\nmanagerat: vl:15\n", encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\n", encoding="utf-8")
+            args = watcher.Args(root, "", root / "manager_mail", root / "state", root / "work_manager_today.md", True, "self@example.test", 900, Path("/bin/false"), manager_target="vl:15")
+            route = watcher.email_route(args, "Re: [a] vl:17 Later VL failures were more subtle")
+            self.assertEqual(root / "work_manager_today.md", route.manager_file)
+            self.assertEqual("vl:15", route.manager_target)
+            self.assertEqual("", route.routed_target)
+
+    def test_managerat_ignores_owned_non_todo_stale_file(self) -> None:
+        from omo_manager import email_idle_watcher as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            submanager = root / "vl_submanager_current_8653.md"
+            stale = root / "stale_worker.md"
+            _ = submanager.write_text("runat: vl:15 codex\nmanagerat: vl:15\n", encoding="utf-8")
+            _ = stale.write_text("runat: vl:17 codex\nmanagerat: vl:15\n", encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nvl_submanager_current_8653.md vl:15\n", encoding="utf-8")
+            args = watcher.Args(root, "", root / "manager_mail", root / "state", root / "work_manager_today.md", True, "self@example.test", 900, Path("/bin/false"), manager_target="wl:16.0")
+            route = watcher.email_route(args, "Re: [a] vl:17 Later VL failures were more subtle")
+            self.assertEqual(root / "work_manager_today.md", route.manager_file)
+            self.assertEqual("wl:16.0", route.manager_target)
+            self.assertEqual("", route.routed_target)
+
     def test_email_watcher_dispatches_targeted_reply_to_task_file(self) -> None:
         from email.message import EmailMessage
         from omo_manager import email_idle_watcher as watcher

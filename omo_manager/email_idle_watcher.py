@@ -357,6 +357,36 @@ def todo_task_candidates(root: Path) -> list[Path]:
     return candidates
 
 
+def current_todo_task_candidates(root: Path) -> list[Path]:
+    todo = root / "TODO.md"
+    if not todo.exists():
+        return []
+    resolved_root = root.resolve()
+    try:
+        lines = todo.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+    in_current = False
+    for line in lines:
+        stripped = line.strip().casefold()
+        if stripped == "current:":
+            in_current = True
+            continue
+        if stripped.endswith(":") and stripped != "current:":
+            in_current = False
+        if not in_current:
+            continue
+        for match in re.findall(r"`?([A-Za-z0-9_./-]+\.md)`?", line):
+            path = (root / match).resolve(strict=False)
+            if path in seen or path == todo.resolve(strict=False) or (path != resolved_root and resolved_root not in path.parents):
+                continue
+            seen.add(path)
+            candidates.append(path)
+    return candidates
+
+
 def markdown_task_files(root: Path) -> list[Path]:
     paths: list[Path] = []
     for path in root.rglob("*.md"):
@@ -371,9 +401,30 @@ def markdown_task_files(root: Path) -> list[Path]:
 
 
 def task_file_for_target(root: Path, tmux_target: str) -> Path | None:
+    return task_file_for_target_in_candidates(root, tmux_target, todo_task_candidates(root))
+
+
+def current_task_file_for_target(root: Path, tmux_target: str) -> Path | None:
+    return task_file_for_target_in_candidates(root, tmux_target, current_todo_task_candidates(root))
+
+
+def current_route_for_owner(args: Args, owner_target: str) -> EmailRoute | None:
+    if not owner_target:
+        return None
+    if owner_target in target_aliases(args.manager_target):
+        if current_task_file_for_target(args.root, owner_target) is None and ":" in owner_target:
+            return None
+        return EmailRoute(current_manager_file(args), args.manager_target, args.manager_target)
+    owner_file = current_task_file_for_target(args.root, owner_target)
+    if owner_file is None:
+        return None
+    return EmailRoute(owner_file, owner_target, owner_target)
+
+
+def task_file_for_target_in_candidates(root: Path, tmux_target: str, candidates: list[Path]) -> Path | None:
     aliases = target_aliases(tmux_target)
     seen: set[Path] = set()
-    for path in todo_task_candidates(root):
+    for path in candidates:
         resolved = path.resolve(strict=False)
         if resolved in seen or not path.is_file():
             continue
@@ -387,12 +438,37 @@ def task_file_for_target(root: Path, tmux_target: str) -> Path | None:
     return None
 
 
+def inactive_task_files_for_target(root: Path, tmux_target: str) -> list[Path]:
+    aliases = target_aliases(tmux_target)
+    active = {path.resolve(strict=False) for path in current_todo_task_candidates(root)}
+    matches: list[Path] = []
+    for path in todo_task_candidates(root):
+        resolved = path.resolve(strict=False)
+        if resolved in active or not path.is_file():
+            continue
+        try:
+            targets = runat_targets(path.read_text(encoding="utf-8"))
+        except OSError:
+            continue
+        if any(target in aliases for target in targets):
+            matches.append(path)
+    return matches
+
+
 def email_route(args: Args, subject: str) -> EmailRoute:
     tmux_target = subject_manager_target(subject)
     if not tmux_target:
         return EmailRoute(current_manager_file(args), args.manager_target)
-    manager_file = task_file_for_target(args.root, tmux_target)
+    manager_file = current_task_file_for_target(args.root, tmux_target)
     if manager_file is None:
+        for inactive_file in inactive_task_files_for_target(args.root, tmux_target):
+            try:
+                inactive_owner_target = managerat_target(inactive_file.read_text(encoding="utf-8"))
+            except OSError:
+                inactive_owner_target = ""
+            owner_route = current_route_for_owner(args, inactive_owner_target)
+            if owner_route is not None:
+                return owner_route
         logging.warning("sub-manager email target did not map to a task file; using default manager: target=%s", tmux_target)
         return EmailRoute(current_manager_file(args), args.manager_target)
     try:
@@ -400,13 +476,11 @@ def email_route(args: Args, subject: str) -> EmailRoute:
     except OSError:
         owner_target = ""
     if owner_target and owner_target not in target_aliases(tmux_target):
-        if owner_target in target_aliases(args.manager_target):
-            return EmailRoute(current_manager_file(args), args.manager_target, args.manager_target)
-        owner_file = task_file_for_target(args.root, owner_target)
-        if owner_file is None:
+        owner_route = current_route_for_owner(args, owner_target)
+        if owner_route is None:
             logging.warning("managerat target did not map to a task file; using default manager: task=%s managerat=%s", manager_file, owner_target)
             return EmailRoute(current_manager_file(args), args.manager_target)
-        return EmailRoute(owner_file, owner_target, owner_target)
+        return owner_route
     return EmailRoute(manager_file, tmux_target, tmux_target)
 
 
