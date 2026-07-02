@@ -962,7 +962,21 @@ class AgentStatusTests(unittest.TestCase):
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             self.assertEqual("", out.getvalue())
 
-    def test_problems_only_reports_pending_task_item_after_done(self) -> None:
+    def test_problems_only_reports_pending_task_item_after_done_in_current(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\ndone.md cfg 1\n", encoding="utf-8")
+            _ = (root / "done.md").write_text("runat: cfg:1 codex\nship feature\n- preserve human request\n(above are pending task items)\n(done)\n", encoding="utf-8")
+            out = StringIO()
+            with redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            text = out.getvalue()
+            self.assertIn("agent-problems: human_request=1", text)
+            self.assertIn("human_request: task=done.md evidence=pending_item=preserve human request", text)
+
+    def test_problems_only_ignores_pending_task_item_after_done_in_previous(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             registry = root / "sessions.json"
@@ -971,10 +985,8 @@ class AgentStatusTests(unittest.TestCase):
             _ = (root / "done.md").write_text("runat: cfg:1 codex\nship feature\n- preserve human request\n(above are pending task items)\n(done)\n", encoding="utf-8")
             out = StringIO()
             with redirect_stdout(out):
-                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
-            text = out.getvalue()
-            self.assertIn("agent-problems: human_request=1", text)
-            self.assertIn("human_request: task=done.md evidence=pending_item=preserve human request", text)
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertEqual("", out.getvalue())
 
     def test_pending_task_item_after_done_does_not_make_default_status_active(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

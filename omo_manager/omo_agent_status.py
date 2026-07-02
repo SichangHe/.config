@@ -313,6 +313,8 @@ def pending_task_item_rows(root: Path) -> list[StatusRow]:
     for task in parse_task_lines(root / "TODO.md"):
         if task.task_file == "TODO.md" or task.task_file in seen:
             continue
+        if task.section not in {"todo:current", "todo:human pending", "todo:low priority"}:
+            continue
         seen.add(task.task_file)
         state_path = resolve_task_path(root, task.task_file)
         if state_path is None:
