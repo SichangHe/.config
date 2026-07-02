@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from omo_manager.omo_task import Args, DEFAULT_TOOL, DEFAULT_WORKER_INSTRUCTIONS, PCODX_WRAPPER, PENDING_TASK_ITEMS_MARKER, VL_WORKER_INSTRUCTIONS, codex_cmd, effective_tool, ensure_task_file, is_vl_agent, link_todo, main, new_window, parse_args, runat_goal_tree_error, runat_header_error, start_codex, validate_inputs, validate_runat_goal_tree, wait_command_started
+from omo_manager.omo_task import Args, DEFAULT_TOOL, DEFAULT_WORKER_INSTRUCTIONS, PCODX_WRAPPER, PENDING_TASK_ITEMS_MARKER, VL_EXPERIMENT_PREFLIGHT, VL_WORKER_INSTRUCTIONS, codex_cmd, effective_tool, ensure_task_file, is_vl_agent, link_todo, main, new_window, parse_args, runat_goal_tree_error, runat_header_error, start_codex, validate_inputs, validate_runat_goal_tree, vl_preflight_env, wait_command_started
 
 
 VALID_GOAL_TREE = "implement manager check\n- reject missing task goal tree\n"
@@ -75,7 +75,6 @@ class OmoTaskTests(unittest.TestCase):
         self.assertIn("plain high-level", runat_goal_tree_error("runat: cfg:2 pcodx\n- implement manager check\n- reject missing task goal tree\n"))
         self.assertIn("concrete bullet subgoal", runat_goal_tree_error("runat: cfg:2 pcodx\nimplement manager check\n"))
         self.assertIn("concrete bullet subgoal", runat_goal_tree_error("runat:\tcfg:2 pcodx\nimplement manager check\n"))
-
 
     def test_rejects_collapsed_runat_header(self) -> None:
         text = (
@@ -209,7 +208,6 @@ class OmoTaskTests(unittest.TestCase):
                 "runat: cfg:2 codex\nmanagerat: wl:1\nimplement manager check\n- reject missing task goal tree\n(above are pending task items)\n",
                 path.read_text(encoding="utf-8"),
             )
-
 
     def test_vl_worker_launch_requires_manager_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -404,10 +402,116 @@ class OmoTaskTests(unittest.TestCase):
         self.assertEqual(("--profile", "deep-review"), args.codex_flags)
         self.assertEqual(DEFAULT_TOOL, args.tool)
 
+    def test_parse_args_accepts_vl_experiment_preflight(self) -> None:
+        args = parse_args(["--task-file", "vl_worker_exp_1.md", "--vl-experiment-preflight", "--vl-preflight-verus", "/tmp/verus"])
+        self.assertTrue(args.vl_experiment_preflight)
+        self.assertEqual(Path("/tmp/verus"), args.vl_preflight_verus)
+
+    def test_vl_experiment_preflight_requires_launch_and_experiment_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.md"
+            prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
+            args = Args(root, "vl_eval_1.md", "vl", "2", "codex", root, "", prompt, False, False, "", "", (), False, "vl:15", True)
+            with self.assertRaisesRegex(ValueError, "experiment or rerun"):
+                validate_inputs(args)
+
+    def test_vl_experiment_launch_is_gated_without_opt_in_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.md"
+            prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
+            out = io.StringIO()
+            argv = [
+                "--root",
+                str(root),
+                "--task-file",
+                "vl_worker_exp_1.md",
+                "--tmux-session",
+                "vl",
+                "--tmux-window",
+                "2",
+                "--workdir",
+                str(root),
+                "--prompt-file",
+                str(prompt),
+                "--manager-target",
+                "vl:15",
+                "--dry-run",
+            ]
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(0, main(argv))
+            self.assertIn(str(VL_EXPERIMENT_PREFLIGHT), out.getvalue())
+
+    def test_vl_experiment_launch_rejects_openrouter_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.md"
+            prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
+            args = Args(root, "vl_worker_exp_1.md", "vl", "2", "codex", root, "", prompt, False, False, "", "", ("--profile", "OpenRouter"), False, "vl:15")
+            with self.assertRaisesRegex(ValueError, "OpenRouter"):
+                validate_inputs(args)
+
+    def test_vl_experiment_worker_env_preserves_inherited_verus(self) -> None:
+        with patch.dict("os.environ", {"VERUS": "/tmp/verus/bin/verus", "PATH": "/usr/bin"}):
+            args = Args(Path("/tmp/root"), "vl_worker_exp_1.md", "vl", "2", "codex", Path("/tmp"), "", None, False, False, "", "", (), False, "vl:15")
+            env = vl_preflight_env(args)
+            self.assertEqual("/tmp/verus/bin/verus", env["VERUS"])
+            self.assertTrue(env["PATH"].startswith("/tmp/verus/bin:"))
+
+    def test_vl_experiment_worker_env_exports_path_verus(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict("os.environ", {"PATH": tmp}, clear=True):
+            verus = Path(tmp) / "verus"
+            verus.touch(mode=0o755)
+            args = Args(Path("/tmp/root"), "vl_worker_exp_1.md", "vl", "2", "codex", Path("/tmp"), "", None, False, False, "", "", (), False, "vl:15")
+            env = vl_preflight_env(args)
+            self.assertEqual(str(verus), env["VERUS"])
+            self.assertTrue(env["PATH"].startswith(f"{tmp}:"))
+
     def test_parse_args_accepts_pcodx_tool(self) -> None:
         args = parse_args(["--task-file", "x.md", "--tool", "pcodx"])
         self.assertEqual("pcodx", args.tool)
         self.assertTrue(args.tool_explicit)
+
+    def test_dry_run_prints_vl_experiment_preflight(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.md"
+            prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
+            out = io.StringIO()
+            argv = [
+                "--root",
+                str(root),
+                "--task-file",
+                "vl_worker_exp_1.md",
+                "--tmux-session",
+                "vl",
+                "--tmux-window",
+                "2",
+                "--workdir",
+                str(root),
+                "--prompt-file",
+                str(prompt),
+                "--manager-target",
+                "vl:15",
+                "--vl-experiment-preflight",
+                "--vl-preflight-vlh",
+                "/tmp/vlh",
+                "--vl-preflight-verus",
+                "/tmp/verus",
+                "--vl-preflight-artifact-root",
+                str(root / "artifacts" / "vl_worker_exp_1"),
+                "--dry-run",
+            ]
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(0, main(argv))
+            text = out.getvalue()
+            self.assertIn(str(VL_EXPERIMENT_PREFLIGHT), text)
+            self.assertIn("--vlh /tmp/vlh", text)
+            self.assertIn("--verus /tmp/verus", text)
+            self.assertIn(str(root / "artifacts" / "vl_worker_exp_1"), text)
+            self.assertIn("VLH=/tmp/vlh", text)
+            self.assertIn("VERUS=/tmp/verus", text)
 
     def test_session_resume_ignores_existing_pcodx_task_tool_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

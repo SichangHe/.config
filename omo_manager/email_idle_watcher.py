@@ -53,7 +53,7 @@ MANAGER_SUBJECT_TOKENS = (MANAGER_SUBJECT_TOKEN, "[omo_manager]")
 MANAGER_REPLY_SEARCH_PREFIXES = (MANAGER_REPLY_PREFIX, "Re:[a]", "Re: [omo_manager]", "Re:[omo_manager]")
 NORMAL_REPLY_SEARCH_PREFIXES = MANAGER_REPLY_SEARCH_PREFIXES
 MANAGER_REPLY_SUBJECT_RE = re.compile(r"^re:\s*(?:\[a\]|\[omo_manager\])\s*", re.IGNORECASE)
-MANAGER_TARGET_SUBJECT_RE = re.compile(r"^(?:re:\s*)*(?:\[a\]|\[omo_manager\])\s+([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)(?:\s+|$)", re.IGNORECASE)
+MANAGER_TARGET_SUBJECT_RE = re.compile(r"^(?:re:\s*)*(?:\[a\]|\[omo_manager\])\s+(?:\[([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\]|([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?))(?:\s+|$)", re.IGNORECASE)
 TMUX_TARGET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?$")
 PWD_FOOTER_RE = re.compile(r"(?:^|\n)PWD: [^\n]+\n?\Z")
 TMUX_FOOTER_RE = re.compile(r"(?:^|\n)tmux: [^\r\n]+\r?\n?\Z", re.IGNORECASE)
@@ -281,7 +281,7 @@ def normalize_human_subject(subject: str) -> str:
     else:
         base = MANAGER_REPLY_SUBJECT_RE.sub("", subject, count=1).strip()
         while True:
-            next_base = re.sub(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?(?:\s+|$)", "", base, count=1).strip()
+            next_base = re.sub(r"^(?:\[[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?\]|[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)(?:\s+|$)", "", base, count=1).strip()
             if next_base == base:
                 break
             base = next_base
@@ -290,7 +290,7 @@ def normalize_human_subject(subject: str) -> str:
 
 def subject_manager_target(subject: str) -> str:
     match = MANAGER_TARGET_SUBJECT_RE.match(subject.strip())
-    return match.group(1) if match is not None else ""
+    return next((group for group in match.groups() if group), "") if match is not None else ""
 
 
 def target_aliases(target: str) -> set[str]:
@@ -442,7 +442,7 @@ def inactive_task_files_for_target(root: Path, tmux_target: str) -> list[Path]:
     aliases = target_aliases(tmux_target)
     active = {path.resolve(strict=False) for path in current_todo_task_candidates(root)}
     matches: list[Path] = []
-    for path in todo_task_candidates(root):
+    for path in markdown_task_files(root):
         resolved = path.resolve(strict=False)
         if resolved in active or not path.is_file():
             continue
@@ -606,9 +606,9 @@ def save_active_manager_mail_thresholds(path: Path, active: set[str]) -> None:
     write_private_state(path, body)
 
 
-def email_source_lines(root: Path, txt_path: Path) -> tuple[str, str]:
+def email_source_lines(root: Path, txt_path: Path) -> tuple[str, ...]:
     ref = source_ref(root, txt_path)
-    return f"(from email {ref})", f"[source: email {ref}]"
+    return f"(record and delegate {ref})", f"(from email {ref})", f"[source: email {ref}]"
 
 
 def source_search_files(root: Path, manager_file: Path | None = None) -> list[Path]:
@@ -644,6 +644,96 @@ def existing_source_line_in_root(root: Path, txt_path: Path, manager_file: Path 
     return None
 
 
+def retryable_routed_line(stripped: str) -> bool:
+    if not stripped.startswith("(manager routed: ") or not stripped.endswith(")"):
+        return False
+    target = stripped[len("(manager routed: ") : -1].strip()
+    return bool(TMUX_TARGET_RE.fullmatch(target))
+
+
+def source_marker_consumed_by_routed_prose(lines: list[str], source_idx: int) -> bool:
+    routed_prose_seen = False
+    for prior_idx in range(source_idx - 1, -1, -1):
+        stripped = lines[prior_idx].strip()
+        if not stripped:
+            continue
+        if stripped.startswith(ROUTED_PREFIXES):
+            if retryable_routed_line(stripped):
+                continue
+            routed_prose_seen = True
+            continue
+        if stripped == "(pending)":
+            return routed_prose_seen
+        if stripped.startswith(("(", "#")):
+            return False
+    return False
+
+
+def consumed_source_reference_line(stripped: str, ref: str) -> bool:
+    quoted_ref = rf"`{re.escape(ref)}`"
+    plain_ref = rf"{re.escape(ref)}(?![A-Za-z0-9_-])(?!(?:\.[A-Za-z0-9_-]))"
+    ref_pattern = rf"(?:{quoted_ref}|{plain_ref})"
+    if not re.search(ref_pattern, stripped):
+        return False
+    if stripped.startswith((*ROUTED_PREFIXES, "(done", "(running", "(blocked")):
+        return True
+    if not stripped.startswith("(comment:"):
+        return False
+    if re.search(rf"\b(?:active\s+mail|live\s+mail|follow-up)\b[^.;]*{ref_pattern}|{ref_pattern}[^.;]*\b(?:is\s+live|follow-up|still\s+pending|still\s+needs|needs\s+work)\b", stripped, re.IGNORECASE):
+        return False
+    for clause in re.split(r";\s*|(?<=[`)])\.\s*", stripped):
+        if not re.search(ref_pattern, clause):
+            continue
+        lowered = clause.lower()
+        if any(
+            phrase in lowered
+            for phrase in (
+                "unhandled",
+                "not acknowledged",
+                "not consumed",
+                "not handled",
+                "not removed",
+                "not cleared",
+                "not routed",
+                "not yet acknowledged",
+                "not yet consumed",
+                "not yet handled",
+                "not yet removed",
+                "not yet cleared",
+                "not yet routed",
+                "still pending",
+                "still needs",
+                "needs work",
+                "keep pending",
+            )
+        ):
+            continue
+        consumed_verbs = ("acknowledged", "consumed", "handled", "routed", "removed", "cleared")
+        if re.search(rf"^(?:\(comment:\s*)?(?:{'|'.join(consumed_verbs)})\s+{ref_pattern}", clause.strip(), re.IGNORECASE):
+            return True
+        stale_cleanup = r"(?:removed|cleared|consumed)\s+(?:another\s+|immediately\s+)?(?:(?:repeated|duplicate)(?:\s+stale)?|stale(?:\s+(?:repeated|duplicate))?)?\s+(?:(?:pending|watcher)\s+)*(?:markers?|batch)\b"
+        stale_match = re.search(rf"\b{stale_cleanup}.*{ref_pattern}", clause, re.IGNORECASE)
+        if stale_match and not re.search(r"\bactive\s+mail\b|\bis\s+live\b|\bfollow-up\b", clause[stale_match.start() :], re.IGNORECASE) and ("watcher marker" in lowered or "stale" in lowered or "duplicate" in lowered):
+            return True
+    return False
+
+
+def existing_consumed_source_line(root: Path, txt_path: Path, manager_file: Path | None = None) -> int | None:
+    ref = str(source_ref(root, txt_path))
+    source_lines = set(email_source_lines(root, txt_path))
+    for path in source_search_files(root, manager_file):
+        if not path.exists():
+            continue
+        lines = path.read_text(encoding="utf-8").splitlines()
+        for idx, line in enumerate(lines):
+            stripped = line.strip()
+            if consumed_source_reference_line(stripped, ref):
+                return idx + 1
+            if stripped in source_lines and source_marker_consumed_by_routed_prose(lines, idx):
+                return idx + 1
+    return None
+
+
 def existing_source_pending_line(root: Path, txt_path: Path, manager_file: Path | None = None) -> int | None:
     manager_file = manager_file or dated_manager_file(root)
     source_line = existing_source_line(root, txt_path, manager_file)
@@ -655,7 +745,9 @@ def existing_source_pending_line(root: Path, txt_path: Path, manager_file: Path 
         if stripped == "(pending)":
             return pending_idx + 1
         if stripped.startswith(ROUTED_PREFIXES):
-            continue
+            if retryable_routed_line(stripped):
+                continue
+            break
         if stripped.startswith(("(", "#")) and stripped != "(pending)":
             break
     return None
@@ -682,9 +774,12 @@ def append_pending(root: Path, txt_path: Path, manager_file: Path | None = None,
     existing_line = existing_source_pending_line(root, txt_path, manager_file)
     if existing_line is not None:
         return existing_line
+    consumed_line = existing_consumed_source_line(root, txt_path, manager_file)
+    if consumed_line is not None:
+        return consumed_line
     lines = manager_file.read_text(encoding="utf-8").splitlines() if manager_file.exists() else []
     line_no = len(lines) + 1
-    from_line, _legacy_source_line = email_source_lines(root, txt_path)
+    from_line = email_source_lines(root, txt_path)[0]
     block = ["", "(pending)", from_line]
     if routed_target:
         block.insert(2, f"(manager routed: {routed_target})")
@@ -831,7 +926,7 @@ def append_recovery_record(root: Path, txt_path: Path, summary: str, manager_fil
     lines = manager_file.read_text(encoding="utf-8").splitlines() if manager_file.exists() else []
     line_no = len(lines) + 1
     stamp = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
-    from_line, legacy_source_line = email_source_lines(root, txt_path)
+    from_line, legacy_source_line, *_ = email_source_lines(root, txt_path)
     block = ["", f"(manager recovery email: {stamp})", from_line, legacy_source_line, summary]
     manager_file.write_text("\n".join(lines + block) + "\n", encoding="utf-8")
     return line_no + 1
@@ -864,8 +959,12 @@ def write_private_temp(text: str, suffix: str) -> Path:
 def email_human(args: Args, subject: str, body: str) -> None:
     subject_path = write_private_temp(subject.rstrip("\n") + "\n", ".txt")
     body_path = write_private_temp(body, ".md")
+    command = [str(Path.home() / ".config/helper.sh/email_me.py"), "--manager-human"]
+    if args.manager_target:
+        command.extend(("--sender-tmux-target", args.manager_target))
+    command.extend(("--subject-file", str(subject_path), "--message-file", str(body_path)))
     try:
-        result = subprocess.run([str(Path.home() / ".config/helper.sh/email_me.py"), "--manager-human", "--subject-file", str(subject_path), "--message-file", str(body_path)], text=True, check=False)
+        result = subprocess.run(command, text=True, check=False)
         if result.returncode != 0:
             logging.error("recovery human email failed: status=%s", result.returncode)
     finally:
@@ -1012,7 +1111,11 @@ def is_self_addressed_manager_header(msg: Message, self_email: str) -> bool:
     sender = str(msg.get("From", ""))
     recipients = str(msg.get("To", ""))
     subject = str(msg.get("Subject", ""))
-    return from_self(sender, self_email) and any(address.lower() == normalized_self for _name, address in getaddresses([recipients])) and any(token.lower() in subject.lower() for token in MANAGER_SUBJECT_TOKENS)
+    return (
+        from_self(sender, self_email)
+        and any(address.lower() == normalized_self for _name, address in getaddresses([recipients]))
+        and any(token.lower() in subject.lower() for token in MANAGER_SUBJECT_TOKENS)
+    )
 
 
 def parsed_message_date(msg: Message) -> datetime | None:
@@ -1103,7 +1206,10 @@ def recoverable_processed_uids(processed_uids: set[str], root: Path, mail_dir: P
     return [
         uid
         for uid in sorted(processed_uids, key=lambda value: (0, int(value)) if value.isdigit() else (1, value))
-        if uid.isdigit() and int(uid) >= min_uid and existing_source_line_in_root(root, mail_dir / f"{uid}.txt", manager_file) is None
+        if uid.isdigit()
+        and int(uid) >= min_uid
+        and existing_source_line_in_root(root, mail_dir / f"{uid}.txt", manager_file) is None
+        and existing_consumed_source_line(root, mail_dir / f"{uid}.txt", manager_file) is None
     ]
 
 
@@ -1117,6 +1223,48 @@ def mark_seen(client: imaplib.IMAP4_SSL, uid: str) -> bool:
         logging.error("email mark read failed: uid=%s typ=%s", uid, typ)
         return False
     return True
+
+
+def fetch_message(client: imaplib.IMAP4_SSL, uid: str) -> Message | None:
+    typ_msg, msg_data = client.uid("fetch", uid, "(BODY.PEEK[])")
+    if typ_msg != "OK" or not msg_data or not isinstance(msg_data[0], tuple):
+        logging.error("email fetch failed: uid=%s typ=%s", uid, typ_msg)
+        return None
+    return BytesParser(policy=policy.default).parsebytes(msg_data[0][1])
+
+
+def has_manager_subject_token(subject: str) -> bool:
+    return any(token.lower() in subject.lower() for token in MANAGER_SUBJECT_TOKENS)
+
+
+def sender_display_name(sender: str) -> str:
+    name, _address = parseaddr(sender)
+    return name.strip().lower()
+
+
+def manager_authored_message(msg: Message, self_email: str) -> bool:
+    sender = str(msg.get("From", ""))
+    subject = str(msg.get("Subject", ""))
+    return has_manager_subject_token(subject) and from_self(sender, self_email) and sender_display_name(sender) != "human" and has_agent_footer(message_text(msg))
+
+
+def stored_mail_has_agent_footer(path: Path) -> bool:
+    try:
+        return has_agent_footer(path.read_text(encoding="utf-8"))
+    except OSError:
+        return False
+
+
+def mark_seen_after_human_intake(client: imaplib.IMAP4_SSL, uid: str, args: Args, msg: Message | None = None, txt_path: Path | None = None) -> bool:
+    candidate = msg
+    if candidate is None and txt_path is not None and txt_path.exists() and stored_mail_has_agent_footer(txt_path):
+        candidate = fetch_message(client, uid)
+        if candidate is None:
+            return False
+    if candidate is not None and manager_authored_message(candidate, args.self_email):
+        logging.info("email mark read skipped for manager-authored mail: uid=%s", uid)
+        return False
+    return mark_seen(client, uid)
 
 
 def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
@@ -1162,25 +1310,29 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
                 unaccepted_changed = True
                 processed_uids.add(uid)
                 processed_changed = True
-                mark_seen(client, uid)
+                mark_seen_after_human_intake(client, uid, args, txt_path=expected_txt_path)
                 handled = True
             else:
                 unaccepted_pending_uids.add(uid)
                 unaccepted_changed = True
             continue
-        if uid in unaccepted_pending_uids and existing_source_line_in_root(args.root, expected_txt_path, manager_file) is not None:
+        if uid in unaccepted_pending_uids and (
+            existing_source_line_in_root(args.root, expected_txt_path, manager_file) is not None
+            or existing_consumed_source_line(args.root, expected_txt_path, manager_file) is not None
+        ):
             logging.info("email unaccepted uid already has consumed source; accepting: uid=%s root=%s", uid, args.root)
             unaccepted_pending_uids.discard(uid)
             unaccepted_changed = True
             processed_uids.add(uid)
             processed_changed = True
-            mark_seen(client, uid)
+            mark_seen_after_human_intake(client, uid, args, txt_path=expected_txt_path)
             handled = True
             continue
         if uid in processed_uids:
             existing_source_line = existing_source_line_in_root(args.root, expected_txt_path, manager_file)
-            if uid not in unaccepted_pending_uids and existing_source_line is not None:
-                handled = mark_seen(client, uid) or handled
+            existing_consumed_line = existing_consumed_source_line(args.root, expected_txt_path, manager_file)
+            if uid not in unaccepted_pending_uids and (existing_source_line is not None or existing_consumed_line is not None):
+                handled = mark_seen_after_human_intake(client, uid, args, txt_path=expected_txt_path) or handled
                 continue
             if uid in unaccepted_pending_uids and existing_source_line is not None:
                 logging.warning("email unaccepted processed uid has source without pending; reprocessing: uid=%s root=%s", uid, args.root)
@@ -1198,11 +1350,20 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
                 unaccepted_changed = True
                 processed_uids.add(uid)
                 processed_changed = True
-                mark_seen(client, uid)
+                mark_seen_after_human_intake(client, uid, args, txt_path=expected_txt_path)
                 handled = True
             else:
                 unaccepted_pending_uids.add(uid)
                 unaccepted_changed = True
+            continue
+        if existing_consumed_source_line(args.root, expected_txt_path, manager_file) is not None:
+            logging.info("email uid already has acknowledged or routed source; accepting without duplicate pending: uid=%s root=%s", uid, args.root)
+            unaccepted_pending_uids.discard(uid)
+            unaccepted_changed = True
+            processed_uids.add(uid)
+            processed_changed = True
+            mark_seen_after_human_intake(client, uid, args, txt_path=expected_txt_path)
+            handled = True
             continue
         typ_msg, msg_data = client.uid("fetch", uid, "(BODY.PEEK[])")
         if typ_msg != "OK" or not msg_data or not isinstance(msg_data[0], tuple):
@@ -1214,8 +1375,7 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
         if not (is_manager_subject(subject) or is_recovery_subject(subject)) or not from_self(sender, args.self_email):
             logging.warning("email candidate rejected after fetch: uid=%s subject=%r from_self=%s", uid, subject, from_self(sender, args.self_email))
             continue
-        body = message_text(msg)
-        if is_manager_subject(subject) and has_agent_footer(body):
+        if manager_authored_message(msg, args.self_email):
             logging.info("email candidate ignored as manager-authored echo: uid=%s subject=%r", uid, subject)
             ignored_uids.add(uid)
             ignored_changed = True
@@ -1229,7 +1389,7 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
                 append_recovery_record(args.root, txt_path, "recovery email recorded; restart refused because sender authentication did not pass", manager_file)
             processed_uids.add(uid)
             processed_changed = True
-            mark_seen(client, uid)
+            mark_seen_after_human_intake(client, uid, args, msg)
             handled = True
         else:
             route = email_route(args, subject)
@@ -1240,7 +1400,7 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
                 unaccepted_changed = True
                 processed_uids.add(uid)
                 processed_changed = True
-                mark_seen(client, uid)
+                mark_seen_after_human_intake(client, uid, args, msg)
                 handled = True
             else:
                 unaccepted_pending_uids.add(uid)

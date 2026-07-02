@@ -3,8 +3,36 @@ from os import environ, fsync, getuid, unlink
 from pathlib import Path
 from stat import S_IMODE, S_ISDIR, S_ISREG
 from tempfile import NamedTemporaryFile, gettempdir
+from types import SimpleNamespace
 
-from requests import RequestException, get
+try:
+    from requests import RequestException, get
+except ModuleNotFoundError as exc:
+    if exc.name != "requests":
+        raise
+
+    from http.client import HTTPException
+    from urllib.error import HTTPError, URLError
+    from urllib.request import urlopen
+
+    class RequestException(Exception):
+        pass
+
+    def get(url: str, timeout: int):
+        try:
+            with urlopen(url, timeout=timeout) as response:
+                return SimpleNamespace(
+                    status_code=response.status,
+                    text=response.read().decode(response.headers.get_content_charset() or "utf-8"),
+                )
+        except HTTPError as exc:
+            try:
+                text = exc.read().decode(exc.headers.get_content_charset() or "utf-8")
+            except (HTTPException, OSError, TimeoutError, UnicodeError) as read_exc:
+                raise RequestException(str(read_exc)) from read_exc
+            return SimpleNamespace(status_code=exc.code, text=text)
+        except (HTTPException, OSError, TimeoutError, UnicodeError, URLError) as exc:
+            raise RequestException(str(exc)) from exc
 
 AGENTS_MD_URL = "https://raw.githubusercontent.com/SichangHe/sichanghe.github.io/refs/heads/main/src/notes/automation_software/AGENTS.md"
 ENV_FILE = Path(__file__).resolve().parent / ".env"

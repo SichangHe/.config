@@ -20,12 +20,14 @@ from omo_manager.omo_tmux_send import (
     message_probes,
     parse_args,
     pending_marker_present,
+    query_async_result,
     read_message,
     require_codex_target,
     run_async_worker,
     run_tmux,
     verify_submit,
     wait_paste_visible,
+    wait_input_ready_before_paste,
     wait_ready,
     write_private_temp,
 )
@@ -61,9 +63,13 @@ class TmuxSendTests(unittest.TestCase):
         self.assertEqual(0, parse_args([*base, "--submit-verify-timeout-s", "3"]).submit_verify_timeout_s)
         self.assertEqual(3, parse_args([*base, "--enter", "--submit-verify-timeout-s", "3"]).submit_verify_timeout_s)
 
-    def test_parse_async_requires_notify_target(self) -> None:
-        with patch("sys.stderr", new_callable=StringIO), self.assertRaises(SystemExit):
-            parse_args(["--target", "cfg:1.0", "--message-file", "prompt.md", "--async"])
+    def test_parse_async_allows_query_without_notify_target(self) -> None:
+        no_notify = parse_args(["--target", "cfg:1.0", "--message-file", "prompt.md", "--async"])
+        self.assertTrue(no_notify.async_mode)
+        self.assertEqual("", no_notify.async_notify_target)
+        query = parse_args(["--async-result", "abc123"])
+        self.assertEqual("abc123", query.async_result)
+        self.assertIsNone(query.message_file)
         args = parse_args(
             [
                 "--target",
@@ -106,6 +112,26 @@ class TmuxSendTests(unittest.TestCase):
 
         self.assertEqual([], [call for call in calls if call[:2] != ["tmux", "delete-buffer"]])
 
+    def test_pending_guard_rechecks_after_input_ready_wait_before_paste(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_wait(args: Args, _: int) -> None:
+            assert args.pending_root is not None and args.pending_file is not None
+            (args.pending_root / args.pending_file).write_text("(manager handled: done.)\nsource\n", encoding="utf-8")
+
+        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        with tempfile.TemporaryDirectory() as tmp, patch("omo_manager.omo_tmux_send.wait_compaction_over_before_send"), patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.wait_ready"), patch("omo_manager.omo_tmux_send.require_codex_target"), patch("omo_manager.omo_tmux_send.wait_input_ready_before_paste", side_effect=fake_wait), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
+            root = Path(tmp)
+            path = root / "task.md"
+            path.write_text("(pending)\nsource\n", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "pending marker cleared"):
+                run_tmux(Args("cfg:1.0", None, 1, 0.15, 10, False, root, Path("task.md"), 1, ""), "pending: file=task.md line=1")
+
+        self.assertEqual([], [call for call in calls if call[:2] != ["tmux", "delete-buffer"]])
+
     def test_pending_guard_matches_digest_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -122,17 +148,71 @@ class TmuxSendTests(unittest.TestCase):
             calls.append(command)
             return subprocess.CompletedProcess(command, 0)
 
-        with patch("omo_manager.omo_tmux_send.wait_compaction_over_before_send"), patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.require_codex_target"), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
+        with patch("omo_manager.omo_tmux_send.wait_compaction_over_before_send"), patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.require_codex_target"), patch("omo_manager.omo_tmux_send.wait_input_ready_before_paste"), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
             run_tmux(Args("cfg:1.0", None, 1, 0.15, 0, False), "literal C-c $(bad)\n")
 
         self.assertEqual("tmux", calls[0][0])
-        self.assertEqual(["tmux", "send-keys", "-t", "cfg:1.0", "C-u"], calls[0])
-        self.assertEqual(["tmux", "load-buffer", "-b"], calls[1][:3])
-        buffer_name = calls[1][3]
-        self.assertEqual(["tmux", "paste-buffer", "-b", buffer_name, "-t", "cfg:1.0"], calls[2])
+        self.assertEqual(["tmux", "load-buffer", "-b"], calls[0][:3])
+        buffer_name = calls[0][3]
+        self.assertEqual(["tmux", "paste-buffer", "-b", buffer_name, "-t", "cfg:1.0"], calls[1])
         self.assertIn(["tmux", "send-keys", "-t", "cfg:1.0", "Enter"], calls)
         self.assertEqual(["tmux", "delete-buffer", "-b", buffer_name], calls[-1])
         self.assertNotIn("literal C-c $(bad)\n", [part for call in calls for part in call])
+
+    def test_run_tmux_blocks_paste_when_input_still_has_stale_text(self) -> None:
+        calls: list[list[str]] = []
+        stale_lines = [
+            "› old pending message",
+            "  gpt-5.5 medium",
+        ]
+
+        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch("omo_manager.omo_tmux_send.wait_compaction_over_before_send"), patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.require_codex_target"), patch("omo_manager.omo_tmux_send.tail", return_value=stale_lines), patch("omo_manager.omo_tmux_send.time.sleep"), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
+            with self.assertRaisesRegex(RuntimeError, "input not ready before paste"):
+                run_tmux(Args("cfg:1.0", None, 1, 0.15, 0, False, submit_verify_timeout_s=0.01), "new prompt\n")
+
+        self.assertFalse(any(call[:3] == ["tmux", "load-buffer", "-b"] for call in calls))
+
+    def test_wait_input_ready_before_paste_accepts_stock_placeholder(self) -> None:
+        lines = [
+            "› Implement {feature}",
+            "  gpt-5.5 medium",
+        ]
+        with patch("omo_manager.omo_tmux_send.tail", return_value=lines):
+            wait_input_ready_before_paste(Args("cfg:1.0", None, 1, 0.15, 0, False, submit_verify_timeout_s=0.01), 80)
+
+    def test_wait_input_ready_before_paste_rejects_running_placeholder(self) -> None:
+        lines = [
+            "• Working (1m 59s • esc to interrupt)",
+            "",
+            "› Implement {feature}",
+            "",
+            "  gpt-5.5",
+        ]
+        with patch("omo_manager.omo_tmux_send.tail", return_value=lines), patch("omo_manager.omo_tmux_send.time.sleep"):
+            with self.assertRaisesRegex(RuntimeError, "input not ready before paste"):
+                wait_input_ready_before_paste(Args("cfg:1.0", None, 1, 0.15, 0, False, submit_verify_timeout_s=0.01), 80)
+
+    def test_wait_input_ready_before_paste_uses_ready_timeout(self) -> None:
+        calls = 0
+        tails = iter(
+            [
+                ["• Working", "", "› Implement {feature}", "", "  gpt-5.5"],
+                ["› Implement {feature}", "  gpt-5.5"],
+            ]
+        )
+
+        def fake_sleep(_: float) -> None:
+            nonlocal calls
+            calls += 1
+
+        with patch("omo_manager.omo_tmux_send.tail", side_effect=lambda *_: next(tails)), patch("omo_manager.omo_tmux_send.time.monotonic", side_effect=[0.0, 0.0, 0.2]), patch("omo_manager.omo_tmux_send.time.sleep", side_effect=fake_sleep):
+            wait_input_ready_before_paste(Args("cfg:1.0", None, 1, 0.15, 1.0, False, submit_verify_timeout_s=0.01), 80)
+
+        self.assertEqual(1, calls)
 
     def test_run_tmux_waits_for_compaction_before_paste_and_enter(self) -> None:
         events: list[str] = []
@@ -144,7 +224,7 @@ class TmuxSendTests(unittest.TestCase):
             events.append(command[1])
             return subprocess.CompletedProcess(command, 0)
 
-        with patch("omo_manager.omo_tmux_send.wait_compaction_over_before_send", side_effect=fake_wait), patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.require_codex_target"), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
+        with patch("omo_manager.omo_tmux_send.wait_compaction_over_before_send", side_effect=fake_wait), patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.require_codex_target"), patch("omo_manager.omo_tmux_send.wait_input_ready_before_paste"), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
             run_tmux(Args("cfg:1.0", None, 1, 0.15, 0, False), "prompt")
 
         load_idx = events.index("load-buffer")
@@ -161,13 +241,12 @@ class TmuxSendTests(unittest.TestCase):
             calls.append(command)
             return subprocess.CompletedProcess(command, 0)
 
-        with patch("omo_manager.omo_tmux_send.wait_compaction_over_before_send") as wait_compaction, patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.require_codex_target"), patch("omo_manager.omo_tmux_send.time.sleep") as sleep, patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
+        with patch("omo_manager.omo_tmux_send.wait_compaction_over_before_send") as wait_compaction, patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.require_codex_target"), patch("omo_manager.omo_tmux_send.wait_input_ready_before_paste"), patch("omo_manager.omo_tmux_send.time.sleep") as sleep, patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
             run_tmux(Args("cfg:1.0", None, 2, 0.15, 0, False), "prompt")
 
         self.assertEqual(4, wait_compaction.call_count)
-        self.assertEqual(["tmux", "send-keys", "-t", "cfg:1.0", "C-u"], calls[0])
         self.assertEqual(2, calls.count(["tmux", "send-keys", "-t", "cfg:1.0", "Enter"]))
-        self.assertEqual(["tmux", "delete-buffer", "-b", calls[1][3]], calls[-1])
+        self.assertEqual(["tmux", "delete-buffer", "-b", calls[0][3]], calls[-1])
         sleep.assert_called_once_with(0.15)
 
     def test_run_tmux_blocks_plan_prompt_by_default(self) -> None:
@@ -182,7 +261,7 @@ class TmuxSendTests(unittest.TestCase):
             "",
             "  Create a plan?  shift + tab use Plan mode   esc dismiss",
         ]
-        with patch("omo_manager.omo_tmux_send.wait_compaction_over_before_send"), patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.require_codex_target"), patch("omo_manager.omo_tmux_send.verify_placeholder_paste", return_value=True), patch("omo_manager.omo_tmux_send.tail", return_value=lines), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
+        with patch("omo_manager.omo_tmux_send.wait_compaction_over_before_send"), patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.require_codex_target"), patch("omo_manager.omo_tmux_send.wait_input_ready_before_paste"), patch("omo_manager.omo_tmux_send.verify_placeholder_paste", return_value=True), patch("omo_manager.omo_tmux_send.tail", return_value=lines), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
             with self.assertRaisesRegex(RuntimeError, "unsafe Plan prompt"):
                 run_tmux(Args("cfg:1.0", None, 1, 0.15, 0, False), "Read the dispatch prompt from /tmp/x and follow it exactly.\n")
 
@@ -200,12 +279,12 @@ class TmuxSendTests(unittest.TestCase):
             "",
             "  Create a plan?  shift + tab use Plan mode   esc dismiss",
         ]
-        with patch("omo_manager.omo_tmux_send.wait_compaction_over_before_send"), patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.require_codex_target"), patch("omo_manager.omo_tmux_send.verify_placeholder_paste", return_value=True), patch("omo_manager.omo_tmux_send.tail", return_value=lines), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
+        with patch("omo_manager.omo_tmux_send.wait_compaction_over_before_send"), patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.require_codex_target"), patch("omo_manager.omo_tmux_send.wait_input_ready_before_paste"), patch("omo_manager.omo_tmux_send.verify_placeholder_paste", return_value=True), patch("omo_manager.omo_tmux_send.tail", return_value=lines), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
             run_tmux(Args("cfg:1.0", None, 1, 0.15, 0, False, allow_plan_prompt_enter=True), "Read the dispatch prompt from /tmp/x and follow it exactly.\n")
 
         self.assertIn(["tmux", "send-keys", "-t", "cfg:1.0", "Enter"], calls)
 
-    def test_launch_async_copies_payload_and_starts_worker(self) -> None:
+    def test_launch_async_copies_payload_starts_worker_and_prints_result_dir(self) -> None:
         started: list[list[str]] = []
 
         class Proc:
@@ -215,7 +294,8 @@ class TmuxSendTests(unittest.TestCase):
             started.append(command)
             return Proc()
 
-        with patch("omo_manager.omo_tmux_send.subprocess.Popen", side_effect=fake_popen), patch("sys.stdout", new_callable=StringIO):
+        stdout = StringIO()
+        with patch("omo_manager.omo_tmux_send.subprocess.Popen", side_effect=fake_popen), patch("sys.stdout", stdout):
             launch_async(
                 Args(
                     "cfg:1.0",
@@ -236,12 +316,24 @@ class TmuxSendTests(unittest.TestCase):
         self.assertIn("--async-worker", command)
         self.assertNotIn("--async", command)
         payload_path = Path(command[command.index("--message-file") + 1])
+        result_dir = Path(command[command.index("--async-result-dir") + 1])
         try:
             self.assertEqual("literal $HOME\n", payload_path.read_text(encoding="utf-8"))
+            self.assertEqual("running\n", (result_dir / "status.txt").read_text(encoding="utf-8"))
+            self.assertTrue((result_dir / "stdout.log").exists())
+            self.assertTrue((result_dir / "stderr.log").exists())
+            self.assertEqual(0o700, stat.S_IMODE(os.stat(result_dir).st_mode))
+            self.assertEqual(0o600, stat.S_IMODE(os.stat(payload_path).st_mode))
+            self.assertEqual(0o600, stat.S_IMODE(os.stat(result_dir / "status.txt").st_mode))
+            self.assertEqual(0o600, stat.S_IMODE(os.stat(result_dir / "stdout.log").st_mode))
+            self.assertIn("async_id:", stdout.getvalue())
+            self.assertIn(f"result_dir: {result_dir}", stdout.getvalue())
             self.assertIn("--enter", command)
             self.assertEqual("cfg:0.0", command[command.index("--async-notify-target") + 1])
         finally:
-            payload_path.unlink(missing_ok=True)
+            for path in result_dir.iterdir():
+                path.unlink(missing_ok=True)
+            result_dir.rmdir()
 
     def test_async_worker_notifies_success_and_cleans_payload(self) -> None:
         calls: list[tuple[str, str]] = []
@@ -250,6 +342,8 @@ class TmuxSendTests(unittest.TestCase):
             calls.append((args.target, message))
 
         with tempfile.TemporaryDirectory() as tmp, patch("omo_manager.omo_tmux_send.run_tmux", side_effect=fake_run_tmux):
+            result_dir = Path(tmp) / "result"
+            result_dir.mkdir()
             payload = Path(tmp) / "payload.txt"
             payload.write_text("/compact\n", encoding="utf-8")
             rc = run_async_worker(
@@ -262,15 +356,18 @@ class TmuxSendTests(unittest.TestCase):
                     False,
                     async_notify_target="cfg:0.0",
                     async_cleanup_message_file=True,
+                    async_result_dir=result_dir,
                 )
             )
 
-        self.assertEqual(0, rc)
-        self.assertEqual(("cfg:1.0", "/compact\n"), calls[0])
-        self.assertEqual("cfg:0.0", calls[1][0])
-        self.assertIn("succeeded", calls[1][1])
-        self.assertIn("Result: sent", calls[1][1])
-        self.assertFalse(payload.exists())
+            self.assertEqual(0, rc)
+            self.assertEqual(("cfg:1.0", "/compact\n"), calls[0])
+            self.assertEqual("cfg:0.0", calls[1][0])
+            self.assertIn("succeeded", calls[1][1])
+            self.assertIn("Result: sent", calls[1][1])
+            self.assertFalse(payload.exists())
+            self.assertEqual("succeeded\n", (result_dir / "status.txt").read_text(encoding="utf-8"))
+            self.assertEqual("sent\n", (result_dir / "result.txt").read_text(encoding="utf-8"))
 
     def test_async_worker_notifies_failure_details(self) -> None:
         calls: list[tuple[str, str]] = []
@@ -281,6 +378,8 @@ class TmuxSendTests(unittest.TestCase):
             calls.append((args.target, message))
 
         with tempfile.TemporaryDirectory() as tmp, patch("omo_manager.omo_tmux_send.run_tmux", side_effect=fake_run_tmux):
+            result_dir = Path(tmp) / "result"
+            result_dir.mkdir()
             payload = Path(tmp) / "payload.txt"
             payload.write_text("/compact\n", encoding="utf-8")
             rc = run_async_worker(
@@ -293,14 +392,108 @@ class TmuxSendTests(unittest.TestCase):
                     False,
                     async_notify_target="cfg:0.0",
                     async_cleanup_message_file=True,
+                    async_result_dir=result_dir,
                 )
             )
 
-        self.assertEqual(1, rc)
-        self.assertEqual(1, len(calls))
-        self.assertEqual("cfg:0.0", calls[0][0])
-        self.assertIn("failed", calls[0][1])
-        self.assertIn("target not ready", calls[0][1])
+            self.assertEqual(1, rc)
+            self.assertEqual(1, len(calls))
+            self.assertEqual("cfg:0.0", calls[0][0])
+            self.assertIn("failed", calls[0][1])
+            self.assertIn("target not ready", calls[0][1])
+            self.assertEqual("failed\n", (result_dir / "status.txt").read_text(encoding="utf-8"))
+            self.assertEqual("target not ready\n", (result_dir / "result.txt").read_text(encoding="utf-8"))
+
+    def test_async_worker_marks_notify_failure_failed(self) -> None:
+        calls: list[tuple[str, str]] = []
+
+        def fake_run_tmux(args: Args, message: str) -> None:
+            if args.target == "cfg:0.0":
+                raise RuntimeError("notify pane gone")
+            calls.append((args.target, message))
+
+        with tempfile.TemporaryDirectory() as tmp, patch("omo_manager.omo_tmux_send.run_tmux", side_effect=fake_run_tmux), patch("sys.stderr", new_callable=StringIO):
+            result_dir = Path(tmp) / "result"
+            result_dir.mkdir()
+            payload = Path(tmp) / "payload.txt"
+            payload.write_text("/compact\n", encoding="utf-8")
+            rc = run_async_worker(
+                Args(
+                    "cfg:1.0",
+                    payload,
+                    1,
+                    0.15,
+                    0,
+                    False,
+                    async_notify_target="cfg:0.0",
+                    async_cleanup_message_file=True,
+                    async_result_dir=result_dir,
+                )
+            )
+
+            self.assertEqual(1, rc)
+            self.assertEqual([("cfg:1.0", "/compact\n")], calls)
+            self.assertEqual("failed\n", (result_dir / "status.txt").read_text(encoding="utf-8"))
+            self.assertIn("async notify failed", (result_dir / "result.txt").read_text(encoding="utf-8"))
+
+    def test_query_async_result_reports_status_logs_and_result(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="omo-tmux-send-async-test-") as tmp:
+            result_dir = Path(tmp)
+            (result_dir / "status.txt").write_text("succeeded\n", encoding="utf-8")
+            (result_dir / "result.txt").write_text("sent\n", encoding="utf-8")
+            with patch("sys.stdout", new_callable=StringIO) as stdout:
+                rc = query_async_result(str(result_dir))
+
+        self.assertEqual(0, rc)
+        text = stdout.getvalue()
+        self.assertIn("status: succeeded", text)
+        self.assertIn(f"result_dir: {result_dir}", text)
+        self.assertIn(f"stdout: {result_dir / 'stdout.log'}", text)
+        self.assertIn("result: sent", text)
+
+    def test_query_async_result_failed_and_missing_return_nonzero(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="omo-tmux-send-async-test-") as tmp:
+            result_dir = Path(tmp)
+            (result_dir / "status.txt").write_text("failed\n", encoding="utf-8")
+            (result_dir / "result.txt").write_text("target not ready\n", encoding="utf-8")
+            with patch("sys.stdout", new_callable=StringIO) as stdout:
+                failed_rc = query_async_result(str(result_dir))
+            missing = result_dir / "missing"
+            with patch("sys.stdout", new_callable=StringIO) as missing_stdout:
+                missing_rc = query_async_result(str(missing))
+
+        self.assertEqual(1, failed_rc)
+        self.assertIn("status: failed", stdout.getvalue())
+        self.assertEqual(1, missing_rc)
+        self.assertIn("status: missing", missing_stdout.getvalue())
+
+    def test_launch_async_prints_result_dir_when_worker_start_fails(self) -> None:
+        stdout = StringIO()
+        with patch("omo_manager.omo_tmux_send.subprocess.Popen", side_effect=RuntimeError("no fork")), patch("sys.stdout", stdout):
+            with self.assertRaisesRegex(RuntimeError, "no fork"):
+                launch_async(
+                    Args(
+                        "cfg:1.0",
+                        None,
+                        1,
+                        0.15,
+                        0,
+                        False,
+                        async_mode=True,
+                    ),
+                    "prompt\n",
+                )
+        lines = stdout.getvalue().splitlines()
+        result_dir = Path(lines[1].removeprefix("result_dir: "))
+        try:
+            self.assertTrue(lines[0].startswith("async_id: "))
+            self.assertEqual("failed\n", (result_dir / "status.txt").read_text(encoding="utf-8"))
+            self.assertEqual("worker start failed\n", (result_dir / "result.txt").read_text(encoding="utf-8"))
+        finally:
+            for path in result_dir.iterdir():
+                path.unlink(missing_ok=True)
+            result_dir.rmdir()
+
 
     def test_wait_ready_waits_through_running_codex(self) -> None:
         seen: list[int] = []
@@ -381,7 +574,7 @@ class TmuxSendTests(unittest.TestCase):
             return subprocess.CompletedProcess(command, 0)
 
         with patch("omo_manager.omo_tmux_send.tail", side_effect=fake_tail), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run), patch("omo_manager.omo_tmux_send.time.sleep"):
-            verify_submit(Args("cfg:1.0", None, 1, 0.15, 0, False, submit_verify_timeout_s=1), "Read the dispatch prompt from /tmp/x and follow it exactly.\n")
+            verify_submit(Args("cfg:1.0", None, 1, 0.15, 0, False, submit_verify_timeout_s=1, allow_plan_prompt_enter=True), "Read the dispatch prompt from /tmp/x and follow it exactly.\n")
 
         self.assertEqual([["tmux", "send-keys", "-t", "cfg:1.0", "Enter"]], calls)
 
@@ -473,27 +666,7 @@ class TmuxSendTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "Codex submit not verified"):
                 verify_submit(Args("cfg:1.0", None, 1, 0.15, 0, False, submit_verify_timeout_s=1), "Read the dispatch prompt from /tmp/x and follow it exactly.\n")
 
-    def test_verify_submit_does_not_retry_enter_on_plan_prompt(self) -> None:
-        calls: list[list[str]] = []
-
-        def fake_tail(_: str, __: int) -> list[str]:
-            return [
-                "› Read the dispatch prompt from /tmp/x and follow it exactly.",
-                "",
-                "  Create a plan?  shift + tab use Plan mode   esc dismiss",
-            ]
-
-        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-            calls.append(command)
-            return subprocess.CompletedProcess(command, 0)
-
-        with patch("omo_manager.omo_tmux_send.tail", side_effect=fake_tail), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
-            with self.assertRaisesRegex(RuntimeError, "unsafe Plan prompt"):
-                verify_submit(Args("cfg:1.0", None, 1, 0.15, 0, False, submit_verify_timeout_s=1), "Read the dispatch prompt from /tmp/x and follow it exactly.\n")
-
-        self.assertEqual([], calls)
-
-    def test_verify_submit_retries_enter_on_allowed_plan_prompt(self) -> None:
+    def test_verify_submit_retries_enter_on_plan_prompt(self) -> None:
         calls: list[list[str]] = []
         tails = iter(
             [
@@ -604,7 +777,7 @@ class TmuxSendTests(unittest.TestCase):
             calls.append("clear")
             return "sent_enter" if len(calls) == 2 else ""
 
-        with patch("omo_manager.omo_tmux_send.wait_compaction_over_before_send"), patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", side_effect=fake_clear), patch("omo_manager.omo_tmux_send.wait_ready") as wait, patch("omo_manager.omo_tmux_send.require_codex_target"), patch("omo_manager.omo_tmux_send.subprocess.run", return_value=subprocess.CompletedProcess(["tmux"], 0)):
+        with patch("omo_manager.omo_tmux_send.wait_compaction_over_before_send"), patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", side_effect=fake_clear), patch("omo_manager.omo_tmux_send.wait_ready") as wait, patch("omo_manager.omo_tmux_send.require_codex_target"), patch("omo_manager.omo_tmux_send.wait_input_ready_before_paste"), patch("omo_manager.omo_tmux_send.subprocess.run", return_value=subprocess.CompletedProcess(["tmux"], 0)):
             run_tmux(Args("cfg:1.0", None, 0, 0.15, 0, False), "prompt")
 
         wait.assert_called_once()
@@ -680,7 +853,7 @@ class TmuxSendTests(unittest.TestCase):
             calls.append(command)
             return subprocess.CompletedProcess(command, 0)
 
-        with patch("omo_manager.omo_tmux_send.wait_compaction_over_before_send"), patch("omo_manager.omo_tmux_send.require_codex_target"), patch("omo_manager.omo_tmux_send.uuid.uuid4", return_value=Uuid()), patch("omo_manager.omo_tmux_send.tail", side_effect=fake_tail), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
+        with patch("omo_manager.omo_tmux_send.wait_compaction_over_before_send"), patch("omo_manager.omo_tmux_send.require_codex_target"), patch("omo_manager.omo_tmux_send.wait_input_ready_before_paste"), patch("omo_manager.omo_tmux_send.uuid.uuid4", return_value=Uuid()), patch("omo_manager.omo_tmux_send.tail", side_effect=fake_tail), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
             run_tmux(Args("cfg:1.0", None, 1, 0.15, 0, False, submit_verify_timeout_s=1), "Summarize recent commits\n")
 
         self.assertIn(["tmux", "send-keys", "-l", "-t", "cfg:1.0", sentinel], calls)

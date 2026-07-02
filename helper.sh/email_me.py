@@ -43,7 +43,9 @@ except ImportError:
 MANAGER_PREFIX = "[a]"
 PWD_FOOTER_RE = re.compile(r"(?:^|\n)(?:>\s*)?PWD: [^\n]+\n?\Z")
 TMUX_WINDOW_RE = re.compile(r"[^:\n]+:\d+(?:\.\d+)?\Z")
-TMUX_SUBJECT_TAG_RE = re.compile(r"^\s*[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?(?:\s+|$)")
+TMUX_SUBJECT_TAG_RE = re.compile(r"^\s*(?:\[[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?\]|[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)(?:\s+|$)")
+BRACKETED_TMUX_TAG_RE = re.compile(r"\[[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?\]")
+MANAGER_HUMAN_SUBJECT_RE = re.compile(r"^(?:Re:\s*)?\[a\]\s+\[[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?\](?:\s+|$)", re.IGNORECASE)
 TMUX_FOOTER_RE = re.compile(r"(?:^|\n)tmux: [^:\n]+:\d+(?:\.\d+)?\r?\n?\Z", re.IGNORECASE)
 MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
 INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
@@ -74,6 +76,7 @@ class ParsedArgs(argparse.Namespace):
     no_pwd_footer: bool = False
     manager_human: bool = False
     tmux_target: str | None = None
+    sender_tmux_target: str | None = None
 
 
 def parse_args(argv: list[str]) -> CliArgs:
@@ -91,7 +94,8 @@ def parse_args(argv: list[str]) -> CliArgs:
     _ = parser.add_argument("--message-file", type=Path, help="Read the email body from this file instead of stdin.")
     _ = parser.add_argument("--dry-run", action="store_true", help="Validate without sending.")
     _ = parser.add_argument("--no-pwd-footer", action="store_true", help="Send the body exactly as provided, without appending a PWD footer.")
-    _ = parser.add_argument("--tmux-target", help="Use this producer tmux target for the footer instead of the caller pane.")
+    _ = parser.add_argument("--tmux-target", help="Use this producer tmux target for the footer and subject instead of the caller pane.")
+    _ = parser.add_argument("--sender-tmux-target", dest="sender_tmux_target", help="Alias for --tmux-target; useful when forwarding or compressing mail while preserving the source owner tag.")
     _ = parser.add_argument("--manager-human", action="store_true", help=argparse.SUPPRESS)
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     if parsed.title is not None and parsed.subject_file is not None:
@@ -134,9 +138,12 @@ def parse_args(argv: list[str]) -> CliArgs:
             parser.error("`title` must not contain control characters.")
     if parsed.manager_human and not content.strip():
         parser.error("email body must not be empty.")
-    if parsed.tmux_target is not None and not valid_tmux_target(parsed.tmux_target):
+    if parsed.tmux_target is not None and parsed.sender_tmux_target is not None and parsed.tmux_target != parsed.sender_tmux_target:
+        parser.error("pass --tmux-target or --sender-tmux-target, not both.")
+    tmux_target = parsed.tmux_target or parsed.sender_tmux_target
+    if tmux_target is not None and not valid_tmux_target(tmux_target):
         parser.error("--tmux-target must have shape session:window or session:window.pane, for example wl:4.")
-    return CliArgs(title=title, content=content, dry_run=parsed.dry_run, add_pwd_footer=not parsed.no_pwd_footer, manager_human=parsed.manager_human, tmux_target=parsed.tmux_target)
+    return CliArgs(title=title, content=content, dry_run=parsed.dry_run, add_pwd_footer=not parsed.no_pwd_footer, manager_human=parsed.manager_human, tmux_target=tmux_target)
 
 
 def normalize_subject(title: str, tmux_target: str = "") -> str:
@@ -167,8 +174,9 @@ def normalize_subject(title: str, tmux_target: str = "") -> str:
         raise ValueError("subject must be a real subject, not the placeholder SUBJECT")
     clean_target = tmux_target.strip()
     base = clean_subject_tmux_tags(base)
-    if clean_target and valid_tmux_target(clean_target) and not base.startswith(f"{clean_target} "):
-        base = f"{clean_target} {base}"
+    bracketed_target = f"[{clean_target}]"
+    if clean_target and valid_tmux_target(clean_target) and not base.startswith(f"{bracketed_target} "):
+        base = f"{bracketed_target} {base}"
     if lowered.startswith("re:"):
         return f"Re: {MANAGER_PREFIX} {base}"
     if reply:
@@ -246,6 +254,12 @@ def clean_subject_tmux_tags(subject: str) -> str:
         if next_text == text:
             return text
         text = next_text
+
+
+def validate_manager_human_subject(subject: str) -> None:
+    stripped = subject.strip()
+    if MANAGER_HUMAN_SUBJECT_RE.match(stripped) is None or len(BRACKETED_TMUX_TAG_RE.findall(stripped)) != 1:
+        raise ValueError("manager-human subject must contain exactly one bracketed tmux tag.")
 
 
 def append_pwd_footer(content: str, cwd: str | Path | None = None, tmux_target: str | None = None) -> str:
@@ -564,10 +578,14 @@ def main(argv: list[str]) -> int:
     args = parse_args(argv)
     try:
         subject_tmux_target = footer_tmux_target(args.tmux_target, args.manager_human)
+        if args.manager_human and subject_tmux_target is None:
+            raise ValueError("manager-human email requires a tmux target.")
         if prepare_subject_and_headers is not None:
             subject, reply_headers = prepare_subject_and_headers(args.title, subject_tmux_target or "")
         else:
             subject, reply_headers = normalize_subject(args.title, subject_tmux_target or ""), {}
+        if args.manager_human:
+            validate_manager_human_subject(subject)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2

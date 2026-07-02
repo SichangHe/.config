@@ -17,8 +17,18 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from omo_manager.omo_agent_status import TaskLine
+from omo_manager.omo_agent_status import active_vl_submanager_target
+from omo_manager.omo_agent_status import effective_owner_target
+from omo_manager.omo_agent_status import parse_task_lines
+from omo_manager.omo_agent_status import resolve_task_path
+from omo_manager.omo_agent_status import scan_task_state
 
 
 def default_state_dir() -> Path:
@@ -45,14 +55,28 @@ PENDING_MARKERS = {"(pending)"}
 TASK_FILE_LINE_WARNING_THRESHOLD = 2000
 TODO_LINE_WARNING_THRESHOLD = 200
 ROUTED_PREFIXES = ("(manager handled:", "(manager routed:")
-EMAIL_SOURCE_PREFIXES = ("(from email ", "[source: email ")
+EMAIL_SOURCE_PREFIXES = ("(record and delegate ", "(from email ", "[source: email ")
 AGENT_SOURCE_PREFIXES = ("[omo-message-source: origin=agent ", "(from agent ")
 STATUS_DETAIL_RE = re.compile(r"^\((pending|running|done|blocked)(?::\s*([^)]*))?\)(?:\s+\(([^)]*)\))?$")
 TMUX_TARGET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?$")
+RUNAT_RE = re.compile(r"^runat:\s+([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\b")
 AGENT_PROBLEM_SOURCE_LINE = "[omo-message-source: origin=agent source=agent action=no-human-ack agent=omo_pending_watch via=omo_pending_watch.py status=agent-problem]"
 MANAGER_COMPACTION_SOURCE_LINE = "[omo-message-source: origin=agent source=agent action=no-human-ack agent=omo_pending_watch via=omo_pending_watch.py status=manager-compaction-reread]"
 MANAGER_COMPACTION_REMINDER = "Manager compaction observed. Reread MANAGER.md now unless the compaction summary already included it, then continue from the current manager task state."
 TODO_LENGTH_REMINDER = "TODO.md length reminder: TODO.md has {n_lines} lines. Move done material to YYYYMM/old_todos.md and keep TODO.md under 200 lines."
+MANAGER_TASK_STATE_REMINDER_HEADER = (
+    "manager task-state reminder: MANAGER.md lines 49-51 require each manager-owned task to be `(running)`, `(done)`, or `(blocked)` while the manager is idle. "
+    "Start/resume the task, mark it done, or block it with a reason. Single-tag enforcement is intentionally not checked."
+)
+MANAGER_TASK_STATE_OK = {"running", "done", "blocked"}
+MANAGER_TASK_STATE_REMINDER_LIMIT = 20
+MANAGER_TASK_STATE_LIVE_SECTIONS = {"todo:current", "todo:human pending", "todo:low priority"}
+MANAGER_WORKTREE_REMINDER_LIMIT = 20
+MANAGER_WORKTREE_CHECK_TIMEOUT_S = 10
+MANAGER_WORKTREE_REMINDER_HEADER = (
+    "manager PWD cleanliness reminder: dirty manager-owned changes are present. "
+    "Route cleanup to manager-ops or compact/resume with this dirty-state summary before the main manager goes idle."
+)
 MANAGER_POLICY_REMINDER_RATE = 0.125
 MANAGER_POLICY_REMINDERS = (
     "Reminder: delegate work; do not do worker work in the manager.",
@@ -387,6 +411,8 @@ def marker_origin_source(block_lines: list[str]) -> tuple[str, str]:
 def delegate_source(block_lines: list[str]) -> str:
     for line in block_lines:
         stripped = line.strip()
+        if stripped.startswith("(record and delegate ") and stripped.endswith(")"):
+            return stripped[len("(record and delegate ") : -1]
         if stripped.startswith("(from email ") and stripped.endswith(")"):
             return stripped[len("(from email ") : -1]
         if stripped.startswith("[source: email ") and stripped.endswith("]"):
@@ -406,15 +432,18 @@ def directive_target(path: Path, name: str) -> str:
     return ""
 
 
-def is_submanager_task_file(path: Path) -> bool:
-    name = path.name
-    return "submanager" in name or name.startswith("vl_supervisor_current_")
+def is_vl_task_file(path: Path) -> bool:
+    return path.name.startswith("vl_") or "/vl_" in path.as_posix()
 
 
 def marker_manager_target(args: Args, marker: Marker) -> str:
-    if marker.origin == "agent" and is_submanager_task_file(marker.file):
-        return args.manager_target
     target = directive_target(args.root / marker.file, "managerat")
+    if target:
+        return target
+    if is_vl_task_file(marker.file):
+        target = active_vl_submanager_target(args.root)
+        if target:
+            return target
     return target or args.manager_target
 
 
@@ -510,6 +539,10 @@ def push_manager_text(args: Args, text: str) -> int:
     return subprocess.run(push_manager_command(args, text), check=False).returncode
 
 
+def push_manager_text_to_target(args: Args, text: str, manager_target: str) -> int:
+    return push_manager_text(replace(args, manager_target=manager_target), text)
+
+
 def push_manager_command(args: Args, text: str) -> list[str]:
     command = ["omo_push_to_manager.py", text, "--root", str(args.root), "--submit"]
     if args.manager_target:
@@ -536,8 +569,95 @@ def maybe_push_idle_status(args: Args, last_activity_s: float, now_s: float) -> 
         return False
     if result.stderr.strip():
         output = f"{output}\nstderr:\n{result.stderr.strip()}".strip()
-    text = f"manager agent status: periodic running-agent status.\n{output}"
+    text = idle_status_text(args, output)
     return push_manager_text(args, text) in {0, 2}
+
+
+def manager_task_state_reminder_text(root: Path, manager_target: str = "") -> str:
+    todo = root / "TODO.md"
+    rows: list[str] = []
+    seen: set[str] = set()
+    for task in parse_task_lines(todo):
+        if task.task_file == "TODO.md" or task.task_file in seen or task.section not in MANAGER_TASK_STATE_LIVE_SECTIONS:
+            continue
+        seen.add(task.task_file)
+        state_path = resolve_task_path(root, task.task_file)
+        if not reminder_task_owned_by_manager(root, task, manager_target, state_path):
+            continue
+        if state_path is None:
+            rows.append(f"task-state: task={task.task_file} status=missing-file")
+            continue
+        state = scan_task_state(state_path)
+        if state is not None and state.status in MANAGER_TASK_STATE_OK:
+            continue
+        status = state.status if state is not None else "missing-status"
+        rows.append(f"task-state: task={task.task_file} status={status}")
+    if not rows:
+        return ""
+    visible_rows = rows[:MANAGER_TASK_STATE_REMINDER_LIMIT]
+    if len(rows) > MANAGER_TASK_STATE_REMINDER_LIMIT:
+        visible_rows.append(f"task-state: omitted={len(rows) - MANAGER_TASK_STATE_REMINDER_LIMIT}")
+    return "\n".join([MANAGER_TASK_STATE_REMINDER_HEADER, *visible_rows])
+
+
+def reminder_task_owned_by_manager(root: Path, task: TaskLine, manager_target: str, state_path: Path | None) -> bool:
+    owner = effective_owner_target(root, task, state_path)
+    if not owner:
+        return True
+    return bool(manager_target and same_tmux_target(owner, manager_target))
+
+
+def manager_worktree_reminder_from_output(output: str) -> str:
+    dirty_rows = [
+        line
+        for line in output.splitlines()
+        if line.strip() and not line.startswith("clean: ") and not (line.startswith("repo-error: ") and "not a git repository" in line)
+    ]
+    if not dirty_rows:
+        return ""
+    visible_rows = dirty_rows[:MANAGER_WORKTREE_REMINDER_LIMIT]
+    if len(dirty_rows) > MANAGER_WORKTREE_REMINDER_LIMIT:
+        visible_rows.append(f"worktree: omitted={len(dirty_rows) - MANAGER_WORKTREE_REMINDER_LIMIT}")
+    return "\n".join([MANAGER_WORKTREE_REMINDER_HEADER, *visible_rows])
+
+
+def manager_worktree_reminder_text(root: Path) -> str:
+    if not (root / ".git").exists():
+        return ""
+    checker = Path(__file__).resolve().with_name("omo_worktree_check.py")
+    try:
+        result = subprocess.run(
+            [sys.executable, str(checker), "--repo", str(root)],
+            capture_output=True,
+            text=True,
+            timeout=MANAGER_WORKTREE_CHECK_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return "\n".join(
+            [
+                MANAGER_WORKTREE_REMINDER_HEADER,
+                f"worktree-check: status=failed error={exc}",
+            ]
+        )
+    output = result.stdout.strip()
+    if result.returncode != 0:
+        details = output or result.stderr.strip() or f"status={result.returncode}"
+        if "not a git repository" in details:
+            return ""
+        return "\n".join([MANAGER_WORKTREE_REMINDER_HEADER, f"worktree-check: {details}"])
+    return manager_worktree_reminder_from_output(output)
+
+
+def idle_status_text(args: Args, output: str) -> str:
+    text = f"manager agent status: periodic running-agent status.\n{output}"
+    reminder = manager_task_state_reminder_text(args.root, args.manager_target)
+    if reminder:
+        text = f"{text}\n{reminder}"
+    worktree_reminder = manager_worktree_reminder_text(args.root)
+    if worktree_reminder:
+        text = f"{text}\n{worktree_reminder}"
+    return text
 
 
 def periodic_status_text(args: Args, result: CommandOutput) -> str | None:
@@ -552,7 +672,7 @@ def periodic_status_text(args: Args, result: CommandOutput) -> str | None:
         return None
     if result.stderr.strip():
         output = f"{output}\nstderr:\n{result.stderr.strip()}".strip()
-    return f"manager agent status: periodic running-agent status.\n{output}"
+    return idle_status_text(args, output)
 
 
 def manager_push_timeout_s() -> float:
@@ -580,8 +700,168 @@ def status_command(args: Args, problems_only: bool = False) -> list[str]:
     return command
 
 
+def agent_problem_count_line(lines: list[str]) -> str:
+    counts = {"not_codex": 0, "blocked_idle": 0, "error": 0, "human_request": 0, "manager_compaction": 0, "ready": 0, "stuck_input": 0, "done-registry-stale": 0}
+    for line in lines:
+        problem_match = re.match(r"^(not_codex|blocked_idle|error|human_request|manager_compaction|ready|stuck_input): ", line)
+        if problem_match is not None:
+            counts[problem_match.group(1)] += 1
+        elif line.startswith("done-stale: "):
+            counts["done-registry-stale"] += 1
+    parts = [f"{status}={counts[status]}" for status in ("not_codex", "blocked_idle", "error", "human_request", "manager_compaction", "ready", "stuck_input") if counts[status]]
+    if counts["done-registry-stale"]:
+        parts.append(f"done-registry-stale={counts['done-registry-stale']}")
+    return f"agent-problems: {' '.join(parts)}" if parts else ""
+
+
+def problem_line_owner_target(line: str) -> str:
+    match = re.search(r"\bowner_target=([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\b", line)
+    return match.group(1) if match is not None else ""
+
+
+def problem_line_target(line: str) -> str:
+    match = re.search(r"\bevidence=target=(\S+)", line)
+    if match is not None:
+        return match.group(1)
+    match = re.search(r"\btarget=(\S+)", line)
+    return match.group(1) if match is not None else ""
+
+
+def manager_actions_for_problem_lines(lines: list[str]) -> list[str]:
+    count_line = agent_problem_count_line(lines)
+    actions: list[str] = []
+    if re.search(r"\bblocked_idle=\d+", count_line):
+        actions.append("manager-action: blocked_idle>0 inspect blocked agents, unblock if possible, or route the exact blocker")
+    if re.search(r"\bdone-registry-stale=\d+", count_line):
+        actions.append("manager-action: done-registry-stale>0 close stale idle agents with omo_codex_stop.py or prune stale registry rows")
+    if re.search(r"\bmanager_compaction=\d+", count_line):
+        actions.append("manager-action: manager_compaction>0 reread MANAGER.md after compaction unless the compaction summary already included it")
+    return actions
+
+
+def agent_problem_output_by_owner(output: str) -> dict[str, str]:
+    lines = output.splitlines()
+    if not lines or not lines[0].startswith("agent-problems:"):
+        return {}
+    groups: dict[str, list[str]] = {}
+    owner_by_target: dict[str, str] = {}
+    for line in lines[1:]:
+        if line.startswith("manager-action: "):
+            continue
+        if line.startswith("unstuck: "):
+            continue
+        owner = problem_line_owner_target(line)
+        groups.setdefault(owner, []).append(line)
+        target = problem_line_target(line)
+        if target:
+            owner_by_target.setdefault(canonical_target(target), owner)
+    for line in lines[1:]:
+        if not line.startswith("unstuck: "):
+            continue
+        owner = owner_by_target.get(canonical_target(problem_line_target(line)), "")
+        groups.setdefault(owner, []).append(line)
+    outputs: dict[str, str] = {}
+    for owner, body_lines in groups.items():
+        count_line = agent_problem_count_line(body_lines)
+        if count_line:
+            outputs[owner] = "\n".join([count_line, *manager_actions_for_problem_lines(body_lines), *body_lines])
+    return outputs
+
+
+def filtered_problem_output(body_lines: list[str], *, suppress_message: str = "") -> str | None:
+    count_line = agent_problem_count_line(body_lines)
+    if not count_line:
+        if suppress_message:
+            print(suppress_message, flush=True)
+        return None
+    return "\n".join([count_line, *manager_actions_for_problem_lines(body_lines), *body_lines])
+
+
+def filter_vl_problem_output(output: str, owner_target: str = "") -> str:
+    lines = output.splitlines()
+    if not lines or not lines[0].startswith("agent-problems:"):
+        return ""
+    kept: list[str] = []
+    kept_targets: set[str] = set()
+    for line in lines[1:]:
+        if line.startswith("manager-action: "):
+            continue
+        if re.match(r"^(?:not_codex|blocked_idle|error|human_request|manager_compaction|ready|stuck_input): task=(?:vl_|[^ ]*/vl_|tmux:vl:)", line):
+            kept.append(line)
+            target = problem_line_target(line)
+            if target:
+                kept_targets.add(canonical_target(target))
+            continue
+        if re.match(r"^(?:not_codex|blocked_idle|error|human_request|manager_compaction|ready|stuck_input): task=\S+ evidence=.*\btarget=vl:", line):
+            kept.append(line)
+            target = problem_line_target(line)
+            if target:
+                kept_targets.add(canonical_target(target))
+            continue
+        if owner_target and problem_line_owner_target(line) and same_tmux_target(problem_line_owner_target(line), owner_target):
+            kept.append(line)
+            target = problem_line_target(line)
+            if target:
+                kept_targets.add(canonical_target(target))
+            continue
+        if line.startswith("done-stale: task=vl_") or line.startswith("done-stale: task=") and "/vl_" in line:
+            kept.append(line)
+    for line in lines[1:]:
+        if not line.startswith("unstuck: "):
+            continue
+        target = canonical_target(problem_line_target(line))
+        if target_session(target) == "vl" or target in kept_targets:
+            kept.append(line)
+    text = filtered_problem_output(kept)
+    if text is None:
+        return ""
+    return text
+
+
+def maybe_push_vl_agent_problems(args: Args, seen: dict[str, float], now_wall_s: float) -> bool:
+    if not args.manager_target:
+        return False
+    vl_target = active_vl_submanager_target(args.root)
+    if not vl_target or same_tmux_target(vl_target, args.manager_target):
+        return False
+    vl_args = replace(args, manager_target=vl_target)
+    try:
+        result = subprocess.run(status_command(vl_args, True), capture_output=True, text=True, timeout=DEFAULT_AGENT_PROBLEM_TIMEOUT_S, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"omo_pending_watch: VL agent problem check failed: {exc}", file=sys.stderr)
+        return False
+    if result.returncode == 0:
+        return False
+    if result.returncode != 3:
+        print(f"omo_pending_watch: VL agent problem check exited status={result.returncode}: {result.stderr.strip()}", file=sys.stderr)
+        return False
+    output = filter_vl_problem_output(result.stdout.strip(), vl_target)
+    if not output:
+        return False
+    if result.stderr.strip():
+        output = f"{output}\nstderr:\n{result.stderr.strip()}".strip()
+    digest = hashlib.sha256(f"{vl_target}\n{output}".encode("utf-8")).hexdigest()[:16]
+    key = f"vl-agent-problem:{digest}"
+    has_unstuck = any(line.startswith("unstuck: ") for line in output.splitlines())
+    if not has_unstuck and now_wall_s - seen.get(key, 0.0) < args.agent_problem_repeat_s:
+        return False
+    text = f"{AGENT_PROBLEM_SOURCE_LINE}\nmanager agent problem: running task marker needs attention.\n{output}"
+    if push_manager_text(vl_args, text) not in {0, 2}:
+        return False
+    seen[key] = now_wall_s
+    return True
+
+
 def target_aliases(target: str) -> set[str]:
     return {target, target[:-2] if target.endswith(".0") else f"{target}.0"} if target else set()
+
+
+def canonical_target(target: str) -> str:
+    return target[:-2] if target.endswith(".0") else target
+
+
+def target_session(target: str) -> str:
+    return target.split(":", 1)[0] if ":" in target else ""
 
 
 def same_tmux_target(left: str, right: str) -> bool:
@@ -653,45 +933,20 @@ def filter_manager_compaction_output(output: str, manager_target: str = "") -> s
     lines = output.splitlines()
     if not lines or not lines[0].startswith("agent-problems:"):
         return output
-    kept = [line for line in lines[1:] if not manager_compaction_line(line, manager_target) and not line.startswith("manager-action: manager_compaction>0 ")]
+    kept = [line for line in lines[1:] if not manager_compaction_line(line, manager_target) and not line.startswith("manager-action: ")]
     if len(kept) == len(lines) - 1:
         return output
-    counts = {"not_codex": 0, "blocked_idle": 0, "error": 0, "manager_compaction": 0, "ready": 0, "stuck_input": 0, "done-registry-stale": 0}
-    for line in kept:
-        problem_match = re.match(r"^(not_codex|blocked_idle|error|manager_compaction|ready|stuck_input): ", line)
-        if problem_match is not None:
-            counts[problem_match.group(1)] += 1
-        elif line.startswith("done-stale: "):
-            counts["done-registry-stale"] += 1
-    parts = [f"{status}={counts[status]}" for status in ("not_codex", "blocked_idle", "error", "manager_compaction", "ready", "stuck_input") if counts[status]]
-    if counts["done-registry-stale"]:
-        parts.append(f"done-registry-stale={counts['done-registry-stale']}")
-    if not parts:
-        return None
-    return "\n".join([f"agent-problems: {' '.join(parts)}", *kept])
+    return filtered_problem_output(kept)
 
 
 def filter_manager_self_problem_output(output: str, manager_target: str = "") -> str | None:
     lines = output.splitlines()
     if not lines or not lines[0].startswith("agent-problems:"):
         return output
-    kept = [line for line in lines[1:] if not manager_self_problem_line(line, manager_target) and not manager_self_unstuck_line(line, manager_target)]
+    kept = [line for line in lines[1:] if not manager_self_problem_line(line, manager_target) and not manager_self_unstuck_line(line, manager_target) and not line.startswith("manager-action: ")]
     if len(kept) == len(lines) - 1:
         return output
-    counts = {"not_codex": 0, "blocked_idle": 0, "error": 0, "manager_compaction": 0, "ready": 0, "stuck_input": 0, "done-registry-stale": 0}
-    for line in kept:
-        problem_match = re.match(r"^(not_codex|blocked_idle|error|manager_compaction|ready|stuck_input): ", line)
-        if problem_match is not None:
-            counts[problem_match.group(1)] += 1
-        elif line.startswith("done-stale: "):
-            counts["done-registry-stale"] += 1
-    parts = [f"{status}={counts[status]}" for status in ("not_codex", "blocked_idle", "error", "manager_compaction", "ready", "stuck_input") if counts[status]]
-    if counts["done-registry-stale"]:
-        parts.append(f"done-registry-stale={counts['done-registry-stale']}")
-    if not parts:
-        print("omo_pending_watch: suppressed manager self-problem report", flush=True)
-        return None
-    return "\n".join([f"agent-problems: {' '.join(parts)}", *kept])
+    return filtered_problem_output(kept, suppress_message="omo_pending_watch: suppressed manager self-problem report")
 
 
 def manager_human_email_problem_output(output: str, manager_target: str = "") -> str:
@@ -730,8 +985,11 @@ def email_human_manager_problem(args: Args, output: str) -> bool:
             body_file = tmp_path / "body.md"
             subject_file.write_text(subject + "\n", encoding="utf-8")
             body_file.write_text(body, encoding="utf-8")
+            command = [str(DEFAULT_HUMAN_EMAIL_HELPER), "--manager-human", "--subject-file", str(subject_file), "--message-file", str(body_file)]
+            if args.manager_target:
+                command.extend(("--sender-tmux-target", args.manager_target))
             result = subprocess.run(
-                [str(DEFAULT_HUMAN_EMAIL_HELPER), "--manager-human", "--subject-file", str(subject_file), "--message-file", str(body_file)],
+                command,
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -753,7 +1011,8 @@ def maybe_push_agent_problems(args: Args, seen: dict[str, float], now_wall_s: fl
     except (OSError, subprocess.SubprocessError) as exc:
         print(f"omo_pending_watch: agent problem check failed: {exc}", file=sys.stderr)
         return False
-    return handle_agent_problem_result(args, seen, CommandOutput("agent-problems", result.returncode, result.stdout, result.stderr), now_wall_s)
+    changed = maybe_push_vl_agent_problems(args, seen, now_wall_s)
+    return handle_agent_problem_result(args, seen, CommandOutput("agent-problems", result.returncode, result.stdout, result.stderr), now_wall_s) or changed
 
 
 def handle_agent_problem_result(args: Args, seen: dict[str, float], result: CommandOutput, now_wall_s: float) -> bool:
@@ -779,16 +1038,20 @@ def handle_agent_problem_result(args: Args, seen: dict[str, float], result: Comm
     output = filter_manager_self_problem_output(output, args.manager_target) or ""
     if not output:
         return manager_email_sent or compaction_changed
-    has_unstuck = any(line.startswith("unstuck: ") for line in output.splitlines())
-    digest = hashlib.sha256(output.encode("utf-8")).hexdigest()[:16]
-    key = f"agent-problem:{digest}"
-    if not has_unstuck and now_wall_s - seen.get(key, 0.0) < args.agent_problem_repeat_s:
-        return manager_email_sent or compaction_changed
-    text = with_manager_policy_reminder(args, f"{AGENT_PROBLEM_SOURCE_LINE}\nmanager agent problem: running task marker needs attention.\n{output}")
-    if push_manager_text(args, text) not in {0, 2}:
-        return manager_email_sent or compaction_changed
-    seen[key] = now_wall_s
-    return True
+    changed = manager_email_sent or compaction_changed
+    for owner_target, owner_output in agent_problem_output_by_owner(output).items():
+        has_unstuck = any(line.startswith("unstuck: ") for line in owner_output.splitlines())
+        digest = hashlib.sha256(f"{owner_target}\n{owner_output}".encode("utf-8")).hexdigest()[:16]
+        key = f"agent-problem:{digest}"
+        if not has_unstuck and now_wall_s - seen.get(key, 0.0) < args.agent_problem_repeat_s:
+            continue
+        text = with_manager_policy_reminder(args, f"{AGENT_PROBLEM_SOURCE_LINE}\nmanager agent problem: running task marker needs attention.\n{owner_output}")
+        target = owner_target or args.manager_target
+        if push_manager_text_to_target(args, text, target) not in {0, 2}:
+            continue
+        seen[key] = now_wall_s
+        changed = True
+    return changed
 
 
 def start_command(name: str, command: list[str], timeout_s: float, cwd: Path | None = None) -> CommandRun | None:

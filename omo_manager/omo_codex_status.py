@@ -301,6 +301,8 @@ def status(lines: list[str], block: Block) -> str:
         return "stuck_input"
     if input_text in CODEX_RUNNING_EMPTY_INPUT_TEXTS and current_input_follows_running_indicator(lines):
         return "running"
+    if not input_text and block.has_footer:
+        return "ready"
     if has_running_indicator(lines) and (not is_stock_placeholder_input_text(input_text) or current_input_follows_running_indicator(lines) or has_compacting_indicator(lines)):
         return "running"
     if block.has_footer or any(READY_RE.match(line) is not None or INPUT_RE.match(line) is not None for line in lines[-10:]):

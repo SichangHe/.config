@@ -15,7 +15,7 @@ Workflow:
 - classify any memo the human should read in whole as retained source mail; omit those UIDs from the superseded UID file
 - write a task-private `superseded-uids.txt` containing only source UIDs fully replaced by the new summaries
 - keep private bodies in `/tmp` or another owner-only scratch directory
-- send replacement summaries with `email_me.py --manager-human --subject-file SUBJECT --message-file BODY`
+- send replacement summaries with `email_me.py --manager-human --sender-tmux-target OWNER_TARGET --subject-file SUBJECT --message-file BODY`
 - after replacements are sent, run `omo_manager_mail_compress.py trash-superseded --uid-file /tmp/manager-mail-compress-PRIVATE/superseded-uids.txt --yes`
 - verify the helper reports `verify_remaining=0`
 - write a task-linked audit with topics, counts, UID boundary, replacement subjects, and any skipped boundary
@@ -35,7 +35,7 @@ Safety boundary:
 - before moving mail, `trash-superseded` rechecks that each still-inbox UID is self-addressed manager mail
 - export refuses a non-empty output directory so stale private body files are not mixed into a new run
 - the helper moves only explicit superseded source mail to `[Gmail]/Trash`; it never expunges or permanently deletes message bodies
-- use `email_me.py --manager-human --subject-file SUBJECT --message-file BODY` for replacement summary text
+- use `email_me.py --manager-human --sender-tmux-target OWNER_TARGET --subject-file SUBJECT --message-file BODY` for replacement summary text
 
 Judgment boundary:
 - the helper does not choose topics or summarize email bodies

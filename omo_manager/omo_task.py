@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -17,9 +18,11 @@ except ModuleNotFoundError:
     from omo_codex_status import current_block, status, tail
 
 DEFAULT_ROOT = Path(os.environ.get("OMO_WORK_LOGS_ROOT", Path.home() / "work_logs"))
-DEFAULT_WORKER_INSTRUCTIONS = Path(__file__).with_name("WORKER_DEFAULTS.md")
-VL_WORKER_INSTRUCTIONS = Path(__file__).with_name("VL_WORKER_DEFAULTS.md")
-PCODX_WRAPPER = Path(__file__).resolve().with_name("pcodx")
+HELPER_DIR = Path(__file__).resolve().parent
+DEFAULT_WORKER_INSTRUCTIONS = HELPER_DIR / "WORKER_DEFAULTS.md"
+VL_WORKER_INSTRUCTIONS = HELPER_DIR / "VL_WORKER_DEFAULTS.md"
+VL_EXPERIMENT_PREFLIGHT = HELPER_DIR / "omo_vl_experiment_preflight.py"
+PCODX_WRAPPER = HELPER_DIR / "pcodx"
 COMMAND_BY_TOOL = {
     "codex": ("bunx", "@openai/codex", "--dangerously-bypass-approvals-and-sandbox"),
     "pcodx": (str(PCODX_WRAPPER),),
@@ -48,6 +51,10 @@ class Args:
     codex_flags: tuple[str, ...]
     tool_explicit: bool = False
     manager_target: str = ""
+    vl_experiment_preflight: bool = False
+    vl_preflight_vlh: Path | None = None
+    vl_preflight_verus: Path | None = None
+    vl_preflight_artifact_root: Path | None = None
 
 
 class ParsedArgs(argparse.Namespace):
@@ -65,6 +72,10 @@ class ParsedArgs(argparse.Namespace):
     reasoning_effort: str = ""
     codex_flag: list[str] | None = None
     manager_target: str = ""
+    vl_experiment_preflight: bool = False
+    vl_preflight_vlh: Path | None = None
+    vl_preflight_verus: Path | None = None
+    vl_preflight_artifact_root: Path | None = None
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -84,6 +95,10 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--reasoning-effort", choices=("low", "medium", "high", "xhigh"), default="", help="Start Codex with `model_reasoning_effort` for this worker.")
     _ = parser.add_argument("--codex-flag", action="append", help="Extra raw Codex argv token. Repeat for flags and values; use `--codex-flag=--flag` when the token starts with `--`.")
     _ = parser.add_argument("--manager-target", default="", help="Optional manager owner target to write as `managerat:` task metadata.")
+    _ = parser.add_argument("--vl-experiment-preflight", action="store_true", help="Run the reusable VL helper/verifier/provider preflight before launching Codex.")
+    _ = parser.add_argument("--vl-preflight-vlh", type=Path, help="Intended `vlh` executable for --vl-experiment-preflight.")
+    _ = parser.add_argument("--vl-preflight-verus", type=Path, help="Verifier executable for --vl-experiment-preflight.")
+    _ = parser.add_argument("--vl-preflight-artifact-root", type=Path, help="Experiment artifact root for --vl-experiment-preflight evidence and staging checks.")
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     if not parsed.task_file.endswith(".md"):
         parser.error("--task-file must end with `.md`.")
@@ -94,7 +109,7 @@ def parse_args(argv: list[str]) -> Args:
     if parsed.tool not in COMMAND_BY_TOOL:
         parser.error("only --tool codex or --tool pcodx is supported.")
     tool_explicit = any(arg == "--tool" or arg.startswith("--tool=") for arg in argv)
-    return Args(parsed.root.resolve(), parsed.task_file, parsed.tmux_session, parsed.tmux_window, parsed.tool, parsed.workdir, parsed.window_name, parsed.prompt_file, parsed.no_link, parsed.dry_run, parsed.session_id, parsed.reasoning_effort, tuple(parsed.codex_flag or ()), tool_explicit, parsed.manager_target)
+    return Args(parsed.root.resolve(), parsed.task_file, parsed.tmux_session, parsed.tmux_window, parsed.tool, parsed.workdir, parsed.window_name, parsed.prompt_file, parsed.no_link, parsed.dry_run, parsed.session_id, parsed.reasoning_effort, tuple(parsed.codex_flag or ()), tool_explicit, parsed.manager_target, parsed.vl_experiment_preflight, parsed.vl_preflight_vlh, parsed.vl_preflight_verus, parsed.vl_preflight_artifact_root)
 
 
 def task_path(root: Path, task_file: str) -> Path:
@@ -129,6 +144,15 @@ def is_vl_submanager_task_file(task_file: str) -> bool:
 
 def is_vl_agent(task_file: str, tmux_target: str) -> bool:
     return is_vl_task_file(task_file) or target_session(tmux_target) == "vl"
+
+
+def is_vl_experiment_task_file(task_file: str) -> bool:
+    name = Path(task_file).name
+    return name.startswith("vl_") and ("_exp_" in name or "_rerun_" in name)
+
+
+def requires_vl_experiment_preflight(args: Args) -> bool:
+    return args.workdir is not None and is_vl_experiment_task_file(args.task_file)
 
 
 def header(tmux_target: str, tool: str) -> str:
@@ -351,12 +375,64 @@ def shell_cmd(command: str) -> str:
     return "bash -lc " + shlex.quote(command)
 
 
-def worker_command(command: str, tmux_target: str) -> str:
-    return f"export OMO_AGENT_TMUX_TARGET={shlex.quote(tmux_target)}; {command}"
+def worker_command(command: str, tmux_target: str, env: dict[str, str] | None = None) -> str:
+    exports = {"OMO_AGENT_TMUX_TARGET": tmux_target}
+    if env is not None:
+        exports.update(env)
+    export_text = " ".join(f"{key}={shlex.quote(value)}" for key, value in exports.items())
+    return f"export {export_text}; {command}"
+
+
+def vl_preflight_env(args: Args) -> dict[str, str]:
+    if not requires_vl_experiment_preflight(args):
+        return {}
+    artifact_root = (args.vl_preflight_artifact_root or task_path(args.root, args.task_file).with_suffix("")).resolve(strict=False)
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "VL_EXPERIMENT_ARTIFACT_ROOT": str(artifact_root),
+    }
+    if args.vl_preflight_vlh is not None:
+        vlh = args.vl_preflight_vlh.resolve(strict=False)
+        env["VLH"] = str(vlh)
+        env["PATH"] = f"{vlh.parent}:{env['PATH']}"
+    elif found_vlh := shutil.which("vlh", path=env["PATH"]):
+        env["VLH"] = str(Path(found_vlh).resolve(strict=False))
+    if args.vl_preflight_verus is not None:
+        verus = args.vl_preflight_verus.resolve(strict=False)
+        env["VERUS"] = str(verus)
+        env["PATH"] = f"{verus.parent}:{env['PATH']}"
+    elif os.environ.get("VERUS"):
+        verus = Path(os.environ["VERUS"]).resolve(strict=False)
+        env["VERUS"] = str(verus)
+        env["PATH"] = f"{verus.parent}:{env['PATH']}"
+    elif found := shutil.which("verus", path=env["PATH"]):
+        verus = Path(found).resolve(strict=False)
+        env["VERUS"] = str(verus)
+        env["PATH"] = f"{verus.parent}:{env['PATH']}"
+    return env
 
 
 def tmux(args: list[str], check: bool = False) -> subprocess.CompletedProcess[str]:
     return subprocess.run(["tmux", *args], capture_output=True, text=True, timeout=10, check=check)
+
+
+def run_vl_experiment_preflight(args: Args) -> None:
+    if not requires_vl_experiment_preflight(args):
+        return
+    if not VL_EXPERIMENT_PREFLIGHT.is_file():
+        raise FileNotFoundError(f"VL experiment preflight not found: {VL_EXPERIMENT_PREFLIGHT}")
+    artifact_root = args.vl_preflight_artifact_root or task_path(args.root, args.task_file).with_suffix("")
+    command = [sys.executable, str(VL_EXPERIMENT_PREFLIGHT), "--artifact-root", str(artifact_root), "--evidence-dir", str(artifact_root)]
+    if args.vl_preflight_vlh is not None:
+        command.extend(("--vlh", str(args.vl_preflight_vlh)))
+    if args.vl_preflight_verus is not None:
+        command.extend(("--verus", str(args.vl_preflight_verus)))
+    env = os.environ.copy()
+    env.update(vl_preflight_env(args))
+    result = subprocess.run(command, capture_output=True, text=True, timeout=30, env=env)
+    if result.returncode != 0:
+        detail = "\n".join(part.strip() for part in (result.stdout, result.stderr) if part.strip())
+        raise ValueError(f"VL experiment preflight failed before launch:\n{detail}")
 
 
 def current_command(target: str) -> str:
@@ -397,7 +473,7 @@ def start_codex(target: str, args: Args) -> None:
     vl_agent = is_vl_agent(args.task_file, target)
     if vl_agent and args.prompt_file is None:
         raise ValueError("VL launches require --prompt-file so the end-goal and reviewer guidance has task-local context.")
-    command = shell_cmd(worker_command(codex_cmd(args.session_id, args.reasoning_effort, args.codex_flags, args.prompt_file, effective_tool(args), vl_agent), target))
+    command = shell_cmd(worker_command(codex_cmd(args.session_id, args.reasoning_effort, args.codex_flags, args.prompt_file, effective_tool(args), vl_agent), target, vl_preflight_env(args)))
     _ = tmux(["send-keys", "-t", target, command, "Enter"], check=True)
     wait_command_started(target)
 
@@ -478,10 +554,18 @@ def dry_run(args: Args) -> None:
     if not args.no_link:
         print(f"todo_line: {todo_line(args, tmux_target)}")
     if args.workdir is not None:
+        if requires_vl_experiment_preflight(args):
+            artifact_root = args.vl_preflight_artifact_root or path.with_suffix("")
+            preflight = [sys.executable, str(VL_EXPERIMENT_PREFLIGHT), "--artifact-root", str(artifact_root), "--evidence-dir", str(artifact_root)]
+            if args.vl_preflight_vlh is not None:
+                preflight.extend(("--vlh", str(args.vl_preflight_vlh)))
+            if args.vl_preflight_verus is not None:
+                preflight.extend(("--verus", str(args.vl_preflight_verus)))
+            print("preflight: " + " ".join(shlex.quote(part) for part in preflight))
         command = ["tmux", *new_window_command(args)]
         print("tmux: " + " ".join(shlex.quote(part) for part in command))
         launch_target = f"{args.tmux_session}:DRYRUN"
-        launch = ["tmux", "send-keys", "-t", launch_target, shell_cmd(worker_command(codex_cmd(args.session_id, args.reasoning_effort, args.codex_flags, args.prompt_file, effective_tool(args), is_vl_agent(args.task_file, launch_target)), launch_target)), "Enter"]
+        launch = ["tmux", "send-keys", "-t", launch_target, shell_cmd(worker_command(codex_cmd(args.session_id, args.reasoning_effort, args.codex_flags, args.prompt_file, effective_tool(args), is_vl_agent(args.task_file, launch_target)), launch_target, vl_preflight_env(args))), "Enter"]
         print("tmux: " + " ".join(shlex.quote(part) for part in launch))
 
 
@@ -490,6 +574,15 @@ def validate_inputs(args: Args) -> None:
         raise ValueError(f"prompt file not found: {args.prompt_file}")
     if any(not flag or "\0" in flag or "\n" in flag for flag in args.codex_flags):
         raise ValueError("codex flags must be non-empty single-line argv tokens.")
+    preflight_paths = (args.vl_preflight_vlh, args.vl_preflight_verus, args.vl_preflight_artifact_root)
+    if args.vl_experiment_preflight and not is_vl_experiment_task_file(args.task_file):
+        raise ValueError("--vl-experiment-preflight is only for VL experiment or rerun task files.")
+    if args.vl_experiment_preflight and args.workdir is None:
+        raise ValueError("--vl-experiment-preflight requires --workdir so it gates a new launch.")
+    if any(path is not None for path in preflight_paths) and not is_vl_experiment_task_file(args.task_file):
+        raise ValueError("VL preflight path flags are only for VL experiment or rerun task files.")
+    if requires_vl_experiment_preflight(args) and any("openrouter" in flag.lower() for flag in args.codex_flags):
+        raise ValueError("VL GPT-backed experiment launches must not use OpenRouter codex flags.")
     if args.tool != "pcodx" and any("mcp_servers." in flag for flag in args.codex_flags):
         raise ValueError("MCP server config requires --tool pcodx.")
     if args.workdir is not None and args.prompt_file is None and is_vl_agent(args.task_file, target(args)):
@@ -528,6 +621,7 @@ def main(argv: list[str]) -> int:
         if args.dry_run:
             dry_run(args)
             return 0
+        run_vl_experiment_preflight(args)
         tmux_target = new_window(args)
         path = ensure_task_file(args, tmux_target)
         if not args.no_link:

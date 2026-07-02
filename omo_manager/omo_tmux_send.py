@@ -24,6 +24,7 @@ try:
         has_compacting_indicator,
         has_plan_prompt,
         inspect,
+        is_stock_placeholder_input_text,
         status,
         submit_stuck_input_if_present,
         tail,
@@ -40,6 +41,7 @@ except ModuleNotFoundError:
         has_compacting_indicator,
         has_plan_prompt,
         inspect,
+        is_stock_placeholder_input_text,
         status,
         submit_stuck_input_if_present,
         tail,
@@ -65,11 +67,13 @@ class Args:
     async_notify_enter_count: int = 1
     async_worker: bool = False
     async_cleanup_message_file: bool = False
+    async_result: str = ""
+    async_result_dir: Path | None = None
     allow_plan_prompt_enter: bool = False
 
 
 class ParsedArgs(argparse.Namespace):
-    target: str = ""
+    target: str | None = None
     message_file: Path | None = None
     enter: bool = False
     enter_count: int = 1
@@ -86,13 +90,15 @@ class ParsedArgs(argparse.Namespace):
     async_notify_enter_count: int = 1
     async_worker: bool = False
     async_cleanup_message_file: bool = False
+    async_result: str = ""
+    async_result_dir: Path | None = None
     allow_plan_prompt_enter: bool = False
 
 
 def parse_args(argv: list[str]) -> Args:
     parser = argparse.ArgumentParser(description=__doc__)
-    _ = parser.add_argument("--target", required=True, help="tmux target pane/window, e.g. cfg:1.0")
-    _ = parser.add_argument("--message-file", type=Path, required=True, help="Read prompt text from this file.")
+    _ = parser.add_argument("--target", help="tmux target pane/window, e.g. cfg:1.0")
+    _ = parser.add_argument("--message-file", type=Path, help="Read prompt text from this file.")
     enter_group = parser.add_mutually_exclusive_group()
     _ = enter_group.add_argument("--enter", dest="enter", action="store_true", help="Send Enter after pasting.")
     _ = enter_group.add_argument("--no-enter", dest="enter", action="store_false", help="Paste only; default.")
@@ -113,8 +119,10 @@ def parse_args(argv: list[str]) -> Args:
     )
     _ = parser.add_argument("--async-notify-target", default="", help="Tmux target to notify when an async send completes.")
     _ = parser.add_argument("--async-notify-enter-count", type=int, default=1, help="Enter keys to send after the async completion notice; default: 1.")
-    _ = parser.add_argument("--async-worker", action="store_true", help=argparse.SUPPRESS)
+    _ = parser.add_argument("--async-result", default="", metavar="ID_OR_DIR", help="Query an async send result by printed id or result directory.")
+    _ = parser.add_argument("--async-result-dir", type=Path, help=argparse.SUPPRESS)
     _ = parser.add_argument("--allow-plan-prompt-enter", action="store_true", help=argparse.SUPPRESS)
+    _ = parser.add_argument("--async-worker", action="store_true", help=argparse.SUPPRESS)
     _ = parser.add_argument("--async-cleanup-message-file", action="store_true", help=argparse.SUPPRESS)
     parser.set_defaults(enter=False)
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
@@ -128,10 +136,22 @@ def parse_args(argv: list[str]) -> Args:
         parser.error("--submit-verify-timeout-s must be non-negative.")
     if parsed.async_notify_enter_count < 0:
         parser.error("--async-notify-enter-count must be non-negative.")
-    if parsed.async_mode and not parsed.async_notify_target:
-        parser.error("--async-notify-target is required with --async.")
     if any((parsed.pending_root, parsed.pending_file, parsed.pending_line)) and not all((parsed.pending_root, parsed.pending_file, parsed.pending_line > 0)):
         parser.error("--pending-root, --pending-file, and --pending-line must be passed together.")
+    if parsed.async_result:
+        return Args(
+            "",
+            None,
+            0,
+            parsed.enter_delay_s,
+            0,
+            parsed.dry_run,
+            async_result=parsed.async_result,
+        )
+    if not parsed.target:
+        parser.error("--target is required.")
+    if parsed.message_file is None:
+        parser.error("--message-file is required.")
     return Args(
         parsed.target,
         parsed.message_file,
@@ -149,6 +169,8 @@ def parse_args(argv: list[str]) -> Args:
         parsed.async_notify_enter_count,
         parsed.async_worker,
         parsed.async_cleanup_message_file,
+        parsed.async_result,
+        parsed.async_result_dir,
         parsed.allow_plan_prompt_enter,
     )
 
@@ -172,6 +194,100 @@ def write_private_temp(message: str) -> Path:
         path.unlink(missing_ok=True)
         raise
     return path
+
+
+@dataclass(frozen=True)
+class AsyncJob:
+    job_id: str
+    result_dir: Path
+    payload_file: Path
+    stdout_file: Path
+    stderr_file: Path
+    status_file: Path
+    result_file: Path
+    metadata_file: Path
+
+
+def async_job_from_dir(result_dir: Path) -> AsyncJob:
+    name = result_dir.name
+    prefix = "omo-tmux-send-async-"
+    job_id = name.removeprefix(prefix) if name.startswith(prefix) else name
+    return AsyncJob(
+        job_id,
+        result_dir,
+        result_dir / "payload.txt",
+        result_dir / "stdout.log",
+        result_dir / "stderr.log",
+        result_dir / "status.txt",
+        result_dir / "result.txt",
+        result_dir / "metadata.tsv",
+    )
+
+
+def make_async_job() -> AsyncJob:
+    job_id = uuid.uuid4().hex
+    result_dir = Path(tempfile.gettempdir()) / f"omo-tmux-send-async-{job_id}"
+    result_dir.mkdir(mode=0o700)
+    return async_job_from_dir(result_dir)
+
+
+def async_job_from_query(raw: str) -> AsyncJob:
+    path = Path(raw).expanduser()
+    if path.exists() or path.is_absolute() or "/" in raw:
+        return async_job_from_dir(path)
+    return async_job_from_dir(Path(tempfile.gettempdir()) / f"omo-tmux-send-async-{raw}")
+
+
+def write_text_0600(path: Path, text: str, *, atomic: bool = False) -> None:
+    if atomic:
+        temp_path = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
+        write_text_0600(temp_path, text)
+        os.replace(temp_path, path)
+        return
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        _ = handle.write(text)
+
+
+def write_status(job: AsyncJob, status_text: str) -> None:
+    write_text_0600(job.status_file, f"{status_text}\n", atomic=True)
+
+
+def write_async_metadata(job: AsyncJob, args: Args, pid: int | None = None) -> None:
+    rows = [
+        ("id", job.job_id),
+        ("result_dir", str(job.result_dir)),
+        ("target", args.target),
+        ("notify_target", args.async_notify_target),
+        ("created_unix_s", f"{time.time():.3f}"),
+    ]
+    if pid is not None:
+        rows.append(("pid", str(pid)))
+    write_text_0600(job.metadata_file, "".join(f"{key}\t{value}\n" for key, value in rows), atomic=True)
+
+
+def query_async_result(raw: str) -> int:
+    job = async_job_from_query(raw)
+    if not job.result_dir.is_dir():
+        print(f"status: missing\nresult_dir: {job.result_dir}")
+        return 1
+    try:
+        status_text = job.status_file.read_text(encoding="utf-8").strip() or "pending"
+    except OSError:
+        status_text = "pending"
+    result = ""
+    try:
+        result = job.result_file.read_text(encoding="utf-8").strip()
+    except OSError:
+        pass
+    print(f"status: {status_text}")
+    print(f"id: {job.job_id}")
+    print(f"result_dir: {job.result_dir}")
+    print(f"stdout: {job.stdout_file}")
+    print(f"stderr: {job.stderr_file}")
+    if result:
+        print(f"result: {result}")
+    return 0 if status_text in {"pending", "running", "succeeded"} else 1
 
 
 def wait_ready(args: Args) -> None:
@@ -343,6 +459,30 @@ def wait_probe_removed(args: Args, probe: str, n_lines: int, deadline_s: float) 
         time.sleep(min(0.25, max(0.05, deadline_s - now_s)))
 
 
+def wait_input_ready_before_paste(args: Args, n_lines: int) -> None:
+    submit_timeout_s = args.submit_verify_timeout_s if args.submit_verify_timeout_s > 0 else 1.0
+    timeout_s = max(args.ready_timeout_s, submit_timeout_s)
+    deadline_s = time.monotonic() + timeout_s
+    last_status = "unknown"
+    last_input = ""
+    while True:
+        lines = tail(args.target, n_lines)
+        last_status = status(lines, current_block(lines))
+        if last_status == "not_codex":
+            raise RuntimeError(f"target is not a Codex pane: {args.target}")
+        if last_status == "error":
+            raise RuntimeError(f"target is in Codex error state: {args.target}")
+        input_text = current_input_text(lines)
+        if last_status == "ready" and (not input_text or is_stock_placeholder_input_text(input_text)):
+            return
+        last_input = input_text
+        now_s = time.monotonic()
+        if now_s >= deadline_s:
+            preview = last_input.replace("\n", " ")[:80]
+            raise RuntimeError(f"Codex input not ready before paste after {timeout_s:g}s: status={last_status} input={preview!r}")
+        time.sleep(min(0.25, max(0.05, deadline_s - now_s)))
+
+
 def verify_submit(args: Args, message: str) -> None:
     if args.enter_count <= 0 or args.submit_verify_timeout_s <= 0:
         return
@@ -423,8 +563,9 @@ def run_tmux(args: Args, message: str) -> None:
         if clear_result in {"compacting", "failed"} or clear_result.startswith("not_safe:"):
             raise RuntimeError(f"target stuck input not cleared before tmux paste: {clear_result}")
         require_codex_target(args, inspect_lines_for_message(message))
-        if args.enter_count:
-            _ = subprocess.run(["tmux", "send-keys", "-t", args.target, "C-u"], timeout=5, check=True)
+        wait_input_ready_before_paste(args, inspect_lines_for_message(message))
+        if not pending_marker_present(args):
+            raise RuntimeError("pending marker cleared before tmux paste")
         _ = subprocess.run(["tmux", "load-buffer", "-b", buffer_name, str(temp_path)], timeout=5, check=True)
         _ = subprocess.run(["tmux", "paste-buffer", "-b", buffer_name, "-t", args.target], timeout=5, check=True)
         if not verify_placeholder_paste(args, message):
@@ -444,16 +585,18 @@ def run_tmux(args: Args, message: str) -> None:
             _ = subprocess.run(["tmux", "delete-buffer", "-b", buffer_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=False)
 
 
-def worker_argv(args: Args, payload_file: Path) -> list[str]:
+def worker_argv(args: Args, job: AsyncJob) -> list[str]:
     argv = [
         sys.executable,
         str(Path(__file__).resolve()),
         "--target",
         args.target,
         "--message-file",
-        str(payload_file),
+        str(job.payload_file),
         "--async-worker",
         "--async-cleanup-message-file",
+        "--async-result-dir",
+        str(job.result_dir),
         "--async-notify-target",
         args.async_notify_target,
         "--async-notify-enter-count",
@@ -492,23 +635,34 @@ def worker_argv(args: Args, payload_file: Path) -> list[str]:
 
 
 def launch_async(args: Args, message: str) -> None:
-    payload_file = write_private_temp(message)
     if args.dry_run:
-        _ = print(f"would start async tmux send using {payload_file}")
+        _ = print("would start async tmux send")
         _ = print(f"would notify {args.async_notify_target} after completion")
-        payload_file.unlink(missing_ok=True)
         return
+    job = make_async_job()
+    write_text_0600(job.payload_file, message)
+    write_text_0600(job.stdout_file, "")
+    write_text_0600(job.stderr_file, "")
+    write_status(job, "running")
+    write_async_metadata(job, args)
     try:
-        proc = subprocess.Popen(
-            worker_argv(args, payload_file),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+        with job.stdout_file.open("ab") as stdout_handle, job.stderr_file.open("ab") as stderr_handle:
+            proc = subprocess.Popen(
+                worker_argv(args, job),
+                stdin=subprocess.DEVNULL,
+                stdout=stdout_handle,
+                stderr=stderr_handle,
+                start_new_session=True,
+            )
     except Exception:
-        payload_file.unlink(missing_ok=True)
+        write_status(job, "failed")
+        write_text_0600(job.result_file, "worker start failed\n", atomic=True)
+        _ = print(f"async_id: {job.job_id}")
+        _ = print(f"result_dir: {job.result_dir}")
         raise
+    write_async_metadata(job, args, proc.pid)
+    _ = print(f"async_id: {job.job_id}")
+    _ = print(f"result_dir: {job.result_dir}")
     _ = print(f"omo_tmux_send: async worker pid={proc.pid}")
 
 
@@ -530,14 +684,20 @@ def notify_async_result(args: Args, ok: bool, result: str) -> None:
 
 
 def run_async_worker(args: Args) -> int:
+    job = async_job_from_dir(args.async_result_dir) if args.async_result_dir is not None else None
     ok = True
     result = "sent"
     try:
+        if job is not None:
+            write_status(job, "running")
         run_tmux(args, read_message(args))
     except Exception as exc:
         ok = False
         result = str(exc)
     finally:
+        if job is not None:
+            write_text_0600(job.result_file, f"{result}\n", atomic=True)
+            write_status(job, "succeeded" if ok else "failed")
         if args.async_cleanup_message_file and args.message_file is not None:
             args.message_file.unlink(missing_ok=True)
     try:
@@ -545,6 +705,9 @@ def run_async_worker(args: Args) -> int:
     except Exception as exc:
         print(f"omo_tmux_send async notify failed: {exc}", file=sys.stderr)
         if ok:
+            if job is not None:
+                write_text_0600(job.result_file, f"sent; async notify failed: {exc}\n", atomic=True)
+                write_status(job, "failed")
             return 1
     return 0 if ok else 1
 
@@ -552,6 +715,8 @@ def run_async_worker(args: Args) -> int:
 def main(argv: list[str]) -> int:
     try:
         args = parse_args(argv)
+        if args.async_result:
+            return query_async_result(args.async_result)
         if args.async_mode:
             launch_async(args, read_message(args))
             return 0

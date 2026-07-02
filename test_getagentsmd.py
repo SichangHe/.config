@@ -8,8 +8,6 @@ from importlib.machinery import SourceFileLoader
 from importlib.util import module_from_spec, spec_from_loader
 from pathlib import Path
 
-from requests import RequestException
-
 
 def load_getagentsmd():
     loader = SourceFileLoader("getagentsmd", str(Path(__file__).with_name("getagentsmd")))
@@ -51,7 +49,7 @@ class GetAgentsMdTest(unittest.TestCase):
             module.CACHE_FILE = Path(tmp) / "AGENTS.md"
             module.CACHE_FILE.write_text("cached\n", encoding="utf-8")
             module.CACHE_FILE.chmod(0o600)
-            module.get = lambda url, timeout: (_ for _ in ()).throw(RequestException("network down"))
+            module.get = lambda url, timeout: (_ for _ in ()).throw(module.RequestException("network down"))
 
             out = io.StringIO()
             with contextlib.redirect_stdout(out):

@@ -25,7 +25,7 @@ MANAGER_TAG_RE = re.compile(r"^\s*(?:\[a\]|\[omo_manager\])\s*", re.IGNORECASE)
 RESERVED_AGENT_TAG_RE = re.compile(r"^(?:re:\s*)*\[omo\]\s*", re.IGNORECASE)
 RE_PREFIX_RE = re.compile(r"^\s*re:\s*", re.IGNORECASE)
 TMUX_TARGET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?$")
-TMUX_SUBJECT_TAG_RE = re.compile(r"^\s*[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?(?:\s+|$)")
+TMUX_SUBJECT_TAG_RE = re.compile(r"^\s*(?:\[[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?\]|[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)(?:\s+|$)")
 PLACEHOLDER_RE = re.compile(r"subject\W*", re.IGNORECASE)
 DEFAULT_THREAD_LOOKUP_WINDOW_S = 3 * 24 * 60 * 60
 DEFAULT_THREAD_LOOKUP_DEADLINE_S = 5.0
@@ -148,8 +148,9 @@ def manager_subject(base: str) -> str:
 def manager_subject_w_target(base: str, tmux_target: str = "", reply: bool = False) -> str:
     clean_base = strip_leading_tmux_tags(base.strip())
     clean_target = tmux_target.strip()
-    if clean_target and TMUX_TARGET_RE.fullmatch(clean_target) and not clean_base.startswith(f"{clean_target} "):
-        clean_base = f"{clean_target} {clean_base}"
+    bracketed_target = f"[{clean_target}]"
+    if clean_target and TMUX_TARGET_RE.fullmatch(clean_target) and not clean_base.startswith(f"{bracketed_target} "):
+        clean_base = f"{bracketed_target} {clean_base}"
     return manager_reply_subject(clean_base) if reply else manager_subject(clean_base)
 
 
