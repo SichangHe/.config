@@ -19,6 +19,8 @@ DEFAULT_ROOT = Path(os.environ.get('OMO_WORK_LOGS_ROOT', Path.home() / 'work_log
 DEFAULT_TMUX_ENTER_COUNT = int(os.environ.get('OMO_MANAGER_TMUX_ENTER_COUNT', os.environ.get('OMO_DISPATCH_TMUX_ENTER_COUNT', '2')))
 DEFAULT_TMUX_READY_TIMEOUT_S = float(os.environ.get('OMO_MANAGER_TMUX_READY_TIMEOUT_S', os.environ.get('OMO_DISPATCH_TMUX_READY_TIMEOUT_S', '300')))
 DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S = float(os.environ.get('OMO_MANAGER_TMUX_SUBMIT_VERIFY_TIMEOUT_S', '5'))
+DEFAULT_PUSH_TIMEOUT_S = float(os.environ.get('OMO_MANAGER_PUSH_TIMEOUT_S', '5'))
+DEFAULT_TMUX_SEND_TIMEOUT_S = float(os.environ.get('OMO_MANAGER_TMUX_SEND_TIMEOUT_S', str((2 * DEFAULT_TMUX_READY_TIMEOUT_S) + (2 * DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S) + 15)))
 
 
 @dataclass(frozen=True)
@@ -40,7 +42,7 @@ class ParsedArgs(argparse.Namespace):
     manager_target: str = DEFAULT_MANAGER_TARGET
     root: Path = DEFAULT_ROOT
     submit: bool = False
-    timeout_s: float = 5.0
+    timeout_s: float = DEFAULT_PUSH_TIMEOUT_S
     pending_file: Path | None = None
     pending_line: int = 0
     pending_digest: str = ''
@@ -53,7 +55,7 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument('--manager-target', default=DEFAULT_MANAGER_TARGET)
     _ = parser.add_argument('--root', type=Path, default=DEFAULT_ROOT)
     _ = parser.add_argument('--submit', action='store_true', help='Submit the manager prompt after append.')
-    _ = parser.add_argument('--timeout-s', type=float, default=5.0)
+    _ = parser.add_argument('--timeout-s', type=float, default=DEFAULT_PUSH_TIMEOUT_S)
     _ = parser.add_argument('--pending-file', type=Path, help='Root-relative pending marker file; validates before delivery.')
     _ = parser.add_argument('--pending-line', type=int, default=0, help='One-based pending marker line; validates before delivery.')
     _ = parser.add_argument('--pending-digest', default='', help='Optional digest of the marker context.')
@@ -108,8 +110,10 @@ def push_tmux(args: Args) -> None:
             command.extend(['--pending-root', str(args.root), '--pending-file', str(args.pending_file), '--pending-line', str(args.pending_line)])
             if args.pending_digest:
                 command.extend(['--pending-digest', args.pending_digest])
-        timeout_s = max(args.timeout_s, DEFAULT_TMUX_READY_TIMEOUT_S + (2 * DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S) + 15) if args.submit else args.timeout_s
-        _ = subprocess.run(command, timeout=timeout_s, check=True)
+        env = os.environ.copy()
+        env.setdefault('OMO_CODEX_COMPACTION_WAIT_TIMEOUT_S', str(DEFAULT_TMUX_READY_TIMEOUT_S))
+        timeout_s = max(args.timeout_s, DEFAULT_TMUX_SEND_TIMEOUT_S) if args.submit else args.timeout_s
+        _ = subprocess.run(command, env=env, timeout=timeout_s, check=True)
     finally:
         path.unlink(missing_ok=True)
 

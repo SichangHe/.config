@@ -12,6 +12,7 @@ from omo_manager.omo_codex_status import Report
 from omo_manager.omo_tmux_send import (
     Args,
     clear_stuck_input_before_send,
+    compaction_wait_timeout_s,
     current_input_text,
     input_has_probe,
     launch_async,
@@ -80,6 +81,11 @@ class TmuxSendTests(unittest.TestCase):
         self.assertEqual("cfg:0.0", args.async_notify_target)
         self.assertEqual(0, args.async_notify_enter_count)
 
+    def test_explicit_compaction_timeout_env_caps_ready_timeout(self) -> None:
+        args = Args("cfg:1.0", None, 1, 0.15, 300, False)
+        with patch.dict(os.environ, {"OMO_CODEX_COMPACTION_WAIT_TIMEOUT_S": "1"}), patch("omo_manager.omo_tmux_send.DEFAULT_COMPACTION_WAIT_TIMEOUT_S", 1.0):
+            self.assertEqual(1.0, compaction_wait_timeout_s(args))
+
     def test_pending_guard_rechecks_after_ready_wait_before_paste(self) -> None:
         calls: list[list[str]] = []
 
@@ -124,8 +130,8 @@ class TmuxSendTests(unittest.TestCase):
         self.assertEqual(["tmux", "load-buffer", "-b"], calls[1][:3])
         buffer_name = calls[1][3]
         self.assertEqual(["tmux", "paste-buffer", "-b", buffer_name, "-t", "cfg:1.0"], calls[2])
-        self.assertEqual(["tmux", "send-keys", "-t", "cfg:1.0", "Enter"], calls[3])
-        self.assertEqual(["tmux", "delete-buffer", "-b", buffer_name], calls[4])
+        self.assertIn(["tmux", "send-keys", "-t", "cfg:1.0", "Enter"], calls)
+        self.assertEqual(["tmux", "delete-buffer", "-b", buffer_name], calls[-1])
         self.assertNotIn("literal C-c $(bad)\n", [part for call in calls for part in call])
 
     def test_run_tmux_waits_for_compaction_before_paste_and_enter(self) -> None:
@@ -145,7 +151,7 @@ class TmuxSendTests(unittest.TestCase):
         paste_idx = events.index("paste-buffer")
         enter_idx = events.index("send-keys", paste_idx)
         self.assertEqual(["wait", "wait"], events[:2])
-        self.assertEqual("wait", events[enter_idx - 1])
+        self.assertIn("wait", events[paste_idx:enter_idx])
         self.assertLess(load_idx, paste_idx)
 
     def test_run_tmux_can_send_repeated_enter(self) -> None:
@@ -160,10 +166,27 @@ class TmuxSendTests(unittest.TestCase):
 
         self.assertEqual(4, wait_compaction.call_count)
         self.assertEqual(["tmux", "send-keys", "-t", "cfg:1.0", "C-u"], calls[0])
-        self.assertEqual(["tmux", "send-keys", "-t", "cfg:1.0", "Enter"], calls[3])
-        self.assertEqual(["tmux", "send-keys", "-t", "cfg:1.0", "Enter"], calls[4])
-        self.assertEqual(["tmux", "delete-buffer", "-b", calls[1][3]], calls[5])
+        self.assertEqual(2, calls.count(["tmux", "send-keys", "-t", "cfg:1.0", "Enter"]))
+        self.assertEqual(["tmux", "delete-buffer", "-b", calls[1][3]], calls[-1])
         sleep.assert_called_once_with(0.15)
+
+    def test_run_tmux_does_not_press_enter_on_plan_prompt(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        lines = [
+            "› Read the dispatch prompt from /tmp/x and follow it exactly.",
+            "",
+            "  Create a plan?  shift + tab use Plan mode   esc dismiss",
+        ]
+        with patch("omo_manager.omo_tmux_send.wait_compaction_over_before_send"), patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.require_codex_target"), patch("omo_manager.omo_tmux_send.verify_placeholder_paste", return_value=True), patch("omo_manager.omo_tmux_send.tail", return_value=lines), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
+            with self.assertRaisesRegex(RuntimeError, "unsafe Plan prompt"):
+                run_tmux(Args("cfg:1.0", None, 1, 0.15, 0, False), "Read the dispatch prompt from /tmp/x and follow it exactly.\n")
+
+        self.assertNotIn(["tmux", "send-keys", "-t", "cfg:1.0", "Enter"], calls)
 
     def test_launch_async_copies_payload_and_starts_worker(self) -> None:
         started: list[list[str]] = []
@@ -433,6 +456,26 @@ class TmuxSendTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "Codex submit not verified"):
                 verify_submit(Args("cfg:1.0", None, 1, 0.15, 0, False, submit_verify_timeout_s=1), "Read the dispatch prompt from /tmp/x and follow it exactly.\n")
 
+    def test_verify_submit_does_not_retry_enter_on_plan_prompt(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_tail(_: str, __: int) -> list[str]:
+            return [
+                "› Read the dispatch prompt from /tmp/x and follow it exactly.",
+                "",
+                "  Create a plan?  shift + tab use Plan mode   esc dismiss",
+            ]
+
+        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch("omo_manager.omo_tmux_send.tail", side_effect=fake_tail), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
+            with self.assertRaisesRegex(RuntimeError, "unsafe Plan prompt"):
+                verify_submit(Args("cfg:1.0", None, 1, 0.15, 0, False, submit_verify_timeout_s=1), "Read the dispatch prompt from /tmp/x and follow it exactly.\n")
+
+        self.assertEqual([], calls)
+
     def test_verify_submit_waits_for_compaction_before_fallback_enter(self) -> None:
         calls: list[tuple[list[str], int]] = []
         n_captures = 0
@@ -579,6 +622,7 @@ class TmuxSendTests(unittest.TestCase):
         tails = iter(
             [
                 [f"› Summarize recent commits{sentinel}", "  gpt-5.5"],
+                ["› Summarize recent commits", "  gpt-5.5"],
                 ["› Summarize recent commits", "  gpt-5.5"],
                 ["• Working", "  gpt-5.5"],
             ]

@@ -22,6 +22,7 @@ try:
         current_block,
         current_input_text,
         has_compacting_indicator,
+        has_plan_prompt,
         inspect,
         status,
         submit_stuck_input_if_present,
@@ -37,6 +38,7 @@ except ModuleNotFoundError:
         current_block,
         current_input_text,
         has_compacting_indicator,
+        has_plan_prompt,
         inspect,
         status,
         submit_stuck_input_if_present,
@@ -240,6 +242,8 @@ def input_has_any_probe(lines: list[str], probes: list[str]) -> bool:
 
 
 def compaction_wait_timeout_s(args: Args) -> float:
+    if "OMO_CODEX_COMPACTION_WAIT_TIMEOUT_S" in os.environ:
+        return DEFAULT_COMPACTION_WAIT_TIMEOUT_S
     return max(args.ready_timeout_s, DEFAULT_COMPACTION_WAIT_TIMEOUT_S)
 
 
@@ -354,6 +358,8 @@ def verify_submit(args: Args, message: str) -> None:
         input_text = current_input_text(lines)
         if not input_text:
             return
+        if has_plan_prompt(lines):
+            raise RuntimeError("Codex submit blocked by unsafe Plan prompt")
         if has_compacting_indicator(lines):
             wait_compaction_over_before_send(args, n_lines)
             deadline_s = time.monotonic() + args.submit_verify_timeout_s
@@ -424,6 +430,8 @@ def run_tmux(args: Args, message: str) -> None:
             if idx:
                 time.sleep(args.enter_delay_s)
             wait_compaction_over_before_send(args, enter_n_lines)
+            if has_plan_prompt(tail(args.target, enter_n_lines)):
+                raise RuntimeError("Codex submit blocked by unsafe Plan prompt")
             send_enter(args.target)
         verify_submit(args, message)
     finally:
