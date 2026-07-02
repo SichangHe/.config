@@ -19,7 +19,7 @@ import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from email import policy
-from email.utils import parsedate_to_datetime
+from email.utils import getaddresses, parsedate_to_datetime
 from email.utils import parseaddr
 from email.message import Message
 from email.parser import BytesParser
@@ -804,7 +804,7 @@ def append_manager_mail_threshold_pending(args: Args, kind: str, counts: Manager
     if kind == "unread-compression":
         summary = f"manager email watcher threshold: unread manager mail {counts.unread} exceeds {args.unread_compression_threshold}"
         route = "route a worker through `~/.config/omo_manager/docs/manager-mail-compression.md`"
-        retention = "compress only unread manager-sent mail, send replacement summaries first, then mark only the explicit superseded UID set seen"
+        retention = "compress only unread manager-sent mail, retain full-read memos, send replacement summaries first, then move only explicitly superseded source UIDs to Trash"
     elif kind == "recent-cleanup":
         hours = args.recent_cleanup_window_s / 3600
         summary = f"manager email watcher threshold: manager-human mail within last {hours:g}h is {counts.recent_total}, exceeding {args.recent_cleanup_threshold}"
@@ -990,7 +990,7 @@ def search_manager_mail_uids(client: imaplib.IMAP4_SSL, self_email: str, unread:
     found: list[str] = []
     seen: set[str] = set()
     for token in MANAGER_SUBJECT_TOKENS:
-        typ, data = client.uid("search", *(criteria + ["FROM", f'"{self_email}"', "SUBJECT", f'"{token}"']))
+        typ, data = client.uid("search", *(criteria + ["FROM", f'"{self_email}"', "TO", f'"{self_email}"', "SUBJECT", f'"{token}"']))
         if typ != "OK":
             raise RuntimeError(f"IMAP manager mail search failed: {typ}")
         for uid in decode_search_uids(data):
@@ -998,6 +998,21 @@ def search_manager_mail_uids(client: imaplib.IMAP4_SSL, self_email: str, unread:
                 seen.add(uid)
                 found.append(uid)
     return found
+
+
+def fetch_manager_count_header(client: imaplib.IMAP4_SSL, uid: str) -> Message | None:
+    typ, data = client.uid("fetch", uid, "(BODY.PEEK[HEADER.FIELDS (DATE FROM TO SUBJECT)])")
+    if typ != "OK" or not data or not isinstance(data[0], tuple):
+        raise RuntimeError(f"IMAP manager mail header fetch failed: uid={uid} typ={typ}")
+    return BytesParser(policy=policy.default).parsebytes(data[0][1])
+
+
+def is_self_addressed_manager_header(msg: Message, self_email: str) -> bool:
+    normalized_self = self_email.lower()
+    sender = str(msg.get("From", ""))
+    recipients = str(msg.get("To", ""))
+    subject = str(msg.get("Subject", ""))
+    return from_self(sender, self_email) and any(address.lower() == normalized_self for _name, address in getaddresses([recipients])) and any(token.lower() in subject.lower() for token in MANAGER_SUBJECT_TOKENS)
 
 
 def parsed_message_date(msg: Message) -> datetime | None:
@@ -1016,14 +1031,9 @@ def parsed_message_date(msg: Message) -> datetime | None:
 def recent_manager_mail_uids(client: imaplib.IMAP4_SSL, self_email: str, candidate_uids: list[str], cutoff: datetime) -> list[str]:
     recent: list[str] = []
     for uid in candidate_uids:
-        typ, data = client.uid("fetch", uid, "(BODY.PEEK[HEADER.FIELDS (DATE FROM SUBJECT)])")
-        if typ != "OK" or not data or not isinstance(data[0], tuple):
-            raise RuntimeError(f"IMAP manager mail header fetch failed: uid={uid} typ={typ}")
-        msg = BytesParser(policy=policy.default).parsebytes(data[0][1])
-        sender = str(msg.get("From", ""))
-        subject = str(msg.get("Subject", ""))
+        msg = fetch_manager_count_header(client, uid)
         dt = parsed_message_date(msg)
-        if dt is not None and dt >= cutoff and from_self(sender, self_email) and any(token.lower() in subject.lower() for token in MANAGER_SUBJECT_TOKENS):
+        if dt is not None and dt >= cutoff and is_self_addressed_manager_header(msg, self_email):
             recent.append(uid)
     return recent
 

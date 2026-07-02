@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Snapshot/export unread manager mail and mark an explicit UID set read."""
+"""Snapshot/export unread manager mail and trash explicit superseded UIDs."""
 from __future__ import annotations
 
 import argparse
@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from email import policy
 from email.message import Message
 from email.parser import BytesParser
-from email.utils import parseaddr
+from email.utils import getaddresses, parseaddr
 from pathlib import Path
 
 if __package__ in {None, ""}:
@@ -22,6 +22,7 @@ from omo_manager.email_idle_watcher import CONFIG_PATH, MANAGER_SUBJECT_TOKENS, 
 
 HEADER_FETCH = "(BODY.PEEK[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)])"
 FULL_FETCH = "(BODY.PEEK[])"
+TRASH_MAILBOX = "[Gmail]/Trash"
 
 
 @dataclass(frozen=True)
@@ -77,7 +78,15 @@ def record_from_msg(uid: str, msg: Message, body: str = "") -> MailRecord:
 
 
 def is_manager_record(record: MailRecord, self_email: str) -> bool:
-    return parseaddr(record.sender)[1].lower() == self_email.lower() and any(token.lower() in record.subject.lower() for token in MANAGER_SUBJECT_TOKENS)
+    normalized_self = self_email.lower()
+    sender_matches = parseaddr(record.sender)[1].lower() == normalized_self
+    recipient_matches = any(address.lower() == normalized_self for _name, address in getaddresses([record.to]))
+    subject_matches = any(token.lower() in record.subject.lower() for token in MANAGER_SUBJECT_TOKENS)
+    return sender_matches and recipient_matches and subject_matches
+
+
+def imap_quoted(text: str) -> str:
+    return '"' + text.replace("\\", "\\\\").replace('"', r"\"") + '"'
 
 
 def load_config() -> dict[str, str]:
@@ -109,6 +118,22 @@ def unread_subset(client: imaplib.IMAP4_SSL, uids: list[str]) -> list[str]:
     if typ != "OK":
         raise RuntimeError(f"IMAP unread UID search failed: {typ}")
     return [raw.decode() for raw in data[0].split()] if data and data[0] else []
+
+
+def inbox_subset(client: imaplib.IMAP4_SSL, uids: list[str]) -> list[str]:
+    if not uids:
+        return []
+    typ, data = client.uid("search", None, "UID", ",".join(uids))
+    if typ != "OK":
+        raise RuntimeError(f"IMAP UID search failed: {typ}")
+    return [raw.decode() for raw in data[0].split()] if data and data[0] else []
+
+
+def mailbox_exists(client: imaplib.IMAP4_SSL, mailbox: str) -> bool:
+    typ, data = client.list()
+    if typ != "OK":
+        raise RuntimeError(f"IMAP mailbox list failed: {typ}")
+    return any(mailbox.encode() in raw for raw in data if isinstance(raw, bytes))
 
 
 def fetch_msg(client: imaplib.IMAP4_SSL, uid: str, fetch_expr: str) -> Message:
@@ -206,8 +231,13 @@ def cmd_export(args: argparse.Namespace) -> int:
 
 
 def cmd_mark_seen(args: argparse.Namespace) -> int:
+    print("mark-seen is retired for manager mail compression; use trash-superseded with an explicit superseded UID file", file=sys.stderr)
+    return 2
+
+
+def cmd_trash_superseded(args: argparse.Namespace) -> int:
     if not args.yes:
-        print("refusing to mark mail read without --yes", file=sys.stderr)
+        print("refusing to move superseded mail to Trash without --yes", file=sys.stderr)
         return 2
     try:
         requested = parse_uids(args.uids, args.uid_file)
@@ -216,23 +246,26 @@ def cmd_mark_seen(args: argparse.Namespace) -> int:
         return 2
     client, config = open_mailbox(readonly=False)
     try:
-        still_unread = unread_subset(client, requested)
-        records = fetch_records(client, still_unread, with_body=False)
+        if not mailbox_exists(client, TRASH_MAILBOX):
+            print(f"refusing because mailbox is missing: {TRASH_MAILBOX}", file=sys.stderr)
+            return 1
+        still_in_inbox = inbox_subset(client, requested)
+        records = fetch_records(client, still_in_inbox, with_body=False)
         bad = [record.uid for record in records if not is_manager_record(record, config["user"])]
         if bad:
             print(f"refusing boundary mismatch uids={','.join(bad)}", file=sys.stderr)
             return 1
-        if still_unread:
-            typ, _data = client.uid("store", ",".join(still_unread), "+FLAGS", r"(\Seen)")
+        if still_in_inbox:
+            typ, _data = client.uid("MOVE", ",".join(still_in_inbox), imap_quoted(TRASH_MAILBOX))
             if typ != "OK":
-                print(f"IMAP STORE failed: {typ}", file=sys.stderr)
+                print(f"IMAP MOVE failed: {typ}", file=sys.stderr)
                 return 1
-        remaining = unread_subset(client, requested)
+        remaining = inbox_subset(client, requested)
     finally:
         client.logout()
-    print(f"mark_seen: requested={len(requested)} marked={len(still_unread)} already_not_unread={len(requested) - len(still_unread)} verify_remaining={len(remaining)}")
+    print(f"trash_superseded: requested={len(requested)} moved={len(still_in_inbox)} already_not_in_inbox={len(requested) - len(still_in_inbox)} verify_remaining={len(remaining)}")
     if remaining:
-        print(f"remaining_unread_uids={','.join(remaining)}")
+        print(f"remaining_inbox_uids={','.join(remaining)}")
         return 1
     return 0
 
@@ -245,11 +278,16 @@ def parser() -> argparse.ArgumentParser:
     export = sub.add_parser("export", help="Export unread manager mail bodies into a private local directory.")
     export.add_argument("--out-dir", type=Path, required=True)
     export.set_defaults(func=cmd_export)
-    mark_seen = sub.add_parser("mark-seen", help="Mark an explicit unread manager UID set read after replacement summaries are sent.")
+    mark_seen = sub.add_parser("mark-seen", help="Retired; use trash-superseded for manager mail compression.")
     mark_seen.add_argument("--uids", default="", help="Comma or whitespace separated UID list.")
     mark_seen.add_argument("--uid-file", type=Path)
     mark_seen.add_argument("--yes", action="store_true")
     mark_seen.set_defaults(func=cmd_mark_seen)
+    trash = sub.add_parser("trash-superseded", help="Move an explicit superseded manager UID set from INBOX to Trash after replacement summaries are sent.")
+    trash.add_argument("--uids", default="", help="Comma or whitespace separated UID list.")
+    trash.add_argument("--uid-file", type=Path)
+    trash.add_argument("--yes", action="store_true")
+    trash.set_defaults(func=cmd_trash_superseded)
     return arg_parser
 
 

@@ -997,6 +997,7 @@ class PendingMarkerTests(unittest.TestCase):
                     if command == "fetch":
                         msg = EmailMessage()
                         msg["From"] = "Manager <me@example.com>"
+                        msg["To"] = "Manager <me@example.com>"
                         msg["Subject"] = "[omo_manager] item"
                         msg["Date"] = recent_date
                         msg.set_content("body")
@@ -1148,6 +1149,7 @@ class PendingMarkerTests(unittest.TestCase):
                     uid = str(args[0])
                     msg = EmailMessage()
                     msg["From"] = "Manager <me@example.com>"
+                    msg["To"] = "Manager <me@example.com>"
                     msg["Subject"] = "[omo_manager] item"
                     msg["Date"] = old_date if uid == "65" else recent_date
                     msg.set_content("body")
@@ -1157,6 +1159,27 @@ class PendingMarkerTests(unittest.TestCase):
         counts = watcher.manager_mail_counts(Client(), "me@example.com", 24 * 60 * 60, 64, now)
         self.assertTrue(counts.recent_exact)
         self.assertEqual(64, counts.recent_total)
+
+    def test_email_watcher_threshold_counts_require_self_recipient(self) -> None:
+        from datetime import datetime
+        from omo_manager import email_idle_watcher as watcher
+
+        now = datetime.now().astimezone()
+
+        class Client:
+            def uid(self, command: str, *args: object) -> tuple[str, list[object]]:
+                if command == "search":
+                    if "TO" not in args:
+                        raise AssertionError("manager mail search must include recipient boundary")
+                    return "OK", [b""]
+                if command == "fetch":
+                    raise AssertionError("non-self-addressed search results should be excluded before fetch")
+                raise AssertionError(command)
+
+        counts = watcher.manager_mail_counts(Client(), "me@example.com", 24 * 60 * 60, 64, now)
+        self.assertEqual(0, counts.total)
+        self.assertEqual(0, counts.unread)
+        self.assertEqual(0, counts.recent_total)
 
     def test_email_watcher_triggers_recent_cleanup_once(self) -> None:
         from datetime import datetime, timedelta
@@ -1182,6 +1205,7 @@ class PendingMarkerTests(unittest.TestCase):
                     if command == "fetch":
                         msg = EmailMessage()
                         msg["From"] = "Manager <me@example.com>"
+                        msg["To"] = "Manager <me@example.com>"
                         msg["Subject"] = "[omo_manager] item"
                         msg["Date"] = recent_date
                         msg.set_content("body")

@@ -14,7 +14,7 @@ Tools:
   - marks processed source inbox mail seen
   - records manager mail counts and queues threshold cleanup work
 - `~/.config/omo_manager/omo_manager_mail_compress.py`
-  - only compresses unread manager-sent mail and marks an explicit UID set seen
+  - only compresses unread manager-sent mail and moves explicit superseded source UIDs to Trash
   - not a stale-thread trash cleanup helper
 - `~/.local/bin/himalaya folder list`
   - verifies `[Gmail]/Trash` exists
