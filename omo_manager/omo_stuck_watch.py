@@ -6,6 +6,8 @@ import argparse
 import hashlib
 import json
 import os
+import re
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -24,10 +26,14 @@ def default_state_dir() -> Path:
 
 DEFAULT_REGISTRY = Path(os.environ.get("OMO_MANAGER_SESSION_REGISTRY", default_state_dir() / "sessions.json"))
 DEFAULT_STATE = Path(os.environ.get("OMO_MANAGER_STUCK_STATE", default_state_dir() / "codex-tail-state.json"))
+DEFAULT_ROOT = Path(os.environ.get("OMO_WORK_LOGS_ROOT", Path.home() / "work_logs"))
+VL_TODO_TARGET_RE = re.compile(r"\bvl\s+\d+\b")
+ACTIVE_TODO_SECTIONS = {"current", "human pending"}
 
 
 @dataclass(frozen=True)
 class Args:
+    root: Path
     registry: Path
     state: Path
     n_lines: int
@@ -40,6 +46,7 @@ class Args:
 
 
 class ParsedArgs(argparse.Namespace):
+    root: Path = DEFAULT_ROOT
     registry: Path = DEFAULT_REGISTRY
     state: Path = DEFAULT_STATE
     n_lines: int = 80
@@ -53,6 +60,7 @@ class ParsedArgs(argparse.Namespace):
 
 def parse_args(argv: list[str]) -> Args:
     parser = argparse.ArgumentParser(description=__doc__)
+    _ = parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     _ = parser.add_argument("--registry", type=Path, default=DEFAULT_REGISTRY)
     _ = parser.add_argument("--state", type=Path, default=DEFAULT_STATE)
     _ = parser.add_argument("--lines", type=int, default=80)
@@ -71,7 +79,7 @@ def parse_args(argv: list[str]) -> Args:
         parser.error("--interval-s must be positive.")
     if parsed.max_iterations < 1:
         parser.error("--max-iterations must be positive.")
-    return Args(parsed.registry, parsed.state, parsed.n_lines, parsed.stale_after_s, parsed.watch, parsed.interval_s, parsed.max_iterations, parsed.manager_target, parsed.auto_unstick)
+    return Args(parsed.root, parsed.registry, parsed.state, parsed.n_lines, parsed.stale_after_s, parsed.watch, parsed.interval_s, parsed.max_iterations, parsed.manager_target, parsed.auto_unstick)
 
 
 def read_json(path: Path, fallback: dict[str, object]) -> dict[str, object]:
@@ -104,7 +112,40 @@ def target_state(raw: object) -> dict[str, object]:
     return raw if isinstance(raw, dict) else {}
 
 
-def session_targets(sessions: list[object], manager_target: str) -> list[tuple[str, str]]:
+def root_has_vl_work(root: Path) -> bool:
+    try:
+        lines = (root / "TODO.md").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    section = ""
+    for line in lines:
+        stripped = line.strip()
+        if stripped.endswith(":") and ".md" not in stripped:
+            section = stripped[:-1].strip().lower()
+            continue
+        if section in ACTIVE_TODO_SECTIONS and ("vl_" in line or "vl:" in line or VL_TODO_TARGET_RE.search(line) is not None):
+            return True
+    return False
+
+
+def tmux_vl_targets(root: Path) -> list[tuple[str, str]]:
+    if not root_has_vl_work(root):
+        return []
+    try:
+        out = subprocess.run(["tmux", "list-panes", "-a", "-F", "#{session_name}:#{window_index}.#{pane_index}"], capture_output=True, text=True, timeout=5, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if out.returncode != 0:
+        return []
+    targets: list[tuple[str, str]] = []
+    for line in out.stdout.splitlines():
+        target = line.strip()
+        if target.startswith("vl:"):
+            targets.append((f"tmux:{target}", target))
+    return targets
+
+
+def session_targets(sessions: list[object], manager_target: str, root: Path) -> list[tuple[str, str]]:
     targets: list[tuple[str, str]] = []
     seen: set[str] = set()
     for item in sessions:
@@ -117,6 +158,11 @@ def session_targets(sessions: list[object], manager_target: str) -> list[tuple[s
         seen.add(canonical_target(target))
     if manager_target and canonical_target(manager_target) not in seen:
         targets.append(("manager", manager_target))
+        seen.add(canonical_target(manager_target))
+    for task_file, target in tmux_vl_targets(root):
+        if canonical_target(target) not in seen:
+            targets.append((task_file, target))
+            seen.add(canonical_target(target))
     return targets
 
 
@@ -132,7 +178,7 @@ def check(args: Args) -> int:
         targets = {}
         state["targets"] = targets
     unstick_by_target: dict[str, str] = {}
-    for task_file, target in session_targets(sessions, args.manager_target):
+    for task_file, target in session_targets(sessions, args.manager_target, args.root):
         report = inspect(StatusArgs(target, args.n_lines))
         tail_hash = digest(report.lines)
         old = target_state(targets.get(target))
@@ -144,7 +190,9 @@ def check(args: Args) -> int:
         targets[target] = {"hash": tail_hash, "first_seen_s": first_seen_s, "status": report.status}
         unstick = ""
         if report.status == "stuck_input":
-            if args.auto_unstick:
+            if task_file.startswith("tmux:"):
+                unstick = "disabled:unregistered_tmux"
+            elif args.auto_unstick:
                 unstick_key = canonical_target(target)
                 if unstick_key in unstick_by_target:
                     unstick = "already_sent" if unstick_by_target[unstick_key] == "sent_enter" else unstick_by_target[unstick_key]

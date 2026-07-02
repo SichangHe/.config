@@ -187,6 +187,28 @@ class CodexStatusTests(unittest.TestCase):
         self.assertEqual('Run `~/.config/getagentsmd` first.\n  Continue `x.md`.\n  - Report back.', current_input_text(lines))
         self.assertEqual('stuck_input', status(lines, current_block(lines)))
 
+    def test_status_stuck_input_for_verulaw_language_update_mail_snapshot(self) -> None:
+        lines = [
+            '• Acknowledged manager_mail/8952.txt by email with subject Using GPT for stricter VL experiments.',
+            '',
+            '  I recorded the instruction privately: OpenRouter should not block valuable VL experiments when GPT is available, and',
+            '  future experiment packets need the corrected verifier-backed/proof-gap standard instead of answer-only outline',
+            '  scoring.',
+            '',
+            '─ Worked for 1m 11s ────────────────────────────────────────────────────────────────────────────────────────────────────',
+            '',
+            '',
+            '› VeruLaw language update landed in commit 1dcbc7c. For human-facing communication, reports, prompts, and handoffs,',
+            '  read /ssd1/sichangheagent/VeruLaw/docs/ubiquitous-language.md first and use its canonical naming; root AGENTS.md now',
+            '  records this.',
+            '',
+            '',
+            '  gpt-5.5 medium · /ssd1/sichangheagent/work_logs · 1.03M used · Context 35% used',
+        ]
+        report = report_from_lines(lines)
+        self.assertEqual('stuck_input', report.status)
+        self.assertIn('VeruLaw language update landed in commit 1dcbc7c.', report.input_text)
+
     def test_status_running_without_worked_footer(self) -> None:
         lines = ['working', '  gpt-5.5']
         self.assertEqual('running', status(lines, current_block(lines)))
