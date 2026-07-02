@@ -27,6 +27,7 @@ COMPACTING_RE = re.compile(r"^• Compacting\b", re.IGNORECASE)
 BACKGROUND_RUNNING_RE = re.compile(r"^• .*?\b(?:Waiting for background terminal|[1-9][0-9]* background terminals? running)\b")
 QUEUE_MESSAGE_FOOTER_RE = re.compile(r"\btab to queue message\b")
 TERMINAL_ENTER_PROMPT_RE = re.compile(r"^\s*\[?press enter(?:/return)?(?: to continue)?(?:\.\.\.)?\]?\s*$", re.IGNORECASE)
+PLAN_PROMPT_RE = re.compile(r"\bCreate a plan\?\s+shift\s+\+\s+tab\s+use Plan mode\s+esc dismiss\s*$")
 CODEX_EMPTY_INPUT_TEXTS = {
     "Use /skills to list available skills",
     "Find and fix a bug in @filename",
@@ -99,6 +100,10 @@ def has_terminal_enter_prompt_after_codex_footer(lines: list[str]) -> bool:
         and CODEX_FOOTER_RE.match(visible[-2]) is not None
         and WORKED_RE.match(visible[-3]) is not None
     )
+
+
+def has_plan_prompt(lines: list[str]) -> bool:
+    return any(PLAN_PROMPT_RE.search(line) is not None for line in lines[-10:])
 
 
 def current_block(lines: list[str]) -> Block:
@@ -205,7 +210,7 @@ def current_input_follows_running_indicator(lines: list[str]) -> bool:
 
 
 def is_empty_input_text(lines: list[str], input_text: str) -> bool:
-    return input_text in CODEX_EMPTY_INPUT_TEXTS or (input_text in CODEX_RUNNING_EMPTY_INPUT_TEXTS and current_input_follows_running_indicator(lines))
+    return is_stock_placeholder_input_text(input_text)
 
 
 def is_stock_placeholder_input_text(input_text: str) -> bool:
@@ -215,6 +220,8 @@ def is_stock_placeholder_input_text(input_text: str) -> bool:
 def can_submit_stuck_input(lines: list[str]) -> bool:
     if has_terminal_enter_prompt_after_codex_footer(lines):
         return True
+    if has_plan_prompt(lines):
+        return False
     if has_queued_running_input(lines) or has_compacting_indicator(lines):
         return False
     input_text = current_input_text(lines)
@@ -224,6 +231,8 @@ def can_submit_stuck_input(lines: list[str]) -> bool:
 def stuck_input_blocker(lines: list[str], input_text: str) -> str:
     if has_terminal_enter_prompt_after_codex_footer(lines):
         return ""
+    if has_plan_prompt(lines):
+        return "plan_prompt"
     if not has_codex_model_footer(lines) and not has_idle_queued_input(lines, input_text):
         return "no_codex_footer"
     if has_compacting_indicator(lines):
@@ -261,6 +270,8 @@ def status(lines: list[str], block: Block) -> str:
     if not has_codex_model_footer(lines):
         if has_terminal_enter_prompt_after_codex_footer(lines):
             return "stuck_input"
+        if has_plan_prompt(lines):
+            return "stuck_input"
         if has_queued_running_input(lines):
             return "running"
         input_text = current_input_text(lines)
@@ -281,7 +292,7 @@ def status(lines: list[str], block: Block) -> str:
         return "stuck_input"
     if input_text in CODEX_RUNNING_EMPTY_INPUT_TEXTS and current_input_follows_running_indicator(lines):
         return "running"
-    if has_running_indicator(lines):
+    if has_running_indicator(lines) and (not is_stock_placeholder_input_text(input_text) or current_input_follows_running_indicator(lines) or has_compacting_indicator(lines)):
         return "running"
     if block.has_footer or any(READY_RE.match(line) is not None or INPUT_RE.match(line) is not None for line in lines[-10:]):
         return "ready"

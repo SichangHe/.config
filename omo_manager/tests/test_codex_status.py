@@ -74,6 +74,19 @@ class CodexStatusTests(unittest.TestCase):
         self.assertEqual('[Pasted Content 1024 chars][Pasted Content 1024 chars] #2[Pasted Content 1024 chars] #3', report.input_text)
         self.assertTrue(report.can_submit_input)
 
+    def test_status_stuck_input_for_plan_prompt_without_model_footer(self) -> None:
+        lines = [
+            '› [Pasted Content 1024 chars][Pasted Content 1024 chars]',
+            '  manager-doc-or-task-change: repo=/ssd1/sichangheagent/work_logs status=M',
+            '',
+            '  Create a plan?  shift + tab use Plan mode   esc dismiss',
+        ]
+        report = report_from_lines(lines)
+        self.assertEqual('stuck_input', report.status)
+        self.assertIn('[Pasted Content 1024 chars]', report.input_text)
+        self.assertFalse(report.can_submit_input)
+        self.assertEqual('plan_prompt', report.input_blocker)
+
     def test_status_ready_with_idle_queued_placeholder_footer(self) -> None:
         lines = [
             '› Summarize recent commits',
@@ -133,15 +146,15 @@ class CodexStatusTests(unittest.TestCase):
         self.assertEqual('not_codex', report.status)
         self.assertFalse(report.can_submit_input)
 
-    def test_status_stuck_input_for_user_entered_explain_on_idle_worker(self) -> None:
+    def test_status_ready_for_idle_explain_placeholder(self) -> None:
         lines = ['────', 'done', '› Explain this codebase', '  gpt-5.5']
-        self.assertEqual('stuck_input', status(lines, current_block(lines)))
-        self.assertTrue(can_submit_stuck_input(lines))
+        self.assertEqual('ready', status(lines, current_block(lines)))
+        self.assertFalse(can_submit_stuck_input(lines))
 
-    def test_status_stuck_input_for_user_entered_implement_on_idle_worker(self) -> None:
+    def test_status_ready_for_idle_implement_placeholder(self) -> None:
         lines = ['────', 'done', '› Implement {feature}', '  gpt-5.5']
-        self.assertEqual('stuck_input', status(lines, current_block(lines)))
-        self.assertTrue(can_submit_stuck_input(lines))
+        self.assertEqual('ready', status(lines, current_block(lines)))
+        self.assertFalse(can_submit_stuck_input(lines))
 
     def test_status_ready_with_finished_background_terminal_and_input(self) -> None:
         lines = ['• Waited for background terminal · timeout 900s verifier', '› Use /skills to list available skills', '  gpt-5.5']
@@ -219,7 +232,7 @@ class CodexStatusTests(unittest.TestCase):
         self.assertEqual('stuck_input', report.status)
         self.assertEqual('Continue the private manager task', report.input_text)
 
-    def test_status_stuck_input_for_running_placeholder_left_after_completed_turn(self) -> None:
+    def test_status_ready_for_placeholder_after_completed_turn(self) -> None:
         lines = [
             '• Working (2m 13s • esc to interrupt)',
             '',
@@ -233,7 +246,7 @@ class CodexStatusTests(unittest.TestCase):
             '  gpt-5.5 medium · /ssd1/sichangheagent/VeruLaw',
         ]
         report = report_from_lines(lines)
-        self.assertEqual('stuck_input', report.status)
+        self.assertEqual('ready', report.status)
         self.assertEqual('Implement {feature}', report.input_text)
 
     def test_status_running_when_running_indicator_is_newer_than_completed_turn(self) -> None:
@@ -320,6 +333,17 @@ class CodexStatusTests(unittest.TestCase):
         latest = Report('stuck_input', ['• Compacting conversation', '', '› Continue task'], 'Continue task', False, 'compacting')
         with patch('omo_manager.omo_codex_status.wait_while_compacting', return_value=latest), patch('omo_manager.omo_codex_status.subprocess.run') as run:
             self.assertEqual('not_safe:compacting', submit_stuck_input_if_present('cfg:1.0', report))
+        run.assert_not_called()
+
+    def test_submit_stuck_input_if_present_does_not_submit_plan_prompt(self) -> None:
+        report = Report('stuck_input', ['› Continue task'], 'Continue task', True)
+        lines = [
+            '› [Pasted Content 1024 chars][Pasted Content 1024 chars]',
+            '',
+            '  Create a plan?  shift + tab use Plan mode   esc dismiss',
+        ]
+        with patch('omo_manager.omo_codex_status.tail', return_value=lines), patch('omo_manager.omo_codex_status.subprocess.run') as run:
+            self.assertEqual('not_safe:plan_prompt', submit_stuck_input_if_present('cfg:1.0', report))
         run.assert_not_called()
 
     def test_submit_stuck_input_if_present_reports_compaction_timeout_as_unsafe(self) -> None:

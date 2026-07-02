@@ -362,7 +362,7 @@ class AgentStatusTests(unittest.TestCase):
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             self.assertEqual("", out.getvalue())
 
-    def test_problems_only_reports_idle_explain_input(self) -> None:
+    def test_problems_only_stays_quiet_for_idle_explain_placeholder(self) -> None:
         pane = ['────', 'done', '› Explain this codebase', '  gpt-5.5']
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -373,13 +373,11 @@ class AgentStatusTests(unittest.TestCase):
             out = StringIO()
             with patch("omo_manager.omo_codex_status.tail", return_value=pane), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present", return_value="sent_enter") as unstick, redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
-            unstick.assert_called_once()
-            text = out.getvalue()
-            self.assertIn("stuck_input: task=active.md", text)
-            self.assertIn("unstick=sent_enter", text)
-            self.assertIn("unstuck: target=cfg:1.0 task=active.md action=sent_enter", text)
+            unstick.assert_not_called()
+            self.assertIn("ready: task=active.md", out.getvalue())
+            self.assertNotIn("stuck_input: task=active.md", out.getvalue())
 
-    def test_problems_only_reports_idle_implement_input(self) -> None:
+    def test_problems_only_stays_quiet_for_idle_implement_placeholder(self) -> None:
         pane = ['────', 'done', '› Implement {feature}', '  gpt-5.5']
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -390,11 +388,9 @@ class AgentStatusTests(unittest.TestCase):
             out = StringIO()
             with patch("omo_manager.omo_codex_status.tail", return_value=pane), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present", return_value="sent_enter") as unstick, redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
-            unstick.assert_called_once()
-            text = out.getvalue()
-            self.assertIn("stuck_input: task=active.md", text)
-            self.assertIn("unstick=sent_enter", text)
-            self.assertIn("unstuck: target=cfg:1.0 task=active.md action=sent_enter", text)
+            unstick.assert_not_called()
+            self.assertIn("ready: task=active.md", out.getvalue())
+            self.assertNotIn("stuck_input: task=active.md", out.getvalue())
 
     def test_problems_only_reports_user_entered_review_input_during_background_terminal_wait(self) -> None:
         pane = ['• Waiting for background terminal · 1 background terminal running · /ps to view · /stop to close', '', '› Run /review on my current changes and summarize findings', '  gpt-5.5']
