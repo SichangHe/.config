@@ -170,7 +170,7 @@ class TmuxSendTests(unittest.TestCase):
         self.assertEqual(["tmux", "delete-buffer", "-b", calls[1][3]], calls[-1])
         sleep.assert_called_once_with(0.15)
 
-    def test_run_tmux_does_not_press_enter_on_plan_prompt(self) -> None:
+    def test_run_tmux_blocks_plan_prompt_by_default(self) -> None:
         calls: list[list[str]] = []
 
         def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
@@ -187,6 +187,23 @@ class TmuxSendTests(unittest.TestCase):
                 run_tmux(Args("cfg:1.0", None, 1, 0.15, 0, False), "Read the dispatch prompt from /tmp/x and follow it exactly.\n")
 
         self.assertNotIn(["tmux", "send-keys", "-t", "cfg:1.0", "Enter"], calls)
+
+    def test_run_tmux_presses_enter_on_allowed_plan_prompt(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        lines = [
+            "› Read the dispatch prompt from /tmp/x and follow it exactly.",
+            "",
+            "  Create a plan?  shift + tab use Plan mode   esc dismiss",
+        ]
+        with patch("omo_manager.omo_tmux_send.wait_compaction_over_before_send"), patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.require_codex_target"), patch("omo_manager.omo_tmux_send.verify_placeholder_paste", return_value=True), patch("omo_manager.omo_tmux_send.tail", return_value=lines), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
+            run_tmux(Args("cfg:1.0", None, 1, 0.15, 0, False, allow_plan_prompt_enter=True), "Read the dispatch prompt from /tmp/x and follow it exactly.\n")
+
+        self.assertIn(["tmux", "send-keys", "-t", "cfg:1.0", "Enter"], calls)
 
     def test_launch_async_copies_payload_and_starts_worker(self) -> None:
         started: list[list[str]] = []
@@ -475,6 +492,31 @@ class TmuxSendTests(unittest.TestCase):
                 verify_submit(Args("cfg:1.0", None, 1, 0.15, 0, False, submit_verify_timeout_s=1), "Read the dispatch prompt from /tmp/x and follow it exactly.\n")
 
         self.assertEqual([], calls)
+
+    def test_verify_submit_retries_enter_on_allowed_plan_prompt(self) -> None:
+        calls: list[list[str]] = []
+        tails = iter(
+            [
+                [
+                    "› Read the dispatch prompt from /tmp/x and follow it exactly.",
+                    "",
+                    "  Create a plan?  shift + tab use Plan mode   esc dismiss",
+                ],
+                ["• Working", "  gpt-5.5"],
+            ]
+        )
+
+        def fake_tail(_: str, __: int) -> list[str]:
+            return next(tails)
+
+        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch("omo_manager.omo_tmux_send.tail", side_effect=fake_tail), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
+            verify_submit(Args("cfg:1.0", None, 1, 0.15, 0, False, submit_verify_timeout_s=1, allow_plan_prompt_enter=True), "Read the dispatch prompt from /tmp/x and follow it exactly.\n")
+
+        self.assertEqual([["tmux", "send-keys", "-t", "cfg:1.0", "Enter"]], calls)
 
     def test_verify_submit_waits_for_compaction_before_fallback_enter(self) -> None:
         calls: list[tuple[list[str], int]] = []

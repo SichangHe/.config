@@ -31,6 +31,7 @@ class PushToManagerTests(unittest.TestCase):
         self.assertIn("--enter-count", calls[0])
         self.assertIn("--ready-timeout-s", calls[0])
         self.assertIn("--submit-verify-timeout-s", calls[0])
+        self.assertIn("--allow-plan-prompt-enter", calls[0])
         self.assertEqual("2", calls[0][calls[0].index("--enter-count") + 1])
         self.assertEqual("300.0", calls[0][calls[0].index("--ready-timeout-s") + 1])
         self.assertEqual("5.0", calls[0][calls[0].index("--submit-verify-timeout-s") + 1])

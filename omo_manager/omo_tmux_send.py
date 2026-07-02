@@ -65,6 +65,7 @@ class Args:
     async_notify_enter_count: int = 1
     async_worker: bool = False
     async_cleanup_message_file: bool = False
+    allow_plan_prompt_enter: bool = False
 
 
 class ParsedArgs(argparse.Namespace):
@@ -85,6 +86,7 @@ class ParsedArgs(argparse.Namespace):
     async_notify_enter_count: int = 1
     async_worker: bool = False
     async_cleanup_message_file: bool = False
+    allow_plan_prompt_enter: bool = False
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -112,6 +114,7 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--async-notify-target", default="", help="Tmux target to notify when an async send completes.")
     _ = parser.add_argument("--async-notify-enter-count", type=int, default=1, help="Enter keys to send after the async completion notice; default: 1.")
     _ = parser.add_argument("--async-worker", action="store_true", help=argparse.SUPPRESS)
+    _ = parser.add_argument("--allow-plan-prompt-enter", action="store_true", help=argparse.SUPPRESS)
     _ = parser.add_argument("--async-cleanup-message-file", action="store_true", help=argparse.SUPPRESS)
     parser.set_defaults(enter=False)
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
@@ -146,6 +149,7 @@ def parse_args(argv: list[str]) -> Args:
         parsed.async_notify_enter_count,
         parsed.async_worker,
         parsed.async_cleanup_message_file,
+        parsed.allow_plan_prompt_enter,
     )
 
 
@@ -358,7 +362,7 @@ def verify_submit(args: Args, message: str) -> None:
         input_text = current_input_text(lines)
         if not input_text:
             return
-        if has_plan_prompt(lines):
+        if has_plan_prompt(lines) and not args.allow_plan_prompt_enter:
             raise RuntimeError("Codex submit blocked by unsafe Plan prompt")
         if has_compacting_indicator(lines):
             wait_compaction_over_before_send(args, n_lines)
@@ -430,7 +434,7 @@ def run_tmux(args: Args, message: str) -> None:
             if idx:
                 time.sleep(args.enter_delay_s)
             wait_compaction_over_before_send(args, enter_n_lines)
-            if has_plan_prompt(tail(args.target, enter_n_lines)):
+            if has_plan_prompt(tail(args.target, enter_n_lines)) and not args.allow_plan_prompt_enter:
                 raise RuntimeError("Codex submit blocked by unsafe Plan prompt")
             send_enter(args.target)
         verify_submit(args, message)
@@ -469,6 +473,8 @@ def worker_argv(args: Args, payload_file: Path) -> list[str]:
                 str(args.ready_timeout_s),
             ]
         )
+    if args.allow_plan_prompt_enter:
+        argv.append("--allow-plan-prompt-enter")
     if args.pending_root is not None and args.pending_file is not None:
         argv.extend(
             [

@@ -105,7 +105,7 @@ def push_tmux(args: Args) -> None:
     try:
         command = ['omo_tmux_send.py', '--target', args.manager_target, '--message-file', str(path)]
         if args.submit:
-            command.extend(['--enter', '--enter-count', str(DEFAULT_TMUX_ENTER_COUNT), '--ready-timeout-s', str(DEFAULT_TMUX_READY_TIMEOUT_S), '--submit-verify-timeout-s', str(DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S)])
+            command.extend(['--enter', '--enter-count', str(DEFAULT_TMUX_ENTER_COUNT), '--ready-timeout-s', str(DEFAULT_TMUX_READY_TIMEOUT_S), '--submit-verify-timeout-s', str(DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S), '--allow-plan-prompt-enter'])
         if args.pending_file is not None:
             command.extend(['--pending-root', str(args.root), '--pending-file', str(args.pending_file), '--pending-line', str(args.pending_line)])
             if args.pending_digest:

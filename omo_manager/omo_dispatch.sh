@@ -84,7 +84,7 @@ if [ "$dispatch_done" -eq 0 ] && [ -n "$tmux_target" ]; then
   tmux_send_args=("omo_tmux_send.py" --target "$tmux_target" --message-file "$tmux_instr_file")
   keep_prompt_file=1
   if [ "$submit" -eq 1 ]; then
-    tmux_send_args+=(--enter --enter-count "${OMO_DISPATCH_TMUX_ENTER_COUNT:-2}" --ready-timeout-s "${OMO_DISPATCH_TMUX_READY_TIMEOUT_S:-300}")
+    tmux_send_args+=(--enter --enter-count "${OMO_DISPATCH_TMUX_ENTER_COUNT:-2}" --ready-timeout-s "${OMO_DISPATCH_TMUX_READY_TIMEOUT_S:-300}" --allow-plan-prompt-enter)
   fi
   "${tmux_send_args[@]}"
   dispatch_done=1
