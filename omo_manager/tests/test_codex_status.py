@@ -84,8 +84,58 @@ class CodexStatusTests(unittest.TestCase):
         report = report_from_lines(lines)
         self.assertEqual('stuck_input', report.status)
         self.assertIn('[Pasted Content 1024 chars]', report.input_text)
+        self.assertTrue(report.can_submit_input)
+        self.assertEqual('', report.input_blocker)
+
+    def test_status_plan_prompt_without_input_is_not_submit_safe(self) -> None:
+        lines = [
+            '› ',
+            '',
+            '  Create a plan?  shift + tab use Plan mode   esc dismiss',
+        ]
+        report = report_from_lines(lines)
+        self.assertEqual('stuck_input', report.status)
+        self.assertEqual('', report.input_text)
         self.assertFalse(report.can_submit_input)
-        self.assertEqual('plan_prompt', report.input_blocker)
+        self.assertEqual('empty_input', report.input_blocker)
+
+    def test_status_plan_prompt_with_placeholder_is_not_submit_safe(self) -> None:
+        lines = [
+            '› Summarize recent commits',
+            '',
+            '  Create a plan?  shift + tab use Plan mode   esc dismiss',
+        ]
+        report = report_from_lines(lines)
+        self.assertEqual('stuck_input', report.status)
+        self.assertEqual('Summarize recent commits', report.input_text)
+        self.assertFalse(report.can_submit_input)
+        self.assertEqual('placeholder_input', report.input_blocker)
+
+    def test_status_plan_prompt_with_model_footer_without_input_is_not_ready(self) -> None:
+        lines = [
+            '› ',
+            '',
+            '  Create a plan?  shift + tab use Plan mode   esc dismiss',
+            '  gpt-5.5',
+        ]
+        report = report_from_lines(lines)
+        self.assertEqual('stuck_input', report.status)
+        self.assertEqual('', report.input_text)
+        self.assertFalse(report.can_submit_input)
+        self.assertEqual('empty_input', report.input_blocker)
+
+    def test_status_plan_prompt_with_model_footer_placeholder_is_not_ready(self) -> None:
+        lines = [
+            '› Summarize recent commits',
+            '',
+            '  Create a plan?  shift + tab use Plan mode   esc dismiss',
+            '  gpt-5.5',
+        ]
+        report = report_from_lines(lines)
+        self.assertEqual('stuck_input', report.status)
+        self.assertEqual('Summarize recent commits', report.input_text)
+        self.assertFalse(report.can_submit_input)
+        self.assertEqual('placeholder_input', report.input_blocker)
 
     def test_status_ready_with_idle_queued_placeholder_footer(self) -> None:
         lines = [
@@ -357,16 +407,16 @@ class CodexStatusTests(unittest.TestCase):
             self.assertEqual('not_safe:compacting', submit_stuck_input_if_present('cfg:1.0', report))
         run.assert_not_called()
 
-    def test_submit_stuck_input_if_present_does_not_submit_plan_prompt(self) -> None:
+    def test_submit_stuck_input_if_present_submits_plan_prompt(self) -> None:
         report = Report('stuck_input', ['› Continue task'], 'Continue task', True)
         lines = [
             '› [Pasted Content 1024 chars][Pasted Content 1024 chars]',
             '',
             '  Create a plan?  shift + tab use Plan mode   esc dismiss',
         ]
-        with patch('omo_manager.omo_codex_status.tail', return_value=lines), patch('omo_manager.omo_codex_status.subprocess.run') as run:
-            self.assertEqual('not_safe:plan_prompt', submit_stuck_input_if_present('cfg:1.0', report))
-        run.assert_not_called()
+        with patch('omo_manager.omo_codex_status.tail', return_value=lines), patch('omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)) as run:
+            self.assertEqual('sent_enter', submit_stuck_input_if_present('cfg:1.0', report))
+        run.assert_called_once_with(['tmux', 'send-keys', '-t', 'cfg:1.0', 'Enter'], capture_output=True, text=True, timeout=5, check=False)
 
     def test_submit_stuck_input_if_present_reports_compaction_timeout_as_unsafe(self) -> None:
         report = Report('stuck_input', ['› Continue task'], 'Continue task', True)

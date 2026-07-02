@@ -138,6 +138,8 @@ def current_input_text(lines: list[str]) -> str:
             input_lines = body[idx:]
             if any(after.startswith(("• ", "│", "└", "├", "─")) for after in input_lines[1:]):
                 return ""
+            while input_lines[1:] and (not input_lines[-1].strip() or PLAN_PROMPT_RE.search(input_lines[-1]) is not None):
+                input_lines.pop()
             text_lines = [line[1:].strip()]
             text_lines.extend(after.rstrip() for after in input_lines[1:])
             return "\n".join(text_lines).strip()
@@ -221,7 +223,8 @@ def can_submit_stuck_input(lines: list[str]) -> bool:
     if has_terminal_enter_prompt_after_codex_footer(lines):
         return True
     if has_plan_prompt(lines):
-        return False
+        input_text = current_input_text(lines)
+        return bool(input_text and not is_empty_input_text(lines, input_text))
     if has_queued_running_input(lines) or has_compacting_indicator(lines):
         return False
     input_text = current_input_text(lines)
@@ -232,7 +235,11 @@ def stuck_input_blocker(lines: list[str], input_text: str) -> str:
     if has_terminal_enter_prompt_after_codex_footer(lines):
         return ""
     if has_plan_prompt(lines):
-        return "plan_prompt"
+        if not input_text:
+            return "empty_input"
+        if is_empty_input_text(lines, input_text):
+            return "placeholder_input"
+        return ""
     if not has_codex_model_footer(lines) and not has_idle_queued_input(lines, input_text):
         return "no_codex_footer"
     if has_compacting_indicator(lines):
@@ -288,6 +295,8 @@ def status(lines: list[str], block: Block) -> str:
     input_text = current_input_text(lines)
     if visible_error_lines(block.lines or lines[-20:], include_unmarked=False):
         return "error"
+    if has_plan_prompt(lines):
+        return "stuck_input"
     if input_text and not is_empty_input_text(lines, input_text):
         return "stuck_input"
     if input_text in CODEX_RUNNING_EMPTY_INPUT_TEXTS and current_input_follows_running_indicator(lines):
