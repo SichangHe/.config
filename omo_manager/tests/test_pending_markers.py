@@ -320,26 +320,27 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual(1, text.count("manager_mail/8867.txt"))
 
     def test_email_append_pending_suppresses_stale_marker_cleanup_comment(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            manager_file = root / "vl_submanager_current_8653.md"
-            mail = root / "manager_mail" / "9507.txt"
-            mail.parent.mkdir()
-            _ = mail.write_text("body\n", encoding="utf-8")
-            manager_file.write_text(
-                "(comment: Acknowledged stale pending notice for line 1061 by email with subject `VL duplicate helper notice cleared`; "
-                "removed repeated watcher markers for `manager_mail/9460.txt`, `manager_mail/9497.txt`, and `manager_mail/9507.txt`. "
-                "No new VL work was represented by this batch.)\n",
-                encoding="utf-8",
-            )
+        for uid in ("9460", "9507"):
+            with self.subTest(uid=uid), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                manager_file = root / "vl_submanager_current_8653.md"
+                mail = root / "manager_mail" / f"{uid}.txt"
+                mail.parent.mkdir()
+                _ = mail.write_text("body\n", encoding="utf-8")
+                manager_file.write_text(
+                    "(comment: Acknowledged stale pending notice for line 1061 by email with subject `VL duplicate helper notice cleared`; "
+                    "removed repeated watcher markers for `manager_mail/9460.txt`, `manager_mail/9497.txt`, and `manager_mail/9507.txt`. "
+                    "No new VL work was represented by this batch.)\n",
+                    encoding="utf-8",
+                )
 
-            line = append_pending(root, mail, manager_file)
+                line = append_pending(root, mail, manager_file)
 
-            self.assertEqual(1, line)
-            self.assertEqual(1, existing_consumed_source_line(root, mail, manager_file))
-            text = manager_file.read_text(encoding="utf-8")
-            self.assertNotIn("(pending)", text)
-            self.assertNotIn("(record and delegate manager_mail/9507.txt)", text)
+                self.assertEqual(1, line)
+                self.assertEqual(1, existing_consumed_source_line(root, mail, manager_file))
+                text = manager_file.read_text(encoding="utf-8")
+                self.assertNotIn("(pending)", text)
+                self.assertNotIn(f"(record and delegate manager_mail/{uid}.txt)", text)
 
     def test_email_append_pending_keeps_unconsumed_comment_references(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -454,6 +455,98 @@ class PendingMarkerTests(unittest.TestCase):
             text = manager_file.read_text(encoding="utf-8")
             self.assertIn("(pending)", text)
             self.assertIn("(record and delegate manager_mail/9507.txt)", text)
+
+    def test_email_consumed_comment_rejects_other_cleanup_before_target_status(self) -> None:
+        for text in (
+            "removed repeated watcher markers for `manager_mail/9497.txt`, and still pending `manager_mail/9507.txt`",
+            "removed repeated watcher markers for `manager_mail/9497.txt`, not removed `manager_mail/9507.txt`",
+            "removed repeated watcher markers for `manager_mail/9497.txt`, not cleared `manager_mail/9507.txt`",
+            "removed repeated watcher markers for `manager_mail/9497.txt`, not handled `manager_mail/9507.txt`",
+            "removed repeated watcher markers for `manager_mail/9497.txt`, not routed `manager_mail/9507.txt`",
+            "removed repeated watcher markers for `manager_mail/9497.txt`, then deferred `manager_mail/9507.txt`",
+            "removed repeated watcher markers for `manager_mail/9497.txt`, later noted `manager_mail/9507.txt` separately",
+            "removed repeated watcher markers for `manager_mail/9497.txt`, and mentioned `manager_mail/9507.txt` separately",
+            "removed repeated watcher markers for `manager_mail/9497.txt`, and logged `manager_mail/9507.txt` separately",
+            "removed repeated watcher markers for `manager_mail/9497.txt`, and `manager_mail/9507.txt` was logged separately",
+            "removed repeated watcher markers for `manager_mail/9497.txt`, and `manager_mail/9507.txt` is separately logged",
+            "removed repeated watcher markers for `manager_mail/9497.txt`, and `manager_mail/9507.txt` not active",
+            "removed repeated watcher markers for `manager_mail/9497.txt`, and `manager_mail/9507.txt` no longer pending",
+        ):
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                manager_file = root / "vl_submanager_current_8653.md"
+                mail = root / "manager_mail" / "9507.txt"
+                mail.parent.mkdir()
+                _ = mail.write_text("body\n", encoding="utf-8")
+                manager_file.write_text(f"(comment: {text}.)\n", encoding="utf-8")
+
+                line = append_pending(root, mail, manager_file)
+
+                self.assertEqual(3, line)
+                self.assertIsNone(existing_consumed_source_line(root, mail, manager_file))
+                self.assertIn("(record and delegate manager_mail/9507.txt)", manager_file.read_text(encoding="utf-8"))
+
+    def test_email_consumed_comment_rejects_trailing_status_for_earlier_cleanup_ref(self) -> None:
+        for text in (
+            "removed repeated watcher markers for `manager_mail/9460.txt`, `manager_mail/9507.txt`; still pending",
+            "removed repeated watcher markers for `manager_mail/9460.txt`, `manager_mail/9507.txt`; active follow-up remains",
+            "removed repeated watcher markers for `manager_mail/9460.txt`, `manager_mail/9507.txt`. Still pending",
+            "removed repeated watcher markers for `manager_mail/9460.txt`, `manager_mail/9507.txt`. Active follow-up remains",
+            "removed repeated watcher markers for `manager_mail/9460.txt`, `manager_mail/9507.txt` and still pending",
+            "removed repeated watcher markers for `manager_mail/9460.txt`, `manager_mail/9507.txt` and active follow-up remains",
+        ):
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                manager_file = root / "vl_submanager_current_8653.md"
+                mail = root / "manager_mail" / "9460.txt"
+                mail.parent.mkdir()
+                _ = mail.write_text("body\n", encoding="utf-8")
+                manager_file.write_text(f"(comment: {text}.)\n", encoding="utf-8")
+
+                line = append_pending(root, mail, manager_file)
+
+                self.assertEqual(3, line)
+                self.assertIsNone(existing_consumed_source_line(root, mail, manager_file))
+                self.assertIn("(record and delegate manager_mail/9460.txt)", manager_file.read_text(encoding="utf-8"))
+
+    def test_email_consumed_comment_accepts_multiref_cleanup_with_inactive_suffix_for_earlier_ref(self) -> None:
+        for text in (
+            "removed repeated watcher markers for `manager_mail/9460.txt`, `manager_mail/9507.txt` and no pending work remains",
+            "removed repeated watcher markers for `manager_mail/9460.txt`, `manager_mail/9507.txt` and not active",
+            "removed repeated watcher markers for `manager_mail/9460.txt`, `manager_mail/9507.txt` and no longer pending",
+            "removed repeated watcher markers for `manager_mail/9460.txt`, `manager_mail/9507.txt` and not a follow-up",
+        ):
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                manager_file = root / "vl_submanager_current_8653.md"
+                mail = root / "manager_mail" / "9460.txt"
+                mail.parent.mkdir()
+                _ = mail.write_text("body\n", encoding="utf-8")
+                manager_file.write_text(f"(comment: {text}.)\n", encoding="utf-8")
+
+                line = append_pending(root, mail, manager_file)
+
+                self.assertEqual(1, line)
+                self.assertEqual(1, existing_consumed_source_line(root, mail, manager_file))
+                self.assertNotIn("(pending)", manager_file.read_text(encoding="utf-8"))
+
+    def test_email_consumed_comment_accepts_cleanup_with_no_live_mail_remaining(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager_file = root / "vl_submanager_current_8653.md"
+            mail = root / "manager_mail" / "9507.txt"
+            mail.parent.mkdir()
+            _ = mail.write_text("body\n", encoding="utf-8")
+            manager_file.write_text(
+                "(comment: removed repeated watcher markers for `manager_mail/9507.txt`; no live mail remains.)\n",
+                encoding="utf-8",
+            )
+
+            line = append_pending(root, mail, manager_file)
+
+            self.assertEqual(1, line)
+            self.assertEqual(1, existing_consumed_source_line(root, mail, manager_file))
+            self.assertNotIn("(pending)", manager_file.read_text(encoding="utf-8"))
 
     def test_email_consumed_comment_rejects_not_yet_consumed_words(self) -> None:
         for verb in ("acknowledged", "routed", "handled", "removed", "cleared"):

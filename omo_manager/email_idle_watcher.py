@@ -673,48 +673,150 @@ def consumed_source_reference_line(stripped: str, ref: str) -> bool:
     quoted_ref = rf"`{re.escape(ref)}`"
     plain_ref = rf"{re.escape(ref)}(?![A-Za-z0-9_-])(?!(?:\.[A-Za-z0-9_-]))"
     ref_pattern = rf"(?:{quoted_ref}|{plain_ref})"
+    negative_patterns = (
+        r"\bunhandled\b",
+        r"\bnot\s+acknowledged\b",
+        r"\bnot\s+consumed\b",
+        r"\bnot\s+handled\b",
+        r"\bnot\s+removed\b",
+        r"\bnot\s+cleared\b",
+        r"\bnot\s+routed\b",
+        r"\bnot-yet\s+(?:acknowledged|consumed|handled|removed|cleared|routed)\b",
+        r"\bnot\s+yet\s+(?:acknowledged|consumed|handled|removed|cleared|routed)\b",
+        r"\bstill[-\s]+pending\b",
+        r"\bis[-\s]+pending\b",
+        r"\bpending\b(?!\s+watcher\s+markers?\b)",
+        r"\bremains[-\s]+pending\b",
+        r"\bpending[-\s]+remains\b",
+        r"\bstill[-\s]+needs(?:[-\s]+work)?\b",
+        r"\bneeds[-\s]+work\b",
+        r"\bkeep\s+pending\b",
+        r"\bdeferred\b",
+        r"\bactive\b",
+        r"\blive\s+mail\b",
+        r"\bis\s+live\b",
+        r"\bfollow-up\b",
+    )
     if not re.search(ref_pattern, stripped):
         return False
     if stripped.startswith((*ROUTED_PREFIXES, "(done", "(running", "(blocked")):
         return True
     if not stripped.startswith("(comment:"):
         return False
-    if re.search(rf"\b(?:active\s+mail|live\s+mail|follow-up)\b[^.;]*{ref_pattern}|{ref_pattern}[^.;]*\b(?:is\s+live|follow-up|still\s+pending|still\s+needs|needs\s+work)\b", stripped, re.IGNORECASE):
-        return False
+    mail_ref_pattern = r"`?manager_mail/\d+\.txt`?"
+    mail_refs = list(re.finditer(mail_ref_pattern, stripped))
+    for pattern in negative_patterns:
+        for negative_match in re.finditer(pattern, stripped, re.IGNORECASE):
+            negative_prefix = stripped[max(0, negative_match.start() - 32) : negative_match.start()]
+            if negative_match.group(0).lower() == "pending" and re.search(
+                r"(?:\bno\b|\bnot\b|\bno\s+longer\b)\s*$",
+                negative_prefix,
+                re.IGNORECASE,
+            ):
+                continue
+            if negative_match.group(0).lower() == "pending" and re.search(
+                r"\b(?:removed|cleared|consumed)\s+.*(?:repeated|duplicate|stale)\s*$",
+                stripped[: negative_match.start()],
+                re.IGNORECASE,
+            ):
+                continue
+            if re.search(r"\bactive\b|\bfollow-up\b|\blive\s+mail\b", negative_match.group(0), re.IGNORECASE) and re.search(
+                r"(?:\bno\b|\bnot\b|\bno\s+longer\b|\binactive\b)(?:\s+active(?:\s+or)?)?(?:\s+a)?\s*$",
+                negative_prefix,
+                re.IGNORECASE,
+            ):
+                continue
+            previous_ref = next((match for match in reversed(mail_refs) if match.end() <= negative_match.start()), None)
+            next_ref = next((match for match in mail_refs if match.start() >= negative_match.end()), None)
+            previous_is_target = previous_ref is not None and re.fullmatch(ref_pattern, previous_ref.group(0))
+            next_is_target = next_ref is not None and re.fullmatch(ref_pattern, next_ref.group(0))
+            target_before_negative = next(
+                (match for match in reversed(list(re.finditer(ref_pattern, stripped[: negative_match.start()])))),
+                None,
+            )
+            if next_is_target and previous_ref is None:
+                tail = stripped[negative_match.end() : next_ref.start()]
+                if negative_match.group(0).lower() == "pending" and re.search(
+                    r"\b(?:removed|cleared|consumed)\s+.*(?:pending|watcher)\s+(?:markers?|batch)\b",
+                    tail,
+                    re.IGNORECASE,
+                ):
+                    continue
+                return False
+            if next_is_target and previous_ref is not None:
+                head = stripped[previous_ref.end() : negative_match.start()]
+                if ";" in head or re.search(r"\.\s*", head):
+                    return False
+            if previous_is_target and next_ref is None:
+                return False
+            if target_before_negative is not None and next_ref is None:
+                target_tail = stripped[target_before_negative.end() : negative_match.start()]
+                target_head = stripped[: target_before_negative.start()]
+                status_boundary = re.search(r";|(?<=`)\.\s|(?<=\.txt)\.\s|\band\s*$", target_tail)
+                before_status = target_tail[: status_boundary.start()] if status_boundary is not None else target_tail
+                status_prefix = target_tail[status_boundary.end() :] if status_boundary is not None else ""
+                before_status_words = {
+                    word.lower()
+                    for word in re.findall(r"\b[A-Za-z]+\b", re.sub(mail_ref_pattern, "", before_status))
+                }
+                if (
+                    status_boundary is not None
+                    and re.search(mail_ref_pattern, status_prefix) is None
+                    and before_status_words <= {"and", "or"}
+                    and re.search(
+                    r"\b(?:removed|cleared|consumed)\s+.*(?:pending|watcher)\s+(?:markers?|batch)\b",
+                    target_head,
+                    re.IGNORECASE,
+                    )
+                ):
+                    return False
+            if previous_is_target and next_is_target:
+                return False
+            if previous_is_target and next_ref is not None:
+                tail = stripped[negative_match.end() : next_ref.start()]
+                if ";" in tail or re.search(r"\.\s*", tail) or re.search(r"\b(?:behind|after|before)\b", tail, re.IGNORECASE):
+                    return False
     for clause in re.split(r";\s*|(?<=[`)])\.\s*", stripped):
         if not re.search(ref_pattern, clause):
             continue
-        lowered = clause.lower()
-        if any(
-            phrase in lowered
-            for phrase in (
-                "unhandled",
-                "not acknowledged",
-                "not consumed",
-                "not handled",
-                "not removed",
-                "not cleared",
-                "not routed",
-                "not yet acknowledged",
-                "not yet consumed",
-                "not yet handled",
-                "not yet removed",
-                "not yet cleared",
-                "not yet routed",
-                "still pending",
-                "still needs",
-                "needs work",
-                "keep pending",
-            )
-        ):
-            continue
         consumed_verbs = ("acknowledged", "consumed", "handled", "routed", "removed", "cleared")
-        if re.search(rf"^(?:\(comment:\s*)?(?:{'|'.join(consumed_verbs)})\s+{ref_pattern}", clause.strip(), re.IGNORECASE):
+        if re.search(rf"^(?:\(comment:\s*)?(?:{'|'.join(consumed_verbs)})\s+{ref_pattern}(?:$|\b|[\s`,.;)])", clause.strip(), re.IGNORECASE):
             return True
+        lowered = clause.lower()
         stale_cleanup = r"(?:removed|cleared|consumed)\s+(?:another\s+|immediately\s+)?(?:(?:repeated|duplicate)(?:\s+stale)?|stale(?:\s+(?:repeated|duplicate))?)?\s+(?:(?:pending|watcher)\s+)*(?:markers?|batch)\b"
-        stale_match = re.search(rf"\b{stale_cleanup}.*{ref_pattern}", clause, re.IGNORECASE)
-        if stale_match and not re.search(r"\bactive\s+mail\b|\bis\s+live\b|\bfollow-up\b", clause[stale_match.start() :], re.IGNORECASE) and ("watcher marker" in lowered or "stale" in lowered or "duplicate" in lowered):
-            return True
+        for stale_match in re.finditer(rf"\b{stale_cleanup}", clause, re.IGNORECASE):
+            stale_tail = clause[stale_match.end() :]
+            cleanup_targets = re.split(
+                r"\b(?:then|later|mentioned|noted|reviewed|separately|deferred|did\s+not|not\s+(?:acknowledged|consumed|handled|removed|cleared|routed)|still[-\s]+pending|is[-\s]+pending|pending|remains[-\s]+pending|pending[-\s]+remains|still[-\s]+needs(?:[-\s]+work)?|needs[-\s]+work|keep\s+pending|active|follow-up)\b|;",
+                stale_tail,
+                maxsplit=1,
+                flags=re.IGNORECASE,
+            )[0]
+            cleanup_target = re.search(ref_pattern, cleanup_targets)
+            if cleanup_target is None:
+                continue
+            cleanup_prefix = cleanup_targets[: cleanup_target.start()]
+            cleanup_prefix = re.sub(mail_ref_pattern, "", cleanup_prefix)
+            cleanup_words = re.findall(r"\b[A-Za-z]+\b", cleanup_prefix)
+            cleanup_suffix = cleanup_targets[cleanup_target.end() :]
+            suffix_has_other_ref = re.search(mail_ref_pattern, cleanup_suffix) is not None
+            cleanup_suffix = re.sub(mail_ref_pattern, "", cleanup_suffix)
+            suffix_words = {word.lower() for word in re.findall(r"\b[A-Za-z]+\b", cleanup_suffix)}
+            allowed_suffix_words = {"and", "or", "but", "while", "for", "mail", "remains", "no", "not", "longer", "a"}
+            if suffix_has_other_ref:
+                allowed_suffix_words.add("is")
+            inactive_suffix_without_connector = (
+                bool(suffix_words & {"no", "not", "longer"})
+                and not suffix_has_other_ref
+                and not re.match(r"\s*(?:and|but|while)\b", cleanup_suffix, re.IGNORECASE)
+            )
+            list_connector = (
+                (not cleanup_words or cleanup_words[-1].lower() in {"for", "and", "or"})
+                and suffix_words <= allowed_suffix_words
+                and not inactive_suffix_without_connector
+            )
+            if list_connector and not re.search(rf"\bnot\s+(?:for\s+)?{ref_pattern}", cleanup_targets, re.IGNORECASE) and ("watcher marker" in lowered or "stale" in lowered or "duplicate" in lowered):
+                return True
     return False
 
 
