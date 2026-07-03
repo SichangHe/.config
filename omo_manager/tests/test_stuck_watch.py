@@ -34,6 +34,38 @@ class StuckWatchTests(unittest.TestCase):
                 self.assertEqual(0, check(Args(root, registry, state, 80, 30.0, False, 60.0, 1)))
             self.assertIn('stale_running: task=x.md target=cfg:1 changed=false same_tail_s=31', out.getvalue())
 
+    def test_running_tail_with_only_elapsed_timer_change_becomes_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / 'sessions.json'
+            state = root / 'state.json'
+            _ = registry.write_text('{"sessions":[{"task_file":"x.md","tmux_target":"cfg:1"}]}', encoding='utf-8')
+            reports = [
+                Report('running', ['• Working (4m 05s • esc to interrupt) · 1 background terminal running', '› Improve documentation in @filename']),
+                Report('running', ['• Working (4m 36s • esc to interrupt) · 1 background terminal running', '› Improve documentation in @filename']),
+            ]
+            out = io.StringIO()
+            with patch('omo_manager.omo_stuck_watch.inspect', side_effect=reports), patch('omo_manager.omo_stuck_watch.time.time', side_effect=[100.0, 131.0]), contextlib.redirect_stdout(out):
+                self.assertEqual(0, check(Args(root, registry, state, 80, 30.0, False, 60.0, 1)))
+                self.assertEqual(0, check(Args(root, registry, state, 80, 30.0, False, 60.0, 1)))
+            self.assertIn('stale_running: task=x.md target=cfg:1 changed=false same_tail_s=31', out.getvalue())
+
+    def test_running_tail_with_non_ui_time_change_resets_stale_clock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / 'sessions.json'
+            state = root / 'state.json'
+            _ = registry.write_text('{"sessions":[{"task_file":"x.md","tmux_target":"cfg:1"}]}', encoding='utf-8')
+            reports = [
+                Report('running', ['Working (4m 05s) on phase A', 'job runtime 4m 05s']),
+                Report('running', ['Working (4m 36s) on phase B', 'job runtime 4m 36s']),
+            ]
+            out = io.StringIO()
+            with patch('omo_manager.omo_stuck_watch.inspect', side_effect=reports), patch('omo_manager.omo_stuck_watch.time.time', side_effect=[100.0, 131.0]), contextlib.redirect_stdout(out):
+                self.assertEqual(0, check(Args(root, registry, state, 80, 30.0, False, 60.0, 1)))
+                self.assertEqual(0, check(Args(root, registry, state, 80, 30.0, False, 60.0, 1)))
+            self.assertIn('running: task=x.md target=cfg:1 changed=true same_tail_s=0', out.getvalue())
+
     def test_check_includes_manager_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -29,6 +29,7 @@ DEFAULT_STATE = Path(os.environ.get("OMO_MANAGER_STUCK_STATE", default_state_dir
 DEFAULT_ROOT = Path(os.environ.get("OMO_WORK_LOGS_ROOT", Path.home() / "work_logs"))
 VL_TODO_TARGET_RE = re.compile(r"\bvl\s+\d+\b")
 ACTIVE_TODO_SECTIONS = {"current", "human pending"}
+WORKING_ELAPSED_RE = re.compile(r"(^• Working \()\d+(?:h|m|s)(?:\s+\d+(?:m|s))*")
 
 
 @dataclass(frozen=True)
@@ -102,6 +103,10 @@ def write_json_private(path: Path, data: dict[str, object]) -> None:
 
 def digest(lines: list[str]) -> str:
     return hashlib.sha256("\n".join(lines).encode()).hexdigest()
+
+
+def stable_digest(lines: list[str]) -> str:
+    return digest([WORKING_ELAPSED_RE.sub(r"\1<elapsed>", line) for line in lines])
 
 
 def canonical_target(target: str) -> str:
@@ -180,7 +185,7 @@ def check(args: Args) -> int:
     unstick_by_target: dict[str, str] = {}
     for task_file, target in session_targets(sessions, args.manager_target, args.root):
         report = inspect(StatusArgs(target, args.n_lines))
-        tail_hash = digest(report.lines)
+        tail_hash = stable_digest(report.lines)
         old = target_state(targets.get(target))
         old_hash = str(old.get("hash", ""))
         changed = old_hash != tail_hash
