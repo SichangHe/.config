@@ -38,7 +38,7 @@ from pathlib import Path
 work_logs_root = Path(environ.get('OMO_WORK_LOGS_ROOT', str(Path.home() / 'work_logs')))
 checks = {
     work_logs_root / 'MANAGER.md': ['Routine verification tests stay quiet', 'pass/fail aggregate only'],
-    Path('omo_manager/MANAGER_HELPERS.md'): ['repeatedly called command set', 'tiny-output script'],
+    Path('omo_manager/docs/helpers/quiet-checks.md'): ['repeatedly called command set', 'tiny-output script'],
     Path('omo_manager/omo_dispatch.sh'): ['no test counts', 'repeated command set'],
     Path('omo_manager/omo_quiet_checks.sh'): ['Successful command output is suppressed', 'repeated command', '--timeout-s', '--kill-after'],
 }

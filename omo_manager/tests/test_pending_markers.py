@@ -1705,7 +1705,7 @@ class PendingMarkerTests(unittest.TestCase):
             manager_text = (root / "work_manager_today.md").read_text(encoding="utf-8")
             self.assertEqual([(2, "unread-compression")], calls)
             self.assertEqual(1, manager_text.count(watcher.threshold_marker("unread-compression")))
-            self.assertIn("docs/manager-mail-compression.md", manager_text)
+            self.assertIn("docs/mail/compression.md", manager_text)
             self.assertIn("unread-compression\t1\n", (state / "email-manager-mail-thresholds.tsv").read_text(encoding="utf-8"))
 
     def test_email_watcher_unread_threshold_can_retrigger_after_count_drops(self) -> None:
@@ -1855,7 +1855,7 @@ class PendingMarkerTests(unittest.TestCase):
             manager_text = (root / "work_manager_today.md").read_text(encoding="utf-8")
             self.assertEqual([(2, "recent-cleanup")], calls)
             self.assertEqual(1, manager_text.count(watcher.threshold_marker("recent-cleanup")))
-            self.assertIn("docs/manager-mail-cleanup.md", manager_text)
+            self.assertIn("docs/mail/cleanup.md", manager_text)
             self.assertIn("recent-cleanup\t1\n", (state / "email-manager-mail-thresholds.tsv").read_text(encoding="utf-8"))
 
     def test_email_watcher_async_worker_start_failure_can_retry(self) -> None:
@@ -4053,6 +4053,33 @@ class PendingMarkerTests(unittest.TestCase):
             text = out.getvalue()
             self.assertIn("pending: file=task.md", text)
             self.assertNotIn("task-file length warning", text)
+
+    def test_seen_cache_evicts_oldest_key_over_limit(self) -> None:
+        from omo_manager.omo_pending_watch import new_seen_cache, remember_seen
+
+        seen = new_seen_cache()
+        remember_seen(seen, "old", 1.0, limit=2)
+        remember_seen(seen, "middle", 2.0, limit=2)
+        remember_seen(seen, "new", 3.0, limit=2)
+        self.assertNotIn("old", seen)
+        self.assertEqual(["middle", "new"], list(seen))
+
+    def test_seen_cache_bounds_plain_dict_callers(self) -> None:
+        from omo_manager.omo_pending_watch import remember_seen, seen_contains
+
+        seen = {"old": 1.0, "middle": 2.0}
+        self.assertTrue(seen_contains(seen, "old"))
+        remember_seen(seen, "new", 3.0, limit=2)
+        self.assertNotIn("middle", seen)
+        self.assertEqual(["old", "new"], list(seen))
+
+    def test_positive_int_env_falls_back_for_invalid_cache_size(self) -> None:
+        from omo_manager.omo_pending_watch import positive_int_env
+
+        with patch.dict(os.environ, {"OMO_MANAGER_SEEN_CACHE_SIZE": "bad"}):
+            self.assertEqual(50000, positive_int_env("OMO_MANAGER_SEEN_CACHE_SIZE", 50000))
+        with patch.dict(os.environ, {"OMO_MANAGER_SEEN_CACHE_SIZE": "-1"}):
+            self.assertEqual(50000, positive_int_env("OMO_MANAGER_SEEN_CACHE_SIZE", 50000))
 
     def test_seen_pending_markers_do_not_expire_into_repush_loop(self) -> None:
         from omo_manager.omo_pending_watch import expire_seen

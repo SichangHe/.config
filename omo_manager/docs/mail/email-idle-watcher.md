@@ -1,0 +1,19 @@
+# email idle watcher
+
+`email_idle_watcher.py` writes manager emails to `manager_mail/UID.txt`, then appends a pending block to the current `work_manager_YYYY-MM-DD.md` at processing time. After durable Markdown queue state exists and the manager ref submit succeeds, it marks the source inbox email read; failed ref submits remain unread and retryable.
+
+Self-addressed manager-thread replies that still carry the generated plain final `PWD: NAME` footer are treated as manager-authored status mail and are ignored instead of being surfaced back to the manager as inbound pending work; quoted reply text such as `> PWD: ...` still remains eligible as human reply content. Ignored self-authored echoes are also excluded from the manager-mail threshold counters so they do not create compression or cleanup pending work.
+
+It keeps IMAP IDLE as the push path, runs an unread pull scan every `--pull-interval-s` seconds, default `600`, and exits after `--idle-exit-after-s` quiet seconds, default `3600`, so the setup supervisor refreshes it. One-shot `--once` scans flush the async queue before process exit.
+
+It records self-addressed `[a]` manager mail, with old `[omo_manager]` compatibility, in `email-manager-mail-counts.tsv`: total manager mail, unread manager mail, and recent manager-human mail within the configured window. It queues manager work when unread manager mail is more than `16`, routing through `docs/mail/compression.md`, and when recent manager-human mail within `24` hours is more than `64`, routing through `docs/mail/cleanup.md`; both triggers create manager refs only and preserve the workflow retention rules.
+
+Already-processed UIDs are marked read only when the current root still has a source marker for that UID in the active manager file or another `work_manager_*.md`; recent processed UIDs without that proof are searched again to repair stale-root races.
+
+New human email pending blocks write `(record and delegate manager_mail/UID.txt)`. Legacy `(from email manager_mail/UID.txt)` and `[source: email manager_mail/UID.txt]` remain recognized for historical duplicate detection but should not be written for new email blocks.
+
+Stored `manager_mail/UID.txt` files keep the body and a normalized subject, omitting redundant self `From`, `Date`, and `UID` headers because the source marker/file name already identify the message. Human `Re: [a] ...` and old `Re: [omo_manager] ...` subjects are stored as `Re: ...` so task-file matching sees the same subject shape the manager originally used.
+
+Leading full tmux window or pane subject tags such as `wl:9`, `[pb:1]`, and stacked `Re: wl:9 wl:6 ...` forms are routing metadata and are stripped before storage or pending presentation. Reply subjects addressed to a task by full tmux target are appended to that task file and pushed to that task's `runat:` target.
+
+`omo_pending_watch.py` remains the durable delivery path for pending Markdown refs.

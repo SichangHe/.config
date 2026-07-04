@@ -1000,12 +1000,12 @@ def append_manager_mail_threshold_pending(args: Args, kind: str, counts: Manager
     line_no = len(lines) + 1
     if kind == "unread-compression":
         summary = f"manager email watcher threshold: unread manager mail {counts.unread} exceeds {args.unread_compression_threshold}"
-        route = "route a worker through `~/.config/omo_manager/docs/manager-mail-compression.md`"
+        route = "route a worker through `~/.config/omo_manager/docs/mail/compression.md`"
         retention = "compress only unread manager-sent mail, retain full-read memos, send replacement summaries first, then move only explicitly superseded source UIDs to Trash"
     elif kind == "recent-cleanup":
         hours = args.recent_cleanup_window_s / 3600
         summary = f"manager email watcher threshold: manager-human mail within last {hours:g}h is {counts.recent_total}, exceeding {args.recent_cleanup_threshold}"
-        route = "route a worker through `~/.config/omo_manager/docs/manager-mail-cleanup.md` and the compression workflow if replacement summaries are needed"
+        route = "route a worker through `~/.config/omo_manager/docs/mail/cleanup.md` and the compression workflow if replacement summaries are needed"
         retention = "threshold is trigger-only; rerun cleanup classification and retain recent, unread, active, human-pending, long-report, and uncertain threads"
     else:
         raise ValueError(f"unknown manager mail threshold kind: {kind}")

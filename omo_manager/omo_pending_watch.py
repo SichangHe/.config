@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -107,8 +108,23 @@ IN_CLOEXEC = getattr(os, "O_CLOEXEC", 0o2000000)
 WATCH_MASK = IN_MODIFY | IN_ATTRIB | IN_CLOSE_WRITE | IN_MOVED_FROM | IN_MOVED_TO | IN_CREATE | IN_DELETE | IN_DELETE_SELF | IN_MOVE_SELF | IN_UNMOUNT
 
 
+def positive_int_env(name: str, default: int) -> int:
+    """Read a positive integer env var or use the default."""
+
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+DEFAULT_SEEN_CACHE_SIZE = positive_int_env("OMO_MANAGER_SEEN_CACHE_SIZE", 50000)
+
+
 @dataclass(frozen=True)
 class Marker:
+    """A single unresolved `(pending)` block found in Markdown."""
+
     file: Path
     line: int
     digest: str
@@ -120,6 +136,8 @@ class Marker:
 
     @property
     def ref(self) -> str:
+        """Return the compact prompt pasted to the manager."""
+
         text = f"pending: file={self.file} line={self.line} origin={self.origin} source={self.source} action={self.action}"
         if self.delegate_source:
             text = f"{text}\n(delegate {self.delegate_source})"
@@ -131,6 +149,8 @@ class Marker:
 
     @property
     def action(self) -> str:
+        """Human-origin messages require acknowledgement; agent-origin messages do not."""
+
         return "ack-human" if self.origin == "human" else "no-human-ack"
 
 
@@ -298,6 +318,18 @@ class ParsedArgs(argparse.Namespace):
     digest_idle_after_s: float = DEFAULT_DIGEST_IDLE_AFTER_S
 
 
+SeenCache = OrderedDict[str, float]
+
+
+def touch_seen(seen: dict[str, float], key: str) -> None:
+    """Refresh LRU order for ordered dict-like caches."""
+
+    if isinstance(seen, OrderedDict):
+        seen.move_to_end(key)
+        return
+    seen[key] = seen.pop(key)
+
+
 def parse_args(argv: list[str]) -> Args:
     parser = argparse.ArgumentParser(description=__doc__)
     _ = parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
@@ -349,11 +381,45 @@ def parse_args(argv: list[str]) -> Args:
     )
 
 
-def load_seen(path: Path) -> dict[str, float]:
+def new_seen_cache(initial: dict[str, float] | None = None) -> SeenCache:
+    """Create the process-local delivery/throttle memory."""
+
+    return OrderedDict(initial or {})
+
+
+def seen_contains(seen: dict[str, float], key: str) -> bool:
+    """Check a key and refresh LRU order when possible."""
+
+    if key not in seen:
+        return False
+    touch_seen(seen, key)
+    return True
+
+
+def seen_get(seen: dict[str, float], key: str, default: float = 0.0) -> float:
+    """Read a timestamp and refresh LRU order when possible."""
+
+    if key not in seen:
+        return default
+    touch_seen(seen, key)
+    return seen[key]
+
+
+def remember_seen(seen: dict[str, float], key: str, timestamp_s: float, limit: int = DEFAULT_SEEN_CACHE_SIZE) -> None:
+    """Record a delivery/throttle key and evict oldest keys over the limit."""
+
+    seen[key] = timestamp_s
+    touch_seen(seen, key)
+    while len(seen) > limit:
+        oldest_key = next(iter(seen))
+        del seen[oldest_key]
+
+
+def load_seen(path: Path) -> SeenCache:
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except OSError:
-        return {}
+        return new_seen_cache()
     seen: dict[str, float] = {}
     for line in lines:
         timestamp_s, sep, key = line.partition("\t")
@@ -362,7 +428,7 @@ def load_seen(path: Path) -> dict[str, float]:
                 seen[key] = float(timestamp_s)
             except ValueError:
                 continue
-    return seen
+    return new_seen_cache(seen)
 
 
 def save_seen(path: Path, seen: dict[str, float]) -> None:
@@ -400,6 +466,8 @@ def mtime_changed_markdown_files(root: Path, state: FileState) -> list[Path]:
 
 
 def marker_origin_source(block_lines: list[str]) -> tuple[str, str]:
+    """Classify who created a pending block from explicit source markers."""
+
     stripped_lines = [line.strip() for line in block_lines]
     if any(line.startswith(AGENT_SOURCE_PREFIXES) for line in stripped_lines):
         return "agent", "agent"
@@ -409,6 +477,8 @@ def marker_origin_source(block_lines: list[str]) -> tuple[str, str]:
 
 
 def delegate_source(block_lines: list[str]) -> str:
+    """Return the stored email source path when a pending block came from email."""
+
     for line in block_lines:
         stripped = line.strip()
         if stripped.startswith("(record and delegate ") and stripped.endswith(")"):
@@ -437,6 +507,8 @@ def is_vl_task_file(path: Path) -> bool:
 
 
 def marker_manager_target(args: Args, marker: Marker) -> str:
+    """Choose the manager pane that owns delivery for this marker."""
+
     target = directive_target(args.root / marker.file, "managerat")
     if target:
         return target
@@ -448,6 +520,8 @@ def marker_manager_target(args: Args, marker: Marker) -> str:
 
 
 def blocked_reason_before_pending(lines: list[str], pending_line: int) -> str:
+    """Attach the latest blocked reason before a pending block as context."""
+
     for line in reversed(lines[: pending_line - 1]):
         match = STATUS_DETAIL_RE.match(line.strip())
         if match is None:
@@ -459,6 +533,8 @@ def blocked_reason_before_pending(lines: list[str], pending_line: int) -> str:
 
 
 def find_markers(root: Path, files: list[Path]) -> list[Marker]:
+    """Find unresolved `(pending)` blocks outside Markdown code fences."""
+
     markers: list[Marker] = []
     for path in files:
         try:
@@ -511,6 +587,8 @@ def with_manager_policy_reminder(args: Args, text: str, reminders: Sequence[str]
 
 
 def push_ref(args: Args, marker: Marker) -> int:
+    """Deliver one pending marker reference, guarded by its current file position."""
+
     reminders = MANAGER_EMAIL_POLICY_REMINDERS if marker.source == "email" else MANAGER_POLICY_REMINDERS
     text = with_manager_policy_reminder(args, marker.ref, reminders)
     if args.dry_run:
@@ -819,6 +897,8 @@ def filter_vl_problem_output(output: str, owner_target: str = "") -> str:
 
 
 def maybe_push_vl_agent_problems(args: Args, seen: dict[str, float], now_wall_s: float) -> bool:
+    """Route VL-owned status problems to the active VL submanager."""
+
     if not args.manager_target:
         return False
     vl_target = active_vl_submanager_target(args.root)
@@ -843,12 +923,12 @@ def maybe_push_vl_agent_problems(args: Args, seen: dict[str, float], now_wall_s:
     digest = hashlib.sha256(f"{vl_target}\n{output}".encode("utf-8")).hexdigest()[:16]
     key = f"vl-agent-problem:{digest}"
     has_unstuck = any(line.startswith("unstuck: ") for line in output.splitlines())
-    if not has_unstuck and now_wall_s - seen.get(key, 0.0) < args.agent_problem_repeat_s:
+    if not has_unstuck and now_wall_s - seen_get(seen, key) < args.agent_problem_repeat_s:
         return False
     text = f"{AGENT_PROBLEM_SOURCE_LINE}\nmanager agent problem: running task marker needs attention.\n{output}"
     if push_manager_text(vl_args, text) not in {0, 2}:
         return False
-    seen[key] = now_wall_s
+    remember_seen(seen, key, now_wall_s)
     return True
 
 
@@ -916,16 +996,18 @@ def clear_manager_compaction_active(args: Args, seen: dict[str, float]) -> bool:
 
 
 def maybe_push_manager_compaction_reminder(args: Args, seen: dict[str, float], output: str, now_wall_s: float) -> bool:
+    """Send one reminder while manager compaction is visibly active."""
+
     lines = output.splitlines()
     if not any(manager_compaction_line(line, args.manager_target) for line in lines[1:]):
         return clear_manager_compaction_active(args, seen)
     key = manager_compaction_active_key(args)
-    if key in seen:
+    if seen_contains(seen, key):
         return False
     text = f"{MANAGER_COMPACTION_SOURCE_LINE}\n{MANAGER_COMPACTION_REMINDER}"
     if push_manager_text(args, text) not in {0, 2}:
         return False
-    seen[key] = now_wall_s
+    remember_seen(seen, key, now_wall_s)
     return True
 
 
@@ -1016,6 +1098,8 @@ def maybe_push_agent_problems(args: Args, seen: dict[str, float], now_wall_s: fl
 
 
 def handle_agent_problem_result(args: Args, seen: dict[str, float], result: CommandOutput, now_wall_s: float) -> bool:
+    """Filter, throttle, and route status-problem output."""
+
     if result.timed_out:
         print("omo_pending_watch: agent problem check timed out", file=sys.stderr)
         return False
@@ -1043,13 +1127,13 @@ def handle_agent_problem_result(args: Args, seen: dict[str, float], result: Comm
         has_unstuck = any(line.startswith("unstuck: ") for line in owner_output.splitlines())
         digest = hashlib.sha256(f"{owner_target}\n{owner_output}".encode("utf-8")).hexdigest()[:16]
         key = f"agent-problem:{digest}"
-        if not has_unstuck and now_wall_s - seen.get(key, 0.0) < args.agent_problem_repeat_s:
+        if not has_unstuck and now_wall_s - seen_get(seen, key) < args.agent_problem_repeat_s:
             continue
         text = with_manager_policy_reminder(args, f"{AGENT_PROBLEM_SOURCE_LINE}\nmanager agent problem: running task marker needs attention.\n{owner_output}")
         target = owner_target or args.manager_target
         if push_manager_text_to_target(args, text, target) not in {0, 2}:
             continue
-        seen[key] = now_wall_s
+        remember_seen(seen, key, now_wall_s)
         changed = True
     return changed
 
@@ -1134,25 +1218,27 @@ def expire_seen(seen: dict[str, float], now_s: float) -> dict[str, float]:
 
 
 def scan_once(args: Args, seen: dict[str, float], files: list[Path]) -> bool:
+    """Scan changed Markdown files and deliver newly observed pending refs once."""
+
     changed = False
     now_s = time.time()
     todo = args.root / "TODO.md"
     if todo in files or not files:
         n_todo_lines = markdown_line_count(todo)
         key = f"{args.root}:TODO.md:line-warning"
-        if n_todo_lines <= TODO_LINE_WARNING_THRESHOLD and key in seen:
+        if n_todo_lines <= TODO_LINE_WARNING_THRESHOLD and seen_contains(seen, key):
             del seen[key]
             changed = True
-        elif n_todo_lines > TODO_LINE_WARNING_THRESHOLD and key not in seen:
+        elif n_todo_lines > TODO_LINE_WARNING_THRESHOLD and not seen_contains(seen, key):
             if push_manager_text(args, TODO_LENGTH_REMINDER.format(n_lines=n_todo_lines)) in {0, 2}:
-                seen[key] = now_s
+                remember_seen(seen, key, now_s)
                 changed = True
     for marker in find_markers(args.root, files):
         key = f"{args.root}:{marker.file}:{marker.line}:{marker.digest}"
-        if key in seen:
+        if seen_contains(seen, key):
             continue
         if push_ref(args, marker) in {0, 2}:
-            seen[key] = now_s
+            remember_seen(seen, key, now_s)
             changed = True
     return changed
 
@@ -1166,7 +1252,7 @@ def markdown_line_count(path: Path) -> int:
 
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
-    seen = {} if args.dry_run else expire_seen(load_seen(args.state), time.time())
+    seen = new_seen_cache() if args.dry_run else expire_seen(load_seen(args.state), time.time())
     if args.once:
         changed = scan_once(args, seen, markdown_files(args.root))
         if changed and not args.dry_run:

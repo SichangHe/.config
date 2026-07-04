@@ -3,7 +3,7 @@
 Use this when unread manager-sent emails need to be compressed into a few topic emails.
 
 Find this doc:
-- manager helpers index: `~/.config/omo_manager/MANAGER_HELPERS.md`
+- manager helpers index: `~/.config/omo_manager/docs/index.md`
 - helper: `~/.config/omo_manager/omo_manager_mail_compress.py`
 
 Workflow:

@@ -5,7 +5,7 @@ Use this when the human asks to clean stale email threads between the human and 
 Entry point:
 - manager instruction: spawn a worker and point it at this doc
 - prior task context: `/ssd1/sichangheagent/work_logs/manager_email_cleanup_6169.md`
-- helper index: `~/.config/omo_manager/MANAGER_HELPERS.md`
+- helper index: `~/.config/omo_manager/docs/index.md`
 
 Tools:
 - `~/.config/omo_manager/email_idle_watcher.py`
