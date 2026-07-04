@@ -1,6 +1,6 @@
 # task file frontmatter
 
-Generic task metadata live in YAML frontmatter. Helper scripts manager it.
+Generic task metadata live in YAML frontmatter. Helper scripts manage it.
 
 ALL task files must have frontmatter, except for the main manager task files.
 
@@ -39,7 +39,7 @@ pending_task_items:
 
 Avoid unnecessary fields.
 
-Reject fields that are not in the schema. All comments stay inside Markdown bodys in `()` instead.
+Reject fields that are not in the schema. All comments stay inside Markdown bodies in `()` instead.
 
 `status` can and can only be one of:
 
@@ -73,8 +73,8 @@ For each active task file:
 1. Parse existing **bottom** `runat:` and `managerat:`.
 2. Parse the latest non-pending status marker.
 3. If latest status is blocked, move the reason into `blocked_on`.
-4. Move bullets above `(above are pending task items)` into `task_items`.
+4. Move bullets above `(above are pending task items)` into `pending_task_items`.
 5. Add frontmatter.
 6. Leave the body as is.
 
-- [ ] need to change MANAGER.md to match these new behavior
+- [ ] finish migrating active task files

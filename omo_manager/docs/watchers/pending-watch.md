@@ -45,15 +45,17 @@
   - verbose `[omo-message-source: ...]` markers remain recognized for old blocks
   - unmarked pending blocks are `origin=human source=manual` because prompts appended to `work_manager*.md` are human-origin unless explicitly marked otherwise
   - human-origin refs require manager email acknowledgement
-  - email content ending in `DM`, ignoring trailing punctuation and whitespace, is delivered to the task `runat:` worker target when that target is safely distinct from the manager target
+  - task-file frontmatter routes pending blocks to `managerat` when `is_manager: true`, and to `runat` otherwise
+  - legacy prose metadata remains recognized only for main manager task files and old explicit source markers
+  - email content ending in `DM`, ignoring trailing punctuation and whitespace, is delivered to the task frontmatter `runat` worker target when that target is safely distinct from the manager target
   - successful DM worker delivery also sends the manager an FYI copy with no required action
   - failed or unroutable DM worker delivery sends the manager an action-required fallback
   - same-process DM manager-FYI retry does not resend the worker copy after worker delivery succeeds
 
 - agent-problem routing
   - runs `omo_agent_status.py --problems-only` every `--agent-problem-interval-s` seconds, default `300`
-  - detects task files still marked `(running)` whose pane is `error`, `not_codex`, `ready`, or `stuck_input`
-  - detects blocked persistent-role task files whose pane is `error`, `not_codex`, or `stuck_input`
+  - detects task files with frontmatter `status: running` whose pane is `error`, `not_codex`, `ready`, or `stuck_input`
+  - detects blocked persistent-role task files from frontmatter whose pane is `error`, `not_codex`, or `stuck_input`
   - detects manager pane problems when `--manager-target` is set
   - detects completed task files that still have stale registry rows
   - agent-problem prompts include an `origin=agent` source marker so any manager-written pending follow-up block is `action=no-human-ack`

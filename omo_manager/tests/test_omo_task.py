@@ -5,7 +5,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from omo_manager.omo_task import Args, DEFAULT_TOOL, DEFAULT_WORKER_INSTRUCTIONS, PCODX_WRAPPER, PENDING_TASK_ITEMS_MARKER, VL_EXPERIMENT_PREFLIGHT, VL_WORKER_INSTRUCTIONS, codex_cmd, effective_tool, ensure_task_file, is_vl_agent, link_todo, main, new_window, parse_args, runat_goal_tree_error, runat_header_error, start_codex, validate_inputs, validate_runat_goal_tree, vl_preflight_env, wait_command_started
+from omo_manager.omo_agent_status import parse_task_metadata
+from omo_manager.omo_task import Args, DEFAULT_TOOL, DEFAULT_WORKER_INSTRUCTIONS, PCODX_WRAPPER, PENDING_TASK_ITEMS_MARKER, VL_WORKER_INSTRUCTIONS, codex_cmd, effective_tool, ensure_task_file, is_vl_agent, link_todo, main, new_window, parse_args, runat_goal_tree_error, runat_header_error, start_codex, validate_inputs, validate_runat_goal_tree, wait_command_started
 
 
 VALID_GOAL_TREE = "implement manager check\n- reject missing task goal tree\n"
@@ -17,11 +18,19 @@ class OmoTaskTests(unittest.TestCase):
             root = Path(tmp)
             prompt = root / "prompt.md"
             prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
-            args = Args(root, 'x.md', 'cfg', '2', 'codex', None, '', prompt, False, False, '', '', ())
+            args = Args(root, 'x.md', 'cfg', '2', 'codex', None, '', prompt, False, False, '', '', (), False, "mgr:1")
             path = ensure_task_file(args, 'cfg:2')
             link_todo(args, 'cfg:2')
-            self.assertEqual('runat: cfg:2 codex', path.read_text(encoding='utf-8').splitlines()[0])
-            self.assertIn(PENDING_TASK_ITEMS_MARKER, path.read_text(encoding="utf-8"))
+            metadata = parse_task_metadata(path.read_text(encoding="utf-8"))
+            self.assertIsNotNone(metadata)
+            assert metadata is not None
+            self.assertEqual("running", metadata.status)
+            self.assertEqual("cfg:2", metadata.runat)
+            self.assertEqual("codex", metadata.tool)
+            self.assertEqual("mgr:1", metadata.managerat)
+            self.assertFalse(metadata.is_manager)
+            self.assertEqual((), metadata.pending_task_items)
+            self.assertNotIn(PENDING_TASK_ITEMS_MARKER, path.read_text(encoding="utf-8"))
             self.assertIn('x.md cfg:2', (root / 'TODO.md').read_text(encoding='utf-8'))
 
     def test_absolute_task_file_writes_relative_todo_link(self) -> None:
@@ -30,7 +39,7 @@ class OmoTaskTests(unittest.TestCase):
             task = root / "nested" / "x.md"
             prompt = root / "prompt.md"
             prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
-            args = Args(root, str(task), "cfg", "2", "codex", None, "", prompt, False, False, "", "", ())
+            args = Args(root, str(task), "cfg", "2", "codex", None, "", prompt, False, False, "", "", (), False, "mgr:1")
             _ = ensure_task_file(args, "cfg:2")
             link_todo(args, "cfg:2")
             text = (root / "TODO.md").read_text(encoding="utf-8")
@@ -64,9 +73,12 @@ class OmoTaskTests(unittest.TestCase):
             root = Path(tmp)
             prompt = root / "prompt.md"
             prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
-            args = Args(root, 'x.md', 'cfg', '2', 'pcodx', None, '', prompt, False, False, '', '', ())
+            args = Args(root, 'x.md', 'cfg', '2', 'pcodx', None, '', prompt, False, False, '', '', (), False, "mgr:1")
             path = ensure_task_file(args, 'cfg:2')
-            self.assertEqual('runat: cfg:2 pcodx', path.read_text(encoding='utf-8').splitlines()[0])
+            metadata = parse_task_metadata(path.read_text(encoding="utf-8"))
+            self.assertIsNotNone(metadata)
+            assert metadata is not None
+            self.assertEqual("pcodx", metadata.tool)
 
     def test_validates_runat_goal_tree(self) -> None:
         validate_runat_goal_tree("runat: cfg:2 pcodx\nimplement manager check\n- reject missing task goal tree\n")
@@ -127,22 +139,7 @@ class OmoTaskTests(unittest.TestCase):
                 validate_inputs(args)
             self.assertEqual(original, path.read_text(encoding="utf-8"))
 
-    def test_new_task_rejects_prompt_started_malformed_managerat(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            prompt = root / "prompt.md"
-            prompt.write_text(
-                "managerat: vl:15 extra\n"
-                "Goal\n"
-                "- item\n",
-                encoding="utf-8",
-            )
-            args = Args(root, "x.md", "cfg", "2", "codex", None, "", prompt, False, False, "", "", ())
-            with self.assertRaisesRegex(ValueError, "managerat: TARGET"):
-                validate_inputs(args)
-            self.assertFalse((root / "x.md").exists())
-
-    def test_new_task_rejects_prompt_started_malformed_managerat_with_manager_target(self) -> None:
+    def test_new_task_preserves_prompt_started_malformed_managerat_as_body(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             prompt = root / "prompt.md"
@@ -153,11 +150,28 @@ class OmoTaskTests(unittest.TestCase):
                 encoding="utf-8",
             )
             args = Args(root, "x.md", "cfg", "2", "codex", None, "", prompt, False, False, "", "", (), False, "vl:15")
-            with self.assertRaisesRegex(ValueError, "managerat: TARGET"):
-                validate_inputs(args)
-            self.assertFalse((root / "x.md").exists())
+            validate_inputs(args)
+            path = ensure_task_file(args, "cfg:2")
+            self.assertIn("managerat: vl:15 extra\nGoal\n- item\n", path.read_text(encoding="utf-8"))
 
-    def test_new_task_rejects_prompt_started_no_space_managerat(self) -> None:
+    def test_new_task_frontmatter_carries_manager_target_when_prompt_starts_managerat(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.md"
+            prompt.write_text(
+                "managerat: vl:15 extra\n"
+                "Goal\n"
+                "- item\n",
+                encoding="utf-8",
+            )
+            args = Args(root, "x.md", "cfg", "2", "codex", None, "", prompt, False, False, "", "", (), False, "vl:15")
+            path = ensure_task_file(args, "cfg:2")
+            metadata = parse_task_metadata(path.read_text(encoding="utf-8"))
+            self.assertIsNotNone(metadata)
+            assert metadata is not None
+            self.assertEqual("vl:15", metadata.managerat)
+
+    def test_new_task_preserves_prompt_started_no_space_managerat_as_body(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             prompt = root / "prompt.md"
@@ -167,12 +181,11 @@ class OmoTaskTests(unittest.TestCase):
                 "- item\n",
                 encoding="utf-8",
             )
-            args = Args(root, "x.md", "cfg", "2", "codex", None, "", prompt, False, False, "", "", ())
-            with self.assertRaisesRegex(ValueError, "managerat: TARGET"):
-                validate_inputs(args)
-            self.assertFalse((root / "x.md").exists())
+            args = Args(root, "x.md", "cfg", "2", "codex", None, "", prompt, False, False, "", "", (), False, "vl:15")
+            path = ensure_task_file(args, "cfg:2")
+            self.assertIn("managerat:vl:15 extra\nGoal\n- item\n", path.read_text(encoding="utf-8"))
 
-    def test_new_task_rejects_prompt_started_collapsed_header(self) -> None:
+    def test_new_task_preserves_prompt_started_collapsed_header_as_body(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             prompt = root / "prompt.md"
@@ -182,10 +195,9 @@ class OmoTaskTests(unittest.TestCase):
                 "- item\n",
                 encoding="utf-8",
             )
-            args = Args(root, "x.md", "", "", "codex", None, "", prompt, False, False, "", "", ())
-            with self.assertRaisesRegex(ValueError, "exactly `runat: TARGET TOOL`"):
-                validate_inputs(args)
-            self.assertFalse((root / "x.md").exists())
+            args = Args(root, "x.md", "cfg", "2", "codex", None, "", prompt, False, False, "", "", (), False, "wl:1")
+            path = ensure_task_file(args, "cfg:2")
+            self.assertIn("runat: cfg:2 codex managerat: wl:1 collapsed\nGoal\n- item\n", path.read_text(encoding="utf-8"))
 
     def test_existing_tabbed_runat_header_is_replaced_not_duplicated(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -205,7 +217,17 @@ class OmoTaskTests(unittest.TestCase):
             args = Args(root, "x.md", "cfg", "2", "codex", None, "", prompt, False, False, "", "", (), False, "wl:1")
             path = ensure_task_file(args, "cfg:2")
             self.assertEqual(
-                "runat: cfg:2 codex\nmanagerat: wl:1\nimplement manager check\n- reject missing task goal tree\n(above are pending task items)\n",
+                "---\n"
+                "version: v1.0.0\n"
+                "status: running\n"
+                "runat: cfg:2\n"
+                "tool: codex\n"
+                "managerat: wl:1\n"
+                "is_manager: false\n"
+                "pending_task_items: []\n"
+                "---\n"
+                "implement manager check\n"
+                "- reject missing task goal tree\n",
                 path.read_text(encoding="utf-8"),
             )
 
@@ -224,7 +246,8 @@ class OmoTaskTests(unittest.TestCase):
             prompt = root / "prompt.md"
             prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
             args = Args(root, "vl_submanager_current_8653.md", "vl", "15", "codex", root, "", prompt, False, False, "", "", ())
-            validate_inputs(args)
+            with patch.dict("os.environ", {"OMO_AGENT_TMUX_TARGET": "main:1"}):
+                validate_inputs(args)
 
     def test_existing_vl_worker_launch_writes_missing_managerat(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -258,11 +281,11 @@ class OmoTaskTests(unittest.TestCase):
                 "- check whether any created task is missing `(above are pending task items)`\n",
                 encoding="utf-8",
             )
-            args = Args(root, "x.md", "cfg", "2", "codex", None, "", prompt, False, False, "", "", ())
+            args = Args(root, "x.md", "cfg", "2", "codex", None, "", prompt, False, False, "", "", (), False, "wl:1")
             path = ensure_task_file(args, "cfg:2")
             lines = path.read_text(encoding="utf-8").splitlines()
-            self.assertEqual(1, lines.count(PENDING_TASK_ITEMS_MARKER))
-            self.assertEqual(PENDING_TASK_ITEMS_MARKER, lines[-1])
+            self.assertEqual(0, lines.count(PENDING_TASK_ITEMS_MARKER))
+            self.assertEqual("- check whether any created task is missing `(above are pending task items)`", lines[-1])
 
     def test_prompt_containing_exact_pending_marker_is_preserved(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -275,13 +298,13 @@ class OmoTaskTests(unittest.TestCase):
                 "- keep this human item pending\n",
                 encoding="utf-8",
             )
-            args = Args(root, "x.md", "cfg", "2", "codex", None, "", prompt, False, False, "", "", ())
+            args = Args(root, "x.md", "cfg", "2", "codex", None, "", prompt, False, False, "", "", (), False, "wl:1")
             path = ensure_task_file(args, "cfg:2")
             lines = path.read_text(encoding="utf-8").splitlines()
             self.assertEqual(1, lines.count(PENDING_TASK_ITEMS_MARKER))
             self.assertEqual("- keep this human item pending", lines[-1])
 
-    def test_new_task_file_places_pending_marker_before_context_bullets(self) -> None:
+    def test_new_task_file_keeps_prompt_body_after_frontmatter(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             prompt = root / "prompt.md"
@@ -294,13 +317,20 @@ class OmoTaskTests(unittest.TestCase):
                 "- manager_mail/8649.txt\n",
                 encoding="utf-8",
             )
-            args = Args(root, "x.md", "cfg", "2", "codex", None, "", prompt, False, False, "", "", ())
+            args = Args(root, "x.md", "cfg", "2", "codex", None, "", prompt, False, False, "", "", (), False, "wl:1")
             path = ensure_task_file(args, "cfg:2")
             self.assertEqual(
-                "runat: cfg:2 codex\n"
+                "---\n"
+                "version: v1.0.0\n"
+                "status: running\n"
+                "runat: cfg:2\n"
+                "tool: codex\n"
+                "managerat: wl:1\n"
+                "is_manager: false\n"
+                "pending_task_items: []\n"
+                "---\n"
                 "route cleanup\n"
                 "- preserve human wording\n"
-                "(above are pending task items)\n"
                 "\n"
                 "Human sources:\n"
                 "\n"
@@ -308,10 +338,68 @@ class OmoTaskTests(unittest.TestCase):
                 path.read_text(encoding="utf-8"),
             )
 
+    def test_existing_frontmatter_task_appends_prompt_without_legacy_header_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "x.md"
+            path.write_text(
+                "---\n"
+                "version: v1.0.0\n"
+                "status: running\n"
+                "runat: cfg:2\n"
+                "tool: codex\n"
+                "managerat: mgr:1\n"
+                "is_manager: false\n"
+                "pending_task_items: []\n"
+                "---\n"
+                "old goal\n"
+                "- old item\n",
+                encoding="utf-8",
+            )
+            prompt = root / "prompt.md"
+            prompt.write_text("new followup\n- route it\n", encoding="utf-8")
+            args = Args(root, "x.md", "cfg", "2", "codex", None, "", prompt, False, False, "", "", ())
+            validate_inputs(args)
+            ensure_task_file(args, "cfg:2")
+            self.assertTrue(path.read_text(encoding="utf-8").endswith("old goal\n- old item\nnew followup\n- route it\n"))
+
+    def test_existing_frontmatter_task_launch_updates_frontmatter_without_legacy_header(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "x.md"
+            path.write_text(
+                "---\n"
+                "version: v1.0.0\n"
+                "status: blocked\n"
+                "blocked_on: waiting on restart\n"
+                "runat: cfg:2\n"
+                "tool: codex\n"
+                "managerat: mgr:1\n"
+                "is_manager: false\n"
+                "pending_task_items: []\n"
+                "---\n"
+                "old goal\n"
+                "- old item\n",
+                encoding="utf-8",
+            )
+            args = Args(root, "x.md", "cfg", "7", "pcodx", root, "", None, False, False, "", "", (), True, "mgr:1")
+            validate_inputs(args)
+            ensure_task_file(args, "cfg:7")
+            text = path.read_text(encoding="utf-8")
+            self.assertTrue(text.startswith("---\n"))
+            self.assertNotIn("blocked_on:", text)
+            metadata = parse_task_metadata(text)
+            self.assertIsNotNone(metadata)
+            assert metadata is not None
+            self.assertEqual("running", metadata.status)
+            self.assertEqual("cfg:7", metadata.runat)
+            self.assertEqual("pcodx", metadata.tool)
+            self.assertEqual("mgr:1", metadata.managerat)
+
     def test_new_task_file_requires_goal_tree(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            args = Args(root, "x.md", "cfg", "2", "pcodx", None, "", None, False, False, "", "", ())
+            args = Args(root, "x.md", "cfg", "2", "pcodx", None, "", None, False, False, "", "", (), False, "mgr:1")
             with self.assertRaisesRegex(ValueError, "high-level goal"):
                 ensure_task_file(args, "cfg:2")
 
@@ -402,116 +490,143 @@ class OmoTaskTests(unittest.TestCase):
         self.assertEqual(("--profile", "deep-review"), args.codex_flags)
         self.assertEqual(DEFAULT_TOOL, args.tool)
 
-    def test_parse_args_accepts_vl_experiment_preflight(self) -> None:
-        args = parse_args(["--task-file", "vl_worker_exp_1.md", "--vl-experiment-preflight", "--vl-preflight-verus", "/tmp/verus"])
-        self.assertTrue(args.vl_experiment_preflight)
-        self.assertEqual(Path("/tmp/verus"), args.vl_preflight_verus)
+    def test_parse_args_accepts_prelaunch_source(self) -> None:
+        args = parse_args(["--task-file", "x.md", "--prelaunch-source", "/tmp/pre launch.sh"])
+        self.assertEqual(Path("/tmp/pre launch.sh"), args.prelaunch_source)
 
-    def test_vl_experiment_preflight_requires_launch_and_experiment_file(self) -> None:
+    def test_parse_args_resolves_relative_prelaunch_source(self) -> None:
+        args = parse_args(["--task-file", "x.md", "--prelaunch-source", "omo_manager/WORKER_DEFAULTS.md"])
+        self.assertEqual((Path.cwd() / "omo_manager" / "WORKER_DEFAULTS.md").resolve(), args.prelaunch_source)
+
+    def test_parse_args_rejects_removed_vl_preflight_flags(self) -> None:
+        for flag in (
+            "--vl-experiment-preflight",
+            "--vl-preflight-vlh",
+            "--vl-preflight-verus",
+            "--vl-preflight-artifact-root",
+        ):
+            argv = ["--task-file", "vl_worker_exp_1.md", flag]
+            if flag != "--vl-experiment-preflight":
+                argv.append("/tmp/value")
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                parse_args(argv)
+
+    def test_prelaunch_source_must_exist_before_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             prompt = root / "prompt.md"
             prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
-            args = Args(root, "vl_eval_1.md", "vl", "2", "codex", root, "", prompt, False, False, "", "", (), False, "vl:15", True)
-            with self.assertRaisesRegex(ValueError, "experiment or rerun"):
-                validate_inputs(args)
-
-    def test_vl_experiment_launch_is_gated_without_opt_in_flag(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            prompt = root / "prompt.md"
-            prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
-            out = io.StringIO()
-            argv = [
-                "--root",
-                str(root),
-                "--task-file",
-                "vl_worker_exp_1.md",
-                "--tmux-session",
-                "vl",
-                "--tmux-window",
-                "2",
-                "--workdir",
-                str(root),
-                "--prompt-file",
-                str(prompt),
-                "--manager-target",
-                "vl:15",
-                "--dry-run",
-            ]
-            with contextlib.redirect_stdout(out):
-                self.assertEqual(0, main(argv))
-            self.assertIn(str(VL_EXPERIMENT_PREFLIGHT), out.getvalue())
-
-    def test_vl_experiment_launch_rejects_openrouter_flags(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            prompt = root / "prompt.md"
-            prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
-            args = Args(root, "vl_worker_exp_1.md", "vl", "2", "codex", root, "", prompt, False, False, "", "", ("--profile", "OpenRouter"), False, "vl:15")
-            with self.assertRaisesRegex(ValueError, "OpenRouter"):
-                validate_inputs(args)
-
-    def test_vl_experiment_worker_env_preserves_inherited_verus(self) -> None:
-        with patch.dict("os.environ", {"VERUS": "/tmp/verus/bin/verus", "PATH": "/usr/bin"}):
-            args = Args(Path("/tmp/root"), "vl_worker_exp_1.md", "vl", "2", "codex", Path("/tmp"), "", None, False, False, "", "", (), False, "vl:15")
-            env = vl_preflight_env(args)
-            self.assertEqual("/tmp/verus/bin/verus", env["VERUS"])
-            self.assertTrue(env["PATH"].startswith("/tmp/verus/bin:"))
-
-    def test_vl_experiment_worker_env_exports_path_verus(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, patch.dict("os.environ", {"PATH": tmp}, clear=True):
-            verus = Path(tmp) / "verus"
-            verus.touch(mode=0o755)
-            args = Args(Path("/tmp/root"), "vl_worker_exp_1.md", "vl", "2", "codex", Path("/tmp"), "", None, False, False, "", "", (), False, "vl:15")
-            env = vl_preflight_env(args)
-            self.assertEqual(str(verus), env["VERUS"])
-            self.assertTrue(env["PATH"].startswith(f"{tmp}:"))
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(
+                    1,
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "--task-file",
+                            "x.md",
+                            "--tmux-session",
+                            "cfg",
+                            "--workdir",
+                            str(root),
+                            "--prompt-file",
+                            str(prompt),
+                            "--prelaunch-source",
+                            str(root / "missing.sh"),
+                        ]
+                    ),
+                )
+            self.assertFalse((root / "x.md").exists())
+            self.assertFalse((root / "TODO.md").exists())
 
     def test_parse_args_accepts_pcodx_tool(self) -> None:
         args = parse_args(["--task-file", "x.md", "--tool", "pcodx"])
         self.assertEqual("pcodx", args.tool)
         self.assertTrue(args.tool_explicit)
 
-    def test_dry_run_prints_vl_experiment_preflight(self) -> None:
+    def test_parse_args_accepts_is_manager(self) -> None:
+        args = parse_args(["--task-file", "x.md", "--is-manager"])
+        self.assertTrue(args.is_manager)
+
+    def test_new_task_file_writes_is_manager_frontmatter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.md"
+            prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
+            args = Args(root, "x.md", "cfg", "2", "codex", None, "", prompt, False, False, "", "", (), False, "mgr:1", None, True)
+            path = ensure_task_file(args, "cfg:2")
+            metadata = parse_task_metadata(path.read_text(encoding="utf-8"))
+            self.assertIsNotNone(metadata)
+            assert metadata is not None
+            self.assertTrue(metadata.is_manager)
+
+    def test_main_success_reminds_to_fill_pending_task_items(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             prompt = root / "prompt.md"
             prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
             out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(
+                    0,
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "--task-file",
+                            "x.md",
+                            "--tmux-session",
+                            "cfg",
+                            "--tmux-window",
+                            "2",
+                            "--prompt-file",
+                            str(prompt),
+                            "--manager-target",
+                            "mgr:1",
+                        ]
+                    ),
+                )
+            self.assertIn("reminder: fill pending_task_items in task frontmatter.", out.getvalue())
+
+    def test_dry_run_prints_prelaunch_source_before_worker_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.md"
+            prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
+            prelaunch = root / "pre launch.sh"
+            prelaunch.write_text("export PROJECT_READY=1\n", encoding="utf-8")
+            out = io.StringIO()
             argv = [
                 "--root",
                 str(root),
                 "--task-file",
-                "vl_worker_exp_1.md",
+                "x.md",
                 "--tmux-session",
-                "vl",
+                "cfg",
                 "--tmux-window",
                 "2",
+                "--manager-target",
+                "mgr:1",
                 "--workdir",
                 str(root),
                 "--prompt-file",
                 str(prompt),
-                "--manager-target",
-                "vl:15",
-                "--vl-experiment-preflight",
-                "--vl-preflight-vlh",
-                "/tmp/vlh",
-                "--vl-preflight-verus",
-                "/tmp/verus",
-                "--vl-preflight-artifact-root",
-                str(root / "artifacts" / "vl_worker_exp_1"),
+                "--prelaunch-source",
+                str(prelaunch),
                 "--dry-run",
             ]
             with contextlib.redirect_stdout(out):
                 self.assertEqual(0, main(argv))
             text = out.getvalue()
-            self.assertIn(str(VL_EXPERIMENT_PREFLIGHT), text)
-            self.assertIn("--vlh /tmp/vlh", text)
-            self.assertIn("--verus /tmp/verus", text)
-            self.assertIn(str(root / "artifacts" / "vl_worker_exp_1"), text)
-            self.assertIn("VLH=/tmp/vlh", text)
-            self.assertIn("VERUS=/tmp/verus", text)
+            self.assertIn(f"prelaunch_source: {prelaunch}", text)
+            launch_line = next(line for line in text.splitlines() if "tmux send-keys" in line)
+            source_idx = launch_line.index("source ")
+            prelaunch_idx = launch_line.index(str(prelaunch))
+            export_idx = launch_line.index("export OMO_AGENT_TMUX_TARGET=cfg:DRYRUN")
+            exec_idx = launch_line.index("exec bunx @openai/codex")
+            self.assertLess(source_idx, prelaunch_idx)
+            self.assertLess(prelaunch_idx, export_idx)
+            self.assertLess(export_idx, exec_idx)
 
     def test_session_resume_ignores_existing_pcodx_task_tool_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -567,6 +682,23 @@ class OmoTaskTests(unittest.TestCase):
             self.assertEqual('Enter', command[4])
             wait_command_started_mock.assert_called_once_with('cfg:7')
 
+    def test_start_codex_sources_prelaunch_before_worker_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.md"
+            prelaunch = root / "pre launch.sh"
+            args = Args(root, "x.md", "cfg", "", "codex", root, "x", prompt, False, False, "", "", (), False, "", prelaunch)
+            with patch("omo_manager.omo_task.tmux") as tmux, patch("omo_manager.omo_task.wait_command_started"):
+                start_codex("cfg:7", args)
+            command = tmux.call_args_list[0].args[0][3]
+            source_idx = command.index("source ")
+            prelaunch_idx = command.index(str(prelaunch))
+            export_idx = command.index("export OMO_AGENT_TMUX_TARGET=cfg:7")
+            exec_idx = command.index("exec bunx @openai/codex")
+            self.assertLess(source_idx, prelaunch_idx)
+            self.assertLess(prelaunch_idx, export_idx)
+            self.assertLess(export_idx, exec_idx)
+
     def test_start_codex_adds_vl_guidance_for_vl_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             prompt = Path(tmp) / "prompt.md"
@@ -599,7 +731,7 @@ class OmoTaskTests(unittest.TestCase):
             prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
-                self.assertEqual(0, main(["--root", str(root), "--task-file", "x.md", "--tmux-session", "cfg", "--workdir", str(root), "--prompt-file", str(prompt), "--dry-run"]))
+                self.assertEqual(0, main(["--root", str(root), "--task-file", "x.md", "--tmux-session", "cfg", "--manager-target", "mgr:1", "--workdir", str(root), "--prompt-file", str(prompt), "--dry-run"]))
             self.assertIn("tmux new-window", out.getvalue())
             self.assertIn("tmux send-keys", out.getvalue())
             self.assertIn("export OMO_AGENT_TMUX_TARGET=cfg:DRYRUN", out.getvalue())
@@ -612,25 +744,34 @@ class OmoTaskTests(unittest.TestCase):
             prompt = root / "prompt.md"
             prompt.write_text("implement manager check\n", encoding="utf-8")
             with contextlib.redirect_stderr(io.StringIO()):
-                self.assertEqual(1, main(["--root", str(root), "--task-file", "x.md", "--tmux-session", "cfg", "--workdir", str(root), "--prompt-file", str(prompt), "--dry-run"]))
+                self.assertEqual(1, main(["--root", str(root), "--task-file", "x.md", "--tmux-session", "cfg", "--manager-target", "mgr:1", "--workdir", str(root), "--prompt-file", str(prompt), "--dry-run"]))
             self.assertFalse((root / "x.md").exists())
             self.assertFalse((root / "TODO.md").exists())
 
-    def test_main_dry_run_allows_new_task_without_runat_header(self) -> None:
+    def test_main_dry_run_rejects_new_task_without_runat_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            with contextlib.redirect_stdout(io.StringIO()):
-                self.assertEqual(0, main(["--root", str(root), "--task-file", "x.md", "--dry-run"]))
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(1, main(["--root", str(root), "--task-file", "x.md", "--manager-target", "mgr:1", "--dry-run"]))
             self.assertFalse((root / "x.md").exists())
             self.assertFalse((root / "TODO.md").exists())
 
-    def test_main_dry_run_validates_prompt_started_runat_without_tmux_header(self) -> None:
+    def test_validate_inputs_rejects_session_only_runat_for_new_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.md"
+            prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
+            args = Args(root, "x.md", "cfg", "", "codex", None, "", prompt, False, False, "", "", (), False, "mgr:1")
+            with self.assertRaisesRegex(ValueError, "full tmux target"):
+                validate_inputs(args)
+
+    def test_main_dry_run_body_runat_does_not_supply_frontmatter_runat(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             prompt = root / "prompt.md"
             prompt.write_text("runat: cfg:2 pcodx\nimplement manager check\n", encoding="utf-8")
             with contextlib.redirect_stderr(io.StringIO()):
-                self.assertEqual(1, main(["--root", str(root), "--task-file", "x.md", "--prompt-file", str(prompt), "--dry-run"]))
+                self.assertEqual(1, main(["--root", str(root), "--task-file", "x.md", "--manager-target", "mgr:1", "--prompt-file", str(prompt), "--dry-run"]))
             self.assertFalse((root / "x.md").exists())
             self.assertFalse((root / "TODO.md").exists())
 
@@ -664,8 +805,12 @@ class OmoTaskTests(unittest.TestCase):
             validate_inputs(args)
 
     def test_allows_raw_mcp_server_config_for_explicit_pcodx_tool(self) -> None:
-        args = parse_args(["--task-file", "x.md", "--tool", "pcodx", "--codex-flag=--config=mcp_servers.pcodx_partial_compact.command=\"bun\""])
-        validate_inputs(args)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.md"
+            prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
+            args = parse_args(["--root", str(root), "--task-file", "x.md", "--tmux-session", "cfg", "--tmux-window", "2", "--manager-target", "mgr:1", "--prompt-file", str(prompt), "--tool", "pcodx", "--codex-flag=--config=mcp_servers.pcodx_partial_compact.command=\"bun\""])
+            validate_inputs(args)
 
     def test_rejects_non_codex_tool(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):

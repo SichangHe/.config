@@ -10,14 +10,79 @@ from omo_manager.omo_agent_status import SessionRecord, StatusRow, TaskLine
 from omo_manager.omo_codex_status import Report
 
 
+def task_frontmatter(status: str, runat: str = "cfg:1", managerat: str = "mgr:1", *, is_manager: bool = False, pending_items: tuple[str, ...] = (), blocked_on: str = "") -> str:
+    lines = [
+        "---",
+        "version: v1.0.0",
+        f"status: {status}",
+    ]
+    if blocked_on:
+        lines.append(f"blocked_on: {blocked_on}")
+    lines.extend(
+        [
+            f"runat: {runat}",
+            "tool: codex",
+            f"managerat: {managerat}",
+            f"is_manager: {str(is_manager).lower()}",
+        ]
+    )
+    if pending_items:
+        lines.append("pending_task_items:")
+        lines.extend(f"  - {item}" for item in pending_items)
+    else:
+        lines.append("pending_task_items: []")
+    lines.append("---")
+    return "\n".join(lines) + "\n"
+
+
 class AgentStatusTests(unittest.TestCase):
+    def test_frontmatter_status_overrides_legacy_prose_markers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
+            _ = (root / "active.md").write_text(f"{task_frontmatter('done')}(running)\n", encoding="utf-8")
+
+            current, done, human_pending = load_task_state(root)
+
+            self.assertEqual({}, current)
+            self.assertEqual({"active.md"}, done)
+            self.assertEqual(set(), human_pending)
+
+    def test_legacy_task_file_without_frontmatter_is_not_status_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
+            _ = (root / "active.md").write_text("runat: cfg:1 codex\n(running)\n", encoding="utf-8")
+
+            current, done, human_pending = load_task_state(root)
+
+            self.assertEqual({}, current)
+            self.assertEqual(set(), done)
+            self.assertEqual(set(), human_pending)
+
+    def test_frontmatter_pending_task_items_report_after_done(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\ndone.md cfg 1\n", encoding="utf-8")
+            _ = (root / "done.md").write_text(task_frontmatter("done", pending_items=("preserve human request",)), encoding="utf-8")
+            out = StringIO()
+
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("not_codex", [])), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+
+            text = out.getvalue()
+            self.assertIn("agent-problems: human_request=1", text)
+            self.assertIn("human_request: task=done.md evidence=pending_item=preserve human request", text)
+
     def test_load_task_state_prefers_reopened_active_over_stale_done(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n\nprevious:\ndone.md cfg 2 (done)\n", encoding="utf-8")
             _ = (root / "MANAGER_TRACKER.md").write_text("## Complete, delivered to human\n- `active.md` complete.\n", encoding="utf-8")
-            _ = (root / "active.md").write_text("runat: cfg:1 codex\n(running)\n", encoding="utf-8")
-            _ = (root / "done.md").write_text("runat: cfg:2 codex\n(done)\n", encoding="utf-8")
+            _ = (root / "active.md").write_text(task_frontmatter("running", runat="cfg:1"), encoding="utf-8")
+            _ = (root / "done.md").write_text(task_frontmatter("done", runat="cfg:2"), encoding="utf-8")
             current, done, _human_pending = load_task_state(root)
             self.assertIn("active.md", current)
             self.assertNotIn("active.md", done)
@@ -28,7 +93,7 @@ class AgentStatusTests(unittest.TestCase):
             root = Path(tmp)
             _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
             _ = (root / "MANAGER_TRACKER.md").write_text("## Active / waiting\n- `tracker.md` (`pb:4`, port `18941`): running\n", encoding="utf-8")
-            _ = (root / "active.md").write_text("runat: cfg:1 codex\n(running)\n", encoding="utf-8")
+            _ = (root / "active.md").write_text(task_frontmatter("running", runat="cfg:1"), encoding="utf-8")
             current, done, human_pending = load_task_state(root)
             self.assertEqual({"active.md"}, set(current))
             self.assertEqual(set(), done)
@@ -38,12 +103,12 @@ class AgentStatusTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             _ = (root / "TODO.md").write_text("human pending:\nreview.md (done)\n\nprevious:\nold.md (blocked)\n", encoding="utf-8")
-            _ = (root / "review.md").write_text("runat: pb:4 codex\n(done)\n\n(blocked)\n", encoding="utf-8")
-            _ = (root / "old.md").write_text("runat: wl:2 codex\n(running)\n", encoding="utf-8")
+            _ = (root / "review.md").write_text(f"{task_frontmatter('done', runat='pb:4')}(blocked)\n", encoding="utf-8")
+            _ = (root / "old.md").write_text(task_frontmatter("running", runat="wl:2"), encoding="utf-8")
             current, done, human_pending = load_task_state(root)
             self.assertEqual({"old.md"}, set(current))
-            self.assertEqual(set(), done)
-            self.assertEqual({"review.md"}, human_pending)
+            self.assertEqual({"review.md"}, done)
+            self.assertEqual(set(), human_pending)
             self.assertEqual("wl:2", current["old.md"].target)
 
     def test_load_task_state_prefers_runat_over_historical_close_note(self) -> None:
@@ -51,7 +116,7 @@ class AgentStatusTests(unittest.TestCase):
             root = Path(tmp)
             _ = (root / "TODO.md").write_text("current:\nvl_submanager_current.md vl 15\n", encoding="utf-8")
             _ = (root / "vl_submanager_current.md").write_text(
-                "runat: vl:15 codex\n"
+                f"{task_frontmatter('blocked', runat='vl:15', blocked_on='persistent role VL submanager remains active')}"
                 "(done: worker report consumed)\n"
                 "(manager closed Codex agent 07-02 10:35 PDT; tmux target `vl:10`; session_id: `old`.)\n"
                 "(blocked: persistent role VL submanager remains active)\n",
@@ -70,6 +135,7 @@ class AgentStatusTests(unittest.TestCase):
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nvl_submanager_current.md vl 15\n", encoding="utf-8")
             _ = (root / "vl_submanager_current.md").write_text(
+                f"{task_frontmatter('blocked', runat='vl:15', blocked_on='persistent role VL submanager remains active')}"
                 "runat: vl:10 codex\n"
                 "(done: old worker closed)\n"
                 "(manager closed Codex agent 07-02 10:35 PDT; tmux target `vl:10`; session_id: `old`.)\n"
@@ -87,52 +153,52 @@ class AgentStatusTests(unittest.TestCase):
     def test_persistent_blocked_task_lines_marks_role_from_latest_blocked_note(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            _ = (root / "TODO.md").write_text("current:\nrole.md cfg 1\n", encoding="utf-8")
-            _ = (root / "role.md").write_text("runat: cfg:1 codex\n(running)\n\n(done)\n\n(blocked: persistent VL proof-analysis role waiting for follow-up)\n", encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nwork_manager_role.md cfg 1\n", encoding="utf-8")
+            _ = (root / "work_manager_role.md").write_text("runat: cfg:1 codex\n(running)\n\n(done)\n\n(blocked: persistent VL proof-analysis role waiting for follow-up)\n", encoding="utf-8")
             current, _done, _human_pending = load_task_state(root)
             standby = persistent_blocked_task_lines(root)
-            self.assertNotIn("role.md", current)
-            self.assertEqual("role.md", standby[0].task_file)
+            self.assertNotIn("work_manager_role.md", current)
+            self.assertEqual("work_manager_role.md", standby[0].task_file)
             self.assertTrue(standby[0].persistent_role)
             self.assertEqual("blocked", standby[0].status)
 
     def test_persistent_blocked_task_lines_accepts_separate_note_form(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            _ = (root / "TODO.md").write_text("current:\nrole.md cfg 1\n", encoding="utf-8")
-            _ = (root / "role.md").write_text("runat: cfg:1 codex\n(running)\n\n(blocked) (persistent role waiting for followup)\n", encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nwork_manager_role.md cfg 1\n", encoding="utf-8")
+            _ = (root / "work_manager_role.md").write_text("runat: cfg:1 codex\n(running)\n\n(blocked) (persistent role waiting for followup)\n", encoding="utf-8")
             standby = persistent_blocked_task_lines(root)
-            self.assertEqual("role.md", standby[0].task_file)
+            self.assertEqual("work_manager_role.md", standby[0].task_file)
             self.assertTrue(standby[0].persistent_role)
 
     def test_persistent_blocked_task_lines_accepts_split_note_form(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            _ = (root / "TODO.md").write_text("current:\nrole.md cfg 1\n", encoding="utf-8")
-            _ = (root / "role.md").write_text("runat: cfg:1 codex\n(running)\n\n(blocked)\n(persistent VL supervisor role waiting for follow-up)\n", encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nwork_manager_role.md cfg 1\n", encoding="utf-8")
+            _ = (root / "work_manager_role.md").write_text("runat: cfg:1 codex\n(running)\n\n(blocked)\n(persistent VL supervisor role waiting for follow-up)\n", encoding="utf-8")
             standby = persistent_blocked_task_lines(root)
-            self.assertEqual("role.md", standby[0].task_file)
+            self.assertEqual("work_manager_role.md", standby[0].task_file)
             self.assertTrue(standby[0].persistent_role)
 
     def test_persistent_blocked_task_lines_rejects_nonadjacent_split_note_form(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            _ = (root / "TODO.md").write_text("current:\nrole.md cfg 1\n", encoding="utf-8")
-            _ = (root / "role.md").write_text("runat: cfg:1 codex\n(blocked)\nplain prose between status and note\n(persistent VL supervisor role waiting for follow-up)\n", encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nwork_manager_role.md cfg 1\n", encoding="utf-8")
+            _ = (root / "work_manager_role.md").write_text("runat: cfg:1 codex\n(blocked)\nplain prose between status and note\n(persistent VL supervisor role waiting for follow-up)\n", encoding="utf-8")
             self.assertEqual([], persistent_blocked_task_lines(root))
 
     def test_persistent_blocked_task_lines_rejects_blank_line_split_note_form(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            _ = (root / "TODO.md").write_text("current:\nrole.md cfg 1\n", encoding="utf-8")
-            _ = (root / "role.md").write_text("runat: cfg:1 codex\n(blocked)\n\n(persistent VL supervisor role waiting for follow-up)\n", encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nwork_manager_role.md cfg 1\n", encoding="utf-8")
+            _ = (root / "work_manager_role.md").write_text("runat: cfg:1 codex\n(blocked)\n\n(persistent VL supervisor role waiting for follow-up)\n", encoding="utf-8")
             self.assertEqual([], persistent_blocked_task_lines(root))
 
     def test_persistent_blocked_task_lines_deduplicates_todo_refs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            _ = (root / "TODO.md").write_text("current:\nrole.md cfg 1\nrole.md cfg 1\n", encoding="utf-8")
-            _ = (root / "role.md").write_text("runat: cfg:1 codex\n(blocked: persistent VL supervisor role waiting for follow-up)\n", encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nwork_manager_role.md cfg 1\nwork_manager_role.md cfg 1\n", encoding="utf-8")
+            _ = (root / "work_manager_role.md").write_text("runat: cfg:1 codex\n(blocked: persistent VL supervisor role waiting for follow-up)\n", encoding="utf-8")
             standby = persistent_blocked_task_lines(root)
             self.assertEqual(1, len(standby))
 
@@ -265,8 +331,8 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[{"task_file":"active.md","tmux_target":"cfg:1.0"},{"task_file":"done.md","tmux_target":"cfg:2.0"}]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n\nprevious:\nactive.md cfg 1 (old done)\ndone.md cfg 2 (done)\n", encoding="utf-8")
-            _ = (root / "active.md").write_text("runat: cfg:1 codex\n(running)\n", encoding="utf-8")
-            _ = (root / "done.md").write_text("runat: cfg:2 codex\n(done)\n", encoding="utf-8")
+            _ = (root / "active.md").write_text(task_frontmatter("running", runat="cfg:1"), encoding="utf-8")
+            _ = (root / "done.md").write_text(task_frontmatter("done", runat="cfg:2"), encoding="utf-8")
             current, done, _human_pending = load_task_state(root)
             self.assertIn("active.md", current)
             self.assertEqual({"done.md"}, done)
@@ -326,7 +392,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[{"task_file":"active.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
-            _ = (root / "active.md").write_text("runat: cfg:1 codex\n(running)\n", encoding="utf-8")
+            _ = (root / "active.md").write_text(task_frontmatter("running", runat="cfg:1"), encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("running", ["working"])), redirect_stdout(out):
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
@@ -339,7 +405,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[{"task_file":"active.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
-            _ = (root / "active.md").write_text("runat: cfg:1 codex\n(running)\n", encoding="utf-8")
+            _ = (root / "active.md").write_text(task_frontmatter("running", runat="cfg:1"), encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_codex_status.tail", return_value=pane), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present") as unstick, redirect_stdout(out):
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
@@ -353,7 +419,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[{"task_file":"active.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
-            _ = (root / "active.md").write_text("runat: cfg:1 codex\n(running)\n", encoding="utf-8")
+            _ = (root / "active.md").write_text(task_frontmatter("running", runat="cfg:1"), encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_codex_status.tail", return_value=pane), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present") as unstick, redirect_stdout(out):
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
@@ -367,7 +433,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[{"task_file":"active.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
-            _ = (root / "active.md").write_text("runat: cfg:1 codex\n(running)\n", encoding="utf-8")
+            _ = (root / "active.md").write_text(task_frontmatter("running", runat="cfg:1"), encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_codex_status.tail", return_value=pane), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present") as unstick, redirect_stdout(out):
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
@@ -389,7 +455,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[{"task_file":"active.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
-            _ = (root / "active.md").write_text("runat: cfg:1 codex\n(running)\n", encoding="utf-8")
+            _ = (root / "active.md").write_text(task_frontmatter("running", runat="cfg:1"), encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_codex_status.tail", return_value=pane), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present") as unstick, redirect_stdout(out):
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
@@ -403,7 +469,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[{"task_file":"active.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
-            _ = (root / "active.md").write_text("runat: cfg:1 codex\n(running)\n", encoding="utf-8")
+            _ = (root / "active.md").write_text(task_frontmatter("running", runat="cfg:1"), encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_codex_status.tail", return_value=pane), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present") as unstick, redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
@@ -420,7 +486,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[{"task_file":"active.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
-            _ = (root / "active.md").write_text("runat: cfg:1 codex\n(running)\n", encoding="utf-8")
+            _ = (root / "active.md").write_text(task_frontmatter("running", runat="cfg:1"), encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_codex_status.tail", return_value=pane), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present") as unstick, redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
@@ -436,7 +502,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[{"task_file":"active.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
-            _ = (root / "active.md").write_text("runat: cfg:1 codex\n(running)\n", encoding="utf-8")
+            _ = (root / "active.md").write_text(task_frontmatter("running", runat="cfg:1"), encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_codex_status.tail", return_value=pane), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present") as unstick, redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
@@ -452,7 +518,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[{"task_file":"active.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
-            _ = (root / "active.md").write_text("runat: cfg:1 codex\n(running)\n", encoding="utf-8")
+            _ = (root / "active.md").write_text(task_frontmatter("running", runat="cfg:1"), encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_codex_status.tail", return_value=pane), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present"), redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
@@ -467,7 +533,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[{"task_file":"active.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
-            _ = (root / "active.md").write_text("runat: cfg:1 codex\n(running)\n", encoding="utf-8")
+            _ = (root / "active.md").write_text(task_frontmatter("running", runat="cfg:1"), encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_codex_status.tail", return_value=pane), redirect_stdout(out):
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
@@ -480,7 +546,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[{"task_file":"active.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
-            _ = (root / "active.md").write_text("runat: cfg:1 codex\n(running)\n", encoding="utf-8")
+            _ = (root / "active.md").write_text(task_frontmatter("running", runat="cfg:1"), encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_codex_status.tail", return_value=pane), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present", return_value="sent_enter") as unstick, redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
@@ -495,7 +561,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[{"task_file":"active.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
-            _ = (root / "active.md").write_text("runat: cfg:1 codex\n(running)\n", encoding="utf-8")
+            _ = (root / "active.md").write_text(task_frontmatter("running", runat="cfg:1"), encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_codex_status.tail", return_value=pane), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present", return_value="sent_enter") as unstick, redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
@@ -510,7 +576,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[{"task_file":"active.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
-            _ = (root / "active.md").write_text("runat: cfg:1 codex\n(running)\n", encoding="utf-8")
+            _ = (root / "active.md").write_text(task_frontmatter("running", runat="cfg:1"), encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_codex_status.tail", return_value=pane), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present", return_value="sent_enter") as unstick, redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
@@ -526,7 +592,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[{"task_file":"active.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
-            _ = (root / "active.md").write_text("runat: cfg:1 codex\n(running)\n", encoding="utf-8")
+            _ = (root / "active.md").write_text(task_frontmatter("running", runat="cfg:1"), encoding="utf-8")
             out = StringIO()
             report = Report("stuck_input", ["› Continue task"], "Continue task", True)
             with patch("omo_manager.omo_agent_status.inspect", return_value=report), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present", return_value="sent_enter") as unstick, redirect_stdout(out):
@@ -541,8 +607,8 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[{"task_file":"active.md","tmux_target":"cfg:1.0","started_at_s":1},{"task_file":"other.md","tmux_target":"cfg:1.0","started_at_s":2}]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\nother.md cfg 1\n", encoding="utf-8")
-            _ = (root / "active.md").write_text("runat: cfg:1 codex\n(running)\n", encoding="utf-8")
-            _ = (root / "other.md").write_text("runat: cfg:1 codex\n(running)\n", encoding="utf-8")
+            _ = (root / "active.md").write_text(task_frontmatter("running", runat="cfg:1"), encoding="utf-8")
+            _ = (root / "other.md").write_text(task_frontmatter("running", runat="cfg:1"), encoding="utf-8")
             out = StringIO()
             report = Report("stuck_input", ["› Continue task"], "Continue task", True)
             with patch("omo_manager.omo_agent_status.inspect", return_value=report), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present", return_value="sent_enter") as unstick, redirect_stdout(out):
@@ -559,8 +625,8 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[{"task_file":"active.md","tmux_target":"cfg:1","started_at_s":1},{"task_file":"other.md","tmux_target":"cfg:1.0","started_at_s":2}]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\nother.md cfg 1\n", encoding="utf-8")
-            _ = (root / "active.md").write_text("runat: cfg:1 codex\n(running)\n", encoding="utf-8")
-            _ = (root / "other.md").write_text("runat: cfg:1.0 codex\n(running)\n", encoding="utf-8")
+            _ = (root / "active.md").write_text(task_frontmatter("running", runat="cfg:1"), encoding="utf-8")
+            _ = (root / "other.md").write_text(task_frontmatter("running", runat="cfg:1.0"), encoding="utf-8")
             out = StringIO()
             report = Report("stuck_input", ["› Continue task"], "Continue task", True)
             with patch("omo_manager.omo_agent_status.inspect", return_value=report), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present", return_value="sent_enter") as unstick, redirect_stdout(out):
@@ -593,11 +659,14 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[{"task_file":"active.md","tmux_target":"wl:1","started_at_s":1}]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nactive.md wl 1\n", encoding="utf-8")
-            _ = (root / "active.md").write_text("runat: wl:1 codex\n(running)\n", encoding="utf-8")
+            _ = (root / "active.md").write_text(task_frontmatter("running", runat="wl:1", managerat="wl:2"), encoding="utf-8")
             report = Report("stuck_input", ["› manager status text"], "manager status text", True)
             out = StringIO()
-            with patch("omo_manager.omo_agent_status.inspect", return_value=report), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present", return_value="sent_enter") as unstick, redirect_stdout(out):
-                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "wl:1.0"]))
+            def fake_inspect(args: object) -> Report:
+                return report if getattr(args, "target") == "wl:1" else Report("running", ["working"])
+
+            with patch("omo_manager.omo_agent_status.inspect", side_effect=fake_inspect), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present", return_value="sent_enter") as unstick, redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "wl:2"]))
             unstick.assert_called_once()
             text = out.getvalue()
             self.assertIn("stuck_input: task=active.md evidence=target=wl:1", text)
@@ -648,7 +717,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[{"task_file":"active.md","tmux_target":"mgr:1.0","started_at_s":1}]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nactive.md mgr 1\n", encoding="utf-8")
-            _ = (root / "active.md").write_text("runat: mgr:1.0 codex\n(running)\n", encoding="utf-8")
+            _ = (root / "active.md").write_text(task_frontmatter("running", runat="mgr:1.0", managerat="wl:1"), encoding="utf-8")
             out = StringIO()
             report = Report("running", ["• Compacting conversation", "", "› Continue managing"], "Continue managing", False, "compacting")
             with patch("omo_manager.omo_agent_status.inspect", return_value=report), redirect_stdout(out):
@@ -711,7 +780,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[{"task_file":"active.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
-            _ = (root / "active.md").write_text("runat: cfg:1 codex\n(running)\n", encoding="utf-8")
+            _ = (root / "active.md").write_text(task_frontmatter("running", runat="cfg:1"), encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["› Use /skills to list available skills"])), redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
@@ -723,7 +792,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[{"task_file":"role.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nrole.md cfg 1\n", encoding="utf-8")
-            _ = (root / "role.md").write_text("runat: cfg:1 codex\n(running: persistent VL spec-analysis role resumed for follow-up work)\n", encoding="utf-8")
+            _ = (root / "role.md").write_text(task_frontmatter("running", runat="cfg:1"), encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["› Use /skills to list available skills"])), redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
@@ -735,7 +804,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[{"task_file":"role.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nrole.md cfg 1\n", encoding="utf-8")
-            _ = (root / "role.md").write_text("runat: cfg:1 codex\n(blocked: persistent VL spec-analysis role waiting for follow-up)\n", encoding="utf-8")
+            _ = (root / "role.md").write_text(task_frontmatter("blocked", runat="cfg:1", blocked_on="persistent VL spec-analysis role waiting for follow-up"), encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["› Use /skills to list available skills"])), redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
@@ -747,7 +816,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[{"task_file":"role.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nrole.md cfg 1\n", encoding="utf-8")
-            _ = (root / "role.md").write_text("runat: cfg:1 codex\n(blocked) (persistent role waiting for followup)\n", encoding="utf-8")
+            _ = (root / "role.md").write_text(task_frontmatter("blocked", runat="cfg:1", blocked_on="persistent role waiting for followup"), encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["› Use /skills to list available skills"])), redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
@@ -759,7 +828,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[{"task_file":"role.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nrole.md cfg 1\n", encoding="utf-8")
-            _ = (root / "role.md").write_text("runat: cfg:1 codex\n(blocked: persistent VL spec-analysis role waiting for follow-up)\n", encoding="utf-8")
+            _ = (root / "role.md").write_text(task_frontmatter("blocked", runat="cfg:1", blocked_on="persistent VL spec-analysis role waiting for follow-up"), encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("stuck_input", ["› Continue follow-up"], "Continue follow-up", True)), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present", return_value="sent_enter"), redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
@@ -771,7 +840,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[{"task_file":"role.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nrole.md cfg 1\n", encoding="utf-8")
-            _ = (root / "role.md").write_text("runat: cfg:1 codex\n(blocked: persistent VL supervisor role waiting for follow-up)\n", encoding="utf-8")
+            _ = (root / "role.md").write_text(task_frontmatter("blocked", runat="cfg:1", blocked_on="persistent VL supervisor role waiting for follow-up"), encoding="utf-8")
             report = Report("stuck_input", ["› Explain this codebase"], "Explain this codebase", True)
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=report), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present") as unstick, redirect_stdout(out):
@@ -786,7 +855,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[{"task_file":"role.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nrole.md cfg 1\n", encoding="utf-8")
-            _ = (root / "role.md").write_text("runat: cfg:1 codex\n(blocked: persistent VL supervisor role waiting for follow-up)\n", encoding="utf-8")
+            _ = (root / "role.md").write_text(task_frontmatter("blocked", runat="cfg:1", blocked_on="persistent VL supervisor role waiting for follow-up"), encoding="utf-8")
             with patch("omo_manager.omo_codex_status.tail", return_value=pane), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present") as unstick:
                 for _ in range(2):
                     out = StringIO()
@@ -801,7 +870,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[{"task_file":"role.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nrole.md cfg 1\n", encoding="utf-8")
-            _ = (root / "role.md").write_text("runat: cfg:1 codex\n(blocked: persistent VL supervisor role waiting for follow-up)\n", encoding="utf-8")
+            _ = (root / "role.md").write_text(task_frontmatter("blocked", runat="cfg:1", blocked_on="persistent VL supervisor role waiting for follow-up"), encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("error", ["traceback"])), redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
@@ -813,7 +882,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[{"task_file":"role.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nrole.md cfg 1\n", encoding="utf-8")
-            _ = (root / "role.md").write_text("runat: cfg:1 codex\n(blocked) (persistent role waiting for followup)\n", encoding="utf-8")
+            _ = (root / "role.md").write_text(task_frontmatter("blocked", runat="cfg:1", blocked_on="persistent role waiting for followup"), encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("not_codex", [])), redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
@@ -825,7 +894,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[{"task_file":"role.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nrole.md cfg 1\n", encoding="utf-8")
-            _ = (root / "role.md").write_text("runat: cfg:1 codex\n(blocked)\n(persistent VL supervisor role waiting for follow-up)\n", encoding="utf-8")
+            _ = (root / "role.md").write_text(task_frontmatter("blocked", runat="cfg:1", blocked_on="persistent VL supervisor role waiting for follow-up"), encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("not_codex", [])), redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
@@ -840,15 +909,12 @@ class AgentStatusTests(unittest.TestCase):
                 "current:\nmanager_vl_watchdog.md wl 5\n\nprevious:\nvl_supervisor_current_7404.md vl 7\nvl_worker.md vl 9\n",
                 encoding="utf-8",
             )
-            _ = (root / "manager_vl_watchdog.md").write_text("runat: wl:5 codex\n(running)\n", encoding="utf-8")
+            _ = (root / "manager_vl_watchdog.md").write_text(task_frontmatter("running", runat="wl:5"), encoding="utf-8")
             _ = (root / "vl_supervisor_current_7404.md").write_text(
-                "runat: vl:7 codex\n(blocked: persistent supervisor waiting on `vl_worker.md`; image lacks codex)\n",
+                task_frontmatter("blocked", runat="vl:7", managerat="vl:15", is_manager=True, blocked_on="persistent supervisor waiting on `vl_worker.md`; image lacks codex"),
                 encoding="utf-8",
             )
-            _ = (root / "vl_worker.md").write_text(
-                "runat: vl:9 codex\n(blocked: Docker image lacks codex; no worker output was produced)\n",
-                encoding="utf-8",
-            )
+            _ = (root / "vl_worker.md").write_text(task_frontmatter("blocked", runat="vl:9", managerat="vl:15", blocked_on="Docker image lacks codex; no worker output was produced"), encoding="utf-8")
             def fake_inspect(args: object) -> Report:
                 return Report("running", ["working"]) if getattr(args, "target") == "wl:5" else Report("ready", ["idle"])
 
@@ -858,7 +924,7 @@ class AgentStatusTests(unittest.TestCase):
             text = out.getvalue()
             self.assertIn("agent-problems: blocked_idle=2", text)
             self.assertIn("manager-action: blocked_idle>0 inspect blocked agents", text)
-            self.assertIn("blocked_idle: task=vl_supervisor_current_7404.md evidence=target=vl:7 role=blocked_idle_vl", text)
+            self.assertIn("blocked_idle: task=vl_supervisor_current_7404.md evidence=target=vl:15 role=blocked_idle_vl", text)
             self.assertIn("blocked_idle: task=vl_worker.md evidence=target=vl:9 role=blocked_idle_vl_dependency", text)
             self.assertIn("image lacks codex", text)
 
@@ -868,7 +934,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nworker.md cfg 1\n", encoding="utf-8")
-            _ = (root / "worker.md").write_text("runat: cfg:1 codex\nmanagerat: wl:16\n(blocked: waiting on human API key)\n", encoding="utf-8")
+            _ = (root / "worker.md").write_text(task_frontmatter("blocked", runat="cfg:1", managerat="wl:16", blocked_on="waiting on human API key"), encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(out):
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "wl:17"]))
@@ -885,7 +951,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nvl_worker.md vl 9\n", encoding="utf-8")
-            _ = (root / "vl_worker.md").write_text("runat: vl:9 codex\n(blocked: image lacks codex)\n", encoding="utf-8")
+            _ = (root / "vl_worker.md").write_text(task_frontmatter("blocked", runat="vl:9", blocked_on="image lacks codex"), encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("running", ["working"])), redirect_stdout(out):
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
@@ -897,8 +963,8 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nvl_submanager_current_8653.md vl 15\nvl_worker.md vl 1\n", encoding="utf-8")
-            _ = (root / "vl_submanager_current_8653.md").write_text("runat: vl:15 codex\n(running)\n", encoding="utf-8")
-            _ = (root / "vl_worker.md").write_text("runat: vl:1 codex\n(blocked: waiting on proof owner)\n", encoding="utf-8")
+            _ = (root / "vl_submanager_current_8653.md").write_text(task_frontmatter("running", runat="vl:99", managerat="vl:15", is_manager=True), encoding="utf-8")
+            _ = (root / "vl_worker.md").write_text(task_frontmatter("blocked", runat="vl:1", managerat="vl:15", blocked_on="waiting on proof owner"), encoding="utf-8")
             def fake_inspect(args: object) -> Report:
                 return Report("running", ["working"]) if getattr(args, "target") == "vl:15" else Report("ready", ["idle"])
 
@@ -913,8 +979,8 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\n- `vl_submanager_current_8653.md` (`vl:15`)\n- `vl_worker.md` (`vl:1`)\n", encoding="utf-8")
-            _ = (root / "vl_submanager_current_8653.md").write_text("runat: vl:15 codex\n(running)\n", encoding="utf-8")
-            _ = (root / "vl_worker.md").write_text("runat: vl:1 codex\n(blocked: waiting on proof owner)\n", encoding="utf-8")
+            _ = (root / "vl_submanager_current_8653.md").write_text(task_frontmatter("running", runat="vl:99", managerat="vl:15", is_manager=True), encoding="utf-8")
+            _ = (root / "vl_worker.md").write_text(task_frontmatter("blocked", runat="vl:1", managerat="vl:15", blocked_on="waiting on proof owner"), encoding="utf-8")
             def fake_inspect(args: object) -> Report:
                 return Report("running", ["working"]) if getattr(args, "target") == "vl:15" else Report("ready", ["idle"])
 
@@ -929,8 +995,8 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nvl_submanager_current_8653.md vl 15\nvl_worker.md vl 1\n", encoding="utf-8")
-            _ = (root / "vl_submanager_current_8653.md").write_text("runat: vl:15 codex\n(running)\n", encoding="utf-8")
-            _ = (root / "vl_worker.md").write_text("runat: vl:1 codex\n(blocked: waiting on proof owner)\n", encoding="utf-8")
+            _ = (root / "vl_submanager_current_8653.md").write_text(task_frontmatter("running", runat="vl:99", managerat="vl:15", is_manager=True), encoding="utf-8")
+            _ = (root / "vl_worker.md").write_text(task_frontmatter("blocked", runat="vl:1", managerat="vl:15", blocked_on="waiting on proof owner"), encoding="utf-8")
             def fake_inspect(args: object) -> Report:
                 return Report("running", ["working"]) if getattr(args, "target") == "vl:15" else Report("ready", ["idle"])
 
@@ -947,8 +1013,8 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nvl_untracked.md vl 8\n\nprevious:\nvl_supervisor_current_7404.md vl 7\n", encoding="utf-8")
-            _ = (root / "vl_untracked.md").write_text("runat: vl:8 codex\n", encoding="utf-8")
-            _ = (root / "vl_supervisor_current_7404.md").write_text("runat: vl:7 codex\n(blocked: image lacks codex)\n", encoding="utf-8")
+            _ = (root / "vl_untracked.md").write_text(task_frontmatter("running", runat="vl:8"), encoding="utf-8")
+            _ = (root / "vl_supervisor_current_7404.md").write_text(task_frontmatter("blocked", runat="vl:7", managerat="vl:15", is_manager=True, blocked_on="image lacks codex"), encoding="utf-8")
             def fake_inspect(args: object) -> Report:
                 return Report("running", ["working"]) if getattr(args, "target") == "vl:8" else Report("ready", ["idle"])
 
@@ -966,7 +1032,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nvl_worker.md vl 9\n", encoding="utf-8")
-            _ = (root / "vl_worker.md").write_text("runat: vl:9 codex\n(blocked: image lacks codex)\n", encoding="utf-8")
+            _ = (root / "vl_worker.md").write_text(task_frontmatter("blocked", runat="vl:9", blocked_on="image lacks codex"), encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("error", ["Selected model is at capacity"])), patch("omo_manager.omo_agent_status.tmux_list_panes", return_value=[]), redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
@@ -984,18 +1050,9 @@ class AgentStatusTests(unittest.TestCase):
                 "current:\nvl_submanager_current_8653.md vl:15\nvl_dirty_audit.md vl:blocked\nvl_followup.md vl:20\n",
                 encoding="utf-8",
             )
-            _ = (root / "vl_submanager_current_8653.md").write_text(
-                "runat: vl:15 codex\n(running)\n",
-                encoding="utf-8",
-            )
-            _ = (root / "vl_dirty_audit.md").write_text(
-                "runat: vl:20 codex\n(blocked: waiting on proof owner)\n",
-                encoding="utf-8",
-            )
-            _ = (root / "vl_followup.md").write_text(
-                "runat: vl:20 codex\n(done)\n",
-                encoding="utf-8",
-            )
+            _ = (root / "vl_submanager_current_8653.md").write_text(task_frontmatter("running", runat="vl:99", managerat="vl:15", is_manager=True), encoding="utf-8")
+            _ = (root / "vl_dirty_audit.md").write_text(task_frontmatter("blocked", runat="vl:20", managerat="vl:15", blocked_on="waiting on proof owner"), encoding="utf-8")
+            _ = (root / "vl_followup.md").write_text(task_frontmatter("done", runat="vl:20", managerat="vl:15"), encoding="utf-8")
             report = Report("stuck_input", ["Reported privately.", "› [Pasted Content 1024 chars][Pasted Content 1024 chars] #2", "  (pending)"], "[Pasted Content 1024 chars][Pasted Content 1024 chars] #2\n  (pending)", True)
             def fake_inspect(args: object) -> Report:
                 return report if getattr(args, "target") == "vl:20" else Report("running", ["working"])
@@ -1016,8 +1073,8 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nvl_current.md vl:20\nvl_old.md vl:blocked\n", encoding="utf-8")
-            _ = (root / "vl_current.md").write_text("runat: vl:20 codex\n(running)\n", encoding="utf-8")
-            _ = (root / "vl_old.md").write_text("runat: vl:20 codex\n(blocked: old blocker)\n", encoding="utf-8")
+            _ = (root / "vl_current.md").write_text(task_frontmatter("running", runat="vl:20"), encoding="utf-8")
+            _ = (root / "vl_old.md").write_text(task_frontmatter("blocked", runat="vl:20", blocked_on="old blocker"), encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("stuck_input", ["› Continue task"], "Continue task", True)), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present", return_value="sent_enter"), patch("omo_manager.omo_agent_status.tmux_list_panes", return_value=[]), redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
@@ -1033,10 +1090,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nvl_role.md vl:20\n", encoding="utf-8")
-            _ = (root / "vl_role.md").write_text(
-                "runat: vl:20 codex\n(blocked: persistent VL supervisor role waiting for follow-up)\n",
-                encoding="utf-8",
-            )
+            _ = (root / "vl_role.md").write_text(task_frontmatter("blocked", runat="vl:20", blocked_on="persistent VL supervisor role waiting for follow-up"), encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("stuck_input", ["› Explain this codebase"], "Explain this codebase", True)), patch("omo_manager.omo_agent_status.tmux_list_panes", return_value=[]), redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
@@ -1048,10 +1102,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nvl_role.md vl:20\n", encoding="utf-8")
-            _ = (root / "vl_role.md").write_text(
-                "runat: vl:20 codex\n(blocked: persistent VL supervisor role waiting for follow-up)\n",
-                encoding="utf-8",
-            )
+            _ = (root / "vl_role.md").write_text(task_frontmatter("blocked", runat="vl:20", blocked_on="persistent VL supervisor role waiting for follow-up"), encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("stuck_input", ["› Continue task"], "Continue task", True)), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present", return_value="sent_enter") as unstick, patch("omo_manager.omo_agent_status.tmux_list_panes", return_value=[]), redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
@@ -1081,8 +1132,8 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nvl_one.md vl 9\nvl_two.md vl 9\n", encoding="utf-8")
-            _ = (root / "vl_one.md").write_text("runat: vl:9 codex\n(blocked: first blocker)\n", encoding="utf-8")
-            _ = (root / "vl_two.md").write_text("runat: vl:9.0 codex\n(blocked: second blocker)\n", encoding="utf-8")
+            _ = (root / "vl_one.md").write_text(task_frontmatter("blocked", runat="vl:9", blocked_on="first blocker"), encoding="utf-8")
+            _ = (root / "vl_two.md").write_text(task_frontmatter("blocked", runat="vl:9.0", blocked_on="second blocker"), encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
@@ -1096,7 +1147,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nvl_worker.md vl 9\n", encoding="utf-8")
-            _ = (root / "vl_worker.md").write_text("runat: vl:9 codex\n(blocked: image lacks codex)\n", encoding="utf-8")
+            _ = (root / "vl_worker.md").write_text(task_frontmatter("blocked", runat="vl:9", blocked_on="image lacks codex"), encoding="utf-8")
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])):
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--exit-code-if-active"]))
 
@@ -1106,7 +1157,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[{"task_file":"blocked.md","tmux_target":"vl:7.0","started_at_s":1}]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("human pending:\nblocked.md vl 7\n", encoding="utf-8")
-            _ = (root / "blocked.md").write_text("runat: vl:7 codex\n(blocked)\n", encoding="utf-8")
+            _ = (root / "blocked.md").write_text(task_frontmatter("blocked", runat="vl:7", blocked_on="blocked with no reason in latest status line"), encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("error", ["Selected model is at capacity. Please try a different model."])), patch("omo_manager.omo_agent_status.tmux_list_panes", return_value=[]), redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
@@ -1120,7 +1171,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[{"task_file":"active.md","tmux_target":"vl:1.0","started_at_s":1},{"task_file":"active.md","tmux_target":"vl:2.0","started_at_s":2}]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nactive.md vl 2\n", encoding="utf-8")
-            _ = (root / "active.md").write_text("runat: vl:2 codex\n(running)\n", encoding="utf-8")
+            _ = (root / "active.md").write_text(task_frontmatter("running", runat="vl:2"), encoding="utf-8")
 
             def fake_inspect(args: object) -> Report:
                 target = getattr(args, "target")
@@ -1141,7 +1192,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[{"task_file":"old.md","tmux_target":"vl:23.0","started_at_s":1}]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("previous:\nold.md vl 23\n", encoding="utf-8")
-            _ = (root / "old.md").write_text("runat: vl:23 codex\n(done)\n", encoding="utf-8")
+            _ = (root / "old.md").write_text(task_frontmatter("done", runat="vl:23"), encoding="utf-8")
             report = Report("stuck_input", ["› pasted manager prompt"], "pasted manager prompt", True)
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=report), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present") as unstick, patch("omo_manager.omo_agent_status.tmux_list_panes", return_value=[]), redirect_stdout(out):
@@ -1161,7 +1212,7 @@ class AgentStatusTests(unittest.TestCase):
                 encoding="utf-8",
             )
             _ = (root / "TODO.md").write_text("current:\nactive.md vl 2\n", encoding="utf-8")
-            _ = (root / "active.md").write_text("runat: vl:2 codex\n(running)\n", encoding="utf-8")
+            _ = (root / "active.md").write_text(task_frontmatter("running", runat="vl:2"), encoding="utf-8")
             report = Report("stuck_input", ["› stale prompt"], "stale prompt", True)
 
             def fake_inspect(args: object) -> Report:
@@ -1187,7 +1238,7 @@ class AgentStatusTests(unittest.TestCase):
                 encoding="utf-8",
             )
             _ = (root / "TODO.md").write_text("current:\nactive.md vl 2\n", encoding="utf-8")
-            _ = (root / "active.md").write_text("runat: vl:2 codex\n(running)\n", encoding="utf-8")
+            _ = (root / "active.md").write_text(task_frontmatter("running", runat="vl:2"), encoding="utf-8")
             report = Report("stuck_input", ["› stale pane prompt"], "stale pane prompt", True)
 
             def fake_inspect(args: object) -> Report:
@@ -1210,7 +1261,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("previous:\nstale.md vl 53\n", encoding="utf-8")
-            _ = (root / "stale.md").write_text("runat: vl:53 codex\n(done)\n", encoding="utf-8")
+            _ = (root / "stale.md").write_text(task_frontmatter("done", runat="vl:53"), encoding="utf-8")
             report = Report("stuck_input", ["› pasted prompt"], "pasted prompt", True)
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=report), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present") as unstick, patch("omo_manager.omo_agent_status.tmux_list_panes", return_value=[]), redirect_stdout(out):
@@ -1226,7 +1277,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("previous:\nstale.md vl 9\n", encoding="utf-8")
-            _ = (root / "stale.md").write_text("runat: vl:9 codex\n(done)\n", encoding="utf-8")
+            _ = (root / "stale.md").write_text(task_frontmatter("done", runat="vl:9"), encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("error", ["Selected model is at capacity. Please try a different model."])), patch("omo_manager.omo_agent_status.tmux_list_panes", return_value=[]), redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
@@ -1240,7 +1291,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[{"task_file":"old.md","tmux_target":"vl:23.0","started_at_s":1}]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("previous:\nold.md vl 23\n", encoding="utf-8")
-            _ = (root / "old.md").write_text("runat: vl:23 codex\n(done)\n", encoding="utf-8")
+            _ = (root / "old.md").write_text(task_frontmatter("done", runat="vl:23"), encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), patch("omo_manager.omo_agent_status.tmux_list_panes", return_value=[]), redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
@@ -1255,7 +1306,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[{"task_file":"active.md","tmux_target":"vl:1.0","started_at_s":1}]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nactive.md vl 2\n", encoding="utf-8")
-            _ = (root / "active.md").write_text("runat: vl:2 codex\n(running)\n", encoding="utf-8")
+            _ = (root / "active.md").write_text(task_frontmatter("running", runat="vl:2"), encoding="utf-8")
 
             def fake_inspect(args: object) -> Report:
                 if getattr(args, "target") == "vl:1.0":
@@ -1278,8 +1329,8 @@ class AgentStatusTests(unittest.TestCase):
                 encoding="utf-8",
             )
             _ = (root / "TODO.md").write_text("current:\npending.md vl 1\nactive.md vl 2\n", encoding="utf-8")
-            _ = (root / "pending.md").write_text("runat: vl:1 codex\n(pending)\n", encoding="utf-8")
-            _ = (root / "active.md").write_text("runat: vl:2 codex\n(running)\n", encoding="utf-8")
+            _ = (root / "pending.md").write_text(f"{task_frontmatter('running', runat='vl:1')}(pending)\n", encoding="utf-8")
+            _ = (root / "active.md").write_text(task_frontmatter("running", runat="vl:2"), encoding="utf-8")
 
             def fake_inspect(args: object) -> Report:
                 target = getattr(args, "target")
@@ -1301,7 +1352,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("previous:\nstale.md vl 53\n", encoding="utf-8")
-            _ = (root / "stale.md").write_text("runat: vl:53 codex\n(done)\n", encoding="utf-8")
+            _ = (root / "stale.md").write_text(task_frontmatter("done", runat="vl:53"), encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), patch("omo_manager.omo_agent_status.tmux_list_panes", return_value=[]), redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
@@ -1315,7 +1366,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("previous:\nstale.md cfg 53\n", encoding="utf-8")
-            _ = (root / "stale.md").write_text("runat: cfg:53 codex\n(done)\n", encoding="utf-8")
+            _ = (root / "stale.md").write_text(task_frontmatter("done", runat="cfg:53"), encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), patch("omo_manager.omo_agent_status.tmux_list_panes", return_value=[]), redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
@@ -1344,8 +1395,8 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[{"task_file":"active.md","tmux_target":"vl:10.0","started_at_s":1}]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nactive.md vl 10\n\nprevious:\nstale.md vl 9\n", encoding="utf-8")
-            _ = (root / "active.md").write_text("runat: vl:10 codex\n(running)\n", encoding="utf-8")
-            _ = (root / "stale.md").write_text("runat: vl:10 codex\n(done)\n", encoding="utf-8")
+            _ = (root / "active.md").write_text(task_frontmatter("running", runat="vl:10"), encoding="utf-8")
+            _ = (root / "stale.md").write_text(task_frontmatter("done", runat="vl:10"), encoding="utf-8")
 
             def fake_inspect(args: object) -> Report:
                 target = getattr(args, "target")
@@ -1366,7 +1417,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("previous:\nvl_supervisor_5410.md\nvl_old_review.md\n", encoding="utf-8")
-            _ = (root / "vl_supervisor_5410.md").write_text("runat: vl:20 codex\n(done)\n", encoding="utf-8")
+            _ = (root / "vl_supervisor_5410.md").write_text(task_frontmatter("done", runat="vl:20"), encoding="utf-8")
             _ = (root / "vl_old_review.md").write_text("(done)\n", encoding="utf-8")
 
             def fake_inspect(args: object) -> Report:
@@ -1433,8 +1484,8 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[{"task_file":"role.md","tmux_target":"cfg:1.0","started_at_s":1},{"task_file":"done.md","tmux_target":"cfg:2.0","started_at_s":1}]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nrole.md cfg 1\n\nprevious:\ndone.md cfg 2\n", encoding="utf-8")
-            _ = (root / "role.md").write_text("runat: cfg:1 codex\n(blocked: persistent VL supervisor role waiting for follow-up)\n", encoding="utf-8")
-            _ = (root / "done.md").write_text("runat: cfg:2 codex\n(done)\n", encoding="utf-8")
+            _ = (root / "role.md").write_text(task_frontmatter("blocked", runat="cfg:1", blocked_on="persistent VL supervisor role waiting for follow-up"), encoding="utf-8")
+            _ = (root / "done.md").write_text(task_frontmatter("done", runat="cfg:2"), encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["ready"])), redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
@@ -1447,7 +1498,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[{"task_file":"done.md","tmux_target":"cfg:2.0","started_at_s":1}]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("previous:\ndone.md cfg 2\n", encoding="utf-8")
-            _ = (root / "done.md").write_text("runat: cfg:2 codex\nmanagerat: wl:17\n(done)\n", encoding="utf-8")
+            _ = (root / "done.md").write_text(task_frontmatter("done", runat="cfg:2", managerat="wl:17"), encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["ready"])), redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "wl:17"]))
@@ -1461,7 +1512,31 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[{"task_file":"pending.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\npending.md cfg 1\n", encoding="utf-8")
-            _ = (root / "pending.md").write_text("runat: cfg:1 codex\n(pending)\n", encoding="utf-8")
+            _ = (root / "pending.md").write_text(f"{task_frontmatter('running', runat='cfg:1')}(pending)\n", encoding="utf-8")
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["ready"])), patch("omo_manager.omo_agent_status.tmux_list_panes", return_value=[]), redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertEqual("", out.getvalue())
+
+    def test_problems_only_ignores_done_pending_task_marker_for_stale_registry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[{"task_file":"pending.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("previous:\npending.md cfg 1\n", encoding="utf-8")
+            _ = (root / "pending.md").write_text(f"{task_frontmatter('done', runat='cfg:1')}(pending)\n", encoding="utf-8")
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["ready"])), patch("omo_manager.omo_agent_status.tmux_list_panes", return_value=[]), redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertEqual("", out.getvalue())
+
+    def test_problems_only_ignores_blocked_pending_task_marker_for_blocked_idle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\npending.md cfg 1\n", encoding="utf-8")
+            _ = (root / "pending.md").write_text(f"{task_frontmatter('blocked', runat='cfg:1', blocked_on='waiting on reply')}(pending)\n", encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["ready"])), patch("omo_manager.omo_agent_status.tmux_list_panes", return_value=[]), redirect_stdout(out):
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
@@ -1473,7 +1548,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\npending.md vl 15\n", encoding="utf-8")
-            _ = (root / "pending.md").write_text("runat: vl:15 codex\n(pending)\n", encoding="utf-8")
+            _ = (root / "pending.md").write_text(f"{task_frontmatter('running', runat='vl:15')}(pending)\n", encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), patch("omo_manager.omo_agent_status.tmux_list_panes", return_value=["vl:15"]), redirect_stdout(out):
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
@@ -1485,7 +1560,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\ndone.md cfg 1\n", encoding="utf-8")
-            _ = (root / "done.md").write_text("runat: cfg:1 codex\nship feature\n- preserve human request\n(above are pending task items)\n(done)\n", encoding="utf-8")
+            _ = (root / "done.md").write_text(task_frontmatter("done", runat="cfg:1", pending_items=("preserve human request",)), encoding="utf-8")
             out = StringIO()
             with redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
@@ -1499,7 +1574,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("previous:\ndone.md cfg 1\n", encoding="utf-8")
-            _ = (root / "done.md").write_text("runat: cfg:1 codex\nship feature\n- preserve human request\n(above are pending task items)\n(done)\n", encoding="utf-8")
+            _ = (root / "done.md").write_text(task_frontmatter("done", runat="cfg:1", pending_items=("preserve human request",)), encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("not_codex", [])), patch("omo_manager.omo_agent_status.tmux_list_panes", return_value=[]), redirect_stdout(out):
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
@@ -1511,7 +1586,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("previous:\ndone.md cfg 1\n", encoding="utf-8")
-            _ = (root / "done.md").write_text("runat: cfg:1 codex\nship feature\n- preserve human request\n(above are pending task items)\n(done)\n", encoding="utf-8")
+            _ = (root / "done.md").write_text(task_frontmatter("done", runat="cfg:1", pending_items=("preserve human request",)), encoding="utf-8")
             out = StringIO()
             with redirect_stdout(out):
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--exit-code-if-active"]))
@@ -1524,8 +1599,11 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nrunning.md cfg 1\npending.md cfg 2\nhuman pending:\nblocked.md cfg 3\n", encoding="utf-8")
-            for name, status in (("running.md", "running"), ("pending.md", "pending"), ("blocked.md", "blocked")):
-                _ = (root / name).write_text(f"runat: cfg:1 codex\nwork\n- keep item\n(above are pending task items)\n({status})\n", encoding="utf-8")
+            for name, status in (("running.md", "running"), ("pending.md", "running"), ("blocked.md", "blocked")):
+                text = task_frontmatter(status, runat="cfg:1", pending_items=("keep item",), blocked_on="waiting" if status == "blocked" else "")
+                if name == "pending.md":
+                    text += "(pending)\n"
+                _ = (root / name).write_text(text, encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("running", ["working"])), redirect_stdout(out):
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
@@ -1537,7 +1615,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nnew.md cfg 1\n", encoding="utf-8")
-            _ = (root / "new.md").write_text("runat: cfg:1 codex\nwork\n- keep item\n(above are pending task items)\n", encoding="utf-8")
+            _ = (root / "new.md").write_text(task_frontmatter("running", runat="cfg:1", pending_items=("keep item",)), encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("running", ["working"])), redirect_stdout(out):
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
@@ -1549,7 +1627,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[{"task_file":"active.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
-            _ = (root / "active.md").write_text("runat: cfg:1 codex\n(running)\n", encoding="utf-8")
+            _ = (root / "active.md").write_text(task_frontmatter("running", runat="cfg:1"), encoding="utf-8")
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["waiting"])):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--exit-code-if-active"]))
 
@@ -1559,7 +1637,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[{"task_file":"active.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
-            _ = (root / "active.md").write_text("runat: cfg:1 codex\n(running)\n", encoding="utf-8")
+            _ = (root / "active.md").write_text(task_frontmatter("running", runat="cfg:1"), encoding="utf-8")
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("running", ["working"])):
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry)]))
 

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shlex
-import shutil
 import subprocess
 import sys
 import time
@@ -14,20 +14,23 @@ from pathlib import Path
 
 try:
     from omo_manager.omo_codex_status import current_block, status, tail
+    from omo_manager.omo_agent_status import parse_task_metadata
 except ModuleNotFoundError:
     from omo_codex_status import current_block, status, tail
+    from omo_agent_status import parse_task_metadata
 
 DEFAULT_ROOT = Path(os.environ.get("OMO_WORK_LOGS_ROOT", Path.home() / "work_logs"))
 HELPER_DIR = Path(__file__).resolve().parent
 DEFAULT_WORKER_INSTRUCTIONS = HELPER_DIR / "WORKER_DEFAULTS.md"
 VL_WORKER_INSTRUCTIONS = HELPER_DIR / "VL_WORKER_DEFAULTS.md"
-VL_EXPERIMENT_PREFLIGHT = HELPER_DIR / "omo_vl_experiment_preflight.py"
 PCODX_WRAPPER = HELPER_DIR / "pcodx"
 COMMAND_BY_TOOL = {
     "codex": ("bunx", "@openai/codex", "--dangerously-bypass-approvals-and-sandbox"),
     "pcodx": (str(PCODX_WRAPPER),),
 }
 DEFAULT_TOOL = "codex"
+TASK_FRONTMATTER_VERSION = "v1.0.0"
+TMUX_TARGET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?$")
 SHELL_COMMANDS = {"bash", "dash", "fish", "sh", "zsh"}
 BULLET_MARKERS = ("- ", "* ")
 PENDING_TASK_ITEMS_MARKER = "(above are pending task items)"
@@ -51,10 +54,8 @@ class Args:
     codex_flags: tuple[str, ...]
     tool_explicit: bool = False
     manager_target: str = ""
-    vl_experiment_preflight: bool = False
-    vl_preflight_vlh: Path | None = None
-    vl_preflight_verus: Path | None = None
-    vl_preflight_artifact_root: Path | None = None
+    prelaunch_source: Path | None = None
+    is_manager: bool = False
 
 
 class ParsedArgs(argparse.Namespace):
@@ -72,10 +73,8 @@ class ParsedArgs(argparse.Namespace):
     reasoning_effort: str = ""
     codex_flag: list[str] | None = None
     manager_target: str = ""
-    vl_experiment_preflight: bool = False
-    vl_preflight_vlh: Path | None = None
-    vl_preflight_verus: Path | None = None
-    vl_preflight_artifact_root: Path | None = None
+    prelaunch_source: Path | None = None
+    is_manager: bool = False
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -95,10 +94,8 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--reasoning-effort", choices=("low", "medium", "high", "xhigh"), default="", help="Start Codex with `model_reasoning_effort` for this worker.")
     _ = parser.add_argument("--codex-flag", action="append", help="Extra raw Codex argv token. Repeat for flags and values; use `--codex-flag=--flag` when the token starts with `--`.")
     _ = parser.add_argument("--manager-target", default="", help="Optional manager owner target to write as `managerat:` task metadata.")
-    _ = parser.add_argument("--vl-experiment-preflight", action="store_true", help="Run the reusable VL helper/verifier/provider preflight before launching Codex.")
-    _ = parser.add_argument("--vl-preflight-vlh", type=Path, help="Intended `vlh` executable for --vl-experiment-preflight.")
-    _ = parser.add_argument("--vl-preflight-verus", type=Path, help="Verifier executable for --vl-experiment-preflight.")
-    _ = parser.add_argument("--vl-preflight-artifact-root", type=Path, help="Experiment artifact root for --vl-experiment-preflight evidence and staging checks.")
+    _ = parser.add_argument("--prelaunch-source", type=Path, help="Readable shell script to source before launching the worker command.")
+    _ = parser.add_argument("--is-manager", action="store_true", help="Mark the task as a manager task in frontmatter.")
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     if not parsed.task_file.endswith(".md"):
         parser.error("--task-file must end with `.md`.")
@@ -109,7 +106,8 @@ def parse_args(argv: list[str]) -> Args:
     if parsed.tool not in COMMAND_BY_TOOL:
         parser.error("only --tool codex or --tool pcodx is supported.")
     tool_explicit = any(arg == "--tool" or arg.startswith("--tool=") for arg in argv)
-    return Args(parsed.root.resolve(), parsed.task_file, parsed.tmux_session, parsed.tmux_window, parsed.tool, parsed.workdir, parsed.window_name, parsed.prompt_file, parsed.no_link, parsed.dry_run, parsed.session_id, parsed.reasoning_effort, tuple(parsed.codex_flag or ()), tool_explicit, parsed.manager_target, parsed.vl_experiment_preflight, parsed.vl_preflight_vlh, parsed.vl_preflight_verus, parsed.vl_preflight_artifact_root)
+    prelaunch_source = parsed.prelaunch_source.resolve() if parsed.prelaunch_source is not None else None
+    return Args(parsed.root.resolve(), parsed.task_file, parsed.tmux_session, parsed.tmux_window, parsed.tool, parsed.workdir, parsed.window_name, parsed.prompt_file, parsed.no_link, parsed.dry_run, parsed.session_id, parsed.reasoning_effort, tuple(parsed.codex_flag or ()), tool_explicit, parsed.manager_target, prelaunch_source, parsed.is_manager)
 
 
 def task_path(root: Path, task_file: str) -> Path:
@@ -129,6 +127,27 @@ def target(args: Args) -> str:
     return args.tmux_session
 
 
+def current_manager_target() -> str:
+    for key in ("OMO_MANAGER_TMUX_TARGET", "OMO_AGENT_TMUX_TARGET"):
+        target = os.environ.get(key, "").strip()
+        if TMUX_TARGET_RE.fullmatch(target) is not None:
+            return target
+    if "TMUX" not in os.environ:
+        return ""
+    result = subprocess.run(["tmux", "display-message", "-p", "#S:#I"], capture_output=True, text=True, timeout=10, check=False)
+    target = result.stdout.strip() if result.returncode == 0 else ""
+    return target if TMUX_TARGET_RE.fullmatch(target) is not None else ""
+
+
+def frontmatter_body_line_index(lines: list[str]) -> int:
+    if not lines or lines[0].strip() != "---":
+        return 0
+    for idx, line in enumerate(lines[1:], start=1):
+        if line.strip() == "---":
+            return idx + 1
+    return 0
+
+
 def target_session(tmux_target: str) -> str:
     return tmux_target.split(":", 1)[0]
 
@@ -144,15 +163,6 @@ def is_vl_submanager_task_file(task_file: str) -> bool:
 
 def is_vl_agent(task_file: str, tmux_target: str) -> bool:
     return is_vl_task_file(task_file) or target_session(tmux_target) == "vl"
-
-
-def is_vl_experiment_task_file(task_file: str) -> bool:
-    name = Path(task_file).name
-    return name.startswith("vl_") and ("_exp_" in name or "_rerun_" in name)
-
-
-def requires_vl_experiment_preflight(args: Args) -> bool:
-    return args.workdir is not None and is_vl_experiment_task_file(args.task_file)
 
 
 def header(tmux_target: str, tool: str) -> str:
@@ -182,7 +192,9 @@ def upsert_header(existing: str, first: str) -> str:
 
 
 def first_non_metadata_index(lines: list[str]) -> int:
-    idx = 1 if lines and is_runat_header(lines[0]) else 0
+    idx = frontmatter_body_line_index(lines)
+    if idx < len(lines) and is_runat_header(lines[idx]):
+        idx += 1
     while idx < len(lines):
         stripped = lines[idx].strip()
         if not stripped:
@@ -280,7 +292,9 @@ def insert_pending_task_items_marker(text: str) -> str:
 
 
 def first_goal_line_index(lines: list[str]) -> int:
-    idx = 1
+    idx = frontmatter_body_line_index(lines)
+    if idx < len(lines) and is_runat_header(lines[idx]):
+        idx += 1
     while idx < len(lines) and any(lines[idx].strip().startswith(prefix) for prefix in TASK_METADATA_PREFIXES):
         idx += 1
     return idx
@@ -288,7 +302,7 @@ def first_goal_line_index(lines: list[str]) -> int:
 
 def runat_goal_tree_error(text: str) -> str:
     lines = text.splitlines()
-    if not lines or not is_runat_header(lines[0]):
+    if not lines or (frontmatter_body_line_index(lines) == 0 and not is_runat_header(lines[0])):
         return ""
     goal_idx = first_goal_line_index(lines)
     if len(lines) <= goal_idx or not lines[goal_idx].strip():
@@ -338,6 +352,83 @@ def effective_tool(args: Args) -> str:
     return args.tool
 
 
+def managerat_for_task(args: Args, runat: str) -> str:
+    managerat = args.manager_target.strip() or current_manager_target()
+    if not managerat:
+        raise ValueError("--manager-target or OMO_AGENT_TMUX_TARGET is required to write task frontmatter.")
+    if TMUX_TARGET_RE.fullmatch(managerat) is None:
+        raise ValueError("task frontmatter `managerat` must be a tmux target.")
+    if managerat in target_aliases(runat):
+        raise ValueError("task frontmatter `managerat` must be different from `runat`.")
+    return managerat
+
+
+def task_frontmatter(args: Args, runat: str, managerat: str) -> str:
+    is_manager = "true" if args.is_manager else "false"
+    return "\n".join(
+        [
+            "---",
+            f"version: {TASK_FRONTMATTER_VERSION}",
+            "status: running",
+            f"runat: {runat}",
+            f"tool: {effective_tool(args)}",
+            f"managerat: {managerat}",
+            f"is_manager: {is_manager}",
+            "pending_task_items: []",
+            "---",
+        ]
+    )
+
+
+def replace_frontmatter_fields(text: str, updates: dict[str, str], remove: set[str] | None = None) -> str:
+    lines = text.splitlines(keepends=True)
+    if not lines or lines[0].strip() != "---":
+        return text
+    remove = remove or set()
+    for closing_idx, line in enumerate(lines[1:], start=1):
+        if line.strip() != "---":
+            continue
+        body = lines[1:closing_idx]
+        updated: list[str] = [lines[0]]
+        pending_updates = dict(updates)
+        for item in body:
+            key, sep, _value = item.partition(":")
+            if sep and key in remove:
+                continue
+            if sep and key in pending_updates:
+                updated.append(f"{key}: {pending_updates.pop(key)}\n")
+                continue
+            updated.append(item)
+        for key, value in pending_updates.items():
+            updated.append(f"{key}: {value}\n")
+        updated.extend(lines[closing_idx:])
+        return "".join(updated)
+    return text
+
+
+def launched_frontmatter_text(existing: str, args: Args, tmux_target: str) -> str:
+    updates = {
+        "status": "running",
+        "runat": tmux_target,
+        "tool": effective_tool(args),
+    }
+    if args.manager_target:
+        updates["managerat"] = args.manager_target
+    if args.is_manager:
+        updates["is_manager"] = "true"
+    return replace_frontmatter_fields(existing, updates, {"blocked_on"})
+
+
+def new_task_text(args: Args, tmux_target: str, validate_target: bool = True) -> str:
+    if not tmux_target:
+        raise ValueError("runat tmux target is required to write task frontmatter.")
+    if validate_target and TMUX_TARGET_RE.fullmatch(tmux_target) is None:
+        raise ValueError("runat tmux target must be a full tmux target like `SESSION:WINDOW`.")
+    prompt = args.prompt_file.read_text(encoding="utf-8").rstrip() if args.prompt_file is not None else ""
+    managerat = managerat_for_task(args, tmux_target)
+    return f"{task_frontmatter(args, tmux_target, managerat)}\n{prompt}\n"
+
+
 def prompt_input(prompt_file: Path | None, vl_agent: bool = False) -> str:
     if prompt_file is None:
         return ""
@@ -375,64 +466,17 @@ def shell_cmd(command: str) -> str:
     return "bash -lc " + shlex.quote(command)
 
 
-def worker_command(command: str, tmux_target: str, env: dict[str, str] | None = None) -> str:
+def worker_command(command: str, tmux_target: str, prelaunch_source: Path | None = None) -> str:
     exports = {"OMO_AGENT_TMUX_TARGET": tmux_target}
-    if env is not None:
-        exports.update(env)
     export_text = " ".join(f"{key}={shlex.quote(value)}" for key, value in exports.items())
-    return f"export {export_text}; {command}"
-
-
-def vl_preflight_env(args: Args) -> dict[str, str]:
-    if not requires_vl_experiment_preflight(args):
-        return {}
-    artifact_root = (args.vl_preflight_artifact_root or task_path(args.root, args.task_file).with_suffix("")).resolve(strict=False)
-    env = {
-        "PATH": os.environ.get("PATH", ""),
-        "VL_EXPERIMENT_ARTIFACT_ROOT": str(artifact_root),
-    }
-    if args.vl_preflight_vlh is not None:
-        vlh = args.vl_preflight_vlh.resolve(strict=False)
-        env["VLH"] = str(vlh)
-        env["PATH"] = f"{vlh.parent}:{env['PATH']}"
-    elif found_vlh := shutil.which("vlh", path=env["PATH"]):
-        env["VLH"] = str(Path(found_vlh).resolve(strict=False))
-    if args.vl_preflight_verus is not None:
-        verus = args.vl_preflight_verus.resolve(strict=False)
-        env["VERUS"] = str(verus)
-        env["PATH"] = f"{verus.parent}:{env['PATH']}"
-    elif os.environ.get("VERUS"):
-        verus = Path(os.environ["VERUS"]).resolve(strict=False)
-        env["VERUS"] = str(verus)
-        env["PATH"] = f"{verus.parent}:{env['PATH']}"
-    elif found := shutil.which("verus", path=env["PATH"]):
-        verus = Path(found).resolve(strict=False)
-        env["VERUS"] = str(verus)
-        env["PATH"] = f"{verus.parent}:{env['PATH']}"
-    return env
+    launch = f"export {export_text} && exec {command}"
+    if prelaunch_source is None:
+        return launch
+    return f"source {shlex.quote(str(prelaunch_source))} && {launch}"
 
 
 def tmux(args: list[str], check: bool = False) -> subprocess.CompletedProcess[str]:
     return subprocess.run(["tmux", *args], capture_output=True, text=True, timeout=10, check=check)
-
-
-def run_vl_experiment_preflight(args: Args) -> None:
-    if not requires_vl_experiment_preflight(args):
-        return
-    if not VL_EXPERIMENT_PREFLIGHT.is_file():
-        raise FileNotFoundError(f"VL experiment preflight not found: {VL_EXPERIMENT_PREFLIGHT}")
-    artifact_root = args.vl_preflight_artifact_root or task_path(args.root, args.task_file).with_suffix("")
-    command = [sys.executable, str(VL_EXPERIMENT_PREFLIGHT), "--artifact-root", str(artifact_root), "--evidence-dir", str(artifact_root)]
-    if args.vl_preflight_vlh is not None:
-        command.extend(("--vlh", str(args.vl_preflight_vlh)))
-    if args.vl_preflight_verus is not None:
-        command.extend(("--verus", str(args.vl_preflight_verus)))
-    env = os.environ.copy()
-    env.update(vl_preflight_env(args))
-    result = subprocess.run(command, capture_output=True, text=True, timeout=30, env=env)
-    if result.returncode != 0:
-        detail = "\n".join(part.strip() for part in (result.stdout, result.stderr) if part.strip())
-        raise ValueError(f"VL experiment preflight failed before launch:\n{detail}")
 
 
 def current_command(target: str) -> str:
@@ -473,7 +517,7 @@ def start_codex(target: str, args: Args) -> None:
     vl_agent = is_vl_agent(args.task_file, target)
     if vl_agent and args.prompt_file is None:
         raise ValueError("VL launches require --prompt-file so the end-goal and reviewer guidance has task-local context.")
-    command = shell_cmd(worker_command(codex_cmd(args.session_id, args.reasoning_effort, args.codex_flags, args.prompt_file, effective_tool(args), vl_agent), target, vl_preflight_env(args)))
+    command = shell_cmd(worker_command(codex_cmd(args.session_id, args.reasoning_effort, args.codex_flags, args.prompt_file, effective_tool(args), vl_agent), target, args.prelaunch_source))
     _ = tmux(["send-keys", "-t", target, command, "Enter"], check=True)
     wait_command_started(target)
 
@@ -493,20 +537,27 @@ def ensure_task_file(args: Args, tmux_target: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     existed = path.exists()
     existing = path.read_text(encoding="utf-8") if existed else ""
-    text = upsert_header(existing, header(tmux_target, effective_tool(args))) if args.workdir is not None or not existed else existing
-    if args.manager_target:
+    metadata = parse_task_metadata(existing) if existed else None
+    if not existed:
+        text = new_task_text(args, tmux_target)
+        validate_runat_goal_tree(text)
+    elif metadata is not None:
+        text = launched_frontmatter_text(existing, args, tmux_target) if args.workdir is not None else existing
+    else:
+        text = upsert_header(existing, header(tmux_target, effective_tool(args))) if args.workdir is not None else existing
+    if existed and args.manager_target and metadata is not None:
+        text = replace_frontmatter_fields(text, {"managerat": args.manager_target})
+    elif existed and args.manager_target:
         text = upsert_managerat(text, args.manager_target)
     if args.prompt_file is not None:
-        sep = "" if not text or text.endswith("\n") else "\n"
-        text += sep + args.prompt_file.read_text(encoding="utf-8").rstrip() + "\n"
-    if not existed:
-        text = insert_pending_task_items_marker(text)
-        validate_runat_header(text)
-        validate_managerat_metadata(text)
-        validate_runat_goal_tree(text)
+        if existed:
+            sep = "" if not text or text.endswith("\n") else "\n"
+            text += sep + args.prompt_file.read_text(encoding="utf-8").rstrip() + "\n"
     if text != existing or not existed:
-        validate_runat_header(text)
-        validate_managerat_metadata(text)
+        if existed:
+            if parse_task_metadata(text) is None:
+                validate_runat_header(text)
+                validate_managerat_metadata(text)
         _ = path.write_text(text, encoding="utf-8")
     return path
 
@@ -554,35 +605,25 @@ def dry_run(args: Args) -> None:
     if not args.no_link:
         print(f"todo_line: {todo_line(args, tmux_target)}")
     if args.workdir is not None:
-        if requires_vl_experiment_preflight(args):
-            artifact_root = args.vl_preflight_artifact_root or path.with_suffix("")
-            preflight = [sys.executable, str(VL_EXPERIMENT_PREFLIGHT), "--artifact-root", str(artifact_root), "--evidence-dir", str(artifact_root)]
-            if args.vl_preflight_vlh is not None:
-                preflight.extend(("--vlh", str(args.vl_preflight_vlh)))
-            if args.vl_preflight_verus is not None:
-                preflight.extend(("--verus", str(args.vl_preflight_verus)))
-            print("preflight: " + " ".join(shlex.quote(part) for part in preflight))
+        if args.prelaunch_source is not None:
+            print(f"prelaunch_source: {args.prelaunch_source}")
         command = ["tmux", *new_window_command(args)]
         print("tmux: " + " ".join(shlex.quote(part) for part in command))
         launch_target = f"{args.tmux_session}:DRYRUN"
-        launch = ["tmux", "send-keys", "-t", launch_target, shell_cmd(worker_command(codex_cmd(args.session_id, args.reasoning_effort, args.codex_flags, args.prompt_file, effective_tool(args), is_vl_agent(args.task_file, launch_target)), launch_target, vl_preflight_env(args))), "Enter"]
+        launch = ["tmux", "send-keys", "-t", launch_target, shell_cmd(worker_command(codex_cmd(args.session_id, args.reasoning_effort, args.codex_flags, args.prompt_file, effective_tool(args), is_vl_agent(args.task_file, launch_target)), launch_target, args.prelaunch_source)), "Enter"]
         print("tmux: " + " ".join(shlex.quote(part) for part in launch))
 
 
 def validate_inputs(args: Args) -> None:
     if args.prompt_file is not None and not args.prompt_file.is_file():
         raise ValueError(f"prompt file not found: {args.prompt_file}")
+    if args.prelaunch_source is not None:
+        if not args.prelaunch_source.is_file():
+            raise ValueError(f"prelaunch source file not found: {args.prelaunch_source}")
+        if not os.access(args.prelaunch_source, os.R_OK):
+            raise ValueError(f"prelaunch source file is not readable: {args.prelaunch_source}")
     if any(not flag or "\0" in flag or "\n" in flag for flag in args.codex_flags):
         raise ValueError("codex flags must be non-empty single-line argv tokens.")
-    preflight_paths = (args.vl_preflight_vlh, args.vl_preflight_verus, args.vl_preflight_artifact_root)
-    if args.vl_experiment_preflight and not is_vl_experiment_task_file(args.task_file):
-        raise ValueError("--vl-experiment-preflight is only for VL experiment or rerun task files.")
-    if args.vl_experiment_preflight and args.workdir is None:
-        raise ValueError("--vl-experiment-preflight requires --workdir so it gates a new launch.")
-    if any(path is not None for path in preflight_paths) and not is_vl_experiment_task_file(args.task_file):
-        raise ValueError("VL preflight path flags are only for VL experiment or rerun task files.")
-    if requires_vl_experiment_preflight(args) and any("openrouter" in flag.lower() for flag in args.codex_flags):
-        raise ValueError("VL GPT-backed experiment launches must not use OpenRouter codex flags.")
     if args.tool != "pcodx" and any("mcp_servers." in flag for flag in args.codex_flags):
         raise ValueError("MCP server config requires --tool pcodx.")
     if args.workdir is not None and args.prompt_file is None and is_vl_agent(args.task_file, target(args)):
@@ -592,25 +633,26 @@ def validate_inputs(args: Args) -> None:
     path = task_path(args.root, args.task_file)
     if path.exists() and args.manager_target:
         existing_text = path.read_text(encoding="utf-8")
-        validate_runat_header(existing_text)
-        validate_managerat_metadata(existing_text)
-        existing_manager_target = managerat_value(existing_text)
+        metadata = parse_task_metadata(existing_text)
+        if metadata is not None:
+            existing_manager_target = metadata.managerat
+        else:
+            validate_runat_header(existing_text)
+            validate_managerat_metadata(existing_text)
+            existing_manager_target = managerat_value(existing_text)
         if existing_manager_target and existing_manager_target != args.manager_target:
             raise ValueError(f"existing managerat {existing_manager_target} does not match --manager-target {args.manager_target}.")
     elif path.exists():
         existing_text = path.read_text(encoding="utf-8")
-        validate_runat_header(existing_text)
-        validate_managerat_metadata(existing_text)
+        if parse_task_metadata(existing_text) is None:
+            validate_runat_header(existing_text)
+            validate_managerat_metadata(existing_text)
     if path.exists():
         return
     tmux_target = "target" if args.workdir is not None else target(args)
-    first = header(tmux_target, effective_tool(args))
-    prompt = args.prompt_file.read_text(encoding="utf-8").rstrip() if args.prompt_file is not None else ""
-    manager_line = f"managerat: {args.manager_target}\n" if args.manager_target else ""
-    text = f"{first}\n{manager_line}{prompt}\n" if first else f"{manager_line}{prompt}\n"
-    text = insert_pending_task_items_marker(text)
-    validate_runat_header(text)
-    validate_managerat_metadata(text)
+    if args.workdir is None and TMUX_TARGET_RE.fullmatch(tmux_target) is None:
+        raise ValueError("runat tmux target must be a full tmux target like `SESSION:WINDOW`.")
+    text = new_task_text(args, tmux_target, validate_target=args.workdir is None)
     validate_runat_goal_tree(text)
 
 
@@ -621,7 +663,7 @@ def main(argv: list[str]) -> int:
         if args.dry_run:
             dry_run(args)
             return 0
-        run_vl_experiment_preflight(args)
+        existed = task_path(args.root, args.task_file).exists()
         tmux_target = new_window(args)
         path = ensure_task_file(args, tmux_target)
         if not args.no_link:
@@ -629,6 +671,8 @@ def main(argv: list[str]) -> int:
         print(path)
         if tmux_target:
             print(tmux_target)
+        if not existed:
+            print("reminder: fill pending_task_items in task frontmatter.")
     except Exception as exc:
         print(f"omo_task: {exc}", file=sys.stderr)
         return 1

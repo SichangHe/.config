@@ -6,7 +6,7 @@ Before closing an idle task-backed worker, it asks for concise process feedback 
 
 It exits Codex with repeated Ctrl-C inputs and short delays until the pane reaches a shell or the bounded retry loop is exhausted. After Codex reaches a shell, it kills the single-pane tmux window or only the target pane in a multi-pane window.
 
-The task-file close note uses `MM-DD HH:MM TZ`, target, optional `session_id`, no year, and no resume command. With `--task-file`, it also moves the task reference from `TODO.md` `current` to the top of `previous`; the task md status tag remains authoritative. Without `--task-file`, it only prints the captured ID. It refuses to stop the current pane unless `--allow-self` is passed.
+The task-file close note uses `MM-DD HH:MM TZ`, target, optional `session_id`, no year, and no resume command. With `--task-file`, it also moves the task reference from `TODO.md` `current` to the top of `previous`; the task file frontmatter remains authoritative. Without `--task-file`, it only prints the captured ID. It refuses to stop the current pane unless `--allow-self` is passed.
 
 Substantial partial-compaction feedback from a worker is routed as product evidence, not only as close-time process notes. This includes feedback collected by the close-time prompt.
 

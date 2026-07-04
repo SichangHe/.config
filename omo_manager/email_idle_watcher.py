@@ -28,11 +28,17 @@ from urllib.parse import urlparse
 
 try:
     from .omo_email_subject import subject_base
+    from .omo_agent_status import TaskFrontmatterError, parse_task_metadata
 except ImportError:
     try:
         from omo_email_subject import subject_base
+        from omo_agent_status import TaskFrontmatterError, parse_task_metadata
     except ImportError:
         subject_base = None
+        TaskFrontmatterError = ValueError
+
+        def parse_task_metadata(_text: str) -> object:
+            return None
 
 
 def default_state_dir() -> Path:
@@ -306,6 +312,12 @@ def target_aliases(target: str) -> set[str]:
 
 
 def runat_targets(text: str) -> list[str]:
+    try:
+        metadata = parse_task_metadata(text)
+    except TaskFrontmatterError:
+        metadata = None
+    if metadata is not None:
+        return [metadata.managerat if metadata.is_manager else metadata.runat]
     targets: list[str] = []
     for line in text.splitlines():
         parts = line.strip().split()
@@ -315,6 +327,12 @@ def runat_targets(text: str) -> list[str]:
 
 
 def managerat_target(text: str) -> str:
+    try:
+        metadata = parse_task_metadata(text)
+    except TaskFrontmatterError:
+        metadata = None
+    if metadata is not None:
+        return metadata.managerat
     for line in text.splitlines():
         parts = line.strip().split()
         if len(parts) >= 2 and parts[0] == "managerat:" and TMUX_TARGET_RE.fullmatch(parts[1]):
@@ -324,9 +342,16 @@ def managerat_target(text: str) -> str:
 
 def top_runat_target(path: Path) -> str:
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        text = path.read_text(encoding="utf-8")
     except OSError:
         return ""
+    try:
+        metadata = parse_task_metadata(text)
+    except TaskFrontmatterError:
+        metadata = None
+    if metadata is not None:
+        return metadata.managerat if metadata.is_manager else metadata.runat
+    lines = text.splitlines()
     if not lines:
         return ""
     parts = lines[0].strip().split()

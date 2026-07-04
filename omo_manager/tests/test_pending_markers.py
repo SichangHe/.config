@@ -45,6 +45,27 @@ def assert_concise_agent_report(test: unittest.TestCase, report_text: str, *, ag
     test.assertNotIn("tmux_window_name=", header)
 
 
+def task_frontmatter(status: str = "running", runat: str = "wl:2", managerat: str = "wl:1", *, is_manager: bool = False, blocked_on: str = "") -> str:
+    lines = [
+        "---",
+        "version: v1.0.0",
+        f"status: {status}",
+    ]
+    if blocked_on:
+        lines.append(f"blocked_on: {blocked_on}")
+    lines.extend(
+        [
+            f"runat: {runat}",
+            "tool: codex",
+            f"managerat: {managerat}",
+            f"is_manager: {str(is_manager).lower()}",
+            "pending_task_items: []",
+            "---",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
 class PendingMarkerTests(unittest.TestCase):
     def test_email_pending_block_has_single_source_marker_and_is_not_generic_pending(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -82,7 +103,7 @@ class PendingMarkerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             path = root / "task.md"
-            path.write_text("(blocked: waiting on API approval)\nnotes\n(pending)\nplease route\n", encoding="utf-8")
+            path.write_text(f"{task_frontmatter(status='blocked', blocked_on='waiting on API approval')}notes\n(pending)\nplease route\n", encoding="utf-8")
             markers = find_markers(root, [path])
             self.assertEqual(1, len(markers))
             self.assertEqual("waiting on API approval", markers[0].blocked_reason)
@@ -92,7 +113,7 @@ class PendingMarkerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             path = root / "task.md"
-            path.write_text("(blocked: old blocker)\n(running)\n(pending)\nplease route\n", encoding="utf-8")
+            path.write_text(f"{task_frontmatter(status='running')}notes\n(pending)\nplease route\n", encoding="utf-8")
             markers = find_markers(root, [path])
             self.assertEqual(1, len(markers))
             self.assertEqual("", markers[0].blocked_reason)
@@ -102,11 +123,22 @@ class PendingMarkerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             path = root / "task.md"
+            path = root / "work_manager.md"
             path.write_text("(blocked)\n(pending)\nplease route\n", encoding="utf-8")
             markers = find_markers(root, [path])
             self.assertEqual(1, len(markers))
             self.assertEqual("blocked with no reason in latest status line", markers[0].blocked_reason)
             self.assertIn("blocked-context: latest prior status is blocked; reason=blocked with no reason in latest status line", markers[0].ref)
+
+    def test_pending_marker_uses_frontmatter_blocked_on_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            path.write_text(f"{task_frontmatter(status='blocked', runat='wl:2', managerat='wl:1', blocked_on='waiting on API approval')}\n(pending)\nplease route\n", encoding="utf-8")
+            markers = find_markers(root, [path])
+            self.assertEqual(1, len(markers))
+            self.assertEqual("waiting on API approval", markers[0].blocked_reason)
+            self.assertIn("blocked-context: latest prior status is blocked; reason=waiting on API approval", markers[0].ref)
 
     def test_pending_push_includes_blocked_context(self) -> None:
         from omo_manager.omo_pending_watch import scan_once
@@ -114,7 +146,7 @@ class PendingMarkerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             path = root / "task.md"
-            path.write_text("(blocked: waiting on API approval)\n\n(pending)\nplease route\n", encoding="utf-8")
+            path.write_text(f"{task_frontmatter(status='blocked', blocked_on='waiting on API approval')}\n(pending)\nplease route\n", encoding="utf-8")
             args = Args(
                 root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=True
             )
@@ -131,7 +163,27 @@ class PendingMarkerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             path = root / "worker.md"
-            path.write_text("runat: wl:2 codex\nmanagerat: wl:1\n\n(pending)\nplease route\n", encoding="utf-8")
+            path.write_text(f"{task_frontmatter(runat='wl:2', managerat='wl:1')}\n(pending)\nplease route\n", encoding="utf-8")
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(command)
+                return subprocess.CompletedProcess(command, 0)
+
+            args = Args(
+                root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=False, manager_target="main:0.0"
+            )
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+                self.assertTrue(scan_once(args, {}, [path]))
+            self.assertEqual("wl:2", calls[0][calls[0].index("--manager-target") + 1])
+
+    def test_pending_push_uses_managerat_for_manager_task_frontmatter(self) -> None:
+        from omo_manager.omo_pending_watch import scan_once
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "submanager.md"
+            path.write_text(f"{task_frontmatter(runat='wl:2', managerat='wl:1', is_manager=True)}\n(pending)\nplease route\n", encoding="utf-8")
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
@@ -151,7 +203,7 @@ class PendingMarkerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             path = root / "worker.md"
-            path.write_text("managerat: wl:9\n(done: old route)\nmanagerat: wl:1\n\n(pending)\nplease route\n", encoding="utf-8")
+            path.write_text(f"{task_frontmatter(runat='wl:2', managerat='wl:1', is_manager=True)}managerat: wl:9\n(done: old route)\n\n(pending)\nplease route\n", encoding="utf-8")
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
@@ -171,7 +223,7 @@ class PendingMarkerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             path = root / "worker.md"
-            path.write_text("managerat: wl:1\n\n(pending)\nplease route\nmanagerat: wl:9\n", encoding="utf-8")
+            path.write_text(f"{task_frontmatter(runat='wl:2', managerat='wl:1', is_manager=True)}\n(pending)\nplease route\nmanagerat: wl:9\n", encoding="utf-8")
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
@@ -191,7 +243,8 @@ class PendingMarkerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             path = root / "worker.md"
-            path.write_text("runat: wl:2 codex\n\n(pending)\nplease route\n", encoding="utf-8")
+            path = root / "work_manager.md"
+            path.write_text("(pending)\nplease route\n", encoding="utf-8")
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
@@ -205,15 +258,15 @@ class PendingMarkerTests(unittest.TestCase):
                 self.assertTrue(scan_once(args, {}, [path]))
             self.assertEqual("main:0.0", calls[0][calls[0].index("--manager-target") + 1])
 
-    def test_vl_pending_push_without_managerat_uses_active_vl_submanager(self) -> None:
+    def test_vl_pending_push_uses_frontmatter_worker_target(self) -> None:
         from omo_manager.omo_pending_watch import scan_once
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             path = root / "vl_worker.md"
-            path.write_text("runat: vl:1 codex\n\n(pending)\nplease route\n", encoding="utf-8")
+            path.write_text(f"{task_frontmatter(runat='vl:1', managerat='vl:15')}\n(pending)\nplease route\n", encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nvl_submanager_current_8653.md vl 15\nvl_worker.md vl 1\n", encoding="utf-8")
-            _ = (root / "vl_submanager_current_8653.md").write_text("runat: vl:15 codex\n(running)\n", encoding="utf-8")
+            _ = (root / "vl_submanager_current_8653.md").write_text(task_frontmatter(runat="vl:99", managerat="vl:15", is_manager=True), encoding="utf-8")
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
@@ -225,7 +278,7 @@ class PendingMarkerTests(unittest.TestCase):
             )
             with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
                 self.assertTrue(scan_once(args, {}, [path]))
-            self.assertEqual("vl:15", calls[0][calls[0].index("--manager-target") + 1])
+            self.assertEqual("vl:1", calls[0][calls[0].index("--manager-target") + 1])
 
     def test_agent_report_in_vl_submanager_file_routes_to_submanager(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -235,7 +288,7 @@ class PendingMarkerTests(unittest.TestCase):
             task = root / "vl_submanager_current_8653.md"
             _ = (root / "TODO.md").write_text("current:\nvl_submanager_current_8653.md vl:15\n", encoding="utf-8")
             _ = task.write_text(
-                "runat: vl:15 codex\nmanagerat: vl:15\n(pending)\n(from agent vl:15 /tmp/report.md)\n",
+                f"{task_frontmatter(runat='vl:99', managerat='vl:15', is_manager=True)}(pending)\n(from agent vl:15 /tmp/report.md)\n",
                 encoding="utf-8",
             )
             markers = find_markers(root, [task])
@@ -253,7 +306,7 @@ class PendingMarkerTests(unittest.TestCase):
             root = Path(tmp)
             task = root / "vl_submanager_current_8653.md"
             _ = (root / "TODO.md").write_text("current:\nvl_submanager_current_8653.md vl:15\n", encoding="utf-8")
-            _ = task.write_text("runat: vl:15 codex\nmanagerat: vl:15\n(pending)\nplease handle this locally\n", encoding="utf-8")
+            _ = task.write_text(f"{task_frontmatter(runat='vl:99', managerat='vl:15', is_manager=True)}(pending)\nplease handle this locally\n", encoding="utf-8")
             markers = find_markers(root, [task])
             self.assertEqual(1, len(markers))
             self.assertEqual("human", markers[0].origin)
@@ -299,7 +352,7 @@ class PendingMarkerTests(unittest.TestCase):
             path = root / "work_manager.md"
             path.write_text(
                 "(pending)\n"
-                "(from agent omo_pending_watch via omo_pending_watch.py status=agent-problem)\n"
+                "(from agent omo_pending_watch agent-problem)\n"
                 "manager agent problem: running task marker needs attention.\n"
                 "agent-problems: stuck_input=1\n",
                 encoding="utf-8",
@@ -923,6 +976,22 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual("wl:1", route.manager_target)
             self.assertEqual("wl:1", route.routed_target)
 
+    def test_frontmatter_managerat_routes_addressed_worker_mail_to_submanager(self) -> None:
+        from omo_manager import email_idle_watcher as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            submanager = root / "submanager.md"
+            worker = root / "worker.md"
+            _ = submanager.write_text(task_frontmatter(runat="wl:9", managerat="wl:1", is_manager=True), encoding="utf-8")
+            _ = worker.write_text(task_frontmatter(runat="wl:2", managerat="wl:1"), encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nsubmanager.md wl 1\nworker.md wl 2\n", encoding="utf-8")
+            args = watcher.Args(root, "", root / "manager_mail", root / "state", root / "work_manager_today.md", True, "self@example.test", 900, Path("/bin/false"), manager_target="main:0.0")
+            route = watcher.email_route(args, "Re: [a] [wl:2] manager update")
+            self.assertEqual(submanager, route.manager_file)
+            self.assertEqual("wl:1", route.manager_target)
+            self.assertEqual("wl:1", route.routed_target)
+
     def test_managerat_routes_inactive_addressed_worker_mail_to_active_submanager(self) -> None:
         from omo_manager import email_idle_watcher as watcher
 
@@ -1093,6 +1162,18 @@ class PendingMarkerTests(unittest.TestCase):
             root = Path(tmp)
             task = root / "submanager.md"
             _ = task.write_text("runat: wl:1 pcodx\n\n(pending)\n(manager routed: wl:1)\n(from email manager_mail/5002.txt)\n", encoding="utf-8")
+            args = watcher.Args(root, "", root / "manager_mail", root / "state", root / "work_manager_today.md", True, "self@example.test", 900, Path("/bin/false"), manager_target="main:0.0")
+            retry_args = watcher.args_for_manager_file(args, task)
+            self.assertEqual("wl:1", retry_args.manager_target)
+            self.assertEqual(task, retry_args.manager_file)
+
+    def test_submanager_email_retry_push_uses_frontmatter_manager_target(self) -> None:
+        from omo_manager import email_idle_watcher as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "submanager.md"
+            _ = task.write_text(f"{task_frontmatter(runat='wl:9', managerat='wl:1', is_manager=True)}\n(pending)\n(manager routed: wl:1)\n(from email manager_mail/5002.txt)\n", encoding="utf-8")
             args = watcher.Args(root, "", root / "manager_mail", root / "state", root / "work_manager_today.md", True, "self@example.test", 900, Path("/bin/false"), manager_target="main:0.0")
             retry_args = watcher.args_for_manager_file(args, task)
             self.assertEqual("wl:1", retry_args.manager_target)
@@ -4154,7 +4235,7 @@ class PendingMarkerTests(unittest.TestCase):
             mail.parent.mkdir()
             mail.write_text("Subject: worker note\n\nPlease inspect this directly. DM!!!\n", encoding="utf-8")
             path = root / "worker.md"
-            path.write_text("runat: wl:2 codex\nmanagerat: wl:1\n\n(pending)\n(record and delegate manager_mail/4002.txt)\n", encoding="utf-8")
+            path.write_text(f"{task_frontmatter(runat='wl:2', managerat='wl:1')}\n(pending)\n(record and delegate manager_mail/4002.txt)\n", encoding="utf-8")
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
@@ -4188,7 +4269,7 @@ class PendingMarkerTests(unittest.TestCase):
             mail.parent.mkdir()
             mail.write_text("Please inspect this directly. DM\n", encoding="utf-8")
             path = root / "worker.md"
-            path.write_text("runat: wl:9 codex\n(done: old worker)\nrunat: wl:2 codex\nmanagerat: wl:1\n\n(pending)\n(record and delegate manager_mail/4002.txt)\n", encoding="utf-8")
+            path.write_text(f"{task_frontmatter(runat='wl:2', managerat='wl:1')}\nrunat: wl:9 codex\n(done: old worker)\n\n(pending)\n(record and delegate manager_mail/4002.txt)\n", encoding="utf-8")
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
@@ -4211,7 +4292,7 @@ class PendingMarkerTests(unittest.TestCase):
             mail.parent.mkdir()
             mail.write_text("Please inspect this directly. DM\n", encoding="utf-8")
             path = root / "worker.md"
-            path.write_text("runat: wl:2 codex\nmanagerat: wl:1\n\n(pending)\n(record and delegate manager_mail/4002.txt)\nrunat: wl:9 codex\n", encoding="utf-8")
+            path.write_text(f"{task_frontmatter(runat='wl:2', managerat='wl:1')}\n(pending)\n(record and delegate manager_mail/4002.txt)\nrunat: wl:9 codex\n", encoding="utf-8")
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
@@ -4234,14 +4315,14 @@ class PendingMarkerTests(unittest.TestCase):
             mail.parent.mkdir()
             mail.write_text("Please inspect this directly. DM\n", encoding="utf-8")
             path = root / "worker.md"
-            path.write_text("runat: wl:2 codex\nmanagerat: wl:1\n\n(pending)\n(record and delegate manager_mail/4002.txt)\n", encoding="utf-8")
+            path.write_text(f"{task_frontmatter(runat='wl:2', managerat='wl:1')}\n(pending)\n(record and delegate manager_mail/4002.txt)\n", encoding="utf-8")
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
                 calls.append(command)
                 target = command[command.index("--manager-target") + 1]
                 if target == "wl:2":
-                    path.write_text("runat: wl:2 codex\nmanagerat: wl:1\n\n(done)\n", encoding="utf-8")
+                    path.write_text(f"{task_frontmatter(status='done', runat='wl:2', managerat='wl:1')}\n(done)\n", encoding="utf-8")
                 return subprocess.CompletedProcess(command, 0)
 
             args = Args(
@@ -4264,7 +4345,7 @@ class PendingMarkerTests(unittest.TestCase):
             mail.parent.mkdir()
             mail.write_text("Please inspect this directly. DM\n", encoding="utf-8")
             path = root / "worker.md"
-            path.write_text("runat: wl:2.0 codex\nmanagerat: wl:1.0\n\n(pending)\n(record and delegate manager_mail/4002.txt)\n", encoding="utf-8")
+            path.write_text(f"{task_frontmatter(runat='wl:2.0', managerat='wl:1.0')}\n(pending)\n(record and delegate manager_mail/4002.txt)\n", encoding="utf-8")
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
@@ -4287,7 +4368,7 @@ class PendingMarkerTests(unittest.TestCase):
             mail.parent.mkdir()
             mail.write_text("Please inspect this directly. DM\n", encoding="utf-8")
             path = root / "worker.md"
-            path.write_text("runat: wl:2 codex\nmanagerat: wl:2.1\n\n(pending)\n(record and delegate manager_mail/4002.txt)\n", encoding="utf-8")
+            path.write_text(f"{task_frontmatter(runat='wl:2', managerat='wl:2.1')}\n(pending)\n(record and delegate manager_mail/4002.txt)\n", encoding="utf-8")
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
@@ -4312,7 +4393,7 @@ class PendingMarkerTests(unittest.TestCase):
             mail.parent.mkdir()
             mail.write_text("Please inspect this directly. DM\n", encoding="utf-8")
             path = root / "worker.md"
-            path.write_text("runat: wl:2 codex\nmanagerat: wl:1\n\n(pending)\n(record and delegate manager_mail/4002.txt)\n", encoding="utf-8")
+            path.write_text(f"{task_frontmatter(runat='wl:2', managerat='wl:1')}\n(pending)\n(record and delegate manager_mail/4002.txt)\n", encoding="utf-8")
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
@@ -4343,7 +4424,7 @@ class PendingMarkerTests(unittest.TestCase):
             mail.parent.mkdir()
             mail.write_text("Please inspect this directly. DM\n", encoding="utf-8")
             path = root / "worker.md"
-            path.write_text("runat: wl:2 codex\nmanagerat: wl:1\n\n(pending)\n(record and delegate manager_mail/4002.txt)\n", encoding="utf-8")
+            path.write_text(f"{task_frontmatter(runat='wl:2', managerat='wl:1')}\n(pending)\n(record and delegate manager_mail/4002.txt)\n", encoding="utf-8")
             calls: list[list[str]] = []
             manager_attempts = 0
 
@@ -4379,7 +4460,7 @@ class PendingMarkerTests(unittest.TestCase):
             mail.parent.mkdir()
             mail.write_text("Please inspect the first version. DM\n", encoding="utf-8")
             path = root / "worker.md"
-            path.write_text("runat: wl:2 codex\nmanagerat: wl:1\n\n(pending)\n(record and delegate manager_mail/4002.txt)\n", encoding="utf-8")
+            path.write_text(f"{task_frontmatter(runat='wl:2', managerat='wl:1')}\n(pending)\n(record and delegate manager_mail/4002.txt)\n", encoding="utf-8")
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
@@ -4408,7 +4489,7 @@ class PendingMarkerTests(unittest.TestCase):
             mail.parent.mkdir()
             mail.write_text("Please inspect this directly. DM...\u201d\n", encoding="utf-8")
             path = root / "worker.md"
-            path.write_text("runat: wl:2 codex\nmanagerat: wl:1\n\n(pending)\n(record and delegate manager_mail/4002.txt)\n", encoding="utf-8")
+            path.write_text(f"{task_frontmatter(runat='wl:2', managerat='wl:1')}\n(pending)\n(record and delegate manager_mail/4002.txt)\n", encoding="utf-8")
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
@@ -4432,7 +4513,7 @@ class PendingMarkerTests(unittest.TestCase):
             visible = "x" * watcher.EMAIL_CONTENT_CHAR_LIMIT
             mail.write_text(f"{visible}\nold hidden\n", encoding="utf-8")
             path = root / "worker.md"
-            path.write_text("runat: wl:2 codex\nmanagerat: wl:1\n\n(pending)\n(record and delegate manager_mail/4002.txt)\n", encoding="utf-8")
+            path.write_text(f"{task_frontmatter(runat='wl:2', managerat='wl:1')}\n(pending)\n(record and delegate manager_mail/4002.txt)\n", encoding="utf-8")
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
@@ -4448,7 +4529,7 @@ class PendingMarkerTests(unittest.TestCase):
                 mail.write_text(f"{visible}\nDM\n", encoding="utf-8")
                 self.assertTrue(watcher.scan_once(args, seen, [path]))
             targets = [call[call.index("--manager-target") + 1] for call in calls]
-            self.assertEqual(["wl:1", "wl:2", "wl:1"], targets)
+            self.assertEqual(["wl:2", "wl:2", "wl:1"], targets)
             self.assertIn("direct-message: human email requested direct delivery", calls[1][1])
 
     def test_email_dm_manager_fyi_skips_policy_reminder(self) -> None:
@@ -4460,7 +4541,7 @@ class PendingMarkerTests(unittest.TestCase):
             mail.parent.mkdir()
             mail.write_text("Please inspect this directly. DM\n", encoding="utf-8")
             path = root / "worker.md"
-            path.write_text("runat: wl:2 codex\nmanagerat: wl:1\n\n(pending)\n(record and delegate manager_mail/4002.txt)\n", encoding="utf-8")
+            path.write_text(f"{task_frontmatter(runat='wl:2', managerat='wl:1')}\n(pending)\n(record and delegate manager_mail/4002.txt)\n", encoding="utf-8")
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
@@ -4802,16 +4883,16 @@ class PendingMarkerTests(unittest.TestCase):
                 "done_task.md cfg:3\n",
                 encoding="utf-8",
             )
-            _ = (root / "pending_task.md").write_text("runat: cfg:1 codex\n(pending)\n", encoding="utf-8")
-            _ = (root / "blocked_task.md").write_text("runat: cfg:2 codex\n(blocked: waiting on human)\n", encoding="utf-8")
-            _ = (root / "done_task.md").write_text("runat: cfg:3 codex\n(done)\n", encoding="utf-8")
+            _ = (root / "pending_task.md").write_text(f"{task_frontmatter(runat='cfg:1')}(pending)\n", encoding="utf-8")
+            _ = (root / "blocked_task.md").write_text(task_frontmatter(status="blocked", runat="cfg:2", blocked_on="waiting on human"), encoding="utf-8")
+            _ = (root / "done_task.md").write_text(task_frontmatter(status="done", runat="cfg:3"), encoding="utf-8")
             result = watcher.CommandOutput("idle status check", 0, "agent-status: running=0\n", "")
 
-            text = watcher.periodic_status_text(Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, True), result)
+            text = watcher.periodic_status_text(Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, True, manager_target="wl:1"), result)
 
             self.assertIsNotNone(text)
             assert text is not None
-            self.assertIn("manager task-state reminder: MANAGER.md lines 49-51", text)
+            self.assertIn("manager task-state reminder: MANAGER.md requires each manager-owned task to have frontmatter", text)
             self.assertIn("task-state: task=pending_task.md status=pending", text)
             self.assertNotIn("blocked_task.md", text)
             self.assertNotIn("done_task.md", text)
@@ -4833,9 +4914,9 @@ class PendingMarkerTests(unittest.TestCase):
                 "trim_metadata.md vl:83 (done; `ANSWER.md`, `PROCESS.md`, and `TELEMETRY.md` now agree)\n",
                 encoding="utf-8",
             )
-            _ = (root / "real_task.md").write_text("runat: wl:1 codex\n(pending)\n", encoding="utf-8")
-            _ = (root / "vl_human_followup_proof_standards_8767.md").write_text("runat: vl:2 codex\n(done)\n", encoding="utf-8")
-            _ = (root / "trim_metadata.md").write_text("runat: vl:83 codex\n(done)\n", encoding="utf-8")
+            _ = (root / "real_task.md").write_text(f"{task_frontmatter(runat='wl:1')}(pending)\n", encoding="utf-8")
+            _ = (root / "vl_human_followup_proof_standards_8767.md").write_text(task_frontmatter(status="done", runat="vl:2"), encoding="utf-8")
+            _ = (root / "trim_metadata.md").write_text(task_frontmatter(status="done", runat="vl:83"), encoding="utf-8")
             result = watcher.CommandOutput("idle status check", 0, "agent-status: running=0\n", "")
 
             text = watcher.periodic_status_text(Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, True), result)
@@ -4892,7 +4973,7 @@ class PendingMarkerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             _ = (root / "TODO.md").write_text("current:\nvl_worker.md vl:1\n", encoding="utf-8")
-            _ = (root / "vl_worker.md").write_text("runat: vl:1 codex\nmanagerat: vl:15\n(pending)\n", encoding="utf-8")
+            _ = (root / "vl_worker.md").write_text(f"{task_frontmatter(runat='vl:1', managerat='vl:15')}(pending)\n", encoding="utf-8")
             result = watcher.CommandOutput("idle status check", 0, "agent-status: running=0\n", "")
 
             text = watcher.periodic_status_text(Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, True, manager_target="wl:0"), result)
@@ -4908,7 +4989,7 @@ class PendingMarkerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             _ = (root / "TODO.md").write_text("current:\nvl_worker.md vl:1\n", encoding="utf-8")
-            _ = (root / "vl_worker.md").write_text("runat: vl:1 codex\nmanagerat: vl:15\n(pending)\n", encoding="utf-8")
+            _ = (root / "vl_worker.md").write_text(f"{task_frontmatter(runat='vl:1', managerat='vl:15')}(pending)\n", encoding="utf-8")
             result = watcher.CommandOutput("idle status check", 0, "agent-status: running=0\n", "")
 
             text = watcher.periodic_status_text(Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, True), result)
@@ -4924,7 +5005,7 @@ class PendingMarkerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             _ = (root / "TODO.md").write_text("current:\nvl_submanager_current_8653.md vl:15\nvl_worker.md vl:1\n", encoding="utf-8")
-            _ = (root / "vl_submanager_current_8653.md").write_text("runat: vl:15 codex\n(running)\n", encoding="utf-8")
+            _ = (root / "vl_submanager_current_8653.md").write_text(task_frontmatter(runat="vl:99", managerat="vl:15", is_manager=True), encoding="utf-8")
             result = watcher.CommandOutput("idle status check", 0, "agent-status: running=0\n", "")
 
             text = watcher.periodic_status_text(Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, True, manager_target="wl:0"), result)
@@ -4940,7 +5021,7 @@ class PendingMarkerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             _ = (root / "TODO.md").write_text("current:\n- `vl_submanager_current_8653.md` (`vl:15`)\n- `vl_worker.md` (`vl:1`)\n", encoding="utf-8")
-            _ = (root / "vl_submanager_current_8653.md").write_text("runat: vl:15 codex\n(running)\n", encoding="utf-8")
+            _ = (root / "vl_submanager_current_8653.md").write_text(task_frontmatter(runat="vl:99", managerat="vl:15", is_manager=True), encoding="utf-8")
             result = watcher.CommandOutput("idle status check", 0, "agent-status: running=0\n", "")
 
             text = watcher.periodic_status_text(Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, True, manager_target="wl:0"), result)
@@ -4984,7 +5065,7 @@ class PendingMarkerTests(unittest.TestCase):
                 self.assertTrue(watcher.maybe_push_agent_problems(args, seen, 1300.0))
             text = out.getvalue()
             self.assertEqual(2, text.count("manager agent problem: running task marker needs attention."))
-            self.assertEqual(2, text.count("(from agent omo_pending_watch via omo_pending_watch.py status=agent-problem)"))
+            self.assertEqual(2, text.count("(from agent omo_pending_watch agent-problem)"))
             self.assertIn("not_codex: task=task.md", text)
 
     def test_agent_problem_check_does_not_throttle_unstuck_reports(self) -> None:
@@ -5003,7 +5084,7 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 1000.0))
             self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 1001.0))
         self.assertEqual(2, out.getvalue().count("unstuck: target=cfg:1"))
-        self.assertEqual(2, out.getvalue().count("(from agent omo_pending_watch via omo_pending_watch.py status=agent-problem)"))
+        self.assertEqual(2, out.getvalue().count("(from agent omo_pending_watch agent-problem)"))
 
     def test_agent_problem_check_pushes_blocked_idle_reports(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -5183,7 +5264,7 @@ class PendingMarkerTests(unittest.TestCase):
             )
             status_script.chmod(0o700)
             _ = (root / "TODO.md").write_text("current:\nvl_submanager_current_8653.md vl:15\nvl_worker.md vl:1\n", encoding="utf-8")
-            _ = (root / "vl_submanager_current_8653.md").write_text("runat: vl:15 codex\n(running)\n", encoding="utf-8")
+            _ = (root / "vl_submanager_current_8653.md").write_text(task_frontmatter(runat="vl:99", managerat="vl:15", is_manager=True), encoding="utf-8")
             args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, status_script, False, False, manager_target="wl:16.0", agent_problem_repeat_s=300.0)
             calls: list[list[str]] = []
             real_run = subprocess.run
@@ -5217,7 +5298,7 @@ class PendingMarkerTests(unittest.TestCase):
             )
             status_script.chmod(0o700)
             _ = (root / "TODO.md").write_text("current:\nvl_submanager_current_8653.md vl:15\nvl_worker.md vl:1\n", encoding="utf-8")
-            _ = (root / "vl_submanager_current_8653.md").write_text("runat: vl:15 codex\n(running)\n", encoding="utf-8")
+            _ = (root / "vl_submanager_current_8653.md").write_text(task_frontmatter(runat="vl:99", managerat="vl:15", is_manager=True), encoding="utf-8")
             args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, status_script, False, False, agent_problem_repeat_s=300.0)
             calls: list[list[str]] = []
             real_run = subprocess.run

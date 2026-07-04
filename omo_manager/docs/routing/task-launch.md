@@ -2,15 +2,15 @@
 
 `omo_task.py --task-file TASK.md --tmux-session SESSION --workdir DIR --prompt-file PROMPT` creates and links task files, opens a new tmux window with its normal shell, then starts plain Codex by default through `bunx @openai/codex --dangerously-bypass-approvals-and-sandbox`.
 
-Use `--tool pcodx` only for a worker that intentionally needs the PCODX CLI wrapper, its scoped `pcodx_partial_compact` MCP tools, and sidecar ledger artifacts under `/tmp/pcodx-runs`; that path records `runat: SESSION:WINDOW pcodx`.
+Use `--tool pcodx` only for a worker that intentionally needs the PCODX CLI wrapper, its scoped `pcodx_partial_compact` MCP tools, and sidecar ledger artifacts under `/tmp/pcodx-runs`; that path records `tool: pcodx` in task frontmatter.
 
-New task files also get `(above are pending task items)` after the prompt body. Bullets above that marker are human request items; remove each bullet only when that item is actually done. `--manager-target TARGET` writes `managerat: TARGET` after `runat:` for submanager-owned tasks; omit it only for main-manager-owned tasks.
+New task files start with YAML frontmatter containing `version`, `status: running`, `runat`, `tool`, `managerat`, `is_manager`, and `pending_task_items: []`. `--manager-target TARGET`, or the current `OMO_AGENT_TMUX_TARGET`, supplies `managerat`. After launch, fill `pending_task_items` with the still-open request items and remove each item only when it is actually done or cancelled. Use `--is-manager` for task files whose pending blocks should route to `managerat`; ordinary worker task pending blocks route to `runat`.
 
 Non-submanager VL worker launches, identified by a `vl_` task filename or the `vl` tmux session, require `--manager-target` so reports and watcher status route to the owning VL submanager. Raw `--codex-flag` MCP server config tokens such as `mcp_servers.*` require explicit `--tool pcodx`, so ordinary new Codex agents do not inherit private partial-compaction MCP registration. The MCP tools provide an auditable partial-compaction ledger; they do not rewrite Codex's hidden native transcript.
 
 `--prompt-file` is passed as Codex's initial prompt argument, not pasted after a startup sleep or injected into an existing Codex TUI input line. VL launches require `--prompt-file` and prepend the narrow VL worker defaults: write the task-local end goal before substantive work, apply the task-relevant reviewer criteria before reporting done, and keep verifier binaries local to verifier-running experiment artifact trees or record exact verifier provenance.
 
-VL experiment and rerun launches matching `vl_*_exp_*.md` or `vl_*_rerun_*.md` are preflight-gated automatically when started with `--workdir`; pass `--vl-preflight-verus PATH_TO_VERUS --vl-preflight-artifact-root ARTIFACT_ROOT` to bind the intended verifier and evidence root. The gate runs before the worker starts, writes `preflight.txt` under the artifact root, exports `VLH`, `VERUS`, `VL_EXPERIMENT_ARTIFACT_ROOT`, and a `PATH` containing the verified helper directory to the worker, and checks intended `vlh` on `PATH`, `vlh help`, Verus executable version/provenance, and GPT-backed OpenRouter absence.
+Use `--prelaunch-source SCRIPT` when a worker needs launcher-time environment setup. `omo_task.py` sources that readable shell script inside the worker pane before exporting `OMO_AGENT_TMUX_TARGET` and starting Codex.
 
 After sending the shell launch command, it verifies the pane left the shell before writing task/TODO state; if the pane stays at the shell, launch verification fails explicitly.
 

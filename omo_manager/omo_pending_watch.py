@@ -28,7 +28,9 @@ if __package__ in {None, ""}:
 from omo_manager.omo_agent_status import TaskLine
 from omo_manager.omo_agent_status import active_vl_submanager_target
 from omo_manager.omo_agent_status import effective_owner_target
+from omo_manager.omo_agent_status import is_main_manager_task_file
 from omo_manager.omo_agent_status import parse_task_lines
+from omo_manager.omo_agent_status import read_task_metadata
 from omo_manager.omo_agent_status import resolve_task_path
 from omo_manager.omo_agent_status import scan_task_state
 from omo_manager.omo_pending_digest import PENDING_CONTENT_CHAR_LIMIT
@@ -66,12 +68,12 @@ AGENT_SOURCE_PREFIXES = ("[omo-message-source: origin=agent ", "(from agent ")
 STATUS_DETAIL_RE = re.compile(r"^\((pending|running|done|blocked)(?::\s*([^)]*))?\)(?:\s+\(([^)]*)\))?$")
 TMUX_TARGET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?$")
 RUNAT_RE = re.compile(r"^runat:\s+([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\b")
-AGENT_PROBLEM_SOURCE_LINE = "(from agent omo_pending_watch via omo_pending_watch.py status=agent-problem)"
-MANAGER_COMPACTION_SOURCE_LINE = "(from agent omo_pending_watch via omo_pending_watch.py status=manager-compaction-reread)"
+AGENT_PROBLEM_SOURCE_LINE = "(from agent omo_pending_watch agent-problem)"
+MANAGER_COMPACTION_SOURCE_LINE = "(from agent omo_pending_watch manager-compaction-reread)"
 MANAGER_COMPACTION_REMINDER = "Manager compaction observed. Reread MANAGER.md now unless the compaction summary already included it, then continue from the current manager task state."
 TODO_LENGTH_REMINDER = "TODO.md length reminder: TODO.md has {n_lines} lines. Move done material to YYYYMM/old_todos.md and keep TODO.md under 200 lines."
 MANAGER_TASK_STATE_REMINDER_HEADER = (
-    "manager task-state reminder: MANAGER.md lines 49-51 require each manager-owned task to be `(running)`, `(done)`, or `(blocked)` while the manager is idle. "
+    "manager task-state reminder: MANAGER.md requires each manager-owned task to have frontmatter `status: running`, `status: done`, or `status: blocked` while the manager is idle. "
     "Start/resume the task, mark it done, or block it with a reason. Single-tag enforcement is intentionally not checked."
 )
 MANAGER_TASK_STATE_OK = {"running", "done", "blocked"}
@@ -497,7 +499,8 @@ def directive_target(path: Path, name: str, before_line: int | None = None) -> s
 
 
 def marker_worker_target(args: Args, marker: Marker, manager_target: str) -> str:
-    target = directive_target(args.root / marker.file, "runat", marker.line)
+    metadata = read_task_metadata(args.root / marker.file)
+    target = metadata.runat if metadata is not None else ""
     if not target or same_tmux_target(target, manager_target) or same_tmux_window_unless_both_panes(target, manager_target):
         return ""
     return target
@@ -508,12 +511,11 @@ def marker_attachment(args: Args, marker: Marker) -> EmailAttachment | None:
 
 
 def attachment_payload_digest(text: str) -> str:
-    payload = truncate_content(text, EMAIL_CONTENT_CHAR_LIMIT)
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
 def dm_worker_seen_key(args: Args, marker: Marker, worker_target: str, attachment: EmailAttachment) -> str:
-    return f"{args.root}:{marker.file}:{marker.line}:{marker.digest}:dm-worker:{canonical_target(worker_target)}:email:{attachment_payload_digest(attachment.text)}"
+    return f"{args.root}:{marker.file}:{marker.line}:{marker.digest}:dm-worker:{canonical_target(worker_target)}:email:{attachment_payload_digest(attachment.text)}:dm:{int(email_ends_with_dm(attachment.text))}"
 
 
 def attachment_error_seen_key(args: Args, marker: Marker) -> str:
@@ -534,16 +536,25 @@ def is_vl_task_file(path: Path) -> bool:
 
 
 def marker_manager_target(args: Args, marker: Marker) -> str:
-    """Choose the manager pane that owns delivery for this marker."""
+    """Choose the manager pane that owns this marker."""
 
-    target = directive_target(args.root / marker.file, "managerat", marker.line)
-    if target:
-        return target
-    if is_vl_task_file(marker.file):
-        target = active_vl_submanager_target(args.root)
-        if target:
-            return target
-    return target or args.manager_target
+    metadata = read_task_metadata(args.root / marker.file)
+    if metadata is not None:
+        return metadata.managerat
+    if is_main_manager_task_file(marker.file):
+        return args.manager_target
+    return args.manager_target
+
+
+def marker_delivery_target(args: Args, marker: Marker) -> str:
+    """Choose the pane that receives the pending block by default."""
+
+    metadata = read_task_metadata(args.root / marker.file)
+    if metadata is not None:
+        return metadata.managerat if metadata.is_manager else metadata.runat
+    if is_main_manager_task_file(marker.file):
+        return args.manager_target
+    return args.manager_target
 
 
 def blocked_reason_before_pending(lines: list[str], pending_line: int) -> str:
@@ -557,6 +568,13 @@ def blocked_reason_before_pending(lines: list[str], pending_line: int) -> str:
             return ""
         return (match.group(2) or match.group(3) or "blocked with no reason in latest status line").strip()
     return ""
+
+
+def blocked_reason_for_marker(path: Path, lines: list[str], pending_line: int) -> str:
+    metadata = read_task_metadata(path)
+    if metadata is not None:
+        return metadata.blocked_on if metadata.status == "blocked" else ""
+    return blocked_reason_before_pending(lines, pending_line) if is_main_manager_task_file(path) else ""
 
 
 def content_section(title: str, body: str, limit: int) -> str:
@@ -658,7 +676,7 @@ def find_markers(root: Path, files: list[Path]) -> list[Marker]:
                     delegate_source=delegate_source(block_lines),
                     pending_tail=pending_tail,
                     file_lines=len(lines),
-                    blocked_reason=blocked_reason_before_pending(lines, idx),
+                    blocked_reason=blocked_reason_for_marker(path, lines, idx),
                 )
             )
     return markers
@@ -718,8 +736,9 @@ def push_ref(args: Args, seen: dict[str, float], now_s: float, marker: Marker, a
 
     reminders = MANAGER_EMAIL_POLICY_REMINDERS if marker.source == "email" else MANAGER_POLICY_REMINDERS
     manager_target = marker_manager_target(args, marker)
-    if not args.dry_run and not args.manager_url and not manager_target:
-        print("omo_pending_watch: --manager-target or --manager-url is required outside --dry-run", file=sys.stderr)
+    delivery_target = marker_delivery_target(args, marker)
+    if not args.dry_run and not args.manager_url and not (manager_target or delivery_target):
+        print("omo_pending_watch: a frontmatter delivery target, --manager-target, or --manager-url is required outside --dry-run", file=sys.stderr)
         return 1
     if attachment is not None and attachment.error:
         error_key = attachment_error_seen_key(args, marker)
@@ -733,7 +752,7 @@ def push_ref(args: Args, seen: dict[str, float], now_s: float, marker: Marker, a
     if attachment is not None and not attachment.error and email_ends_with_dm(attachment.text):
         return push_dm_ref(args, seen, now_s, marker, attachment, manager_target)
     text = marker_delivery_text(marker, attachment)
-    return push_marker_text(args, marker, with_manager_policy_reminder(args, text, reminders), manager_target)
+    return push_marker_text(args, marker, with_manager_policy_reminder(args, text, reminders), delivery_target)
 
 
 def push_manager_text(args: Args, text: str) -> int:
@@ -793,6 +812,9 @@ def manager_task_state_reminder_text(root: Path, manager_target: str = "") -> st
             continue
         if state_path is None:
             rows.append(f"task-state: task={task.task_file} status=missing-file")
+            continue
+        if find_markers(root, [state_path]):
+            rows.append(f"task-state: task={task.task_file} status=pending")
             continue
         state = scan_task_state(state_path)
         if state is not None and state.status in MANAGER_TASK_STATE_OK:
