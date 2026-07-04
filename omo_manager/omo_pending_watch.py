@@ -482,20 +482,22 @@ def delegate_source(block_lines: list[str]) -> str:
     return ""
 
 
-def directive_target(path: Path, name: str) -> str:
+def directive_target(path: Path, name: str, before_line: int | None = None) -> str:
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except OSError:
         return ""
-    for line in lines:
+    target = ""
+    scan_lines = lines[: before_line - 1] if before_line is not None else lines
+    for line in scan_lines:
         parts = line.strip().split()
         if len(parts) >= 2 and parts[0] == f"{name}:" and TMUX_TARGET_RE.fullmatch(parts[1]):
-            return parts[1]
-    return ""
+            target = parts[1]
+    return target
 
 
 def marker_worker_target(args: Args, marker: Marker, manager_target: str) -> str:
-    target = directive_target(args.root / marker.file, "runat")
+    target = directive_target(args.root / marker.file, "runat", marker.line)
     if not target or same_tmux_target(target, manager_target) or same_tmux_window_unless_both_panes(target, manager_target):
         return ""
     return target
@@ -534,7 +536,7 @@ def is_vl_task_file(path: Path) -> bool:
 def marker_manager_target(args: Args, marker: Marker) -> str:
     """Choose the manager pane that owns delivery for this marker."""
 
-    target = directive_target(args.root / marker.file, "managerat")
+    target = directive_target(args.root / marker.file, "managerat", marker.line)
     if target:
         return target
     if is_vl_task_file(marker.file):
