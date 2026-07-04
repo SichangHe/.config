@@ -259,7 +259,7 @@ class PendingMarkerTests(unittest.TestCase):
             path = root / "work_manager.md"
             path.write_text(
                 "(pending)\n"
-                "[omo-message-source: origin=agent source=agent action=no-human-ack agent=omo_pending_watch via=omo_pending_watch.py status=agent-problem]\n"
+                "(from agent omo_pending_watch via omo_pending_watch.py status=agent-problem)\n"
                 "manager agent problem: running task marker needs attention.\n"
                 "agent-problems: stuck_input=1\n",
                 encoding="utf-8",
@@ -3905,6 +3905,9 @@ class PendingMarkerTests(unittest.TestCase):
     def test_new_email_source_is_delivered_by_pending_watch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            mail = root / "manager_mail" / "4002.txt"
+            mail.parent.mkdir()
+            mail.write_text("Subject: routed\n\nPlease handle this.\n", encoding="utf-8")
             path = dated_manager_file(root)
             _ = path.write_text("(pending)\n(from email manager_mail/4002.txt)\n[source: email manager_mail/4002.txt]\n", encoding="utf-8")
             seen: dict[str, float] = {}
@@ -3927,7 +3930,8 @@ class PendingMarkerTests(unittest.TestCase):
             text = out.getvalue()
             self.assertIn("origin=human source=email action=ack-human", text)
             self.assertIn("(delegate manager_mail/4002.txt)", text)
-            self.assertNotIn("(from email manager_mail/4002.txt)", text)
+            self.assertIn("pending-content: work_manager_", text)
+            self.assertIn("(from email manager_mail/4002.txt)", text)
 
     def test_record_and_delegate_email_source_is_delivered_by_pending_watch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3945,6 +3949,9 @@ class PendingMarkerTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            mail = root / "manager_mail" / "4002.txt"
+            mail.parent.mkdir()
+            mail.write_text("Subject: reminder\n\nPlease handle this.\n", encoding="utf-8")
             path = dated_manager_file(root)
             path.write_text("(pending)\n(from email manager_mail/4002.txt)\n", encoding="utf-8")
             args = Args(
@@ -3998,6 +4005,9 @@ class PendingMarkerTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            mail = root / "manager_mail" / "4002.txt"
+            mail.parent.mkdir()
+            mail.write_text("Subject: email reminder\n\nPlease handle this.\n", encoding="utf-8")
             path = dated_manager_file(root)
             path.write_text("(pending)\n(from email manager_mail/4002.txt)\n", encoding="utf-8")
             args = Args(
@@ -4054,6 +4064,490 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertIn("pending: file=task.md", text)
             self.assertNotIn("task-file length warning", text)
 
+    def test_pending_push_includes_pending_tail_and_truncates_it(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            body = "x" * (watcher.PENDING_CONTENT_CHAR_LIMIT + 50)
+            path.write_text(f"header\n(pending)\n{body}\nsecret-tail\n", encoding="utf-8")
+            args = Args(
+                root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=True
+            )
+            out = StringIO()
+            with redirect_stdout(out):
+                self.assertTrue(watcher.scan_once(args, {}, [path]))
+            text = out.getvalue()
+            self.assertIn("pending-content: task.md:2 to EOF", text)
+            self.assertIn("--- begin ---\n(pending)\n", text)
+            self.assertIn("... [truncated ", text)
+            self.assertNotIn("secret-tail", text)
+
+    def test_email_pending_push_attaches_email_content(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mail = root / "manager_mail" / "4002.txt"
+            mail.parent.mkdir()
+            mail.write_text("Subject: hello\n\nPlease inspect this.\n", encoding="utf-8")
+            path = root / "work_manager_today.md"
+            path.write_text("(pending)\n(record and delegate manager_mail/4002.txt)\n", encoding="utf-8")
+            args = Args(
+                root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=True
+            )
+            out = StringIO()
+            with redirect_stdout(out):
+                self.assertTrue(watcher.scan_once(args, {}, [path]))
+            text = out.getvalue()
+            self.assertIn("email-content: manager_mail/4002.txt", text)
+            self.assertIn("Subject: hello", text)
+            self.assertIn("Please inspect this.", text)
+
+    def test_email_dm_pending_pushes_worker_and_manager_fyi(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mail = root / "manager_mail" / "4002.txt"
+            mail.parent.mkdir()
+            mail.write_text("Subject: worker note\n\nPlease inspect this directly. DM!!!\n", encoding="utf-8")
+            path = root / "worker.md"
+            path.write_text("runat: wl:2 codex\nmanagerat: wl:1\n\n(pending)\n(record and delegate manager_mail/4002.txt)\n", encoding="utf-8")
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(command)
+                return subprocess.CompletedProcess(command, 0)
+
+            args = Args(
+                root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=False, manager_target="main:0.0"
+            )
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+                self.assertTrue(watcher.scan_once(args, {}, [path]))
+            self.assertEqual(2, len(calls))
+            self.assertEqual("wl:2", calls[0][calls[0].index("--manager-target") + 1])
+            self.assertEqual("wl:1", calls[1][calls[1].index("--manager-target") + 1])
+            self.assertIn("--pending-file", calls[0])
+            self.assertNotIn("--pending-file", calls[1])
+            self.assertIn("direct-message: human email requested direct delivery to worker target wl:2.", calls[0][1])
+            self.assertIn("direct-message FYI: delivered directly to worker target wl:2; no manager action required.", calls[1][1])
+            self.assertNotIn("ack-human", calls[1][1])
+            self.assertIn("action=fyi-no-manager-action", calls[1][1])
+            self.assertIn("Please inspect this directly. DM!!!", calls[0][1])
+            self.assertNotIn("[omo-message-source:", calls[0][1])
+            self.assertNotIn("[omo-message-source:", calls[1][1])
+
+    def test_email_dm_manager_fyi_survives_worker_clearing_marker(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mail = root / "manager_mail" / "4002.txt"
+            mail.parent.mkdir()
+            mail.write_text("Please inspect this directly. DM\n", encoding="utf-8")
+            path = root / "worker.md"
+            path.write_text("runat: wl:2 codex\nmanagerat: wl:1\n\n(pending)\n(record and delegate manager_mail/4002.txt)\n", encoding="utf-8")
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(command)
+                target = command[command.index("--manager-target") + 1]
+                if target == "wl:2":
+                    path.write_text("runat: wl:2 codex\nmanagerat: wl:1\n\n(done)\n", encoding="utf-8")
+                return subprocess.CompletedProcess(command, 0)
+
+            args = Args(
+                root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=False, manager_target="main:0.0"
+            )
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+                self.assertTrue(watcher.scan_once(args, {}, [path]))
+            self.assertEqual(2, len(calls))
+            self.assertEqual("wl:1", calls[1][calls[1].index("--manager-target") + 1])
+            self.assertNotIn("--pending-file", calls[1])
+            self.assertIn("direct-message FYI: delivered directly to worker target wl:2; no manager action required.", calls[1][1])
+            self.assertNotIn("ack-human", calls[1][1])
+
+    def test_email_dm_uses_managerat_without_global_manager_target(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mail = root / "manager_mail" / "4002.txt"
+            mail.parent.mkdir()
+            mail.write_text("Please inspect this directly. DM\n", encoding="utf-8")
+            path = root / "worker.md"
+            path.write_text("runat: wl:2.0 codex\nmanagerat: wl:1.0\n\n(pending)\n(record and delegate manager_mail/4002.txt)\n", encoding="utf-8")
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(command)
+                return subprocess.CompletedProcess(command, 0)
+
+            args = Args(
+                root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=False
+            )
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+                self.assertTrue(watcher.scan_once(args, {}, [path]))
+            self.assertEqual(["wl:2.0", "wl:1.0"], [call[call.index("--manager-target") + 1] for call in calls])
+
+    def test_email_dm_rejects_ambiguous_same_window_target(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mail = root / "manager_mail" / "4002.txt"
+            mail.parent.mkdir()
+            mail.write_text("Please inspect this directly. DM\n", encoding="utf-8")
+            path = root / "worker.md"
+            path.write_text("runat: wl:2 codex\nmanagerat: wl:2.1\n\n(pending)\n(record and delegate manager_mail/4002.txt)\n", encoding="utf-8")
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(command)
+                return subprocess.CompletedProcess(command, 0)
+
+            args = Args(
+                root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=False
+            )
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+                self.assertTrue(watcher.scan_once(args, {}, [path]))
+            self.assertEqual(1, len(calls))
+            self.assertEqual("wl:2.1", calls[0][calls[0].index("--manager-target") + 1])
+            self.assertIn("no safe worker `runat:` target was found", calls[0][1])
+
+    def test_email_dm_worker_failure_sends_manager_action_fallback(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mail = root / "manager_mail" / "4002.txt"
+            mail.parent.mkdir()
+            mail.write_text("Please inspect this directly. DM\n", encoding="utf-8")
+            path = root / "worker.md"
+            path.write_text("runat: wl:2 codex\nmanagerat: wl:1\n\n(pending)\n(record and delegate manager_mail/4002.txt)\n", encoding="utf-8")
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(command)
+                target = command[command.index("--manager-target") + 1]
+                return subprocess.CompletedProcess(command, 2 if target == "wl:2" else 0)
+
+            args = Args(
+                root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=False, manager_target="main:0.0"
+            )
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+                self.assertTrue(watcher.scan_once(args, {}, [path]))
+            self.assertEqual(2, len(calls))
+            self.assertEqual("wl:2", calls[0][calls[0].index("--manager-target") + 1])
+            self.assertEqual("wl:1", calls[1][calls[1].index("--manager-target") + 1])
+            manager_text = calls[1][1]
+            self.assertIn("direct worker delivery to wl:2 failed with status 2", manager_text)
+            self.assertIn("manager action required to route or help", manager_text)
+            self.assertNotIn("delivered directly to worker target wl:2", manager_text)
+            self.assertNotIn("no manager action required", manager_text)
+
+    def test_email_dm_manager_fyi_retry_does_not_redeliver_worker(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mail = root / "manager_mail" / "4002.txt"
+            mail.parent.mkdir()
+            mail.write_text("Please inspect this directly. DM\n", encoding="utf-8")
+            path = root / "worker.md"
+            path.write_text("runat: wl:2 codex\nmanagerat: wl:1\n\n(pending)\n(record and delegate manager_mail/4002.txt)\n", encoding="utf-8")
+            calls: list[list[str]] = []
+            manager_attempts = 0
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                nonlocal manager_attempts
+                calls.append(command)
+                target = command[command.index("--manager-target") + 1]
+                if target == "wl:1":
+                    manager_attempts += 1
+                    return subprocess.CompletedProcess(command, 1 if manager_attempts == 1 else 0)
+                return subprocess.CompletedProcess(command, 0)
+
+            args = Args(
+                root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=False, manager_target="main:0.0"
+            )
+            seen: dict[str, float] = {}
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+                self.assertFalse(watcher.scan_once(args, seen, [path]))
+                self.assertTrue(watcher.scan_once(args, seen, [path]))
+            targets = [call[call.index("--manager-target") + 1] for call in calls]
+            self.assertEqual(["wl:2", "wl:1", "wl:1"], targets)
+            self.assertEqual(1, targets.count("wl:2"))
+            self.assertEqual(2, targets.count("wl:1"))
+            self.assertIn("direct-message FYI: delivered directly to worker target wl:2; no manager action required.", calls[1][1])
+            self.assertIn("direct-message FYI: delivered directly to worker target wl:2; no manager action required.", calls[2][1])
+
+    def test_email_dm_content_change_redelivers_worker(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mail = root / "manager_mail" / "4002.txt"
+            mail.parent.mkdir()
+            mail.write_text("Please inspect the first version. DM\n", encoding="utf-8")
+            path = root / "worker.md"
+            path.write_text("runat: wl:2 codex\nmanagerat: wl:1\n\n(pending)\n(record and delegate manager_mail/4002.txt)\n", encoding="utf-8")
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(command)
+                return subprocess.CompletedProcess(command, 0)
+
+            args = Args(
+                root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=False, manager_target="main:0.0"
+            )
+            seen: dict[str, float] = {}
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+                self.assertTrue(watcher.scan_once(args, seen, [path]))
+                mail.write_text("Please inspect the second version. DM\n", encoding="utf-8")
+                self.assertTrue(watcher.scan_once(args, seen, [path]))
+            targets = [call[call.index("--manager-target") + 1] for call in calls]
+            self.assertEqual(["wl:2", "wl:1", "wl:2", "wl:1"], targets)
+            self.assertIn("first version", calls[0][1])
+            self.assertIn("second version", calls[2][1])
+
+    def test_email_dm_suffix_ignores_unicode_punctuation(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mail = root / "manager_mail" / "4002.txt"
+            mail.parent.mkdir()
+            mail.write_text("Please inspect this directly. DM...\u201d\n", encoding="utf-8")
+            path = root / "worker.md"
+            path.write_text("runat: wl:2 codex\nmanagerat: wl:1\n\n(pending)\n(record and delegate manager_mail/4002.txt)\n", encoding="utf-8")
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(command)
+                return subprocess.CompletedProcess(command, 0)
+
+            args = Args(
+                root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=False, manager_target="main:0.0"
+            )
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+                self.assertTrue(watcher.scan_once(args, {}, [path]))
+            self.assertEqual(["wl:2", "wl:1"], [call[call.index("--manager-target") + 1] for call in calls])
+
+    def test_email_hidden_tail_dm_change_redelivers_worker(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mail = root / "manager_mail" / "4002.txt"
+            mail.parent.mkdir()
+            visible = "x" * watcher.EMAIL_CONTENT_CHAR_LIMIT
+            mail.write_text(f"{visible}\nold hidden\n", encoding="utf-8")
+            path = root / "worker.md"
+            path.write_text("runat: wl:2 codex\nmanagerat: wl:1\n\n(pending)\n(record and delegate manager_mail/4002.txt)\n", encoding="utf-8")
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(command)
+                return subprocess.CompletedProcess(command, 0)
+
+            args = Args(
+                root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=False, manager_target="main:0.0"
+            )
+            seen: dict[str, float] = {}
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+                self.assertTrue(watcher.scan_once(args, seen, [path]))
+                mail.write_text(f"{visible}\nDM\n", encoding="utf-8")
+                self.assertTrue(watcher.scan_once(args, seen, [path]))
+            targets = [call[call.index("--manager-target") + 1] for call in calls]
+            self.assertEqual(["wl:1", "wl:2", "wl:1"], targets)
+            self.assertIn("direct-message: human email requested direct delivery", calls[1][1])
+
+    def test_email_dm_manager_fyi_skips_policy_reminder(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mail = root / "manager_mail" / "4002.txt"
+            mail.parent.mkdir()
+            mail.write_text("Please inspect this directly. DM\n", encoding="utf-8")
+            path = root / "worker.md"
+            path.write_text("runat: wl:2 codex\nmanagerat: wl:1\n\n(pending)\n(record and delegate manager_mail/4002.txt)\n", encoding="utf-8")
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(command)
+                return subprocess.CompletedProcess(command, 0)
+
+            args = Args(
+                root=root,
+                manager_url="",
+                state=root / "seen.tsv",
+                interval_s=1.0,
+                full_scan_interval_s=1.0,
+                idle_status_interval_s=1800.0,
+                status_script=Path("/bin/false"),
+                once=True,
+                dry_run=False,
+                manager_target="main:0.0",
+                reminder_random=lambda: 0.0,
+                reminder_choice=lambda reminders: reminders[-1],
+            )
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+                self.assertTrue(watcher.scan_once(args, {}, [path]))
+            manager_text = calls[1][1]
+            self.assertIn("direct-message FYI: delivered directly to worker target wl:2; no manager action required.", manager_text)
+            self.assertNotIn("ack-human", manager_text)
+            self.assertNotIn("Reminder:", manager_text)
+            self.assertNotIn("acknowledge human email first, then delegate", manager_text)
+
+    def test_email_dm_pending_falls_back_when_worker_target_is_unknown(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mail = root / "manager_mail" / "4002.txt"
+            mail.parent.mkdir()
+            mail.write_text("Please route this. DM.\n", encoding="utf-8")
+            path = root / "work_manager_today.md"
+            path.write_text("(pending)\n(record and delegate manager_mail/4002.txt)\n", encoding="utf-8")
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(command)
+                return subprocess.CompletedProcess(command, 0)
+
+            args = Args(
+                root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=False, manager_target="main:0.0"
+            )
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+                self.assertTrue(watcher.scan_once(args, {}, [path]))
+            self.assertEqual(1, len(calls))
+            self.assertEqual("main:0.0", calls[0][calls[0].index("--manager-target") + 1])
+            self.assertIn("direct-message fallback: email ends with `DM`, but no safe worker `runat:` target was found; delivering to the manager for routing.", calls[0][1])
+
+    def test_email_attachment_error_does_not_mark_marker_seen(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "work_manager_today.md"
+            path.write_text("(pending)\n(record and delegate manager_mail/4002.txt)\n", encoding="utf-8")
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(command)
+                return subprocess.CompletedProcess(command, 0)
+
+            args = Args(
+                root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=False, manager_target="main:0.0"
+            )
+            seen: dict[str, float] = {}
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+                self.assertFalse(watcher.scan_once(args, seen, [path]))
+                self.assertFalse(watcher.scan_once(args, seen, [path]))
+                mail = root / "manager_mail" / "4002.txt"
+                mail.parent.mkdir()
+                mail.write_text("Subject: now readable\n\nPlease inspect this.\n", encoding="utf-8")
+                self.assertTrue(watcher.scan_once(args, seen, [path]))
+            self.assertEqual(2, len(calls))
+            self.assertIn("cannot read source", calls[0][1])
+            self.assertIn("Subject: now readable", calls[1][1])
+
+    def test_same_process_seen_suppresses_unchanged_pending_marker(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            path.write_text("(pending)\nplease handle this\n", encoding="utf-8")
+            args = Args(
+                root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=True
+            )
+            calls: list[object] = []
+
+            def fake_push_ref(*call_args: object) -> int:
+                calls.append(call_args)
+                return 0
+
+            seen: dict[str, float] = {}
+            with patch("omo_manager.omo_pending_watch.push_ref", side_effect=fake_push_ref):
+                self.assertTrue(watcher.scan_once(args, seen, [path]))
+                self.assertFalse(watcher.scan_once(args, seen, [path]))
+            self.assertEqual(1, len(calls))
+
+    def test_same_process_seen_redelivers_changed_pending_tail(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            path.write_text("(pending)\nold details\n", encoding="utf-8")
+            args = Args(
+                root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=True
+            )
+            calls: list[object] = []
+
+            def fake_push_ref(*call_args: object) -> int:
+                calls.append(call_args)
+                return 0
+
+            seen: dict[str, float] = {}
+            with patch("omo_manager.omo_pending_watch.push_ref", side_effect=fake_push_ref):
+                self.assertTrue(watcher.scan_once(args, seen, [path]))
+                path.write_text("(pending)\nnew details\n", encoding="utf-8")
+                self.assertTrue(watcher.scan_once(args, seen, [path]))
+            self.assertEqual(2, len(calls))
+
+    def test_same_process_seen_ignores_changes_beyond_truncated_pending_tail(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            visible = "x" * watcher.PENDING_CONTENT_CHAR_LIMIT
+            path.write_text(f"(pending)\n{visible}\nold hidden\n", encoding="utf-8")
+            args = Args(
+                root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=True
+            )
+            calls: list[object] = []
+
+            def fake_push_ref(*call_args: object) -> int:
+                calls.append(call_args)
+                return 0
+
+            seen: dict[str, float] = {}
+            with patch("omo_manager.omo_pending_watch.push_ref", side_effect=fake_push_ref):
+                self.assertTrue(watcher.scan_once(args, seen, [path]))
+                path.write_text(f"(pending)\n{visible}\nnew hidden\n", encoding="utf-8")
+                self.assertFalse(watcher.scan_once(args, seen, [path]))
+            self.assertEqual(1, len(calls))
+
+    def test_email_attachment_content_change_redelivers_pending_marker(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mail = root / "manager_mail" / "4002.txt"
+            mail.parent.mkdir()
+            mail.write_text("Subject: first\n\nPlease inspect this.\n", encoding="utf-8")
+            path = root / "work_manager_today.md"
+            path.write_text("(pending)\n(record and delegate manager_mail/4002.txt)\n", encoding="utf-8")
+            args = Args(
+                root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=True
+            )
+            seen: dict[str, float] = {}
+            out = StringIO()
+            with redirect_stdout(out):
+                self.assertTrue(watcher.scan_once(args, seen, [path]))
+                mail.write_text("Subject: second\n\nPlease inspect this.\n", encoding="utf-8")
+                self.assertTrue(watcher.scan_once(args, seen, [path]))
+            text = out.getvalue()
+            self.assertIn("Subject: first", text)
+            self.assertIn("Subject: second", text)
+
     def test_seen_cache_evicts_oldest_key_over_limit(self) -> None:
         from omo_manager.omo_pending_watch import new_seen_cache, remember_seen
 
@@ -4081,11 +4575,17 @@ class PendingMarkerTests(unittest.TestCase):
         with patch.dict(os.environ, {"OMO_MANAGER_SEEN_CACHE_SIZE": "-1"}):
             self.assertEqual(50000, positive_int_env("OMO_MANAGER_SEEN_CACHE_SIZE", 50000))
 
-    def test_seen_pending_markers_do_not_expire_into_repush_loop(self) -> None:
-        from omo_manager.omo_pending_watch import expire_seen
+    def test_pending_watch_does_not_write_seen_state_file(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
 
-        seen = {"root:task.md:2:digest": 1.0}
-        self.assertEqual(seen, expire_seen(seen, 3601.0))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "seen.tsv"
+            path = root / "task.md"
+            path.write_text("(pending)\nsource\n", encoding="utf-8")
+            with patch("omo_manager.omo_pending_watch.push_ref", return_value=0):
+                self.assertEqual(0, watcher.main(["--root", str(root), "--state", str(state), "--once"]))
+            self.assertFalse(state.exists())
 
     def test_manager_routed_pending_marker_is_not_redelivered(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4398,7 +4898,7 @@ class PendingMarkerTests(unittest.TestCase):
                 self.assertTrue(watcher.maybe_push_agent_problems(args, seen, 1300.0))
             text = out.getvalue()
             self.assertEqual(2, text.count("manager agent problem: running task marker needs attention."))
-            self.assertEqual(2, text.count("[omo-message-source: origin=agent source=agent action=no-human-ack agent=omo_pending_watch via=omo_pending_watch.py status=agent-problem]"))
+            self.assertEqual(2, text.count("(from agent omo_pending_watch via omo_pending_watch.py status=agent-problem)"))
             self.assertIn("not_codex: task=task.md", text)
 
     def test_agent_problem_check_does_not_throttle_unstuck_reports(self) -> None:
@@ -4417,7 +4917,7 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 1000.0))
             self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 1001.0))
         self.assertEqual(2, out.getvalue().count("unstuck: target=cfg:1"))
-        self.assertEqual(2, out.getvalue().count("[omo-message-source: origin=agent source=agent action=no-human-ack agent=omo_pending_watch via=omo_pending_watch.py status=agent-problem]"))
+        self.assertEqual(2, out.getvalue().count("(from agent omo_pending_watch via omo_pending_watch.py status=agent-problem)"))
 
     def test_agent_problem_check_pushes_blocked_idle_reports(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -4879,6 +5379,25 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertTrue(notified)
             self.assertFalse(full_scan)
             self.assertIn(path, files)
+
+    def test_manager_mail_inotify_event_forces_full_scan(self) -> None:
+        from omo_manager.omo_pending_watch import MarkdownChangeWatcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mail_dir = root / "manager_mail"
+            mail_dir.mkdir()
+            watcher = MarkdownChangeWatcher.open(root)
+            if watcher is None:
+                self.skipTest("inotify unavailable")
+            try:
+                (mail_dir / "4002.txt").write_text("Subject: ready\n\nbody\n", encoding="utf-8")
+                files, full_scan, notified = watcher.wait(2.0)
+            finally:
+                watcher.close()
+            self.assertTrue(notified)
+            self.assertTrue(full_scan)
+            self.assertEqual([], files)
 
     def test_pending_watch_poll_backstop_interval_is_configurable(self) -> None:
         from omo_manager.omo_pending_watch import parse_args

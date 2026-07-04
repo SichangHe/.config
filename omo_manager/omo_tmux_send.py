@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import os
 import subprocess
 import sys
@@ -14,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 try:
+    from omo_manager.omo_pending_digest import pending_tail_digest
     from omo_manager.omo_codex_status import (
         CODEX_EMPTY_INPUT_TEXTS,
         COMPACTION_WAIT_LINES,
@@ -31,6 +31,7 @@ try:
         wait_while_compacting,
     )
 except ModuleNotFoundError:
+    from omo_pending_digest import pending_tail_digest
     from omo_codex_status import (
         CODEX_EMPTY_INPUT_TEXTS,
         COMPACTION_WAIT_LINES,
@@ -324,8 +325,8 @@ def pending_marker_present(args: Args) -> bool:
         return False
     if not args.pending_digest:
         return True
-    next_line = lines[idx + 1].strip() if idx + 1 < len(lines) else ""
-    digest = hashlib.sha256(f"{args.pending_file}:{args.pending_line}:{next_line}".encode("utf-8")).hexdigest()[:16]
+    pending_tail = "\n".join(lines[idx:])
+    digest = pending_tail_digest(args.pending_file, args.pending_line, pending_tail)
     return digest == args.pending_digest
 
 

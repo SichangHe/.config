@@ -1,4 +1,3 @@
-import hashlib
 import os
 import stat
 import subprocess
@@ -9,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from omo_manager.omo_codex_status import Report
+from omo_manager.omo_pending_digest import pending_tail_digest
 from omo_manager.omo_tmux_send import (
     Args,
     clear_stuck_input_before_send,
@@ -137,8 +137,10 @@ class TmuxSendTests(unittest.TestCase):
             root = Path(tmp)
             path = root / "task.md"
             path.write_text("(pending)\nsource\n", encoding="utf-8")
-            digest = hashlib.sha256("task.md:1:source".encode("utf-8")).hexdigest()[:16]
+            digest = pending_tail_digest(Path("task.md"), 1, "(pending)\nsource")
             self.assertTrue(pending_marker_present(Args("cfg:1.0", None, 0, 0.15, 0, False, root, Path("task.md"), 1, digest)))
+            path.write_text("(pending)\nsource\nextra\n", encoding="utf-8")
+            self.assertFalse(pending_marker_present(Args("cfg:1.0", None, 0, 0.15, 0, False, root, Path("task.md"), 1, digest)))
             self.assertFalse(pending_marker_present(Args("cfg:1.0", None, 0, 0.15, 0, False, root, Path("task.md"), 1, "bad")))
 
     def test_run_tmux_uses_buffer_and_enter_without_message_send_keys(self) -> None:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Watch Markdown files for pending markers and push file-line refs."""
+"""Watch Markdown files for pending markers and push actionable context."""
 from __future__ import annotations
 
 import argparse
@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
@@ -30,6 +31,9 @@ from omo_manager.omo_agent_status import effective_owner_target
 from omo_manager.omo_agent_status import parse_task_lines
 from omo_manager.omo_agent_status import resolve_task_path
 from omo_manager.omo_agent_status import scan_task_state
+from omo_manager.omo_pending_digest import PENDING_CONTENT_CHAR_LIMIT
+from omo_manager.omo_pending_digest import pending_tail_digest
+from omo_manager.omo_pending_digest import truncate_content
 
 
 def default_state_dir() -> Path:
@@ -55,14 +59,15 @@ DEFAULT_HUMAN_EMAIL_HELPER = Path(__file__).resolve().parents[1] / "helper.sh" /
 PENDING_MARKERS = {"(pending)"}
 TASK_FILE_LINE_WARNING_THRESHOLD = 2000
 TODO_LINE_WARNING_THRESHOLD = 200
+EMAIL_CONTENT_CHAR_LIMIT = 6000
 ROUTED_PREFIXES = ("(manager handled:", "(manager routed:")
 EMAIL_SOURCE_PREFIXES = ("(record and delegate ", "(from email ", "[source: email ")
 AGENT_SOURCE_PREFIXES = ("[omo-message-source: origin=agent ", "(from agent ")
 STATUS_DETAIL_RE = re.compile(r"^\((pending|running|done|blocked)(?::\s*([^)]*))?\)(?:\s+\(([^)]*)\))?$")
 TMUX_TARGET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?$")
 RUNAT_RE = re.compile(r"^runat:\s+([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\b")
-AGENT_PROBLEM_SOURCE_LINE = "[omo-message-source: origin=agent source=agent action=no-human-ack agent=omo_pending_watch via=omo_pending_watch.py status=agent-problem]"
-MANAGER_COMPACTION_SOURCE_LINE = "[omo-message-source: origin=agent source=agent action=no-human-ack agent=omo_pending_watch via=omo_pending_watch.py status=manager-compaction-reread]"
+AGENT_PROBLEM_SOURCE_LINE = "(from agent omo_pending_watch via omo_pending_watch.py status=agent-problem)"
+MANAGER_COMPACTION_SOURCE_LINE = "(from agent omo_pending_watch via omo_pending_watch.py status=manager-compaction-reread)"
 MANAGER_COMPACTION_REMINDER = "Manager compaction observed. Reread MANAGER.md now unless the compaction summary already included it, then continue from the current manager task state."
 TODO_LENGTH_REMINDER = "TODO.md length reminder: TODO.md has {n_lines} lines. Move done material to YYYYMM/old_todos.md and keep TODO.md under 200 lines."
 MANAGER_TASK_STATE_REMINDER_HEADER = (
@@ -131,6 +136,7 @@ class Marker:
     origin: str
     source: str
     delegate_source: str
+    pending_tail: str
     file_lines: int
     blocked_reason: str
 
@@ -188,6 +194,13 @@ class CommandRun:
     process: subprocess.Popen[str]
     started_wall_s: float
     timeout_s: float
+
+
+@dataclass(frozen=True)
+class EmailAttachment:
+    source: str
+    text: str
+    error: str = ""
 
 
 @dataclass(frozen=True)
@@ -294,8 +307,13 @@ class MarkdownChangeWatcher:
                     if not is_ignored(path.relative_to(self.root)):
                         full_scan = True
                     continue
-                if path.suffix == ".md" and not is_ignored(path.relative_to(self.root)):
+                if is_ignored(path.relative_to(self.root)):
+                    continue
+                if path.suffix == ".md":
                     changed.add(path)
+                    continue
+                if path.suffix == ".txt" and path.parent.name == "manager_mail":
+                    full_scan = True
         return sorted(changed), full_scan, True
 
 
@@ -335,7 +353,7 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     _ = parser.add_argument("--manager-url", default=DEFAULT_MANAGER_URL)
     _ = parser.add_argument("--manager-target", default=DEFAULT_MANAGER_TARGET)
-    _ = parser.add_argument("--state", type=Path, default=DEFAULT_STATE)
+    _ = parser.add_argument("--state", type=Path, default=DEFAULT_STATE, help="Compatibility option; pending delivery memory is process-local.")
     _ = parser.add_argument("--interval-s", type=float, default=2.0)
     _ = parser.add_argument("--full-scan-interval-s", type=float, default=300.0)
     _ = parser.add_argument("--idle-status-interval-s", type=float, default=1800.0)
@@ -415,32 +433,6 @@ def remember_seen(seen: dict[str, float], key: str, timestamp_s: float, limit: i
         del seen[oldest_key]
 
 
-def load_seen(path: Path) -> SeenCache:
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return new_seen_cache()
-    seen: dict[str, float] = {}
-    for line in lines:
-        timestamp_s, sep, key = line.partition("\t")
-        if sep:
-            try:
-                seen[key] = float(timestamp_s)
-            except ValueError:
-                continue
-    return new_seen_cache(seen)
-
-
-def save_seen(path: Path, seen: dict[str, float]) -> None:
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if path.parent.resolve() != Path("/tmp"):
-        path.parent.chmod(0o700)
-    body = "".join(f"{timestamp_s}\t{key}\n" for key, timestamp_s in sorted(seen.items()))
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        _ = handle.write(body)
-
-
 def is_ignored(path: Path) -> bool:
     return any(part in IGNORE_PARTS for part in path.parts)
 
@@ -502,6 +494,39 @@ def directive_target(path: Path, name: str) -> str:
     return ""
 
 
+def marker_worker_target(args: Args, marker: Marker, manager_target: str) -> str:
+    target = directive_target(args.root / marker.file, "runat")
+    if not target or same_tmux_target(target, manager_target) or same_tmux_window_unless_both_panes(target, manager_target):
+        return ""
+    return target
+
+
+def marker_attachment(args: Args, marker: Marker) -> EmailAttachment | None:
+    return delegate_email_attachment(args.root, marker.delegate_source) if marker.delegate_source else None
+
+
+def attachment_payload_digest(text: str) -> str:
+    payload = truncate_content(text, EMAIL_CONTENT_CHAR_LIMIT)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def dm_worker_seen_key(args: Args, marker: Marker, worker_target: str, attachment: EmailAttachment) -> str:
+    return f"{args.root}:{marker.file}:{marker.line}:{marker.digest}:dm-worker:{canonical_target(worker_target)}:email:{attachment_payload_digest(attachment.text)}"
+
+
+def attachment_error_seen_key(args: Args, marker: Marker) -> str:
+    return f"{args.root}:{marker.file}:{marker.line}:{marker.digest}:attachment-error:{marker.delegate_source}"
+
+
+def marker_seen_key(args: Args, marker: Marker, attachment: EmailAttachment | None) -> str:
+    key = f"{args.root}:{marker.file}:{marker.line}:{marker.digest}"
+    if attachment is None:
+        return key
+    if attachment.error:
+        return key
+    return f"{key}:email:{attachment_payload_digest(attachment.text)}:dm:{int(email_ends_with_dm(attachment.text))}"
+
+
 def is_vl_task_file(path: Path) -> bool:
     return path.name.startswith("vl_") or "/vl_" in path.as_posix()
 
@@ -530,6 +555,61 @@ def blocked_reason_before_pending(lines: list[str], pending_line: int) -> str:
             return ""
         return (match.group(2) or match.group(3) or "blocked with no reason in latest status line").strip()
     return ""
+
+
+def content_section(title: str, body: str, limit: int) -> str:
+    return f"{title}\n--- begin ---\n{truncate_content(body, limit)}\n--- end ---"
+
+
+def delegate_email_attachment(root: Path, source: str) -> EmailAttachment:
+    path = Path(source).expanduser()
+    if not path.is_absolute():
+        path = root / path
+    try:
+        resolved = path.resolve(strict=False)
+        root_resolved = root.resolve(strict=False)
+    except OSError as exc:
+        return EmailAttachment(source, "", f"cannot resolve source: {exc}")
+    if resolved != root_resolved and root_resolved not in resolved.parents:
+        return EmailAttachment(source, "", "source is outside root")
+    try:
+        return EmailAttachment(source, path.read_text(encoding="utf-8"))
+    except UnicodeDecodeError:
+        return EmailAttachment(source, path.read_text(encoding="utf-8", errors="replace"))
+    except OSError as exc:
+        return EmailAttachment(source, "", f"cannot read source: {exc}")
+
+
+def email_ends_with_dm(text: str) -> bool:
+    tail = text.rstrip()
+    while tail and unicodedata.category(tail[-1]).startswith("P"):
+        tail = tail[:-1].rstrip()
+    if not tail.endswith("DM"):
+        return False
+    prefix = tail[:-2]
+    return not prefix or not (prefix[-1].isalnum() or prefix[-1] == "_")
+
+
+def marker_delivery_text(marker: Marker, attachment: EmailAttachment | None = None, prefix: str = "") -> str:
+    parts = [marker.ref]
+    parts.append(content_section(f"pending-content: {marker.file}:{marker.line} to EOF", marker.pending_tail, PENDING_CONTENT_CHAR_LIMIT))
+    if attachment is not None:
+        if attachment.error:
+            parts.append(f"email-content: {attachment.source}\n{attachment.error}")
+        else:
+            parts.append(content_section(f"email-content: {attachment.source}", attachment.text, EMAIL_CONTENT_CHAR_LIMIT))
+    text = "\n".join(parts)
+    return f"{prefix}\n{text}" if prefix else text
+
+
+def marker_fyi_text(marker: Marker, attachment: EmailAttachment, prefix: str) -> str:
+    parts = [prefix]
+    parts.append(f"pending-source: file={marker.file} line={marker.line} origin={marker.origin} source={marker.source} action=fyi-no-manager-action")
+    if marker.delegate_source:
+        parts.append(f"(delegate {marker.delegate_source})")
+    parts.append(content_section(f"pending-content: {marker.file}:{marker.line} to EOF", marker.pending_tail, PENDING_CONTENT_CHAR_LIMIT))
+    parts.append(content_section(f"email-content: {attachment.source}", attachment.text, EMAIL_CONTENT_CHAR_LIMIT))
+    return "\n".join(parts)
 
 
 def find_markers(root: Path, files: list[Path]) -> list[Marker]:
@@ -563,8 +643,9 @@ def find_markers(root: Path, files: list[Path]) -> list[Marker]:
                     end_idx = block_idx
                     break
             block_lines = lines[idx - 1 : end_idx]
+            pending_tail = "\n".join(lines[idx - 1 :])
             origin, source = marker_origin_source(block_lines)
-            digest = hashlib.sha256(f"{rel}:{idx}:{next_line}".encode("utf-8")).hexdigest()[:16]
+            digest = pending_tail_digest(rel, idx, pending_tail)
             markers.append(
                 Marker(
                     file=rel,
@@ -573,6 +654,7 @@ def find_markers(root: Path, files: list[Path]) -> list[Marker]:
                     origin=origin,
                     source=source,
                     delegate_source=delegate_source(block_lines),
+                    pending_tail=pending_tail,
                     file_lines=len(lines),
                     blocked_reason=blocked_reason_before_pending(lines, idx),
                 )
@@ -586,18 +668,10 @@ def with_manager_policy_reminder(args: Args, text: str, reminders: Sequence[str]
     return f"{text}\n{args.reminder_choice(reminders)}"
 
 
-def push_ref(args: Args, marker: Marker) -> int:
-    """Deliver one pending marker reference, guarded by its current file position."""
-
-    reminders = MANAGER_EMAIL_POLICY_REMINDERS if marker.source == "email" else MANAGER_POLICY_REMINDERS
-    text = with_manager_policy_reminder(args, marker.ref, reminders)
+def push_marker_text(args: Args, marker: Marker, text: str, manager_target: str) -> int:
     if args.dry_run:
         print(text)
         return 0
-    if not args.manager_url and not args.manager_target:
-        print("omo_pending_watch: --manager-target or --manager-url is required outside --dry-run", file=sys.stderr)
-        return 1
-    manager_target = marker_manager_target(args, marker)
     command = ["omo_push_to_manager.py", text, "--root", str(args.root), "--submit"]
     command.extend(["--pending-file", str(marker.file), "--pending-line", str(marker.line), "--pending-digest", marker.digest])
     if manager_target:
@@ -605,6 +679,59 @@ def push_ref(args: Args, marker: Marker) -> int:
     if args.manager_url:
         command.extend(["--manager-url", args.manager_url])
     return subprocess.run(command, check=False).returncode
+
+
+def push_dm_ref(args: Args, seen: dict[str, float], now_s: float, marker: Marker, attachment: EmailAttachment, manager_target: str) -> int:
+    worker_target = marker_worker_target(args, marker, manager_target)
+    reminders = MANAGER_EMAIL_POLICY_REMINDERS if marker.source == "email" else MANAGER_POLICY_REMINDERS
+    if not worker_target:
+        text = marker_delivery_text(
+            marker,
+            attachment,
+            "direct-message fallback: email ends with `DM`, but no safe worker `runat:` target was found; delivering to the manager for routing.",
+        )
+        return push_marker_text(args, marker, with_manager_policy_reminder(args, text, reminders), manager_target)
+    worker_text = marker_delivery_text(marker, attachment, f"direct-message: human email requested direct delivery to worker target {worker_target}.")
+    worker_key = dm_worker_seen_key(args, marker, worker_target, attachment)
+    if not seen_contains(seen, worker_key):
+        worker_status = push_marker_text(args, marker, worker_text, worker_target)
+        if worker_status != 0:
+            text = marker_delivery_text(
+                marker,
+                attachment,
+                f"direct-message fallback: direct worker delivery to {worker_target} failed with status {worker_status}; manager action required to route or help with the human request.",
+            )
+            return push_marker_text(args, marker, with_manager_policy_reminder(args, text, reminders), manager_target)
+        remember_seen(seen, worker_key, now_s)
+    manager_text = marker_fyi_text(
+        marker,
+        attachment,
+        f"direct-message FYI: delivered directly to worker target {worker_target}; no manager action required.",
+    )
+    return push_manager_text_to_target(args, manager_text, manager_target)
+
+
+def push_ref(args: Args, seen: dict[str, float], now_s: float, marker: Marker, attachment: EmailAttachment | None) -> int:
+    """Deliver one pending marker, guarded by its current file position."""
+
+    reminders = MANAGER_EMAIL_POLICY_REMINDERS if marker.source == "email" else MANAGER_POLICY_REMINDERS
+    manager_target = marker_manager_target(args, marker)
+    if not args.dry_run and not args.manager_url and not manager_target:
+        print("omo_pending_watch: --manager-target or --manager-url is required outside --dry-run", file=sys.stderr)
+        return 1
+    if attachment is not None and attachment.error:
+        error_key = attachment_error_seen_key(args, marker)
+        if seen_contains(seen, error_key):
+            return 1
+        text = marker_delivery_text(marker, attachment)
+        status = push_marker_text(args, marker, with_manager_policy_reminder(args, text, reminders), manager_target)
+        if status in {0, 2}:
+            remember_seen(seen, error_key, now_s)
+        return status if status not in {0, 2} else 1
+    if attachment is not None and not attachment.error and email_ends_with_dm(attachment.text):
+        return push_dm_ref(args, seen, now_s, marker, attachment, manager_target)
+    text = marker_delivery_text(marker, attachment)
+    return push_marker_text(args, marker, with_manager_policy_reminder(args, text, reminders), manager_target)
 
 
 def push_manager_text(args: Args, text: str) -> int:
@@ -944,6 +1071,22 @@ def target_session(target: str) -> str:
     return target.split(":", 1)[0] if ":" in target else ""
 
 
+def target_window(target: str) -> str:
+    return target.split(":", 1)[1].split(".", 1)[0] if ":" in target else ""
+
+
+def target_has_explicit_pane(target: str) -> bool:
+    return "." in target.split(":", 1)[1] if ":" in target else False
+
+
+def same_tmux_window_unless_both_panes(left: str, right: str) -> bool:
+    if not left or not right:
+        return False
+    if target_session(left) != target_session(right) or target_window(left) != target_window(right):
+        return False
+    return not (target_has_explicit_pane(left) and target_has_explicit_pane(right))
+
+
 def same_tmux_target(left: str, right: str) -> bool:
     return bool(target_aliases(left) & target_aliases(right))
 
@@ -1213,10 +1356,6 @@ def idle_digest_due(args: Args, fallback_mail_activity_s: float, now_wall_s: flo
         return False
 
 
-def expire_seen(seen: dict[str, float], now_s: float) -> dict[str, float]:
-    return seen
-
-
 def scan_once(args: Args, seen: dict[str, float], files: list[Path]) -> bool:
     """Scan changed Markdown files and deliver newly observed pending refs once."""
 
@@ -1234,10 +1373,11 @@ def scan_once(args: Args, seen: dict[str, float], files: list[Path]) -> bool:
                 remember_seen(seen, key, now_s)
                 changed = True
     for marker in find_markers(args.root, files):
-        key = f"{args.root}:{marker.file}:{marker.line}:{marker.digest}"
+        attachment = marker_attachment(args, marker)
+        key = marker_seen_key(args, marker, attachment)
         if seen_contains(seen, key):
             continue
-        if push_ref(args, marker) in {0, 2}:
+        if push_ref(args, seen, now_s, marker, attachment) in {0, 2}:
             remember_seen(seen, key, now_s)
             changed = True
     return changed
@@ -1252,11 +1392,9 @@ def markdown_line_count(path: Path) -> int:
 
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
-    seen = new_seen_cache() if args.dry_run else expire_seen(load_seen(args.state), time.time())
+    seen = new_seen_cache()
     if args.once:
-        changed = scan_once(args, seen, markdown_files(args.root))
-        if changed and not args.dry_run:
-            save_seen(args.state, seen)
+        _ = scan_once(args, seen, markdown_files(args.root))
         return 0
     watcher = MarkdownChangeWatcher.open(args.root)
     if watcher is None:
@@ -1277,7 +1415,6 @@ def main(argv: list[str]) -> int:
     while True:
         now_s = time.monotonic()
         now_wall_s = time.time()
-        changed = False
         if now_s >= next_full_s:
             next_full_s = now_s + args.full_scan_interval_s
             next_poll_s = now_s + args.poll_backstop_interval_s
@@ -1287,7 +1424,7 @@ def main(argv: list[str]) -> int:
             next_poll_s = now_s + args.poll_backstop_interval_s
             pending_files = mtime_changed_markdown_files(args.root, file_state)
         if pending_files:
-            changed = scan_once(args, seen, pending_files)
+            _ = scan_once(args, seen, pending_files)
             pending_files = []
         if agent_problem_run is None and now_s - last_agent_problem_check_s >= args.agent_problem_interval_s:
             agent_problem_run = start_command("agent problem check", status_command(args, True), DEFAULT_AGENT_PROBLEM_TIMEOUT_S)
@@ -1295,7 +1432,7 @@ def main(argv: list[str]) -> int:
         if agent_problem_run is not None:
             result = poll_command(agent_problem_run, now_wall_s)
             if result is not None:
-                changed = handle_agent_problem_result(args, seen, result, now_wall_s) or changed
+                _ = handle_agent_problem_result(args, seen, result, now_wall_s)
                 agent_problem_run = None
         last_idle_status_check_s, idle_status_run = update_idle_status_check(args, last_idle_status_check_s, now_s, idle_status_run)
         if idle_status_run is not None:
@@ -1313,9 +1450,6 @@ def main(argv: list[str]) -> int:
                 elif result.returncode not in {0, 2} and result.stderr.strip():
                     print(f"omo_pending_watch: idle status delivery exited status={result.returncode}: {result.stderr.strip()}", file=sys.stderr)
                 idle_status_push_run = None
-        seen = expire_seen(seen, time.time())
-        if changed:
-            save_seen(args.state, seen)
         if now_s - last_digest_check_s >= min(args.digest_idle_after_s, 60.0):
             if args.dry_run and maybe_deliver_idle_digest(args, fallback_mail_activity_s, now_wall_s):
                 fallback_mail_activity_s = now_wall_s
