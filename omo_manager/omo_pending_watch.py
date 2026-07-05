@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 import unicodedata
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
@@ -698,7 +699,7 @@ def push_marker_text(args: Args, marker: Marker, text: str, manager_target: str)
         command.extend(["--manager-target", manager_target])
     if args.manager_url:
         command.extend(["--manager-url", args.manager_url])
-    return subprocess.run(command, check=False).returncode
+    return run_delivery_command("pending delivery", command)
 
 
 def push_dm_ref(args: Args, seen: dict[str, float], now_s: float, marker: Marker, attachment: EmailAttachment, manager_target: str) -> int:
@@ -762,7 +763,7 @@ def push_manager_text(args: Args, text: str) -> int:
     if not args.manager_url and not args.manager_target:
         print("omo_pending_watch: --manager-target or --manager-url is required outside --dry-run", file=sys.stderr)
         return 1
-    return subprocess.run(push_manager_command(args, text), check=False).returncode
+    return run_delivery_command("manager delivery", push_manager_command(args, text))
 
 
 def push_manager_text_to_target(args: Args, text: str, manager_target: str) -> int:
@@ -776,6 +777,14 @@ def push_manager_command(args: Args, text: str) -> list[str]:
     if args.manager_url:
         command.extend(["--manager-url", args.manager_url])
     return command
+
+
+def run_delivery_command(name: str, command: list[str]) -> int:
+    try:
+        return subprocess.run(command, check=False).returncode
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"omo_pending_watch: {name} launch failed: {exc}", file=sys.stderr)
+        return 1
 
 
 def maybe_push_idle_status(args: Args, last_activity_s: float, now_s: float) -> bool:
@@ -1518,5 +1527,57 @@ def main(argv: list[str]) -> int:
             pending_files = event_files
 
 
+def crash_email_sender_target(argv: list[str]) -> str:
+    target = DEFAULT_MANAGER_TARGET if TMUX_TARGET_RE.fullmatch(DEFAULT_MANAGER_TARGET) else ""
+    for idx, arg in enumerate(argv):
+        candidate = ""
+        if arg == "--manager-target" and idx + 1 < len(argv):
+            candidate = argv[idx + 1]
+        elif arg.startswith("--manager-target="):
+            candidate = arg.removeprefix("--manager-target=")
+        if TMUX_TARGET_RE.fullmatch(candidate):
+            target = candidate
+    return target
+
+
+def email_human_watcher_crash(argv: list[str], exc: BaseException) -> None:
+    subject = "pending watcher crashed"
+    body = (
+        "The pending watcher crashed unexpectedly.\n\n"
+        f"argv: {' '.join(argv) or '(none)'}\n\n"
+        f"{''.join(traceback.format_exception(type(exc), exc, exc.__traceback__))}"
+    )
+    try:
+        with tempfile.TemporaryDirectory(prefix="omo-pending-watch-crash-email.") as tmp:
+            tmp_path = Path(tmp)
+            subject_file = tmp_path / "subject.txt"
+            body_file = tmp_path / "body.md"
+            subject_file.write_text(subject + "\n", encoding="utf-8")
+            body_file.write_text(body, encoding="utf-8")
+            command = [str(DEFAULT_HUMAN_EMAIL_HELPER), "--manager-human", "--subject-file", str(subject_file), "--message-file", str(body_file)]
+            if sender_target := crash_email_sender_target(argv):
+                command.extend(("--sender-tmux-target", sender_target))
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+    except (OSError, subprocess.SubprocessError) as email_exc:
+        print(f"omo_pending_watch: crash human email failed: {email_exc}", file=sys.stderr)
+        return
+    if result.returncode != 0:
+        print(f"omo_pending_watch: crash human email exited status={result.returncode}: {result.stderr.strip()}", file=sys.stderr)
+
+
+def cli(argv: list[str]) -> int:
+    try:
+        return main(argv)
+    except Exception as exc:
+        email_human_watcher_crash(argv, exc)
+        raise
+
+
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv[1:]))
+    raise SystemExit(cli(sys.argv[1:]))

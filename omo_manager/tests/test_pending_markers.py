@@ -8,7 +8,7 @@ import sys
 import tempfile
 import time
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime
 from email.message import EmailMessage
 from email.utils import format_datetime
@@ -4404,8 +4404,10 @@ class PendingMarkerTests(unittest.TestCase):
             args = Args(
                 root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=False, manager_target="main:0.0"
             )
+            seen: dict[str, float] = {}
             with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
-                self.assertTrue(watcher.scan_once(args, {}, [path]))
+                self.assertTrue(watcher.scan_once(args, seen, [path]))
+            self.assertEqual(1, len(seen))
             self.assertEqual(2, len(calls))
             self.assertEqual("wl:2", calls[0][calls[0].index("--manager-target") + 1])
             self.assertEqual("wl:1", calls[1][calls[1].index("--manager-target") + 1])
@@ -4414,6 +4416,37 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertIn("manager action required to route or help", manager_text)
             self.assertNotIn("delivered directly to worker target wl:2", manager_text)
             self.assertNotIn("no manager action required", manager_text)
+
+    def test_email_dm_worker_launch_failure_sends_manager_action_fallback(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mail = root / "manager_mail" / "4002.txt"
+            mail.parent.mkdir()
+            mail.write_text("Please inspect this directly. DM\n", encoding="utf-8")
+            path = root / "worker.md"
+            path.write_text(f"{task_frontmatter(runat='wl:2', managerat='wl:1')}\n(pending)\n(record and delegate manager_mail/4002.txt)\n", encoding="utf-8")
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(command)
+                target = command[command.index("--manager-target") + 1]
+                if target == "wl:2":
+                    raise OSError("exec failed")
+                return subprocess.CompletedProcess(command, 0)
+
+            args = Args(
+                root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=False, manager_target="main:0.0"
+            )
+            seen: dict[str, float] = {}
+            err = StringIO()
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run), redirect_stderr(err):
+                self.assertTrue(watcher.scan_once(args, seen, [path]))
+                self.assertFalse(watcher.scan_once(args, seen, [path]))
+            self.assertEqual(1, len(seen))
+            self.assertEqual(["wl:2", "wl:1"], [call[call.index("--manager-target") + 1] for call in calls])
+            self.assertIn("pending delivery launch failed: exec failed", err.getvalue())
 
     def test_email_dm_manager_fyi_retry_does_not_redeliver_worker(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -5621,6 +5654,61 @@ class PendingMarkerTests(unittest.TestCase):
             with redirect_stdout(out):
                 self.assertTrue(watcher.scan_once(args, seen, [todo]))
             self.assertIn("TODO.md length reminder: TODO.md has 201 lines.", out.getvalue())
+
+    def test_pending_delivery_launch_failure_is_retryable(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            path.write_text("(pending)\nplease route\n", encoding="utf-8")
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/missing-status.py"), False, False, manager_target="wl:1")
+            seen: dict[str, float] = {}
+            err = StringIO()
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=OSError("exec failed")), redirect_stderr(err):
+                self.assertFalse(watcher.scan_once(args, seen, [path]))
+            self.assertEqual({}, seen)
+            self.assertIn("pending delivery launch failed: exec failed", err.getvalue())
+
+    def test_manager_delivery_launch_failure_is_retryable(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            todo = root / "TODO.md"
+            todo.write_text("\n".join(f"line {idx}" for idx in range(201)) + "\n", encoding="utf-8")
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/missing-status.py"), False, False, manager_target="wl:1")
+            seen: dict[str, float] = {}
+            err = StringIO()
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=OSError("exec failed")), redirect_stderr(err):
+                self.assertFalse(watcher.scan_once(args, seen, [todo]))
+            self.assertEqual({}, seen)
+            self.assertIn("manager delivery launch failed: exec failed", err.getvalue())
+
+    def test_cli_emails_human_when_watcher_crashes(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        sent: dict[str, str] = {}
+
+        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            sent["helper"] = command[0]
+            sent["sender_target"] = command[command.index("--sender-tmux-target") + 1]
+            sent["subject"] = Path(command[command.index("--subject-file") + 1]).read_text(encoding="utf-8")
+            sent["body"] = Path(command[command.index("--message-file") + 1]).read_text(encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with (
+            patch.object(watcher, "main", side_effect=RuntimeError("boom")),
+            patch.object(watcher, "DEFAULT_HUMAN_EMAIL_HELPER", Path("/fake/email_me.py")),
+            patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run),
+            self.assertRaises(RuntimeError),
+        ):
+            watcher.cli(["--root", "/tmp/work_logs", "--manager-target", "wl:1"])
+        self.assertEqual("/fake/email_me.py", sent["helper"])
+        self.assertEqual("wl:1", sent["sender_target"])
+        self.assertEqual("pending watcher crashed\n", sent["subject"])
+        self.assertIn("The pending watcher crashed unexpectedly.", sent["body"])
+        self.assertIn("RuntimeError: boom", sent["body"])
 
     def test_background_agent_problem_check_does_not_block_pending_scan(self) -> None:
         from omo_manager import omo_pending_watch as watcher

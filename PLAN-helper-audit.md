@@ -55,8 +55,10 @@
   - reviewer loop complete for first DM/direct-delivery pass
   - reviewer follow-up found frontmatter relaunch, invalid runat, email routing, pending stale-suppression, and stale-doc issues
   - active fix: reviewer follow-up issues patched with focused tests and docs
-  - pending review: `omo_pending_watch.py` source classification, including short source marker parsing and stale-marker behavior
-  - pending review: `omo_pending_watch.py` delivery failure behavior, including failed tmux sends, missing targets, and partial manager/worker delivery
+  - reviewed: `omo_pending_watch.py` source classification; agent markers win over email markers, email markers require human ack, unmarked pending blocks require human ack, and generated routed email blocks place `(manager routed: ...)` immediately after `(pending)` so stale routed blocks are skipped
+  - finding: `omo_pending_watch.py` delivery failure handling treats nonzero push exits as retryable but does not catch `subprocess.run` launch exceptions in `push_marker_text` or `push_manager_text`, so a PATH/spawn failure can crash the watcher instead of leaving the marker unresolved for retry
+  - reviewed fix: push helpers catch launch exceptions, log them, return failure, and keep unresolved markers retryable
+  - reviewed fix: top-level pending-watcher crash guard emails the human on unexpected process crash, passes a sender tmux target when available, and re-raises for supervisor restart
   - pending review: `omo_pending_watch.py` watcher loop and restart behavior, including bounded in-memory `seen`, full rescans, mtime polling, and restart duplicates
   - pending review: `omo_pending_watch.py` docs/tests gaps after the current script review is complete
 - [ ] status helpers
