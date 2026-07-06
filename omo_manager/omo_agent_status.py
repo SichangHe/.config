@@ -19,6 +19,7 @@ from omo_manager.omo_codex_status import Args as StatusArgs
 from omo_manager.omo_codex_status import COMPACTING_RE
 from omo_manager.omo_codex_status import Report
 from omo_manager.omo_codex_status import inspect
+from omo_manager.omo_codex_status import interrupt_waiting_subagent_if_present
 from omo_manager.omo_codex_status import is_stock_placeholder_input_text
 from omo_manager.omo_codex_status import submit_stuck_input_if_present
 from omo_manager.omo_codex_status import visible_error_lines
@@ -56,6 +57,7 @@ TASK_FRONTMATTER_VERSION = "v1.0.0"
 TASK_FRONTMATTER_REQUIRED_FIELDS = {"version", "status", "runat", "tool", "managerat", "is_manager", "pending_task_items"}
 TASK_FRONTMATTER_ALLOWED_FIELDS = TASK_FRONTMATTER_REQUIRED_FIELDS | {"blocked_on"}
 TASK_FRONTMATTER_STATUSES = {"running", "blocked", "done"}
+RETIRED_RUNAT = "retired"
 TASK_RE = re.compile(r"`?([A-Za-z0-9_./-]+\.md)`?")
 TARGET_RE = re.compile(r"\b([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\b")
 TARGET_SESSION_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*):")
@@ -215,6 +217,11 @@ def is_current_vl_supervisor(task_file: str) -> bool:
     return name.startswith("vl_supervisor_current_") or name.startswith("vl_submanager_current_")
 
 
+def is_recorded_persistent_manager_wait(task: TaskLine, state: TaskState) -> bool:
+    reason = state.reason.lower()
+    return state.is_manager and bool(state.reason) and (is_current_vl_supervisor(task.task_file) or ("persistent" in reason and ("manager" in reason or "submanager" in reason or "role" in reason)))
+
+
 def canonical_target(target: str) -> str:
     return target[:-2] if target.endswith(".0") else target
 
@@ -355,8 +362,10 @@ def parse_task_metadata(text: str) -> TaskMetadata | None:
         raise TaskFrontmatterError(f"`version` must be `{TASK_FRONTMATTER_VERSION}`.")
     runat = values["runat"]
     managerat = values["managerat"]
-    if not isinstance(runat, str) or TARGET_RE.fullmatch(runat) is None:
-        raise TaskFrontmatterError("`runat` must be a tmux target.")
+    if not isinstance(runat, str) or (TARGET_RE.fullmatch(runat) is None and runat != RETIRED_RUNAT):
+        raise TaskFrontmatterError("`runat` must be a tmux target or `retired`.")
+    if runat == RETIRED_RUNAT and status != "blocked":
+        raise TaskFrontmatterError("`runat: retired` is only valid when `status` is `blocked`.")
     if not isinstance(managerat, str) or TARGET_RE.fullmatch(managerat) is None:
         raise TaskFrontmatterError("`managerat` must be a tmux target.")
     tool = values["tool"]
@@ -592,7 +601,7 @@ def scan_task_state(path: Path) -> TaskState | None:
             port = int(port_match.group(1))
             break
     persistent_role = bool(metadata.blocked_on and PERSISTENT_ROLE_RE.search(metadata.blocked_on.lower()) is not None)
-    target = metadata.runat
+    target = "" if metadata.runat == RETIRED_RUNAT else metadata.runat
     return TaskState(metadata.status, target, port, persistent_role, metadata.blocked_on, metadata.managerat, metadata.is_manager, metadata.tool)
 
 
@@ -771,6 +780,8 @@ def add_blocked_idle_vl_row(root: Path, task: TaskLine, role: str, rows: list[St
         classified = classify_target(task.task_file, target, state.persistent_role, state.status, auto_unstick, role, unstick_by_target, auto_unstick_disabled_reason)
         idle_status = classified.status
         if idle_status == "running":
+            return
+        if is_recorded_persistent_manager_wait(task, state) and idle_status not in {"error", "not_codex", "stuck_input"}:
             return
     reason = state.reason or "blocked with no reason in latest status line"
     evidence = classified.evidence if classified is not None else f"target={target} role={role} task_status=blocked"
@@ -1030,8 +1041,13 @@ def unmanaged_problem_row(row: StatusRow, report_not_codex: bool, report_ready_r
 def manager_problem_row(args: Args, skip_targets: set[str], unstick_by_target: dict[str, str]) -> StatusRow | None:
     if not args.manager_target:
         return None
-    report = inspect(StatusArgs(args.manager_target, 80))
+    report = inspect(StatusArgs(args.manager_target, 80), detect_waiting_subagent=True)
     evidence = f"target={args.manager_target} role=manager" + report_output_evidence(report)
+    if report.status == "waiting_subagent":
+        interrupt = interrupt_waiting_subagent_if_present(args.manager_target, report) if args.auto_unstick else "disabled:no_auto_unstick"
+        if interrupt == "sent_escape":
+            return None
+        return StatusRow("manager", "manager_waiting_subagent", f"{evidence} interrupt={interrupt}", target=args.manager_target, unstick=interrupt)
     if manager_compaction_needs_reread(report):
         return StatusRow("manager", "manager_compaction", evidence, target=args.manager_target)
     if any(same_tmux_target(args.manager_target, target) for target in skip_targets):
@@ -1077,7 +1093,7 @@ def format_summary(rows: list[StatusRow], completed_stale_count: int, pruned_cou
     return "\n".join(lines)
 
 
-PROBLEM_STATUSES = {"blocked_idle", "error", "human_request", "manager_compaction", "not_codex", "ready", "stuck_input", "untracked_agent"}
+PROBLEM_STATUSES = {"blocked_idle", "error", "human_request", "manager_compaction", "manager_waiting_subagent", "not_codex", "ready", "stuck_input", "untracked_agent"}
 
 
 def is_parked_persistent_blocked_row(row: StatusRow) -> bool:
@@ -1099,10 +1115,10 @@ def format_problem_summary(rows: list[StatusRow], completed_stale: set[str] | di
     problem_rows = [row for row in rows if row.status in PROBLEM_STATUSES and not is_parked_persistent_blocked_row(row)]
     if not problem_rows and not completed_stale_evidence_map:
         return ""
-    counts: dict[str, int] = {"not_codex": 0, "blocked_idle": 0, "error": 0, "human_request": 0, "manager_compaction": 0, "ready": 0, "stuck_input": 0, "untracked_agent": 0}
+    counts: dict[str, int] = {"not_codex": 0, "blocked_idle": 0, "error": 0, "human_request": 0, "manager_compaction": 0, "manager_waiting_subagent": 0, "ready": 0, "stuck_input": 0, "untracked_agent": 0}
     for row in problem_rows:
         counts[row.status] = counts.get(row.status, 0) + 1
-    parts = [f"{status}={counts[status]}" for status in ("not_codex", "blocked_idle", "error", "human_request", "manager_compaction", "ready", "stuck_input", "untracked_agent") if counts[status]]
+    parts = [f"{status}={counts[status]}" for status in ("not_codex", "blocked_idle", "error", "human_request", "manager_compaction", "manager_waiting_subagent", "ready", "stuck_input", "untracked_agent") if counts[status]]
     if completed_stale_evidence_map:
         parts.append(f"done-registry-stale={len(completed_stale_evidence_map)}")
     lines = [f"agent-problems: {' '.join(parts)}"]

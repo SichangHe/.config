@@ -28,6 +28,9 @@ BACKGROUND_RUNNING_RE = re.compile(r"^• .*?\b(?:Waiting for background termina
 QUEUE_MESSAGE_FOOTER_RE = re.compile(r"\btab to queue message\b")
 TERMINAL_ENTER_PROMPT_RE = re.compile(r"^\s*\[?press enter(?:/return)?(?: to continue)?(?:\.\.\.)?\]?\s*$", re.IGNORECASE)
 PLAN_PROMPT_RE = re.compile(r"\bCreate a plan\?\s+shift\s+\+\s+tab\s+use Plan mode\s+esc dismiss\s*$")
+WAITING_FOR_SUBAGENT_RE = re.compile(r"^• Waiting for [0-9a-fA-F][0-9a-fA-F-]{15,}$")
+WORKING_INTERRUPT_RE = re.compile(r"^• Working \([^)]* • esc to interrupt\)$")
+QUEUED_AFTER_TOOL_CALL_RE = re.compile(r"^• Messages to be submitted after next tool call \(press esc to interrupt and send immediately\)$")
 CODEX_EMPTY_INPUT_TEXTS = {
     "Use /skills to list available skills",
     "Find and fix a bug in @filename",
@@ -192,6 +195,34 @@ def has_queued_message_footer(lines: list[str]) -> bool:
     return bool(lines and QUEUE_MESSAGE_FOOTER_RE.search(lines[-1]) is not None)
 
 
+def has_waiting_subagent_prompt(lines: list[str]) -> bool:
+    """Detect a running Codex turn blocked in a parent-side subagent wait."""
+
+    if not has_codex_model_footer(lines):
+        return False
+    body = lines[:-1]
+    start = 0
+    for idx in range(len(body) - 1, -1, -1):
+        if SEP_RE.match(body[idx]):
+            start = idx + 1
+            break
+    body = [line.rstrip() for line in body[start:]]
+    while body and not body[0]:
+        del body[0]
+    while body and not body[-1]:
+        body.pop()
+    if body and WORKED_RE.match(body[-1]):
+        return False
+    for idx in range(len(body) - 1, -1, -1):
+        if WORKED_RE.match(body[idx]):
+            body = body[idx + 1 :]
+            break
+    for idx in range(len(body) - 2):
+        if WAITING_FOR_SUBAGENT_RE.match(body[idx].rstrip()) and WORKING_INTERRUPT_RE.match(body[idx + 1].rstrip()) and QUEUED_AFTER_TOOL_CALL_RE.match(body[idx + 2].rstrip()):
+            return True
+    return False
+
+
 def has_queued_running_input(lines: list[str]) -> bool:
     return has_queued_message_footer(lines) and has_visible_running_indicator(lines)
 
@@ -299,9 +330,24 @@ def submit_stuck_input_if_present(target: str, report: Report, n_lines: int = CO
     return "sent_enter" if result.returncode == 0 else "failed"
 
 
-def status(lines: list[str], block: Block) -> str:
+def interrupt_waiting_subagent_if_present(target: str, report: Report, n_lines: int = COMPACTION_WAIT_LINES) -> str:
+    if report.status != "waiting_subagent":
+        return ""
+    latest = report_from_lines(tail(target, n_lines), detect_waiting_subagent=True)
+    if latest.status != "waiting_subagent":
+        return "not_waiting_subagent"
+    try:
+        result = subprocess.run(["tmux", "send-keys", "-t", target, "Escape"], capture_output=True, text=True, timeout=5, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return "failed"
+    return "sent_escape" if result.returncode == 0 else "failed"
+
+
+def status(lines: list[str], block: Block, *, detect_waiting_subagent: bool = False) -> str:
     if not lines:
         return "not_codex"
+    if detect_waiting_subagent and has_waiting_subagent_prompt(lines):
+        return "waiting_subagent"
     if not has_codex_model_footer(lines):
         if has_terminal_enter_prompt_after_codex_footer(lines):
             return "stuck_input"
@@ -340,17 +386,17 @@ def status(lines: list[str], block: Block) -> str:
     return "running"
 
 
-def report_from_lines(lines: list[str]) -> Report:
+def report_from_lines(lines: list[str], *, detect_waiting_subagent: bool = False) -> Report:
     block = current_block(lines)
     input_text = current_input_text(lines)
     can_submit_input = can_submit_stuck_input(lines)
-    report_status = status(lines, block)
+    report_status = status(lines, block, detect_waiting_subagent=detect_waiting_subagent)
     input_blocker = stuck_input_blocker(lines, input_text) if report_status == "stuck_input" and not can_submit_input else ""
     return Report(report_status, report_output(lines, block, report_status), input_text, can_submit_input, input_blocker)
 
 
-def inspect(args: Args) -> Report:
-    return report_from_lines(tail(args.target, args.n_lines))
+def inspect(args: Args, *, detect_waiting_subagent: bool = False) -> Report:
+    return report_from_lines(tail(args.target, args.n_lines), detect_waiting_subagent=detect_waiting_subagent)
 
 
 def wait_while_compacting(target: str, n_lines: int = COMPACTION_WAIT_LINES, timeout_s: float = DEFAULT_COMPACTION_WAIT_TIMEOUT_S, interval_s: float = COMPACTION_WAIT_INTERVAL_S) -> Report:

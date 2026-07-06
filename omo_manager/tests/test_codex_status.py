@@ -2,7 +2,7 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from omo_manager.omo_codex_status import Args, Report, can_submit_stuck_input, current_block, current_input_text, final_assistant_output, has_compacting_indicator, has_terminal_enter_prompt_after_codex_footer, inspect, last_output, report_from_lines, status, submit_stuck_input_if_present, visible_error_lines
+from omo_manager.omo_codex_status import Args, Report, can_submit_stuck_input, current_block, current_input_text, final_assistant_output, has_compacting_indicator, has_terminal_enter_prompt_after_codex_footer, has_waiting_subagent_prompt, inspect, interrupt_waiting_subagent_if_present, last_output, report_from_lines, status, submit_stuck_input_if_present, visible_error_lines
 
 
 class CodexStatusTests(unittest.TestCase):
@@ -77,6 +77,74 @@ class CodexStatusTests(unittest.TestCase):
     def test_status_running_when_message_is_queued(self) -> None:
         lines = ['• Messages to be submitted after next tool call (press esc to interrupt and send immediately)', '› Use /skills to list available skills', '  gpt-5.5']
         self.assertEqual('running', status(lines, current_block(lines)))
+
+    def test_status_waiting_subagent_when_exact_queued_wait_pattern_is_visible(self) -> None:
+        lines = [
+            '• Waiting for 019f3875-05fe-7583-ac1a-48abda94c6f9',
+            '• Working (21s • esc to interrupt)',
+            '• Messages to be submitted after next tool call (press esc to interrupt and send immediately)',
+            '',
+            '› Implement {feature}',
+            '',
+            '  gpt-5.5 xhigh · ~/.config · 71.7M used',
+        ]
+        self.assertTrue(has_waiting_subagent_prompt(lines))
+        self.assertEqual('running', report_from_lines(lines).status)
+        self.assertEqual('waiting_subagent', report_from_lines(lines, detect_waiting_subagent=True).status)
+
+    def test_status_waiting_subagent_requires_pending_message_line(self) -> None:
+        lines = [
+            '• Waiting for 019f3875-05fe-7583-ac1a-48abda94c6f9',
+            '• Working (21s • esc to interrupt)',
+            '',
+            '› Implement {feature}',
+            '',
+            '  gpt-5.5 xhigh · ~/.config · 71.7M used',
+        ]
+        self.assertFalse(has_waiting_subagent_prompt(lines))
+        self.assertEqual('running', report_from_lines(lines).status)
+
+    def test_status_waiting_subagent_ignores_stale_scrollback_pattern(self) -> None:
+        lines = [
+            '• Waiting for 019f3875-05fe-7583-ac1a-48abda94c6f9',
+            '• Working (21s • esc to interrupt)',
+            '• Messages to be submitted after next tool call (press esc to interrupt and send immediately)',
+            '',
+            '› Implement {feature}',
+            '',
+            '─ Worked for 1s ─',
+            '',
+            '› Use /skills to list available skills',
+            '',
+            '  gpt-5.5 xhigh · ~/.config · 71.7M used',
+        ]
+        self.assertFalse(has_waiting_subagent_prompt(lines))
+        self.assertEqual('ready', report_from_lines(lines).status)
+
+    def test_status_waiting_subagent_ignores_completed_wait_turn(self) -> None:
+        lines = [
+            '• Waiting for 019f3875-05fe-7583-ac1a-48abda94c6f9',
+            '• Working (21s • esc to interrupt)',
+            '• Messages to be submitted after next tool call (press esc to interrupt and send immediately)',
+            '',
+            '─ Worked for 1s ─',
+            '  gpt-5.5 xhigh · ~/.config · 71.7M used',
+        ]
+        self.assertFalse(has_waiting_subagent_prompt(lines))
+        self.assertEqual('ready', report_from_lines(lines).status)
+
+    def test_interrupt_waiting_subagent_sends_escape_after_recheck(self) -> None:
+        lines = [
+            '• Waiting for 019f3875-05fe-7583-ac1a-48abda94c6f9',
+            '• Working (21s • esc to interrupt)',
+            '• Messages to be submitted after next tool call (press esc to interrupt and send immediately)',
+            '› Implement {feature}',
+            '  gpt-5.5 xhigh · ~/.config · 71.7M used',
+        ]
+        report = report_from_lines(lines, detect_waiting_subagent=True)
+        with patch('omo_manager.omo_codex_status.tail', return_value=lines), patch('omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)) as run:
+            self.assertEqual('sent_escape', interrupt_waiting_subagent_if_present('cfg:1.0', report))
+        run.assert_called_once_with(['tmux', 'send-keys', '-t', 'cfg:1.0', 'Escape'], capture_output=True, text=True, timeout=5, check=False)
 
     def test_status_running_while_waiting_for_background_terminal_with_review_placeholder(self) -> None:
         lines = ['• Waiting for background terminal · 1 background terminal running · /ps to view · /stop to close', '', '› Run /review on my current changes', '  gpt-5.5']

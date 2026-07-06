@@ -78,7 +78,7 @@
   - reviewed fix: push helpers catch launch exceptions, log them, return failure, and keep unresolved markers retryable
   - reviewed fix: top-level pending-watcher crash guard emails the human on unexpected process crash, passes a sender tmux target when available, and re-raises for supervisor restart
   - pending review: `omo_pending_watch.py` watcher loop and restart behavior, including bounded in-memory `seen`, full rescans, mtime polling, and restart duplicates
-  - finding: restart loses process-local `seen`; `omo_push_to_manager.py`/`omo_tmux_send.py` validate pending marker freshness but do not durably mark a successful pending delivery as routed, so unchanged unannotated pending blocks can be delivered again after watcher restart
+  - finding: restart loses process-local `seen`; direct `omo_tmux_send.py` delivery validates pending marker freshness but does not durably mark a successful pending delivery as routed, so unchanged unannotated pending blocks can be delivered again after watcher restart
   - pending review: `omo_pending_watch.py` docs/tests gaps after the current script review is complete
   - active incident fix: `email_idle_watcher.py` retry routing changed so worker task files route to `managerat`, not `runat`
   - active incident check: live pending watcher command no longer includes old pending-watcher routing flags

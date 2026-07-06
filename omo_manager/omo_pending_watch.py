@@ -37,13 +37,16 @@ from omo_manager.omo_agent_status import scan_task_state
 from omo_manager.omo_pending_digest import PENDING_CONTENT_CHAR_LIMIT
 from omo_manager.omo_pending_digest import pending_tail_digest
 from omo_manager.omo_pending_digest import truncate_content
+from omo_manager.omo_tmux_send import CodexSendOptions
+from omo_manager.omo_tmux_send import DEFAULT_TMUX_ENTER_COUNT
+from omo_manager.omo_tmux_send import DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S
+from omo_manager.omo_tmux_send import send_to_codex
 
 
 def default_state_dir() -> Path:
     return Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "omo-manager"
 
 DEFAULT_ROOT = Path(os.environ.get("OMO_WORK_LOGS_ROOT", Path.home() / "work_logs"))
-DEFAULT_MANAGER_URL = os.environ.get("OMO_MANAGER_URL", "")
 DEFAULT_MANAGER_TARGET = os.environ.get("OMO_MANAGER_TMUX_TARGET", "")
 DEFAULT_STATE = default_state_dir() / "pending-watch-unused"
 DEFAULT_DIGEST_IDLE_AFTER_S = float(os.environ.get("OMO_MANAGER_DIGEST_IDLE_AFTER_S", "3600"))
@@ -59,8 +62,6 @@ DEFAULT_AGENT_PROBLEM_TIMEOUT_S = float(
     )
 )
 DEFAULT_POLL_BACKSTOP_INTERVAL_S = float(os.environ.get("OMO_MANAGER_POLL_BACKSTOP_INTERVAL_S", "30"))
-DEFAULT_TMUX_READY_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_TMUX_READY_TIMEOUT_S", os.environ.get("OMO_DISPATCH_TMUX_READY_TIMEOUT_S", "300")))
-DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_TMUX_SUBMIT_VERIFY_TIMEOUT_S", "5"))
 DEFAULT_HUMAN_EMAIL_HELPER = Path(__file__).resolve().parents[1] / "helper.sh" / "email_me.py"
 PENDING_MARKERS = {"(pending)"}
 FOR_MANAGER_MARKER = "for manager"
@@ -398,7 +399,7 @@ def parse_args(argv: list[str]) -> Args:
     root = parsed.root.resolve()
     return Args(
         root,
-        DEFAULT_MANAGER_URL.rstrip("/"),
+        "",
         DEFAULT_STATE,
         parsed.interval_s,
         parsed.full_scan_interval_s,
@@ -548,6 +549,12 @@ def marker_is_dm(marker: Marker, attachments: Sequence[SourceAttachment]) -> boo
     return any(not attachment.error and text_marks_dm(attachment.text) for attachment in attachments)
 
 
+def marker_is_dm_only(marker: Marker, attachments: Sequence[SourceAttachment]) -> bool:
+    if text_marks_dm_only(marker.block_text):
+        return True
+    return any(not attachment.error and text_marks_dm_only(attachment.text) for attachment in attachments)
+
+
 def marker_is_for_manager(marker: Marker, attachments: Sequence[SourceAttachment]) -> bool:
     if text_marks_for_manager(marker.block_text):
         return True
@@ -556,7 +563,9 @@ def marker_is_for_manager(marker: Marker, attachments: Sequence[SourceAttachment
 
 def dm_worker_seen_key(args: Args, marker: Marker, worker_target: str, attachments: Sequence[SourceAttachment]) -> str:
     payload = f"{marker.block_text}\n{readable_attachment_payload(attachments)}"
-    return f"{args.root}:{marker.file}:{marker.line}:{marker.digest}:dm-worker:{canonical_target(worker_target)}:{attachment_payload_digest(payload)}:dm:{int(marker_is_dm(marker, attachments))}"
+    dm = int(marker_is_dm(marker, attachments))
+    dm_only = int(marker_is_dm_only(marker, attachments))
+    return f"{args.root}:{marker.file}:{marker.line}:{marker.digest}:dm-worker:{canonical_target(worker_target)}:{attachment_payload_digest(payload)}:dm:{dm}:dm-only:{dm_only}"
 
 
 def attachment_error_seen_key(args: Args, marker: Marker, attachments: Sequence[SourceAttachment]) -> str:
@@ -572,8 +581,9 @@ def marker_seen_key(args: Args, marker: Marker, attachments: Sequence[SourceAtta
         return key
     payload = readable_attachment_payload(attachments)
     dm = int(marker_is_dm(marker, attachments))
+    dm_only = int(marker_is_dm_only(marker, attachments))
     for_manager = int(marker_is_for_manager(marker, attachments))
-    return f"{key}:files:{attachment_payload_digest(payload)}:dm:{dm}:for-manager:{for_manager}"
+    return f"{key}:files:{attachment_payload_digest(payload)}:dm:{dm}:dm-only:{dm_only}:for-manager:{for_manager}"
 
 
 def is_vl_task_file(path: Path) -> bool:
@@ -720,6 +730,10 @@ def text_marks_dm(text: str) -> bool:
     return text_has_edge_marker(text, "DM")
 
 
+def text_marks_dm_only(text: str) -> bool:
+    return text_has_edge_marker(text, "DM only")
+
+
 def text_marks_for_manager(text: str) -> bool:
     return text_has_edge_marker(text, FOR_MANAGER_MARKER, case_sensitive=False)
 
@@ -837,25 +851,47 @@ def with_manager_policy_reminder(args: Args, text: str, reminders: Sequence[str]
     return f"{text}\n{args.reminder_choice(reminders)}"
 
 
+def pending_marker_present(root: Path, pending_file: Path, pending_line: int, pending_digest: str = "") -> bool:
+    path = root / pending_file
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    idx = pending_line - 1
+    if idx < 0 or idx >= len(lines) or lines[idx].strip() != "(pending)":
+        return False
+    if not pending_digest:
+        return True
+    pending_tail = "\n".join(lines[idx:])
+    return pending_tail_digest(pending_file, pending_line, pending_tail) == pending_digest
+
+
 def push_marker_text(args: Args, marker: Marker, text: str, manager_target: str) -> int:
     if args.dry_run:
         print(text)
         return 0
-    command = ["omo_push_to_manager.py", text, "--root", str(args.root), "--submit"]
-    command.extend(["--pending-file", str(marker.file), "--pending-line", str(marker.line), "--pending-digest", marker.digest])
     if manager_target:
-        command.extend(["--manager-target", manager_target])
-    return run_delivery_command("pending delivery", command)
+        return send_delivery_text(
+            "pending delivery",
+            text,
+            manager_target,
+            root=args.root,
+            pending_file=marker.file,
+            pending_line=marker.line,
+            pending_digest=marker.digest,
+        )
+    return 1
 
 
-def push_dm_ref(args: Args, seen: dict[str, float], now_s: float, marker: Marker, attachments: Sequence[SourceAttachment], manager_target: str) -> int:
+def push_dm_ref(args: Args, seen: dict[str, float], now_s: float, marker: Marker, attachments: Sequence[SourceAttachment], manager_target: str, *, copy_manager: bool = True) -> int:
     worker_target = marker_worker_target(args, marker, manager_target)
     reminders = MANAGER_EMAIL_POLICY_REMINDERS if marker.source == "email" else MANAGER_POLICY_REMINDERS
+    marker_name = "DM" if copy_manager else "DM only"
     if not worker_target:
         text = marker_delivery_text(
             marker,
             attachments,
-            "direct-message fallback: pending block or linked file starts or ends with `DM`, but no safe worker `runat:` target was found; delivering to the manager for routing.",
+            f"direct-message fallback: pending block or linked file starts or ends with `{marker_name}`, but no safe worker `runat:` target was found; delivering to the manager for routing.",
         )
         return push_marker_text(args, marker, with_manager_policy_reminder(args, text, reminders), manager_target)
     worker_text = marker_worker_dm_text(marker, attachments)
@@ -870,6 +906,8 @@ def push_dm_ref(args: Args, seen: dict[str, float], now_s: float, marker: Marker
             )
             return push_marker_text(args, marker, with_manager_policy_reminder(args, text, reminders), manager_target)
         remember_seen(seen, worker_key, now_s)
+    if not copy_manager:
+        return 0
     manager_text = marker_fyi_text(marker, attachments)
     return push_manager_text_to_target(args, manager_text, manager_target)
 
@@ -880,9 +918,11 @@ def push_ref(args: Args, seen: dict[str, float], now_s: float, marker: Marker, a
     reminders = MANAGER_EMAIL_POLICY_REMINDERS if marker.source == "email" else MANAGER_POLICY_REMINDERS
     for_manager = marker_is_for_manager(marker, attachments)
     manager_target = marker_for_manager_target(args, marker) if for_manager else marker_manager_target(args, marker)
-    if not args.dry_run and not manager_target and not args.manager_url:
-        print("omo_pending_watch: a frontmatter `managerat`, OMO_MANAGER_TMUX_TARGET, or OMO_MANAGER_URL is required outside --dry-run", file=sys.stderr)
+    if not args.dry_run and not manager_target:
+        print("omo_pending_watch: a frontmatter `managerat` or OMO_MANAGER_TMUX_TARGET is required outside --dry-run", file=sys.stderr)
         return 1
+    if not for_manager and marker_is_dm_only(marker, attachments):
+        return push_dm_ref(args, seen, now_s, marker, attachments, manager_target, copy_manager=False)
     if not for_manager and marker_is_dm(marker, attachments):
         return push_dm_ref(args, seen, now_s, marker, attachments, manager_target)
     if any(attachment.error for attachment in attachments):
@@ -902,29 +942,49 @@ def push_manager_text(args: Args, text: str) -> int:
     if args.dry_run:
         print(text)
         return 0
-    if not args.manager_url and not args.manager_target:
-        print("omo_pending_watch: OMO_MANAGER_TMUX_TARGET or OMO_MANAGER_URL is required outside --dry-run", file=sys.stderr)
+    if not args.manager_target:
+        print("omo_pending_watch: OMO_MANAGER_TMUX_TARGET is required outside --dry-run", file=sys.stderr)
         return 1
-    return run_delivery_command("manager delivery", push_manager_command(args, text))
+    return send_delivery_text("manager delivery", text, args.manager_target)
 
 
 def push_manager_text_to_target(args: Args, text: str, manager_target: str) -> int:
     return push_manager_text(replace(args, manager_target=manager_target), text)
 
 
-def push_manager_command(args: Args, text: str) -> list[str]:
-    command = ["omo_push_to_manager.py", text, "--root", str(args.root), "--submit"]
-    if args.manager_target:
-        command.extend(["--manager-target", args.manager_target])
-    return command
-
-
-def run_delivery_command(name: str, command: list[str]) -> int:
-    try:
-        return subprocess.run(command, check=False).returncode
-    except (OSError, subprocess.SubprocessError) as exc:
-        print(f"omo_pending_watch: {name} launch failed: {exc}", file=sys.stderr)
+def send_delivery_text(
+    name: str,
+    text: str,
+    target: str,
+    *,
+    root: Path | None = None,
+    pending_file: Path | None = None,
+    pending_line: int = 0,
+    pending_digest: str = "",
+    submit_verify_timeout_s: float = DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S,
+) -> int:
+    if root is not None and pending_file is not None and not pending_marker_present(root, pending_file, pending_line, pending_digest):
+        print(f"omo_pending_watch: {name} skipped; pending marker cleared before tmux paste", file=sys.stderr)
         return 1
+    try:
+        send_to_codex(
+            target,
+            text,
+            CodexSendOptions(
+                DEFAULT_TMUX_ENTER_COUNT,
+                0.15,
+                False,
+                submit_verify_timeout_s,
+                True,
+            ),
+        )
+    except subprocess.CalledProcessError as exc:
+        print(f"omo_pending_watch: {name} failed: {exc}", file=sys.stderr)
+        return exc.returncode or 1
+    except Exception as exc:
+        print(f"omo_pending_watch: {name} failed: {exc}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def maybe_push_idle_status(args: Args, last_activity_s: float, now_s: float) -> bool:
@@ -1053,10 +1113,6 @@ def periodic_status_text(args: Args, result: CommandOutput) -> str | None:
     return idle_status_text(args, output)
 
 
-def manager_push_timeout_s() -> float:
-    return DEFAULT_TMUX_READY_TIMEOUT_S + (2 * DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S) + 15
-
-
 def update_idle_status_check(args: Args, last_check_s: float, now_s: float, status_run: CommandRun | None) -> tuple[float, CommandRun | None]:
     if now_s - last_check_s < args.idle_status_interval_s:
         return last_check_s, status_run
@@ -1079,14 +1135,14 @@ def status_command(args: Args, problems_only: bool = False) -> list[str]:
 
 
 def agent_problem_count_line(lines: list[str]) -> str:
-    counts = {"not_codex": 0, "blocked_idle": 0, "error": 0, "human_request": 0, "manager_compaction": 0, "ready": 0, "stuck_input": 0, "untracked_agent": 0, "done-registry-stale": 0}
+    counts = {"not_codex": 0, "blocked_idle": 0, "error": 0, "human_request": 0, "manager_compaction": 0, "manager_waiting_subagent": 0, "ready": 0, "stuck_input": 0, "untracked_agent": 0, "done-registry-stale": 0}
     for line in lines:
-        problem_match = re.match(r"^(not_codex|blocked_idle|error|human_request|manager_compaction|ready|stuck_input|untracked_agent): ", line)
+        problem_match = re.match(r"^(not_codex|blocked_idle|error|human_request|manager_compaction|manager_waiting_subagent|ready|stuck_input|untracked_agent): ", line)
         if problem_match is not None:
             counts[problem_match.group(1)] += 1
         elif line.startswith("done-stale: "):
             counts["done-registry-stale"] += 1
-    parts = [f"{status}={counts[status]}" for status in ("not_codex", "blocked_idle", "error", "human_request", "manager_compaction", "ready", "stuck_input", "untracked_agent") if counts[status]]
+    parts = [f"{status}={counts[status]}" for status in ("not_codex", "blocked_idle", "error", "human_request", "manager_compaction", "manager_waiting_subagent", "ready", "stuck_input", "untracked_agent") if counts[status]]
     if counts["done-registry-stale"]:
         parts.append(f"done-registry-stale={counts['done-registry-stale']}")
     return f"agent-problems: {' '.join(parts)}" if parts else ""
@@ -1106,12 +1162,12 @@ def problem_line_target(line: str) -> str:
 
 
 def problem_line_task(line: str) -> str:
-    match = re.match(r"^(?:not_codex|blocked_idle|error|human_request|manager_compaction|ready|stuck_input|untracked_agent|done-stale): task=(\S+)", line)
+    match = re.match(r"^(?:not_codex|blocked_idle|error|human_request|manager_compaction|manager_waiting_subagent|ready|stuck_input|untracked_agent|done-stale): task=(\S+)", line)
     return match.group(1) if match is not None else ""
 
 
 def problem_line_status(line: str) -> str:
-    match = re.match(r"^(not_codex|blocked_idle|error|human_request|manager_compaction|ready|stuck_input|untracked_agent|done-stale): ", line)
+    match = re.match(r"^(not_codex|blocked_idle|error|human_request|manager_compaction|manager_waiting_subagent|ready|stuck_input|untracked_agent|done-stale): ", line)
     return match.group(1) if match is not None else ""
 
 
@@ -1121,7 +1177,7 @@ def problem_line_unstick(line: str) -> str:
 
 
 def problem_line_value(line: str, key: str) -> str:
-    match = re.search(rf"\b{re.escape(key)}=(.*?)(?=\s+(?:output_tail|role|persistent_role|task_status|idle_status|reason|pending_item|unstick|owner_target)=|$)", line)
+    match = re.search(rf"\b{re.escape(key)}=(.*?)(?=\s+(?:output_tail|role|persistent_role|task_status|idle_status|reason|pending_item|interrupt|unstick|owner_target)=|$)", line)
     return match.group(1).strip() if match is not None else ""
 
 
@@ -1264,7 +1320,7 @@ def problem_row_line(row: ProblemRow) -> str:
         return f"{label} {tagged_text('input', row.input_text)}"
     if row.status == "untracked_agent":
         return f"{label} {tagged_text('output', row.output)}"
-    if row.status in {"not_codex", "error", "ready", "manager_compaction"}:
+    if row.status in {"not_codex", "error", "ready", "manager_compaction", "manager_waiting_subagent"}:
         return f"{label} {tagged_text('output', row.output)}"
     if row.status == "blocked_idle":
         reason = row.reason or row.output
@@ -1285,6 +1341,7 @@ def problem_section(status: str, rows: list[ProblemRow]) -> list[str]:
         "error": f"{len(rows)} have visible errors; inspect the pane, fix the error, or restart them:",
         "human_request": f"{len(rows)} have pending human requests; record the item, ack if needed, then route it:",
         "manager_compaction": f"{len(rows)} are compacting; reread MANAGER.md after compaction unless the summary already included it:",
+        "manager_waiting_subagent": f"{len(rows)} managers are waiting on a subagent and could not be interrupted automatically; inspect or interrupt them:",
         "ready": f"{len(rows)} ready and not blocked; consider closing them:",
         "stuck_input": f"{len(rows)} have their input being stuck; unstick or restart them:",
         "untracked_agent": f"{len(rows)} not tracked in any task file; ask them what their task is, or consider closing them:",
@@ -1299,7 +1356,7 @@ def format_agent_problem_report(lines: list[str]) -> str:
     rows = [row for line in lines if (row := parse_problem_row(line)) is not None]
     if not rows:
         return ""
-    order = ("not_codex", "untracked_agent", "blocked_idle", "error", "human_request", "manager_compaction", "ready", "stuck_input", "done-stale")
+    order = ("not_codex", "untracked_agent", "blocked_idle", "error", "human_request", "manager_compaction", "manager_waiting_subagent", "ready", "stuck_input", "done-stale")
     parts = [HELPER_NOTICE_INSTRUCTION, "omo_pending_watch agent problems:"]
     for status in order:
         parts.extend(problem_section(status, [row for row in rows if row.status == status]))
@@ -1473,9 +1530,9 @@ def evidence_target(line: str) -> str:
 
 
 def manager_self_problem_line(line: str, manager_target: str = "") -> bool:
-    if re.match(r"^(?:blocked_idle|error|not_codex|ready|stuck_input): task=manager evidence=.*\brole=manager\b", line):
+    if re.match(r"^(?:blocked_idle|error|manager_waiting_subagent|not_codex|ready|stuck_input): task=manager evidence=.*\brole=manager\b", line):
         return True
-    if re.match(r"^(?:blocked_idle|error|not_codex|ready|stuck_input): task=\S+ evidence=target=", line) is None:
+    if re.match(r"^(?:blocked_idle|error|manager_waiting_subagent|not_codex|ready|stuck_input): task=\S+ evidence=target=", line) is None:
         return False
     return same_tmux_target(evidence_target(line), manager_target)
 
@@ -1485,9 +1542,9 @@ def manager_human_email_problem_line(line: str, manager_target: str = "") -> boo
         unstick_match = re.search(r"\bunstick=(\S+)$", line)
         if unstick_match is not None and not unstick_match.group(1).startswith("not_safe:"):
             return False
-    if re.match(r"^(?:error|not_codex|stuck_input): task=manager evidence=.*\brole=manager\b", line):
+    if re.match(r"^(?:error|manager_waiting_subagent|not_codex|stuck_input): task=manager evidence=.*\brole=manager\b", line):
         return True
-    if re.match(r"^(?:error|not_codex|stuck_input): task=\S+ evidence=target=", line) is None:
+    if re.match(r"^(?:error|manager_waiting_subagent|not_codex|stuck_input): task=\S+ evidence=target=", line) is None:
         return False
     return same_tmux_target(evidence_target(line), manager_target)
 
@@ -1557,12 +1614,12 @@ def manager_human_email_problem_output(output: str, manager_target: str = "") ->
     kept = [line for line in lines[1:] if manager_human_email_problem_line(line, manager_target)]
     if not kept:
         return ""
-    counts = {"not_codex": 0, "error": 0, "stuck_input": 0}
+    counts = {"not_codex": 0, "error": 0, "manager_waiting_subagent": 0, "stuck_input": 0}
     for line in kept:
-        problem_match = re.match(r"^(not_codex|error|stuck_input): ", line)
+        problem_match = re.match(r"^(not_codex|error|manager_waiting_subagent|stuck_input): ", line)
         if problem_match is not None:
             counts[problem_match.group(1)] += 1
-    parts = [f"{status}={counts[status]}" for status in ("not_codex", "error", "stuck_input") if counts[status]]
+    parts = [f"{status}={counts[status]}" for status in ("not_codex", "error", "manager_waiting_subagent", "stuck_input") if counts[status]]
     return "\n".join([f"manager-problems: {' '.join(parts)}", *kept])
 
 
@@ -1659,9 +1716,9 @@ def handle_agent_problem_result(args: Args, seen: dict[str, float], result: Comm
     return changed
 
 
-def start_command(name: str, command: list[str], timeout_s: float, cwd: Path | None = None) -> CommandRun | None:
+def start_command(name: str, command: list[str], timeout_s: float, cwd: Path | None = None, env: dict[str, str] | None = None) -> CommandRun | None:
     try:
-        process = subprocess.Popen(command, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        process = subprocess.Popen(command, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     except OSError as exc:
         print(f"omo_pending_watch: {name} start failed: {exc}", file=sys.stderr)
         return None
@@ -1788,7 +1845,6 @@ def main(argv: list[str]) -> int:
     last_idle_status_check_s = time.monotonic()
     agent_problem_run: CommandRun | None = None
     idle_status_run: CommandRun | None = None
-    idle_status_push_run: CommandRun | None = None
     digest_run: CommandRun | None = None
     while True:
         now_s = time.monotonic()
@@ -1817,17 +1873,9 @@ def main(argv: list[str]) -> int:
             result = poll_command(idle_status_run, now_wall_s)
             if result is not None:
                 text = periodic_status_text(args, result)
-                if text is not None and idle_status_push_run is None:
-                    idle_status_push_run = start_command("idle status delivery", push_manager_command(args, text), manager_push_timeout_s())
+                if text is not None and args.manager_target:
+                    _ = send_delivery_text("idle status delivery", text, args.manager_target)
                 idle_status_run = None
-        if idle_status_push_run is not None:
-            result = poll_command(idle_status_push_run, now_wall_s)
-            if result is not None:
-                if result.timed_out:
-                    print("omo_pending_watch: idle status delivery timed out", file=sys.stderr)
-                elif result.returncode not in {0, 2} and result.stderr.strip():
-                    print(f"omo_pending_watch: idle status delivery exited status={result.returncode}: {result.stderr.strip()}", file=sys.stderr)
-                idle_status_push_run = None
         if now_s - last_digest_check_s >= min(args.digest_idle_after_s, 60.0):
             if args.dry_run and maybe_deliver_idle_digest(args, fallback_mail_activity_s, now_wall_s):
                 fallback_mail_activity_s = now_wall_s
@@ -1853,7 +1901,7 @@ def main(argv: list[str]) -> int:
         ]
         if watcher is not None:
             deadlines.append(next_poll_s)
-        if agent_problem_run is not None or idle_status_run is not None or idle_status_push_run is not None or digest_run is not None:
+        if agent_problem_run is not None or idle_status_run is not None or digest_run is not None:
             deadlines.append(now_s + 0.2)
         timeout_s = args.interval_s if watcher is None else max(0.0, min(deadlines) - now_s)
         if watcher is None:

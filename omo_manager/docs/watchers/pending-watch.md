@@ -21,7 +21,7 @@
   - while inotify is active, `--poll-backstop-interval-s` runs an mtime scan after 30 seconds without a filesystem notification, full scan, or previous backstop poll
 
 - subprocess isolation
-  - pending dispatch uses the existing `omo_push_to_manager.py` path
+  - pending dispatch calls the `omo_tmux_send.py` library sender in-process
   - agent-problem checks run as background child processes and are polled
   - digest delivery runs as a background child process and is polled
   - timeout handling kills overdue maintenance children and logs stderr
@@ -57,6 +57,7 @@
   - worker `runat` is used for DM worker delivery
   - legacy prose metadata remains recognized only for main manager task files and old explicit source markers
   - a pending block or any readable linked file starting or ending with standalone `DM`, after quote lines are ignored and edge punctuation/whitespace is trimmed, is delivered to the task frontmatter `runat` worker target when that target is safely distinct from the manager target
+  - `DM only` follows the same marker rules as `DM` but does not send the manager FYI copy after successful worker delivery
   - successful DM worker delivery also sends the manager an FYI copy that starts ``Immediately record every pending item, then ack human, then remove `(pending)`; this message is already dispatched to the agent, this is FYI:``
   - agent-origin DM manager FYI copies say ``don't ack human`` instead of ``ack human``
   - worker DM delivery starts ``Direct message from the human; act on the request in the snippets below:``

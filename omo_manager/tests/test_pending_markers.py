@@ -18,9 +18,29 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from omo_manager import omo_pending_watch as pending_watcher
 from omo_manager.email_idle_watcher import append_pending, current_manager_file, dated_manager_file, existing_consumed_source_line, existing_source_pending_line, normalize_human_subject
 from omo_manager.omo_email_subject import RecentHeader, fetch_recent_header, manager_subject_w_target, normalized_subject_key, prepare_subject, prepare_subject_and_headers, reply_headers_for_subject, strip_leading_tmux_tags
 from omo_manager.omo_pending_watch import Args, find_markers
+
+ORIGINAL_PENDING_WATCH_RUN = pending_watcher.subprocess.run
+
+
+def capture_delivery_call(command: list[str]) -> list[str]:
+    if command and command[0] == "omo_tmux_send.py" and "--message-file" in command:
+        message_file = Path(command[command.index("--message-file") + 1])
+        target = command[command.index("--target") + 1]
+        captured = ["omo_tmux_send.py", message_file.read_text(encoding="utf-8"), "--manager-target", target, *command[1:]]
+        if "--enter" in command:
+            captured.append("--submit")
+        return captured
+    return command
+
+
+def delivery_target(command: list[str]) -> str:
+    if "--target" in command:
+        return command[command.index("--target") + 1]
+    return command[command.index("--manager-target") + 1]
 
 
 def agent_pointer_paths(text: str) -> list[Path]:
@@ -85,6 +105,19 @@ def write_report_worker_task(root: Path, name: str = "task.md", *, runat: str = 
 
 
 class PendingMarkerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._send_patch = patch("omo_manager.omo_pending_watch.send_to_codex", side_effect=self._fake_send_to_codex)
+        self._send_patch.start()
+        self.addCleanup(self._send_patch.stop)
+
+    def _fake_send_to_codex(self, target: str, message: str, _options: object = None) -> None:
+        if pending_watcher.subprocess.run is ORIGINAL_PENDING_WATCH_RUN:
+            return
+        command = ["omo_tmux_send.py", message, "--manager-target", target, "--target", target, "--submit"]
+        result = pending_watcher.subprocess.run(command, check=False)
+        if result.returncode != 0:
+            raise subprocess.CalledProcessError(result.returncode, command)
+
     def test_email_pending_block_has_single_source_marker_and_is_not_generic_pending(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -185,7 +218,7 @@ class PendingMarkerTests(unittest.TestCase):
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-                calls.append(command)
+                calls.append(capture_delivery_call(command))
                 return subprocess.CompletedProcess(command, 0)
 
             args = Args(
@@ -205,7 +238,7 @@ class PendingMarkerTests(unittest.TestCase):
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-                calls.append(command)
+                calls.append(capture_delivery_call(command))
                 return subprocess.CompletedProcess(command, 0)
 
             args = Args(
@@ -225,7 +258,7 @@ class PendingMarkerTests(unittest.TestCase):
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-                calls.append(command)
+                calls.append(capture_delivery_call(command))
                 return subprocess.CompletedProcess(command, 0)
 
             args = Args(
@@ -245,7 +278,7 @@ class PendingMarkerTests(unittest.TestCase):
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-                calls.append(command)
+                calls.append(capture_delivery_call(command))
                 return subprocess.CompletedProcess(command, 0)
 
             args = Args(
@@ -265,7 +298,7 @@ class PendingMarkerTests(unittest.TestCase):
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-                calls.append(command)
+                calls.append(capture_delivery_call(command))
                 return subprocess.CompletedProcess(command, 0)
 
             args = Args(
@@ -289,7 +322,7 @@ class PendingMarkerTests(unittest.TestCase):
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-                calls.append(command)
+                calls.append(capture_delivery_call(command))
                 return subprocess.CompletedProcess(command, 0)
 
             args = Args(
@@ -310,7 +343,7 @@ class PendingMarkerTests(unittest.TestCase):
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-                calls.append(command)
+                calls.append(capture_delivery_call(command))
                 return subprocess.CompletedProcess(command, 0)
 
             args = Args(
@@ -331,7 +364,7 @@ class PendingMarkerTests(unittest.TestCase):
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-                calls.append(command)
+                calls.append(capture_delivery_call(command))
                 return subprocess.CompletedProcess(command, 0)
 
             args = Args(
@@ -351,7 +384,7 @@ class PendingMarkerTests(unittest.TestCase):
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-                calls.append(command)
+                calls.append(capture_delivery_call(command))
                 return subprocess.CompletedProcess(command, 0)
 
             args = Args(
@@ -372,7 +405,7 @@ class PendingMarkerTests(unittest.TestCase):
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-                calls.append(command)
+                calls.append(capture_delivery_call(command))
                 return subprocess.CompletedProcess(command, 0)
 
             args = Args(
@@ -394,7 +427,7 @@ class PendingMarkerTests(unittest.TestCase):
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-                calls.append(command)
+                calls.append(capture_delivery_call(command))
                 return subprocess.CompletedProcess(command, 0)
 
             args = Args(
@@ -1070,7 +1103,7 @@ class PendingMarkerTests(unittest.TestCase):
         calls: list[list[str]] = []
 
         def run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-            calls.append(command)
+            calls.append(capture_delivery_call(command))
             return subprocess.CompletedProcess(command, 0)
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -1823,11 +1856,10 @@ class PendingMarkerTests(unittest.TestCase):
                 watcher.run_email_push = old_run
             self.assertEqual([2, 3], [push.line_no for push in calls])
             push = calls[0]
-            command = push.command
-            env = push.env
-            self.assertIn("--submit", command)
-            self.assertEqual(env["OMO_MANAGER_TMUX_READY_TIMEOUT_S"], str(watcher.DEFAULT_EMAIL_PUSH_READY_TIMEOUT_S))
-            self.assertEqual(env["OMO_MANAGER_TMUX_SUBMIT_VERIFY_TIMEOUT_S"], str(watcher.DEFAULT_EMAIL_PUSH_SUBMIT_VERIFY_TIMEOUT_S))
+            self.assertEqual("wl:1.0", push.target)
+            self.assertEqual(root, push.root)
+            self.assertEqual(Path("work_manager_today.md"), push.pending_file)
+            self.assertEqual("pending: file=work_manager_today.md line=2 origin=human source=email action=ack-human", push.text)
 
             def fail(_push: watcher.EmailPush) -> bool:
                 return False
@@ -4702,7 +4734,7 @@ class PendingMarkerTests(unittest.TestCase):
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-                calls.append(command)
+                calls.append(capture_delivery_call(command))
                 return subprocess.CompletedProcess(command, 0)
 
             args = Args(
@@ -4713,8 +4745,6 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual(2, len(calls))
             self.assertEqual("wl:2", calls[0][calls[0].index("--manager-target") + 1])
             self.assertEqual("wl:1", calls[1][calls[1].index("--manager-target") + 1])
-            self.assertIn("--pending-file", calls[0])
-            self.assertNotIn("--pending-file", calls[1])
             self.assertIn("Direct message from the human; act on the request in the snippets below:", calls[0][1])
             self.assertNotIn("Immediately record", calls[0][1])
             self.assertIn("Immediately record every pending item, then ack human, then remove `(pending)`; this message is already dispatched to the agent, this is FYI:", calls[1][1])
@@ -4738,7 +4768,7 @@ class PendingMarkerTests(unittest.TestCase):
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-                calls.append(command)
+                calls.append(capture_delivery_call(command))
                 return subprocess.CompletedProcess(command, 0)
 
             args = Args(
@@ -4764,7 +4794,7 @@ class PendingMarkerTests(unittest.TestCase):
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-                calls.append(command)
+                calls.append(capture_delivery_call(command))
                 return subprocess.CompletedProcess(command, 0)
 
             args = Args(
@@ -4777,6 +4807,59 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertNotIn('<snippet file="worker.md:', calls[0][1])
             self.assertIn('<snippet file="worker.md:', calls[1][1])
 
+    def test_pending_block_dm_only_pushes_worker_without_manager_fyi(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mail = root / "manager_mail" / "4002.txt"
+            mail.parent.mkdir()
+            mail.write_text("Subject: worker note\n\nPlease inspect this directly.\n", encoding="utf-8")
+            path = root / "worker.md"
+            path.write_text(f"{task_frontmatter(runat='wl:2', managerat='wl:1')}\n(pending)\nDM only: please inspect directly\n(record and delegate manager_mail/4002.txt)\n", encoding="utf-8")
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(capture_delivery_call(command))
+                return subprocess.CompletedProcess(command, 0)
+
+            args = Args(
+                root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=False, manager_target="main:0.0"
+            )
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+                self.assertTrue(watcher.scan_once(args, {}, [path]))
+            self.assertEqual(["wl:2"], [call[call.index("--manager-target") + 1] for call in calls])
+            self.assertIn("Direct message from the human; act on the request in the snippets below:", calls[0][1])
+            self.assertIn("<message>\n(pending)\nDM only: please inspect directly\n(record and delegate manager_mail/4002.txt)\n</message>", calls[0][1])
+            self.assertNotIn("this message is already dispatched to the agent, this is FYI", calls[0][1])
+
+    def test_linked_file_dm_only_pushes_worker_without_manager_fyi(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            docs = root / "docs"
+            docs.mkdir()
+            request = docs / "request.md"
+            request.write_text("Follow this linked request. DM only\n", encoding="utf-8")
+            path = root / "worker.md"
+            path.write_text(f"{task_frontmatter(runat='wl:2', managerat='wl:1')}\n(pending)\ndocs/request.md\n", encoding="utf-8")
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(capture_delivery_call(command))
+                return subprocess.CompletedProcess(command, 0)
+
+            args = Args(
+                root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=False, manager_target="main:0.0"
+            )
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+                self.assertTrue(watcher.scan_once(args, {}, [path]))
+            self.assertEqual(["wl:2"], [call[call.index("--manager-target") + 1] for call in calls])
+            self.assertIn('<snippet file="docs/request.md:1-1">', calls[0][1])
+            self.assertNotIn('<snippet file="worker.md:', calls[0][1])
+            self.assertNotIn("this message is already dispatched to the agent, this is FYI", calls[0][1])
+
     def test_agent_origin_dm_manager_fyi_says_do_not_ack_human(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
@@ -4787,7 +4870,7 @@ class PendingMarkerTests(unittest.TestCase):
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-                calls.append(command)
+                calls.append(capture_delivery_call(command))
                 return subprocess.CompletedProcess(command, 0)
 
             args = Args(
@@ -4812,7 +4895,7 @@ class PendingMarkerTests(unittest.TestCase):
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-                calls.append(command)
+                calls.append(capture_delivery_call(command))
                 return subprocess.CompletedProcess(command, 0)
 
             args = Args(
@@ -4840,7 +4923,7 @@ class PendingMarkerTests(unittest.TestCase):
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-                calls.append(command)
+                calls.append(capture_delivery_call(command))
                 return subprocess.CompletedProcess(command, 0)
 
             args = Args(
@@ -4867,7 +4950,7 @@ class PendingMarkerTests(unittest.TestCase):
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-                calls.append(command)
+                calls.append(capture_delivery_call(command))
                 return subprocess.CompletedProcess(command, 0)
 
             args = Args(
@@ -4894,7 +4977,7 @@ class PendingMarkerTests(unittest.TestCase):
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-                calls.append(command)
+                calls.append(capture_delivery_call(command))
                 return subprocess.CompletedProcess(command, 0)
 
             args = Args(
@@ -4920,7 +5003,7 @@ class PendingMarkerTests(unittest.TestCase):
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-                calls.append(command)
+                calls.append(capture_delivery_call(command))
                 return subprocess.CompletedProcess(command, 0)
 
             args = Args(
@@ -4955,7 +5038,7 @@ class PendingMarkerTests(unittest.TestCase):
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-                calls.append(command)
+                calls.append(capture_delivery_call(command))
                 return subprocess.CompletedProcess(command, 0)
 
             args = Args(
@@ -4982,7 +5065,7 @@ class PendingMarkerTests(unittest.TestCase):
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-                calls.append(command)
+                calls.append(capture_delivery_call(command))
                 return subprocess.CompletedProcess(command, 0)
 
             args = Args(
@@ -5005,7 +5088,7 @@ class PendingMarkerTests(unittest.TestCase):
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-                calls.append(command)
+                calls.append(capture_delivery_call(command))
                 return subprocess.CompletedProcess(command, 0)
 
             args = Args(
@@ -5028,7 +5111,7 @@ class PendingMarkerTests(unittest.TestCase):
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-                calls.append(command)
+                calls.append(capture_delivery_call(command))
                 return subprocess.CompletedProcess(command, 0)
 
             args = Args(
@@ -5053,8 +5136,8 @@ class PendingMarkerTests(unittest.TestCase):
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-                calls.append(command)
-                target = command[command.index("--manager-target") + 1]
+                calls.append(capture_delivery_call(command))
+                target = delivery_target(command)
                 if target == "wl:2":
                     path.write_text(f"{task_frontmatter(status='done', runat='wl:2', managerat='wl:1')}\n(done)\n", encoding="utf-8")
                 return subprocess.CompletedProcess(command, 0)
@@ -5083,7 +5166,7 @@ class PendingMarkerTests(unittest.TestCase):
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-                calls.append(command)
+                calls.append(capture_delivery_call(command))
                 return subprocess.CompletedProcess(command, 0)
 
             args = Args(
@@ -5106,7 +5189,7 @@ class PendingMarkerTests(unittest.TestCase):
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-                calls.append(command)
+                calls.append(capture_delivery_call(command))
                 return subprocess.CompletedProcess(command, 0)
 
             args = Args(
@@ -5131,8 +5214,8 @@ class PendingMarkerTests(unittest.TestCase):
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-                calls.append(command)
-                target = command[command.index("--manager-target") + 1]
+                calls.append(capture_delivery_call(command))
+                target = delivery_target(command)
                 return subprocess.CompletedProcess(command, 2 if target == "wl:2" else 0)
 
             args = Args(
@@ -5164,7 +5247,7 @@ class PendingMarkerTests(unittest.TestCase):
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-                calls.append(command)
+                calls.append(capture_delivery_call(command))
                 return subprocess.CompletedProcess(command, 0)
 
             args = Args(
@@ -5189,8 +5272,8 @@ class PendingMarkerTests(unittest.TestCase):
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-                calls.append(command)
-                target = command[command.index("--manager-target") + 1]
+                calls.append(capture_delivery_call(command))
+                target = delivery_target(command)
                 if target == "wl:2":
                     raise OSError("exec failed")
                 return subprocess.CompletedProcess(command, 0)
@@ -5205,7 +5288,7 @@ class PendingMarkerTests(unittest.TestCase):
                 self.assertFalse(watcher.scan_once(args, seen, [path]))
             self.assertEqual(1, len(seen))
             self.assertEqual(["wl:2", "wl:1"], [call[call.index("--manager-target") + 1] for call in calls])
-            self.assertIn("pending delivery launch failed: exec failed", err.getvalue())
+            self.assertIn("pending delivery failed: exec failed", err.getvalue())
 
     def test_email_dm_manager_fyi_retry_does_not_redeliver_worker(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -5222,8 +5305,8 @@ class PendingMarkerTests(unittest.TestCase):
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
                 nonlocal manager_attempts
-                calls.append(command)
-                target = command[command.index("--manager-target") + 1]
+                calls.append(capture_delivery_call(command))
+                target = delivery_target(command)
                 if target == "wl:1":
                     manager_attempts += 1
                     return subprocess.CompletedProcess(command, 1 if manager_attempts == 1 else 0)
@@ -5256,7 +5339,7 @@ class PendingMarkerTests(unittest.TestCase):
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-                calls.append(command)
+                calls.append(capture_delivery_call(command))
                 return subprocess.CompletedProcess(command, 0)
 
             args = Args(
@@ -5285,7 +5368,7 @@ class PendingMarkerTests(unittest.TestCase):
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-                calls.append(command)
+                calls.append(capture_delivery_call(command))
                 return subprocess.CompletedProcess(command, 0)
 
             args = Args(
@@ -5309,7 +5392,7 @@ class PendingMarkerTests(unittest.TestCase):
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-                calls.append(command)
+                calls.append(capture_delivery_call(command))
                 return subprocess.CompletedProcess(command, 0)
 
             args = Args(
@@ -5337,7 +5420,7 @@ class PendingMarkerTests(unittest.TestCase):
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-                calls.append(command)
+                calls.append(capture_delivery_call(command))
                 return subprocess.CompletedProcess(command, 0)
 
             args = Args(
@@ -5375,7 +5458,7 @@ class PendingMarkerTests(unittest.TestCase):
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-                calls.append(command)
+                calls.append(capture_delivery_call(command))
                 return subprocess.CompletedProcess(command, 0)
 
             args = Args(
@@ -5397,7 +5480,7 @@ class PendingMarkerTests(unittest.TestCase):
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-                calls.append(command)
+                calls.append(capture_delivery_call(command))
                 return subprocess.CompletedProcess(command, 0)
 
             args = Args(
@@ -5824,11 +5907,6 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertNotIn("manager task-state reminder", text)
             self.assertNotIn("vl_worker.md", text)
 
-    def test_idle_status_delivery_timeout_matches_push_budget(self) -> None:
-        from omo_manager import omo_pending_watch as watcher
-
-        self.assertEqual(325.0, watcher.manager_push_timeout_s())
-
     def test_idle_status_stays_quiet_before_idle_interval(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
@@ -5993,7 +6071,7 @@ class PendingMarkerTests(unittest.TestCase):
         calls: list[list[str]] = []
 
         def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-            calls.append(command)
+            calls.append(capture_delivery_call(command))
             return subprocess.CompletedProcess(command, 0)
 
         with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
@@ -6045,7 +6123,7 @@ class PendingMarkerTests(unittest.TestCase):
         calls: list[list[str]] = []
 
         def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
-            calls.append(command)
+            calls.append(capture_delivery_call(command))
             return subprocess.CompletedProcess(command, 0)
 
         seen: dict[str, float] = {}
@@ -6221,7 +6299,7 @@ class PendingMarkerTests(unittest.TestCase):
             def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
                 if command and command[0] == str(status_script):
                     return real_run(command, **kwargs)
-                calls.append(command)
+                calls.append(capture_delivery_call(command))
                 return subprocess.CompletedProcess(command, 0)
 
             with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
@@ -6262,7 +6340,7 @@ class PendingMarkerTests(unittest.TestCase):
             def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
                 if command and command[0] == str(status_script):
                     return real_run(command, **kwargs)
-                calls.append(command)
+                calls.append(capture_delivery_call(command))
                 return subprocess.CompletedProcess(command, 0)
 
             with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
@@ -6296,7 +6374,7 @@ class PendingMarkerTests(unittest.TestCase):
             def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
                 if command and command[0] == str(status_script):
                     return real_run(command, **kwargs)
-                calls.append(command)
+                calls.append(capture_delivery_call(command))
                 return subprocess.CompletedProcess(command, 0)
 
             with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
@@ -6628,7 +6706,7 @@ class PendingMarkerTests(unittest.TestCase):
             with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=OSError("exec failed")), redirect_stderr(err):
                 self.assertFalse(watcher.scan_once(args, seen, [path]))
             self.assertEqual({}, seen)
-            self.assertIn("pending delivery launch failed: exec failed", err.getvalue())
+            self.assertIn("pending delivery failed: exec failed", err.getvalue())
 
     def test_manager_delivery_launch_failure_is_retryable(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -6643,7 +6721,7 @@ class PendingMarkerTests(unittest.TestCase):
             with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=OSError("exec failed")), redirect_stderr(err):
                 self.assertFalse(watcher.scan_once(args, seen, [todo]))
             self.assertEqual({}, seen)
-            self.assertIn("manager delivery launch failed: exec failed", err.getvalue())
+            self.assertIn("manager delivery failed: exec failed", err.getvalue())
 
     def test_cli_emails_human_when_watcher_crashes(self) -> None:
         from omo_manager import omo_pending_watch as watcher

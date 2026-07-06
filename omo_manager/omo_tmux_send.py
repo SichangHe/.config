@@ -12,57 +12,52 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+DEFAULT_TMUX_ENTER_COUNT = int(os.environ.get("OMO_MANAGER_TMUX_ENTER_COUNT", os.environ.get("OMO_DISPATCH_TMUX_ENTER_COUNT", "2")))
+DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_TMUX_SUBMIT_VERIFY_TIMEOUT_S", "5"))
+
 try:
-    from omo_manager.omo_pending_digest import pending_tail_digest
     from omo_manager.omo_codex_status import (
         CODEX_EMPTY_INPUT_TEXTS,
-        COMPACTION_WAIT_LINES,
-        DEFAULT_COMPACTION_WAIT_TIMEOUT_S,
+        CODEX_RUNNING_EMPTY_INPUT_TEXTS,
         Args as StatusArgs,
         current_block,
         current_input_text,
-        has_compacting_indicator,
         has_plan_prompt,
         inspect,
-        is_stock_placeholder_input_text,
         status,
-        submit_stuck_input_if_present,
         tail,
-        wait_while_compacting,
     )
 except ModuleNotFoundError:
-    from omo_pending_digest import pending_tail_digest
     from omo_codex_status import (
         CODEX_EMPTY_INPUT_TEXTS,
-        COMPACTION_WAIT_LINES,
-        DEFAULT_COMPACTION_WAIT_TIMEOUT_S,
+        CODEX_RUNNING_EMPTY_INPUT_TEXTS,
         Args as StatusArgs,
         current_block,
         current_input_text,
-        has_compacting_indicator,
         has_plan_prompt,
         inspect,
-        is_stock_placeholder_input_text,
         status,
-        submit_stuck_input_if_present,
         tail,
-        wait_while_compacting,
     )
+
+
+CODEX_PLACEHOLDER_INPUT_TEXTS = CODEX_EMPTY_INPUT_TEXTS | CODEX_RUNNING_EMPTY_INPUT_TEXTS
+
+
+@dataclass(frozen=True)
+class CodexSendOptions:
+    enter_count: int
+    enter_delay_s: float
+    dry_run: bool
+    submit_verify_timeout_s: float = DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S
+    allow_plan_prompt_enter: bool = False
 
 
 @dataclass(frozen=True)
 class Args:
     target: str
     message_file: Path | None
-    enter_count: int
-    enter_delay_s: float
-    ready_timeout_s: float
-    dry_run: bool
-    pending_root: Path | None = None
-    pending_file: Path | None = None
-    pending_line: int = 0
-    pending_digest: str = ""
-    submit_verify_timeout_s: float = 0
+    options: CodexSendOptions
     async_mode: bool = False
     async_notify_target: str = ""
     async_notify_enter_count: int = 1
@@ -70,22 +65,15 @@ class Args:
     async_cleanup_message_file: bool = False
     async_result: str = ""
     async_result_dir: Path | None = None
-    allow_plan_prompt_enter: bool = False
 
 
 class ParsedArgs(argparse.Namespace):
     target: str | None = None
     message_file: Path | None = None
-    enter: bool = False
     enter_count: int = 1
     enter_delay_s: float = 0.15
-    ready_timeout_s: float = 0
-    submit_verify_timeout_s: float = 5
+    submit_verify_timeout_s: float = DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S
     dry_run: bool = False
-    pending_root: Path | None = None
-    pending_file: Path | None = None
-    pending_line: int = 0
-    pending_digest: str = ""
     async_mode: bool = False
     async_notify_target: str = ""
     async_notify_enter_count: int = 1
@@ -100,18 +88,12 @@ def parse_args(argv: list[str]) -> Args:
     parser = argparse.ArgumentParser(description=__doc__)
     _ = parser.add_argument("--target", help="tmux target pane/window, e.g. cfg:1.0")
     _ = parser.add_argument("--message-file", type=Path, help="Read prompt text from this file.")
-    enter_group = parser.add_mutually_exclusive_group()
-    _ = enter_group.add_argument("--enter", dest="enter", action="store_true", help="Send Enter after pasting.")
-    _ = enter_group.add_argument("--no-enter", dest="enter", action="store_false", help="Paste only; default.")
-    _ = parser.add_argument("--enter-count", type=int, default=1, help="Number of Enter keys to send when submitting; default: 1.")
+    _ = parser.add_argument("--enter-count", type=int, default=1, help="Number of Enter keys to send after paste; default: 1.")
     _ = parser.add_argument("--enter-delay-s", type=float, default=0.15, help="Delay between repeated Enter keys; default: 0.15.")
-    _ = parser.add_argument("--ready-timeout-s", type=float, default=0, help="When submitting to Codex, wait up to this many seconds for an idle input box before paste; default: 0.")
-    _ = parser.add_argument("--submit-verify-timeout-s", type=float, default=5, help="After Enter, wait up to this many seconds to verify Codex no longer has the prompt in its input; default: 5.")
+    _ = parser.add_argument("--submit-verify-timeout-s", type=float, default=DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S, help="After Enter, wait up to this many seconds to verify Codex starts running.")
+    _ = parser.add_argument("--enter", action="store_true", help=argparse.SUPPRESS)
+    _ = parser.add_argument("--ready-timeout-s", type=float, help=argparse.SUPPRESS)
     _ = parser.add_argument("--dry-run", action="store_true", help="Validate inputs and print planned tmux actions without touching tmux.")
-    _ = parser.add_argument("--pending-root", type=Path, help="Skip paste unless the pending marker still exists under this root.")
-    _ = parser.add_argument("--pending-file", type=Path, help="Root-relative pending marker file.")
-    _ = parser.add_argument("--pending-line", type=int, default=0, help="One-based pending marker line.")
-    _ = parser.add_argument("--pending-digest", default="", help="Optional digest of the marker context.")
     _ = parser.add_argument(
         "--async",
         dest="async_mode",
@@ -125,28 +107,27 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--allow-plan-prompt-enter", action="store_true", help=argparse.SUPPRESS)
     _ = parser.add_argument("--async-worker", action="store_true", help=argparse.SUPPRESS)
     _ = parser.add_argument("--async-cleanup-message-file", action="store_true", help=argparse.SUPPRESS)
-    parser.set_defaults(enter=False)
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     if parsed.enter_count < 1:
         parser.error("--enter-count must be positive.")
     if parsed.enter_delay_s < 0:
         parser.error("--enter-delay-s must be non-negative.")
-    if parsed.ready_timeout_s < 0:
-        parser.error("--ready-timeout-s must be non-negative.")
     if parsed.submit_verify_timeout_s < 0:
         parser.error("--submit-verify-timeout-s must be non-negative.")
-    if parsed.async_notify_enter_count < 0:
-        parser.error("--async-notify-enter-count must be non-negative.")
-    if any((parsed.pending_root, parsed.pending_file, parsed.pending_line)) and not all((parsed.pending_root, parsed.pending_file, parsed.pending_line > 0)):
-        parser.error("--pending-root, --pending-file, and --pending-line must be passed together.")
+    if parsed.async_notify_enter_count < 1:
+        parser.error("--async-notify-enter-count must be positive.")
+    options = CodexSendOptions(
+        parsed.enter_count,
+        parsed.enter_delay_s,
+        parsed.dry_run,
+        parsed.submit_verify_timeout_s,
+        parsed.allow_plan_prompt_enter,
+    )
     if parsed.async_result:
         return Args(
             "",
             None,
-            0,
-            parsed.enter_delay_s,
-            0,
-            parsed.dry_run,
+            options,
             async_result=parsed.async_result,
         )
     if not parsed.target:
@@ -156,15 +137,7 @@ def parse_args(argv: list[str]) -> Args:
     return Args(
         parsed.target,
         parsed.message_file,
-        parsed.enter_count if parsed.enter else 0,
-        parsed.enter_delay_s,
-        parsed.ready_timeout_s if parsed.enter else 0,
-        parsed.dry_run,
-        parsed.pending_root,
-        parsed.pending_file,
-        parsed.pending_line,
-        parsed.pending_digest,
-        parsed.submit_verify_timeout_s if parsed.enter else 0,
+        options,
         parsed.async_mode,
         parsed.async_notify_target,
         parsed.async_notify_enter_count,
@@ -172,16 +145,38 @@ def parse_args(argv: list[str]) -> Args:
         parsed.async_cleanup_message_file,
         parsed.async_result,
         parsed.async_result_dir,
-        parsed.allow_plan_prompt_enter,
     )
 
 
 def read_message(args: Args) -> str:
     if args.message_file is None:
         raise RuntimeError("--message-file is required.")
-    if not args.message_file.is_file():
-        raise RuntimeError(f"message file not found: {args.message_file}")
-    return args.message_file.read_text(encoding="utf-8")
+    return read_message_file(args.message_file)
+
+
+def read_message_file(message_file: Path) -> str:
+    if not message_file.is_file():
+        raise RuntimeError(f"message file not found: {message_file}")
+    return message_file.read_text(encoding="utf-8")
+
+
+def validate_options(options: CodexSendOptions) -> None:
+    if options.enter_count < 1:
+        raise RuntimeError("enter_count must be positive")
+    if options.enter_delay_s < 0:
+        raise RuntimeError("enter_delay_s must be non-negative")
+    if options.submit_verify_timeout_s < 0:
+        raise RuntimeError("submit_verify_timeout_s must be non-negative")
+
+
+def send_to_codex(target: str, message: str, options: CodexSendOptions | None = None) -> None:
+    selected = options or CodexSendOptions(1, 0.15, False)
+    validate_options(selected)
+    run_tmux(target, message, selected)
+
+
+def send_message_file_to_codex(target: str, message_file: Path, options: CodexSendOptions | None = None) -> None:
+    send_to_codex(target, read_message_file(message_file), options)
 
 
 def write_private_temp(message: str) -> Path:
@@ -291,53 +286,6 @@ def query_async_result(raw: str) -> int:
     return 0 if status_text in {"pending", "running", "succeeded"} else 1
 
 
-def wait_ready(args: Args) -> None:
-    if args.ready_timeout_s <= 0:
-        return
-    deadline_s = time.monotonic() + args.ready_timeout_s
-    last_status = "unknown"
-    while True:
-        lines = tail(args.target, 80)
-        last_status = status(lines, current_block(lines))
-        if last_status == "not_codex":
-            raise RuntimeError(f"target is not a Codex pane: {args.target}")
-        if last_status == "error":
-            raise RuntimeError(f"target is in Codex error state: {args.target}")
-        if last_status == "ready":
-            return
-        if last_status == "stuck_input":
-            return
-        if time.monotonic() >= deadline_s:
-            raise RuntimeError(f"target not ready after {args.ready_timeout_s:g}s: {last_status}")
-        time.sleep(min(0.5, max(0.05, deadline_s - time.monotonic())))
-
-
-def pending_marker_present(args: Args) -> bool:
-    if args.pending_root is None or args.pending_file is None:
-        return True
-    path = args.pending_root / args.pending_file
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return False
-    idx = args.pending_line - 1
-    if idx < 0 or idx >= len(lines) or lines[idx].strip() != "(pending)":
-        return False
-    if not args.pending_digest:
-        return True
-    pending_tail = "\n".join(lines[idx:])
-    digest = pending_tail_digest(args.pending_file, args.pending_line, pending_tail)
-    return digest == args.pending_digest
-
-
-def message_probe(message: str) -> str:
-    for line in message.splitlines():
-        probe = line.strip()
-        if probe:
-            return probe[:80]
-    return ""
-
-
 def message_probes(message: str) -> list[str]:
     probes: list[str] = []
     for line in message.splitlines():
@@ -353,35 +301,20 @@ def inspect_lines_for_message(message: str) -> int:
     return min(2000, max(80, len(message.splitlines()) + 20))
 
 
-def input_has_probe(lines: list[str], probe: str) -> bool:
-    return bool(probe and probe in current_input_text(lines))
-
-
-def input_has_any_probe(lines: list[str], probes: list[str]) -> bool:
-    input_text = current_input_text(lines)
-    return any(probe in input_text for probe in probes)
-
-
-def compaction_wait_timeout_s(args: Args) -> float:
-    if "OMO_CODEX_COMPACTION_WAIT_TIMEOUT_S" in os.environ:
-        return DEFAULT_COMPACTION_WAIT_TIMEOUT_S
-    return max(args.ready_timeout_s, DEFAULT_COMPACTION_WAIT_TIMEOUT_S)
-
-
-def wait_compaction_over_before_send(args: Args, n_lines: int = COMPACTION_WAIT_LINES) -> None:
-    try:
-        _ = wait_while_compacting(args.target, n_lines, compaction_wait_timeout_s(args))
-    except TimeoutError as exc:
-        raise RuntimeError(str(exc)) from exc
-
-
-def require_codex_target(args: Args, n_lines: int = 80) -> None:
-    lines = tail(args.target, n_lines)
+def require_codex_target(target: str, n_lines: int = 80) -> str:
+    lines = tail(target, n_lines)
     current_status = status(lines, current_block(lines))
     if current_status == "not_codex":
-        raise RuntimeError(f"target is not a Codex pane: {args.target}")
+        raise RuntimeError(f"target is not a Codex pane: {target}")
     if current_status == "error":
-        raise RuntimeError(f"target is in Codex error state: {args.target}")
+        raise RuntimeError(f"target is in Codex error state: {target}")
+    return current_status
+
+
+def require_sendable_codex_target(target: str, n_lines: int = 80) -> None:
+    current_status = require_codex_target(target, n_lines)
+    if current_status not in {"ready", "running", "stuck_input", "waiting_subagent"}:
+        raise RuntimeError(f"target is not a supported Codex send state before paste: {target} status={current_status}")
 
 
 def send_literal(target: str, text: str) -> None:
@@ -397,196 +330,153 @@ def send_enter(target: str) -> None:
     _ = subprocess.run(["tmux", "send-keys", "-t", target, "Enter"], timeout=5, check=True)
 
 
-def wait_paste_visible(args: Args, message: str) -> None:
-    if args.enter_count <= 0 or args.submit_verify_timeout_s <= 0:
+def wait_paste_visible(target: str, message: str, options: CodexSendOptions) -> None:
+    if options.submit_verify_timeout_s <= 0:
         return
     probes = message_probes(message)
     if not probes:
         return
     n_lines = inspect_lines_for_message(message)
-    deadline_s = time.monotonic() + args.submit_verify_timeout_s
+    deadline_s = time.monotonic() + options.submit_verify_timeout_s
     last_status = "unknown"
     last_input = ""
     while True:
-        lines = tail(args.target, n_lines)
+        lines = tail(target, n_lines)
         last_status = status(lines, current_block(lines))
-        if last_status == "not_codex":
-            return
+        if last_status in {"not_codex", "error"}:
+            raise RuntimeError(f"target left supported Codex state before submit: {target} status={last_status}")
         input_text = current_input_text(lines)
-        if has_compacting_indicator(lines):
-            wait_compaction_over_before_send(args, n_lines)
-            deadline_s = time.monotonic() + args.submit_verify_timeout_s
-            continue
-        if input_text and input_text not in CODEX_EMPTY_INPUT_TEXTS and any(probe in input_text for probe in probes):
+        if input_text and input_text not in CODEX_PLACEHOLDER_INPUT_TEXTS and all(probe in input_text for probe in probes):
             return
         last_input = "" if input_text in CODEX_EMPTY_INPUT_TEXTS else input_text
         now_s = time.monotonic()
         if now_s >= deadline_s:
             suffix = "input box has different text" if last_input else "prompt not visible in input"
-            raise RuntimeError(f"Codex paste not verified after {args.submit_verify_timeout_s:g}s: {suffix}, status={last_status}")
+            raise RuntimeError(f"Codex paste not verified after {options.submit_verify_timeout_s:g}s: {suffix}, status={last_status}")
         time.sleep(min(0.25, max(0.05, deadline_s - now_s)))
 
 
-def verify_placeholder_paste(args: Args, message: str) -> bool:
+def verify_placeholder_paste(target: str, message: str, options: CodexSendOptions) -> bool:
     submitted_text = message.strip()
-    if args.enter_count <= 0 or args.submit_verify_timeout_s <= 0 or submitted_text not in CODEX_EMPTY_INPUT_TEXTS:
+    if options.submit_verify_timeout_s <= 0 or submitted_text not in CODEX_PLACEHOLDER_INPUT_TEXTS:
         return False
     sentinel = f"__omo_paste_probe_{uuid.uuid4().hex[:8]}__"
     n_lines = inspect_lines_for_message(f"{message}\n{sentinel}")
-    deadline_s = time.monotonic() + args.submit_verify_timeout_s
-    send_literal(args.target, sentinel)
+    deadline_s = time.monotonic() + options.submit_verify_timeout_s
+    send_literal(target, sentinel)
     while True:
-        input_text = current_input_text(tail(args.target, n_lines))
+        input_text = current_input_text(tail(target, n_lines))
         if sentinel in input_text and input_text.endswith(sentinel) and input_text[: -len(sentinel)].strip() == submitted_text:
-            send_backspaces(args.target, len(sentinel))
-            wait_probe_removed(args, sentinel, n_lines, max(deadline_s, time.monotonic() + 1.0))
+            send_backspaces(target, len(sentinel))
+            wait_probe_removed(target, options, sentinel, n_lines, max(deadline_s, time.monotonic() + 1.0))
             return True
         now_s = time.monotonic()
         if now_s >= deadline_s:
             if sentinel in input_text:
-                send_backspaces(args.target, len(sentinel))
-                wait_probe_removed(args, sentinel, n_lines, max(deadline_s, time.monotonic() + 1.0))
-            raise RuntimeError(f"Codex paste not verified after {args.submit_verify_timeout_s:g}s: placeholder probe did not attach to prompt")
+                send_backspaces(target, len(sentinel))
+                wait_probe_removed(target, options, sentinel, n_lines, max(deadline_s, time.monotonic() + 1.0))
+            raise RuntimeError(f"Codex paste not verified after {options.submit_verify_timeout_s:g}s: placeholder probe did not attach to prompt")
         time.sleep(min(0.25, max(0.05, deadline_s - now_s)))
 
 
-def wait_probe_removed(args: Args, probe: str, n_lines: int, deadline_s: float) -> None:
+def wait_probe_removed(target: str, options: CodexSendOptions, probe: str, n_lines: int, deadline_s: float) -> None:
     while True:
-        if probe not in current_input_text(tail(args.target, n_lines)):
+        if probe not in current_input_text(tail(target, n_lines)):
             return
         now_s = time.monotonic()
         if now_s >= deadline_s:
-            raise RuntimeError(f"Codex paste cleanup not verified after {args.submit_verify_timeout_s:g}s: placeholder probe still in input")
+            raise RuntimeError(f"Codex paste cleanup not verified after {options.submit_verify_timeout_s:g}s: placeholder probe still in input")
         time.sleep(min(0.25, max(0.05, deadline_s - now_s)))
 
 
-def wait_input_ready_before_paste(args: Args, n_lines: int) -> None:
-    submit_timeout_s = args.submit_verify_timeout_s if args.submit_verify_timeout_s > 0 else 1.0
-    timeout_s = max(args.ready_timeout_s, submit_timeout_s)
-    deadline_s = time.monotonic() + timeout_s
-    last_status = "unknown"
-    last_input = ""
-    while True:
-        lines = tail(args.target, n_lines)
-        last_status = status(lines, current_block(lines))
-        if last_status == "not_codex":
-            raise RuntimeError(f"target is not a Codex pane: {args.target}")
-        if last_status == "error":
-            raise RuntimeError(f"target is in Codex error state: {args.target}")
-        input_text = current_input_text(lines)
-        if last_status == "ready" and (not input_text or is_stock_placeholder_input_text(input_text)):
-            return
-        last_input = input_text
-        now_s = time.monotonic()
-        if now_s >= deadline_s:
-            preview = last_input.replace("\n", " ")[:80]
-            raise RuntimeError(f"Codex input not ready before paste after {timeout_s:g}s: status={last_status} input={preview!r}")
-        time.sleep(min(0.25, max(0.05, deadline_s - now_s)))
-
-
-def verify_submit(args: Args, message: str) -> None:
-    if args.enter_count <= 0 or args.submit_verify_timeout_s <= 0:
+def verify_submit(target: str, message: str, options: CodexSendOptions) -> None:
+    if options.submit_verify_timeout_s <= 0:
         return
-    probe = message_probe(message)
-    if not probe:
+    probes = message_probes(message)
+    if not probes:
         return
-    submitted_text = message.strip()
     n_lines = inspect_lines_for_message(message)
-    deadline_s = time.monotonic() + args.submit_verify_timeout_s
+    deadline_s = time.monotonic() + options.submit_verify_timeout_s
     last_status = "unknown"
     next_enter_s = 0.0
     while True:
-        lines = tail(args.target, n_lines)
+        lines = tail(target, n_lines)
         last_status = status(lines, current_block(lines))
         if last_status == "not_codex":
-            return
+            raise RuntimeError(f"target is not a Codex pane after submit: {target}")
+        if last_status == "error":
+            raise RuntimeError(f"target is in Codex error state after submit: {target}")
         input_text = current_input_text(lines)
-        if not input_text:
+        prompt_still_present = any(probe in input_text for probe in probes)
+        if last_status in {"running", "waiting_subagent"} and not prompt_still_present:
             return
-        if has_plan_prompt(lines) and not args.allow_plan_prompt_enter:
+        if has_plan_prompt(lines) and not options.allow_plan_prompt_enter:
             raise RuntimeError("Codex submit blocked by unsafe Plan prompt")
-        if has_compacting_indicator(lines):
-            wait_compaction_over_before_send(args, n_lines)
-            deadline_s = time.monotonic() + args.submit_verify_timeout_s
-            continue
-        if input_text in CODEX_EMPTY_INPUT_TEXTS:
-            if input_text != submitted_text or last_status == "running":
-                return
-            now_s = time.monotonic()
-            if now_s >= deadline_s:
-                raise RuntimeError(f"Codex submit not verified after {args.submit_verify_timeout_s:g}s: prompt still in input, status={last_status}")
-            time.sleep(min(0.25, max(0.05, deadline_s - now_s)))
-            continue
         now_s = time.monotonic()
-        if probe in input_text and now_s >= next_enter_s:
-            send_enter(args.target)
-            next_enter_s = now_s + max(args.enter_delay_s, 0.25)
+        if prompt_still_present and now_s >= next_enter_s:
+            send_enter(target)
+            next_enter_s = now_s + max(options.enter_delay_s, 0.25)
         if now_s >= deadline_s:
-            suffix = "prompt still in input" if probe in input_text else "input box still has text"
-            raise RuntimeError(f"Codex submit not verified after {args.submit_verify_timeout_s:g}s: {suffix}, status={last_status}")
+            suffix = "prompt still in input" if prompt_still_present else "target did not become running"
+            raise RuntimeError(f"Codex submit not verified after {options.submit_verify_timeout_s:g}s: {suffix}, status={last_status}")
         time.sleep(min(0.25, max(0.05, min(deadline_s, next_enter_s) - now_s)))
 
 
-def clear_stuck_input_before_send(args: Args) -> str:
+def clear_stuck_input_before_send(target: str, options: CodexSendOptions) -> str:
     try:
-        report = inspect(StatusArgs(args.target, 80))
+        report = inspect(StatusArgs(target, 80))
     except Exception:
         return ""
     if report.status != "stuck_input":
         return ""
-    result = submit_stuck_input_if_present(args.target, report, compaction_wait_timeout_s=compaction_wait_timeout_s(args))
-    if result == "sent_enter" and args.enter_delay_s > 0:
-        time.sleep(args.enter_delay_s)
-    return result
+    if not report.can_submit_input:
+        return "not_submitted"
+    try:
+        result = subprocess.run(["tmux", "send-keys", "-t", target, "Enter"], capture_output=True, text=True, timeout=5, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return "failed"
+    if result.returncode != 0:
+        return "failed"
+    if options.enter_delay_s > 0:
+        time.sleep(options.enter_delay_s)
+    return "sent_enter"
 
 
-def run_tmux(args: Args, message: str) -> None:
+def run_tmux(target: str, message: str, options: CodexSendOptions) -> None:
     temp_path = write_private_temp(message)
     buffer_name = f"omo-tmux-send-{os.getpid()}-{uuid.uuid4().hex}"
     try:
-        if args.dry_run:
+        if options.dry_run:
             _ = print(f"would load tmux buffer {buffer_name} from {temp_path}")
-            _ = print(f"would paste buffer {buffer_name} to {args.target}")
-            for _ in range(args.enter_count):
-                _ = print(f"would send Enter to {args.target}")
+            _ = print(f"would paste buffer {buffer_name} to {target}")
+            for _ in range(options.enter_count):
+                _ = print(f"would send Enter to {target}")
             return
-        if not pending_marker_present(args):
-            raise RuntimeError("pending marker cleared before tmux paste")
-        wait_compaction_over_before_send(args)
-        clear_result = clear_stuck_input_before_send(args)
-        if clear_result in {"compacting", "failed"} or clear_result.startswith("not_safe:"):
+        require_sendable_codex_target(target, inspect_lines_for_message(message))
+        clear_result = clear_stuck_input_before_send(target, options)
+        if clear_result == "failed":
             raise RuntimeError(f"target stuck input not cleared before tmux paste: {clear_result}")
-        wait_ready(args)
-        if not pending_marker_present(args):
-            raise RuntimeError("pending marker cleared before tmux paste")
-        wait_compaction_over_before_send(args)
-        clear_result = clear_stuck_input_before_send(args)
-        if clear_result in {"compacting", "failed"} or clear_result.startswith("not_safe:"):
-            raise RuntimeError(f"target stuck input not cleared before tmux paste: {clear_result}")
-        require_codex_target(args, inspect_lines_for_message(message))
-        wait_input_ready_before_paste(args, inspect_lines_for_message(message))
-        if not pending_marker_present(args):
-            raise RuntimeError("pending marker cleared before tmux paste")
+        require_sendable_codex_target(target, inspect_lines_for_message(message))
         _ = subprocess.run(["tmux", "load-buffer", "-b", buffer_name, str(temp_path)], timeout=5, check=True)
-        _ = subprocess.run(["tmux", "paste-buffer", "-b", buffer_name, "-t", args.target], timeout=5, check=True)
-        if not verify_placeholder_paste(args, message):
-            wait_paste_visible(args, message)
+        _ = subprocess.run(["tmux", "paste-buffer", "-b", buffer_name, "-t", target], timeout=5, check=True)
+        if not verify_placeholder_paste(target, message, options):
+            wait_paste_visible(target, message, options)
         enter_n_lines = inspect_lines_for_message(message)
-        for idx in range(args.enter_count):
+        for idx in range(options.enter_count):
             if idx:
-                time.sleep(args.enter_delay_s)
-            wait_compaction_over_before_send(args, enter_n_lines)
-            if has_plan_prompt(tail(args.target, enter_n_lines)) and not args.allow_plan_prompt_enter:
+                time.sleep(options.enter_delay_s)
+            if has_plan_prompt(tail(target, enter_n_lines)) and not options.allow_plan_prompt_enter:
                 raise RuntimeError("Codex submit blocked by unsafe Plan prompt")
-            send_enter(args.target)
-        verify_submit(args, message)
+            send_enter(target)
+        verify_submit(target, message, options)
     finally:
         temp_path.unlink(missing_ok=True)
-        if not args.dry_run:
+        if not options.dry_run:
             _ = subprocess.run(["tmux", "delete-buffer", "-b", buffer_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=False)
 
 
 def worker_argv(args: Args, job: AsyncJob) -> list[str]:
+    options = args.options
     argv = [
         sys.executable,
         str(Path(__file__).resolve()),
@@ -602,41 +492,20 @@ def worker_argv(args: Args, job: AsyncJob) -> list[str]:
         args.async_notify_target,
         "--async-notify-enter-count",
         str(args.async_notify_enter_count),
+        "--enter-count",
+        str(options.enter_count),
+        "--enter-delay-s",
+        str(options.enter_delay_s),
+        "--submit-verify-timeout-s",
+        str(options.submit_verify_timeout_s),
     ]
-    if args.enter_count:
-        argv.extend(
-            [
-                "--enter",
-                "--enter-count",
-                str(args.enter_count),
-                "--enter-delay-s",
-                str(args.enter_delay_s),
-                "--submit-verify-timeout-s",
-                str(args.submit_verify_timeout_s),
-                "--ready-timeout-s",
-                str(args.ready_timeout_s),
-            ]
-        )
-    if args.allow_plan_prompt_enter:
+    if options.allow_plan_prompt_enter:
         argv.append("--allow-plan-prompt-enter")
-    if args.pending_root is not None and args.pending_file is not None:
-        argv.extend(
-            [
-                "--pending-root",
-                str(args.pending_root),
-                "--pending-file",
-                str(args.pending_file),
-                "--pending-line",
-                str(args.pending_line),
-            ]
-        )
-    if args.pending_digest:
-        argv.extend(["--pending-digest", args.pending_digest])
     return argv
 
 
 def launch_async(args: Args, message: str) -> None:
-    if args.dry_run:
+    if args.options.dry_run:
         _ = print("would start async tmux send")
         _ = print(f"would notify {args.async_notify_target} after completion")
         return
@@ -676,12 +545,17 @@ def notify_async_result(args: Args, ok: bool, result: str) -> None:
     if not args.async_notify_target:
         return
     message = async_result_message(args, ok, result)
-    notify_path = write_private_temp(message)
-    try:
-        notify_args = Args(args.async_notify_target, notify_path, args.async_notify_enter_count, args.enter_delay_s, 0, False)
-        run_tmux(notify_args, message)
-    finally:
-        notify_path.unlink(missing_ok=True)
+    send_to_codex(
+        args.async_notify_target,
+        message,
+        CodexSendOptions(
+            args.async_notify_enter_count,
+            args.options.enter_delay_s,
+            False,
+            args.options.submit_verify_timeout_s,
+            args.options.allow_plan_prompt_enter,
+        ),
+    )
 
 
 def run_async_worker(args: Args) -> int:
@@ -691,7 +565,7 @@ def run_async_worker(args: Args) -> int:
     try:
         if job is not None:
             write_status(job, "running")
-        run_tmux(args, read_message(args))
+        send_to_codex(args.target, read_message(args), args.options)
     except Exception as exc:
         ok = False
         result = str(exc)
@@ -723,7 +597,9 @@ def main(argv: list[str]) -> int:
             return 0
         if args.async_worker:
             return run_async_worker(args)
-        run_tmux(args, read_message(args))
+        if args.message_file is None:
+            raise RuntimeError("--message-file is required.")
+        send_message_file_to_codex(args.target, args.message_file, args.options)
     except Exception as exc:
         print(f"omo_tmux_send: {exc}", file=sys.stderr)
         return 1

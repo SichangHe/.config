@@ -29,10 +29,12 @@ from urllib.parse import urlparse
 try:
     from .omo_email_subject import subject_base
     from .omo_agent_status import TaskFrontmatterError, parse_task_metadata
+    from .omo_tmux_send import CodexSendOptions, DEFAULT_TMUX_ENTER_COUNT, send_to_codex
 except ImportError:
     try:
         from omo_email_subject import subject_base
         from omo_agent_status import TaskFrontmatterError, parse_task_metadata
+        from omo_tmux_send import CodexSendOptions, DEFAULT_TMUX_ENTER_COUNT, send_to_codex
     except ImportError:
         subject_base = None
         TaskFrontmatterError = ValueError
@@ -84,9 +86,7 @@ DEFAULT_IMAP_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_EMAIL_IMAP_TIMEOUT_S"
 DEFAULT_PULL_INTERVAL_S = float(os.environ.get("OMO_MANAGER_EMAIL_PULL_INTERVAL_S", "600"))
 DEFAULT_IDLE_EXIT_AFTER_S = float(os.environ.get("OMO_MANAGER_EMAIL_IDLE_EXIT_AFTER_S", "3600"))
 DEFAULT_PROCESSED_RECOVERY_UID_WINDOW = int(os.environ.get("OMO_MANAGER_EMAIL_PROCESSED_RECOVERY_UID_WINDOW", "256"))
-DEFAULT_EMAIL_PUSH_READY_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_EMAIL_PUSH_READY_TIMEOUT_S", "2"))
 DEFAULT_EMAIL_PUSH_SUBMIT_VERIFY_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_EMAIL_PUSH_SUBMIT_VERIFY_TIMEOUT_S", "1"))
-DEFAULT_EMAIL_PUSH_PROCESS_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_EMAIL_PUSH_PROCESS_TIMEOUT_S", str(max(30.0, DEFAULT_EMAIL_PUSH_READY_TIMEOUT_S + (2 * DEFAULT_EMAIL_PUSH_SUBMIT_VERIFY_TIMEOUT_S) + 15.0))))
 DEFAULT_MANAGER_UNREAD_COMPRESSION_THRESHOLD = int(os.environ.get("OMO_MANAGER_EMAIL_UNREAD_COMPRESSION_THRESHOLD", "16"))
 DEFAULT_MANAGER_RECENT_CLEANUP_THRESHOLD = int(os.environ.get("OMO_MANAGER_EMAIL_RECENT_CLEANUP_THRESHOLD", "64"))
 DEFAULT_MANAGER_RECENT_CLEANUP_WINDOW_S = float(os.environ.get("OMO_MANAGER_EMAIL_RECENT_CLEANUP_WINDOW_S", str(24 * 60 * 60)))
@@ -96,8 +96,10 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 @dataclass(frozen=True)
 class EmailPush:
     line_no: int
-    command: list[str]
-    env: dict[str, str]
+    target: str
+    text: str
+    root: Path
+    pending_file: Path
 
 
 @dataclass(frozen=True)
@@ -904,17 +906,33 @@ def append_pending(root: Path, txt_path: Path, manager_file: Path | None = None,
     return line_no + 1
 
 
-def run_email_push(push: EmailPush) -> bool:
+def pending_marker_present(root: Path, pending_file: Path, pending_line: int) -> bool:
     try:
-        result = subprocess.run(push.command, check=False, env=push.env, timeout=DEFAULT_EMAIL_PUSH_PROCESS_TIMEOUT_S)
-    except subprocess.TimeoutExpired as exc:
-        logging.error("email pending async push timed out: line=%s timeout_s=%s command=%s", push.line_no, exc.timeout, shell_join(push.command))
+        lines = (root / pending_file).read_text(encoding="utf-8").splitlines()
+    except OSError:
         return False
-    except OSError as exc:
+    idx = pending_line - 1
+    return 0 <= idx < len(lines) and lines[idx].strip() == "(pending)"
+
+
+def run_email_push(push: EmailPush) -> bool:
+    if not pending_marker_present(push.root, push.pending_file, push.line_no):
+        logging.error("email pending async push skipped: line=%s marker cleared", push.line_no)
+        return False
+    try:
+        send_to_codex(
+            push.target,
+            push.text,
+            CodexSendOptions(
+                DEFAULT_TMUX_ENTER_COUNT,
+                0.15,
+                False,
+                DEFAULT_EMAIL_PUSH_SUBMIT_VERIFY_TIMEOUT_S,
+                True,
+            ),
+        )
+    except Exception as exc:
         logging.error("email pending async push failed: line=%s error=%s", push.line_no, exc)
-        return False
-    if result.returncode != 0:
-        logging.error("email pending async push failed: line=%s status=%s", push.line_no, result.returncode)
         return False
     return True
 
@@ -943,45 +961,32 @@ def wait_email_pushes() -> None:
     _email_push_queue.join()
 
 
+def email_tmux_push(args: Args, text: str, ref: Path, line_no: int) -> EmailPush:
+    return EmailPush(line_no, args.manager_target, text, args.root, ref)
+
+
 def push_email_ref(args: Args, line_no: int) -> bool:
-    if not args.manager_url and not args.manager_target:
-        logging.error("email pending push failed: manager URL or target is required")
+    if not args.manager_target:
+        logging.error("email pending push failed: manager target is required")
         return False
     manager_file = current_manager_file(args)
     ref = manager_file.relative_to(args.root) if manager_file.is_relative_to(args.root) else manager_file
-    command = ["omo_push_to_manager.py", f"pending: file={ref} line={line_no} origin=human source=email action=ack-human", "--root", str(args.root), "--submit"]
-    command.extend(["--pending-file", str(ref), "--pending-line", str(line_no)])
-    if args.manager_target:
-        command.extend(["--manager-target", args.manager_target])
-    if args.manager_url:
-        command.extend(["--manager-url", args.manager_url])
-    env = os.environ.copy()
-    env["OMO_MANAGER_TMUX_READY_TIMEOUT_S"] = str(DEFAULT_EMAIL_PUSH_READY_TIMEOUT_S)
-    env["OMO_MANAGER_TMUX_SUBMIT_VERIFY_TIMEOUT_S"] = str(DEFAULT_EMAIL_PUSH_SUBMIT_VERIFY_TIMEOUT_S)
-    return run_email_push(EmailPush(line_no, command, env))
+    return run_email_push(email_tmux_push(args, f"pending: file={ref} line={line_no} origin=human source=email action=ack-human", Path(ref), line_no))
 
 
 def push_manager_mail_threshold_ref(args: Args, line_no: int, kind: str) -> bool:
-    if not args.manager_url and not args.manager_target:
-        logging.error("manager mail threshold push failed: kind=%s manager URL or target is required", kind)
+    if not args.manager_target:
+        logging.error("manager mail threshold push failed: kind=%s manager target is required", kind)
         return False
     manager_file = current_manager_file(args)
     ref = manager_file.relative_to(args.root) if manager_file.is_relative_to(args.root) else manager_file
-    command = ["omo_push_to_manager.py", f"pending: file={ref} line={line_no} origin=agent source=email-watcher action=no-human-ack kind={kind}", "--root", str(args.root), "--submit"]
-    command.extend(["--pending-file", str(ref), "--pending-line", str(line_no)])
-    if args.manager_target:
-        command.extend(["--manager-target", args.manager_target])
-    if args.manager_url:
-        command.extend(["--manager-url", args.manager_url])
-    env = os.environ.copy()
-    env["OMO_MANAGER_TMUX_READY_TIMEOUT_S"] = str(DEFAULT_EMAIL_PUSH_READY_TIMEOUT_S)
-    env["OMO_MANAGER_TMUX_SUBMIT_VERIFY_TIMEOUT_S"] = str(DEFAULT_EMAIL_PUSH_SUBMIT_VERIFY_TIMEOUT_S)
+    text = f"pending: file={ref} line={line_no} origin=agent source=email-watcher action=no-human-ack kind={kind}"
     try:
         start_email_push_worker()
     except RuntimeError as exc:
         logging.error("manager mail threshold async push worker start failed: kind=%s line=%s error=%s", kind, line_no, exc)
         return False
-    _email_push_queue.put(EmailPush(line_no, command, env))
+    _email_push_queue.put(email_tmux_push(args, text, Path(ref), line_no))
     logging.info("manager mail threshold async push queued: kind=%s line=%s", kind, line_no)
     return True
 

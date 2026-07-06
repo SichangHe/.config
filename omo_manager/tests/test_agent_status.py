@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from omo_manager.omo_agent_status import Args, TaskFrontmatterError, classify_task, format_problem_summary, load_local_env, load_task_state, main, parse_task_lines, parse_task_metadata, persistent_blocked_task_lines, registry_prune, session_records
 from omo_manager.omo_agent_status import SessionRecord, StatusRow, TaskLine
-from omo_manager.omo_codex_status import Report
+from omo_manager.omo_codex_status import Args as CodexStatusArgs, Report
 
 
 def task_frontmatter(status: str, runat: str = "cfg:1", managerat: str = "mgr:1", *, is_manager: bool = False, pending_items: tuple[str, ...] = (), blocked_on: str = "") -> str:
@@ -164,6 +164,40 @@ class AgentStatusTests(unittest.TestCase):
             text = out.getvalue()
             self.assertIn("blocked_idle: task=vl_submanager_current.md evidence=target=vl:15", text)
             self.assertNotIn("target=vl:10", text)
+
+    def test_blocked_retired_frontmatter_is_targetless(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nvl_submanager_current.md\n", encoding="utf-8")
+            _ = (root / "vl_submanager_current.md").write_text(
+                task_frontmatter(
+                    "blocked",
+                    runat="retired",
+                    managerat="wl:1",
+                    is_manager=True,
+                    blocked_on="persistent role waiting on lower manager reports; idle pane retired",
+                ),
+                encoding="utf-8",
+            )
+            out = StringIO()
+
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("not_codex", [])), redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+
+            current, _done, human_pending = load_task_state(root)
+            self.assertEqual({}, current)
+            self.assertEqual({"vl_submanager_current.md"}, human_pending)
+            self.assertEqual("", out.getvalue())
+
+    def test_retired_runat_requires_blocked_status(self) -> None:
+        with self.assertRaisesRegex(TaskFrontmatterError, "only valid"):
+            parse_task_metadata(task_frontmatter("running", runat="retired"))
+
+    def test_fake_blocked_runat_is_invalid(self) -> None:
+        with self.assertRaisesRegex(TaskFrontmatterError, "tmux target or `retired`"):
+            parse_task_metadata(task_frontmatter("blocked", runat="pb:blocked", blocked_on="waiting"))
 
     def test_persistent_blocked_task_lines_marks_role_from_latest_blocked_note(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -677,7 +711,7 @@ class AgentStatusTests(unittest.TestCase):
             _ = (root / "active.md").write_text(task_frontmatter("running", runat="wl:1", managerat="wl:2"), encoding="utf-8")
             report = Report("stuck_input", ["› manager status text"], "manager status text", True)
             out = StringIO()
-            def fake_inspect(args: object) -> Report:
+            def fake_inspect(args: object, **_: object) -> Report:
                 return report if getattr(args, "target") == "wl:1" else Report("running", ["working"])
 
             with patch("omo_manager.omo_agent_status.inspect", side_effect=fake_inspect), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present", return_value="sent_enter") as unstick, redirect_stdout(out):
@@ -697,6 +731,56 @@ class AgentStatusTests(unittest.TestCase):
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["› Use /skills to list available skills"])), patch("omo_manager.omo_agent_status.tmux_list_panes", return_value=["mgr:1"]), redirect_stdout(out):
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "mgr:1.0"]))
+            self.assertEqual("", out.getvalue())
+
+    def test_problems_only_interrupts_manager_waiting_on_subagent_without_reporting(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\n", encoding="utf-8")
+            report = Report("waiting_subagent", ["• Waiting for 019f3875-05fe-7583-ac1a-48abda94c6f9", "• Working (21s • esc to interrupt)", "• Messages to be submitted after next tool call (press esc to interrupt and send immediately)"])
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=report) as inspect_call, patch("omo_manager.omo_agent_status.interrupt_waiting_subagent_if_present", return_value="sent_escape") as interrupt, redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "mgr:1.0"]))
+            inspect_call.assert_called_once_with(CodexStatusArgs("mgr:1.0", 80), detect_waiting_subagent=True)
+            interrupt.assert_called_once_with("mgr:1.0", report)
+            self.assertEqual("", out.getvalue())
+
+    def test_problems_only_reports_manager_waiting_on_subagent_when_escape_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\n", encoding="utf-8")
+            report = Report("waiting_subagent", ["• Waiting for 019f3875-05fe-7583-ac1a-48abda94c6f9", "• Working (21s • esc to interrupt)", "• Messages to be submitted after next tool call (press esc to interrupt and send immediately)"])
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=report) as inspect_call, patch("omo_manager.omo_agent_status.interrupt_waiting_subagent_if_present", return_value="failed"), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "mgr:1.0"]))
+            inspect_call.assert_called_once_with(CodexStatusArgs("mgr:1.0", 80), detect_waiting_subagent=True)
+            text = out.getvalue()
+            self.assertIn("agent-problems: manager_waiting_subagent=1", text)
+            self.assertIn("manager_waiting_subagent: task=manager evidence=target=mgr:1.0 role=manager", text)
+            self.assertIn("interrupt=failed", text)
+
+    def test_problems_only_does_not_interrupt_worker_waiting_on_subagent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[{"task_file":"active.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
+            _ = (root / "active.md").write_text(task_frontmatter("running", runat="cfg:1.0", managerat="mgr:1"), encoding="utf-8")
+            out = StringIO()
+
+            def fake_inspect(args: object, **_: object) -> Report:
+                target = getattr(args, "target")
+                if target == "cfg:1.0":
+                    return Report("waiting_subagent", ["• Waiting for 019f3875-05fe-7583-ac1a-48abda94c6f9", "• Working (21s • esc to interrupt)", "• Messages to be submitted after next tool call (press esc to interrupt and send immediately)"])
+                return Report("running", ["manager active"])
+
+            with patch("omo_manager.omo_agent_status.inspect", side_effect=fake_inspect), patch("omo_manager.omo_agent_status.interrupt_waiting_subagent_if_present") as interrupt, redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "mgr:1.0"]))
+            interrupt.assert_not_called()
             self.assertEqual("", out.getvalue())
 
     def test_problems_only_reports_manager_compaction_reread_needed(self) -> None:
@@ -825,6 +909,66 @@ class AgentStatusTests(unittest.TestCase):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             self.assertIn("blocked_idle: task=role.md", out.getvalue())
 
+    def test_problems_only_ignores_ready_blocked_manager_with_recorded_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[{"task_file":"manager.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nmanager.md cfg 1\n", encoding="utf-8")
+            _ = (root / "manager.md").write_text(task_frontmatter("blocked", runat="cfg:1", is_manager=True, blocked_on="persistent submanager waiting on lower manager and human follow-up"), encoding="utf-8")
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["› Use /skills to list available skills"])), redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertEqual("", out.getvalue())
+
+    def test_problems_only_reports_ready_blocked_nonpersistent_manager(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[{"task_file":"manager.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nmanager.md cfg 1\n", encoding="utf-8")
+            _ = (root / "manager.md").write_text(task_frontmatter("blocked", runat="cfg:1", is_manager=True, blocked_on="waiting on worker report"), encoding="utf-8")
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["› Use /skills to list available skills"])), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertIn("blocked_idle: task=manager.md", out.getvalue())
+
+    def test_problems_only_reports_error_for_blocked_manager_with_recorded_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[{"task_file":"manager.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nmanager.md cfg 1\n", encoding="utf-8")
+            _ = (root / "manager.md").write_text(task_frontmatter("blocked", runat="cfg:1", is_manager=True, blocked_on="persistent submanager waiting on lower manager and human follow-up"), encoding="utf-8")
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("error", ["traceback"])), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertIn("error: task=manager.md", out.getvalue())
+
+    def test_problems_only_reports_not_codex_for_blocked_manager_with_recorded_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[{"task_file":"manager.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nmanager.md cfg 1\n", encoding="utf-8")
+            _ = (root / "manager.md").write_text(task_frontmatter("blocked", runat="cfg:1", is_manager=True, blocked_on="persistent submanager waiting on lower manager and human follow-up"), encoding="utf-8")
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("not_codex", [])), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertIn("not_codex: task=manager.md", out.getvalue())
+
+    def test_problems_only_reports_stuck_input_for_blocked_manager_with_recorded_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[{"task_file":"manager.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nmanager.md cfg 1\n", encoding="utf-8")
+            _ = (root / "manager.md").write_text(task_frontmatter("blocked", runat="cfg:1", is_manager=True, blocked_on="persistent submanager waiting on lower manager and human follow-up"), encoding="utf-8")
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("stuck_input", ["typed request"], "typed request", True)), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertIn("stuck_input: task=manager.md", out.getvalue())
+
     def test_problems_only_reports_ready_blocked_persistent_role_separate_note_form(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -937,9 +1081,9 @@ class AgentStatusTests(unittest.TestCase):
             with patch("omo_manager.omo_agent_status.inspect", side_effect=fake_inspect), redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             text = out.getvalue()
-            self.assertIn("agent-problems: blocked_idle=2", text)
+            self.assertIn("agent-problems: blocked_idle=1", text)
             self.assertIn("manager-action: blocked_idle>0 inspect blocked agents", text)
-            self.assertIn("blocked_idle: task=vl_supervisor_current_7404.md evidence=target=vl:7 role=blocked_idle_vl", text)
+            self.assertNotIn("blocked_idle: task=vl_supervisor_current_7404.md", text)
             self.assertIn("owner_target=vl:15", text)
             self.assertIn("blocked_idle: task=vl_worker.md evidence=target=vl:9 role=blocked_idle_vl_dependency", text)
             self.assertIn("image lacks codex", text)
@@ -981,7 +1125,7 @@ class AgentStatusTests(unittest.TestCase):
             _ = (root / "TODO.md").write_text("current:\nvl_submanager_current_8653.md vl 15\nvl_worker.md vl 1\n", encoding="utf-8")
             _ = (root / "vl_submanager_current_8653.md").write_text(task_frontmatter("running", runat="vl:15", managerat="wl:16.0", is_manager=True), encoding="utf-8")
             _ = (root / "vl_worker.md").write_text(task_frontmatter("blocked", runat="vl:1", managerat="vl:15", blocked_on="waiting on proof owner"), encoding="utf-8")
-            def fake_inspect(args: object) -> Report:
+            def fake_inspect(args: object, **_: object) -> Report:
                 return Report("running", ["working"]) if getattr(args, "target") == "vl:15" else Report("ready", ["idle"])
 
             out = StringIO()
@@ -997,7 +1141,7 @@ class AgentStatusTests(unittest.TestCase):
             _ = (root / "TODO.md").write_text("current:\n- `vl_submanager_current_8653.md` (`vl:15`)\n- `vl_worker.md` (`vl:1`)\n", encoding="utf-8")
             _ = (root / "vl_submanager_current_8653.md").write_text(task_frontmatter("running", runat="vl:15", managerat="wl:16.0", is_manager=True), encoding="utf-8")
             _ = (root / "vl_worker.md").write_text(task_frontmatter("blocked", runat="vl:1", managerat="vl:15", blocked_on="waiting on proof owner"), encoding="utf-8")
-            def fake_inspect(args: object) -> Report:
+            def fake_inspect(args: object, **_: object) -> Report:
                 return Report("running", ["working"]) if getattr(args, "target") == "vl:15" else Report("ready", ["idle"])
 
             out = StringIO()
@@ -1013,7 +1157,7 @@ class AgentStatusTests(unittest.TestCase):
             _ = (root / "TODO.md").write_text("current:\nvl_submanager_current_8653.md vl 15\nvl_worker.md vl 1\n", encoding="utf-8")
             _ = (root / "vl_submanager_current_8653.md").write_text(task_frontmatter("running", runat="vl:99", managerat="vl:15", is_manager=True), encoding="utf-8")
             _ = (root / "vl_worker.md").write_text(task_frontmatter("blocked", runat="vl:1", managerat="vl:15", blocked_on="waiting on proof owner"), encoding="utf-8")
-            def fake_inspect(args: object) -> Report:
+            def fake_inspect(args: object, **_: object) -> Report:
                 return Report("running", ["working"]) if getattr(args, "target") == "vl:15" else Report("ready", ["idle"])
 
             out = StringIO()
@@ -1038,9 +1182,9 @@ class AgentStatusTests(unittest.TestCase):
             with patch("omo_manager.omo_agent_status.inspect", side_effect=fake_inspect), redirect_stdout(out):
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry)]))
             text = out.getvalue()
-            self.assertIn("agent-status: not_codex=0 running=1 blocked_idle=1", text)
+            self.assertIn("agent-status: not_codex=0 running=1 blocked_idle=0", text)
             self.assertIn("running: task=vl_untracked.md", text)
-            self.assertIn("blocked_idle: task=vl_supervisor_current_7404.md", text)
+            self.assertNotIn("blocked_idle: task=vl_supervisor_current_7404.md", text)
 
     def test_problems_only_does_not_duplicate_blocked_idle_target_as_unmanaged_problem(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1070,7 +1214,7 @@ class AgentStatusTests(unittest.TestCase):
             _ = (root / "vl_dirty_audit.md").write_text(task_frontmatter("blocked", runat="vl:20", managerat="vl:15", blocked_on="waiting on proof owner"), encoding="utf-8")
             _ = (root / "vl_followup.md").write_text(task_frontmatter("done", runat="vl:20", managerat="vl:15"), encoding="utf-8")
             report = Report("stuck_input", ["Reported privately.", "› [Pasted Content 1024 chars][Pasted Content 1024 chars] #2", "  (pending)"], "[Pasted Content 1024 chars][Pasted Content 1024 chars] #2\n  (pending)", True)
-            def fake_inspect(args: object) -> Report:
+            def fake_inspect(args: object, **_: object) -> Report:
                 return report if getattr(args, "target") == "vl:20" else Report("running", ["working"])
 
             out = StringIO()
