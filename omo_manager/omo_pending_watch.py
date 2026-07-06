@@ -49,6 +49,9 @@ DEFAULT_STATE = default_state_dir() / "pending-watch-unused"
 DEFAULT_DIGEST_IDLE_AFTER_S = float(os.environ.get("OMO_MANAGER_DIGEST_IDLE_AFTER_S", "3600"))
 DEFAULT_AGENT_PROBLEM_INTERVAL_S = float(os.environ.get("OMO_MANAGER_AGENT_PROBLEM_INTERVAL_S", "300"))
 DEFAULT_AGENT_PROBLEM_REPEAT_S = float(os.environ.get("OMO_MANAGER_AGENT_PROBLEM_REPEAT_S", "1800"))
+BLOCKED_IDLE_BACKOFF_INITIAL_S = 600.0
+BLOCKED_IDLE_BACKOFF_MULTIPLIER = 1.5
+BLOCKED_IDLE_BACKOFF_STATE_TTL_S = 30 * 24 * 60 * 60.0
 DEFAULT_AGENT_PROBLEM_TIMEOUT_S = float(
     os.environ.get(
         "OMO_MANAGER_AGENT_PROBLEM_TIMEOUT_S",
@@ -60,6 +63,8 @@ DEFAULT_TMUX_READY_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_TMUX_READY_TIME
 DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_TMUX_SUBMIT_VERIFY_TIMEOUT_S", "5"))
 DEFAULT_HUMAN_EMAIL_HELPER = Path(__file__).resolve().parents[1] / "helper.sh" / "email_me.py"
 PENDING_MARKERS = {"(pending)"}
+FOR_MANAGER_MARKER = "for manager"
+HELPER_NOTICE_INSTRUCTION = "Handle this helper-generated notice, then don't ack human:"
 TASK_FILE_LINE_WARNING_THRESHOLD = 2000
 TODO_LINE_WARNING_THRESHOLD = 200
 EMAIL_CONTENT_CHAR_LIMIT = PENDING_CONTENT_CHAR_LIMIT
@@ -222,6 +227,13 @@ class ProblemRow:
     pending_item: str = ""
     owner_target: str = ""
     unstick: str = ""
+
+
+@dataclass(frozen=True)
+class AgentProblemDispatch:
+    text: str
+    digest_text: str
+    blocked_idle_lines: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -536,6 +548,12 @@ def marker_is_dm(marker: Marker, attachments: Sequence[SourceAttachment]) -> boo
     return any(not attachment.error and text_marks_dm(attachment.text) for attachment in attachments)
 
 
+def marker_is_for_manager(marker: Marker, attachments: Sequence[SourceAttachment]) -> bool:
+    if text_marks_for_manager(marker.block_text):
+        return True
+    return any(not attachment.error and text_marks_for_manager(attachment.text) for attachment in attachments)
+
+
 def dm_worker_seen_key(args: Args, marker: Marker, worker_target: str, attachments: Sequence[SourceAttachment]) -> str:
     payload = f"{marker.block_text}\n{readable_attachment_payload(attachments)}"
     return f"{args.root}:{marker.file}:{marker.line}:{marker.digest}:dm-worker:{canonical_target(worker_target)}:{attachment_payload_digest(payload)}:dm:{int(marker_is_dm(marker, attachments))}"
@@ -554,7 +572,8 @@ def marker_seen_key(args: Args, marker: Marker, attachments: Sequence[SourceAtta
         return key
     payload = readable_attachment_payload(attachments)
     dm = int(marker_is_dm(marker, attachments))
-    return f"{key}:files:{attachment_payload_digest(payload)}:dm:{dm}"
+    for_manager = int(marker_is_for_manager(marker, attachments))
+    return f"{key}:files:{attachment_payload_digest(payload)}:dm:{dm}:for-manager:{for_manager}"
 
 
 def is_vl_task_file(path: Path) -> bool:
@@ -571,6 +590,13 @@ def marker_manager_target(args: Args, marker: Marker) -> str:
         return metadata.managerat or args.manager_target
     if is_main_manager_task_file(marker.file):
         return args.manager_target
+    return args.manager_target
+
+
+def marker_for_manager_target(args: Args, marker: Marker) -> str:
+    metadata = read_task_metadata(args.root / marker.file)
+    if metadata is not None:
+        return metadata.managerat or args.manager_target
     return args.manager_target
 
 
@@ -664,7 +690,7 @@ def unquoted_pending_content(text: str) -> str:
     return "\n".join(lines)
 
 
-def trim_dm_edge_punctuation(text: str) -> str:
+def trim_edge_marker_punctuation(text: str) -> str:
     value = unquoted_pending_content(text).strip()
     while value and unicodedata.category(value[0]).startswith("P"):
         value = value[1:].lstrip()
@@ -673,23 +699,35 @@ def trim_dm_edge_punctuation(text: str) -> str:
     return value
 
 
-def dm_marker_edge_is_word_char(text: str, index: int) -> bool:
+def edge_marker_char_is_word(text: str, index: int) -> bool:
     return text[index].isalnum() or text[index] == "_"
 
 
-def text_marks_dm(text: str) -> bool:
-    value = trim_dm_edge_punctuation(text)
-    if value.startswith("DM") and (len(value) == 2 or not dm_marker_edge_is_word_char(value, 2)):
+def text_has_edge_marker(text: str, marker: str, *, case_sensitive: bool = True) -> bool:
+    """Check active text for a standalone marker at either outer edge."""
+
+    value = trim_edge_marker_punctuation(text)
+    haystack = value if case_sensitive else value.casefold()
+    needle = marker if case_sensitive else marker.casefold()
+    if haystack.startswith(needle) and (len(value) == len(marker) or not edge_marker_char_is_word(value, len(marker))):
         return True
-    if value.endswith("DM") and (len(value) == 2 or not dm_marker_edge_is_word_char(value, -3)):
+    if haystack.endswith(needle) and (len(value) == len(marker) or not edge_marker_char_is_word(value, -len(marker) - 1)):
         return True
     return False
+
+
+def text_marks_dm(text: str) -> bool:
+    return text_has_edge_marker(text, "DM")
+
+
+def text_marks_for_manager(text: str) -> bool:
+    return text_has_edge_marker(text, FOR_MANAGER_MARKER, case_sensitive=False)
 
 
 def manager_pending_instruction(marker: Marker) -> str:
     if marker.origin == "human":
         return "Immediately record every pending item, then ack human, then remove `(pending)`, then dispatch the task:"
-    return "Immediately record every pending item, then remove `(pending)`, then dispatch the task:"
+    return "Immediately record every pending item, then don't ack human, then remove `(pending)`, then dispatch the task:"
 
 
 def marker_snippet_parts(marker: Marker, attachments: Sequence[SourceAttachment]) -> list[str]:
@@ -736,7 +774,8 @@ def marker_worker_dm_text(marker: Marker, attachments: Sequence[SourceAttachment
 
 
 def marker_fyi_text(marker: Marker, attachments: Sequence[SourceAttachment]) -> str:
-    parts = ["Immediately record every pending item, then ack human, then remove `(pending)`; this message is already dispatched to the agent, this is FYI:"]
+    ack = "ack human" if marker.origin == "human" else "don't ack human"
+    parts = [f"Immediately record every pending item, then {ack}, then remove `(pending)`; this message is already dispatched to the agent, this is FYI:"]
     parts.extend(marker_snippet_parts(marker, attachments))
     return "\n".join(parts)
 
@@ -839,11 +878,12 @@ def push_ref(args: Args, seen: dict[str, float], now_s: float, marker: Marker, a
     """Deliver one pending marker, guarded by its current file position."""
 
     reminders = MANAGER_EMAIL_POLICY_REMINDERS if marker.source == "email" else MANAGER_POLICY_REMINDERS
-    manager_target = marker_manager_target(args, marker)
+    for_manager = marker_is_for_manager(marker, attachments)
+    manager_target = marker_for_manager_target(args, marker) if for_manager else marker_manager_target(args, marker)
     if not args.dry_run and not manager_target and not args.manager_url:
         print("omo_pending_watch: a frontmatter `managerat`, OMO_MANAGER_TMUX_TARGET, or OMO_MANAGER_URL is required outside --dry-run", file=sys.stderr)
         return 1
-    if marker_is_dm(marker, attachments):
+    if not for_manager and marker_is_dm(marker, attachments):
         return push_dm_ref(args, seen, now_s, marker, attachments, manager_target)
     if any(attachment.error for attachment in attachments):
         error_key = attachment_error_seen_key(args, marker, attachments)
@@ -988,7 +1028,7 @@ def manager_worktree_reminder_text(root: Path) -> str:
 
 
 def idle_status_text(args: Args, output: str) -> str:
-    text = f"manager agent status: periodic running-agent status.\n{output}"
+    text = f"{HELPER_NOTICE_INSTRUCTION}\nmanager agent status: periodic running-agent status.\n{output}"
     reminder = manager_task_state_reminder_text(args.root, args.manager_target)
     if reminder:
         text = f"{text}\n{reminder}"
@@ -1158,6 +1198,38 @@ def clear_all_enter_attempts(args: Args, seen: dict[str, float]) -> bool:
     return removed
 
 
+def blocked_idle_backoff_prefix(args: Args, owner_target: str, line: str) -> str:
+    digest = hashlib.sha256(line.encode("utf-8")).hexdigest()[:16]
+    owner = canonical_target(owner_target) or "default"
+    return f"blocked-idle-backoff:{args.root}:{owner}:{digest}:"
+
+
+def prune_blocked_idle_backoff(seen: dict[str, float], prefix: str, now_wall_s: float) -> None:
+    for key, expires_s in list(seen.items()):
+        if key.startswith(f"{prefix}count:") and now_wall_s >= expires_s:
+            del seen[key]
+
+
+def blocked_idle_backoff_count(seen: dict[str, float], prefix: str, now_wall_s: float) -> int:
+    prune_blocked_idle_backoff(seen, prefix, now_wall_s)
+    return sum(1 for key in seen if key.startswith(f"{prefix}count:"))
+
+
+def blocked_idle_report_due(args: Args, seen: dict[str, float], owner_target: str, line: str, now_wall_s: float) -> bool:
+    if problem_line_status(line) != "blocked_idle":
+        return True
+    prefix = blocked_idle_backoff_prefix(args, owner_target, line)
+    return now_wall_s >= seen.get(f"{prefix}next", 0.0)
+
+
+def remember_blocked_idle_report(args: Args, seen: dict[str, float], owner_target: str, line: str, now_wall_s: float) -> None:
+    prefix = blocked_idle_backoff_prefix(args, owner_target, line)
+    count = blocked_idle_backoff_count(seen, prefix, now_wall_s)
+    delay_s = BLOCKED_IDLE_BACKOFF_INITIAL_S * (BLOCKED_IDLE_BACKOFF_MULTIPLIER**count)
+    seen[f"{prefix}count:{count + 1}"] = now_wall_s + BLOCKED_IDLE_BACKOFF_STATE_TTL_S
+    seen[f"{prefix}next"] = now_wall_s + delay_s
+
+
 def manager_actions_for_problem_lines(lines: list[str]) -> list[str]:
     count_line = agent_problem_count_line(lines)
     actions: list[str] = []
@@ -1228,18 +1300,21 @@ def format_agent_problem_report(lines: list[str]) -> str:
     if not rows:
         return ""
     order = ("not_codex", "untracked_agent", "blocked_idle", "error", "human_request", "manager_compaction", "ready", "stuck_input", "done-stale")
-    parts = ["omo_pending_watch agent problems:"]
+    parts = [HELPER_NOTICE_INSTRUCTION, "omo_pending_watch agent problems:"]
     for status in order:
         parts.extend(problem_section(status, [row for row in rows if row.status == status]))
     return "\n".join(parts).strip()
 
 
-def agent_problem_output_by_owner(args: Args, seen: dict[str, float], output: str, now_wall_s: float) -> dict[str, str]:
+def agent_problem_output_by_owner(args: Args, seen: dict[str, float], output: str, now_wall_s: float, backoff_owner_target: str = "") -> dict[str, AgentProblemDispatch]:
     lines = output.splitlines()
     if not lines or not lines[0].startswith("agent-problems:"):
         return {}
     clear_resolved_enter_attempts(args, seen, lines[1:], now_wall_s)
     groups: dict[str, list[str]] = {}
+    digest_groups: dict[str, list[str]] = {}
+    blocked_idle_lines: dict[str, list[tuple[str, str]]] = {}
+    quiet_blocked_owners: set[str] = set()
     for line in lines[1:]:
         if line.startswith("manager-action: "):
             continue
@@ -1247,13 +1322,24 @@ def agent_problem_output_by_owner(args: Args, seen: dict[str, float], output: st
             continue
         if suppress_enter_attempt_row(args, seen, line, now_wall_s):
             continue
-        owner = problem_line_owner_target(line)
+        line_owner = problem_line_owner_target(line)
+        owner = backoff_owner_target or line_owner
+        backoff_owner = backoff_owner_target or line_owner
+        digest_groups.setdefault(owner, []).append(line)
+        if not blocked_idle_report_due(args, seen, backoff_owner, line, now_wall_s):
+            quiet_blocked_owners.add(owner)
+            continue
         groups.setdefault(owner, []).append(line)
-    outputs: dict[str, str] = {}
+        if problem_line_status(line) == "blocked_idle":
+            blocked_idle_lines.setdefault(owner, []).append((backoff_owner, line))
+    outputs: dict[str, AgentProblemDispatch] = {}
     for owner, body_lines in groups.items():
+        if owner in quiet_blocked_owners and owner not in blocked_idle_lines:
+            continue
         text = format_agent_problem_report(body_lines)
+        digest_text = format_agent_problem_report(digest_groups.get(owner, body_lines))
         if text:
-            outputs[owner] = text
+            outputs[owner] = AgentProblemDispatch(text, digest_text or text, tuple(blocked_idle_lines.get(owner, ())))
     return outputs
 
 
@@ -1331,18 +1417,20 @@ def maybe_push_vl_agent_problems(args: Args, seen: dict[str, float], now_wall_s:
         return False
     if result.stderr.strip():
         output = f"{output}\nstderr:\n{result.stderr.strip()}".strip()
-    digest = hashlib.sha256(f"{vl_target}\n{output}".encode("utf-8")).hexdigest()[:16]
-    key = f"vl-agent-problem:{digest}"
     has_unstuck = any(line.startswith("unstuck: ") for line in output.splitlines())
-    if not has_unstuck and now_wall_s - seen_get(seen, key, now_s=now_wall_s) < args.agent_problem_repeat_s:
+    owner_outputs = agent_problem_output_by_owner(vl_args, seen, output, now_wall_s, backoff_owner_target=vl_target)
+    dispatch = owner_outputs.get(vl_target) or next(iter(owner_outputs.values()), None)
+    if dispatch is None:
         return False
-    owner_outputs = agent_problem_output_by_owner(vl_args, seen, output, now_wall_s)
-    text_body = owner_outputs.get(vl_target) or next(iter(owner_outputs.values()), "")
-    if not text_body:
+    digest = hashlib.sha256(f"{vl_target}\n{dispatch.digest_text}".encode("utf-8")).hexdigest()[:16]
+    key = f"vl-agent-problem:{digest}"
+    if not dispatch.blocked_idle_lines and not has_unstuck and now_wall_s - seen_get(seen, key, now_s=now_wall_s) < args.agent_problem_repeat_s:
         return False
-    text = f"{AGENT_PROBLEM_SOURCE_LINE}\n{text_body}"
+    text = f"{AGENT_PROBLEM_SOURCE_LINE}\n{dispatch.text}"
     if push_manager_text(vl_args, text) not in {0, 2}:
         return False
+    for backoff_owner, line in dispatch.blocked_idle_lines:
+        remember_blocked_idle_report(vl_args, seen, backoff_owner, line, now_wall_s)
     remember_seen(seen, key, now_wall_s)
     return True
 
@@ -1435,7 +1523,7 @@ def maybe_push_manager_compaction_reminder(args: Args, seen: dict[str, float], o
     key = manager_compaction_active_key(args)
     if seen_contains(seen, key, now_wall_s):
         return False
-    text = f"{MANAGER_COMPACTION_SOURCE_LINE}\n{MANAGER_COMPACTION_REMINDER}"
+    text = f"{MANAGER_COMPACTION_SOURCE_LINE}\n{HELPER_NOTICE_INSTRUCTION}\n{MANAGER_COMPACTION_REMINDER}"
     if push_manager_text(args, text) not in {0, 2}:
         return False
     remember_seen(seen, key, now_wall_s)
@@ -1555,15 +1643,17 @@ def handle_agent_problem_result(args: Args, seen: dict[str, float], result: Comm
     if not output:
         return manager_email_sent or compaction_changed
     changed = manager_email_sent or compaction_changed
-    for owner_target, owner_output in agent_problem_output_by_owner(args, seen, output, now_wall_s).items():
-        digest = hashlib.sha256(f"{owner_target}\n{owner_output}".encode("utf-8")).hexdigest()[:16]
+    for owner_target, dispatch in agent_problem_output_by_owner(args, seen, output, now_wall_s).items():
+        digest = hashlib.sha256(f"{owner_target}\n{dispatch.digest_text}".encode("utf-8")).hexdigest()[:16]
         key = f"agent-problem:{digest}"
-        if now_wall_s - seen_get(seen, key, now_s=now_wall_s) < args.agent_problem_repeat_s:
+        if not dispatch.blocked_idle_lines and now_wall_s - seen_get(seen, key, now_s=now_wall_s) < args.agent_problem_repeat_s:
             continue
-        text = with_manager_policy_reminder(args, f"{AGENT_PROBLEM_SOURCE_LINE}\n{owner_output}")
+        text = with_manager_policy_reminder(args, f"{AGENT_PROBLEM_SOURCE_LINE}\n{dispatch.text}")
         target = owner_target or args.manager_target
         if push_manager_text_to_target(args, text, target) not in {0, 2}:
             continue
+        for backoff_owner, line in dispatch.blocked_idle_lines:
+            remember_blocked_idle_report(args, seen, backoff_owner, line, now_wall_s)
         remember_seen(seen, key, now_wall_s)
         changed = True
     return changed
@@ -1657,7 +1747,7 @@ def scan_once(args: Args, seen: dict[str, float], files: list[Path]) -> bool:
             del seen[key]
             changed = True
         elif n_todo_lines > TODO_LINE_WARNING_THRESHOLD and not seen_contains(seen, key, now_s):
-            if push_manager_text(args, TODO_LENGTH_REMINDER.format(n_lines=n_todo_lines)) in {0, 2}:
+            if push_manager_text(args, f"{HELPER_NOTICE_INSTRUCTION}\n{TODO_LENGTH_REMINDER.format(n_lines=n_todo_lines)}") in {0, 2}:
                 remember_seen(seen, key, now_s)
                 changed = True
     for marker in find_markers(args.root, files):

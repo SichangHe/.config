@@ -215,6 +215,112 @@ class PendingMarkerTests(unittest.TestCase):
                 self.assertTrue(scan_once(args, {}, [path]))
             self.assertEqual("wl:2", calls[0][calls[0].index("--manager-target") + 1])
 
+    def test_for_manager_prefix_routes_manager_task_to_managerat(self) -> None:
+        from omo_manager.omo_pending_watch import scan_once
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "submanager.md"
+            path.write_text(f"{task_frontmatter(runat='wl:2', managerat='wl:1', is_manager=True)}\n(pending)\n\"FoR MaNaGeR\": please route upward\n", encoding="utf-8")
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(command)
+                return subprocess.CompletedProcess(command, 0)
+
+            args = Args(
+                root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=False, manager_target="main:0.0"
+            )
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+                self.assertTrue(scan_once(args, {}, [path]))
+            self.assertEqual("wl:1", calls[0][calls[0].index("--manager-target") + 1])
+
+    def test_for_manager_suffix_routes_manager_task_to_managerat(self) -> None:
+        from omo_manager.omo_pending_watch import scan_once
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "submanager.md"
+            path.write_text(f"{task_frontmatter(runat='wl:2', managerat='wl:1', is_manager=True)}\n(pending)\nplease route upward\n(for manager) \n", encoding="utf-8")
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(command)
+                return subprocess.CompletedProcess(command, 0)
+
+            args = Args(
+                root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=False, manager_target="main:0.0"
+            )
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+                self.assertTrue(scan_once(args, {}, [path]))
+            self.assertEqual("wl:1", calls[0][calls[0].index("--manager-target") + 1])
+
+    def test_quoted_for_manager_marker_does_not_route_manager_task_to_managerat(self) -> None:
+        from omo_manager.omo_pending_watch import scan_once
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "submanager.md"
+            path.write_text(f"{task_frontmatter(runat='wl:2', managerat='wl:1', is_manager=True)}\n(pending)\n> for manager\nplease handle locally\n", encoding="utf-8")
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(command)
+                return subprocess.CompletedProcess(command, 0)
+
+            args = Args(
+                root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=False, manager_target="main:0.0"
+            )
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+                self.assertTrue(scan_once(args, {}, [path]))
+            self.assertEqual("wl:2", calls[0][calls[0].index("--manager-target") + 1])
+
+    def test_linked_file_for_manager_routes_manager_task_to_managerat(self) -> None:
+        from omo_manager.omo_pending_watch import scan_once
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            docs = root / "docs"
+            docs.mkdir()
+            request = docs / "request.md"
+            request.write_text("Please route this to the parent manager. FOR MANAGER!!!\n", encoding="utf-8")
+            path = root / "submanager.md"
+            path.write_text(f"{task_frontmatter(runat='wl:2', managerat='wl:1', is_manager=True)}\n(pending)\ndocs/request.md\n", encoding="utf-8")
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(command)
+                return subprocess.CompletedProcess(command, 0)
+
+            args = Args(
+                root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=False, manager_target="main:0.0"
+            )
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+                self.assertTrue(scan_once(args, {}, [path]))
+            self.assertEqual("wl:1", calls[0][calls[0].index("--manager-target") + 1])
+            self.assertIn('<snippet file="docs/request.md:1-1">', calls[0][1])
+
+    def test_for_manager_marker_overrides_dm_in_manager_task(self) -> None:
+        from omo_manager.omo_pending_watch import scan_once
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "submanager.md"
+            path.write_text(f"{task_frontmatter(runat='wl:2', managerat='wl:1', is_manager=True)}\n(pending)\nDM\nfor manager\n", encoding="utf-8")
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(command)
+                return subprocess.CompletedProcess(command, 0)
+
+            args = Args(
+                root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=False, manager_target="main:0.0"
+            )
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+                self.assertTrue(scan_once(args, {}, [path]))
+            self.assertEqual(["wl:1"], [call[call.index("--manager-target") + 1] for call in calls])
+            self.assertNotIn("Direct message from the human", calls[0][1])
+
     def test_pending_push_uses_frontmatter_managerat_over_body_managerat(self) -> None:
         from omo_manager.omo_pending_watch import scan_once
 
@@ -4576,8 +4682,8 @@ class PendingMarkerTests(unittest.TestCase):
             with redirect_stdout(out):
                 self.assertTrue(watcher.scan_once(args, {}, [path]))
             text = out.getvalue()
-            self.assertIn("Immediately record every pending item, then remove `(pending)`, then dispatch the task:", text)
-            self.assertNotIn("ack human", text)
+            self.assertIn("Immediately record every pending item, then don't ack human, then remove `(pending)`, then dispatch the task:", text)
+            self.assertNotIn("then ack human", text)
             self.assertIn(f"<snippet file=\"helper_audit_agent_9580.md:1-2\">\n(pending)\n(from agent {report})", text)
             self.assertNotIn(f"(from agent hcfg:1 {report})", text)
             self.assertIn(f"<snippet file=\"{report}:1-4\">", text)
@@ -4670,6 +4776,28 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertIn("<message>\n(pending)\nDM: please inspect directly\n(record and delegate manager_mail/4002.txt)\n</message>", calls[0][1])
             self.assertNotIn('<snippet file="worker.md:', calls[0][1])
             self.assertIn('<snippet file="worker.md:', calls[1][1])
+
+    def test_agent_origin_dm_manager_fyi_says_do_not_ack_human(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "worker.md"
+            path.write_text(f"{task_frontmatter(runat='wl:2', managerat='wl:1')}\n(pending)\n(from agent wl:9 /tmp/omo-agent-messages-test/request.md)\nDM\n", encoding="utf-8")
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(command)
+                return subprocess.CompletedProcess(command, 0)
+
+            args = Args(
+                root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=False, manager_target="main:0.0"
+            )
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+                self.assertTrue(watcher.scan_once(args, {}, [path]))
+            self.assertEqual(["wl:2", "wl:1"], [call[call.index("--manager-target") + 1] for call in calls])
+            self.assertIn("then don't ack human, then remove `(pending)`; this message is already dispatched to the agent, this is FYI:", calls[1][1])
+            self.assertNotIn("then ack human, then remove `(pending)`; this message is already dispatched to the agent, this is FYI:", calls[1][1])
 
     def test_quoted_dm_in_pending_block_does_not_trigger_dm(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -5484,7 +5612,7 @@ class PendingMarkerTests(unittest.TestCase):
 
         result = watcher.CommandOutput("idle status check", 0, "agent-status: running=1\nrunning: task=a.md\n", "")
         self.assertEqual(
-            "manager agent status: periodic running-agent status.\nagent-status: running=1\nrunning: task=a.md",
+            "Handle this helper-generated notice, then don't ack human:\nmanager agent status: periodic running-agent status.\nagent-status: running=1\nrunning: task=a.md",
             watcher.periodic_status_text(Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, True), result),
         )
 
@@ -5557,6 +5685,7 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertIsNotNone(text)
             assert text is not None
             self.assertIn("manager task-state reminder: MANAGER.md requires each manager-owned task to have frontmatter", text)
+            self.assertIn("Handle this helper-generated notice, then don't ack human:", text)
             self.assertIn("task-state: task=pending_task.md status=pending", text)
             self.assertNotIn("blocked_task.md", text)
             self.assertNotIn("done_task.md", text)
@@ -5729,6 +5858,7 @@ class PendingMarkerTests(unittest.TestCase):
                 self.assertTrue(watcher.maybe_push_agent_problems(args, seen, 1300.0))
             text = out.getvalue()
             self.assertEqual(2, text.count("omo_pending_watch agent problems:"))
+            self.assertEqual(2, text.count("Handle this helper-generated notice, then don't ack human:"))
             self.assertEqual(2, text.count("(from agent omo_pending_watch agent-problem)"))
             self.assertIn("1 not codex; check if agent failed to launch:", text)
             self.assertIn("task.md cfg:1 <output></output>", text)
@@ -5767,8 +5897,81 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
         text = out.getvalue()
         self.assertIn("omo_pending_watch agent problems:", text)
+        self.assertIn("Handle this helper-generated notice, then don't ack human:", text)
         self.assertIn("1 blocked agents are idle; record the blocker, unblock them, or retire them:", text)
         self.assertIn("vl_worker.md vl:9 <blocked_on>image lacks codex</blocked_on>", text)
+
+    def test_agent_problem_check_exponentially_backs_off_blocked_idle_rows(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, True, agent_problem_repeat_s=300.0)
+        result = watcher.CommandOutput(
+            "agent-problems",
+            3,
+            "agent-problems: blocked_idle=1\nblocked_idle: task=vl_worker.md evidence=target=vl:9 role=blocked_idle_vl task_status=blocked idle_status=ready reason=image lacks codex\n",
+            "",
+        )
+        seen: dict[str, float] = {}
+        out = StringIO()
+        with redirect_stdout(out):
+            self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 1000.0))
+            self.assertFalse(watcher.handle_agent_problem_result(args, seen, result, 1599.0))
+            self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 1600.0))
+            self.assertFalse(watcher.handle_agent_problem_result(args, seen, result, 2499.0))
+            self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 2500.0))
+        self.assertEqual(3, out.getvalue().count("1 blocked agents are idle; record the blocker, unblock them, or retire them:"))
+
+    def test_agent_problem_check_blocked_idle_backoff_ignores_mixed_report_repeat(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, True, agent_problem_repeat_s=1800.0)
+        result = watcher.CommandOutput(
+            "agent-problems",
+            3,
+            "\n".join(
+                [
+                    "agent-problems: blocked_idle=1 ready=1",
+                    "blocked_idle: task=blocked.md evidence=target=cfg:1 task_status=blocked idle_status=ready reason=waiting",
+                    "ready: task=ready.md evidence=target=cfg:2 output=idle",
+                ]
+            ),
+            "",
+        )
+        changed_ready_result = watcher.CommandOutput(
+            "agent-problems",
+            3,
+            "\n".join(
+                [
+                    "agent-problems: blocked_idle=1 ready=1",
+                    "blocked_idle: task=blocked.md evidence=target=cfg:1 task_status=blocked idle_status=ready reason=waiting",
+                    "ready: task=ready.md evidence=target=cfg:2 output=changed",
+                ]
+            ),
+            "",
+        )
+        seen: dict[str, float] = {}
+        out = StringIO()
+        with redirect_stdout(out):
+            self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 10000.0))
+            self.assertFalse(watcher.handle_agent_problem_result(args, seen, changed_ready_result, 10599.0))
+            self.assertTrue(watcher.handle_agent_problem_result(args, seen, changed_ready_result, 10600.0))
+        text = out.getvalue()
+        self.assertEqual(2, text.count("blocked.md cfg:1 <blocked_on>waiting</blocked_on>"))
+        self.assertEqual(1, text.count("ready.md cfg:2 <output>idle</output>"))
+        self.assertEqual(1, text.count("ready.md cfg:2 <output>changed</output>"))
+
+    def test_agent_problem_check_uses_vl_backoff_owner_for_unowned_rows(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, True, agent_problem_repeat_s=1800.0)
+        line = "blocked_idle: task=vl_worker.md evidence=target=vl:1 task_status=blocked idle_status=ready reason=waiting"
+        output = f"agent-problems: blocked_idle=1\n{line}"
+        seen: dict[str, float] = {}
+
+        self.assertTrue(watcher.agent_problem_output_by_owner(args, seen, output, 10000.0, backoff_owner_target="vl:15"))
+        watcher.remember_blocked_idle_report(args, seen, "vl:15", line, 10000.0)
+        self.assertEqual({}, watcher.agent_problem_output_by_owner(args, seen, output, 10599.0, backoff_owner_target="vl:15"))
+        self.assertTrue(watcher.agent_problem_output_by_owner(args, seen, output, 10600.0, backoff_owner_target="vl:15"))
 
     def test_agent_problem_check_dispatches_rows_to_owner_targets(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -5998,9 +6201,10 @@ class PendingMarkerTests(unittest.TestCase):
                 "import sys\n"
                 "target = sys.argv[sys.argv.index('--manager-target') + 1] if '--manager-target' in sys.argv else ''\n"
                 "if target == 'vl:15':\n"
-                "    print('agent-problems: blocked_idle=1 error=1 human_request=1')\n"
+                "    print('agent-problems: blocked_idle=1 ready=1 error=1 human_request=1')\n"
                 "    print('manager-action: blocked_idle>0 inspect blocked agents')\n"
                 "    print('blocked_idle: task=vl_worker.md evidence=target=vl:1 role=blocked_idle_vl task_status=blocked idle_status=ready reason=waiting')\n"
+                "    print('ready: task=vl_owned.md evidence=target=vl:2 output=owned owner_target=vl:15')\n"
                 "    print('human_request: task=vl_done.md evidence=pending_item=clear human-facing terms')\n"
                 "    print('error: task=main.md evidence=target=wl:2 output=main noise')\n"
                 "    raise SystemExit(3)\n"
@@ -6025,8 +6229,49 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual("vl:15", calls[0][calls[0].index("--manager-target") + 1])
             pushed_text = calls[0][1]
             self.assertIn("vl_worker.md vl:1 <blocked_on>waiting</blocked_on>", pushed_text)
+            self.assertIn("vl_owned.md vl:2 <output>owned</output>", pushed_text)
             self.assertIn("vl_done.md <pending_item>clear human-facing terms</pending_item>", pushed_text)
             self.assertNotIn("main.md", pushed_text)
+
+    def test_vl_agent_problem_check_suppresses_mixed_report_until_blocked_backoff_due(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            status_script = root / "status.py"
+            _ = status_script.write_text(
+                "#!/usr/bin/env python3\n"
+                "import sys\n"
+                "target = sys.argv[sys.argv.index('--manager-target') + 1] if '--manager-target' in sys.argv else ''\n"
+                "if target == 'vl:15':\n"
+                "    print('agent-problems: blocked_idle=1 ready=1')\n"
+                "    print('blocked_idle: task=vl_worker.md evidence=target=vl:1 task_status=blocked idle_status=ready reason=waiting')\n"
+                "    print('ready: task=vl_ready.md evidence=target=vl:2 output=idle')\n"
+                "    raise SystemExit(3)\n"
+                "raise SystemExit(0)\n",
+                encoding="utf-8",
+            )
+            status_script.chmod(0o700)
+            _ = (root / "TODO.md").write_text("current:\nvl_submanager_current_8653.md vl:15\n", encoding="utf-8")
+            _ = (root / "vl_submanager_current_8653.md").write_text(task_frontmatter(runat="vl:15", managerat="wl:16.0", is_manager=True), encoding="utf-8")
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, status_script, False, False, manager_target="wl:16.0", agent_problem_repeat_s=1800.0)
+            seen: dict[str, float] = {}
+            calls: list[list[str]] = []
+            real_run = subprocess.run
+
+            def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+                if command and command[0] == str(status_script):
+                    return real_run(command, **kwargs)
+                calls.append(command)
+                return subprocess.CompletedProcess(command, 0)
+
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+                self.assertTrue(watcher.maybe_push_vl_agent_problems(args, seen, 10000.0))
+                self.assertFalse(watcher.maybe_push_vl_agent_problems(args, seen, 10599.0))
+                self.assertTrue(watcher.maybe_push_vl_agent_problems(args, seen, 10600.0))
+            self.assertEqual(2, len(calls))
+            self.assertEqual(2, sum("vl_worker.md vl:1 <blocked_on>waiting</blocked_on>" in call[1] for call in calls))
+            self.assertEqual(2, sum("vl_ready.md vl:2 <output>idle</output>" in call[1] for call in calls))
 
     def test_agent_problem_check_unscoped_owner_routing_does_not_duplicate_vl_side_push(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -6351,6 +6596,7 @@ class PendingMarkerTests(unittest.TestCase):
             with redirect_stdout(out):
                 self.assertTrue(watcher.scan_once(args, seen, [todo]))
             text = out.getvalue()
+            self.assertIn("Handle this helper-generated notice, then don't ack human:", text)
             self.assertIn("TODO.md length reminder: TODO.md has 201 lines.", text)
             self.assertIn("Move done material to YYYYMM/old_todos.md", text)
             todo.write_text(todo.read_text(encoding="utf-8") + "another line\n", encoding="utf-8")
@@ -6365,7 +6611,9 @@ class PendingMarkerTests(unittest.TestCase):
             out = StringIO()
             with redirect_stdout(out):
                 self.assertTrue(watcher.scan_once(args, seen, [todo]))
-            self.assertIn("TODO.md length reminder: TODO.md has 201 lines.", out.getvalue())
+            text = out.getvalue()
+            self.assertIn("Handle this helper-generated notice, then don't ack human:", text)
+            self.assertIn("TODO.md length reminder: TODO.md has 201 lines.", text)
 
     def test_pending_delivery_launch_failure_is_retryable(self) -> None:
         from omo_manager import omo_pending_watch as watcher

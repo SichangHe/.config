@@ -56,6 +56,8 @@ ALL other fields are required.
 
 ## helper behavior
 
+Managers change `status` with `omo_task_status.py TASK.md running|blocked|done`. Use `--root ROOT` when the task path is relative to a non-default work-log root. Use `--blocked-on TEXT` only with `blocked`. The script rejects status changes while any live `(pending)` marker remains, and rejects `done` while `pending_task_items` is nonempty.
+
 `omo_task.py` creates new task files with correct placeholder frontmatter. `status` is `running`; `managerat` is the current tmux window; `runat`, `tool`, `is_manager` are mandatory arguments passed in; `pending_task_items` is empty. After a successful return, this script reminds the caller to fill in `pending_task_items`.
 
 `omo_agent_status.py` only reads from frontmatter.
