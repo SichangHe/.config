@@ -1,44 +1,41 @@
-# manager mail compression workflow
+# manager mail compression
 
-Use this when unread manager-sent emails need to be compressed into a few topic emails.
+Use this when unread manager-sent email should be replaced by fewer topic emails.
 
-Find this doc:
-- manager helpers index: `~/.config/omo_manager/docs/index.md`
-- helper: `~/.config/omo_manager/omo_manager_mail_compress.py`
+Helper:
+- `~/.config/omo_manager/omo_manager_mail_compress.py`
 
 Workflow:
-- inspect current instructions and the source task first
+- inspect current instructions and source task
 - run `omo_manager_mail_compress.py snapshot`
 - create a fresh private export directory, for example `mktemp -d /tmp/manager-mail-compress.XXXXXX`
 - run `omo_manager_mail_compress.py export --out-dir PRIVATE_DIR`
-- use the exported `manifest.tsv`, `uids.txt`, and `UID.txt` files to group topics and write human-facing summaries
-- classify any memo the human should read in whole as retained source mail; omit those UIDs from the superseded UID file
-- write a task-private `superseded-uids.txt` containing only source UIDs fully replaced by the new summaries
+- group topics from `manifest.tsv`, `uids.txt`, and `UID.txt`
+- retain any memo the human should read in full
+- write `superseded-uids.txt` with only UIDs fully replaced by new summaries
+- send summaries with `email_me.py --manager-human --sender-tmux-target OWNER_TARGET --subject-file SUBJECT --message-file BODY`
+- run `omo_manager_mail_compress.py trash-superseded --uid-file PRIVATE_DIR/superseded-uids.txt --yes`
+- verify `verify_remaining=0`
+- report topics, counts, UID boundary, replacement subjects, skipped boundary, and verification
+- delete the private export directory when raw local copies are no longer needed
+
+Trigger:
+- `email_idle_watcher.py` queues this workflow when unread manager mail is more than `16`
+- the trigger creates manager work only
+- summaries and trash movement still require the explicit workflow above
+
+Safety:
 - keep private bodies in `/tmp` or another owner-only scratch directory
-- send replacement summaries with `email_me.py --manager-human --sender-tmux-target OWNER_TARGET --subject-file SUBJECT --message-file BODY`
-- after replacements are sent, run `omo_manager_mail_compress.py trash-superseded --uid-file /tmp/manager-mail-compress-PRIVATE/superseded-uids.txt --yes`
-- verify the helper reports `verify_remaining=0`
-- write a task-linked audit with topics, counts, UID boundary, replacement subjects, and any skipped boundary
-- report through `omo_report.sh`
-- delete the private export directory after the task if the audit no longer needs raw local copies
+- export refuses a non-empty output directory
+- snapshot/export search only `INBOX` unread self-addressed manager mail with `[a]` or old `[omo_manager]`
+- the helper re-parses headers and skips boundary mismatches before exporting bodies
+- `trash-superseded` acts only on the explicit UID list
+- before moving mail, `trash-superseded` rechecks each UID is still self-addressed manager mail in `INBOX`
+- the helper moves only explicit superseded source mail to `[Gmail]/Trash`
+- it never expunges or permanently deletes message bodies
 
-Watcher trigger:
-- `email_idle_watcher.py` records manager mail counts in `email-manager-mail-counts.tsv`
-- it queues this workflow when unread manager mail is more than `16`
-- the trigger is a manager work item only; replacement summaries and `trash-superseded` still require the explicit workflow above
-
-Safety boundary:
-- the helper reads the same Gmail/Himalaya config as `email_idle_watcher.py`
-- snapshot/export search only `INBOX` unread messages from the configured self address with `[a]` or old `[omo_manager]` in the subject
-- snapshot/export locally re-parse headers and skip boundary mismatches before exporting bodies
-- `trash-superseded` only acts on an explicit UID list
-- before moving mail, `trash-superseded` rechecks that each still-inbox UID is self-addressed manager mail
-- export refuses a non-empty output directory so stale private body files are not mixed into a new run
-- the helper moves only explicit superseded source mail to `[Gmail]/Trash`; it never expunges or permanently deletes message bodies
-- use `email_me.py --manager-human --sender-tmux-target OWNER_TARGET --subject-file SUBJECT --message-file BODY` for replacement summary text
-
-Judgment boundary:
-- the helper does not choose topics or summarize email bodies
-- the agent must decide what information remains useful to the human
-- the agent must retain full-read memo emails instead of replacing them with compressed summaries
-- omit low-level implementation trivia unless the human needs it for action or review
+Judgment:
+- the helper does not choose topics or summarize bodies
+- the agent decides what remains useful to the human
+- retain full-read memo emails instead of replacing them
+- omit low-level implementation trivia unless the human needs it

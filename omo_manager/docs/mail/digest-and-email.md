@@ -4,6 +4,13 @@
 
 `deliver-once` sends queued items immediately when requested and renders absolute queued/published times; idle timing and recent-contact checks belong to a separate watcher.
 
+PB news digest:
+- PB watcher queues digest items into the manager repo queue at `/ssd1/sichangheagent/work_logs/manager_digest.md`
+- append one Markdown item from stdin with `scripts/manager-digest append`
+- preview delivery with `scripts/manager-digest deliver --dry-run`
+- when the human asks, run `scripts/manager-digest deliver` immediately from `/ssd1/sichangheagent/work_logs`
+- the delivery script clears the manager queue only after a successful send
+
 `email_me.py --manager-human` is the human email sender. New manager-human subjects use `[a] [TARGET]`; old `[omo_manager]` subjects remain accepted and canonicalized to `[a]`.
 
 Before sending, recent-thread lookup strips repeated `Re:` plus `[a]`, `[omo_manager]`, legacy `[omo]`, and leading tmux window/pane subject tags. When a match is found in the recent window, the outgoing subject becomes `Re: [a] [TARGET] SUBJECT` and the message includes `In-Reply-To` and `References` headers from the matched self-sent mail.
