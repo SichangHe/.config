@@ -781,6 +781,13 @@ def add_blocked_idle_vl_row(root: Path, task: TaskLine, role: str, rows: list[St
 
 
 def session_records(registry: Path) -> list[SessionRecord]:
+    """Load persisted Codex session registry rows.
+
+    Registry `tmux_target` becomes `SessionRecord.target`; this is the code
+    path behind the formerly line-numbered status helper question.
+    `port` is parsed separately and is only the optional server port.
+    """
+
     raw_obj = read_json(registry, {"sessions": []}).get("sessions", [])
     raw: list[object] = cast(list[object], raw_obj) if isinstance(raw_obj, list) else []
     records: list[SessionRecord] = []
@@ -808,6 +815,8 @@ def session_records(registry: Path) -> list[SessionRecord]:
 
 
 def choose_session(task: TaskLine, records: list[SessionRecord]) -> SessionRecord | None:
+    """Pick the newest registry row that still matches the task target."""
+
     matches = [record for record in records if record.task_file == task.task_file]
     if not matches:
         return None
@@ -821,6 +830,8 @@ def choose_session(task: TaskLine, records: list[SessionRecord]) -> SessionRecor
 
 
 def display_target(task: TaskLine, record: SessionRecord | None) -> str:
+    """Prefer the live registry tmux target, then fall back to the task line."""
+
     if record is not None and record.target:
         return record.target
     return task.target

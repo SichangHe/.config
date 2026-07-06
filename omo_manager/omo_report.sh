@@ -100,6 +100,12 @@ def target_aliases(target: str) -> set[str]:
         return set()
     return {target, target[:-2] if target.endswith(".0") else f"{target}.0"}
 
+def target_session(target: str) -> str:
+    return target.split(":", 1)[0] if ":" in target else ""
+
+def is_named_main_manager_target(target: str) -> bool:
+    return target_session(target) in {"main", "omo-manager"}
+
 def parse_frontmatter(path: Path) -> dict[str, str] | None:
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
@@ -167,6 +173,9 @@ if not TARGET_RE.fullmatch(managerat):
     print("task frontmatter `managerat` must be a tmux target", file=sys.stderr)
     raise SystemExit(2)
 if target_aliases(managerat) & target_aliases(main_target):
+    print(main_manager_file())
+    raise SystemExit(0)
+if is_named_main_manager_target(managerat):
     print(main_manager_file())
     raise SystemExit(0)
 for candidate in active_task_refs():

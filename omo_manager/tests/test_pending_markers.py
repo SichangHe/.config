@@ -3454,6 +3454,152 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual(1, len(markers))
             self.assertEqual("agent", markers[0].origin)
 
+    def test_omo_report_main_manager_alias_does_not_need_env_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            root.mkdir()
+            msg = Path(tmp) / "msg.md"
+            msg.write_text("done\n", encoding="utf-8")
+            _ = write_report_worker_task(root, "task.md", managerat="main:0.0")
+
+            result = subprocess.run(
+                [
+                    str(Path.home() / ".config/omo_manager/omo_report.sh"),
+                    "--root",
+                    str(root),
+                    "--manager-url",
+                    "http://127.0.0.1:1",
+                    "--task-file",
+                    "task.md",
+                    "--status",
+                    "done",
+                    "--agent",
+                    "agent-4002",
+                    "--message-file",
+                    str(msg),
+                ],
+                cwd=tmp,
+                env=report_test_env(tmp, manager_target=""),
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+
+            self.assertEqual("", result.stderr)
+            self.assertEqual(0, result.returncode)
+            manager_text = dated_manager_file(root).read_text(encoding="utf-8")
+            self.assertIn("(pending)", manager_text)
+            self.assertNotIn("(pending)", (root / "task.md").read_text(encoding="utf-8"))
+
+    def test_omo_report_main_manager_alias_ignores_nonmatching_env_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            root.mkdir()
+            msg = Path(tmp) / "msg.md"
+            msg.write_text("done\n", encoding="utf-8")
+            _ = write_report_worker_task(root, "task.md", managerat="main:0.0")
+
+            result = subprocess.run(
+                [
+                    str(Path.home() / ".config/omo_manager/omo_report.sh"),
+                    "--root",
+                    str(root),
+                    "--manager-url",
+                    "http://127.0.0.1:1",
+                    "--task-file",
+                    "task.md",
+                    "--status",
+                    "done",
+                    "--agent",
+                    "agent-4002",
+                    "--message-file",
+                    str(msg),
+                ],
+                cwd=tmp,
+                env=report_test_env(tmp, manager_target="other:9.0"),
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+
+            self.assertEqual("", result.stderr)
+            self.assertEqual(0, result.returncode)
+            self.assertIn("(pending)", dated_manager_file(root).read_text(encoding="utf-8"))
+
+    def test_omo_report_omo_manager_named_target_routes_to_dated_log(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            root.mkdir()
+            msg = Path(tmp) / "msg.md"
+            msg.write_text("done\n", encoding="utf-8")
+            _ = write_report_worker_task(root, "task.md", managerat="omo-manager:0.0")
+
+            result = subprocess.run(
+                [
+                    str(Path.home() / ".config/omo_manager/omo_report.sh"),
+                    "--root",
+                    str(root),
+                    "--manager-url",
+                    "http://127.0.0.1:1",
+                    "--task-file",
+                    "task.md",
+                    "--status",
+                    "done",
+                    "--agent",
+                    "agent-4002",
+                    "--message-file",
+                    str(msg),
+                ],
+                cwd=tmp,
+                env=report_test_env(tmp, manager_target=""),
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+
+            self.assertEqual("", result.stderr)
+            self.assertEqual(0, result.returncode)
+            self.assertIn("(pending)", dated_manager_file(root).read_text(encoding="utf-8"))
+
+    def test_omo_report_configured_main_manager_target_routes_to_dated_log(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            root.mkdir()
+            msg = Path(tmp) / "msg.md"
+            msg.write_text("done\n", encoding="utf-8")
+            _ = write_report_worker_task(root, "task.md", managerat="wl:1.0")
+
+            result = subprocess.run(
+                [
+                    str(Path.home() / ".config/omo_manager/omo_report.sh"),
+                    "--root",
+                    str(root),
+                    "--manager-url",
+                    "http://127.0.0.1:1",
+                    "--task-file",
+                    "task.md",
+                    "--status",
+                    "done",
+                    "--agent",
+                    "agent-4002",
+                    "--message-file",
+                    str(msg),
+                ],
+                cwd=tmp,
+                env=report_test_env(tmp, manager_target="wl:1.0"),
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+
+            self.assertEqual("", result.stderr)
+            self.assertEqual(0, result.returncode)
+            self.assertIn("(pending)", dated_manager_file(root).read_text(encoding="utf-8"))
+
     def test_omo_report_appends_worker_report_to_manager_task_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "logs"
