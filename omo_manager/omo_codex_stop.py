@@ -388,9 +388,10 @@ def codex_status(target: str) -> str:
 def feedback_prompt(task_file: str) -> str:
     return (
         "Before the manager closes this session, please send concise process feedback if this was a non-trivial task. "
-        "If there is anything worth preserving, first run `REPORT_FILE=$(omo_report.sh --task-file "
-        f"{task_file} --alloc-message-file)`, write the report file through an editor, apply_patch, or another non-shell text channel, then run `omo_report.sh --task-file "
-        f"{task_file} --status done --message-file \"$REPORT_FILE\"`. "
+        "If there is anything worth preserving, first run `REPORT_FILE=$(omo_report.sh --alloc-message-file)`, "
+        "write the report file through an editor, apply_patch, or another non-shell text channel, "
+        "then run `omo_report.sh --status done --message-file \"$REPORT_FILE\"`. "
+        "Do not use cat, heredocs, or shell text injection for report bodies. "
         "Say whether you had partial-compaction access, whether you used it, why or why not, and any feedback about the PCODX instructions, tools, or compaction triggers. "
         "Mention unclear instructions, routing/communication gaps, missing tooling/docs, check friction, or whether manager-triggered compaction would have helped you continue. "
         "If the partial-compaction feedback is substantial, include the relevant evidence paths, such as the task file, tmux target, session id, transcript path, or PCODX ledger path, so the manager can email the human and forward it to OPC partial-compaction work. "

@@ -7,7 +7,6 @@ if [ -f "$local_env" ]; then
   source "$local_env"
 fi
 root="${OMO_WORK_LOGS_ROOT:-$HOME/work_logs}"
-manager_url="${OMO_MANAGER_URL:-http://127.0.0.1:18790}"
 manager_target="${OMO_MANAGER_TMUX_TARGET:-}"
 if [ -n "$env_root" ]; then root="$env_root"; fi
 task_file=""
@@ -17,15 +16,12 @@ alloc_message_file=0
 agent="${OMO_AGENT_NAME:-agent}"
 usage() {
   printf '%s\n' \
-    "Usage: omo_report.sh --status STATUS --message-file FILE [--agent NAME] [--task-file FILE]" \
-    "       omo_report.sh --alloc-message-file [--task-file FILE]" \
+    "Usage: omo_report.sh --status STATUS --message-file FILE [--agent NAME]" \
+    "       omo_report.sh --alloc-message-file" \
     "Create report text in a private helper-allocated file, then pass that path with --message-file. A file named REPORT is refused unless it is in a private owner-only directory."
 }
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --root) root="$2"; shift 2 ;;
-    --manager-url) manager_url="$2"; shift 2 ;;
-    --task-file) task_file="$2"; shift 2 ;;
     --status) status="$2"; shift 2 ;;
     --message-file) message_file="$2"; shift 2 ;;
     --alloc-message-file) alloc_message_file=1; shift ;;
@@ -136,7 +132,7 @@ def active_task_refs() -> list[Path]:
 
 current = current_tmux_target()
 if not current:
-    print("task file not supplied and current tmux pane/window could not be identified; pass --task-file explicitly", file=sys.stderr)
+    print("current tmux pane/window could not be identified; cannot infer report task", file=sys.stderr)
     raise SystemExit(2)
 matches: list[Path] = []
 for candidate in active_task_refs():
@@ -150,10 +146,10 @@ if len(matches) == 1:
     print(matches[0].relative_to(root))
     raise SystemExit(0)
 if not matches:
-    print(f"could not infer task file for tmux target {current}; pass --task-file explicitly", file=sys.stderr)
+    print(f"could not infer task file for tmux target {current}", file=sys.stderr)
 else:
     choices = ", ".join(str(path.relative_to(root)) for path in matches)
-    print(f"multiple active task files match tmux target {current}: {choices}; pass --task-file explicitly", file=sys.stderr)
+    print(f"multiple active task files match tmux target {current}: {choices}", file=sys.stderr)
 raise SystemExit(2)
 PY
   )

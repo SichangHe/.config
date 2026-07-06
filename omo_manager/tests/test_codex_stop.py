@@ -274,8 +274,11 @@ class CodexStopTests(unittest.TestCase):
 
     def test_feedback_prompt_names_task_file_and_report_path(self) -> None:
         text = feedback_prompt("task.md")
-        self.assertIn("REPORT_FILE=$(omo_report.sh --task-file task.md --alloc-message-file)", text)
-        self.assertIn('--task-file task.md --status done --message-file "$REPORT_FILE"', text)
+        self.assertIn("REPORT_FILE=$(omo_report.sh --alloc-message-file)", text)
+        self.assertIn('omo_report.sh --status done --message-file "$REPORT_FILE"', text)
+        self.assertNotIn("--task-file", text)
+        self.assertNotIn("--root", text)
+        self.assertIn("Do not use cat, heredocs, or shell text injection for report bodies.", text)
         self.assertIn("whether you had partial-compaction access", text)
         self.assertIn("whether you used it", text)
         self.assertIn("PCODX ledger path", text)

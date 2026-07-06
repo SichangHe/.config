@@ -97,7 +97,7 @@ class ReportHelperTests(unittest.TestCase):
             self.assertIn("task-file=task.md", durable_text)
             self.assertIn("default report\n", durable_text)
 
-    def test_omo_report_inference_failure_names_explicit_task_file_fallback(self) -> None:
+    def test_omo_report_inference_failure_does_not_offer_explicit_task_file_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             root = tmp_path / "logs"
@@ -127,7 +127,8 @@ class ReportHelperTests(unittest.TestCase):
 
             self.assertEqual(2, result.returncode)
             self.assertIn("could not infer task file for tmux target cfg:9.0", result.stderr)
-            self.assertIn("pass --task-file explicitly", result.stderr)
+            self.assertNotIn("pass --task-file explicitly", result.stderr)
+            self.assertNotIn("--task-file", result.stderr)
 
     def test_omo_report_does_not_infer_different_explicit_pane_in_same_window(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -218,14 +219,13 @@ cp "$prompt_file" "$OMO_CAPTURE_PROMPT"
             self.assertEqual(0, result.returncode)
             prompt = capture.read_text(encoding="utf-8")
             self.assertIn("REPORT_FILE=$(omo_report.sh --alloc-message-file)", prompt)
-            self.assertIn('omo_report.sh --status STATUS --agent agent-name --message-file "$REPORT_FILE"', prompt)
-            self.assertIn("REPORT_FILE=$(omo_report.sh --task-file task.md --alloc-message-file)", prompt)
-            self.assertIn('omo_report.sh --task-file task.md --status STATUS --agent agent-name --message-file "$REPORT_FILE"', prompt)
-            self.assertIn("--root", prompt)
+            self.assertIn('omo_report.sh --status STATUS --message-file "$REPORT_FILE"', prompt)
+            self.assertNotIn("--agent agent-name", prompt)
+            self.assertNotIn("--task-file", prompt)
+            self.assertNotIn("--root", prompt)
             self.assertIn("editor/file-editing tool", prompt)
-            self.assertNotIn("omo_report.sh --root", prompt)
-            self.assertNotIn("omo_report.sh --root ", prompt)
-            self.assertNotRegex(prompt.lower(), re.compile(r"\bcat\b|cat\s*>"))
+            self.assertIn("Do not use cat, heredocs, or shell text injection for report bodies.", prompt)
+            self.assertNotIn("Fallback only if task inference fails", prompt)
 
 
 if __name__ == "__main__":

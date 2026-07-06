@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -87,20 +88,100 @@ def task_frontmatter(status: str = "running", runat: str = "wl:2", managerat: st
 
 
 def report_test_env(tmp: str, manager_target: str = "main:0.0", **updates: str) -> dict[str, str]:
-    env = {key: value for key, value in os.environ.items() if key not in {"TMUX", "TMUX_PANE"}}
+    root = Path(tmp) / "logs"
+    local_env = Path(tmp) / "local.env"
+    local_env.write_text(
+        "\n".join(
+            [
+                f"OMO_WORK_LOGS_ROOT={shlex.quote(str(root))}",
+                f"OMO_MANAGER_TMUX_TARGET={shlex.quote(manager_target)}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    bin_dir = Path(tmp) / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    tmux = bin_dir / "tmux"
+    if not tmux.exists():
+        tmux.write_text(
+            """#!/usr/bin/env bash
+set -euo pipefail
+if [ -n "${OMO_FAKE_TMUX_INFO:-}" ]; then
+  printf '%b\n' "$OMO_FAKE_TMUX_INFO"
+else
+  printf 'agent\t1\t0\t%%report\treport-window\n'
+fi
+""",
+            encoding="utf-8",
+        )
+        tmux.chmod(0o700)
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"TMUX", "TMUX_PANE", "OMO_MANAGER_LOCAL_ENV", "OMO_WORK_LOGS_ROOT", "OMO_MANAGER_TMUX_TARGET", "OMO_MANAGER_URL"}
+    }
     env.update(
         {
-            "OMO_MANAGER_LOCAL_ENV": str(Path(tmp) / "missing-local.env"),
-            "OMO_MANAGER_TMUX_TARGET": manager_target,
+            "OMO_MANAGER_LOCAL_ENV": str(local_env),
+            "PATH": f"{bin_dir}:{env.get('PATH', '')}",
+            "TMUX_PANE": "%report",
         }
     )
     env.update(updates)
     return env
 
 
+def omo_report_script() -> str:
+    return str(Path.home() / ".config/omo_manager/omo_report.sh")
+
+
+def omo_report_command(*, status: str = "done", agent: str = "agent-4002", message_file: Path) -> list[str]:
+    return [
+        omo_report_script(),
+        "--status",
+        status,
+        "--agent",
+        agent,
+        "--message-file",
+        str(message_file),
+    ]
+
+
+def omo_report_alloc_command() -> list[str]:
+    return [omo_report_script(), "--alloc-message-file"]
+
+
+def report_ref(root: Path, path: Path) -> str:
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return path.name
+
+
+def add_report_todo_ref(root: Path, path: Path) -> None:
+    ref = report_ref(root, path)
+    todo = root / "TODO.md"
+    if todo.exists():
+        text = todo.read_text(encoding="utf-8")
+        if ref in {line.strip().strip("`") for line in text.splitlines()}:
+            return
+        if not text.endswith("\n"):
+            text += "\n"
+    else:
+        text = "current:\n"
+    todo.write_text(f"{text}{ref}\n", encoding="utf-8")
+
+
+def write_report_todo(root: Path, *paths: Path) -> None:
+    lines = ["current:", *(report_ref(root, path) for path in paths)]
+    (root / "TODO.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def write_report_worker_task(root: Path, name: str = "task.md", *, runat: str = "agent:1", managerat: str = "main:0.0") -> Path:
     path = root / name
     path.write_text(task_frontmatter(runat=runat, managerat=managerat), encoding="utf-8")
+    add_report_todo_ref(root, path)
     return path
 
 
@@ -3542,21 +3623,7 @@ class PendingMarkerTests(unittest.TestCase):
             task = write_report_worker_task(root)
             for message_file in (msg, duplicate_msg):
                 result = subprocess.run(
-                    [
-                        str(Path.home() / ".config/omo_manager/omo_report.sh"),
-                        "--root",
-                        str(root),
-                        "--manager-url",
-                        "http://127.0.0.1:1",
-                        "--task-file",
-                        "task.md",
-                        "--status",
-                        "done",
-                        "--agent",
-                        "agent-4002",
-                        "--message-file",
-                        str(message_file),
-                    ],
+                    omo_report_command(agent="agent-4002", message_file=message_file),
                     cwd=tmp,
                     env=report_test_env(tmp),
                     text=True,
@@ -3568,7 +3635,7 @@ class PendingMarkerTests(unittest.TestCase):
                 self.assertEqual(0, result.returncode)
             manager_log = dated_manager_file(root)
             text = manager_log.read_text(encoding="utf-8")
-            self.assertRegex(text, re.compile(r"^\(pending\)\n\(from agent agent-4002 /tmp/omo-agent-messages-\d+/agent-4002_done_[0-9a-f]{64}\.md\)$", re.MULTILINE))
+            self.assertRegex(text, re.compile(r"^\(pending\)\n\(from agent agent:1 /tmp/omo-agent-messages-\d+/agent-4002_done_[0-9a-f]{64}\.md\)$", re.MULTILINE))
             self.assertNotIn("[omo-message-source: ", text)
             self.assertNotIn("(report manager ", text)
             self.assertNotIn("[message-sha256: ", text)
@@ -3580,7 +3647,7 @@ class PendingMarkerTests(unittest.TestCase):
             report_path = report_paths[0]
             self.assertEqual(Path("/tmp") / f"omo-agent-messages-{os.getuid()}", report_path.parent)
             report_text = report_path.read_text(encoding="utf-8")
-            assert_concise_agent_report(self, report_text, agent="agent-4002", tmux="agent-4002", task_file="task.md", message=b"done\n")
+            assert_concise_agent_report(self, report_text, agent="agent-4002", tmux="agent:1", task_file="task.md", message=b"done\n")
             self.assertTrue(report_text.endswith("message:\ndone\n"))
             self.assertEqual(0o600, report_path.stat().st_mode & 0o777)
             self.assertEqual(0o700, report_path.parent.stat().st_mode & 0o777)
@@ -3592,6 +3659,69 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual(1, len(markers))
             self.assertEqual("agent", markers[0].origin)
 
+    def test_omo_report_allocated_message_file_submits_with_default_inference(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            root.mkdir()
+            write_report_worker_task(root)
+
+            allocated = subprocess.run(
+                omo_report_alloc_command(),
+                cwd=tmp,
+                env=report_test_env(tmp),
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+
+            self.assertEqual("", allocated.stderr)
+            self.assertEqual(0, allocated.returncode)
+            report_file = Path(allocated.stdout.strip())
+            self.assertEqual(Path("/tmp") / f"omo-report-drafts-{os.getuid()}", report_file.parent)
+            self.assertTrue(report_file.name.startswith("task."))
+            self.assertEqual(0o600, report_file.stat().st_mode & 0o777)
+            self.assertEqual(0o700, report_file.parent.stat().st_mode & 0o777)
+            report_file.write_text("allocated done\n", encoding="utf-8")
+
+            submitted = subprocess.run(
+                omo_report_command(agent="agent-4002", message_file=report_file),
+                cwd=tmp,
+                env=report_test_env(tmp),
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+
+            self.assertEqual("", submitted.stderr)
+            self.assertEqual(0, submitted.returncode)
+            manager_text = dated_manager_file(root).read_text(encoding="utf-8")
+            report_text = agent_pointer_paths(manager_text)[0].read_text(encoding="utf-8")
+            assert_concise_agent_report(self, report_text, agent="agent-4002", tmux="agent:1", task_file="task.md", message=b"allocated done\n")
+
+    def test_omo_report_rejects_pruned_explicit_route_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            root.mkdir()
+            write_report_worker_task(root)
+            msg = Path(tmp) / "msg.md"
+            msg.write_text("done\n", encoding="utf-8")
+
+            for flag, value in (("--root", str(root)), ("--task-file", "task.md"), ("--manager-url", "http://127.0.0.1:1")):
+                result = subprocess.run(
+                    [omo_report_script(), flag, value, "--status", "done", "--message-file", str(msg)],
+                    cwd=tmp,
+                    env=report_test_env(tmp),
+                    text=True,
+                    capture_output=True,
+                    timeout=10,
+                    check=False,
+                )
+
+                self.assertEqual(2, result.returncode)
+                self.assertIn(f"unknown argument: {flag}", result.stderr)
+
     def test_omo_report_main_manager_alias_does_not_need_env_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "logs"
@@ -3601,21 +3731,7 @@ class PendingMarkerTests(unittest.TestCase):
             _ = write_report_worker_task(root, "task.md", managerat="main:0.0")
 
             result = subprocess.run(
-                [
-                    str(Path.home() / ".config/omo_manager/omo_report.sh"),
-                    "--root",
-                    str(root),
-                    "--manager-url",
-                    "http://127.0.0.1:1",
-                    "--task-file",
-                    "task.md",
-                    "--status",
-                    "done",
-                    "--agent",
-                    "agent-4002",
-                    "--message-file",
-                    str(msg),
-                ],
+                omo_report_command(agent="agent-4002", message_file=msg),
                 cwd=tmp,
                 env=report_test_env(tmp, manager_target=""),
                 text=True,
@@ -3639,21 +3755,7 @@ class PendingMarkerTests(unittest.TestCase):
             _ = write_report_worker_task(root, "task.md", managerat="main:0.0")
 
             result = subprocess.run(
-                [
-                    str(Path.home() / ".config/omo_manager/omo_report.sh"),
-                    "--root",
-                    str(root),
-                    "--manager-url",
-                    "http://127.0.0.1:1",
-                    "--task-file",
-                    "task.md",
-                    "--status",
-                    "done",
-                    "--agent",
-                    "agent-4002",
-                    "--message-file",
-                    str(msg),
-                ],
+                omo_report_command(agent="agent-4002", message_file=msg),
                 cwd=tmp,
                 env=report_test_env(tmp, manager_target="other:9.0"),
                 text=True,
@@ -3675,21 +3777,7 @@ class PendingMarkerTests(unittest.TestCase):
             _ = write_report_worker_task(root, "task.md", managerat="omo-manager:0.0")
 
             result = subprocess.run(
-                [
-                    str(Path.home() / ".config/omo_manager/omo_report.sh"),
-                    "--root",
-                    str(root),
-                    "--manager-url",
-                    "http://127.0.0.1:1",
-                    "--task-file",
-                    "task.md",
-                    "--status",
-                    "done",
-                    "--agent",
-                    "agent-4002",
-                    "--message-file",
-                    str(msg),
-                ],
+                omo_report_command(agent="agent-4002", message_file=msg),
                 cwd=tmp,
                 env=report_test_env(tmp, manager_target=""),
                 text=True,
@@ -3711,21 +3799,7 @@ class PendingMarkerTests(unittest.TestCase):
             _ = write_report_worker_task(root, "task.md", managerat="wl:1.0")
 
             result = subprocess.run(
-                [
-                    str(Path.home() / ".config/omo_manager/omo_report.sh"),
-                    "--root",
-                    str(root),
-                    "--manager-url",
-                    "http://127.0.0.1:1",
-                    "--task-file",
-                    "task.md",
-                    "--status",
-                    "done",
-                    "--agent",
-                    "agent-4002",
-                    "--message-file",
-                    str(msg),
-                ],
+                omo_report_command(agent="agent-4002", message_file=msg),
                 cwd=tmp,
                 env=report_test_env(tmp, manager_target="wl:1.0"),
                 text=True,
@@ -3750,23 +3824,9 @@ class PendingMarkerTests(unittest.TestCase):
             (root / "TODO.md").write_text("current:\nmanager.md vl:15\nworker.md vl:2\n", encoding="utf-8")
 
             result = subprocess.run(
-                [
-                    str(Path.home() / ".config/omo_manager/omo_report.sh"),
-                    "--root",
-                    str(root),
-                    "--manager-url",
-                    "http://127.0.0.1:1",
-                    "--task-file",
-                    "worker.md",
-                    "--status",
-                    "done",
-                    "--agent",
-                    "worker-agent",
-                    "--message-file",
-                    str(msg),
-                ],
+                omo_report_command(agent="worker-agent", message_file=msg),
                 cwd=tmp,
-                env=report_test_env(tmp),
+                env=report_test_env(tmp, OMO_FAKE_TMUX_INFO="vl\t2\t0\t%report\tworker\n"),
                 text=True,
                 capture_output=True,
                 timeout=10,
@@ -3777,37 +3837,24 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual(0, result.returncode)
             manager_text = manager_task.read_text(encoding="utf-8")
             self.assertIn("(pending)", manager_text)
-            self.assertRegex(manager_text, re.compile(r"^\(from agent worker-agent /tmp/omo-agent-messages-\d+/worker-agent_done_[0-9a-f]{64}\.md\)$", re.MULTILINE))
+            self.assertRegex(manager_text, re.compile(r"^\(from agent vl:2 /tmp/omo-agent-messages-\d+/worker-agent_done_[0-9a-f]{64}\.md\)$", re.MULTILINE))
             self.assertNotIn("(pending)", worker_task.read_text(encoding="utf-8"))
             self.assertFalse(dated_manager_file(root).exists())
             report_text = agent_pointer_paths(manager_text)[0].read_text(encoding="utf-8")
-            assert_concise_agent_report(self, report_text, agent="worker-agent", tmux="worker-agent", task_file="worker.md", message=b"worker done\n")
+            assert_concise_agent_report(self, report_text, agent="worker-agent", tmux="vl:2", task_file="worker.md", message=b"worker done\n")
 
-    def test_omo_report_redirects_undated_main_manager_file_to_dated_log(self) -> None:
+    def test_omo_report_inferred_main_manager_task_routes_to_dated_log(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "logs"
             root.mkdir()
             msg = Path(tmp) / "msg.md"
             msg.write_text("main manager done\n", encoding="utf-8")
-            undated = root / "work_manager.md"
-            undated.write_text("", encoding="utf-8")
+            manager_task = root / "main-manager.md"
+            manager_task.write_text(task_frontmatter(runat="agent:1", managerat="main:0.0", is_manager=True), encoding="utf-8")
+            write_report_todo(root, manager_task)
 
             result = subprocess.run(
-                [
-                    str(Path.home() / ".config/omo_manager/omo_report.sh"),
-                    "--root",
-                    str(root),
-                    "--manager-url",
-                    "http://127.0.0.1:1",
-                    "--task-file",
-                    "work_manager.md",
-                    "--status",
-                    "done",
-                    "--agent",
-                    "manager-agent",
-                    "--message-file",
-                    str(msg),
-                ],
+                omo_report_command(agent="manager-agent", message_file=msg),
                 cwd=tmp,
                 env=report_test_env(tmp),
                 text=True,
@@ -3818,11 +3865,10 @@ class PendingMarkerTests(unittest.TestCase):
 
             self.assertEqual("", result.stderr)
             self.assertEqual(0, result.returncode)
-            self.assertEqual("", undated.read_text(encoding="utf-8"))
             manager_text = dated_manager_file(root).read_text(encoding="utf-8")
             self.assertIn("(pending)", manager_text)
             report_text = agent_pointer_paths(manager_text)[0].read_text(encoding="utf-8")
-            assert_concise_agent_report(self, report_text, agent="manager-agent", tmux="manager-agent", task_file="work_manager.md", message=b"main manager done\n")
+            assert_concise_agent_report(self, report_text, agent="manager-agent", tmux="agent:1", task_file="main-manager.md", message=b"main manager done\n")
 
     def test_omo_report_same_body_different_task_keeps_task_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3830,27 +3876,12 @@ class PendingMarkerTests(unittest.TestCase):
             root.mkdir()
             msg = Path(tmp) / "msg.md"
             msg.write_text("same done\n", encoding="utf-8")
-            env = report_test_env(tmp)
-            for task_name in ("task-a.md", "task-b.md"):
-                write_report_worker_task(root, task_name)
+            for idx, task_name in enumerate(("task-a.md", "task-b.md"), start=1):
+                write_report_worker_task(root, task_name, runat=f"agent:{idx}")
                 result = subprocess.run(
-                    [
-                        str(Path.home() / ".config/omo_manager/omo_report.sh"),
-                        "--root",
-                        str(root),
-                        "--manager-url",
-                        "http://127.0.0.1:1",
-                        "--task-file",
-                        task_name,
-                        "--status",
-                        "done",
-                        "--agent",
-                        "agent-4002",
-                        "--message-file",
-                        str(msg),
-                    ],
+                    omo_report_command(agent="agent-4002", message_file=msg),
                     cwd=tmp,
-                    env=env,
+                    env=report_test_env(tmp, OMO_FAKE_TMUX_INFO=f"agent\t{idx}\t0\t%report\tworker\n"),
                     text=True,
                     capture_output=True,
                     timeout=10,
@@ -3873,21 +3904,7 @@ class PendingMarkerTests(unittest.TestCase):
             msg.write_text("done\n", encoding="utf-8")
             write_report_worker_task(root)
             env = report_test_env(tmp)
-            base_cmd = [
-                str(Path.home() / ".config/omo_manager/omo_report.sh"),
-                "--root",
-                str(root),
-                "--manager-url",
-                "http://127.0.0.1:1",
-                "--task-file",
-                "task.md",
-                "--status",
-                "done",
-                "--agent",
-                "agent-4002",
-                "--message-file",
-                str(msg),
-            ]
+            base_cmd = omo_report_command(agent="agent-4002", message_file=msg)
             first = subprocess.run(base_cmd, cwd=tmp, env=env, text=True, capture_output=True, timeout=10, check=False)
             self.assertEqual("", first.stderr)
             self.assertEqual(0, first.returncode)
@@ -3905,21 +3922,7 @@ class PendingMarkerTests(unittest.TestCase):
             msg.write_text("done\n", encoding="utf-8")
             task = write_report_worker_task(root)
             env = report_test_env(tmp)
-            base_cmd = [
-                str(Path.home() / ".config/omo_manager/omo_report.sh"),
-                "--root",
-                str(root),
-                "--manager-url",
-                "http://127.0.0.1:1",
-                "--task-file",
-                "task.md",
-                "--status",
-                "done",
-                "--agent",
-                "agent-4002",
-                "--message-file",
-                str(msg),
-            ]
+            base_cmd = omo_report_command(agent="agent-4002", message_file=msg)
             first = subprocess.run(base_cmd, cwd=tmp, env=env, text=True, capture_output=True, timeout=10, check=False)
             self.assertEqual("", first.stderr)
             self.assertEqual(0, first.returncode)
@@ -3947,7 +3950,7 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual("", second.stderr)
             self.assertEqual(0, second.returncode)
             self.assertEqual(1, manager_log.read_text(encoding="utf-8").count("(pending)"))
-            assert_concise_agent_report(self, report_path.read_text(encoding="utf-8"), agent="agent-4002", tmux="agent-4002", task_file="task.md")
+            assert_concise_agent_report(self, report_path.read_text(encoding="utf-8"), agent="agent-4002", tmux="agent:1", task_file="task.md")
 
     def test_omo_report_deduplicates_old_format_pending_block(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3962,7 +3965,7 @@ class PendingMarkerTests(unittest.TestCase):
                 "\n".join(
                     [
                         "(pending)",
-                        "[omo-message-source: origin=agent agent=agent-4002 via=omo_report.sh status=done]",
+                        "[omo-message-source: origin=agent agent=agent-4002 via=omo_report.sh status=done tmux_session=agent tmux_window_index=1 tmux_pane_index=0 tmux_pane_id=%report tmux_target=agent:1.0 tmux_window_name=report-window]",
                         "(from agent agent-4002 via omo_report.sh status=done)",
                         "(report manager 2026-06-10 12:02 agent=agent-4002 status=done)",
                         f"[message-sha256: {old_hash}]",
@@ -3975,21 +3978,7 @@ class PendingMarkerTests(unittest.TestCase):
                 encoding="utf-8",
             )
             result = subprocess.run(
-                [
-                    str(Path.home() / ".config/omo_manager/omo_report.sh"),
-                    "--root",
-                    str(root),
-                    "--manager-url",
-                    "http://127.0.0.1:1",
-                    "--task-file",
-                    "task.md",
-                    "--status",
-                    "done",
-                    "--agent",
-                    "agent-4002",
-                    "--message-file",
-                    str(msg),
-                ],
+                omo_report_command(agent="agent-4002", message_file=msg),
                 cwd=tmp,
                 env=report_test_env(tmp),
                 text=True,
@@ -4026,21 +4015,7 @@ class PendingMarkerTests(unittest.TestCase):
                 encoding="utf-8",
             )
             result = subprocess.run(
-                [
-                    str(Path.home() / ".config/omo_manager/omo_report.sh"),
-                    "--root",
-                    str(root),
-                    "--manager-url",
-                    "http://127.0.0.1:1",
-                    "--task-file",
-                    "task.md",
-                    "--status",
-                    "done",
-                    "--agent",
-                    "agent-4002",
-                    "--message-file",
-                    str(msg),
-                ],
+                omo_report_command(agent="agent-4002", message_file=msg),
                 cwd=tmp,
                 env=report_test_env(tmp),
                 text=True,
@@ -4053,7 +4028,7 @@ class PendingMarkerTests(unittest.TestCase):
             text = manager_log.read_text(encoding="utf-8")
             self.assertEqual(2, text.count("(pending)"))
             self.assertEqual(1, text.count("[message-sha256: "))
-            self.assertRegex(text, re.compile(r"^\(from agent agent-4002 /tmp/omo-agent-messages-\d+/agent-4002_done_[0-9a-f]{64}\.md\)$", re.MULTILINE))
+            self.assertRegex(text, re.compile(r"^\(from agent agent:1 /tmp/omo-agent-messages-\d+/agent-4002_done_[0-9a-f]{64}\.md\)$", re.MULTILINE))
 
     def test_omo_report_old_format_tmux_route_dedupes_only_same_route(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4063,14 +4038,14 @@ class PendingMarkerTests(unittest.TestCase):
             bin_dir.mkdir()
             tmux = bin_dir / "tmux"
             tmux.write_text(
-                "#!/usr/bin/env bash\ncase \"$*\" in\n  *%1701*) printf 'cfg\\t7\\t0\\t%%1701\\tleft\\n' ;;\n  *%1702*) printf 'cfg\\t8\\t0\\t%%1702\\tright\\n' ;;\n  *) exit 1 ;;\nesac\n",
+                "#!/usr/bin/env bash\ncase \"$*\" in\n  *%1701*) printf 'cfg\\t7\\t0\\t%%1701\\tleft\\n' ;;\n  *%1702*) printf 'cfg\\t7\\t1\\t%%1702\\tright\\n' ;;\n  *) exit 1 ;;\nesac\n",
                 encoding="utf-8",
             )
             tmux.chmod(0o700)
             msg = Path(tmp) / "msg.md"
             msg.write_text("same body\n", encoding="utf-8")
             old_hash = hashlib.sha256(b"same body\n").hexdigest()
-            write_report_worker_task(root)
+            write_report_worker_task(root, runat="cfg:7")
             manager_log = dated_manager_file(root)
             manager_log.write_text(
                 "\n".join(
@@ -4092,21 +4067,7 @@ class PendingMarkerTests(unittest.TestCase):
             }
             for pane, expected_blocks in (("%1701", 1), ("%1702", 2)):
                 result = subprocess.run(
-                    [
-                        str(Path.home() / ".config/omo_manager/omo_report.sh"),
-                        "--root",
-                        str(root),
-                        "--manager-url",
-                        "http://127.0.0.1:1",
-                        "--task-file",
-                        "task.md",
-                        "--status",
-                        "done",
-                        "--agent",
-                        "agent-tmux",
-                        "--message-file",
-                        str(msg),
-                    ],
+                    omo_report_command(agent="agent-tmux", message_file=msg),
                     cwd=tmp,
                     env={**base_env, "TMUX_PANE": pane},
                     text=True,
@@ -4133,7 +4094,7 @@ class PendingMarkerTests(unittest.TestCase):
             msg = Path(tmp) / "msg.md"
             msg.write_text("same body\n", encoding="utf-8")
             old_hash = hashlib.sha256(b"same body\n").hexdigest()
-            write_report_worker_task(root)
+            write_report_worker_task(root, runat="cfg:7")
             manager_log = dated_manager_file(root)
             manager_log.write_text(
                 "\n".join(
@@ -4150,21 +4111,7 @@ class PendingMarkerTests(unittest.TestCase):
                 encoding="utf-8",
             )
             result = subprocess.run(
-                [
-                    str(Path.home() / ".config/omo_manager/omo_report.sh"),
-                    "--root",
-                    str(root),
-                    "--manager-url",
-                    "http://127.0.0.1:1",
-                    "--task-file",
-                    "task.md",
-                    "--status",
-                    "done",
-                    "--agent",
-                    "agent-tmux",
-                    "--message-file",
-                    str(msg),
-                ],
+                omo_report_command(agent="agent-tmux", message_file=msg),
                 cwd=tmp,
                 env={
                     **report_test_env(tmp),
@@ -4187,19 +4134,13 @@ class PendingMarkerTests(unittest.TestCase):
             result = subprocess.run(
                 [
                     str(Path.home() / ".config/omo_manager/omo_report.sh"),
-                    "--root",
-                    str(root),
-                    "--manager-url",
-                    "http://127.0.0.1:1",
-                    "--task-file",
-                    "task.md",
                     "--status",
                     "done",
                     "--agent",
                     "agent-file-required",
                 ],
                 cwd=tmp,
-                env={**os.environ, "OMO_MANAGER_LOCAL_ENV": str(Path(tmp) / "missing-local.env")},
+                env=report_test_env(tmp),
                 text=True,
                 capture_output=True,
                 timeout=10,
@@ -4223,23 +4164,9 @@ class PendingMarkerTests(unittest.TestCase):
             tmux.chmod(0o700)
             msg = Path(tmp) / "msg.md"
             msg.write_text("tmux report\n", encoding="utf-8")
-            write_report_worker_task(root)
+            write_report_worker_task(root, runat="cfg:7")
             result = subprocess.run(
-                [
-                    str(Path.home() / ".config/omo_manager/omo_report.sh"),
-                    "--root",
-                    str(root),
-                    "--manager-url",
-                    "http://127.0.0.1:1",
-                    "--task-file",
-                    "task.md",
-                    "--status",
-                    "done",
-                    "--agent",
-                    "agent-tmux",
-                    "--message-file",
-                    str(msg),
-                ],
+                omo_report_command(agent="agent-tmux", message_file=msg),
                 cwd=tmp,
                 env={
                     **report_test_env(tmp),
@@ -4279,7 +4206,7 @@ class PendingMarkerTests(unittest.TestCase):
             tmux.chmod(0o700)
             msg = Path(tmp) / "msg.md"
             msg.write_text("same body\n", encoding="utf-8")
-            write_report_worker_task(root)
+            write_report_worker_task(root, runat="cfg:7")
             base_env = {
                 **report_test_env(tmp),
                 "PATH": f"{bin_dir}:{os.environ['PATH']}",
@@ -4287,21 +4214,7 @@ class PendingMarkerTests(unittest.TestCase):
             }
             for window_name in ("left", "right"):
                 result = subprocess.run(
-                    [
-                        str(Path.home() / ".config/omo_manager/omo_report.sh"),
-                        "--root",
-                        str(root),
-                        "--manager-url",
-                        "http://127.0.0.1:1",
-                        "--task-file",
-                        "task.md",
-                        "--status",
-                        "done",
-                        "--agent",
-                        "agent-tmux",
-                        "--message-file",
-                        str(msg),
-                    ],
+                    omo_report_command(agent="agent-tmux", message_file=msg),
                     cwd=tmp,
                     env={**base_env, "OMO_FAKE_WINDOW_NAME": window_name},
                     text=True,
@@ -4326,30 +4239,16 @@ class PendingMarkerTests(unittest.TestCase):
             bin_dir.mkdir()
             tmux = bin_dir / "tmux"
             tmux.write_text(
-                "#!/usr/bin/env bash\ncase \"$*\" in\n  *%1701*) printf 'cfg\\t7\\t0\\t%%1701\\tleft\\n' ;;\n  *%1702*) printf 'cfg\\t8\\t0\\t%%1702\\tright\\n' ;;\n  *) exit 1 ;;\nesac\n",
+                "#!/usr/bin/env bash\ncase \"$*\" in\n  *%1701*) printf 'cfg\\t7\\t0\\t%%1701\\tleft\\n' ;;\n  *%1702*) printf 'cfg\\t7\\t1\\t%%1702\\tright\\n' ;;\n  *) exit 1 ;;\nesac\n",
                 encoding="utf-8",
             )
             tmux.chmod(0o700)
             msg = Path(tmp) / "msg.md"
             msg.write_text("same body\n", encoding="utf-8")
-            write_report_worker_task(root)
+            write_report_worker_task(root, runat="cfg:7")
             for pane in ("%1701", "%1702"):
                 result = subprocess.run(
-                    [
-                        str(Path.home() / ".config/omo_manager/omo_report.sh"),
-                        "--root",
-                        str(root),
-                        "--manager-url",
-                        "http://127.0.0.1:1",
-                        "--task-file",
-                        "task.md",
-                        "--status",
-                        "done",
-                        "--agent",
-                        "agent-tmux",
-                        "--message-file",
-                        str(msg),
-                    ],
+                    omo_report_command(agent="agent-tmux", message_file=msg),
                     cwd=tmp,
                     env={
                         **report_test_env(tmp),
@@ -4367,10 +4266,10 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual(2, text.count("(pending)"))
             self.assertEqual(0, text.count("message-file: "))
             self.assertIn("(from agent cfg:7 ", text)
-            self.assertIn("(from agent cfg:8 ", text)
+            self.assertIn("(from agent cfg:7.1 ", text)
             report_text = "\n".join(path.read_text(encoding="utf-8") for path in agent_pointer_paths(text))
             self.assertIn("tmux=cfg:7 ", report_text)
-            self.assertIn("tmux=cfg:8 ", report_text)
+            self.assertIn("tmux=cfg:7.1 ", report_text)
             self.assertNotIn("tmux_target=", report_text)
             self.assertNotIn("message:\n", text)
 
@@ -4387,21 +4286,7 @@ class PendingMarkerTests(unittest.TestCase):
             env = report_test_env(tmp)
             procs = [
                 subprocess.Popen(
-                    [
-                        str(Path.home() / ".config/omo_manager/omo_report.sh"),
-                        "--root",
-                        str(root),
-                        "--manager-url",
-                        "http://127.0.0.1:1",
-                        "--task-file",
-                        "task.md",
-                        "--status",
-                        "done",
-                        "--agent",
-                        "agent-4002",
-                        "--message-file",
-                        str(msg),
-                    ],
+                    omo_report_command(agent="agent-4002", message_file=msg),
                     cwd=tmp,
                     env=env,
                     text=True,
@@ -4417,7 +4302,7 @@ class PendingMarkerTests(unittest.TestCase):
                 self.assertEqual(0, proc.returncode)
             manager_log = dated_manager_file(root)
             text = manager_log.read_text(encoding="utf-8")
-            self.assertEqual(12, text.count("(from agent agent-4002 "))
+            self.assertEqual(12, text.count("(from agent agent:1 "))
             self.assertEqual(0, text.count("message-file: "))
             self.assertNotIn("message:\n", text)
             for idx in range(12):
@@ -7145,6 +7030,11 @@ cp "$prompt_file" "$OMO_CAPTURE_PROMPT"
             self.assertIn("- item", prompt)
             self.assertNotIn("(for manager:", prompt)
             self.assertIn("REPORT_FILE=$(omo_report.sh", prompt)
+            self.assertIn('omo_report.sh --status STATUS --message-file "$REPORT_FILE"', prompt)
+            self.assertNotIn("--agent agent-name", prompt)
+            self.assertNotIn("--task-file", prompt)
+            self.assertNotIn("--root", prompt)
+            self.assertIn("Do not use cat, heredocs, or shell text injection for report bodies.", prompt)
 
     def test_omo_dispatch_preserves_same_line_payload_syntax_after_dm_marker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

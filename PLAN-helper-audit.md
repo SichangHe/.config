@@ -26,6 +26,9 @@
 - communication: keep chat terse; email important human-visible conclusions
 - current incident: agents sent manager reports to themselves
 - current human directive: `omo_report.sh` must route reports by reading the reporting task file's `managerat`, not by appending to the reporting task file
+- current human directive: normal `omo_report.sh` use must not take `--root` or `--task-file`; it should read the work-log root from `.config/omo_manager/local.env`, infer the reporting task from the current tmux pane, then route to that task's `managerat`
+- current human directive: report bodies must be written into helper-allocated private files through an editor or file-editing tool, not via `cat`, heredocs, or shell text injection
+- active delegated implementation: report-script worker owns `omo_report.sh`, report tests, and directly required report instructions; main agent owns the human walkthrough plan and later integration/review
 - current human directive: remove legacy task metadata compatibility and migrate all active task files to frontmatter
 - confirmed mechanism 1: the live pending watcher was stale and still ran old `--state`, `--manager-target`, and `--manager-url` flags
 - confirmed mechanism 2: `email_idle_watcher.py` retry routing used non-current task-file `runat` before `managerat`
@@ -54,6 +57,38 @@
 - audit docs and tests only where they define expected behavior or reveal gaps
 - rank findings by user impact, reproducibility, and blast radius
 - propose narrow fixes with tests only when a defect has a clear local cause
+
+## helper realm map
+
+- human contact helpers: `helper.sh/email_me.py`, `helper.sh/vb-speak.sh`, `helper.sh/natural-syntax-ls.sh`
+- message and pending helpers: `omo_pending_watch.py`, `omo_pending_digest.py`, `omo_dispatch.sh`, `omo_report.sh`
+- status and stuck helpers: `omo_agent_status.py`, `omo_codex_status.py`, `omo_stuck_watch.py`, `omo_worktree_check.py`
+- tmux and Codex delivery helpers: `omo_tmux_send.py`, `omo_codex_stop.py`, `omo_codex_compact_when_idle.py`, `omo_manager_restart.sh`
+- task lifecycle helpers: `omo_task.py`, `omo_task_status.py`, `omo_spawn_session.py`, `omo_project_registry.py`
+- watcher process helpers: `omo_manager_setup_watchers.sh`, `omo_manager_watchdog.sh`, `email_idle_watcher.py`
+- mail and digest helpers: `omo_email_subject.py`, `omo_digest_queue.py`, `omo_manager_mail_compress.py`
+- verification helpers: `omo_quiet_checks.sh`, `omo_manager_quiet_check.sh`, `omo_triage_report.py`
+- cost/history helpers: `omo_codex_cost.py`, `omo_oc_history.py`
+- OpenCode legacy helpers: `opencode_auth_switch.py`, `opencode_auth_rotation_dryrun.py`, `opencode_quota_profile_watch.py`, `opencode_rotation_quiet_check.py`, `pcodx`
+- domain-specific helpers to prune or isolate: `omo_vl_experiment_preflight.py`
+- helper docs and tests: `omo_manager/docs/**`, `omo_manager/tests/**`, `WORKER_DEFAULTS.md`, `MANAGER_HELPERS.md`, `VL_WORKER_DEFAULTS.md`, work-log `MANAGER.md`
+
+## human walkthrough plan
+
+- review exactly one helper surface at a time
+- for each helper, start with purpose, caller, inputs, outputs, state, and failure behavior
+- point to exact files and line ranges before discussing behavior
+- answer the human's immediate question first, then list only the next concrete audit question
+- avoid mixing implementation, design, and review unless the human asks to fix immediately
+- keep the current helper open until these are clear:
+  - why the helper exists
+  - what data it reads and writes
+  - how it avoids duplicate or stale work
+  - how it decides routing or target ownership
+  - how it proves delivery or completion
+  - how it fails and who is notified
+  - what tests lock the behavior
+- move to the next helper only after the human agrees or no open reliability question remains
 
 ## checklist
 
@@ -93,6 +128,12 @@
 - [ ] pending helpers
 - [ ] mail helpers
 - [ ] tmux delivery helpers
+- [ ] report helpers
+  - active worker: remove normal-use `--root` and `--task-file` from `omo_report.sh`
+  - active worker: keep work-log root from `local.env`/`OMO_WORK_LOGS_ROOT`
+  - active worker: infer task from current tmux target and task frontmatter `runat`
+  - active worker: route report by inferred task `managerat`
+  - active worker: update tests and report instructions to use `REPORT_FILE=$(omo_report.sh --alloc-message-file)`, editor/file-editing writes, and `omo_report.sh --status STATUS --message-file "$REPORT_FILE"`
 - [ ] task launch helpers
   - active fix: `omo_task.py` prelaunch hook from `manager_prelaunch_hook_note_9758.md`
   - problem: `omo_task.py` hard-codes VL experiment preflight flags, automatic VL filename gating, provider policy, Verus/vlh setup, and worker env injection
