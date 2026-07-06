@@ -2,13 +2,66 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from omo_manager.omo_codex_status import Args, Report, can_submit_stuck_input, current_block, current_input_text, has_compacting_indicator, has_terminal_enter_prompt_after_codex_footer, inspect, last_output, report_from_lines, status, submit_stuck_input_if_present, visible_error_lines
+from omo_manager.omo_codex_status import Args, Report, can_submit_stuck_input, current_block, current_input_text, final_assistant_output, has_compacting_indicator, has_terminal_enter_prompt_after_codex_footer, inspect, last_output, report_from_lines, status, submit_stuck_input_if_present, visible_error_lines
 
 
 class CodexStatusTests(unittest.TestCase):
     def test_extracts_last_output_from_current_block(self) -> None:
         lines = ['old', '────', ' kept  ', '', '─ Worked for 1m 2s ─', '  gpt-5.5']
         self.assertEqual([' kept'], last_output(lines))
+
+    def test_extracts_final_assistant_output_before_placeholder_prompt(self) -> None:
+        lines = [
+            '────',
+            '• Implemented and privately reported.',
+            '',
+            '─ Worked for 12s ───────────────────────────────────────────────────────────────────────────────────────────────────────',
+            '',
+            '',
+            '› Write tests for @filename',
+            '',
+            '  gpt-5.5 medium · /home/sichangheagent/.config',
+        ]
+        report = report_from_lines(lines)
+        self.assertEqual(['• Implemented and privately reported.'], final_assistant_output(lines))
+        self.assertEqual('ready', report.status)
+        self.assertEqual('Write tests for @filename', report.input_text)
+        self.assertEqual(['• Implemented and privately reported.'], report.lines)
+
+    def test_report_keeps_live_block_when_running_after_completed_turn(self) -> None:
+        lines = [
+            '────',
+            '• Implemented and privately reported.',
+            '',
+            '─ Worked for 12s ───────────────────────────────────────────────────────────────────────────────────────────────────────',
+            '',
+            '• Working (2m 13s • esc to interrupt)',
+            '',
+            '› Write tests for @filename',
+            '',
+            '  gpt-5.5 medium · /home/sichangheagent/.config',
+        ]
+        report = report_from_lines(lines)
+        self.assertEqual('running', report.status)
+        self.assertIn('• Working (2m 13s • esc to interrupt)', report.lines)
+        self.assertIn('› Write tests for @filename', report.lines)
+
+    def test_report_keeps_pending_input_evidence_for_stuck_input(self) -> None:
+        lines = [
+            '────',
+            '• Implemented and privately reported.',
+            '',
+            '─ Worked for 12s ───────────────────────────────────────────────────────────────────────────────────────────────────────',
+            '',
+            '',
+            '› Continue with the next private step',
+            '',
+            '  gpt-5.5 medium · /home/sichangheagent/.config',
+        ]
+        report = report_from_lines(lines)
+        self.assertEqual('stuck_input', report.status)
+        self.assertEqual('Continue with the next private step', report.input_text)
+        self.assertIn('› Continue with the next private step', report.lines)
 
     def test_status_requires_codex_marker_in_last_line(self) -> None:
         self.assertEqual('not_codex', status(['shell'], current_block(['shell'])))
@@ -145,6 +198,7 @@ class CodexStatusTests(unittest.TestCase):
         report = report_from_lines(lines)
         self.assertEqual('ready', report.status)
         self.assertEqual('Summarize recent commits', report.input_text)
+        self.assertEqual([], report.lines)
         self.assertFalse(report.can_submit_input)
 
     def test_status_stuck_input_while_compacting_but_not_safe_to_submit_immediately(self) -> None:

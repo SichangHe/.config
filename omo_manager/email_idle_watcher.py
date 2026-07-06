@@ -315,47 +315,20 @@ def runat_targets(text: str) -> list[str]:
     try:
         metadata = parse_task_metadata(text)
     except TaskFrontmatterError:
-        metadata = None
+        return []
     if metadata is not None:
-        return [metadata.managerat if metadata.is_manager else metadata.runat]
-    targets: list[str] = []
-    for line in text.splitlines():
-        parts = line.strip().split()
-        if len(parts) >= 2 and parts[0] == "runat:":
-            targets.append(parts[1])
-    return targets
+        return [metadata.runat]
+    return []
 
 
 def managerat_target(text: str) -> str:
     try:
         metadata = parse_task_metadata(text)
     except TaskFrontmatterError:
-        metadata = None
+        return ""
     if metadata is not None:
         return metadata.managerat
-    for line in text.splitlines():
-        parts = line.strip().split()
-        if len(parts) >= 2 and parts[0] == "managerat:" and TMUX_TARGET_RE.fullmatch(parts[1]):
-            return parts[1]
     return ""
-
-
-def top_runat_target(path: Path) -> str:
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
-        return ""
-    try:
-        metadata = parse_task_metadata(text)
-    except TaskFrontmatterError:
-        metadata = None
-    if metadata is not None:
-        return metadata.managerat if metadata.is_manager else metadata.runat
-    lines = text.splitlines()
-    if not lines:
-        return ""
-    parts = lines[0].strip().split()
-    return parts[1] if len(parts) >= 2 and parts[0] == "runat:" else ""
 
 
 def is_ignored(path: Path) -> bool:
@@ -497,9 +470,16 @@ def email_route(args: Args, subject: str) -> EmailRoute:
         logging.warning("sub-manager email target did not map to a task file; using default manager: target=%s", tmux_target)
         return EmailRoute(current_manager_file(args), args.manager_target)
     try:
-        owner_target = managerat_target(manager_file.read_text(encoding="utf-8"))
+        manager_text = manager_file.read_text(encoding="utf-8")
     except OSError:
-        owner_target = ""
+        manager_text = ""
+    try:
+        metadata = parse_task_metadata(manager_text) if manager_text else None
+    except TaskFrontmatterError:
+        metadata = None
+    if metadata is not None and metadata.is_manager:
+        return EmailRoute(manager_file, tmux_target, tmux_target)
+    owner_target = metadata.managerat if metadata is not None else ""
     if owner_target and owner_target not in target_aliases(tmux_target):
         owner_route = current_route_for_owner(args, owner_target)
         if owner_route is None:
@@ -513,7 +493,17 @@ def manager_target_for_file(args: Args, manager_file: Path) -> str:
     current = current_manager_file(args)
     if manager_file == current or manager_file.name.startswith("work_manager_"):
         return args.manager_target
-    return top_runat_target(manager_file) or args.manager_target
+    try:
+        text = manager_file.read_text(encoding="utf-8")
+    except OSError:
+        return args.manager_target
+    try:
+        metadata = parse_task_metadata(text)
+    except TaskFrontmatterError:
+        metadata = None
+    if metadata is not None:
+        return metadata.runat if metadata.is_manager else metadata.managerat
+    return args.manager_target
 
 
 def routed_target_for_pending_line(path: Path, line_no: int) -> str:

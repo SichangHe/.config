@@ -8,6 +8,7 @@ if [ -f "$local_env" ]; then
 fi
 root="${OMO_WORK_LOGS_ROOT:-$HOME/work_logs}"
 manager_url="${OMO_MANAGER_URL:-http://127.0.0.1:18790}"
+manager_target="${OMO_MANAGER_TMUX_TARGET:-}"
 if [ -n "$env_root" ]; then root="$env_root"; fi
 task_file=""
 status=""
@@ -81,7 +82,106 @@ print("allocate a private path first: omo_report.sh --task-file TASK.md --alloc-
 raise SystemExit(2)
 PY
 if [ ! -f "$message_file" ]; then echo "message file not found" >&2; exit 2; fi
-mkdir -p "$(dirname "$path_real")"
+if [ ! -f "$path_real" ]; then echo "task file not found" >&2; exit 2; fi
+append_path_real=$(python3 - "$root_real" "$path_real" "$manager_target" <<'PY'
+from __future__ import annotations
+import re
+import sys
+from datetime import datetime
+from pathlib import Path
+root = Path(sys.argv[1])
+task_path = Path(sys.argv[2])
+main_target = sys.argv[3].strip()
+TARGET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?$")
+ACTIVE_SECTIONS = {"current", "human pending", "low priority"}
+
+def target_aliases(target: str) -> set[str]:
+    if not target:
+        return set()
+    return {target, target[:-2] if target.endswith(".0") else f"{target}.0"}
+
+def parse_frontmatter(path: Path) -> dict[str, str] | None:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    if not lines or lines[0].strip() != "---":
+        return None
+    try:
+        end = next(idx for idx, line in enumerate(lines[1:], start=1) if line.strip() == "---")
+    except StopIteration:
+        return None
+    values: dict[str, str] = {}
+    for line in lines[1:end]:
+        if not line or line.startswith("  - "):
+            continue
+        key, sep, value = line.partition(":")
+        if sep:
+            values[key.strip()] = value.strip()
+    return values
+
+def main_manager_file() -> Path:
+    today = datetime.now().astimezone().strftime("%Y-%m-%d")
+    return root / f"work_manager_{today}.md"
+
+def active_task_refs() -> list[Path]:
+    todo = root / "TODO.md"
+    try:
+        lines = todo.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    refs: list[Path] = []
+    seen: set[Path] = set()
+    section = ""
+    for line in lines:
+        stripped = line.strip()
+        if stripped.endswith(":") and stripped[:-1] in ACTIVE_SECTIONS | {"previous"}:
+            section = stripped[:-1]
+            continue
+        if section not in ACTIVE_SECTIONS:
+            continue
+        for match in re.findall(r"`?([A-Za-z0-9_./-]+\.md)`?", line):
+            path = (root / match).resolve(strict=False)
+            if path in seen or path.name == "TODO.md":
+                continue
+            try:
+                path.relative_to(root)
+            except ValueError:
+                continue
+            seen.add(path)
+            refs.append(path)
+    return refs
+
+metadata = parse_frontmatter(task_path)
+if metadata is None:
+    if task_path.name == "work_manager.md":
+        print(main_manager_file())
+        raise SystemExit(0)
+    if task_path.name.startswith("work_manager_"):
+        print(task_path)
+        raise SystemExit(0)
+    print("task frontmatter is required to route report", file=sys.stderr)
+    raise SystemExit(2)
+managerat = metadata.get("managerat", "")
+if not TARGET_RE.fullmatch(managerat):
+    print("task frontmatter `managerat` must be a tmux target", file=sys.stderr)
+    raise SystemExit(2)
+if target_aliases(managerat) & target_aliases(main_target):
+    print(main_manager_file())
+    raise SystemExit(0)
+for candidate in active_task_refs():
+    candidate_metadata = parse_frontmatter(candidate)
+    if candidate_metadata is None or candidate_metadata.get("is_manager") != "true":
+        continue
+    runat = candidate_metadata.get("runat", "")
+    if target_aliases(runat) & target_aliases(managerat):
+        print(candidate)
+        raise SystemExit(0)
+print(f"manager task file not found for managerat {managerat}", file=sys.stderr)
+raise SystemExit(2)
+PY
+)
+mkdir -p "$(dirname "$append_path_real")"
 stamp=$(date '+%H:%M')
 append_kv() {
   python3 - "$1" "$2" <<'PY'
@@ -208,11 +308,11 @@ PY
 IFS=$'\t' read -r message_hash durable_message_file pointer_line <<EOF
 $pointer_info
 EOF
-lock_path="${path_real}.omo_report.lock"
+lock_path="${append_path_real}.omo_report.lock"
 exec 9>"$lock_path"
 flock 9
-if [ ! -f "$path_real" ]; then : >"$path_real"; fi
-python3 - "$path_real" "$message_hash" "$pointer_line" "$old_legacy_source_match" "$old_source_line" <<'PY'
+if [ ! -f "$append_path_real" ]; then : >"$append_path_real"; fi
+python3 - "$append_path_real" "$message_hash" "$pointer_line" "$old_legacy_source_match" "$old_source_line" <<'PY'
 from __future__ import annotations
 import re
 import sys

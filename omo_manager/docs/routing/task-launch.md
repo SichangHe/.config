@@ -4,7 +4,7 @@
 
 Use `--tool pcodx` only for a worker that intentionally needs the PCODX CLI wrapper, its scoped `pcodx_partial_compact` MCP tools, and sidecar ledger artifacts under `/tmp/pcodx-runs`; that path records `tool: pcodx` in task frontmatter.
 
-New task files start with YAML frontmatter containing `version`, `status: running`, `runat`, `tool`, `managerat`, `is_manager`, and `pending_task_items: []`. `--manager-target TARGET`, or the current `OMO_AGENT_TMUX_TARGET`, supplies `managerat`. After launch, fill `pending_task_items` with the still-open request items and remove each item only when it is actually done or cancelled. Use `--is-manager` for task files whose pending blocks should route to `managerat`; ordinary worker task pending blocks route to `runat`.
+New task files start with YAML frontmatter containing `version`, `status: running`, `runat`, `tool`, `managerat`, `is_manager`, and `pending_task_items: []`. `--manager-target TARGET`, or the current `OMO_AGENT_TMUX_TARGET`, supplies `managerat`. After launch, fill `pending_task_items` with the still-open request items and remove each item only when it is actually done or cancelled. Normal pending blocks route to `managerat`; `runat` is only for the worker pane and direct-message delivery.
 
 Non-submanager VL worker launches, identified by a `vl_` task filename or the `vl` tmux session, require `--manager-target` so reports and watcher status route to the owning VL submanager. Raw `--codex-flag` MCP server config tokens such as `mcp_servers.*` require explicit `--tool pcodx`, so ordinary new Codex agents do not inherit private partial-compaction MCP registration. The MCP tools provide an auditable partial-compaction ledger; they do not rewrite Codex's hidden native transcript.
 

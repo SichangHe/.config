@@ -67,7 +67,6 @@ ARTIFACT_TASK_NAMES = {"ANSWER.md", "PROCESS.md", "TELEMETRY.md"}
 ARTIFACT_TASK_DIRS = {"docs", "manager_mail"}
 STATUS_DETAIL_RE = re.compile(r"^\((pending|running|done|blocked)(?::\s*([^)]*))?\)(?:\s+\(([^)]*)\))?$")
 RUNAT_RE = re.compile(r"^runat:\s+([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\b")
-MANAGERAT_RE = re.compile(r"^managerat:\s+([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\b")
 CLOSE_TARGET_RE = re.compile(r"\btmux target [`']?([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)[`']?")
 PERSISTENT_ROLE_RE = re.compile(r"\bpersistent\b.*\brole\b")
 MANAGER_MD_REREAD_RE = re.compile(r"\b(?:re-?read|read)\b[^.\n?!;]{0,80}\bMANAGER\.md\b|\bMANAGER\.md\b[^.\n?!;]{0,80}\b(?:re-?read|read)\b", re.IGNORECASE)
@@ -193,10 +192,12 @@ def parse_args(argv: list[str]) -> Args:
 
 
 def target_aliases(target: str) -> set[str]:
+    """Return tmux pane forms that name the same pane with or without `.0`."""
     return {target, target[:-2] if target.endswith(".0") else f"{target}.0"} if target else set()
 
 
 def same_tmux_target(left: str, right: str) -> bool:
+    """Compare tmux targets after accepting the common implicit `.0` pane."""
     return bool(target_aliases(left) & target_aliases(right))
 
 
@@ -358,10 +359,10 @@ def parse_task_metadata(text: str) -> TaskMetadata | None:
         raise TaskFrontmatterError("`runat` must be a tmux target.")
     if not isinstance(managerat, str) or TARGET_RE.fullmatch(managerat) is None:
         raise TaskFrontmatterError("`managerat` must be a tmux target.")
-    if same_tmux_target(runat, managerat):
-        raise TaskFrontmatterError("`managerat` must be different from `runat`.")
     tool = values["tool"]
     is_manager = values["is_manager"]
+    if same_tmux_target(runat, managerat) and is_manager is not True:
+        raise TaskFrontmatterError("`managerat` must be different from `runat` unless `is_manager` is true.")
     pending_items = values["pending_task_items"]
     blocked_on = values.get("blocked_on", "")
     if not isinstance(tool, str) or not tool:
@@ -459,19 +460,26 @@ def managerat_target(path: Path | None) -> str:
 
 
 def active_vl_submanager_target(root: Path) -> str:
+    """Find the current VL manager pane so VL child tasks route to that owner."""
     for task in parse_task_lines(root / "TODO.md"):
         if task.section != "todo:current" or not is_current_vl_supervisor(task.task_file):
             continue
         state_path = resolve_task_path(root, task.task_file)
         state = scan_task_state(state_path) if state_path is not None else None
         if state is not None and state.target:
-            return state.manager_target if state.is_manager and state.manager_target else state.target
+            return state.target
         if task.target:
             return task.target
     return ""
 
 
 def effective_owner_target(root: Path, task: TaskLine, state_path: Path | None = None) -> str:
+    """Return the manager pane responsible for a task, when ownership is known.
+
+    Frontmatter `managerat` is authoritative. VL child tasks without explicit
+    ownership are assigned to the active VL submanager so the top-level manager
+    does not report or mutate work owned by that submanager.
+    """
     explicit = managerat_target(state_path or resolve_task_path(root, task.task_file))
     if explicit:
         return explicit
@@ -481,11 +489,22 @@ def effective_owner_target(root: Path, task: TaskLine, state_path: Path | None =
 
 
 def task_owned_by_manager(root: Path, task: TaskLine, manager_target: str, state_path: Path | None = None) -> bool:
+    """Return whether `manager_target` should include this task in its view.
+
+    Empty owner or empty manager target means there is no routing filter, so the
+    task remains visible to preserve the legacy all-manager view.
+    """
     owner = effective_owner_target(root, task, state_path)
     return not owner or not manager_target or same_tmux_target(owner, manager_target)
 
 
 def owner_target_for_status_row(root: Path, row: StatusRow) -> str:
+    """Recover owner routing for rows after classification.
+
+    Problem rows can be built from task files, registry rows, or raw tmux panes.
+    This keeps the final output attributable without requiring every caller to
+    thread owner metadata through each intermediate row.
+    """
     if row.owner_target:
         return row.owner_target
     target = row.target
@@ -573,7 +592,7 @@ def scan_task_state(path: Path) -> TaskState | None:
             port = int(port_match.group(1))
             break
     persistent_role = bool(metadata.blocked_on and PERSISTENT_ROLE_RE.search(metadata.blocked_on.lower()) is not None)
-    target = metadata.managerat if metadata.is_manager else metadata.runat
+    target = metadata.runat
     return TaskState(metadata.status, target, port, persistent_role, metadata.blocked_on, metadata.managerat, metadata.is_manager, metadata.tool)
 
 
@@ -680,6 +699,8 @@ def current_untracked_task_rows(args: Args, skip_targets: set[str], auto_unstick
         if state is not None:
             continue
         row = classify_target(task.task_file, task.target, task_status="unlinked", auto_unstick=auto_unstick, role="todo_current_untracked", unstick_by_target=unstick_by_target, auto_unstick_disabled_reason=auto_unstick_disabled_reason)
+        if row.status in {"error", "ready", "running", "stuck_input"}:
+            row = replace(row, status="untracked_agent")
         rows.append(row)
         seen_targets.add(target)
     return rows
@@ -723,6 +744,13 @@ def blocked_idle_task_rows(root: Path, manager_target: str = "", auto_unstick: b
 
 
 def add_blocked_idle_vl_row(root: Path, task: TaskLine, role: str, rows: list[StatusRow], seen: set[str], manager_target: str = "", auto_unstick: bool = False, unstick_by_target: dict[str, str] | None = None, auto_unstick_disabled_reason: str = "not_problems_only") -> None:
+    """Report blocked task files whose agent pane is no longer doing work.
+
+    A blocked task is only actionable here when its pane is inspectable and not
+    currently running. Errors, missing Codex state, and stuck input keep their
+    sharper status; other non-running results become `blocked_idle` with the
+    task's blocked reason attached.
+    """
     state_path = resolve_task_path(root, task.task_file)
     if task_has_pending_marker(state_path):
         return
@@ -799,6 +827,18 @@ def display_target(task: TaskLine, record: SessionRecord | None) -> str:
 
 
 def classify_target(task_file: str, target: str, persistent_role: bool = False, task_status: str = "", auto_unstick: bool = False, role: str = "", unstick_by_target: dict[str, str] | None = None, auto_unstick_disabled_reason: str = "not_problems_only", report: Report | None = None) -> StatusRow:
+    """Classify a task by inspecting the Codex state visible in its tmux pane.
+
+    `target` is the only address `inspect` can use. When it is empty, the task
+    may still exist in TODO or a task file, but there is no pane to inspect as a
+    Codex session. That is reported as `not_codex` with `target=` evidence so
+    callers can surface the broken/missing routing instead of silently dropping
+    the task.
+
+    Stuck input is intentionally conservative for blocked tasks, but non-blocked
+    panes may receive Enter when `omo_codex_status` says the visible input is
+    safe to submit.
+    """
     if not target:
         return StatusRow(task_file, "not_codex", "target=", persistent_role, task_status)
     report = report or inspect(StatusArgs(target, 80))
@@ -814,12 +854,8 @@ def classify_target(task_file: str, target: str, persistent_role: bool = False, 
     if report.status == "stuck_input" and persistent_role and task_status == "blocked" and is_stock_placeholder_input_text(report.input_text):
         return StatusRow(task_file, "ready", evidence, persistent_role, task_status, target)
     if report.status == "stuck_input":
-        if task_file.startswith("tmux:"):
-            unstick = "disabled:unregistered_tmux"
-        elif role == "registry_unmanaged":
-            unstick = f"disabled:{role}_{task_status or 'unknown'}"
-        elif role in {"todo_current_untracked", "todo_unmanaged"} and task_status != "running":
-            unstick = f"disabled:{role}_{task_status or 'unknown'}"
+        if task_status == "blocked":
+            unstick = f"disabled:{role}_blocked" if role else "disabled:blocked"
         elif auto_unstick:
             unstick_key = canonical_target(target)
             if unstick_by_target is not None and unstick_key in unstick_by_target:
@@ -835,6 +871,7 @@ def classify_target(task_file: str, target: str, persistent_role: bool = False, 
 
 
 def classify_task(task: TaskLine, record: SessionRecord | None, auto_unstick: bool = False, unstick_by_target: dict[str, str] | None = None, no_auto_unstick_target: str = "", auto_unstick_disabled_reason: str = "not_problems_only") -> StatusRow:
+    """Classify a task using its matching registry pane when one exists."""
     target = display_target(task, record)
     return classify_target(task.task_file, target, task.persistent_role, task.status, auto_unstick, unstick_by_target=unstick_by_target, auto_unstick_disabled_reason=auto_unstick_disabled_reason)
 
@@ -918,6 +955,19 @@ def owned_todo_targets(args: Args) -> set[str]:
     return targets
 
 
+def current_task_targets(root: Path) -> set[str]:
+    targets: set[str] = set()
+    for task in parse_task_lines(root / "TODO.md"):
+        if task.section != "todo:current":
+            continue
+        state_path = resolve_task_path(root, task.task_file)
+        state = scan_task_state(state_path) if state_path is not None else None
+        target = state.target if state is not None else task.target
+        if target:
+            targets.add(target)
+    return targets
+
+
 def tmux_list_panes() -> list[str]:
     try:
         out = subprocess.run(["tmux", "list-panes", "-a", "-F", "#{session_name}:#{window_index}.#{pane_index}"], capture_output=True, text=True, timeout=5, check=False)
@@ -928,35 +978,35 @@ def tmux_list_panes() -> list[str]:
     return [canonical_target(line.strip()) for line in out.stdout.splitlines() if line.strip()]
 
 
-def unmanaged_session_names(root: Path) -> set[str]:
-    names: set[str] = set()
-    for task in parse_task_lines(root / "TODO.md"):
-        if task_line_is_vl(task):
-            names.add("vl")
-    return names
+def is_human_tmux_target(target: str) -> bool:
+    return target_session(target).startswith("h")
 
 
 def tmux_unmanaged_problem_rows(args: Args, skip_targets: set[str], auto_unstick: bool, unstick_by_target: dict[str, str], auto_unstick_disabled_reason: str) -> list[StatusRow]:
-    session_names = unmanaged_session_names(args.root)
-    if not session_names:
-        return []
     rows: list[StatusRow] = []
     seen_targets = {canonical_target(target) for target in skip_targets if target}
     for target in tmux_list_panes():
-        if target in seen_targets or target_session(target) not in session_names:
+        if target in seen_targets or is_human_tmux_target(target):
+            continue
+        if args.manager_target and target_session(target) != target_session(args.manager_target):
             continue
         task_file = f"tmux:{target}"
-        if active_vl_submanager_target(args.root) and args.manager_target and target_session(args.manager_target) != "vl":
+        if target_session(target) == "vl" and active_vl_submanager_target(args.root) and args.manager_target and target_session(args.manager_target) != "vl":
             continue
         row = classify_target(task_file, target, auto_unstick=auto_unstick, role="tmux_unmanaged", unstick_by_target=unstick_by_target, auto_unstick_disabled_reason=auto_unstick_disabled_reason)
-        problem = unmanaged_problem_row(row, report_not_codex=False, report_ready_running=True)
-        if problem is not None:
-            rows.append(problem)
+        if row.status in {"error", "ready", "running", "stuck_input"}:
+            rows.append(replace(row, status="untracked_agent"))
             seen_targets.add(target)
     return rows
 
 
 def unmanaged_problem_row(row: StatusRow, report_not_codex: bool, report_ready_running: bool) -> StatusRow | None:
+    """Keep only unmanaged rows that require manager attention.
+
+    Callers decide whether `not_codex` and `ready` panes are problems because
+    registry, TODO, and raw tmux discovery have different confidence levels
+    about whether the pane belongs to a managed task.
+    """
     if row.status == "ready" and report_ready_running:
         return row
     if row.status in {"error", "stuck_input"}:
@@ -1016,7 +1066,7 @@ def format_summary(rows: list[StatusRow], completed_stale_count: int, pruned_cou
     return "\n".join(lines)
 
 
-PROBLEM_STATUSES = {"blocked_idle", "error", "human_request", "manager_compaction", "not_codex", "ready", "stuck_input"}
+PROBLEM_STATUSES = {"blocked_idle", "error", "human_request", "manager_compaction", "not_codex", "ready", "stuck_input", "untracked_agent"}
 
 
 def is_parked_persistent_blocked_row(row: StatusRow) -> bool:
@@ -1038,10 +1088,10 @@ def format_problem_summary(rows: list[StatusRow], completed_stale: set[str] | di
     problem_rows = [row for row in rows if row.status in PROBLEM_STATUSES and not is_parked_persistent_blocked_row(row)]
     if not problem_rows and not completed_stale_evidence_map:
         return ""
-    counts: dict[str, int] = {"not_codex": 0, "blocked_idle": 0, "error": 0, "human_request": 0, "manager_compaction": 0, "ready": 0, "stuck_input": 0}
+    counts: dict[str, int] = {"not_codex": 0, "blocked_idle": 0, "error": 0, "human_request": 0, "manager_compaction": 0, "ready": 0, "stuck_input": 0, "untracked_agent": 0}
     for row in problem_rows:
         counts[row.status] = counts.get(row.status, 0) + 1
-    parts = [f"{status}={counts[status]}" for status in ("not_codex", "blocked_idle", "error", "human_request", "manager_compaction", "ready", "stuck_input") if counts[status]]
+    parts = [f"{status}={counts[status]}" for status in ("not_codex", "blocked_idle", "error", "human_request", "manager_compaction", "ready", "stuck_input", "untracked_agent") if counts[status]]
     if completed_stale_evidence_map:
         parts.append(f"done-registry-stale={len(completed_stale_evidence_map)}")
     lines = [f"agent-problems: {' '.join(parts)}"]
@@ -1105,6 +1155,7 @@ def main(argv: list[str]) -> int:
             todo_rows = todo_unmanaged_problem_rows(args, inspected_targets, auto_unstick, unstick_by_target, auto_unstick_disabled_reason)
             rows.extend(todo_rows)
             inspected_targets.update(owned_todo_targets(args))
+            inspected_targets.update(current_task_targets(args.root))
             inspected_targets.update(row.target for row in todo_rows if row.target)
             tmux_rows = tmux_unmanaged_problem_rows(args, inspected_targets, auto_unstick, unstick_by_target, auto_unstick_disabled_reason)
             rows.extend(tmux_rows)

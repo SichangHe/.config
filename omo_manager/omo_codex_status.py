@@ -128,6 +128,34 @@ def last_output(lines: list[str]) -> list[str]:
     return current_block(lines).lines
 
 
+def final_assistant_output(lines: list[str]) -> list[str]:
+    body = lines[:-1] if has_codex_model_footer(lines) or has_queued_message_footer(lines) else lines[:]
+    worked_idx = -1
+    for idx in range(len(body) - 1, -1, -1):
+        if WORKED_RE.match(body[idx]):
+            worked_idx = idx
+            break
+    if worked_idx < 0:
+        return []
+    start = 0
+    for idx in range(worked_idx - 1, -1, -1):
+        if SEP_RE.match(body[idx]) or WORKED_RE.match(body[idx]):
+            start = idx + 1
+            break
+    output = [line.rstrip() for line in body[start:worked_idx]]
+    while output and not output[0]:
+        del output[0]
+    while output and not output[-1]:
+        output.pop()
+    return output
+
+
+def report_output(lines: list[str], block: Block, report_status: str) -> list[str]:
+    if report_status == "ready":
+        return final_assistant_output(lines)
+    return block.lines
+
+
 def current_input_text(lines: list[str]) -> str:
     body = lines[:-1] if has_codex_model_footer(lines) or has_queued_message_footer(lines) else lines[:]
     while body and not body[-1].strip():
@@ -318,7 +346,7 @@ def report_from_lines(lines: list[str]) -> Report:
     can_submit_input = can_submit_stuck_input(lines)
     report_status = status(lines, block)
     input_blocker = stuck_input_blocker(lines, input_text) if report_status == "stuck_input" and not can_submit_input else ""
-    return Report(report_status, block.lines, input_text, can_submit_input, input_blocker)
+    return Report(report_status, report_output(lines, block, report_status), input_text, can_submit_input, input_blocker)
 
 
 def inspect(args: Args) -> Report:

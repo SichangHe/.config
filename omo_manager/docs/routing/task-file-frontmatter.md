@@ -50,7 +50,7 @@ Reject fields that are not in the schema. All comments stay inside Markdown bodi
 If `status: blocked`, `blocked_on` is required; else, `blocked_on` MUST NOT exist.
 ALL other fields are required.
 
-`managerat` MUST be different from `runat`. If `is_manager` is `true`, send pending messages to the tmux window at `managerat`; otherwise, send to `runat`.
+`managerat` MUST be different from `runat`. In a worker task file, `managerat` is the manager that owns the task. In a manager task file, `runat` is the manager pane that receives pending blocks already written to that manager file. Use worker `runat` only for the worker pane and direct-message delivery.
 
 `pending_task_items` only contains items that are still open. Remove done/cancelled items IMMEDIATELY.
 
@@ -60,9 +60,11 @@ ALL other fields are required.
 
 `omo_agent_status.py` only reads from frontmatter.
 
-`omo_pending_watch.py` scans for `(pending)` markers and dispatches lines from there to the end of the task file according to `is_manager`, `runat`, `managerat`, etc. It then remembers the dispatch for 10min before possibly re-dispatching. The target manager is responsible for removing the `(pending)` marker.
+`omo_pending_watch.py` scans for `(pending)` markers and dispatches lines from there to the end of the task file. Worker task files route normal pending blocks to `managerat`; manager task files route normal pending blocks to their own `runat`. It then remembers the dispatch in process memory before possibly re-dispatching. The target manager is responsible for recording `pending_task_items`, removing the `(pending)` marker, and routing the work. Worker `runat` is used for direct-message worker delivery only.
 
-`email_idle_watcher.py` and `omo_report.sh` simply append `(pending)` and the message body to the task file.
+`omo_report.sh` reads the reporting worker task file, finds its `managerat`, and appends the `(pending)` report block to that manager's task file. If `managerat` is the main manager target, the destination is the dated `work_manager_YYYY-MM-DD.md` file.
+
+`email_idle_watcher.py` appends human email pending blocks to the current main manager file or to the addressed manager task file. When an addressed task is a worker task, its `managerat` is used to find the current manager file that should receive the block.
 
 ## migration plan
 

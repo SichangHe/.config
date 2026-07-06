@@ -5,16 +5,24 @@ import hashlib
 from pathlib import Path
 
 
-PENDING_CONTENT_CHAR_LIMIT = 6000
+PENDING_CONTENT_CHAR_LIMIT = 2000
 
 
 def truncate_content(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
-    body = text[:limit].rstrip()
-    return f"{body}\n... [truncated {len(text) - len(body)} chars]"
+    omitted_n = len(text) - limit
+    while True:
+        marker = f"…{omitted_n}chars…"
+        keep = max(0, limit - len(marker))
+        next_omitted_n = len(text) - keep
+        if next_omitted_n == omitted_n:
+            break
+        omitted_n = next_omitted_n
+    head_n = keep // 2
+    tail_n = keep - head_n
+    return f"{text[:head_n].rstrip()}{marker}{text[-tail_n:].lstrip()}"
 
 
 def pending_tail_digest(path: Path, line: int, pending_tail: str) -> str:
-    payload = truncate_content(pending_tail, PENDING_CONTENT_CHAR_LIMIT)
-    return hashlib.sha256(f"{path}:{line}:{payload}".encode("utf-8")).hexdigest()[:16]
+    return hashlib.sha256(f"{path}:{line}:{pending_tail}".encode("utf-8")).hexdigest()[:16]

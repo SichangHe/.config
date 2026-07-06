@@ -10,6 +10,6 @@ Before sending, recent-thread lookup strips repeated `Re:` plus `[a]`, `[omo_man
 
 Reply subject preparation strips old tmux tags before prepending the selected current bracketed tag. For manager-human sends, the selected tag and footer target prefer explicit `--tmux-target` or `--sender-tmux-target`, then `OMO_MANAGER_TMUX_TARGET`, then the agent/current tmux fallback; sending fails when no valid target is available.
 
-`omo_manager_setup_watchers.sh` loads `local.env` and passes `--manager-target` to watcher helpers so the manager target stays stable. Lookup failures are non-critical and fall back to a normal `[a] [TARGET] SUBJECT` send.
+`omo_manager_setup_watchers.sh` loads `local.env`, exports the manager environment for pending watcher helpers, and passes explicit manager flags only to helpers that still require them. Lookup failures are non-critical and fall back to a normal `[a] [TARGET] SUBJECT` send.
 
 `email_me.py` sends a plain text fallback with Markdown links expanded to bare URLs, emits an email-compatible HTML alternative with escaped raw HTML, renders list-containing bodies as normal HTML instead of wrapping the whole email in `<pre>`, and appends a final `tmux: TARGET` footer when a target is known, otherwise `PWD: NAME`.

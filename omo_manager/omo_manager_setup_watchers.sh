@@ -19,7 +19,6 @@ env_manager_url="${OMO_MANAGER_URL+x}${OMO_MANAGER_URL-}"
 env_manager_target="${OMO_MANAGER_TMUX_TARGET+x}${OMO_MANAGER_TMUX_TARGET-}"
 env_root="${OMO_WORK_LOGS_ROOT+x}${OMO_WORK_LOGS_ROOT-}"
 env_state_dir="${OMO_MANAGER_STATE_DIR+x}${OMO_MANAGER_STATE_DIR-}"
-env_pending_seen="${OMO_MANAGER_PENDING_SEEN+x}${OMO_MANAGER_PENDING_SEEN-}"
 env_mail_dir="${OMO_MANAGER_MAIL_DIR+x}${OMO_MANAGER_MAIL_DIR-}"
 env_email_enable="${OMO_MANAGER_ENABLE_EMAIL_WATCHER+x}${OMO_MANAGER_ENABLE_EMAIL_WATCHER-}"
 env_email_config="${OMO_EMAIL_CONFIG_PATH+x}${OMO_EMAIL_CONFIG_PATH-}"
@@ -33,7 +32,6 @@ fi
 [ -n "$env_manager_target" ] && OMO_MANAGER_TMUX_TARGET="${env_manager_target#x}"
 [ -n "$env_root" ] && OMO_WORK_LOGS_ROOT="${env_root#x}"
 [ -n "$env_state_dir" ] && OMO_MANAGER_STATE_DIR="${env_state_dir#x}"
-[ -n "$env_pending_seen" ] && OMO_MANAGER_PENDING_SEEN="${env_pending_seen#x}"
 [ -n "$env_mail_dir" ] && OMO_MANAGER_MAIL_DIR="${env_mail_dir#x}"
 [ -n "$env_email_enable" ] && OMO_MANAGER_ENABLE_EMAIL_WATCHER="${env_email_enable#x}"
 [ -n "$env_email_config" ] && OMO_EMAIL_CONFIG_PATH="${env_email_config#x}"
@@ -43,16 +41,15 @@ manager_url="${OMO_MANAGER_URL:-}"
 manager_target="${OMO_MANAGER_TMUX_TARGET:-}"
 state_base="${XDG_STATE_HOME:-$HOME/.local/state}/omo-manager"
 state_dir="${OMO_MANAGER_STATE_DIR:-$state_base}"
-pending_seen="${OMO_MANAGER_PENDING_SEEN:-$state_dir/pending-seen.tsv}"
-if [ "$pending_seen" = "/tmp/omo-manager-pending-seen.tsv" ]; then
-  pending_seen="$state_dir/pending-seen.tsv"
-fi
-export OMO_MANAGER_PENDING_SEEN="$pending_seen"
 email_enable="${OMO_MANAGER_ENABLE_EMAIL_WATCHER:-auto}"
 stuck_enable="${OMO_MANAGER_ENABLE_STUCK_WATCHER:-true}"
 email_config="${OMO_EMAIL_CONFIG_PATH:-$HOME/.config/himalaya/config.toml}"
 mail_dir="${OMO_MANAGER_MAIL_DIR:-$root/manager_mail}"
 email_supervisor_startup_grace_s="${OMO_MANAGER_EMAIL_SUPERVISOR_STARTUP_GRACE_S:-2}"
+export OMO_MANAGER_URL="$manager_url"
+export OMO_MANAGER_TMUX_TARGET="$manager_target"
+export OMO_WORK_LOGS_ROOT="$root"
+export OMO_MANAGER_STATE_DIR="$state_dir"
 export OMO_MANAGER_EMAIL_SUPERVISOR_STARTUP_GRACE_S="$email_supervisor_startup_grace_s"
 export OMO_MANAGER_MAIL_DIR="$mail_dir"
 mkdir -p -m 700 "$state_dir"
@@ -62,8 +59,6 @@ if [ -z "$manager_url" ] && [ -z "$manager_target" ]; then
   exit 2
 fi
 echo "manager_target=${manager_target:-unset} manager_url=${manager_url:-unset}"
-pkill -f "[p]ending-watch-supervisor .*--state ${pending_seen}" >/dev/null 2>&1 || true
-pkill -f "[o]mo_pending_watch.py .*--state ${pending_seen}" >/dev/null 2>&1 || true
 pkill -f "[e]mail-watch-supervisor .*--state-dir ${state_dir}" >/dev/null 2>&1 || true
 pkill -f "[e]mail_idle_watcher.py .*--state-dir ${state_dir}" >/dev/null 2>&1 || true
 pkill -f "[e]mail-watch-supervisor .*--root ${root}" >/dev/null 2>&1 || true
@@ -72,9 +67,7 @@ pkill -f "[p]ending-watch-supervisor .*--root ${root}" >/dev/null 2>&1 || true
 pkill -f "[o]mo_pending_watch.py .*--root ${root}" >/dev/null 2>&1 || true
 pkill -f "[e]mail_idle_watcher.py .*--root ${root}" >/dev/null 2>&1 || true
 pkill -f "[o]mo_stuck_watch.py .*--watch" >/dev/null 2>&1 || true
-pending_args=(--root "$root" --state "$pending_seen")
-[ -n "$manager_target" ] && pending_args+=(--manager-target "$manager_target")
-[ -n "$manager_url" ] && pending_args+=(--manager-url "$manager_url")
+pending_args=(--root "$root")
 setsid bash -c '
 while :; do
   "$@"

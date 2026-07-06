@@ -3,7 +3,7 @@
 ## instructions
 
 - talk directly to the human in chat
-- do not use email for this task
+- use email for human-visible status that must not be missed
 - stop clarifying dirty-file ownership
 - focus only on reviewing helpers
 - answer in one paragraph by default
@@ -20,6 +20,24 @@
 - start with the helpers that affect manager, pending, status, mail, and tmux delivery
 - explain findings and proposed fixes directly to the human
 - make changes only after the human agrees to the audit direction or asks for fixes
+
+## active state
+
+- communication: keep chat terse; email important human-visible conclusions
+- current incident: agents sent manager reports to themselves
+- current human directive: `omo_report.sh` must route reports by reading the reporting task file's `managerat`, not by appending to the reporting task file
+- current human directive: remove legacy task metadata compatibility and migrate all active task files to frontmatter
+- confirmed mechanism 1: the live pending watcher was stale and still ran old `--state`, `--manager-target`, and `--manager-url` flags
+- confirmed mechanism 2: `email_idle_watcher.py` retry routing used non-current task-file `runat` before `managerat`
+- corrected mechanism: `omo_report.sh` now appends worker reports to the manager task file found from worker `managerat`; main-manager reports go to dated `work_manager_YYYY-MM-DD.md`
+- corrected watcher rule: pending blocks already inside a manager task file route to that manager task's `runat`; worker task pending blocks route to `managerat`
+- current tests: focused report, pending, email-route, status, codex status, syntax, ruff, and diff checks pass for corrected report source-routing and agent-problem handling
+- current human directive: fix `omo_pending_watch` agent-problem notices so they route each problem to the owning manager, summarize actionable groups, hide noisy raw status fields, send Enter to non-blocked stuck panes before reporting, and report only after three failed unstick attempts
+- current human directive: tmux sessions starting with `h` are human-owned; every other Codex-looking tmux pane is agent-owned and must be tracked by a task file, so unmatched agent panes are `untracked_agent` problems
+- implemented: `omo_agent_status.py` now treats non-`h*` unmatched running, ready, errored, or stuck Codex panes as `untracked_agent`, auto-enters safe non-blocked stuck panes, leaves blocked panes untouched, and scopes raw tmux scans to the manager's tmux session when a manager target is supplied
+- implemented: `omo_pending_watch.py` now formats agent-problem reports into grouped action text, suppresses first and second auto-enter notices, reports the third unresolved attempt, and forgets Enter attempts when the pane is no longer stuck
+- completed: reviewer follow-up found no blockers for the agent-problem/report-routing fixes
+- completed: watcher setup restarted pending, stuck, and email watchers after the helper changes
 
 ## plan
 
@@ -45,13 +63,13 @@
 - [ ] helper-owned docs
 - [ ] message tracking and sending
   - accepted assumption: Markdown pending files are generally append-only or block-swap-only, so relative pending line positions should not shift often enough to require stable message IDs now
-  - changed `omo_pending_watch.py` pending/problem `seen` tracking from disk-backed state to process-local bounded LRU cache
+  - changed `omo_pending_watch.py` pending/problem `seen` tracking from disk-backed state to process-local time-based cache
   - removed live `pending-seen.tsv`
-  - changed `omo_pending_watch.py` to include pending-line context and truncated file-tail context in worker deliveries
-  - changed `omo_pending_watch.py` to attach pointed email content when a pending line references manager mail
+  - changed `omo_pending_watch.py` to include pending-line context, source line ranges, a remove-marker instruction, and 2000-char start/end truncation in deliveries
+  - changed `omo_pending_watch.py` to attach referenced file content, including pointed email content when a pending line references manager mail and absolute agent report paths
   - changed `omo_pending_watch.py` DM handling so email messages ending in `DM` route directly to the worker with an FYI copy to the manager
   - kept compact `(from agent ...)` source markers as the preferred agent pending-block format
-  - changed `omo_pending_watch.py` owner target routing to use the latest valid `runat:` or `managerat:` before the pending line and ignore later stale directives
+  - changed `omo_pending_watch.py` pending routing so normal pending goes to `managerat` and only DM delivery goes to `runat`
   - reviewer loop complete for first DM/direct-delivery pass
   - reviewer follow-up found frontmatter relaunch, invalid runat, email routing, pending stale-suppression, and stale-doc issues
   - active fix: reviewer follow-up issues patched with focused tests and docs
@@ -60,10 +78,18 @@
   - reviewed fix: push helpers catch launch exceptions, log them, return failure, and keep unresolved markers retryable
   - reviewed fix: top-level pending-watcher crash guard emails the human on unexpected process crash, passes a sender tmux target when available, and re-raises for supervisor restart
   - pending review: `omo_pending_watch.py` watcher loop and restart behavior, including bounded in-memory `seen`, full rescans, mtime polling, and restart duplicates
+  - finding: restart loses process-local `seen`; `omo_push_to_manager.py`/`omo_tmux_send.py` validate pending marker freshness but do not durably mark a successful pending delivery as routed, so unchanged unannotated pending blocks can be delivered again after watcher restart
   - pending review: `omo_pending_watch.py` docs/tests gaps after the current script review is complete
+  - active incident fix: `email_idle_watcher.py` retry routing changed so worker task files route to `managerat`, not `runat`
+  - active incident check: live pending watcher command no longer includes old pending-watcher routing flags
+  - active incident review: reviewer found no blocker for the self-route fix
 - [ ] status helpers
   - first pass complete: producer, aggregator, watcher consumer, and representative tests inspected
   - deeper pass pending: exact false-positive cases, live target ownership, and output-noise policy
+  - reviewed fix: agent-problem report format and ownership routing from `omo_agent_status.py` output through `omo_pending_watch.py`
+  - reviewed fix: unmatched non-human Codex panes are reported as `untracked_agent`; the manager instruction says to ask the agent what their task is or consider closing them
+  - reviewed fix: safe non-blocked stuck panes receive Enter before reporting; first and second attempts are suppressed, the third unresolved attempt is reported, and attempt memory is cleared when the pane is no longer stuck
+  - reviewed fix: still-stuck panes keep Enter-attempt memory even when the latest status is `not_safe:*` or another non-`sent_enter` result
 - [ ] pending helpers
 - [ ] mail helpers
 - [ ] tmux delivery helpers
@@ -83,6 +109,9 @@
   - reviewed: MANAGER.md frontmatter instruction patch had reviewer issues and was tightened so `status: blocked` requires a concrete blocker
   - migration done: task-file migration worker added frontmatter to 32 active task files using `pending_task_items`
   - migration blockers: 10 active task files lacked enough valid legacy metadata, e.g. no blocked reason, no managerat, managerat equals runat, or human runat/tool mismatch
+  - new directive: no backwards compatibility; all active task files must be migrated instead of keeping helper fallback paths
+  - active definition: `TODO.md` sections `current`, `human pending`, and `low priority`
+  - active implementation split: task-file migration worker owns `/ssd1/sichangheagent/work_logs` active task files; helper-code worker owns `.config/omo_manager` legacy metadata fallback removal
 - [ ] watcher helpers
 - [ ] docs and instruction contracts
 - [ ] test coverage gaps
