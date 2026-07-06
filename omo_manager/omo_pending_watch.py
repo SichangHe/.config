@@ -248,6 +248,12 @@ class CommandOutput:
     timed_out: bool = False
 
 
+@dataclass(frozen=True)
+class DeliveryResult:
+    status: int
+    error: str = ""
+
+
 class MarkdownChangeWatcher:
     def __init__(self, root: Path, libc: ctypes.CDLL, fd: int) -> None:
         self.root = root
@@ -1026,12 +1032,12 @@ def clear_pending_marker_if_current(root: Path, marker: Marker) -> bool:
             tmp_path.unlink(missing_ok=True)
 
 
-def push_marker_text(args: Args, marker: Marker, text: str, manager_target: str) -> int:
+def push_marker_delivery(args: Args, marker: Marker, text: str, manager_target: str) -> DeliveryResult:
     if args.dry_run:
         print(text)
-        return 0
+        return DeliveryResult(0)
     if manager_target:
-        return send_delivery_text(
+        return try_send_delivery_text(
             "pending delivery",
             text,
             manager_target,
@@ -1040,7 +1046,41 @@ def push_marker_text(args: Args, marker: Marker, text: str, manager_target: str)
             pending_line=marker.line,
             pending_digest=marker.digest,
         )
-    return 1
+    return DeliveryResult(1, "missing delivery target")
+
+
+def push_marker_text(args: Args, marker: Marker, text: str, manager_target: str) -> int:
+    return push_marker_delivery(args, marker, text, manager_target).status
+
+
+def target_unavailable(result: DeliveryResult) -> bool:
+    error = result.error.lower()
+    return any(fragment in error for fragment in ("not a codex pane", "status=not_codex", "can't find", "cannot find", "no such window", "no such pane", "does not exist"))
+
+
+def main_manager_fallback_target(args: Args, failed_target: str) -> str:
+    if not args.manager_target or canonical_target(args.manager_target) == canonical_target(failed_target):
+        return ""
+    return args.manager_target
+
+
+def with_failed_target_escalation(text: str, failed_target: str, result: DeliveryResult) -> str:
+    detail = result.error or f"status {result.status}"
+    prefix = f"Delivery to resolved target `{failed_target}` failed: {detail}. Main manager action required: fix the stale task target or restart the owning manager, then handle this message."
+    first, sep, rest = text.partition("\n")
+    if not sep:
+        return f"{text}\n{prefix}"
+    return f"{first}\n{prefix}\n{rest}"
+
+
+def push_marker_text_or_escalate(args: Args, marker: Marker, text: str, manager_target: str) -> int:
+    result = push_marker_delivery(args, marker, text, manager_target)
+    if result.status == 0 or not target_unavailable(result):
+        return result.status
+    fallback_target = main_manager_fallback_target(args, manager_target)
+    if not fallback_target:
+        return result.status
+    return push_marker_delivery(args, marker, with_failed_target_escalation(text, manager_target, result), fallback_target).status
 
 
 def push_dm_ref(args: Args, seen: dict[str, float], now_s: float, marker: Marker, attachments: Sequence[SourceAttachment], manager_target: str, *, copy_manager: bool = True) -> int:
@@ -1053,7 +1093,7 @@ def push_dm_ref(args: Args, seen: dict[str, float], now_s: float, marker: Marker
             attachments,
             f"direct-message fallback: pending block or linked file starts or ends with `{marker_name}`, but no safe worker `runat:` target was found; delivering to the manager for routing.",
         )
-        return push_marker_text(args, marker, with_manager_policy_reminder(args, text, reminders), manager_target)
+        return push_marker_text_or_escalate(args, marker, with_manager_policy_reminder(args, text, reminders), manager_target)
     worker_text = marker_worker_dm_text(marker, attachments)
     worker_key = dm_worker_seen_key(args, marker, worker_target, attachments)
     worker_seen = seen_contains(seen, worker_key, now_s)
@@ -1065,7 +1105,7 @@ def push_dm_ref(args: Args, seen: dict[str, float], now_s: float, marker: Marker
                 attachments,
                 f"direct-message fallback: direct worker delivery to {worker_target} failed with status {worker_status}; manager action required to route or help with the human request.",
             )
-            return push_marker_text(args, marker, with_manager_policy_reminder(args, text, reminders), manager_target)
+            return push_marker_text_or_escalate(args, marker, with_manager_policy_reminder(args, text, reminders), manager_target)
     if not copy_manager:
         remember_seen(seen, worker_key, now_s)
         if args.dry_run or clear_pending_marker_if_current(args.root, marker):
@@ -1095,12 +1135,12 @@ def push_ref(args: Args, seen: dict[str, float], now_s: float, marker: Marker, a
         if seen_contains(seen, error_key, now_s):
             return 1
         text = marker_delivery_text(marker, attachments)
-        status = push_marker_text(args, marker, with_manager_policy_reminder(args, text, reminders), manager_target)
+        status = push_marker_text_or_escalate(args, marker, with_manager_policy_reminder(args, text, reminders), manager_target)
         if status in {0, 2}:
             remember_seen(seen, error_key, now_s)
         return status if status not in {0, 2} else 1
     text = marker_delivery_text(marker, attachments)
-    return push_marker_text(args, marker, with_manager_policy_reminder(args, text, reminders), manager_target)
+    return push_marker_text_or_escalate(args, marker, with_manager_policy_reminder(args, text, reminders), manager_target)
 
 
 def push_manager_text(args: Args, text: str) -> int:
@@ -1114,7 +1154,20 @@ def push_manager_text(args: Args, text: str) -> int:
 
 
 def push_manager_text_to_target(args: Args, text: str, manager_target: str) -> int:
-    return push_manager_text(replace(args, manager_target=manager_target), text)
+    scoped_args = replace(args, manager_target=manager_target)
+    if scoped_args.dry_run:
+        print(text)
+        return 0
+    if not scoped_args.manager_target:
+        print("omo_pending_watch: OMO_MANAGER_TMUX_TARGET is required outside --dry-run", file=sys.stderr)
+        return 1
+    result = try_send_delivery_text("manager delivery", text, scoped_args.manager_target)
+    if result.status == 0 or not target_unavailable(result):
+        return result.status
+    fallback_target = main_manager_fallback_target(args, scoped_args.manager_target)
+    if not fallback_target:
+        return result.status
+    return try_send_delivery_text("manager delivery", with_failed_target_escalation(text, scoped_args.manager_target, result), fallback_target).status
 
 
 def send_delivery_text(
@@ -1128,9 +1181,23 @@ def send_delivery_text(
     pending_digest: str = "",
     submit_verify_timeout_s: float = DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S,
 ) -> int:
+    return try_send_delivery_text(name, text, target, root=root, pending_file=pending_file, pending_line=pending_line, pending_digest=pending_digest, submit_verify_timeout_s=submit_verify_timeout_s).status
+
+
+def try_send_delivery_text(
+    name: str,
+    text: str,
+    target: str,
+    *,
+    root: Path | None = None,
+    pending_file: Path | None = None,
+    pending_line: int = 0,
+    pending_digest: str = "",
+    submit_verify_timeout_s: float = DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S,
+) -> DeliveryResult:
     if root is not None and pending_file is not None and not pending_marker_present(root, pending_file, pending_line, pending_digest):
         print(f"omo_pending_watch: {name} skipped; pending marker cleared before tmux paste", file=sys.stderr)
-        return 1
+        return DeliveryResult(1, "pending marker cleared before tmux paste")
     try:
         send_to_codex(
             target,
@@ -1145,11 +1212,11 @@ def send_delivery_text(
         )
     except subprocess.CalledProcessError as exc:
         print(f"omo_pending_watch: {name} failed: {exc}", file=sys.stderr)
-        return exc.returncode or 1
+        return DeliveryResult(exc.returncode or 1, str(exc))
     except Exception as exc:
         print(f"omo_pending_watch: {name} failed: {exc}", file=sys.stderr)
-        return 1
-    return 0
+        return DeliveryResult(1, str(exc))
+    return DeliveryResult(0)
 
 
 def maybe_push_idle_status(args: Args, last_activity_s: float, now_s: float) -> bool:

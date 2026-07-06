@@ -53,6 +53,7 @@
   - human-origin refs require manager email acknowledgement
   - worker task-file frontmatter routes normal pending blocks to `managerat`
   - manager task-file frontmatter routes normal pending blocks to that manager's `runat`
+  - if a resolved manager delivery target is unavailable and differs from `OMO_MANAGER_TMUX_TARGET`, the same manager-facing message is escalated to `OMO_MANAGER_TMUX_TARGET` with the failed target and error inline
   - a pending block or any readable linked file starting or ending with standalone case-insensitive `for manager`, after quote lines are ignored and edge punctuation/whitespace is trimmed, routes to the task frontmatter `managerat`
   - worker `runat` is used for DM worker delivery
   - legacy prose metadata remains recognized only for main manager task files and old explicit source markers

@@ -518,6 +518,41 @@ class PendingMarkerTests(unittest.TestCase):
                 self.assertTrue(scan_once(args, {}, [path]))
             self.assertEqual("vl:15", calls[0][calls[0].index("--manager-target") + 1])
 
+    def test_for_manager_pending_escalates_to_main_when_manager_target_is_not_codex(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "vl_vlhsplit_10046.md"
+            path.write_text(
+                f"{task_frontmatter(status='done', runat='vl:37', managerat='vl:32')}\n"
+                "(pending)\n"
+                "(for manager: Is the public repo artifact superseded?)\n",
+                encoding="utf-8",
+            )
+            calls: list[tuple[str, str]] = []
+
+            def fake_send_to_codex(target: str, message: str, _options: object = None) -> None:
+                calls.append((target, message))
+                if target == "vl:32":
+                    raise RuntimeError("target is not a Codex pane: vl:32")
+
+            args = Args(
+                root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=False, manager_target="wl:1.0"
+            )
+            with patch("omo_manager.omo_pending_watch.send_to_codex", side_effect=fake_send_to_codex):
+                self.assertTrue(watcher.scan_once(args, {}, [path]))
+            self.assertEqual(["vl:32", "wl:1.0"], [target for target, _message in calls])
+            escalated = calls[1][1]
+            self.assertTrue(escalated.startswith("Immediately record every pending item, then ack human, then remove `(pending)` in below file, then dispatch the task:"))
+            self.assertIn("Delivery to resolved target `vl:32` failed: target is not a Codex pane: vl:32.", escalated)
+            self.assertIn("<snippet file=\"vl_vlhsplit_10046.md:11-12\">", escalated)
+
+    def test_target_unavailable_matches_codex_status_not_codex_error(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        self.assertTrue(watcher.target_unavailable(watcher.DeliveryResult(1, "target left supported Codex state before submit: vl:32 status=not_codex")))
+
     def test_agent_report_in_vl_submanager_file_routes_to_submanager(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
