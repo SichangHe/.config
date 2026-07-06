@@ -1082,6 +1082,7 @@ def registry_prune(args: Args, completed: set[str]) -> int:
 
 
 def format_summary(rows: list[StatusRow], completed_stale_count: int, pruned_count: int) -> str:
+    rows = [row for row in rows if not is_quiet_blocked_active_row(row)]
     counts: dict[str, int] = {"not_codex": 0, "running": 0, "blocked_idle": 0, "error": 0, "ready": 0, "stuck_input": 0, "human_request": 0}
     for row in rows:
         counts[row.status] = counts.get(row.status, 0) + 1
@@ -1096,8 +1097,8 @@ def format_summary(rows: list[StatusRow], completed_stale_count: int, pruned_cou
 PROBLEM_STATUSES = {"blocked_idle", "error", "human_request", "manager_compaction", "manager_waiting_subagent", "not_codex", "ready", "stuck_input", "untracked_agent"}
 
 
-def is_parked_persistent_blocked_row(row: StatusRow) -> bool:
-    return row.persistent_role and row.task_status == "blocked" and row.status == "ready"
+def is_quiet_blocked_active_row(row: StatusRow) -> bool:
+    return row.task_status == "blocked" and row.status in {"ready", "running"}
 
 
 def completed_stale_evidence(root: Path, completed_stale: set[str]) -> dict[str, str]:
@@ -1112,7 +1113,7 @@ def completed_stale_evidence(root: Path, completed_stale: set[str]) -> dict[str,
 
 def format_problem_summary(rows: list[StatusRow], completed_stale: set[str] | dict[str, str]) -> str:
     completed_stale_evidence_map = {task_file: "session registry still has a completed task; owner manager should close or prune it" for task_file in completed_stale} if isinstance(completed_stale, set) else completed_stale
-    problem_rows = [row for row in rows if row.status in PROBLEM_STATUSES and not is_parked_persistent_blocked_row(row)]
+    problem_rows = [row for row in rows if row.status in PROBLEM_STATUSES and not is_quiet_blocked_active_row(row)]
     if not problem_rows and not completed_stale_evidence_map:
         return ""
     counts: dict[str, int] = {"not_codex": 0, "blocked_idle": 0, "error": 0, "human_request": 0, "manager_compaction": 0, "manager_waiting_subagent": 0, "ready": 0, "stuck_input": 0, "untracked_agent": 0}
@@ -1202,7 +1203,8 @@ def main(argv: list[str]) -> int:
             print(text)
             return 3
         print(format_summary(rows, len(completed_stale), pruned_count))
-        if args.exit_code_if_active and any(row.status != "blocked_idle" for row in rows):
+        active_rows = [row for row in rows if not is_quiet_blocked_active_row(row)]
+        if args.exit_code_if_active and any(row.status != "blocked_idle" for row in active_rows):
             return 3
     except Exception as exc:
         print(f"omo_agent_status: {exc}", file=sys.stderr)

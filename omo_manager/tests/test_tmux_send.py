@@ -151,18 +151,43 @@ class TmuxSendTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "Codex paste not verified"):
                     wait_paste_visible("cfg:1.0", message, options())
 
+    def test_wait_paste_visible_accepts_collapsed_pasted_content(self) -> None:
+        lines = ["› [Pasted Content 2048 chars]", "  gpt-5.5"]
+        with patch("omo_manager.omo_tmux_send.tail", return_value=lines):
+            wait_paste_visible("cfg:1.0", "line one\nline two\n", options())
+
     def test_clear_stuck_input_before_send_submits_existing_real_input(self) -> None:
-        report = Report("stuck_input", ["› Draft the manager reply"], "Draft the manager reply", True)
-        with patch("omo_manager.omo_tmux_send.inspect", return_value=report), patch("omo_manager.omo_tmux_send.subprocess.run", return_value=subprocess.CompletedProcess(["tmux"], 0)) as run, patch("omo_manager.omo_tmux_send.time.sleep") as sleep:
+        before = Report("stuck_input", ["› Draft the manager reply"], "Draft the manager reply", True)
+        after = Report("running", ["• Working"], "", False)
+        with patch("omo_manager.omo_tmux_send.inspect", side_effect=[before, after]), patch("omo_manager.omo_tmux_send.subprocess.run", return_value=subprocess.CompletedProcess(["tmux"], 0)) as run, patch("omo_manager.omo_tmux_send.time.sleep") as sleep:
             self.assertEqual("sent_enter", clear_stuck_input_before_send("cfg:1.0", options()))
         run.assert_called_once()
         sleep.assert_called_once()
 
-    def test_clear_stuck_input_before_send_does_not_block_on_unsafe_input(self) -> None:
+    def test_clear_stuck_input_before_send_submits_even_when_report_says_unsafe(self) -> None:
+        before = Report("stuck_input", ["› Continue task"], "Continue task", False, "compacting")
+        after = Report("running", ["• Working"], "", False)
+        with patch("omo_manager.omo_tmux_send.inspect", side_effect=[before, after]), patch("omo_manager.omo_tmux_send.subprocess.run", return_value=subprocess.CompletedProcess(["tmux"], 0)) as run:
+            self.assertEqual("sent_enter", clear_stuck_input_before_send("cfg:1.0", options()))
+        run.assert_called_once()
+
+    def test_clear_stuck_input_before_send_refuses_to_paste_if_still_stuck(self) -> None:
         report = Report("stuck_input", ["› Continue task"], "Continue task", False, "compacting")
-        with patch("omo_manager.omo_tmux_send.inspect", return_value=report), patch("omo_manager.omo_tmux_send.subprocess.run") as run:
-            self.assertEqual("not_submitted", clear_stuck_input_before_send("cfg:1.0", options()))
-        run.assert_not_called()
+        with patch("omo_manager.omo_tmux_send.inspect", side_effect=[report, report]), patch("omo_manager.omo_tmux_send.subprocess.run", return_value=subprocess.CompletedProcess(["tmux"], 0)):
+            self.assertEqual("still_stuck", clear_stuck_input_before_send("cfg:1.0", options()))
+
+    def test_run_tmux_stops_before_paste_when_stuck_input_remains(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", return_value="still_stuck"), patch("omo_manager.omo_tmux_send.require_sendable_codex_target"), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
+            with self.assertRaisesRegex(RuntimeError, "target stuck input not cleared"):
+                run_tmux("cfg:1.0", "prompt\n", options())
+
+        self.assertFalse(any(command[:2] == ["tmux", "paste-buffer"] for command in calls))
 
     def test_verify_submit_requires_running_and_prompt_gone(self) -> None:
         tails = iter(
@@ -193,6 +218,40 @@ class TmuxSendTests(unittest.TestCase):
         ]
         with patch("omo_manager.omo_tmux_send.tail", return_value=lines):
             verify_submit("cfg:1.0", "Read the dispatch prompt from /tmp/x and follow it exactly.\n", options())
+
+    def test_verify_submit_retries_enter_for_collapsed_paste_until_prompt_clears(self) -> None:
+        tails = iter(
+            [
+                [
+                    "• Working (19m 47s • esc to interrupt)",
+                    "",
+                    "› [Pasted Content 2048 chars]",
+                    "  tab to queue message                                                                                    28% context left",
+                ],
+                ["• Working", "", "› Implement {feature}", "  gpt-5.5"],
+            ]
+        )
+        calls: list[list[str]] = []
+
+        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch("omo_manager.omo_tmux_send.tail", side_effect=lambda *_: next(tails)), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run), patch("omo_manager.omo_tmux_send.time.sleep"):
+            verify_submit("cfg:1.0", "Read the dispatch prompt from /tmp/x and follow it exactly.\n", options())
+
+        self.assertEqual([["tmux", "send-keys", "-t", "cfg:1.0", "Enter"]], calls)
+
+    def test_verify_submit_rejects_unrelated_visible_input_even_if_running(self) -> None:
+        lines = [
+            "• Working (19m 47s • esc to interrupt)",
+            "",
+            "› human typed something else",
+            "  tab to queue message                                                                                    28% context left",
+        ]
+        with patch("omo_manager.omo_tmux_send.tail", return_value=lines):
+            with self.assertRaisesRegex(RuntimeError, "different input remains visible"):
+                verify_submit("cfg:1.0", "Read the dispatch prompt from /tmp/x and follow it exactly.\n", options())
 
     def test_verify_submit_fails_when_prompt_gone_but_not_running(self) -> None:
         with patch("omo_manager.omo_tmux_send.tail", return_value=["› Use /skills to list available skills", "  gpt-5.5"]), patch("omo_manager.omo_tmux_send.time.monotonic", side_effect=[0, 2]):

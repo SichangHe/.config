@@ -65,6 +65,8 @@ DEFAULT_POLL_BACKSTOP_INTERVAL_S = float(os.environ.get("OMO_MANAGER_POLL_BACKST
 DEFAULT_HUMAN_EMAIL_HELPER = Path(__file__).resolve().parents[1] / "helper.sh" / "email_me.py"
 PENDING_MARKERS = {"(pending)"}
 FOR_MANAGER_MARKER = "for manager"
+DIRECT_MARKER_SEPARATOR_CHARS = {":", ".", "!", "?", ";", ","}
+DIRECT_MARKER_WRAPPER_CLOSERS = {")": "(", "]": "[", "}": "{", '"': '"', "'": "'", "`": "`"}
 HELPER_NOTICE_INSTRUCTION = "Handle this helper-generated notice, then don't ack human:"
 TASK_FILE_LINE_WARNING_THRESHOLD = 2000
 TODO_LINE_WARNING_THRESHOLD = 200
@@ -727,21 +729,133 @@ def text_has_edge_marker(text: str, marker: str, *, case_sensitive: bool = True)
 
 
 def text_marks_dm(text: str) -> bool:
-    return text_has_edge_marker(text, "DM")
+    return text_has_edge_marker(text, "DM", case_sensitive=False)
 
 
 def text_marks_dm_only(text: str) -> bool:
-    return text_has_edge_marker(text, "DM only")
+    return text_has_edge_marker(text, "DM only", case_sensitive=False)
 
 
 def text_marks_for_manager(text: str) -> bool:
     return text_has_edge_marker(text, FOR_MANAGER_MARKER, case_sensitive=False)
 
 
+def strip_edge_marker(text: str, marker: str) -> str:
+    """Remove one routing marker from the active text edge."""
+
+    value = strip_start_edge_marker(text, marker)
+    if value != text.strip():
+        return value
+    return strip_end_edge_marker(text, marker)
+
+
+def strip_start_edge_marker(text: str, marker: str) -> str:
+    """Remove one routing marker from the start of active text."""
+
+    value = text.strip()
+    folded = value.casefold()
+    marker_folded = marker.casefold()
+    start = 0
+    while start < len(value) and (value[start].isspace() or unicodedata.category(value[start]).startswith("P")):
+        start += 1
+    after = start + len(marker)
+    if folded.startswith(marker_folded, start) and (after == len(value) or not edge_marker_char_is_word(value, after)):
+        while after < len(value):
+            if value[after].isspace() or value[after] in DIRECT_MARKER_SEPARATOR_CHARS or value[after] in DIRECT_MARKER_WRAPPER_CLOSERS:
+                after += 1
+                continue
+            break
+        return value[after:].strip()
+    return value
+
+
+def strip_end_edge_marker(text: str, marker: str) -> str:
+    """Remove one routing marker from the end of active text."""
+
+    value = text.strip()
+    folded = value.casefold()
+    marker_folded = marker.casefold()
+    end = len(value)
+    wrapper_closers: list[str] = []
+    while end > 0:
+        if value[end - 1].isspace() or value[end - 1] in DIRECT_MARKER_SEPARATOR_CHARS:
+            end -= 1
+            continue
+        if value[end - 1] in DIRECT_MARKER_WRAPPER_CLOSERS:
+            wrapper_closers.append(value[end - 1])
+            end -= 1
+            continue
+        break
+    marker_start = end - len(marker)
+    if marker_start >= 0 and folded[marker_start:end] == marker_folded and (marker_start == 0 or not edge_marker_char_is_word(value, marker_start - 1)):
+        prefix_end = marker_start
+        while prefix_end > 0 and value[prefix_end - 1] in {" ", "\t"}:
+            prefix_end -= 1
+        while prefix_end > 0 and wrapper_closers and value[prefix_end - 1] == DIRECT_MARKER_WRAPPER_CLOSERS[wrapper_closers[-1]]:
+            wrapper_closers.pop()
+            prefix_end -= 1
+            while prefix_end > 0 and value[prefix_end - 1] in {" ", "\t"}:
+                prefix_end -= 1
+        return value[:prefix_end].strip()
+    return value
+
+
+def strip_pending_marker_line(text: str) -> str:
+    lines = text.splitlines()
+    while lines and not lines[0].strip():
+        del lines[0]
+    if lines and lines[0].strip() in PENDING_MARKERS:
+        del lines[0]
+    return "\n".join(lines)
+
+
+def active_content_edge_indices(lines: Sequence[str]) -> tuple[int, int] | None:
+    active = [idx for idx, line in enumerate(lines) if line.strip() and not line.lstrip().startswith(">")]
+    if not active:
+        return None
+    return active[0], active[-1]
+
+
+def strip_active_edge_marker_once(text: str, marker: str) -> tuple[str, bool]:
+    lines = text.splitlines()
+    edge_indices = active_content_edge_indices(lines)
+    if edge_indices is None:
+        return "\n".join(lines).strip(), False
+    for idx in edge_indices:
+        if text_has_edge_marker(lines[idx], marker, case_sensitive=False):
+            before = lines[idx]
+            if edge_indices[0] == edge_indices[1]:
+                lines[idx] = strip_edge_marker(lines[idx], marker)
+            elif idx == edge_indices[0]:
+                lines[idx] = strip_start_edge_marker(lines[idx], marker)
+            else:
+                lines[idx] = strip_end_edge_marker(lines[idx], marker)
+            if lines[idx] == before:
+                continue
+            if not lines[idx]:
+                del lines[idx]
+            return "\n".join(lines).strip(), True
+    return "\n".join(lines).strip(), False
+
+
+def strip_direct_markers(text: str) -> str:
+    """Remove worker-routing markers from active request text."""
+
+    value = strip_pending_marker_line(text)
+    while True:
+        changed = False
+        for marker in ("DM only", "DM"):
+            value, changed = strip_active_edge_marker_once(value, marker)
+            if changed:
+                break
+        if not changed:
+            return value
+
+
 def manager_pending_instruction(marker: Marker) -> str:
     if marker.origin == "human":
-        return "Immediately record every pending item, then ack human, then remove `(pending)`, then dispatch the task:"
-    return "Immediately record every pending item, then don't ack human, then remove `(pending)`, then dispatch the task:"
+        return "Immediately record every pending item, then ack human, then remove `(pending)` in below file, then dispatch the task:"
+    return "Immediately record every pending item, then don't ack human, then remove `(pending)` in below file, then dispatch the task:"
 
 
 def marker_snippet_parts(marker: Marker, attachments: Sequence[SourceAttachment]) -> list[str]:
@@ -767,7 +881,17 @@ def attachment_snippet_parts(attachments: Sequence[SourceAttachment]) -> list[st
 
 
 def direct_block_section(marker: Marker) -> str:
-    return f"<message>\n{truncate_content(display_pending_tail(marker.block_text), PENDING_CONTENT_CHAR_LIMIT)}\n</message>"
+    return f"<message>\n{truncate_content(display_pending_tail(strip_direct_markers(marker.block_text)), PENDING_CONTENT_CHAR_LIMIT)}\n</message>"
+
+
+def worker_attachment_snippet_parts(attachments: Sequence[SourceAttachment]) -> list[str]:
+    parts: list[str] = []
+    for attachment in attachments:
+        if attachment.error:
+            parts.append(source_error_section(attachment.source, attachment.error))
+        else:
+            parts.append(snippet_section(attachment.source, attachment.start_line, attachment.end_line, strip_direct_markers(attachment.text), EMAIL_CONTENT_CHAR_LIMIT))
+    return parts
 
 
 def marker_delivery_text(marker: Marker, attachments: Sequence[SourceAttachment] = (), prefix: str = "") -> str:
@@ -781,15 +905,14 @@ def marker_delivery_text(marker: Marker, attachments: Sequence[SourceAttachment]
 
 def marker_worker_dm_text(marker: Marker, attachments: Sequence[SourceAttachment]) -> str:
     parts = ["Direct message from the human; act on the request in the snippets below:"]
-    if text_marks_dm(marker.block_text):
-        parts.append(direct_block_section(marker))
-    parts.extend(attachment_snippet_parts(attachments))
+    parts.append(direct_block_section(marker))
+    parts.extend(worker_attachment_snippet_parts(attachments))
     return "\n".join(parts)
 
 
 def marker_fyi_text(marker: Marker, attachments: Sequence[SourceAttachment]) -> str:
     ack = "ack human" if marker.origin == "human" else "don't ack human"
-    parts = [f"Immediately record every pending item, then {ack}, then remove `(pending)`; this message is already dispatched to the agent, this is FYI:"]
+    parts = [f"Immediately record every pending item, then {ack}, then remove `(pending)` in below file; this message is already dispatched to the agent, this is FYI:"]
     parts.extend(marker_snippet_parts(marker, attachments))
     return "\n".join(parts)
 
@@ -866,6 +989,43 @@ def pending_marker_present(root: Path, pending_file: Path, pending_line: int, pe
     return pending_tail_digest(pending_file, pending_line, pending_tail) == pending_digest
 
 
+def clear_pending_marker_if_current(root: Path, marker: Marker) -> bool:
+    """Remove one delivered `DM only` marker after verifying the pending tail."""
+
+    path = root / marker.file
+    tmp_path: Path | None = None
+    try:
+        before = path.stat()
+        text = path.read_text(encoding="utf-8")
+        lines = text.splitlines()
+        idx = marker.line - 1
+        if idx < 0 or idx >= len(lines) or lines[idx].strip() != "(pending)":
+            return False
+        pending_tail = "\n".join(lines[idx:])
+        if pending_tail_digest(marker.file, marker.line, pending_tail) != marker.digest:
+            return False
+        del lines[idx]
+        updated = "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False) as handle:
+            _ = handle.write(updated)
+            handle.flush()
+            os.fsync(handle.fileno())
+            tmp_path = Path(handle.name)
+        tmp_path.chmod(before.st_mode & 0o7777)
+        after = path.stat()
+        if after.st_dev != before.st_dev or after.st_ino != before.st_ino or after.st_mtime_ns != before.st_mtime_ns or after.st_size != before.st_size:
+            return False
+        os.replace(tmp_path, path)
+        tmp_path = None
+        return True
+    except OSError as exc:
+        print(f"omo_pending_watch: failed to clear delivered DM-only pending marker in {marker.file}: {exc}", file=sys.stderr)
+        return False
+    finally:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
+
+
 def push_marker_text(args: Args, marker: Marker, text: str, manager_target: str) -> int:
     if args.dry_run:
         print(text)
@@ -896,7 +1056,8 @@ def push_dm_ref(args: Args, seen: dict[str, float], now_s: float, marker: Marker
         return push_marker_text(args, marker, with_manager_policy_reminder(args, text, reminders), manager_target)
     worker_text = marker_worker_dm_text(marker, attachments)
     worker_key = dm_worker_seen_key(args, marker, worker_target, attachments)
-    if not seen_contains(seen, worker_key, now_s):
+    worker_seen = seen_contains(seen, worker_key, now_s)
+    if not worker_seen:
         worker_status = push_marker_text(args, marker, worker_text, worker_target)
         if worker_status != 0:
             text = marker_delivery_text(
@@ -905,9 +1066,13 @@ def push_dm_ref(args: Args, seen: dict[str, float], now_s: float, marker: Marker
                 f"direct-message fallback: direct worker delivery to {worker_target} failed with status {worker_status}; manager action required to route or help with the human request.",
             )
             return push_marker_text(args, marker, with_manager_policy_reminder(args, text, reminders), manager_target)
-        remember_seen(seen, worker_key, now_s)
     if not copy_manager:
-        return 0
+        remember_seen(seen, worker_key, now_s)
+        if args.dry_run or clear_pending_marker_if_current(args.root, marker):
+            return 0
+        return 1
+    if not worker_seen:
+        remember_seen(seen, worker_key, now_s)
     manager_text = marker_fyi_text(marker, attachments)
     return push_manager_text_to_target(args, manager_text, manager_target)
 
@@ -1004,6 +1169,9 @@ def maybe_push_idle_status(args: Args, last_activity_s: float, now_s: float) -> 
         return False
     if result.stderr.strip():
         output = f"{output}\nstderr:\n{result.stderr.strip()}".strip()
+    output = filter_manager_self_status_output(output, args.manager_target)
+    if not output:
+        return False
     text = idle_status_text(args, output)
     return push_manager_text(args, text) in {0, 2}
 
@@ -1110,6 +1278,9 @@ def periodic_status_text(args: Args, result: CommandOutput) -> str | None:
         return None
     if result.stderr.strip():
         output = f"{output}\nstderr:\n{result.stderr.strip()}".strip()
+    output = filter_manager_self_status_output(output, args.manager_target)
+    if not output:
+        return None
     return idle_status_text(args, output)
 
 
@@ -1146,6 +1317,21 @@ def agent_problem_count_line(lines: list[str]) -> str:
     if counts["done-registry-stale"]:
         parts.append(f"done-registry-stale={counts['done-registry-stale']}")
     return f"agent-problems: {' '.join(parts)}" if parts else ""
+
+
+def count_line_value(count_line: str, name: str) -> int:
+    match = re.search(rf"\b{re.escape(name)}=(\d+)", count_line)
+    return int(match.group(1)) if match is not None else 0
+
+
+def agent_status_count_line(lines: list[str], count_line: str) -> str:
+    counts = {"not_codex": 0, "running": 0, "blocked_idle": 0, "error": 0, "ready": 0, "stuck_input": 0, "human_request": 0}
+    for line in lines:
+        match = re.match(r"^(not_codex|running|blocked_idle|error|ready|stuck_input|human_request): ", line)
+        if match is not None:
+            counts[match.group(1)] += 1
+    parts = [f"{status}={counts[status]}" for status in ("not_codex", "running", "blocked_idle", "error", "ready", "stuck_input", "human_request")]
+    return f"agent-status: {' '.join(parts)} done-registry-stale={count_line_value(count_line, 'done-registry-stale')} pruned={count_line_value(count_line, 'pruned')}"
 
 
 def problem_line_owner_target(line: str) -> str:
@@ -1527,6 +1713,26 @@ def same_tmux_target(left: str, right: str) -> bool:
 def evidence_target(line: str) -> str:
     match = re.search(r"\bevidence=target=(\S+)", line)
     return match.group(1) if match is not None else ""
+
+
+def manager_self_status_line(line: str, manager_target: str = "") -> bool:
+    if re.match(r"^(?:not_codex|running|blocked_idle|error|ready|stuck_input|human_request): task=\S+ evidence=target=", line) is None:
+        return False
+    target = evidence_target(line)
+    return bool(target and same_tmux_target(target, manager_target))
+
+
+def filter_manager_self_status_output(output: str, manager_target: str = "") -> str:
+    lines = output.splitlines()
+    if not lines or not lines[0].startswith("agent-status:"):
+        return output
+    kept = [line for line in lines[1:] if not manager_self_status_line(line, manager_target)]
+    if len(kept) == len(lines) - 1:
+        return output
+    if not kept and count_line_value(lines[0], "done-registry-stale") == 0 and count_line_value(lines[0], "pruned") == 0:
+        print("omo_pending_watch: suppressed manager self-status report", flush=True)
+        return ""
+    return "\n".join([agent_status_count_line(kept, lines[0]), *kept])
 
 
 def manager_self_problem_line(line: str, manager_target: str = "") -> bool:

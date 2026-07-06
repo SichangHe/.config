@@ -4606,7 +4606,7 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertIn("<snippet file=\"task.md:2-4\">\n(pending)\n", text)
             self.assertRegex(text, r"…\d+chars…")
             self.assertIn("secret-tail", text)
-            self.assertIn("Immediately record every pending item, then ack human, then remove `(pending)`, then dispatch the task:", text)
+            self.assertIn("Immediately record every pending item, then ack human, then remove `(pending)` in below file, then dispatch the task:", text)
 
     def test_email_pending_push_attaches_email_content(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -4714,7 +4714,7 @@ class PendingMarkerTests(unittest.TestCase):
             with redirect_stdout(out):
                 self.assertTrue(watcher.scan_once(args, {}, [path]))
             text = out.getvalue()
-            self.assertIn("Immediately record every pending item, then don't ack human, then remove `(pending)`, then dispatch the task:", text)
+            self.assertIn("Immediately record every pending item, then don't ack human, then remove `(pending)` in below file, then dispatch the task:", text)
             self.assertNotIn("then ack human", text)
             self.assertIn(f"<snippet file=\"helper_audit_agent_9580.md:1-2\">\n(pending)\n(from agent {report})", text)
             self.assertNotIn(f"(from agent hcfg:1 {report})", text)
@@ -4747,9 +4747,10 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual("wl:1", calls[1][calls[1].index("--manager-target") + 1])
             self.assertIn("Direct message from the human; act on the request in the snippets below:", calls[0][1])
             self.assertNotIn("Immediately record", calls[0][1])
-            self.assertIn("Immediately record every pending item, then ack human, then remove `(pending)`; this message is already dispatched to the agent, this is FYI:", calls[1][1])
+            self.assertIn("Immediately record every pending item, then ack human, then remove `(pending)` in below file; this message is already dispatched to the agent, this is FYI:", calls[1][1])
             self.assertNotIn("ack-human", calls[1][1])
-            self.assertIn("Please inspect this directly. DM!!!", calls[0][1])
+            self.assertIn("Please inspect this directly", calls[0][1])
+            self.assertNotIn("DM!!!", calls[0][1])
             self.assertNotIn('<snippet file="worker.md:', calls[0][1])
             self.assertIn('<snippet file="worker.md:', calls[1][1])
             self.assertNotIn("[omo-message-source:", calls[0][1])
@@ -4777,7 +4778,8 @@ class PendingMarkerTests(unittest.TestCase):
             with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
                 self.assertTrue(watcher.scan_once(args, {}, [path]))
             self.assertEqual(["wl:2", "wl:1"], [call[call.index("--manager-target") + 1] for call in calls])
-            self.assertIn("<message>\n(pending)\n(record and delegate manager_mail/4002.txt)\nDM\n</message>", calls[0][1])
+            self.assertIn("<message>\n(record and delegate manager_mail/4002.txt)\n</message>", calls[0][1])
+            self.assertNotIn("\n(pending)\n", calls[0][1])
             self.assertNotIn('<snippet file="worker.md:', calls[0][1])
             self.assertIn('<snippet file="worker.md:', calls[1][1])
 
@@ -4803,7 +4805,8 @@ class PendingMarkerTests(unittest.TestCase):
             with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
                 self.assertTrue(watcher.scan_once(args, {}, [path]))
             self.assertEqual(["wl:2", "wl:1"], [call[call.index("--manager-target") + 1] for call in calls])
-            self.assertIn("<message>\n(pending)\nDM: please inspect directly\n(record and delegate manager_mail/4002.txt)\n</message>", calls[0][1])
+            self.assertIn("<message>\nplease inspect directly\n(record and delegate manager_mail/4002.txt)\n</message>", calls[0][1])
+            self.assertNotIn("DM: please inspect directly", calls[0][1])
             self.assertNotIn('<snippet file="worker.md:', calls[0][1])
             self.assertIn('<snippet file="worker.md:', calls[1][1])
 
@@ -4830,8 +4833,77 @@ class PendingMarkerTests(unittest.TestCase):
                 self.assertTrue(watcher.scan_once(args, {}, [path]))
             self.assertEqual(["wl:2"], [call[call.index("--manager-target") + 1] for call in calls])
             self.assertIn("Direct message from the human; act on the request in the snippets below:", calls[0][1])
-            self.assertIn("<message>\n(pending)\nDM only: please inspect directly\n(record and delegate manager_mail/4002.txt)\n</message>", calls[0][1])
+            self.assertIn("<message>\nplease inspect directly\n(record and delegate manager_mail/4002.txt)\n</message>", calls[0][1])
+            self.assertNotIn("DM only: please inspect directly", calls[0][1])
             self.assertNotIn("this message is already dispatched to the agent, this is FYI", calls[0][1])
+            text = path.read_text(encoding="utf-8")
+            self.assertNotIn("(pending)", text)
+            self.assertIn("DM only: please inspect directly", text)
+
+    def test_pending_block_dm_only_strips_case_and_punctuation_for_worker(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mail = root / "manager_mail" / "4002.txt"
+            mail.parent.mkdir()
+            mail.write_text("Subject: worker note\n\nPlease inspect this directly.\n", encoding="utf-8")
+            path = root / "worker.md"
+            path.write_text(f"{task_frontmatter(runat='wl:2', managerat='wl:1')}\n(pending)\nDM Only. Please inspect directly.\n(record and delegate manager_mail/4002.txt)\n", encoding="utf-8")
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(capture_delivery_call(command))
+                return subprocess.CompletedProcess(command, 0)
+
+            args = Args(
+                root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=False, manager_target="main:0.0"
+            )
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+                self.assertTrue(watcher.scan_once(args, {}, [path]))
+            self.assertEqual(["wl:2"], [call[call.index("--manager-target") + 1] for call in calls])
+            self.assertIn("<message>\nPlease inspect directly.\n(record and delegate manager_mail/4002.txt)\n</message>", calls[0][1])
+            self.assertNotIn("(pending)", calls[0][1])
+            self.assertNotIn("DM Only", calls[0][1])
+            self.assertNotIn("(pending)", path.read_text(encoding="utf-8"))
+
+    def test_pending_block_dm_only_preserves_quoted_content_for_worker(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "worker.md"
+            path.write_text(f"{task_frontmatter(runat='wl:2', managerat='wl:1')}\n(pending)\nDM only\n> quoted error excerpt\nPlease inspect directly.\n", encoding="utf-8")
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(capture_delivery_call(command))
+                return subprocess.CompletedProcess(command, 0)
+
+            args = Args(
+                root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=False, manager_target="main:0.0"
+            )
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+                self.assertTrue(watcher.scan_once(args, {}, [path]))
+            self.assertIn("> quoted error excerpt", calls[0][1])
+            self.assertIn("Please inspect directly.", calls[0][1])
+            self.assertNotIn("\nDM only\n", calls[0][1])
+            self.assertNotIn("\n(pending)\n", calls[0][1])
+
+    def test_direct_marker_stripping_preserves_same_line_payload_syntax(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        self.assertEqual("- [ ] fix task", watcher.strip_direct_markers("(pending)\nDM - [ ] fix task"))
+        self.assertEqual("- [ ] fix task", watcher.strip_direct_markers("(pending)\nDM: - [ ] fix task"))
+        self.assertEqual("> quoted payload", watcher.strip_direct_markers("(pending)\nDM > quoted payload"))
+        self.assertEqual("(for manager: ask agent to report back)", watcher.strip_direct_markers("(pending)\nDM (for manager: ask agent to report back)"))
+        self.assertEqual("- [ ] fix task", watcher.strip_direct_markers("(pending)\n- [ ] fix task DM only."))
+        self.assertEqual("payload", watcher.strip_direct_markers("(pending)\nDM\npayload\nDM"))
+        self.assertEqual("payload", watcher.strip_direct_markers("(pending)\nDM only\npayload\nDM only"))
+        self.assertEqual("please DM\nmore details", watcher.strip_direct_markers("(pending)\nDM\nplease DM\nmore details"))
+        self.assertEqual("payload", watcher.strip_direct_markers("(pending)\n(DM)\npayload"))
+        self.assertEqual("payload", watcher.strip_direct_markers("(pending)\n[DM]\npayload"))
+        self.assertEqual("payload", watcher.strip_direct_markers("(pending)\npayload (DM)"))
 
     def test_linked_file_dm_only_pushes_worker_without_manager_fyi(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -4857,8 +4929,72 @@ class PendingMarkerTests(unittest.TestCase):
                 self.assertTrue(watcher.scan_once(args, {}, [path]))
             self.assertEqual(["wl:2"], [call[call.index("--manager-target") + 1] for call in calls])
             self.assertIn('<snippet file="docs/request.md:1-1">', calls[0][1])
+            self.assertIn("Follow this linked request", calls[0][1])
+            self.assertNotIn("Follow this linked request. DM only", calls[0][1])
             self.assertNotIn('<snippet file="worker.md:', calls[0][1])
             self.assertNotIn("this message is already dispatched to the agent, this is FYI", calls[0][1])
+            text = path.read_text(encoding="utf-8")
+            self.assertNotIn("(pending)", text)
+            self.assertIn("docs/request.md", text)
+
+    def test_linked_file_dm_only_preserves_quoted_content_for_worker(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            docs = root / "docs"
+            docs.mkdir()
+            request = docs / "request.md"
+            request.write_text("DM only\n> quoted file excerpt\nFollow this linked request.\n", encoding="utf-8")
+            path = root / "worker.md"
+            path.write_text(f"{task_frontmatter(runat='wl:2', managerat='wl:1')}\n(pending)\ndocs/request.md\n", encoding="utf-8")
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(capture_delivery_call(command))
+                return subprocess.CompletedProcess(command, 0)
+
+            args = Args(
+                root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=False, manager_target="main:0.0"
+            )
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+                self.assertTrue(watcher.scan_once(args, {}, [path]))
+            self.assertIn("> quoted file excerpt", calls[0][1])
+            self.assertIn("Follow this linked request.", calls[0][1])
+            self.assertNotIn("\nDM only\n", calls[0][1])
+
+    def test_dm_only_clears_one_pending_marker_per_delivery(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "worker.md"
+            path.write_text(
+                f"{task_frontmatter(runat='wl:2', managerat='wl:1')}\n"
+                "(pending)\nDM only: first\n"
+                "(pending)\nDM only: second\n",
+                encoding="utf-8",
+            )
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(capture_delivery_call(command))
+                return subprocess.CompletedProcess(command, 0)
+
+            args = Args(
+                root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=False, manager_target="main:0.0"
+            )
+            seen: dict[str, float] = {}
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+                self.assertTrue(watcher.scan_once(args, seen, [path]))
+                self.assertTrue(watcher.scan_once(args, seen, [path]))
+            self.assertEqual(["wl:2", "wl:2"], [call[call.index("--manager-target") + 1] for call in calls])
+            self.assertIn("first", calls[0][1])
+            self.assertNotIn("DM only", calls[0][1])
+            self.assertNotIn("second", calls[0][1])
+            self.assertIn("second", calls[1][1])
+            self.assertNotIn("DM only", calls[1][1])
+            self.assertNotIn("(pending)", path.read_text(encoding="utf-8"))
 
     def test_agent_origin_dm_manager_fyi_says_do_not_ack_human(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -4879,8 +5015,8 @@ class PendingMarkerTests(unittest.TestCase):
             with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
                 self.assertTrue(watcher.scan_once(args, {}, [path]))
             self.assertEqual(["wl:2", "wl:1"], [call[call.index("--manager-target") + 1] for call in calls])
-            self.assertIn("then don't ack human, then remove `(pending)`; this message is already dispatched to the agent, this is FYI:", calls[1][1])
-            self.assertNotIn("then ack human, then remove `(pending)`; this message is already dispatched to the agent, this is FYI:", calls[1][1])
+            self.assertIn("then don't ack human, then remove `(pending)` in below file; this message is already dispatched to the agent, this is FYI:", calls[1][1])
+            self.assertNotIn("then ack human, then remove `(pending)` in below file; this message is already dispatched to the agent, this is FYI:", calls[1][1])
 
     def test_quoted_dm_in_pending_block_does_not_trigger_dm(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -5698,6 +5834,64 @@ class PendingMarkerTests(unittest.TestCase):
             "Handle this helper-generated notice, then don't ack human:\nmanager agent status: periodic running-agent status.\nagent-status: running=1\nrunning: task=a.md",
             watcher.periodic_status_text(Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, True), result),
         )
+
+    def test_periodic_status_text_suppresses_manager_self_status(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        result = watcher.CommandOutput(
+            "idle status check",
+            0,
+            "agent-status: running=1 ready=1\nrunning: task=manager evidence=target=wl:1.0 role=manager output=working\nready: task=worker.md evidence=target=wl:2 output=idle\n",
+            "",
+        )
+
+        text = watcher.periodic_status_text(Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, True, manager_target="wl:1"), result)
+
+        self.assertIsNotNone(text)
+        assert text is not None
+        self.assertNotIn("task=manager", text)
+        self.assertIn("ready: task=worker.md", text)
+        self.assertIn("agent-status: not_codex=0 running=0 blocked_idle=0 error=0 ready=1 stuck_input=0 human_request=0", text)
+
+    def test_periodic_status_text_returns_none_for_only_manager_self_status(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        result = watcher.CommandOutput("idle status check", 0, "agent-status: running=1\nrunning: task=manager evidence=target=wl:1.0 role=manager output=working\n", "")
+
+        self.assertIsNone(watcher.periodic_status_text(Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, True, manager_target="wl:1"), result))
+
+    def test_periodic_status_text_preserves_stale_counts_when_suppressing_manager_self_status(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        result = watcher.CommandOutput(
+            "idle status check",
+            0,
+            "agent-status: not_codex=0 running=1 blocked_idle=0 error=0 ready=0 stuck_input=0 human_request=0 done-registry-stale=2 pruned=1\nrunning: task=manager evidence=target=wl:1.0 role=manager output=working\n",
+            "",
+        )
+
+        text = watcher.periodic_status_text(Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, True, manager_target="wl:1"), result)
+
+        self.assertIsNotNone(text)
+        assert text is not None
+        self.assertNotIn("task=manager", text)
+        self.assertIn("done-registry-stale=2 pruned=1", text)
+
+    def test_periodic_status_text_keeps_other_manager_named_task_status(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        result = watcher.CommandOutput(
+            "idle status check",
+            0,
+            "agent-status: not_codex=0 running=1 blocked_idle=0 error=0 ready=0 stuck_input=0 human_request=0 done-registry-stale=0 pruned=0\nrunning: task=manager.md evidence=target=wl:2.0 role=worker output=working\n",
+            "",
+        )
+
+        text = watcher.periodic_status_text(Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, True, manager_target="wl:1"), result)
+
+        self.assertIsNotNone(text)
+        assert text is not None
+        self.assertIn("running: task=manager.md", text)
 
     def test_manager_worktree_reminder_from_dirty_output(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -6832,6 +7026,397 @@ class PendingMarkerTests(unittest.TestCase):
             args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/missing-status.py"), False, False, mail_dir=mail_dir, digest_script=script, digest_idle_after_s=3600.0)
             self.assertTrue(watcher.maybe_deliver_idle_digest(args, 0.0, 4600.0))
             self.assertEqual(f"{root} deliver\n", log.read_text(encoding="utf-8"))
+
+    def test_omo_dispatch_strips_pending_and_direct_markers_then_clears_pending(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "logs"
+            root.mkdir()
+            home = tmp_path / "home"
+            bin_dir = home / ".config/bin"
+            bin_dir.mkdir(parents=True)
+            capture = tmp_path / "captured-prompt.txt"
+            tmux_send = bin_dir / "omo_tmux_send.py"
+            tmux_send.write_text(
+                """#!/usr/bin/env bash
+set -euo pipefail
+message_file=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --message-file) message_file="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+prompt_file=$(sed -n 's/^Read the dispatch prompt from \\(.*\\) and follow it exactly\\.$/\\1/p' "$message_file")
+cp "$prompt_file" "$OMO_CAPTURE_PROMPT"
+""",
+                encoding="utf-8",
+            )
+            tmux_send.chmod(0o700)
+            task = root / "task.md"
+            task.write_text("header\n  (pending)  \nDM only. Send this to the worker.\n", encoding="utf-8")
+
+            result = subprocess.run(
+                [
+                    str(Path(__file__).resolve().parents[1] / "omo_dispatch.sh"),
+                    "--root",
+                    str(root),
+                    "--file",
+                    "task.md",
+                    "--start",
+                    "2",
+                    "--end",
+                    "3",
+                    "--tmux-target",
+                    "cfg:7",
+                    "--no-submit",
+                ],
+                cwd=tmp,
+                env={**os.environ, "HOME": str(home), "OMO_CAPTURE_PROMPT": str(capture)},
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+
+            self.assertEqual("", result.stderr)
+            self.assertEqual(0, result.returncode)
+            self.assertEqual("Send this to the worker.", capture.read_text(encoding="utf-8"))
+            task_text = task.read_text(encoding="utf-8")
+            self.assertNotIn("(pending)", task_text)
+            self.assertIn("(manager dispatch:", task_text)
+
+    def test_omo_dispatch_strips_marker_line_without_corrupting_following_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "logs"
+            root.mkdir()
+            home = tmp_path / "home"
+            bin_dir = home / ".config/bin"
+            bin_dir.mkdir(parents=True)
+            capture = tmp_path / "captured-prompt.txt"
+            tmux_send = bin_dir / "omo_tmux_send.py"
+            tmux_send.write_text(
+                """#!/usr/bin/env bash
+set -euo pipefail
+message_file=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --message-file) message_file="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+prompt_file=$(sed -n 's/^Read the dispatch prompt from \\(.*\\) and follow it exactly\\.$/\\1/p' "$message_file")
+cp "$prompt_file" "$OMO_CAPTURE_PROMPT"
+""",
+                encoding="utf-8",
+            )
+            tmux_send.chmod(0o700)
+            task = root / "task.md"
+            task.write_text("header\n(pending)\nDM\n> quote\n- item\n(for manager: ask agent to report back to manager)\n", encoding="utf-8")
+
+            result = subprocess.run(
+                [
+                    str(Path(__file__).resolve().parents[1] / "omo_dispatch.sh"),
+                    "--root",
+                    str(root),
+                    "--file",
+                    "task.md",
+                    "--start",
+                    "2",
+                    "--end",
+                    "6",
+                    "--tmux-target",
+                    "cfg:7",
+                    "--no-submit",
+                ],
+                cwd=tmp,
+                env={**os.environ, "HOME": str(home), "OMO_CAPTURE_PROMPT": str(capture)},
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+
+            self.assertEqual("", result.stderr)
+            self.assertEqual(0, result.returncode)
+            prompt = capture.read_text(encoding="utf-8")
+            self.assertIn("> quote", prompt)
+            self.assertIn("- item", prompt)
+            self.assertNotIn("(for manager:", prompt)
+            self.assertIn("REPORT_FILE=$(omo_report.sh", prompt)
+
+    def test_omo_dispatch_preserves_same_line_payload_syntax_after_dm_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "logs"
+            root.mkdir()
+            home = tmp_path / "home"
+            bin_dir = home / ".config/bin"
+            bin_dir.mkdir(parents=True)
+            capture = tmp_path / "captured-prompt.txt"
+            tmux_send = bin_dir / "omo_tmux_send.py"
+            tmux_send.write_text(
+                """#!/usr/bin/env bash
+set -euo pipefail
+message_file=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --message-file) message_file="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+prompt_file=$(sed -n 's/^Read the dispatch prompt from \\(.*\\) and follow it exactly\\.$/\\1/p' "$message_file")
+cp "$prompt_file" "$OMO_CAPTURE_PROMPT"
+""",
+                encoding="utf-8",
+            )
+            tmux_send.chmod(0o700)
+            task = root / "task.md"
+            task.write_text("header\n(pending)\nDM: - [ ] fix task\n> quoted payload\n", encoding="utf-8")
+
+            result = subprocess.run(
+                [
+                    str(Path(__file__).resolve().parents[1] / "omo_dispatch.sh"),
+                    "--root",
+                    str(root),
+                    "--file",
+                    "task.md",
+                    "--start",
+                    "2",
+                    "--end",
+                    "4",
+                    "--tmux-target",
+                    "cfg:7",
+                    "--no-submit",
+                ],
+                cwd=tmp,
+                env={**os.environ, "HOME": str(home), "OMO_CAPTURE_PROMPT": str(capture)},
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+
+            self.assertEqual("", result.stderr)
+            self.assertEqual(0, result.returncode)
+            self.assertEqual("- [ ] fix task\n> quoted payload", capture.read_text(encoding="utf-8"))
+
+    def test_omo_dispatch_preserves_quoted_trailing_dm_marker_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "logs"
+            root.mkdir()
+            home = tmp_path / "home"
+            bin_dir = home / ".config/bin"
+            bin_dir.mkdir(parents=True)
+            capture = tmp_path / "captured-prompt.txt"
+            tmux_send = bin_dir / "omo_tmux_send.py"
+            tmux_send.write_text(
+                """#!/usr/bin/env bash
+set -euo pipefail
+message_file=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --message-file) message_file="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+prompt_file=$(sed -n 's/^Read the dispatch prompt from \\(.*\\) and follow it exactly\\.$/\\1/p' "$message_file")
+cp "$prompt_file" "$OMO_CAPTURE_PROMPT"
+""",
+                encoding="utf-8",
+            )
+            tmux_send.chmod(0o700)
+            task = root / "task.md"
+            task.write_text("header\n(pending)\npayload\n> DM\n", encoding="utf-8")
+
+            result = subprocess.run(
+                [
+                    str(Path(__file__).resolve().parents[1] / "omo_dispatch.sh"),
+                    "--root",
+                    str(root),
+                    "--file",
+                    "task.md",
+                    "--start",
+                    "2",
+                    "--end",
+                    "4",
+                    "--tmux-target",
+                    "cfg:7",
+                    "--no-submit",
+                ],
+                cwd=tmp,
+                env={**os.environ, "HOME": str(home), "OMO_CAPTURE_PROMPT": str(capture)},
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+
+            self.assertEqual("", result.stderr)
+            self.assertEqual(0, result.returncode)
+            self.assertEqual("payload\n> DM", capture.read_text(encoding="utf-8"))
+
+    def test_omo_dispatch_strips_repeated_edge_direct_markers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "logs"
+            root.mkdir()
+            home = tmp_path / "home"
+            bin_dir = home / ".config/bin"
+            bin_dir.mkdir(parents=True)
+            capture = tmp_path / "captured-prompt.txt"
+            tmux_send = bin_dir / "omo_tmux_send.py"
+            tmux_send.write_text(
+                """#!/usr/bin/env bash
+set -euo pipefail
+message_file=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --message-file) message_file="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+prompt_file=$(sed -n 's/^Read the dispatch prompt from \\(.*\\) and follow it exactly\\.$/\\1/p' "$message_file")
+cp "$prompt_file" "$OMO_CAPTURE_PROMPT"
+""",
+                encoding="utf-8",
+            )
+            tmux_send.chmod(0o700)
+            task = root / "task.md"
+            task.write_text("header\n(pending)\nDM\nDM only\npayload\nDM\nDM only\n", encoding="utf-8")
+
+            result = subprocess.run(
+                [
+                    str(Path(__file__).resolve().parents[1] / "omo_dispatch.sh"),
+                    "--root",
+                    str(root),
+                    "--file",
+                    "task.md",
+                    "--start",
+                    "2",
+                    "--end",
+                    "7",
+                    "--tmux-target",
+                    "cfg:7",
+                    "--no-submit",
+                ],
+                cwd=tmp,
+                env={**os.environ, "HOME": str(home), "OMO_CAPTURE_PROMPT": str(capture)},
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+
+            self.assertEqual("", result.stderr)
+            self.assertEqual(0, result.returncode)
+            self.assertEqual("payload", capture.read_text(encoding="utf-8"))
+
+    def test_omo_dispatch_clears_only_one_matching_pending_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "logs"
+            root.mkdir()
+            home = tmp_path / "home"
+            bin_dir = home / ".config/bin"
+            bin_dir.mkdir(parents=True)
+            capture = tmp_path / "captured-prompt.txt"
+            tmux_send = bin_dir / "omo_tmux_send.py"
+            tmux_send.write_text(
+                """#!/usr/bin/env bash
+set -euo pipefail
+message_file=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --message-file) message_file="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+prompt_file=$(sed -n 's/^Read the dispatch prompt from \\(.*\\) and follow it exactly\\.$/\\1/p' "$message_file")
+cp "$prompt_file" "$OMO_CAPTURE_PROMPT"
+""",
+                encoding="utf-8",
+            )
+            tmux_send.chmod(0o700)
+            task = root / "task.md"
+            task.write_text("header\n(pending)\nfirst\n(pending)\nsecond\n", encoding="utf-8")
+
+            result = subprocess.run(
+                [
+                    str(Path(__file__).resolve().parents[1] / "omo_dispatch.sh"),
+                    "--root",
+                    str(root),
+                    "--file",
+                    "task.md",
+                    "--start",
+                    "2",
+                    "--end",
+                    "5",
+                    "--tmux-target",
+                    "cfg:7",
+                    "--no-submit",
+                ],
+                cwd=tmp,
+                env={**os.environ, "HOME": str(home), "OMO_CAPTURE_PROMPT": str(capture)},
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+
+            self.assertEqual("", result.stderr)
+            self.assertEqual(0, result.returncode)
+            self.assertEqual("first\n(pending)\nsecond", capture.read_text(encoding="utf-8"))
+            self.assertEqual(1, task.read_text(encoding="utf-8").count("(pending)"))
+
+    def test_omo_dispatch_does_not_clear_pending_when_file_changes_during_send(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "logs"
+            root.mkdir()
+            home = tmp_path / "home"
+            bin_dir = home / ".config/bin"
+            bin_dir.mkdir(parents=True)
+            tmux_send = bin_dir / "omo_tmux_send.py"
+            task = root / "task.md"
+            task.write_text("header\n(pending)\nfirst\n", encoding="utf-8")
+            tmux_send.write_text(
+                f"""#!/usr/bin/env bash
+set -euo pipefail
+printf 'header\\n(pending)\\nchanged\\n' > {task}
+""",
+                encoding="utf-8",
+            )
+            tmux_send.chmod(0o700)
+
+            result = subprocess.run(
+                [
+                    str(Path(__file__).resolve().parents[1] / "omo_dispatch.sh"),
+                    "--root",
+                    str(root),
+                    "--file",
+                    "task.md",
+                    "--start",
+                    "2",
+                    "--end",
+                    "3",
+                    "--tmux-target",
+                    "cfg:7",
+                    "--no-submit",
+                ],
+                cwd=tmp,
+                env={**os.environ, "HOME": str(home)},
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+
+            self.assertEqual(1, result.returncode)
+            self.assertIn("dispatch cleanup skipped: file changed during send", result.stderr)
+            self.assertEqual("header\n(pending)\nchanged\n", task.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

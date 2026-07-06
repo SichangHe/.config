@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -42,6 +43,7 @@ except ModuleNotFoundError:
 
 
 CODEX_PLACEHOLDER_INPUT_TEXTS = CODEX_EMPTY_INPUT_TEXTS | CODEX_RUNNING_EMPTY_INPUT_TEXTS
+COLLAPSED_PASTE_RE = re.compile(r"\[Pasted Content [0-9]+ chars\]", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -297,6 +299,14 @@ def message_probes(message: str) -> list[str]:
     return [probes[0], probes[-1]]
 
 
+def is_real_input_text(input_text: str) -> bool:
+    return bool(input_text) and input_text not in CODEX_PLACEHOLDER_INPUT_TEXTS
+
+
+def has_collapsed_paste_text(input_text: str) -> bool:
+    return COLLAPSED_PASTE_RE.search(input_text) is not None
+
+
 def inspect_lines_for_message(message: str) -> int:
     return min(2000, max(80, len(message.splitlines()) + 20))
 
@@ -346,7 +356,7 @@ def wait_paste_visible(target: str, message: str, options: CodexSendOptions) -> 
         if last_status in {"not_codex", "error"}:
             raise RuntimeError(f"target left supported Codex state before submit: {target} status={last_status}")
         input_text = current_input_text(lines)
-        if input_text and input_text not in CODEX_PLACEHOLDER_INPUT_TEXTS and all(probe in input_text for probe in probes):
+        if is_real_input_text(input_text) and (all(probe in input_text for probe in probes) or has_collapsed_paste_text(input_text)):
             return
         last_input = "" if input_text in CODEX_EMPTY_INPUT_TEXTS else input_text
         now_s = time.monotonic()
@@ -407,9 +417,12 @@ def verify_submit(target: str, message: str, options: CodexSendOptions) -> None:
         if last_status == "error":
             raise RuntimeError(f"target is in Codex error state after submit: {target}")
         input_text = current_input_text(lines)
-        prompt_still_present = any(probe in input_text for probe in probes)
-        if last_status in {"running", "waiting_subagent"} and not prompt_still_present:
+        real_input_visible = is_real_input_text(input_text)
+        prompt_still_present = real_input_visible and (any(probe in input_text for probe in probes) or has_collapsed_paste_text(input_text))
+        if last_status in {"running", "waiting_subagent"} and not real_input_visible:
             return
+        if real_input_visible and not prompt_still_present:
+            raise RuntimeError(f"Codex submit not verified: different input remains visible, status={last_status}")
         if has_plan_prompt(lines) and not options.allow_plan_prompt_enter:
             raise RuntimeError("Codex submit blocked by unsafe Plan prompt")
         now_s = time.monotonic()
@@ -429,8 +442,6 @@ def clear_stuck_input_before_send(target: str, options: CodexSendOptions) -> str
         return ""
     if report.status != "stuck_input":
         return ""
-    if not report.can_submit_input:
-        return "not_submitted"
     try:
         result = subprocess.run(["tmux", "send-keys", "-t", target, "Enter"], capture_output=True, text=True, timeout=5, check=False)
     except (OSError, subprocess.SubprocessError):
@@ -439,6 +450,12 @@ def clear_stuck_input_before_send(target: str, options: CodexSendOptions) -> str
         return "failed"
     if options.enter_delay_s > 0:
         time.sleep(options.enter_delay_s)
+    try:
+        after = inspect(StatusArgs(target, 80))
+    except Exception:
+        return "inspect_failed"
+    if after.status == "stuck_input":
+        return "still_stuck"
     return "sent_enter"
 
 
@@ -454,7 +471,7 @@ def run_tmux(target: str, message: str, options: CodexSendOptions) -> None:
             return
         require_sendable_codex_target(target, inspect_lines_for_message(message))
         clear_result = clear_stuck_input_before_send(target, options)
-        if clear_result == "failed":
+        if clear_result not in {"", "sent_enter"}:
             raise RuntimeError(f"target stuck input not cleared before tmux paste: {clear_result}")
         require_sendable_codex_target(target, inspect_lines_for_message(message))
         _ = subprocess.run(["tmux", "load-buffer", "-b", buffer_name, str(temp_path)], timeout=5, check=True)

@@ -5,7 +5,7 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
-from omo_manager.omo_agent_status import Args, TaskFrontmatterError, classify_task, format_problem_summary, load_local_env, load_task_state, main, parse_task_lines, parse_task_metadata, persistent_blocked_task_lines, registry_prune, session_records
+from omo_manager.omo_agent_status import Args, TaskFrontmatterError, classify_task, format_problem_summary, format_summary, load_local_env, load_task_state, main, parse_task_lines, parse_task_metadata, persistent_blocked_task_lines, registry_prune, session_records
 from omo_manager.omo_agent_status import SessionRecord, StatusRow, TaskLine
 from omo_manager.omo_codex_status import Args as CodexStatusArgs, Report
 
@@ -434,6 +434,31 @@ class AgentStatusTests(unittest.TestCase):
         self.assertIn("not_codex: task=gone.md", text)
         self.assertIn("ready: task=ordinary.md", text)
         self.assertIn("ready: task=wrong-marker.md", text)
+
+    def test_summaries_keep_blocked_active_rows_quiet(self) -> None:
+        rows = [
+            StatusRow("active.md", "running", "target=cfg:1 task_status=running", task_status="running"),
+            StatusRow("blocked-running.md", "running", "target=cfg:2 task_status=blocked", task_status="blocked"),
+            StatusRow("blocked-ready.md", "ready", "target=cfg:3 task_status=blocked", task_status="blocked"),
+            StatusRow("blocked-idle.md", "blocked_idle", "target=cfg:4 task_status=blocked", task_status="blocked"),
+            StatusRow("blocked-error.md", "error", "target=cfg:5 task_status=blocked", task_status="blocked"),
+            StatusRow("blocked-gone.md", "not_codex", "target=cfg:6 task_status=blocked", task_status="blocked"),
+            StatusRow("blocked-input.md", "stuck_input", "target=cfg:7 task_status=blocked", task_status="blocked"),
+        ]
+
+        status_text = format_summary(rows, 0, 0)
+        self.assertIn("agent-status: not_codex=1 running=1 blocked_idle=1 error=1 ready=0 stuck_input=1", status_text)
+        self.assertNotIn("blocked-running.md", status_text)
+        self.assertNotIn("blocked-ready.md", status_text)
+
+        problem_text = format_problem_summary(rows, set())
+        self.assertIn("agent-problems: not_codex=1 blocked_idle=1 error=1 stuck_input=1", problem_text)
+        self.assertNotIn("blocked-running.md", problem_text)
+        self.assertNotIn("blocked-ready.md", problem_text)
+        self.assertIn("blocked_idle: task=blocked-idle.md", problem_text)
+        self.assertIn("error: task=blocked-error.md", problem_text)
+        self.assertIn("not_codex: task=blocked-gone.md", problem_text)
+        self.assertIn("stuck_input: task=blocked-input.md", problem_text)
 
     def test_problems_only_stays_quiet_when_all_active_agents_are_running(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1311,6 +1336,16 @@ class AgentStatusTests(unittest.TestCase):
             _ = (root / "TODO.md").write_text("current:\nvl_worker.md vl 9\n", encoding="utf-8")
             _ = (root / "vl_worker.md").write_text(task_frontmatter("blocked", runat="vl:9", blocked_on="image lacks codex"), encoding="utf-8")
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--exit-code-if-active"]))
+
+    def test_exit_code_if_active_ignores_quiet_blocked_ready_running_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[{"task_file":"blocked.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nblocked.md cfg 1\n", encoding="utf-8")
+            _ = (root / "blocked.md").write_text(task_frontmatter("blocked", runat="cfg:1", blocked_on="waiting on human"), encoding="utf-8")
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("running", ["working"])), redirect_stdout(StringIO()):
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--exit-code-if-active"]))
 
     def test_problems_only_reports_registry_unmanaged_capacity_error(self) -> None:
