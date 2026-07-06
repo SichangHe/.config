@@ -40,8 +40,52 @@ root_real=$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.arg
 path_real=$(python3 -c 'from pathlib import Path; import sys; print((Path(sys.argv[1]) / sys.argv[2]).resolve(strict=False))' "$root_real" "$file")
 case "$path_real" in "$root_real"/*) ;; *) echo "file escapes root" >&2; exit 2 ;; esac
 if [ ! -f "$path_real" ]; then echo "file not found: $file" >&2; exit 2; fi
+before_sig=$(python3 -c 'import os, sys; st = os.stat(sys.argv[1]); print(f"{st.st_dev}:{st.st_ino}:{st.st_mtime_ns}:{st.st_size}")' "$path_real")
 body=$(sed -n "${start},${end}p" "$path_real")
 if [ -z "$body" ]; then echo "empty dispatch block" >&2; exit 2; fi
+body=$(printf '%s\n' "$body" | python3 -c 'from __future__ import annotations
+import re
+import sys
+lines = sys.stdin.read().splitlines()
+while lines and lines[0].strip() == "(pending)":
+    del lines[0]
+marker_re = re.compile(r"^\s*(DM only|DM)\b\s*[:.!?;,]*\s*$", re.I)
+def active_indices() -> list[int]:
+    return [idx for idx, line in enumerate(lines) if line.strip() and not line.lstrip().startswith(">")]
+def strip_first_marker() -> bool:
+    active = active_indices()
+    if not active:
+        return False
+    idx = active[0]
+    before = lines[idx]
+    if marker_re.match(lines[idx]):
+        del lines[idx]
+        return True
+    else:
+        lines[idx] = re.sub(r"^\s*(DM only|DM)\b(?:\s*[:.!?;,]+\s*|\s+)?", "", lines[idx], count=1, flags=re.I)
+        return lines[idx] != before
+def strip_last_marker() -> bool:
+    active = active_indices()
+    if not active:
+        return False
+    idx = active[-1]
+    before = lines[idx]
+    if marker_re.match(lines[idx]):
+        del lines[idx]
+        return True
+    else:
+        lines[idx] = re.sub(r"(?:\s*[:.!?;,]+\s*|\s+)?\b(DM only|DM)\b\s*[:.!?;,]*\s*$", "", lines[idx], count=1, flags=re.I)
+        return lines[idx] != before
+while True:
+    if strip_first_marker():
+        continue
+    if strip_last_marker():
+        continue
+    break
+text = "\n".join(lines).strip()
+sys.stdout.write(text)
+')
+if [ -z "$body" ]; then echo "empty dispatch block after removing pending/direct markers" >&2; exit 2; fi
 manager_line_pattern='^\s*(?:>\s*)*(?:(?:[-*+]\s+(?:\[[ xX]\]\s+)?)|(?:[0-9]+[.)]\s+))*\(for manager:'
 manager_lines=$(printf '%s\n' "$body" | python3 -c 'import re, sys; pat = re.compile(sys.argv[1], re.I); sys.stdout.write("\n".join(line for line in sys.stdin.read().splitlines() if pat.match(line)))' "$manager_line_pattern")
 prompt=$(printf '%s\n' "$body" | python3 -c 'import re, sys; pat = re.compile(sys.argv[1], re.I); sys.stdout.write("\n".join(line for line in sys.stdin.read().splitlines() if not pat.match(line)))' "$manager_line_pattern")
@@ -62,7 +106,7 @@ sys.stdout.write("1" if found else "")' "$manager_line_pattern")
 if [ -n "$report_request" ]; then
   report_root=$(python3 -c 'import shlex, sys; print(shlex.quote(sys.argv[1]))' "$root_real")
   report_task=$(python3 -c 'import shlex, sys; print(shlex.quote(sys.argv[1]))' "$file")
-  report_instruction="For manager reports, allocate a private report file with \`REPORT_FILE=\$(omo_report.sh --root ${report_root} --task-file ${report_task} --alloc-message-file)\`, write the report text to that file through an editor/file-editing tool or other non-shell text channel, then run \`omo_report.sh --root ${report_root} --task-file ${report_task} --status STATUS --agent agent-name --message-file \"\$REPORT_FILE\"\`; STATUS=blocked|in-progress|done. Email human only if manager unreachable/explicit, using \`email_me.py --manager-human --subject-file SUBJECT_FILE --message-file BODY_FILE\`. Verification: aggregate only—command names + pass/fail/failures, no test counts or verbose passing logs. Prefer \`omo_quiet_checks.sh -- \"COMMAND\" [-- \"COMMAND\" ...]\`; if the same repeated command set is used, create/run a tiny-output \`*_quiet_check.*\` wrapper and report only that aggregate output."
+  report_instruction="For manager reports, allocate a private report file with \`REPORT_FILE=\$(omo_report.sh --alloc-message-file)\`, write the report text to that file through an editor/file-editing tool or other non-shell text channel, then run \`omo_report.sh --status STATUS --agent agent-name --message-file \"\$REPORT_FILE\"\`; STATUS=blocked|in-progress|done. Fallback only if task inference fails: use \`REPORT_FILE=\$(omo_report.sh --task-file ${report_task} --alloc-message-file)\` and \`omo_report.sh --task-file ${report_task} --status STATUS --agent agent-name --message-file \"\$REPORT_FILE\"\`; if local.env/OMO_WORK_LOGS_ROOT is unavailable, add \`--root ${report_root}\` to those fallback commands. Email human only if manager unreachable/explicit, using \`email_me.py --manager-human --subject-file SUBJECT_FILE --message-file BODY_FILE\`. Verification: aggregate only—command names + pass/fail/failures, no test counts or verbose passing logs. Prefer \`omo_quiet_checks.sh -- \"COMMAND\" [-- \"COMMAND\" ...]\`; if the same repeated command set is used, create/run a tiny-output \`*_quiet_check.*\` wrapper and report only that aggregate output."
   prompt=$(printf '%s\n\n%s' "$prompt" "$report_instruction")
 fi
 prompt_file=$(mktemp /tmp/omo-dispatch-prompt.XXXXXX)
@@ -95,27 +139,37 @@ if [ "$dispatch_done" -eq 0 ]; then
 fi
 stamp=$(date '+%Y-%m-%d %H:%M:%S')
 note="(manager dispatch: ${stamp})"
-python3 - "$path_real" "$start" "$end" "$note" <<'PY'
+python3 - "$path_real" "$start" "$end" "$note" "$before_sig" <<'PY'
 from __future__ import annotations
+import os
 import sys
 from pathlib import Path
 path = Path(sys.argv[1])
 start = int(sys.argv[2])
 end = int(sys.argv[3])
 note = sys.argv[4]
+before_sig = sys.argv[5]
+stat = os.stat(path)
+after_sig = f"{stat.st_dev}:{stat.st_ino}:{stat.st_mtime_ns}:{stat.st_size}"
+if after_sig != before_sig:
+    raise SystemExit("dispatch cleanup skipped: file changed during send")
 lines = path.read_text(encoding="utf-8").splitlines()
-delete_from = max(0, start - 2)
-delete_to = min(end, len(lines))
-delete_indices = [idx for idx in range(delete_from, delete_to) if lines[idx] == "(pending)"]
-for idx in reversed(delete_indices):
-    del lines[idx]
-removed_before_end = sum(1 for idx in delete_indices if idx < end)
+delete_idx = -1
+selected_idx = start - 1
+before_idx = start - 2
+if 0 <= selected_idx < len(lines) and lines[selected_idx].strip() == "(pending)":
+    delete_idx = selected_idx
+elif 0 <= before_idx < len(lines) and lines[before_idx].strip() == "(pending)":
+    delete_idx = before_idx
+if delete_idx >= 0:
+    del lines[delete_idx]
+removed_before_end = 1 if 0 <= delete_idx < end else 0
 insert_at = min(end - removed_before_end, len(lines))
 if note not in lines:
     lines.insert(insert_at, note)
     changed = True
 else:
-    changed = bool(delete_indices)
+    changed = delete_idx >= 0
 if changed:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 PY

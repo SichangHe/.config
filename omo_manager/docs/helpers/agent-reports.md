@@ -1,6 +1,8 @@
 # agent report helper
 
-`omo_report.sh` is the agent-to-manager durable path. Reports use `omo_report.sh --task-file TASK --alloc-message-file` to create a private draft, then `omo_report.sh --task-file TASK --status STATUS --agent AGENT --message-file FILE` to submit it.
+`omo_report.sh` is the agent-to-manager durable path. Normal worker panes use `omo_report.sh --alloc-message-file` to create a private draft, then `omo_report.sh --status STATUS --agent AGENT --message-file FILE` to submit it.
+
+The work-log root comes from `local.env`/`OMO_WORK_LOGS_ROOT`, with `~/work_logs` as fallback. The task file is inferred from the current tmux pane/window by matching active `TODO.md` task refs to task frontmatter `runat`. If inference is ambiguous or unavailable, pass `--task-file TASK` explicitly.
 
 The submit path refuses any file named exactly `REPORT` unless its parent directory is private and owner-only, because shared task/workspace `REPORT` paths can submit stale content. It writes a private detailed report artifact under `/tmp/omo-agent-messages-$UID/`, mode `0600`, then appends only a compact `(pending)` block to the target task Markdown file: `(pending)` followed by `(from agent SOURCE /tmp/omo-agent-messages-$UID/FILE.md)`.
 

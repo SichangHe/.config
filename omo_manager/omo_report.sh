@@ -17,8 +17,8 @@ alloc_message_file=0
 agent="${OMO_AGENT_NAME:-agent}"
 usage() {
   printf '%s\n' \
-    "Usage: omo_report.sh --task-file FILE --status STATUS --message-file FILE [--agent NAME]" \
-    "       omo_report.sh --task-file FILE --alloc-message-file" \
+    "Usage: omo_report.sh --status STATUS --message-file FILE [--agent NAME] [--task-file FILE]" \
+    "       omo_report.sh --alloc-message-file [--task-file FILE]" \
     "Create report text in a private helper-allocated file, then pass that path with --message-file. A file named REPORT is refused unless it is in a private owner-only directory."
 }
 while [ "$#" -gt 0 ]; do
@@ -34,10 +34,130 @@ while [ "$#" -gt 0 ]; do
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
-if [ -z "$task_file" ]; then usage >&2; exit 2; fi
 if [ "$alloc_message_file" -eq 1 ] && [ -n "$message_file" ]; then echo "--alloc-message-file cannot be combined with --message-file" >&2; exit 2; fi
 if [ "$alloc_message_file" -eq 0 ] && { [ -z "$status" ] || [ -z "$message_file" ]; }; then usage >&2; exit 2; fi
 root_real=$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve())' "$root")
+if [ -z "$task_file" ]; then
+  task_file=$(python3 - "$root_real" <<'PY'
+from __future__ import annotations
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+root = Path(sys.argv[1])
+ACTIVE_SECTIONS = {"current", "human pending", "low priority"}
+TARGET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?$")
+
+def target_parts(target: str) -> tuple[str, str, str]:
+    session, sep, rest = target.partition(":")
+    if not sep:
+        return "", "", ""
+    window, dot, pane = rest.partition(".")
+    return session, window, pane if dot else ""
+
+def same_tmux_target(left: str, right: str) -> bool:
+    left_session, left_window, left_pane = target_parts(left)
+    right_session, right_window, right_pane = target_parts(right)
+    if not left_session or not right_session:
+        return False
+    if left_session != right_session or left_window != right_window:
+        return False
+    return not left_pane or not right_pane or left_pane == right_pane
+
+def current_tmux_target() -> str:
+    if shutil.which("tmux") is None:
+        return ""
+    pane = os.environ.get("TMUX_PANE", "").strip()
+    command = ["tmux", "display-message", "-p", "#{session_name}\t#{window_index}\t#{pane_index}"]
+    if pane:
+        command[3:3] = ["-t", pane]
+    elif not os.environ.get("TMUX"):
+        return ""
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=5, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    if result.returncode != 0:
+        return ""
+    session, window, pane_index = (result.stdout.rstrip("\n").split("\t") + ["", "", ""])[:3]
+    if not session or not window or not pane_index:
+        return ""
+    return f"{session}:{window}.{pane_index}"
+
+def parse_frontmatter(path: Path) -> dict[str, str] | None:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    if not lines or lines[0].strip() != "---":
+        return None
+    try:
+        end = next(idx for idx, line in enumerate(lines[1:], start=1) if line.strip() == "---")
+    except StopIteration:
+        return None
+    values: dict[str, str] = {}
+    for line in lines[1:end]:
+        if not line or line.startswith("  - "):
+            continue
+        key, sep, value = line.partition(":")
+        if sep:
+            values[key.strip()] = value.strip()
+    return values
+
+def active_task_refs() -> list[Path]:
+    todo = root / "TODO.md"
+    try:
+        lines = todo.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    refs: list[Path] = []
+    seen: set[Path] = set()
+    section = ""
+    for line in lines:
+        stripped = line.strip()
+        if stripped.endswith(":") and stripped[:-1] in ACTIVE_SECTIONS | {"previous"}:
+            section = stripped[:-1]
+            continue
+        if section not in ACTIVE_SECTIONS:
+            continue
+        for match in re.findall(r"`?([A-Za-z0-9_./-]+\.md)`?", line):
+            path = (root / match).resolve(strict=False)
+            if path in seen or path.name == "TODO.md":
+                continue
+            try:
+                path.relative_to(root)
+            except ValueError:
+                continue
+            seen.add(path)
+            refs.append(path)
+    return refs
+
+current = current_tmux_target()
+if not current:
+    print("task file not supplied and current tmux pane/window could not be identified; pass --task-file explicitly", file=sys.stderr)
+    raise SystemExit(2)
+matches: list[Path] = []
+for candidate in active_task_refs():
+    metadata = parse_frontmatter(candidate)
+    if metadata is None:
+        continue
+    runat = metadata.get("runat", "")
+    if TARGET_RE.fullmatch(runat) and same_tmux_target(runat, current):
+        matches.append(candidate)
+if len(matches) == 1:
+    print(matches[0].relative_to(root))
+    raise SystemExit(0)
+if not matches:
+    print(f"could not infer task file for tmux target {current}; pass --task-file explicitly", file=sys.stderr)
+else:
+    choices = ", ".join(str(path.relative_to(root)) for path in matches)
+    print(f"multiple active task files match tmux target {current}: {choices}; pass --task-file explicitly", file=sys.stderr)
+raise SystemExit(2)
+PY
+  )
+fi
 path_real=$(python3 -c 'from pathlib import Path; import sys; print((Path(sys.argv[1]) / sys.argv[2]).resolve(strict=False))' "$root_real" "$task_file")
 case "$path_real" in "$root_real"/*) ;; *) echo "task file escapes root" >&2; exit 2 ;; esac
 if [ "$alloc_message_file" -eq 1 ]; then
@@ -78,7 +198,7 @@ if parent_stat is not None and parent_stat.st_uid == os.getuid() and stat.S_IMOD
     raise SystemExit(0)
 print(f"refusing shared report path: {sys.argv[1]}", file=sys.stderr)
 print("files named REPORT are accepted only from a private owner-only directory", file=sys.stderr)
-print("allocate a private path first: omo_report.sh --task-file TASK.md --alloc-message-file", file=sys.stderr)
+print("allocate a private path first: omo_report.sh --alloc-message-file", file=sys.stderr)
 raise SystemExit(2)
 PY
 if [ ! -f "$message_file" ]; then echo "message file not found" >&2; exit 2; fi
@@ -95,10 +215,21 @@ main_target = sys.argv[3].strip()
 TARGET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?$")
 ACTIVE_SECTIONS = {"current", "human pending", "low priority"}
 
-def target_aliases(target: str) -> set[str]:
-    if not target:
-        return set()
-    return {target, target[:-2] if target.endswith(".0") else f"{target}.0"}
+def target_parts(target: str) -> tuple[str, str, str]:
+    session, sep, rest = target.partition(":")
+    if not sep:
+        return "", "", ""
+    window, dot, pane = rest.partition(".")
+    return session, window, pane if dot else ""
+
+def same_tmux_target(left: str, right: str) -> bool:
+    left_session, left_window, left_pane = target_parts(left)
+    right_session, right_window, right_pane = target_parts(right)
+    if not left_session or not right_session:
+        return False
+    if left_session != right_session or left_window != right_window:
+        return False
+    return not left_pane or not right_pane or left_pane == right_pane
 
 def target_session(target: str) -> str:
     return target.split(":", 1)[0] if ":" in target else ""
@@ -172,7 +303,7 @@ managerat = metadata.get("managerat", "")
 if not TARGET_RE.fullmatch(managerat):
     print("task frontmatter `managerat` must be a tmux target", file=sys.stderr)
     raise SystemExit(2)
-if target_aliases(managerat) & target_aliases(main_target):
+if same_tmux_target(managerat, main_target):
     print(main_manager_file())
     raise SystemExit(0)
 if is_named_main_manager_target(managerat):
@@ -183,7 +314,7 @@ for candidate in active_task_refs():
     if candidate_metadata is None or candidate_metadata.get("is_manager") != "true":
         continue
     runat = candidate_metadata.get("runat", "")
-    if target_aliases(runat) & target_aliases(managerat):
+    if same_tmux_target(runat, managerat):
         print(candidate)
         raise SystemExit(0)
 print(f"manager task file not found for managerat {managerat}", file=sys.stderr)

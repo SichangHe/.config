@@ -6,6 +6,6 @@ For new temporary prose, create a random private empty file with `mktemp "${TMPD
 
 Human-facing email subjects must include the relevant task md filename so replies can route after manager compaction. Human email message bodies passed to `email_me.py` accept Markdown input, but plain text is preferred.
 
-Pass files directly with `email_me.py --manager-human --subject-file SUBJECT --message-file BODY`, `omo_tmux_send.py --message-file PROMPT`, `omo_task.py --prompt-file PROMPT`, or `omo_report.sh --message-file REPORT_FILE` after allocating `REPORT_FILE` with `omo_report.sh --task-file TASK --alloc-message-file`.
+Pass files directly with `email_me.py --manager-human --subject-file SUBJECT --message-file BODY`, `omo_tmux_send.py --message-file PROMPT`, `omo_task.py --prompt-file PROMPT`, or `omo_report.sh --message-file REPORT_FILE` after allocating `REPORT_FILE` with `omo_report.sh --alloc-message-file`.
 
 Human-review note: review and approve this standing manager rule and consider adding the same invariant to broader AGENTS.md.
