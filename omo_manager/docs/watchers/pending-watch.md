@@ -61,8 +61,9 @@
   - `DM only` follows the same marker rules as `DM` but does not send the manager FYI copy after successful worker delivery
   - successful DM worker delivery also sends the manager an FYI copy that starts ``Immediately record every pending item, then ack human, then remove `(pending)`; this message is already dispatched to the agent, this is FYI:``
   - agent-origin DM manager FYI copies say ``don't ack human`` instead of ``ack human``
-  - worker DM delivery starts ``Direct message from the human; act on the request in the snippets below:``
-  - worker DM delivery does not include the manager pending-item instruction or the task-file snippet
+  - worker DM delivery contains only the cleaned message text
+  - worker DM delivery does not include manager instructions, task-file snippets, source snippets, or XML-style wrappers
+  - worker DM delivery strips standalone file-pointer lines after including readable file content, and extracts only the `message:` body from `omo_report.sh` agent report files
   - manager DM FYI keeps the task-file snippet inline so the manager can record and clear the pending marker
   - failed or unroutable DM worker delivery sends the manager an action-required fallback
   - same-process DM manager-FYI retry does not resend the worker copy after worker delivery succeeds

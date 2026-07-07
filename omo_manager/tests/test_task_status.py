@@ -4,9 +4,11 @@ import io
 import tempfile
 import unittest
 from contextlib import redirect_stderr
+from contextlib import redirect_stdout
 from pathlib import Path
 
 from omo_manager.omo_agent_status import TaskFrontmatterError
+from omo_manager.omo_task_status import DONE_REMINDER
 from omo_manager.omo_task_status import run
 from omo_manager.omo_task_status import update_frontmatter_status
 from omo_manager.omo_task_status import Args as StatusArgs
@@ -115,11 +117,26 @@ class TaskStatusTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "task.md"
             path.write_text(task_frontmatter() + "body\n", encoding="utf-8")
+            stdout = io.StringIO()
 
-            exit_code = run(StatusArgs(Path(tmp), Path("task.md"), "done", ""))
+            with redirect_stdout(stdout):
+                exit_code = run(StatusArgs(Path(tmp), Path("task.md"), "done", ""))
 
             self.assertEqual(0, exit_code)
             self.assertIn("status: done\nrunat:", path.read_text(encoding="utf-8"))
+            self.assertIn(DONE_REMINDER, stdout.getvalue())
+
+    def test_cli_running_has_no_done_reminder(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "task.md"
+            path.write_text(task_frontmatter(status="blocked", blocked_on="waiting") + "body\n", encoding="utf-8")
+            stdout = io.StringIO()
+
+            with redirect_stdout(stdout):
+                exit_code = run(StatusArgs(Path(tmp), Path("task.md"), "running", ""))
+
+            self.assertEqual(0, exit_code)
+            self.assertEqual("", stdout.getvalue())
 
     def test_cli_rejects_relative_path_that_escapes_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

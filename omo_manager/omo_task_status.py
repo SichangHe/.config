@@ -19,6 +19,7 @@ from omo_manager.omo_agent_status import frontmatter_parts
 from omo_manager.omo_agent_status import parse_task_metadata
 
 PENDING_MARKER = "(pending)"
+DONE_REMINDER = "Status set to done. Remember to email the human."
 
 
 @dataclass(frozen=True)
@@ -145,6 +146,8 @@ def run(args: Args) -> int:
     except (OSError, TaskFrontmatterError) as exc:
         print(f"omo_task_status.py: {exc}", file=sys.stderr)
         return 2
+    if args.status == "done":
+        print(DONE_REMINDER)
     return 0
 
 

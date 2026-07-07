@@ -67,6 +67,7 @@ PENDING_MARKERS = {"(pending)"}
 FOR_MANAGER_MARKER = "for manager"
 DIRECT_MARKER_SEPARATOR_CHARS = {":", ".", "!", "?", ";", ","}
 DIRECT_MARKER_WRAPPER_CLOSERS = {")": "(", "]": "[", "}": "{", '"': '"', "'": "'", "`": "`"}
+POINTER_WRAPPER_PAIRS = {"`": "`", "'": "'", '"': '"', "(": ")", "[": "]", "<": ">", "{": "}"}
 HELPER_NOTICE_INSTRUCTION = "Handle this helper-generated notice, then don't ack human:"
 TASK_FILE_LINE_WARNING_THRESHOLD = 2000
 TODO_LINE_WARNING_THRESHOLD = 200
@@ -75,6 +76,9 @@ ROUTED_PREFIXES = ("(manager handled:", "(manager routed:")
 EMAIL_SOURCE_PREFIXES = ("(record and delegate ", "(from email ", "[source: email ")
 AGENT_SOURCE_PREFIXES = ("[omo-message-source: origin=agent ", "(from agent ")
 FILE_REF_RE = re.compile(r"(?<![\w@.-])((?:/)?(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+\.[A-Za-z0-9_.-]+|[A-Za-z0-9_.-]+\.(?:md|txt|json|yaml|yml|toml|py|sh))(?![\w/.-])")
+LIST_POINTER_PREFIX_RE = re.compile(r"^(?:[-*+]|\d+[.)])\s+")
+CHECKBOX_POINTER_PREFIX_RE = re.compile(r"^\[[ xX]\]\s+")
+MARKDOWN_POINTER_LINK_RE = re.compile(r"^\[[^\]]*\]\(\s*<?([^)\s>]+)>?(?:\s+(?:\"[^\"]*\"|'[^']*'|\([^)]*\)))?\s*\)$")
 STATUS_DETAIL_RE = re.compile(r"^\((pending|running|done|blocked)(?::\s*([^)]*))?\)(?:\s+\(([^)]*)\))?$")
 TMUX_TARGET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?$")
 AGENT_POINTER_WITH_TARGET_RE = re.compile(r"^\(from agent ([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?) (/tmp/omo-agent-messages-[^)]*)\)$")
@@ -886,18 +890,87 @@ def attachment_snippet_parts(attachments: Sequence[SourceAttachment]) -> list[st
     return parts
 
 
-def direct_block_section(marker: Marker) -> str:
-    return f"<message>\n{truncate_content(display_pending_tail(strip_direct_markers(marker.block_text)), PENDING_CONTENT_CHAR_LIMIT)}\n</message>"
+def bare_source_pointer_text(line: str) -> str:
+    """Return a line's file pointer when no other request text is present."""
+
+    value = line.strip()
+    while True:
+        next_value = LIST_POINTER_PREFIX_RE.sub("", value, count=1).strip()
+        next_value = CHECKBOX_POINTER_PREFIX_RE.sub("", next_value, count=1).strip()
+        if next_value == value:
+            break
+        value = next_value
+    while len(value) >= 2:
+        if match := MARKDOWN_POINTER_LINK_RE.match(value):
+            return match.group(1)
+        if POINTER_WRAPPER_PAIRS.get(value[0]) != value[-1]:
+            break
+        value = value[1:-1].strip()
+    if match := MARKDOWN_POINTER_LINK_RE.match(value):
+        return match.group(1)
+    return value
 
 
-def worker_attachment_snippet_parts(attachments: Sequence[SourceAttachment]) -> list[str]:
+def is_standalone_source_pointer(line: str, sources: set[str]) -> bool:
+    return bare_source_pointer_text(line) in sources
+
+
+def clean_direct_message_lines(text: str) -> str:
+    """Remove routing source metadata from direct worker text."""
+
+    lines = []
+    for line in strip_direct_markers(text).splitlines():
+        stripped = line.strip()
+        if stripped.startswith(EMAIL_SOURCE_PREFIXES) or stripped.startswith(AGENT_SOURCE_PREFIXES):
+            continue
+        lines.append(line)
+    return strip_direct_markers("\n".join(lines))
+
+
+def direct_message_block_text(marker: Marker, attachments: Sequence[SourceAttachment]) -> str:
+    """Return only human request text from the pending block."""
+
+    attachment_sources = {attachment.source for attachment in attachments if not attachment.error}
+    lines = []
+    for line in clean_direct_message_lines(marker.block_text).splitlines():
+        if is_standalone_source_pointer(line, attachment_sources):
+            continue
+        lines.append(line)
+    return display_pending_tail("\n".join(lines)).strip()
+
+
+def agent_report_message_text(text: str) -> str:
+    """Extract the body from `omo_report.sh` agent report artifacts."""
+
+    lines = text.splitlines()
+    if not any(line.startswith(AGENT_SOURCE_PREFIXES) or line.startswith("(sent from agent via omo_report.sh ") for line in lines[:8]):
+        return text
+    for idx, line in enumerate(lines):
+        if line.strip() == "message:":
+            return "\n".join(lines[idx + 1 :]).strip()
+    return text
+
+
+def direct_attachment_text(attachment: SourceAttachment) -> str:
+    """Return only readable linked-message text for worker DMs."""
+
+    if attachment.error:
+        return ""
+    return clean_direct_message_lines(agent_report_message_text(attachment.text))
+
+
+def direct_message_text(marker: Marker, attachments: Sequence[SourceAttachment]) -> str:
+    """Build a worker DM with no manager instructions or metadata wrappers."""
+
     parts: list[str] = []
+    block_text = direct_message_block_text(marker, attachments)
+    if block_text:
+        parts.append(block_text)
     for attachment in attachments:
-        if attachment.error:
-            parts.append(source_error_section(attachment.source, attachment.error))
-        else:
-            parts.append(snippet_section(attachment.source, attachment.start_line, attachment.end_line, strip_direct_markers(attachment.text), EMAIL_CONTENT_CHAR_LIMIT))
-    return parts
+        attachment_text = direct_attachment_text(attachment)
+        if attachment_text:
+            parts.append(attachment_text)
+    return truncate_content("\n\n".join(parts), PENDING_CONTENT_CHAR_LIMIT)
 
 
 def marker_delivery_text(marker: Marker, attachments: Sequence[SourceAttachment] = (), prefix: str = "") -> str:
@@ -910,10 +983,7 @@ def marker_delivery_text(marker: Marker, attachments: Sequence[SourceAttachment]
 
 
 def marker_worker_dm_text(marker: Marker, attachments: Sequence[SourceAttachment]) -> str:
-    parts = ["Direct message from the human; act on the request in the snippets below:"]
-    parts.append(direct_block_section(marker))
-    parts.extend(worker_attachment_snippet_parts(attachments))
-    return "\n".join(parts)
+    return direct_message_text(marker, attachments)
 
 
 def marker_fyi_text(marker: Marker, attachments: Sequence[SourceAttachment]) -> str:
