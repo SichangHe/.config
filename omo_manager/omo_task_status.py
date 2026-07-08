@@ -81,7 +81,9 @@ def update_frontmatter_status(text: str, status: str, blocked_on: str) -> str:
     if has_pending_marker(text):
         raise TaskFrontmatterError("task file still contains `(pending)`; handle pending markers before changing status.")
     if status == "done" and metadata.pending_task_items:
-        raise TaskFrontmatterError("task file still has `pending_task_items`; clear them before marking done.")
+        raise TaskFrontmatterError(
+            "task file still has `pending_task_items`; verify each pending item is actually complete or cancelled, then remove it before marking done."
+        )
     if status == "blocked" and not blocked_on:
         raise TaskFrontmatterError("`--blocked-on` is required when setting status to `blocked`.")
     if "\n" in blocked_on or "\r" in blocked_on:

@@ -81,7 +81,7 @@ class TaskStatusTests(unittest.TestCase):
     def test_done_rejects_pending_task_items(self) -> None:
         text = task_frontmatter(pending_items=("finish review",)) + "body\n"
 
-        with self.assertRaisesRegex(TaskFrontmatterError, "pending_task_items"):
+        with self.assertRaisesRegex(TaskFrontmatterError, "verify each pending item is actually complete"):
             update_frontmatter_status(text, "done", "")
 
     def test_pending_marker_inside_fenced_code_is_allowed(self) -> None:

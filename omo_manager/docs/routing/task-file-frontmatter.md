@@ -52,11 +52,11 @@ ALL other fields are required.
 
 `managerat` MUST be different from `runat`. In a worker task file, `managerat` is the manager that owns the task. In a manager task file, `runat` is the manager pane that receives pending blocks already written to that manager file. Use worker `runat` only for the worker pane and direct-message delivery.
 
-`pending_task_items` only contains items that are still open. Remove done/cancelled items IMMEDIATELY.
+`pending_task_items` only contains items that are still open. Before removing an item, verify it is actually complete or cancelled; remove it immediately after that verification.
 
 ## helper behavior
 
-Managers change `status` with `omo_task_status.py TASK.md running|blocked|done`. Use `--root ROOT` when the task path is relative to a non-default work-log root. Use `--blocked-on TEXT` only with `blocked`. The script rejects status changes while any live `(pending)` marker remains, and rejects `done` while `pending_task_items` is nonempty. When it switches a task to `done`, it closes the task `runat` Codex pane, appends the standard close note with the captured session id when available, and prints a reminder to email the human.
+Managers change `status` with `omo_task_status.py TASK.md running|blocked|done`. Use `--root ROOT` when the task path is relative to a non-default work-log root. Use `--blocked-on TEXT` only with `blocked`. The script rejects status changes while any live `(pending)` marker remains, and rejects `done` while `pending_task_items` is nonempty with a reminder to verify each item is actually complete or cancelled before removing it. When it switches a task to `done`, it closes the task `runat` Codex pane, appends the standard close note with the captured session id when available, and prints a reminder to email the human.
 
 `omo_task.py` creates new task files with correct placeholder frontmatter. `status` is `running`; `managerat` is the current tmux window; `runat`, `tool`, `is_manager` are mandatory arguments passed in; `pending_task_items` is empty. After a successful return, this script reminds the caller to fill in `pending_task_items`.
 
