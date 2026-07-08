@@ -106,9 +106,13 @@ class RecordPendingTests(unittest.TestCase):
             task.write_text(task_frontmatter() + "(pending)\nPlease do it.\n", encoding="utf-8")
             stdout = io.StringIO()
             commands: list[list[str]] = []
+            subjects: list[str] = []
+            bodies: list[str] = []
 
             def fake_run(command: list[str], check: bool) -> None:
                 commands.append(command)
+                subjects.append(Path(command[command.index("--subject-file") + 1]).read_text(encoding="utf-8"))
+                bodies.append(Path(command[command.index("--message-file") + 1]).read_text(encoding="utf-8"))
 
             with patch("omo_manager.omo_record_pending.subprocess.run", side_effect=fake_run), redirect_stdout(stdout):
                 exit_code = run(Args(root, Path("task.md"), 10, Path("task.md"), ("finish review",), True))
@@ -118,7 +122,32 @@ class RecordPendingTests(unittest.TestCase):
             self.assertIn("--manager-human", commands[0])
             self.assertIn("--subject-file", commands[0])
             self.assertIn("--message-file", commands[0])
+            self.assertEqual("Request recorded\n", subjects[0])
+            self.assertEqual("Added pending items:\n- finish review\n", bodies[0])
+            self.assertNotIn("task.md", bodies[0])
             self.assertIn("recorded 1 pending item", stdout.getvalue())
+
+    def test_ack_human_uses_email_file_subject(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            task.write_text(task_frontmatter() + "(pending)\nPlease do it.\n", encoding="utf-8")
+            mail = root / "manager_mail" / "4002.txt"
+            mail.parent.mkdir()
+            mail.write_text("Subject: Re: PB review request\n\nPlease do it.\n", encoding="utf-8")
+            subjects: list[str] = []
+            bodies: list[str] = []
+
+            def fake_run(command: list[str], check: bool) -> None:
+                subjects.append(Path(command[command.index("--subject-file") + 1]).read_text(encoding="utf-8"))
+                bodies.append(Path(command[command.index("--message-file") + 1]).read_text(encoding="utf-8"))
+
+            with patch("omo_manager.omo_record_pending.subprocess.run", side_effect=fake_run):
+                exit_code = run(Args(root, Path("task.md"), 10, Path("task.md"), ("Please do it.",), True, Path("manager_mail/4002.txt")))
+
+            self.assertEqual(0, exit_code)
+            self.assertEqual(["Re: PB review request\n"], subjects)
+            self.assertEqual(["Added pending items:\n- Please do it.\n"], bodies)
 
     def test_ack_human_retry_succeeds_after_email_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

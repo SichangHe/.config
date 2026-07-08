@@ -37,6 +37,9 @@
   - inspects each pending block for explicit source markers
   - normal manager deliveries start by telling the manager to run `omo_record_pending.py`
   - human-origin manager deliveries include `--ack-human` so recording the pending items also emails the human
+  - email-origin manager deliveries also include `--email-file manager_mail/N.txt` so `omo_record_pending.py` can reuse the original email subject
+  - human-origin manager deliveries tell the manager to quote the human's words as much as possible when choosing `--item` values
+  - agent-origin manager deliveries tell the manager to quote the request's words as much as possible when choosing `--item` values
   - agent-origin manager deliveries say to omit `--ack-human`
   - if no pending task item should be added, or an existing pending item must be edited, the manager edits the task file directly instead; human-origin direct edits still need a manual human email
   - includes the pending line and content from that line to end of file
@@ -72,7 +75,7 @@
 - manager delivery example
   - ``Normally record pending items and remove the consumed `(pending)` marker by running:``
   - ``omo_record_pending.py --pending-file helper_audit_agent_9580.md --line 156 --item PENDING_ITEM_TEXT [--item ...] [--task-file TARGET_TASK.md]``
-  - ``Do not pass `--ack-human`; agent-origin reports do not need a human acknowledgement. If there is no pending task item to add, or you need to edit an existing pending item, edit the task file directly instead. Then dispatch the task:``
+  - ``Choose `--item` values by quoting the request's words as much as possible. Do not pass `--ack-human`; agent-origin reports do not need a human acknowledgement. If there is no pending task item to add, or you need to edit an existing pending item, edit the task file directly instead. Then dispatch the task:``
   - `<snippet file="helper_audit_agent_9580.md:156-157">`
   - `(pending)`
   - `(from agent /tmp/omo-agent-messages-30033/agent_running_450901fc7c538b93789982a05ef20df3651c465ebf7f86eb641b75d6b6c5a9da.md)`
@@ -89,8 +92,8 @@
 
 - dm fyi example
   - ``Normally record pending items and remove the consumed `(pending)` marker by running:``
-  - ``omo_record_pending.py --pending-file worker.md --line 11 --item PENDING_ITEM_TEXT [--item ...] [--task-file TARGET_TASK.md] --ack-human``
-  - ``Use `--ack-human` so the script emails the human after recording. If there is no pending task item to add, or you need to edit an existing pending item, edit the task file directly instead and email the human manually. This message is already dispatched to the agent, this is FYI:``
+  - ``omo_record_pending.py --pending-file worker.md --line 11 --item PENDING_ITEM_TEXT [--item ...] [--task-file TARGET_TASK.md] --email-file manager_mail/4002.txt --ack-human``
+  - ``Choose `--item` values by quoting the human's words as much as possible. Use `--ack-human` so the script emails the human after recording. If there is no pending task item to add, or you need to edit an existing pending item, edit the task file directly instead and email the human manually. This message is already dispatched to the agent, this is FYI:``
   - `<snippet file="worker.md:11-12">`
   - `(pending)`
   - `(record and delegate manager_mail/4002.txt)`

@@ -30,6 +30,7 @@ class Args:
     task_file: Path
     items: tuple[str, ...]
     ack_human: bool
+    email_file: Path | None = None
 
 
 class ParsedArgs(argparse.Namespace):
@@ -39,6 +40,7 @@ class ParsedArgs(argparse.Namespace):
     task_file: Path | None = None
     item: list[str]
     ack_human: bool = False
+    email_file: Path | None = None
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -49,6 +51,7 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--task-file", type=Path, help="Task file that receives `pending_task_items`; defaults to --pending-file.")
     _ = parser.add_argument("--item", action="append", default=[], help="Pending task item to append. Pass once per item.")
     _ = parser.add_argument("--ack-human", action="store_true", help="Email the human after the pending marker and items are recorded.")
+    _ = parser.add_argument("--email-file", type=Path, help="Stored `manager_mail/*.txt` file whose `Subject:` header should be used for the human acknowledgement.")
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     try:
         items = tuple(normalized_item(item) for item in parsed.item)
@@ -56,7 +59,7 @@ def parse_args(argv: list[str]) -> Args:
         parser.error(str(exc))
     if not items:
         parser.error("at least one --item is required; directly edit the task file for no-item acknowledgements or existing-item edits.")
-    return Args(parsed.root.resolve(), parsed.pending_file, parsed.line, parsed.task_file or parsed.pending_file, items, parsed.ack_human)
+    return Args(parsed.root.resolve(), parsed.pending_file, parsed.line, parsed.task_file or parsed.pending_file, items, parsed.ack_human, parsed.email_file)
 
 
 def normalized_item(item: str) -> str:
@@ -142,21 +145,36 @@ def retry_already_recorded(pending_text: str, target_text: str, line: int, items
     return not pending_marker_at_line(pending_text, line) and not has_pending_marker(pending_text) and all_items_recorded(target_text, items)
 
 
-def ack_subject() -> str:
+def subject_from_email_file(path: Path) -> str:
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            break
+        key, sep, value = line.partition(":")
+        if sep and key.casefold() == "subject":
+            subject = value.strip()
+            if subject:
+                return subject
+            break
+    raise TaskFrontmatterError("email file has no nonempty `Subject:` header.")
+
+
+def ack_subject(email_path: Path | None) -> str:
+    if email_path is not None:
+        return subject_from_email_file(email_path)
     return "Request recorded"
 
 
-def ack_body(pending_path: Path, line: int, target_path: Path, items: tuple[str, ...]) -> str:
+def ack_body(items: tuple[str, ...]) -> str:
     item_text = "\n".join(f"- {item}" for item in items)
-    return f"Recorded the request from `{pending_path.name}:{line}` in `{target_path.name}`.\n\nPending items:\n{item_text}\n"
+    return f"Added pending items:\n{item_text}\n"
 
 
-def send_human_ack(pending_path: Path, line: int, target_path: Path, items: tuple[str, ...]) -> None:
+def send_human_ack(items: tuple[str, ...], email_path: Path | None) -> None:
     with tempfile.TemporaryDirectory(prefix="omo-record-pending-") as tmp:
         subject_path = Path(tmp) / "subject.txt"
         body_path = Path(tmp) / "body.md"
-        subject_path.write_text(ack_subject() + "\n", encoding="utf-8")
-        body_path.write_text(ack_body(pending_path, line, target_path, items), encoding="utf-8")
+        subject_path.write_text(ack_subject(email_path) + "\n", encoding="utf-8")
+        body_path.write_text(ack_body(items), encoding="utf-8")
         subprocess.run([str(EMAIL_HELPER), "--manager-human", "--subject-file", str(subject_path), "--message-file", str(body_path)], check=True)
 
 
@@ -164,6 +182,7 @@ def run(args: Args) -> int:
     try:
         pending_path = task_path(args.root, args.pending_file)
         target_path = task_path(args.root, args.task_file)
+        email_path = task_path(args.root, args.email_file) if args.email_file is not None else None
         pending_before = pending_path.stat()
         target_before = target_path.stat()
         same_file = pending_path == target_path
@@ -171,7 +190,7 @@ def run(args: Args) -> int:
         target_text = pending_text if same_file else target_path.read_text(encoding="utf-8")
         if retry_already_recorded(pending_text, target_text, args.line, args.items):
             if args.ack_human:
-                send_human_ack(pending_path, args.line, target_path, args.items)
+                send_human_ack(args.items, email_path)
             print(f"recorded {len(args.items)} pending item(s) in {target_path.name}; `(pending)` was already removed from {pending_path.name}:{args.line}")
             return 0
         updated_pending, updated_target = update_texts(pending_text, target_text, same_file, args.line, args.items)
@@ -181,7 +200,7 @@ def run(args: Args) -> int:
             replace_if_unchanged(target_path, updated_target, target_before)
             replace_if_unchanged(pending_path, updated_pending, pending_before)
         if args.ack_human:
-            send_human_ack(pending_path, args.line, target_path, args.items)
+            send_human_ack(args.items, email_path)
     except (OSError, TaskFrontmatterError, subprocess.CalledProcessError, argparse.ArgumentTypeError) as exc:
         print(f"omo_record_pending.py: {exc}", file=sys.stderr)
         return 2

@@ -4394,6 +4394,8 @@ class PendingMarkerTests(unittest.TestCase):
             text = out.getvalue()
             self.assertIn("Normally record pending items and remove the consumed `(pending)` marker by running:", text)
             self.assertIn("--ack-human", text)
+            self.assertIn("--email-file manager_mail/4002.txt", text)
+            self.assertIn("Choose `--item` values by quoting the human's words as much as possible.", text)
             self.assertIn("<snippet file=\"work_manager_", text)
             self.assertIn("(from email manager_mail/4002.txt)", text)
 
@@ -4693,6 +4695,7 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertIn("Normally record pending items and remove the consumed `(pending)` marker by running:", calls[1][1])
             self.assertIn("this message is already dispatched to the agent, this is FYI", calls[1][1])
             self.assertIn("--ack-human", calls[1][1])
+            self.assertIn("--email-file manager_mail/4002.txt", calls[1][1])
             self.assertNotIn("DM!!!", calls[0][1])
             self.assertNotIn('<snippet file="worker.md:', calls[0][1])
             self.assertIn('<snippet file="worker.md:', calls[1][1])

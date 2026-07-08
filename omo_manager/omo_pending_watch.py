@@ -1022,30 +1022,34 @@ def strip_direct_markers(text: str) -> str:
 
 
 def manager_pending_instruction(marker: Marker, after_recording: str = "Then dispatch the task:") -> str:
-    command = " ".join(
-        [
-            "omo_record_pending.py",
-            "--pending-file",
-            shlex.quote(str(marker.file)),
-            "--line",
-            str(marker.line),
-            "--item",
-            shlex.quote("PENDING_ITEM_TEXT"),
-            "[--item ...]",
-            "[--task-file TARGET_TASK.md]",
-            "--ack-human" if marker.origin == "human" else "",
-        ]
-    ).strip()
+    command_parts = [
+        "omo_record_pending.py",
+        "--pending-file",
+        shlex.quote(str(marker.file)),
+        "--line",
+        str(marker.line),
+        "--item",
+        shlex.quote("PENDING_ITEM_TEXT"),
+        "[--item ...]",
+        "[--task-file TARGET_TASK.md]",
+    ]
+    if marker.origin == "human" and marker.source == "email" and marker.delegate_source:
+        command_parts.extend(["--email-file", shlex.quote(marker.delegate_source)])
     if marker.origin == "human":
+        command_parts.append("--ack-human")
+    command = " ".join(command_parts)
+    if marker.origin == "human":
+        quote_note = "Choose `--item` values by quoting the human's words as much as possible."
         flag_note = "Use `--ack-human` so the script emails the human after recording."
         fallback_note = "If there is no pending task item to add, or you need to edit an existing pending item, edit the task file directly instead and email the human manually."
     else:
+        quote_note = "Choose `--item` values by quoting the request's words as much as possible."
         flag_note = "Do not pass `--ack-human`; agent-origin reports do not need a human acknowledgement."
         fallback_note = "If there is no pending task item to add, or you need to edit an existing pending item, edit the task file directly instead."
     return (
         "Normally record pending items and remove the consumed `(pending)` marker by running:\n"
         f"`{command}`\n"
-        f"{flag_note} {fallback_note} {after_recording}"
+        f"{quote_note} {flag_note} {fallback_note} {after_recording}"
     )
 
 
