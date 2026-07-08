@@ -103,7 +103,7 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--min-high-percent", type=float, default=50.0)
     _ = parser.add_argument("--check-file", type=Path, action="append", default=[])
     _ = parser.add_argument("--quota-command", default="", help="Optional read-only quota command; advisory only, e.g. an OpenCode /quota wrapper.")
-    _ = parser.add_argument("--stall-command", default="", help="Optional local no-model stall command, e.g. omo_stuck_watch.py.")
+    _ = parser.add_argument("--stall-command", default="", help="Optional local no-model stall command.")
     _ = parser.add_argument("--health-command", default="", help="Optional local no-model health command, e.g. omo_manager_watchdog.sh.")
     _ = parser.add_argument("--low-percent", type=float, default=LOW_PERCENT_DEFAULT)
     _ = parser.add_argument("--report-file", type=Path)

@@ -1,5 +1,6 @@
 - `helpers/index.md` shared helper conventions and general helper scripts
 - `mail/index.md` manager-human mail ingestion, cleanup, and compression workflows
+- `monthly-archive.md` TODO.md previous-task archive policy
 - `pb-agent.md` PB watcher and PB agent manager usage
 - `watchers/index.md` pending-marker delivery and maintenance watchers
 - `codex/index.md` Codex-specific helper references

@@ -16,6 +16,7 @@ from omo_manager.omo_tmux_send import CodexSendOptions
 from omo_manager.omo_tmux_send import async_job_from_query
 from omo_manager.omo_tmux_send import clear_stuck_input_before_send
 from omo_manager.omo_tmux_send import launch_async
+from omo_manager.omo_tmux_send import main
 from omo_manager.omo_tmux_send import parse_args
 from omo_manager.omo_tmux_send import query_async_result
 from omo_manager.omo_tmux_send import read_message
@@ -74,7 +75,7 @@ class TmuxSendTests(unittest.TestCase):
     def test_send_to_codex_is_importable_library_boundary(self) -> None:
         calls: list[tuple[str, str, CodexSendOptions]] = []
 
-        def fake_run(target: str, message: str, selected: CodexSendOptions) -> None:
+        def fake_run(target: str, message: str, selected: CodexSendOptions, **_kwargs: object) -> None:
             calls.append((target, message, selected))
 
         with patch("omo_manager.omo_tmux_send.run_tmux", side_effect=fake_run):
@@ -136,6 +137,22 @@ class TmuxSendTests(unittest.TestCase):
         self.assertIn(["tmux", "load-buffer", "-b", calls[0][3], calls[0][4]], calls)
         self.assertIn(["tmux", "paste-buffer", "-b", calls[0][3], "-t", "cfg:1.0"], calls)
         self.assertIn(["tmux", "send-keys", "-t", "cfg:1.0", "Enter"], calls)
+
+    def test_run_tmux_calls_before_paste_immediately_before_buffer_load(self) -> None:
+        events: list[str] = []
+
+        def before_paste() -> None:
+            events.append("before_paste")
+
+        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            events.append(command[1])
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.require_sendable_codex_target"), patch("omo_manager.omo_tmux_send.verify_placeholder_paste", return_value=True), patch("omo_manager.omo_tmux_send.verify_submit"), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
+            run_tmux("cfg:1.0", "prompt\n", options(), before_paste=before_paste)
+
+        self.assertEqual(["load-buffer", "before_paste", "paste-buffer"], events[:3])
+        self.assertIn("send-keys", events)
 
     def test_run_tmux_does_not_wait_for_compaction(self) -> None:
         with patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.require_sendable_codex_target"), patch("omo_manager.omo_tmux_send.verify_placeholder_paste", return_value=True), patch("omo_manager.omo_tmux_send.verify_submit"), patch("omo_manager.omo_tmux_send.subprocess.run", return_value=subprocess.CompletedProcess(["tmux"], 0)):
@@ -288,6 +305,34 @@ class TmuxSendTests(unittest.TestCase):
             for path in result_dir.iterdir():
                 path.unlink(missing_ok=True)
             result_dir.rmdir()
+
+    def test_main_async_cleanup_removes_launch_message_file_after_read(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = Path(tmp) / "prompt.txt"
+            payload.write_text("prompt\n", encoding="utf-8")
+            launched: dict[str, str] = {}
+
+            def fake_launch_async(_args: Args, message: str) -> None:
+                launched["message"] = message
+
+            with patch("omo_manager.omo_tmux_send.launch_async", side_effect=fake_launch_async):
+                rc = main(["--target", "cfg:1.0", "--message-file", str(payload), "--async", "--async-cleanup-message-file"])
+
+            self.assertEqual(0, rc)
+            self.assertEqual("prompt\n", launched["message"])
+            self.assertFalse(payload.exists())
+
+    def test_main_async_cleanup_keeps_message_file_when_launch_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = Path(tmp) / "prompt.txt"
+            payload.write_text("prompt\n", encoding="utf-8")
+
+            with patch("omo_manager.omo_tmux_send.launch_async", side_effect=OSError("spawn failed")):
+                rc = main(["--target", "cfg:1.0", "--message-file", str(payload), "--async", "--async-cleanup-message-file"])
+
+            self.assertEqual(1, rc)
+            self.assertTrue(payload.exists())
+            self.assertEqual("prompt\n", payload.read_text(encoding="utf-8"))
 
     def test_async_result_lookup_accepts_id_or_path(self) -> None:
         with tempfile.TemporaryDirectory(prefix="omo-tmux-send-async-test-") as tmp:

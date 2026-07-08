@@ -96,21 +96,19 @@
   - detects task files with frontmatter `status: running` whose pane is `error`, `not_codex`, `ready`, or `stuck_input`
   - detects blocked persistent-role task files from frontmatter whose pane is `error`, `not_codex`, or `stuck_input`
   - detects manager pane problems when `OMO_MANAGER_TMUX_TARGET` is set
-  - detects completed task files that still have stale registry rows
+  - detects completed task files whose agents still appear open
   - detects `untracked_agent` panes when a non-`h*` tmux session contains a running, ready, errored, or stuck Codex pane that no task file owns
-  - agent-problem prompts include an `origin=agent` source marker so any manager-written pending follow-up block is `action=no-human-ack`
+  - agent-problem prompts start with a direct helper instruction and do not need human acknowledgement
   - email pending refs remain `origin=human source=email action=ack-human`
 
 - agent-problem prompt format
-  - starts with ``Handle this helper-generated notice, then don't ack human:``
-  - next line is ``omo_pending_watch agent problems:``
+  - starts with ``Handle ALL omo_pending_watch agent problems below; only email human if you cannot handle them:``
   - groups each problem class under a concrete action heading
   - strips raw `role=...`, `owner_target=...`, and `unstick=...` fields from manager-facing text
   - labels pane content as `<output>...</output>` or `<input>...</input>`
   - uses only the tmux target once for `tmux:TARGET` rows
   - example:
-    - ``Handle this helper-generated notice, then don't ack human:``
-    - ``omo_pending_watch agent problems:``
+    - ``Handle ALL omo_pending_watch agent problems below; only email human if you cannot handle them:``
     - ``1 not codex; check if agent failed to launch:``
     - ``vl_langdoc_9160.md vl:32 <output>...</output>``
     - ``16 ready and not blocked; consider closing them:``
@@ -119,6 +117,8 @@
     - ``vl:37 <input>Manager correction: ignore the earlier Read first item for MANAGER.md.</input>``
     - ``1 not tracked in any task file; ask them what their task is, or consider closing them:``
     - ``vl:41 <output>Implemented and privately reported.</output>``
+    - ``1 are marked `done` but remain open; either close the agents or correct the task status:``
+    - ``task_name.md``
 
 - scoped maintenance
   - when a current `vl_submanager_current_*` or `vl_supervisor_current_*` task exists, the root watcher also runs a VL-owned problem pass and sends only VL-scoped problem rows to that submanager target
@@ -127,6 +127,10 @@
   - remembered Enter attempts are cleared when that target is no longer reported as stuck
   - unchanged `blocked_idle` rows are reported with exponential delay after each successful report: 10 minutes, 15 minutes, 22.5 minutes, and so on
   - manager self-problem rows and matching `unstuck:` rows are logged and filtered by the watcher so they are not pasted back into the manager prompt
+  - `human_request` status rows are filtered from agent-problem prompts because live `(pending)` blocks are dispatched through the pending-marker path
+  - manager compaction reminders say ``Unless you know the exact content of MANAGER.md, read it. Normally, don't ack human``
+  - `TODO.md` length reminders point to `docs/monthly-archive.md`
+  - dirty worktree reminders name the dirty repo path and omit raw status/category fields
   - identical problem output is keyed by SHA-256 in process-local time-bounded delivery memory and is repeated at most once per `--agent-problem-repeat-s` seconds, default `1800`
   - digest idle delivery uses a separate human-contact clock: if `manager_digest.md` has content and the newest `manager_mail/*.txt` is at least `--digest-idle-after-s` seconds old, default `3600`, it runs `scripts/manager-digest deliver`
 

@@ -15,6 +15,9 @@ if __package__ in {None, ""}:
 from omo_manager.omo_agent_status import TASK_FRONTMATTER_STATUSES
 from omo_manager.omo_agent_status import TaskFrontmatterError
 from omo_manager.omo_agent_status import DEFAULT_ROOT
+from omo_manager.omo_codex_stop import Args as StopArgs
+from omo_manager.omo_codex_stop import record_close
+from omo_manager.omo_codex_stop import stop
 from omo_manager.omo_agent_status import frontmatter_parts
 from omo_manager.omo_agent_status import parse_task_metadata
 
@@ -136,17 +139,45 @@ def replace_if_unchanged(path: Path, text: str, before: os.stat_result) -> None:
             tmp_path.unlink(missing_ok=True)
 
 
+def stop_done_agent(root: Path, path: Path, target: str) -> tuple[StopArgs, str]:
+    """Close the task's Codex pane and return the captured session id."""
+
+    task_file = path.relative_to(root).as_posix()
+    stop_args = StopArgs(target, 10.0, 2000, False, False, root, task_file, True, 0.0)
+    session_id = stop(stop_args)
+    return stop_args, session_id
+
+
+def done_close_message(target: str, session_id: str) -> str:
+    if session_id:
+        return f"Closed {target}; session_id: {session_id}."
+    return f"Closed {target}; Codex session id not found."
+
+
 def run(args: Args) -> int:
     try:
         path = task_path(args.root, args.task_file)
         before = path.stat()
         text = path.read_text(encoding="utf-8")
+        metadata = parse_task_metadata(text)
+        target = metadata.runat if metadata is not None and args.status == "done" else ""
         updated = update_frontmatter_status(text, args.status, args.blocked_on)
+        close_args: StopArgs | None = None
+        session_id = ""
         replace_if_unchanged(path, updated, before)
+        if target:
+            close_args, session_id = stop_done_agent(args.root, path, target)
+        if close_args is not None:
+            record_close(close_args, session_id)
     except (OSError, TaskFrontmatterError) as exc:
         print(f"omo_task_status.py: {exc}", file=sys.stderr)
         return 2
+    except Exception as exc:
+        print(f"omo_task_status.py: failed to close done agent: {exc}", file=sys.stderr)
+        return 2
     if args.status == "done":
+        if target:
+            print(done_close_message(target, session_id))
         print(DONE_REMINDER)
     return 0
 

@@ -16,7 +16,7 @@ if __package__ in {None, ""}:
 
 from omo_manager.omo_codex_status import Args as StatusArgs
 from omo_manager.omo_codex_status import Report, inspect
-from omo_manager.omo_tmux_send import Args as SendArgs
+from omo_manager.omo_tmux_send import CodexSendOptions
 from omo_manager.omo_tmux_send import run_tmux
 
 
@@ -69,8 +69,8 @@ def parse_args(argv: list[str]) -> Args:
         parser.error("--interval-s must be positive.")
     if parsed.lines <= 0:
         parser.error("--lines must be positive.")
-    if parsed.notify_enter_count < 0:
-        parser.error("--notify-enter-count must be non-negative.")
+    if parsed.notify_enter_count < 1:
+        parser.error("--notify-enter-count must be positive.")
     if parsed.submit_verify_timeout_s < 0:
         parser.error("--submit-verify-timeout-s must be non-negative.")
     if parsed.background and parsed.worker:
@@ -106,8 +106,7 @@ def send_compact(args: Args) -> None:
     report = wait_until_ready(args)
     if report.status != "ready":
         raise RuntimeError(f"target {args.target} is not ready; status: {report.status}")
-    send_args = SendArgs(args.target, None, 1, 0.15, 0, False, submit_verify_timeout_s=args.submit_verify_timeout_s)
-    run_tmux(send_args, COMPACT_MESSAGE)
+    run_tmux(args.target, COMPACT_MESSAGE, CodexSendOptions(1, 0.15, False, args.submit_verify_timeout_s))
 
 
 def result_message(args: Args, ok: bool, result: str) -> str:
@@ -144,8 +143,7 @@ def notify(args: Args, ok: bool, result: str) -> None:
             file=sys.stderr,
         )
         return
-    notify_args = SendArgs(args.notify_target, None, args.notify_enter_count, 0.15, 0, False)
-    run_tmux(notify_args, result_message(args, ok, result))
+    run_tmux(args.notify_target, result_message(args, ok, result), CodexSendOptions(args.notify_enter_count, 0.15, False))
 
 
 def worker_argv(args: Args) -> list[str]:

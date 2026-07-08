@@ -6,9 +6,11 @@ import unittest
 from contextlib import redirect_stderr
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 from omo_manager.omo_agent_status import TaskFrontmatterError
 from omo_manager.omo_task_status import DONE_REMINDER
+from omo_manager.omo_task_status import StopArgs
 from omo_manager.omo_task_status import run
 from omo_manager.omo_task_status import update_frontmatter_status
 from omo_manager.omo_task_status import Args as StatusArgs
@@ -118,13 +120,37 @@ class TaskStatusTests(unittest.TestCase):
             path = Path(tmp) / "task.md"
             path.write_text(task_frontmatter() + "body\n", encoding="utf-8")
             stdout = io.StringIO()
+            close_calls: list[tuple[StopArgs, str]] = []
 
-            with redirect_stdout(stdout):
+            def fake_record(args: StopArgs, session_id: str) -> None:
+                close_calls.append((args, session_id))
+
+            with patch("omo_manager.omo_task_status.stop_done_agent", return_value=(StopArgs("wl:2", 10.0, 2000, False, False, Path(tmp), "task.md", True, 0.0), "session-1")), patch(
+                "omo_manager.omo_task_status.record_close",
+                side_effect=fake_record,
+            ), redirect_stdout(stdout):
                 exit_code = run(StatusArgs(Path(tmp), Path("task.md"), "done", ""))
 
             self.assertEqual(0, exit_code)
             self.assertIn("status: done\nrunat:", path.read_text(encoding="utf-8"))
+            self.assertEqual(1, len(close_calls))
+            self.assertEqual("task.md", close_calls[0][0].task_file)
+            self.assertEqual("session-1", close_calls[0][1])
+            self.assertIn("Closed wl:2; session_id: session-1.", stdout.getvalue())
             self.assertIn(DONE_REMINDER, stdout.getvalue())
+
+    def test_cli_done_reports_failure_when_close_fails_after_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "task.md"
+            path.write_text(task_frontmatter() + "body\n", encoding="utf-8")
+            stderr = io.StringIO()
+
+            with patch("omo_manager.omo_task_status.stop_done_agent", side_effect=RuntimeError("tmux target not found")), redirect_stderr(stderr):
+                exit_code = run(StatusArgs(Path(tmp), Path("task.md"), "done", ""))
+
+            self.assertEqual(2, exit_code)
+            self.assertIn("status: done\nrunat:", path.read_text(encoding="utf-8"))
+            self.assertIn("failed to close done agent", stderr.getvalue())
 
     def test_cli_running_has_no_done_reminder(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

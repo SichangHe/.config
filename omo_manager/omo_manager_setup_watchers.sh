@@ -63,7 +63,6 @@ pkill -f "[e]mail_idle_watcher.py" >/dev/null 2>&1 || true
 pkill -f "[p]ending-watch-supervisor .*--root ${root}" >/dev/null 2>&1 || true
 pkill -f "[o]mo_pending_watch.py .*--root ${root}" >/dev/null 2>&1 || true
 pkill -f "[e]mail_idle_watcher.py .*--root ${root}" >/dev/null 2>&1 || true
-pkill -f "[o]mo_stuck_watch.py .*--root ${root} .*--watch" >/dev/null 2>&1 || true
 pending_args=(--root "$root")
 setsid bash -c '
 while :; do

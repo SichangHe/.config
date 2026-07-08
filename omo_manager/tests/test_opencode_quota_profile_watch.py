@@ -66,7 +66,7 @@ class OpenCodeQuotaProfileWatchTests(unittest.TestCase):
         self.assertIn("health_command", result.stdout)
 
     def test_missing_stall_command_is_trigger_but_missing_quota_command_is_unknown(self) -> None:
-        stall = self.run_helper("--stall-command", "/definitely/missing/omo-stuck-watch")
+        stall = self.run_helper("--stall-command", "/definitely/missing/stall-command")
         self.assertEqual(1, stall.returncode, stall.stderr)
         self.assertIn("watcher_status: hang_or_stall_detected", stall.stdout)
         quota = self.run_helper("--quota-command", "/definitely/missing/quota-command")

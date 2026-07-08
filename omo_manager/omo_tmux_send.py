@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -171,10 +172,10 @@ def validate_options(options: CodexSendOptions) -> None:
         raise RuntimeError("submit_verify_timeout_s must be non-negative")
 
 
-def send_to_codex(target: str, message: str, options: CodexSendOptions | None = None) -> None:
+def send_to_codex(target: str, message: str, options: CodexSendOptions | None = None, *, before_paste: Callable[[], None] | None = None) -> None:
     selected = options or CodexSendOptions(1, 0.15, False)
     validate_options(selected)
-    run_tmux(target, message, selected)
+    run_tmux(target, message, selected, before_paste=before_paste)
 
 
 def send_message_file_to_codex(target: str, message_file: Path, options: CodexSendOptions | None = None) -> None:
@@ -459,7 +460,7 @@ def clear_stuck_input_before_send(target: str, options: CodexSendOptions) -> str
     return "sent_enter"
 
 
-def run_tmux(target: str, message: str, options: CodexSendOptions) -> None:
+def run_tmux(target: str, message: str, options: CodexSendOptions, *, before_paste: Callable[[], None] | None = None) -> None:
     temp_path = write_private_temp(message)
     buffer_name = f"omo-tmux-send-{os.getpid()}-{uuid.uuid4().hex}"
     try:
@@ -475,6 +476,8 @@ def run_tmux(target: str, message: str, options: CodexSendOptions) -> None:
             raise RuntimeError(f"target stuck input not cleared before tmux paste: {clear_result}")
         require_sendable_codex_target(target, inspect_lines_for_message(message))
         _ = subprocess.run(["tmux", "load-buffer", "-b", buffer_name, str(temp_path)], timeout=5, check=True)
+        if before_paste is not None:
+            before_paste()
         _ = subprocess.run(["tmux", "paste-buffer", "-b", buffer_name, "-t", target], timeout=5, check=True)
         if not verify_placeholder_paste(target, message, options):
             wait_paste_visible(target, message, options)
@@ -521,11 +524,11 @@ def worker_argv(args: Args, job: AsyncJob) -> list[str]:
     return argv
 
 
-def launch_async(args: Args, message: str) -> None:
+def launch_async(args: Args, message: str) -> AsyncJob | None:
     if args.options.dry_run:
         _ = print("would start async tmux send")
         _ = print(f"would notify {args.async_notify_target} after completion")
-        return
+        return None
     job = make_async_job()
     write_text_0600(job.payload_file, message)
     write_text_0600(job.stdout_file, "")
@@ -551,6 +554,7 @@ def launch_async(args: Args, message: str) -> None:
     _ = print(f"async_id: {job.job_id}")
     _ = print(f"result_dir: {job.result_dir}")
     _ = print(f"omo_tmux_send: async worker pid={proc.pid}")
+    return job
 
 
 def async_result_message(args: Args, ok: bool, result: str) -> str:
@@ -610,7 +614,10 @@ def main(argv: list[str]) -> int:
         if args.async_result:
             return query_async_result(args.async_result)
         if args.async_mode:
-            launch_async(args, read_message(args))
+            message = read_message(args)
+            launch_async(args, message)
+            if args.async_cleanup_message_file and args.message_file is not None:
+                args.message_file.unlink(missing_ok=True)
             return 0
         if args.async_worker:
             return run_async_worker(args)

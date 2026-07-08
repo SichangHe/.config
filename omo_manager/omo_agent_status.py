@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shutil
@@ -23,11 +24,28 @@ from omo_manager.omo_codex_status import interrupt_waiting_subagent_if_present
 from omo_manager.omo_codex_status import is_stock_placeholder_input_text
 from omo_manager.omo_codex_status import submit_stuck_input_if_present
 from omo_manager.omo_codex_status import visible_error_lines
-from omo_manager.omo_stuck_watch import read_json, write_json_private
 
 
 def default_state_dir() -> Path:
     return Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "omo-manager"
+
+
+def read_json(path: Path, fallback: dict[str, object]) -> dict[str, object]:
+    try:
+        data: object = json.loads(path.read_text(encoding="utf-8"))
+    except OSError:
+        return fallback
+    return data if isinstance(data, dict) else fallback
+
+
+def write_json_private(path: Path, data: dict[str, object]) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if path.parent.resolve() != Path("/tmp"):
+        path.parent.chmod(0o700)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(data, handle, indent=2, sort_keys=True)
+        _ = handle.write("\n")
 
 
 def load_local_env() -> dict[str, str]:
@@ -1107,12 +1125,12 @@ def completed_stale_evidence(root: Path, completed_stale: set[str]) -> dict[str,
         row = StatusRow(task_file, "done-stale", "", task_status="done")
         owner = owner_target_for_status_row(root, row)
         owner_suffix = f" owner_target={owner}" if owner else ""
-        evidence[task_file] = f"session registry still has a completed task; owner manager should close or prune it{owner_suffix}"
+        evidence[task_file] = f"session registry still has a completed task; close it if the pane is still open or prune the registry row{owner_suffix}"
     return evidence
 
 
 def format_problem_summary(rows: list[StatusRow], completed_stale: set[str] | dict[str, str]) -> str:
-    completed_stale_evidence_map = {task_file: "session registry still has a completed task; owner manager should close or prune it" for task_file in completed_stale} if isinstance(completed_stale, set) else completed_stale
+    completed_stale_evidence_map = {task_file: "session registry still has a completed task; close it if the pane is still open or prune the registry row" for task_file in completed_stale} if isinstance(completed_stale, set) else completed_stale
     problem_rows = [row for row in rows if row.status in PROBLEM_STATUSES and not is_quiet_blocked_active_row(row)]
     if not problem_rows and not completed_stale_evidence_map:
         return ""
@@ -1126,7 +1144,7 @@ def format_problem_summary(rows: list[StatusRow], completed_stale: set[str] | di
     if counts["blocked_idle"]:
         lines.append("manager-action: blocked_idle>0 inspect blocked agents, unblock if possible, or route the exact blocker")
     if completed_stale_evidence_map:
-        lines.append("manager-action: done-registry-stale>0 close stale idle agents with omo_codex_stop.py or prune stale registry rows")
+        lines.append("manager-action: done-registry-stale>0 close agents marked done but still open, or prune stale registry rows")
     if counts["manager_compaction"]:
         lines.append("manager-action: manager_compaction>0 reread MANAGER.md after compaction unless the compaction summary already included it")
     for row in sorted(problem_rows, key=lambda item: (item.status, item.task_file)):

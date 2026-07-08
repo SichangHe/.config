@@ -2,7 +2,7 @@
 
 `pyproject.toml`, `.python-version`, and `uv.lock` define the manager-helper Python environment.
 
-`omo_manager_setup_watchers.sh` starts pending and email watchers through `uv run --project ~/.config/omo_manager` when `uv` is installed, falling back to direct script execution otherwise. Setup refresh kills old pending watchers and legacy watch-mode stuck watchers for the active root, and old email watchers for this user, before starting replacements. It does not start a stuck watcher.
+`omo_manager_setup_watchers.sh` starts pending and email watchers through `uv run --project ~/.config/omo_manager` when `uv` is installed, falling back to direct script execution otherwise. Setup refresh kills old pending watchers for the active root, and old email watchers for this user, before starting replacements.
 
 Watcher logs live under `~/.local/state/omo-manager/` by default: `pending-watch.log` for pending-marker dispatch, agent-problem notices, and stuck handling through `omo_agent_status.py --problems-only`; and `email-watch.log` for mail ingestion. `omo_manager_setup_watchers.sh` prints the exact log paths after restart.
 

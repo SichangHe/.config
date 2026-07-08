@@ -62,7 +62,7 @@
 
 - human contact helpers: `helper.sh/email_me.py`, `helper.sh/vb-speak.sh`, `helper.sh/natural-syntax-ls.sh`
 - message and pending helpers: `omo_pending_watch.py`, `omo_pending_digest.py`, `omo_dispatch.sh`, `omo_report.sh`
-- status and stuck helpers: `omo_agent_status.py`, `omo_codex_status.py`, `omo_stuck_watch.py`, `omo_worktree_check.py`
+- status and stuck helpers: `omo_agent_status.py`, `omo_codex_status.py`, `omo_pending_watch.py`, `omo_worktree_check.py`
 - tmux and Codex delivery helpers: `omo_tmux_send.py`, `omo_codex_stop.py`, `omo_codex_compact_when_idle.py`, `omo_manager_restart.sh`
 - task lifecycle helpers: `omo_task.py`, `omo_task_status.py`, `omo_spawn_session.py`, `omo_project_registry.py`
 - watcher process helpers: `omo_manager_setup_watchers.sh`, `omo_manager_watchdog.sh`, `email_idle_watcher.py`

@@ -6,7 +6,7 @@
   - raw Codex session token and cost aggregation reference
 - `compact-when-idle.md`
   - dedicated `/compact` sender for idle Codex panes
-- `status-and-stuck-watch.md`
+- `status-and-stuck-handling.md`
   - Codex pane status classification and stuck-input handling
 - `stop.md`
   - worker stop, session capture, and partial-compaction feedback handling

@@ -19,9 +19,15 @@ import tempfile
 import time
 import traceback
 import unicodedata
+from concurrent.futures import Future
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import wait as wait_futures
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
+from queue import Empty
+from queue import SimpleQueue
+from threading import Lock
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -40,7 +46,9 @@ from omo_manager.omo_pending_digest import truncate_content
 from omo_manager.omo_tmux_send import CodexSendOptions
 from omo_manager.omo_tmux_send import DEFAULT_TMUX_ENTER_COUNT
 from omo_manager.omo_tmux_send import DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S
-from omo_manager.omo_tmux_send import send_to_codex
+from omo_manager.omo_tmux_send import inspect_lines_for_message
+from omo_manager.omo_tmux_send import require_sendable_codex_target
+from omo_manager.omo_tmux_send import send_to_codex as verified_send_to_codex
 
 
 def default_state_dir() -> Path:
@@ -52,6 +60,7 @@ DEFAULT_STATE = default_state_dir() / "pending-watch-unused"
 DEFAULT_DIGEST_IDLE_AFTER_S = float(os.environ.get("OMO_MANAGER_DIGEST_IDLE_AFTER_S", "3600"))
 DEFAULT_AGENT_PROBLEM_INTERVAL_S = float(os.environ.get("OMO_MANAGER_AGENT_PROBLEM_INTERVAL_S", "300"))
 DEFAULT_AGENT_PROBLEM_REPEAT_S = float(os.environ.get("OMO_MANAGER_AGENT_PROBLEM_REPEAT_S", "1800"))
+ASYNC_DELIVERY_STARTED = 202
 BLOCKED_IDLE_BACKOFF_INITIAL_S = 600.0
 BLOCKED_IDLE_BACKOFF_MULTIPLIER = 1.5
 BLOCKED_IDLE_BACKOFF_STATE_TTL_S = 30 * 24 * 60 * 60.0
@@ -68,7 +77,6 @@ FOR_MANAGER_MARKER = "for manager"
 DIRECT_MARKER_SEPARATOR_CHARS = {":", ".", "!", "?", ";", ","}
 DIRECT_MARKER_WRAPPER_CLOSERS = {")": "(", "]": "[", "}": "{", '"': '"', "'": "'", "`": "`"}
 POINTER_WRAPPER_PAIRS = {"`": "`", "'": "'", '"': '"', "(": ")", "[": "]", "<": ">", "{": "}"}
-HELPER_NOTICE_INSTRUCTION = "Handle this helper-generated notice, then don't ack human:"
 TASK_FILE_LINE_WARNING_THRESHOLD = 2000
 TODO_LINE_WARNING_THRESHOLD = 200
 EMAIL_CONTENT_CHAR_LIMIT = PENDING_CONTENT_CHAR_LIMIT
@@ -83,10 +91,9 @@ STATUS_DETAIL_RE = re.compile(r"^\((pending|running|done|blocked)(?::\s*([^)]*))
 TMUX_TARGET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?$")
 AGENT_POINTER_WITH_TARGET_RE = re.compile(r"^\(from agent ([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?) (/tmp/omo-agent-messages-[^)]*)\)$")
 AGENT_MESSAGE_DIR_RE = re.compile(r"^/tmp/omo-agent-messages-[^/]+/")
-AGENT_PROBLEM_SOURCE_LINE = "(from agent omo_pending_watch agent-problem)"
-MANAGER_COMPACTION_SOURCE_LINE = "(from agent omo_pending_watch manager-compaction-reread)"
-MANAGER_COMPACTION_REMINDER = "Manager compaction observed. Reread MANAGER.md now unless the compaction summary already included it, then continue from the current manager task state."
-TODO_LENGTH_REMINDER = "TODO.md length reminder: TODO.md has {n_lines} lines. Move done material to YYYYMM/old_todos.md and keep TODO.md under 200 lines."
+AGENT_PROBLEM_HEADER = "Handle ALL omo_pending_watch agent problems below; only email human if you cannot handle them:"
+MANAGER_COMPACTION_REMINDER = "Unless you know the exact content of MANAGER.md, read it. Normally, don't ack human"
+TODO_LENGTH_REMINDER = "omo_pending_watch detected TODO.md with {n_lines} lines is too long. Move done material to YYYYMM/old_todos.md per docs/monthly-archive.md."
 MANAGER_TASK_STATE_REMINDER_HEADER = (
     "manager task-state reminder: MANAGER.md requires each manager-owned task to have frontmatter `status: running`, `status: done`, or `status: blocked` while the manager is idle. "
     "Start/resume the task, mark it done, or block it with a reason. Single-tag enforcement is intentionally not checked."
@@ -96,10 +103,6 @@ MANAGER_TASK_STATE_REMINDER_LIMIT = 20
 MANAGER_TASK_STATE_LIVE_SECTIONS = {"todo:current", "todo:human pending", "todo:low priority"}
 MANAGER_WORKTREE_REMINDER_LIMIT = 20
 MANAGER_WORKTREE_CHECK_TIMEOUT_S = 10
-MANAGER_WORKTREE_REMINDER_HEADER = (
-    "manager PWD cleanliness reminder: dirty manager-owned changes are present. "
-    "Route cleanup to manager-ops or compact/resume with this dirty-state summary before the main manager goes idle."
-)
 MANAGER_POLICY_REMINDER_RATE = 0.125
 MANAGER_POLICY_REMINDERS = (
     "Reminder: delegate work; do not do worker work in the manager.",
@@ -234,6 +237,7 @@ class ProblemRow:
     pending_item: str = ""
     owner_target: str = ""
     unstick: str = ""
+    main_manager: bool = False
 
 
 @dataclass(frozen=True)
@@ -256,6 +260,156 @@ class CommandOutput:
 class DeliveryResult:
     status: int
     error: str = ""
+
+
+@dataclass(frozen=True)
+class PendingGuard:
+    root: Path
+    pending_file: Path
+    pending_line: int
+    pending_digest: str
+
+
+@dataclass(frozen=True)
+class DeliverySuccessEvent:
+    seen_keys: tuple[str, ...] = ()
+    seen_after_clear_keys: tuple[str, ...] = ()
+    blocked_idle_lines: tuple[tuple[str, str], ...] = ()
+    seen_at_s: float = 0.0
+    clear_root: Path | None = None
+    clear_marker: Marker | None = None
+
+
+DELIVERY_SUCCESS_EVENTS: SimpleQueue[DeliverySuccessEvent] = SimpleQueue()
+PENDING_SENDS: set[Future[None]] = set()
+PENDING_SENDS_LOCK = Lock()
+
+
+def delivery_accepted(status: int) -> bool:
+    return status in {0, 2, ASYNC_DELIVERY_STARTED}
+
+
+SEND_EXECUTOR: ThreadPoolExecutor | None = None
+
+
+def send_executor() -> ThreadPoolExecutor:
+    """Return the process-local sender pool used by watcher deliveries."""
+
+    global SEND_EXECUTOR
+    if SEND_EXECUTOR is None:
+        SEND_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="omo-pending-send")
+    return SEND_EXECUTOR
+
+
+def run_verified_send(target: str, message: str, options: CodexSendOptions, pending_guard: PendingGuard | None = None) -> None:
+    """Verify the pending marker immediately before the tmux paste."""
+
+    def before_paste() -> None:
+        if pending_guard is not None and not pending_marker_present(
+            pending_guard.root,
+            pending_guard.pending_file,
+            pending_guard.pending_line,
+            pending_guard.pending_digest,
+        ):
+            raise RuntimeError("pending marker cleared before tmux paste")
+
+    verified_send_to_codex(target, message, options, before_paste=before_paste if pending_guard is not None else None)
+
+
+def log_send_result(future: Future[None], success_event: DeliverySuccessEvent | None = None) -> None:
+    """Log delivery failure or queue success-side effects for the main loop."""
+
+    try:
+        _ = future.result()
+    except Exception as exc:
+        print(f"omo_pending_watch: async delivery failed: {exc}", file=sys.stderr)
+        return
+    if success_event is not None:
+        DELIVERY_SUCCESS_EVENTS.put(success_event)
+
+
+def forget_send(future: Future[None]) -> None:
+    with PENDING_SENDS_LOCK:
+        PENDING_SENDS.discard(future)
+
+
+def submit_send(
+    target: str,
+    message: str,
+    options: CodexSendOptions,
+    pending_guard: PendingGuard | None = None,
+    success_event: DeliverySuccessEvent | None = None,
+) -> Future[None]:
+    """Submit verified tmux delivery without forking a helper process."""
+
+    future = send_executor().submit(run_verified_send, target, message, options, pending_guard)
+    with PENDING_SENDS_LOCK:
+        PENDING_SENDS.add(future)
+    future.add_done_callback(lambda completed: (log_send_result(completed, success_event), forget_send(completed)))
+    return future
+
+
+def send_to_codex(
+    target: str,
+    message: str,
+    options: CodexSendOptions | None = None,
+    *,
+    pending_guard: PendingGuard | None = None,
+    success_event: DeliverySuccessEvent | None = None,
+) -> Future[None] | None:
+    """Validate a target synchronously, then deliver through a background thread."""
+
+    selected = options or CodexSendOptions(DEFAULT_TMUX_ENTER_COUNT, 0.15, False)
+    if selected.dry_run:
+        print(message)
+        return None
+    require_sendable_codex_target(target, inspect_lines_for_message(message))
+    return submit_send(target, message, selected, pending_guard, success_event)
+
+
+def drain_delivery_successes(args: Args, seen: dict[str, float], now_wall_s: float) -> bool:
+    """Apply completed background-send side effects on the watcher thread."""
+
+    changed = False
+    while True:
+        try:
+            event = DELIVERY_SUCCESS_EVENTS.get_nowait()
+        except Empty:
+            return changed
+        seen_at_s = event.seen_at_s or now_wall_s
+        clear_ok = True
+        if event.clear_root is not None and event.clear_marker is not None:
+            clear_ok = clear_pending_marker_if_current(event.clear_root, event.clear_marker)
+        for key in event.seen_keys:
+            remember_seen(seen, key, seen_at_s)
+            changed = True
+        if clear_ok:
+            for key in event.seen_after_clear_keys:
+                remember_seen(seen, key, seen_at_s)
+                changed = True
+        for owner_target, line in event.blocked_idle_lines:
+            remember_blocked_idle_report(args, seen, owner_target, line, seen_at_s)
+            changed = True
+
+
+def pending_send_snapshot() -> tuple[Future[None], ...]:
+    with PENDING_SENDS_LOCK:
+        return tuple(PENDING_SENDS)
+
+
+def wait_for_delivery_successes(args: Args, seen: dict[str, float], timeout_s: float) -> bool:
+    """Wait for already-launched sends so one-shot mode can apply callbacks."""
+
+    changed = False
+    deadline_s = time.monotonic() + timeout_s
+    while futures := pending_send_snapshot():
+        remaining_s = deadline_s - time.monotonic()
+        if remaining_s <= 0:
+            print(f"omo_pending_watch: timed out waiting for {len(futures)} async delivery result(s)", file=sys.stderr)
+            return drain_delivery_successes(args, seen, time.time()) or changed
+        _done, _pending = wait_futures(futures, timeout=min(remaining_s, 0.5))
+        changed = drain_delivery_successes(args, seen, time.time()) or changed
+    return drain_delivery_successes(args, seen, time.time()) or changed
 
 
 class MarkdownChangeWatcher:
@@ -1102,7 +1256,7 @@ def clear_pending_marker_if_current(root: Path, marker: Marker) -> bool:
             tmp_path.unlink(missing_ok=True)
 
 
-def push_marker_delivery(args: Args, marker: Marker, text: str, manager_target: str) -> DeliveryResult:
+def push_marker_delivery(args: Args, marker: Marker, text: str, manager_target: str, success_event: DeliverySuccessEvent | None = None) -> DeliveryResult:
     if args.dry_run:
         print(text)
         return DeliveryResult(0)
@@ -1115,12 +1269,13 @@ def push_marker_delivery(args: Args, marker: Marker, text: str, manager_target: 
             pending_file=marker.file,
             pending_line=marker.line,
             pending_digest=marker.digest,
+            success_event=success_event,
         )
     return DeliveryResult(1, "missing delivery target")
 
 
-def push_marker_text(args: Args, marker: Marker, text: str, manager_target: str) -> int:
-    return push_marker_delivery(args, marker, text, manager_target).status
+def push_marker_text(args: Args, marker: Marker, text: str, manager_target: str, success_event: DeliverySuccessEvent | None = None) -> int:
+    return push_marker_delivery(args, marker, text, manager_target, success_event).status
 
 
 def target_unavailable(result: DeliveryResult) -> bool:
@@ -1143,54 +1298,92 @@ def with_failed_target_escalation(text: str, failed_target: str, result: Deliver
     return f"{first}\n{prefix}\n{rest}"
 
 
-def push_marker_text_or_escalate(args: Args, marker: Marker, text: str, manager_target: str) -> int:
-    result = push_marker_delivery(args, marker, text, manager_target)
-    if result.status == 0 or not target_unavailable(result):
+def push_marker_text_or_escalate(args: Args, marker: Marker, text: str, manager_target: str, success_event: DeliverySuccessEvent | None = None) -> int:
+    result = push_marker_delivery(args, marker, text, manager_target, success_event)
+    if result.status in {0, ASYNC_DELIVERY_STARTED} or not target_unavailable(result):
         return result.status
     fallback_target = main_manager_fallback_target(args, manager_target)
     if not fallback_target:
         return result.status
-    return push_marker_delivery(args, marker, with_failed_target_escalation(text, manager_target, result), fallback_target).status
+    return push_marker_delivery(args, marker, with_failed_target_escalation(text, manager_target, result), fallback_target, success_event).status
 
 
 def push_dm_ref(args: Args, seen: dict[str, float], now_s: float, marker: Marker, attachments: Sequence[SourceAttachment], manager_target: str, *, copy_manager: bool = True) -> int:
     worker_target = marker_worker_target(args, marker, manager_target)
     reminders = MANAGER_EMAIL_POLICY_REMINDERS if marker.source == "email" else MANAGER_POLICY_REMINDERS
     marker_name = "DM" if copy_manager else "DM only"
+    marker_key = marker_seen_key(args, marker, attachments)
     if not worker_target:
         text = marker_delivery_text(
             marker,
             attachments,
             f"direct-message fallback: pending block or linked file starts or ends with `{marker_name}`, but no safe worker `runat:` target was found; delivering to the manager for routing.",
         )
-        return push_marker_text_or_escalate(args, marker, with_manager_policy_reminder(args, text, reminders), manager_target)
+        return push_marker_text_or_escalate(
+            args,
+            marker,
+            with_manager_policy_reminder(args, text, reminders),
+            manager_target,
+            DeliverySuccessEvent(seen_keys=(marker_key,), seen_at_s=now_s),
+        )
     worker_text = marker_worker_dm_text(marker, attachments)
     worker_key = dm_worker_seen_key(args, marker, worker_target, attachments)
     worker_seen = seen_contains(seen, worker_key, now_s)
+    worker_status = 0
     if not worker_seen:
-        worker_status = push_marker_text(args, marker, worker_text, worker_target)
-        if worker_status != 0:
+        worker_status = push_marker_text(
+            args,
+            marker,
+            worker_text,
+            worker_target,
+            DeliverySuccessEvent(
+                seen_keys=(worker_key,),
+                seen_after_clear_keys=(marker_key,) if not copy_manager else (),
+                seen_at_s=now_s,
+                clear_root=args.root if not copy_manager else None,
+                clear_marker=marker if not copy_manager else None,
+            ),
+        )
+        if worker_status not in {0, ASYNC_DELIVERY_STARTED}:
             text = marker_delivery_text(
                 marker,
                 attachments,
                 f"direct-message fallback: direct worker delivery to {worker_target} failed with status {worker_status}; manager action required to route or help with the human request.",
             )
-            return push_marker_text_or_escalate(args, marker, with_manager_policy_reminder(args, text, reminders), manager_target)
+            return push_marker_text_or_escalate(
+                args,
+                marker,
+                with_manager_policy_reminder(args, text, reminders),
+                manager_target,
+                DeliverySuccessEvent(seen_keys=(marker_key,), seen_at_s=now_s),
+            )
     if not copy_manager:
-        remember_seen(seen, worker_key, now_s)
+        if worker_status == ASYNC_DELIVERY_STARTED:
+            return ASYNC_DELIVERY_STARTED
+        if worker_status == 0:
+            remember_seen(seen, worker_key, now_s)
         if args.dry_run or clear_pending_marker_if_current(args.root, marker):
             return 0
         return 1
-    if not worker_seen:
+    if not worker_seen and worker_status == 0:
         remember_seen(seen, worker_key, now_s)
     manager_text = marker_fyi_text(marker, attachments)
-    return push_manager_text_to_target(args, manager_text, manager_target)
+    manager_status = push_manager_text_to_target(
+        args,
+        manager_text,
+        manager_target,
+        DeliverySuccessEvent(seen_keys=(marker_key,), seen_at_s=now_s),
+    )
+    if manager_status == 0 and worker_status == ASYNC_DELIVERY_STARTED:
+        return ASYNC_DELIVERY_STARTED
+    return manager_status
 
 
 def push_ref(args: Args, seen: dict[str, float], now_s: float, marker: Marker, attachments: Sequence[SourceAttachment]) -> int:
     """Deliver one pending marker, guarded by its current file position."""
 
     reminders = MANAGER_EMAIL_POLICY_REMINDERS if marker.source == "email" else MANAGER_POLICY_REMINDERS
+    marker_key = marker_seen_key(args, marker, attachments)
     for_manager = marker_is_for_manager(marker, attachments)
     manager_target = marker_for_manager_target(args, marker) if for_manager else marker_manager_target(args, marker)
     if not args.dry_run and not manager_target:
@@ -1205,25 +1398,37 @@ def push_ref(args: Args, seen: dict[str, float], now_s: float, marker: Marker, a
         if seen_contains(seen, error_key, now_s):
             return 1
         text = marker_delivery_text(marker, attachments)
-        status = push_marker_text_or_escalate(args, marker, with_manager_policy_reminder(args, text, reminders), manager_target)
-        if status in {0, 2}:
+        status = push_marker_text_or_escalate(
+            args,
+            marker,
+            with_manager_policy_reminder(args, text, reminders),
+            manager_target,
+            DeliverySuccessEvent(seen_keys=(error_key,), seen_at_s=now_s),
+        )
+        if status == 0:
             remember_seen(seen, error_key, now_s)
         return status if status not in {0, 2} else 1
     text = marker_delivery_text(marker, attachments)
-    return push_marker_text_or_escalate(args, marker, with_manager_policy_reminder(args, text, reminders), manager_target)
+    return push_marker_text_or_escalate(
+        args,
+        marker,
+        with_manager_policy_reminder(args, text, reminders),
+        manager_target,
+        DeliverySuccessEvent(seen_keys=(marker_key,), seen_at_s=now_s),
+    )
 
 
-def push_manager_text(args: Args, text: str) -> int:
+def push_manager_text(args: Args, text: str, success_event: DeliverySuccessEvent | None = None) -> int:
     if args.dry_run:
         print(text)
         return 0
     if not args.manager_target:
         print("omo_pending_watch: OMO_MANAGER_TMUX_TARGET is required outside --dry-run", file=sys.stderr)
         return 1
-    return send_delivery_text("manager delivery", text, args.manager_target)
+    return try_send_delivery_text("manager delivery", text, args.manager_target, success_event=success_event).status
 
 
-def push_manager_text_to_target(args: Args, text: str, manager_target: str) -> int:
+def push_manager_text_to_target(args: Args, text: str, manager_target: str, success_event: DeliverySuccessEvent | None = None) -> int:
     scoped_args = replace(args, manager_target=manager_target)
     if scoped_args.dry_run:
         print(text)
@@ -1231,13 +1436,13 @@ def push_manager_text_to_target(args: Args, text: str, manager_target: str) -> i
     if not scoped_args.manager_target:
         print("omo_pending_watch: OMO_MANAGER_TMUX_TARGET is required outside --dry-run", file=sys.stderr)
         return 1
-    result = try_send_delivery_text("manager delivery", text, scoped_args.manager_target)
-    if result.status == 0 or not target_unavailable(result):
+    result = try_send_delivery_text("manager delivery", text, scoped_args.manager_target, success_event=success_event)
+    if result.status in {0, ASYNC_DELIVERY_STARTED} or not target_unavailable(result):
         return result.status
     fallback_target = main_manager_fallback_target(args, scoped_args.manager_target)
     if not fallback_target:
         return result.status
-    return try_send_delivery_text("manager delivery", with_failed_target_escalation(text, scoped_args.manager_target, result), fallback_target).status
+    return try_send_delivery_text("manager delivery", with_failed_target_escalation(text, scoped_args.manager_target, result), fallback_target, success_event=success_event).status
 
 
 def send_delivery_text(
@@ -1264,12 +1469,14 @@ def try_send_delivery_text(
     pending_line: int = 0,
     pending_digest: str = "",
     submit_verify_timeout_s: float = DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S,
+    success_event: DeliverySuccessEvent | None = None,
 ) -> DeliveryResult:
     if root is not None and pending_file is not None and not pending_marker_present(root, pending_file, pending_line, pending_digest):
         print(f"omo_pending_watch: {name} skipped; pending marker cleared before tmux paste", file=sys.stderr)
         return DeliveryResult(1, "pending marker cleared before tmux paste")
+    pending_guard = PendingGuard(root, pending_file, pending_line, pending_digest) if root is not None and pending_file is not None else None
     try:
-        send_to_codex(
+        async_job = send_to_codex(
             target,
             text,
             CodexSendOptions(
@@ -1279,6 +1486,8 @@ def try_send_delivery_text(
                 submit_verify_timeout_s,
                 True,
             ),
+            pending_guard=pending_guard,
+            success_event=success_event,
         )
     except subprocess.CalledProcessError as exc:
         print(f"omo_pending_watch: {name} failed: {exc}", file=sys.stderr)
@@ -1286,31 +1495,16 @@ def try_send_delivery_text(
     except Exception as exc:
         print(f"omo_pending_watch: {name} failed: {exc}", file=sys.stderr)
         return DeliveryResult(1, str(exc))
-    return DeliveryResult(0)
+    return DeliveryResult(ASYNC_DELIVERY_STARTED if async_job is not None else 0)
 
 
 def maybe_push_idle_status(args: Args, last_activity_s: float, now_s: float) -> bool:
     if now_s - last_activity_s < args.idle_status_interval_s:
         return False
-    command = status_command(args)
-    try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=30, check=False)
-    except (OSError, subprocess.SubprocessError) as exc:
-        print(f"omo_pending_watch: idle status check failed: {exc}", file=sys.stderr)
+    text = manager_task_state_reminder_text(args.root, args.manager_target)
+    if not text:
         return False
-    if result.returncode not in {0, 3}:
-        print(f"omo_pending_watch: idle status check exited status={result.returncode}: {result.stderr.strip()}", file=sys.stderr)
-        return False
-    output = result.stdout.strip()
-    if not output:
-        return False
-    if result.stderr.strip():
-        output = f"{output}\nstderr:\n{result.stderr.strip()}".strip()
-    output = filter_manager_self_status_output(output, args.manager_target)
-    if not output:
-        return False
-    text = idle_status_text(args, output)
-    return push_manager_text(args, text) in {0, 2}
+    return delivery_accepted(push_manager_text(args, text))
 
 
 def manager_task_state_reminder_text(root: Path, manager_target: str = "") -> str:
@@ -1350,7 +1544,16 @@ def reminder_task_owned_by_manager(root: Path, task: TaskLine, manager_target: s
     return bool(manager_target and same_tmux_target(owner, manager_target))
 
 
-def manager_worktree_reminder_from_output(output: str) -> str:
+def worktree_line_value(line: str, key: str) -> str:
+    match = re.search(rf"\b{re.escape(key)}=(.*?)(?=\s+\w+=|$)", line)
+    return match.group(1).strip() if match is not None else ""
+
+
+def manager_worktree_reminder_header(repo: Path | str) -> str:
+    return f"omo_pending_watch detected {repo} is dirty. Clean it up, let every agent commit their changes."
+
+
+def manager_worktree_reminder_from_output(output: str, root: Path | None = None) -> str:
     dirty_rows = [
         line
         for line in output.splitlines()
@@ -1358,10 +1561,11 @@ def manager_worktree_reminder_from_output(output: str) -> str:
     ]
     if not dirty_rows:
         return ""
-    visible_rows = dirty_rows[:MANAGER_WORKTREE_REMINDER_LIMIT]
+    repo = worktree_line_value(dirty_rows[0], "repo") or str(root or "manager PWD")
+    visible_rows = [worktree_line_value(line, "file") or worktree_line_value(line, "path") or line for line in dirty_rows[:MANAGER_WORKTREE_REMINDER_LIMIT]]
     if len(dirty_rows) > MANAGER_WORKTREE_REMINDER_LIMIT:
         visible_rows.append(f"worktree: omitted={len(dirty_rows) - MANAGER_WORKTREE_REMINDER_LIMIT}")
-    return "\n".join([MANAGER_WORKTREE_REMINDER_HEADER, *visible_rows])
+    return "\n".join([manager_worktree_reminder_header(repo), *visible_rows])
 
 
 def manager_worktree_reminder_text(root: Path) -> str:
@@ -1377,30 +1581,33 @@ def manager_worktree_reminder_text(root: Path) -> str:
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        return "\n".join(
-            [
-                MANAGER_WORKTREE_REMINDER_HEADER,
-                f"worktree-check: status=failed error={exc}",
-            ]
-        )
+        return "\n".join([manager_worktree_reminder_header(root), f"worktree-check failed: {exc}"])
     output = result.stdout.strip()
     if result.returncode != 0:
         details = output or result.stderr.strip() or f"status={result.returncode}"
         if "not a git repository" in details:
             return ""
-        return "\n".join([MANAGER_WORKTREE_REMINDER_HEADER, f"worktree-check: {details}"])
-    return manager_worktree_reminder_from_output(output)
+        return "\n".join([manager_worktree_reminder_header(root), f"worktree-check: {details}"])
+    return manager_worktree_reminder_from_output(output, root)
 
 
-def idle_status_text(args: Args, output: str) -> str:
-    text = f"{HELPER_NOTICE_INSTRUCTION}\nmanager agent status: periodic running-agent status.\n{output}"
-    reminder = manager_task_state_reminder_text(args.root, args.manager_target)
-    if reminder:
-        text = f"{text}\n{reminder}"
-    worktree_reminder = manager_worktree_reminder_text(args.root)
-    if worktree_reminder:
-        text = f"{text}\n{worktree_reminder}"
-    return text
+def worktree_check_command(root: Path) -> list[str] | None:
+    if not (root / ".git").exists():
+        return None
+    checker = Path(__file__).resolve().with_name("omo_worktree_check.py")
+    return [sys.executable, str(checker), "--repo", str(root)]
+
+
+def worktree_reminder_text_from_result(result: CommandOutput, root: Path | None = None) -> str:
+    if result.timed_out:
+        return "\n".join([manager_worktree_reminder_header(root or "manager PWD"), "worktree-check failed: timed out"])
+    output = result.stdout.strip()
+    if result.returncode != 0:
+        details = output or result.stderr.strip() or f"status={result.returncode}"
+        if "not a git repository" in details:
+            return ""
+        return "\n".join([manager_worktree_reminder_header(root or "manager PWD"), f"worktree-check: {details}"])
+    return manager_worktree_reminder_from_output(output, root)
 
 
 def periodic_status_text(args: Args, result: CommandOutput) -> str | None:
@@ -1410,15 +1617,7 @@ def periodic_status_text(args: Args, result: CommandOutput) -> str | None:
     if result.returncode not in {0, 3}:
         print(f"omo_pending_watch: idle status check exited status={result.returncode}: {result.stderr.strip()}", file=sys.stderr)
         return None
-    output = result.stdout.strip()
-    if not output:
-        return None
-    if result.stderr.strip():
-        output = f"{output}\nstderr:\n{result.stderr.strip()}".strip()
-    output = filter_manager_self_status_output(output, args.manager_target)
-    if not output:
-        return None
-    return idle_status_text(args, output)
+    return manager_task_state_reminder_text(args.root, args.manager_target) or None
 
 
 def update_idle_status_check(args: Args, last_check_s: float, now_s: float, status_run: CommandRun | None) -> tuple[float, CommandRun | None]:
@@ -1443,14 +1642,14 @@ def status_command(args: Args, problems_only: bool = False) -> list[str]:
 
 
 def agent_problem_count_line(lines: list[str]) -> str:
-    counts = {"not_codex": 0, "blocked_idle": 0, "error": 0, "human_request": 0, "manager_compaction": 0, "manager_waiting_subagent": 0, "ready": 0, "stuck_input": 0, "untracked_agent": 0, "done-registry-stale": 0}
+    counts = {"not_codex": 0, "blocked_idle": 0, "error": 0, "manager_compaction": 0, "manager_waiting_subagent": 0, "ready": 0, "stuck_input": 0, "untracked_agent": 0, "done-registry-stale": 0}
     for line in lines:
-        problem_match = re.match(r"^(not_codex|blocked_idle|error|human_request|manager_compaction|manager_waiting_subagent|ready|stuck_input|untracked_agent): ", line)
+        problem_match = re.match(r"^(not_codex|blocked_idle|error|manager_compaction|manager_waiting_subagent|ready|stuck_input|untracked_agent): ", line)
         if problem_match is not None:
             counts[problem_match.group(1)] += 1
         elif line.startswith("done-stale: "):
             counts["done-registry-stale"] += 1
-    parts = [f"{status}={counts[status]}" for status in ("not_codex", "blocked_idle", "error", "human_request", "manager_compaction", "manager_waiting_subagent", "ready", "stuck_input", "untracked_agent") if counts[status]]
+    parts = [f"{status}={counts[status]}" for status in ("not_codex", "blocked_idle", "error", "manager_compaction", "manager_waiting_subagent", "ready", "stuck_input", "untracked_agent") if counts[status]]
     if counts["done-registry-stale"]:
         parts.append(f"done-registry-stale={counts['done-registry-stale']}")
     return f"agent-problems: {' '.join(parts)}" if parts else ""
@@ -1519,6 +1718,7 @@ def parse_problem_row(line: str) -> ProblemRow | None:
         pending_item=problem_line_value(line, "pending_item"),
         owner_target=problem_line_owner_target(line),
         unstick=problem_line_unstick(line),
+        main_manager=bool(task == "manager" and re.search(r"\brole=manager\b", line)),
     )
 
 
@@ -1615,18 +1815,19 @@ def manager_actions_for_problem_lines(lines: list[str]) -> list[str]:
     if re.search(r"\bblocked_idle=\d+", count_line):
         actions.append("manager-action: blocked_idle>0 inspect blocked agents, unblock if possible, or route the exact blocker")
     if re.search(r"\bdone-registry-stale=\d+", count_line):
-        actions.append("manager-action: done-registry-stale>0 close stale idle agents with omo_codex_stop.py or prune stale registry rows")
+        actions.append("manager-action: done-registry-stale>0 close agents marked done but still open, or correct the task status")
     if re.search(r"\bmanager_compaction=\d+", count_line):
         actions.append("manager-action: manager_compaction>0 reread MANAGER.md after compaction unless the compaction summary already included it")
     return actions
 
 
 def task_target_label(row: ProblemRow) -> str:
+    note = " (this is the main manager)" if row.main_manager else ""
     if row.task == f"tmux:{row.target}":
-        return row.target
+        return f"{row.target}{note}"
     if row.target and row.target not in {row.task, row.task.removeprefix("tmux:")}:
-        return f"{row.task} {row.target}"
-    return row.task or row.target
+        return f"{row.task}{note} {row.target}"
+    return f"{row.task or row.target}{note}"
 
 
 def tagged_text(tag: str, text: str) -> str:
@@ -1648,10 +1849,8 @@ def problem_row_line(row: ProblemRow) -> str:
     if row.status == "blocked_idle":
         reason = row.reason or row.output
         return f"{label} {tagged_text('blocked_on', reason)}"
-    if row.status == "human_request":
-        return f"{label} {tagged_text('pending_item', row.pending_item or row.output)}"
     if row.status == "done-stale":
-        return f"{label} {tagged_text('next', 'close the stale idle agent or prune the stale registry row')}"
+        return label
     return label
 
 
@@ -1660,15 +1859,14 @@ def problem_section(status: str, rows: list[ProblemRow]) -> list[str]:
         return []
     headings = {
         "not_codex": f"{len(rows)} not codex; check if agent failed to launch:",
-        "blocked_idle": f"{len(rows)} blocked agents are idle; record the blocker, unblock them, or retire them:",
+        "blocked_idle": f"{len(rows)} blocked agents are ready; if they are not actually blocked, correct their status, otherwise make sure whatever is blocking them is being resolved:",
         "error": f"{len(rows)} have visible errors; inspect the pane, fix the error, or restart them:",
-        "human_request": f"{len(rows)} have pending human requests; record the item, ack if needed, then route it:",
         "manager_compaction": f"{len(rows)} are compacting; reread MANAGER.md after compaction unless the summary already included it:",
         "manager_waiting_subagent": f"{len(rows)} managers are waiting on a subagent and could not be interrupted automatically; inspect or interrupt them:",
         "ready": f"{len(rows)} ready and not blocked; consider closing them:",
         "stuck_input": f"{len(rows)} have their input being stuck; unstick or restart them:",
         "untracked_agent": f"{len(rows)} not tracked in any task file; ask them what their task is, or consider closing them:",
-        "done-stale": f"{len(rows)} have stale registry rows; close the idle agent or prune the registry:",
+        "done-stale": f"{len(rows)} are marked `done` but remain open; either close the agents or correct the task status:",
     }
     lines = ["", headings[status]]
     lines.extend(problem_row_line(row) for row in sorted(rows, key=lambda item: task_target_label(item)))
@@ -1676,11 +1874,11 @@ def problem_section(status: str, rows: list[ProblemRow]) -> list[str]:
 
 
 def format_agent_problem_report(lines: list[str]) -> str:
-    rows = [row for line in lines if (row := parse_problem_row(line)) is not None]
+    rows = [row for line in lines if (row := parse_problem_row(line)) is not None and row.status != "human_request"]
     if not rows:
         return ""
-    order = ("not_codex", "untracked_agent", "blocked_idle", "error", "human_request", "manager_compaction", "manager_waiting_subagent", "ready", "stuck_input", "done-stale")
-    parts = [HELPER_NOTICE_INSTRUCTION, "omo_pending_watch agent problems:"]
+    order = ("not_codex", "untracked_agent", "blocked_idle", "error", "manager_compaction", "manager_waiting_subagent", "ready", "stuck_input", "done-stale")
+    parts = [AGENT_PROBLEM_HEADER]
     for status in order:
         parts.extend(problem_section(status, [row for row in rows if row.status == status]))
     return "\n".join(parts).strip()
@@ -1741,13 +1939,13 @@ def filter_vl_problem_output(output: str, owner_target: str = "") -> str:
     for line in lines[1:]:
         if line.startswith("manager-action: "):
             continue
-        if re.match(r"^(?:not_codex|blocked_idle|error|human_request|manager_compaction|ready|stuck_input|untracked_agent): task=(?:vl_|[^ ]*/vl_|tmux:vl:)", line):
+        if re.match(r"^(?:not_codex|blocked_idle|error|manager_compaction|ready|stuck_input|untracked_agent): task=(?:vl_|[^ ]*/vl_|tmux:vl:)", line):
             kept.append(line)
             target = problem_line_target(line)
             if target:
                 kept_targets.add(canonical_target(target))
             continue
-        if re.match(r"^(?:not_codex|blocked_idle|error|human_request|manager_compaction|ready|stuck_input|untracked_agent): task=\S+ evidence=.*\btarget=vl:", line):
+        if re.match(r"^(?:not_codex|blocked_idle|error|manager_compaction|ready|stuck_input|untracked_agent): task=\S+ evidence=.*\btarget=vl:", line):
             kept.append(line)
             target = problem_line_target(line)
             if target:
@@ -1806,12 +2004,19 @@ def maybe_push_vl_agent_problems(args: Args, seen: dict[str, float], now_wall_s:
     key = f"vl-agent-problem:{digest}"
     if not dispatch.blocked_idle_lines and not has_unstuck and now_wall_s - seen_get(seen, key, now_s=now_wall_s) < args.agent_problem_repeat_s:
         return False
-    text = f"{AGENT_PROBLEM_SOURCE_LINE}\n{dispatch.text}"
-    if push_manager_text(vl_args, text) not in {0, 2}:
+    text = dispatch.text
+    event = DeliverySuccessEvent(
+        seen_keys=(key,),
+        blocked_idle_lines=dispatch.blocked_idle_lines,
+        seen_at_s=now_wall_s,
+    )
+    status = push_manager_text(vl_args, text, event)
+    if not delivery_accepted(status):
         return False
-    for backoff_owner, line in dispatch.blocked_idle_lines:
-        remember_blocked_idle_report(vl_args, seen, backoff_owner, line, now_wall_s)
-    remember_seen(seen, key, now_wall_s)
+    if status == 0:
+        for backoff_owner, line in dispatch.blocked_idle_lines:
+            remember_blocked_idle_report(vl_args, seen, backoff_owner, line, now_wall_s)
+        remember_seen(seen, key, now_wall_s)
     return True
 
 
@@ -1923,10 +2128,11 @@ def maybe_push_manager_compaction_reminder(args: Args, seen: dict[str, float], o
     key = manager_compaction_active_key(args)
     if seen_contains(seen, key, now_wall_s):
         return False
-    text = f"{MANAGER_COMPACTION_SOURCE_LINE}\n{HELPER_NOTICE_INSTRUCTION}\n{MANAGER_COMPACTION_REMINDER}"
-    if push_manager_text(args, text) not in {0, 2}:
+    status = push_manager_text(args, MANAGER_COMPACTION_REMINDER, DeliverySuccessEvent(seen_keys=(key,), seen_at_s=now_wall_s))
+    if not delivery_accepted(status):
         return False
-    remember_seen(seen, key, now_wall_s)
+    if status == 0:
+        remember_seen(seen, key, now_wall_s)
     return True
 
 
@@ -1934,7 +2140,7 @@ def filter_manager_compaction_output(output: str, manager_target: str = "") -> s
     lines = output.splitlines()
     if not lines or not lines[0].startswith("agent-problems:"):
         return output
-    kept = [line for line in lines[1:] if not manager_compaction_line(line, manager_target) and not line.startswith("manager-action: ")]
+    kept = [line for line in lines[1:] if problem_line_status(line) != "human_request" and not manager_compaction_line(line, manager_target) and not line.startswith("manager-action: ")]
     if len(kept) == len(lines) - 1:
         return output
     return filtered_problem_output(kept)
@@ -1944,7 +2150,7 @@ def filter_manager_self_problem_output(output: str, manager_target: str = "") ->
     lines = output.splitlines()
     if not lines or not lines[0].startswith("agent-problems:"):
         return output
-    kept = [line for line in lines[1:] if not manager_self_problem_line(line, manager_target) and not manager_self_unstuck_line(line, manager_target) and not line.startswith("manager-action: ")]
+    kept = [line for line in lines[1:] if problem_line_status(line) != "human_request" and not manager_self_problem_line(line, manager_target) and not manager_self_unstuck_line(line, manager_target) and not line.startswith("manager-action: ")]
     if len(kept) == len(lines) - 1:
         return output
     return filtered_problem_output(kept, suppress_message="omo_pending_watch: suppressed manager self-problem report")
@@ -1957,13 +2163,7 @@ def manager_human_email_problem_output(output: str, manager_target: str = "") ->
     kept = [line for line in lines[1:] if manager_human_email_problem_line(line, manager_target)]
     if not kept:
         return ""
-    counts = {"not_codex": 0, "error": 0, "manager_waiting_subagent": 0, "stuck_input": 0}
-    for line in kept:
-        problem_match = re.match(r"^(not_codex|error|manager_waiting_subagent|stuck_input): ", line)
-        if problem_match is not None:
-            counts[problem_match.group(1)] += 1
-    parts = [f"{status}={counts[status]}" for status in ("not_codex", "error", "manager_waiting_subagent", "stuck_input") if counts[status]]
-    return "\n".join([f"manager-problems: {' '.join(parts)}", *kept])
+    return filtered_problem_output(kept) or ""
 
 
 def manager_problem_targets(output: str, manager_target: str = "") -> set[str]:
@@ -1999,16 +2199,9 @@ def active_manager_problem_targets(root: Path, output: str, manager_target: str 
 
 
 def manager_problem_route_text(args: Args, output: str) -> str:
-    target = args.manager_target or "unset"
-    return "\n".join(
-        [
-            AGENT_PROBLEM_SOURCE_LINE,
-            HELPER_NOTICE_INSTRUCTION,
-            f"main-manager-problem: target={target}",
-            f"manager-action: inspect/fix/restart main manager target {target}; restore normal manager delivery, then continue routing.",
-            output,
-        ]
-    )
+    lines = output.splitlines()
+    body_lines = [line for line in lines[1:] if not line.startswith("manager-action: ")] if lines and lines[0].startswith("agent-problems:") else lines
+    return format_agent_problem_report(body_lines)
 
 
 def route_or_email_manager_problem(args: Args, output: str) -> bool:
@@ -2025,7 +2218,7 @@ def route_or_email_manager_problem(args: Args, output: str) -> bool:
             print(f"manager problem route due: target={target}\n{text}", flush=True)
             return True
         result = try_send_delivery_text("manager problem routing", text, target)
-        if result.status == 0:
+        if delivery_accepted(result.status):
             return True
     return email_human_manager_problem(args, output)
 
@@ -2044,29 +2237,39 @@ def email_human_manager_problem(args: Args, output: str) -> bool:
         print(f"manager human email due: {subject}\n{body}", flush=True)
         return True
     try:
-        with tempfile.TemporaryDirectory(prefix="omo-manager-problem-email.") as tmp:
-            tmp_path = Path(tmp)
-            subject_file = tmp_path / "subject.txt"
-            body_file = tmp_path / "body.md"
-            subject_file.write_text(subject + "\n", encoding="utf-8")
-            body_file.write_text(body, encoding="utf-8")
-            command = [str(DEFAULT_HUMAN_EMAIL_HELPER), "--manager-human", "--subject-file", str(subject_file), "--message-file", str(body_file)]
-            if args.manager_target:
-                command.extend(("--sender-tmux-target", args.manager_target))
-            result = subprocess.run(
-                command,
-                capture_output=True,
-                text=True,
-                timeout=30,
-                check=False,
-            )
-    except (OSError, subprocess.SubprocessError) as exc:
-        print(f"omo_pending_watch: manager problem human email failed: {exc}", file=sys.stderr)
-        return False
-    if result.returncode != 0:
-        print(f"omo_pending_watch: manager problem human email exited status={result.returncode}: {result.stderr.strip()}", file=sys.stderr)
+        tmp_path = Path(tempfile.mkdtemp(prefix="omo-manager-problem-email."))
+        tmp_path.chmod(0o700)
+        subject_file = tmp_path / "subject.txt"
+        body_file = tmp_path / "body.md"
+        subject_file.write_text(subject + "\n", encoding="utf-8")
+        body_file.write_text(body, encoding="utf-8")
+        command = [str(DEFAULT_HUMAN_EMAIL_HELPER), "--manager-human", "--subject-file", str(subject_file), "--message-file", str(body_file)]
+        if args.manager_target:
+            command.extend(("--sender-tmux-target", args.manager_target))
+        _ = subprocess.Popen(
+            cleanup_after_email_command(tmp_path, command),
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        print(f"omo_pending_watch: manager problem human email launch failed: {exc}", file=sys.stderr)
         return False
     return True
+
+
+def cleanup_after_email_command(tmp_path: Path, command: list[str]) -> list[str]:
+    cleanup_code = (
+        "import shutil, subprocess, sys\n"
+        "tmp = sys.argv[1]\n"
+        "command = sys.argv[2:]\n"
+        "rc = 1\n"
+        "try:\n"
+        "    rc = subprocess.call(command)\n"
+        "finally:\n"
+        "    shutil.rmtree(tmp, ignore_errors=True)\n"
+        "raise SystemExit(rc)\n"
+    )
+    return [sys.executable, "-c", cleanup_code, str(tmp_path), *command]
 
 
 def maybe_push_agent_problems(args: Args, seen: dict[str, float], now_wall_s: float) -> bool:
@@ -2112,13 +2315,20 @@ def handle_agent_problem_result(args: Args, seen: dict[str, float], result: Comm
         key = f"agent-problem:{digest}"
         if not dispatch.blocked_idle_lines and now_wall_s - seen_get(seen, key, now_s=now_wall_s) < args.agent_problem_repeat_s:
             continue
-        text = with_manager_policy_reminder(args, f"{AGENT_PROBLEM_SOURCE_LINE}\n{dispatch.text}")
+        text = with_manager_policy_reminder(args, dispatch.text)
         target = owner_target or args.manager_target
-        if push_manager_text_to_target(args, text, target) not in {0, 2}:
+        event = DeliverySuccessEvent(
+            seen_keys=(key,),
+            blocked_idle_lines=dispatch.blocked_idle_lines,
+            seen_at_s=now_wall_s,
+        )
+        status = push_manager_text_to_target(args, text, target, event)
+        if not delivery_accepted(status):
             continue
-        for backoff_owner, line in dispatch.blocked_idle_lines:
-            remember_blocked_idle_report(args, seen, backoff_owner, line, now_wall_s)
-        remember_seen(seen, key, now_wall_s)
+        if status == 0:
+            for backoff_owner, line in dispatch.blocked_idle_lines:
+                remember_blocked_idle_report(args, seen, backoff_owner, line, now_wall_s)
+            remember_seen(seen, key, now_wall_s)
         changed = True
     return changed
 
@@ -2201,8 +2411,8 @@ def idle_digest_due(args: Args, fallback_mail_activity_s: float, now_wall_s: flo
 def scan_once(args: Args, seen: dict[str, float], files: list[Path]) -> bool:
     """Scan changed Markdown files and deliver newly observed pending refs once."""
 
-    changed = False
     now_s = time.time()
+    changed = drain_delivery_successes(args, seen, now_s)
     todo = args.root / "TODO.md"
     if todo in files or not files:
         n_todo_lines = markdown_line_count(todo)
@@ -2211,18 +2421,27 @@ def scan_once(args: Args, seen: dict[str, float], files: list[Path]) -> bool:
             del seen[key]
             changed = True
         elif n_todo_lines > TODO_LINE_WARNING_THRESHOLD and not seen_contains(seen, key, now_s):
-            if push_manager_text(args, f"{HELPER_NOTICE_INSTRUCTION}\n{TODO_LENGTH_REMINDER.format(n_lines=n_todo_lines)}") in {0, 2}:
-                remember_seen(seen, key, now_s)
+            status = push_manager_text(
+                args,
+                TODO_LENGTH_REMINDER.format(n_lines=n_todo_lines),
+                DeliverySuccessEvent(seen_keys=(key,), seen_at_s=now_s),
+            )
+            if delivery_accepted(status):
+                if status == 0:
+                    remember_seen(seen, key, now_s)
                 changed = True
     for marker in find_markers(args.root, files):
         attachments = marker_attachments(args, marker)
         key = marker_seen_key(args, marker, attachments)
         if seen_contains(seen, key, now_s):
             continue
-        if push_ref(args, seen, now_s, marker, attachments) in {0, 2}:
+        status = push_ref(args, seen, now_s, marker, attachments)
+        if status == 0:
             remember_seen(seen, key, now_s)
             changed = True
-    return changed
+        elif status == ASYNC_DELIVERY_STARTED:
+            changed = True
+    return drain_delivery_successes(args, seen, time.time()) or changed
 
 
 def markdown_line_count(path: Path) -> int:
@@ -2237,6 +2456,7 @@ def main(argv: list[str]) -> int:
     seen = new_seen_cache()
     if args.once:
         _ = scan_once(args, seen, markdown_files(args.root))
+        _ = wait_for_delivery_successes(args, seen, max(10.0, DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S + 5.0))
         return 0
     watcher = MarkdownChangeWatcher.open(args.root)
     if watcher is None:
@@ -2253,9 +2473,11 @@ def main(argv: list[str]) -> int:
     agent_problem_run: CommandRun | None = None
     idle_status_run: CommandRun | None = None
     digest_run: CommandRun | None = None
+    worktree_run: CommandRun | None = None
     while True:
         now_s = time.monotonic()
         now_wall_s = time.time()
+        _ = drain_delivery_successes(args, seen, now_wall_s)
         if now_s >= next_full_s:
             next_full_s = now_s + args.full_scan_interval_s
             next_poll_s = now_s + args.poll_backstop_interval_s
@@ -2282,7 +2504,16 @@ def main(argv: list[str]) -> int:
                 text = periodic_status_text(args, result)
                 if text is not None and args.manager_target:
                     _ = send_delivery_text("idle status delivery", text, args.manager_target)
+                if worktree_run is None and (worktree_command := worktree_check_command(args.root)) is not None:
+                    worktree_run = start_command("worktree check", worktree_command, MANAGER_WORKTREE_CHECK_TIMEOUT_S)
                 idle_status_run = None
+        if worktree_run is not None:
+            result = poll_command(worktree_run, now_wall_s)
+            if result is not None:
+                text = worktree_reminder_text_from_result(result, args.root)
+                if text and args.manager_target:
+                    _ = send_delivery_text("worktree reminder delivery", text, args.manager_target)
+                worktree_run = None
         if now_s - last_digest_check_s >= min(args.digest_idle_after_s, 60.0):
             if args.dry_run and maybe_deliver_idle_digest(args, fallback_mail_activity_s, now_wall_s):
                 fallback_mail_activity_s = now_wall_s
@@ -2308,7 +2539,7 @@ def main(argv: list[str]) -> int:
         ]
         if watcher is not None:
             deadlines.append(next_poll_s)
-        if agent_problem_run is not None or idle_status_run is not None or digest_run is not None:
+        if agent_problem_run is not None or idle_status_run is not None or digest_run is not None or worktree_run is not None:
             deadlines.append(now_s + 0.2)
         timeout_s = args.interval_s if watcher is None else max(0.0, min(deadlines) - now_s)
         if watcher is None:
