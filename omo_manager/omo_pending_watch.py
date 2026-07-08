@@ -11,6 +11,7 @@ import os
 import hashlib
 import random
 import re
+import shlex
 import select
 import struct
 import subprocess
@@ -97,6 +98,10 @@ TODO_LENGTH_REMINDER = "omo_pending_watch detected TODO.md with {n_lines} lines 
 MANAGER_TASK_STATE_REMINDER_HEADER = (
     "manager task-state reminder: MANAGER.md requires each manager-owned task to have frontmatter `status: running`, `status: done`, or `status: blocked` while the manager is idle. "
     "Start/resume the task, mark it done, or block it with a reason. Single-tag enforcement is intentionally not checked."
+)
+MANAGER_PENDING_ITEMS_REMINDER_HEADER = (
+    "manager pending-item reminder: manager task files should not keep `pending_task_items`. "
+    "Move each item into worker task files, then clear the manager list."
 )
 MANAGER_TASK_STATE_OK = {"running", "done", "blocked"}
 MANAGER_TASK_STATE_REMINDER_LIMIT = 20
@@ -1016,10 +1021,32 @@ def strip_direct_markers(text: str) -> str:
             return value
 
 
-def manager_pending_instruction(marker: Marker) -> str:
+def manager_pending_instruction(marker: Marker, after_recording: str = "Then dispatch the task:") -> str:
+    command = " ".join(
+        [
+            "omo_record_pending.py",
+            "--pending-file",
+            shlex.quote(str(marker.file)),
+            "--line",
+            str(marker.line),
+            "--item",
+            shlex.quote("PENDING_ITEM_TEXT"),
+            "[--item ...]",
+            "[--task-file TARGET_TASK.md]",
+            "--ack-human" if marker.origin == "human" else "",
+        ]
+    ).strip()
     if marker.origin == "human":
-        return "Immediately record every pending item, then ack human, then remove `(pending)` in below file, then dispatch the task:"
-    return "Immediately record every pending item, then don't ack human, then remove `(pending)` in below file, then dispatch the task:"
+        flag_note = "Use `--ack-human` so the script emails the human after recording."
+        fallback_note = "If there is no pending task item to add, or you need to edit an existing pending item, edit the task file directly instead and email the human manually."
+    else:
+        flag_note = "Do not pass `--ack-human`; agent-origin reports do not need a human acknowledgement."
+        fallback_note = "If there is no pending task item to add, or you need to edit an existing pending item, edit the task file directly instead."
+    return (
+        "Normally record pending items and remove the consumed `(pending)` marker by running:\n"
+        f"`{command}`\n"
+        f"{flag_note} {fallback_note} {after_recording}"
+    )
 
 
 def marker_snippet_parts(marker: Marker, attachments: Sequence[SourceAttachment]) -> list[str]:
@@ -1141,8 +1168,7 @@ def marker_worker_dm_text(marker: Marker, attachments: Sequence[SourceAttachment
 
 
 def marker_fyi_text(marker: Marker, attachments: Sequence[SourceAttachment]) -> str:
-    ack = "ack human" if marker.origin == "human" else "don't ack human"
-    parts = [f"Immediately record every pending item, then {ack}, then remove `(pending)` in below file; this message is already dispatched to the agent, this is FYI:"]
+    parts = [manager_pending_instruction(marker, "this message is already dispatched to the agent, this is FYI:")]
     parts.extend(marker_snippet_parts(marker, attachments))
     return "\n".join(parts)
 
@@ -1501,10 +1527,22 @@ def try_send_delivery_text(
 def maybe_push_idle_status(args: Args, last_activity_s: float, now_s: float) -> bool:
     if now_s - last_activity_s < args.idle_status_interval_s:
         return False
+    return push_idle_reminders(args)
+
+
+def push_idle_reminders(args: Args) -> bool:
+    changed = False
     text = manager_task_state_reminder_text(args.root, args.manager_target)
-    if not text:
-        return False
-    return delivery_accepted(push_manager_text(args, text))
+    if text:
+        changed = delivery_accepted(push_manager_text(args, text))
+    return push_manager_pending_item_reminders(args) or changed
+
+
+def push_manager_pending_item_reminders(args: Args) -> bool:
+    changed = False
+    for target, reminder_text in manager_pending_item_reminder_texts(args.root).items():
+        changed = delivery_accepted(push_manager_text_to_target(args, reminder_text, target)) or changed
+    return changed
 
 
 def manager_task_state_reminder_text(root: Path, manager_target: str = "") -> str:
@@ -1535,6 +1573,30 @@ def manager_task_state_reminder_text(root: Path, manager_target: str = "") -> st
     if len(rows) > MANAGER_TASK_STATE_REMINDER_LIMIT:
         visible_rows.append(f"task-state: omitted={len(rows) - MANAGER_TASK_STATE_REMINDER_LIMIT}")
     return "\n".join([MANAGER_TASK_STATE_REMINDER_HEADER, *visible_rows])
+
+
+def manager_pending_item_reminder_texts(root: Path) -> dict[str, str]:
+    todo = root / "TODO.md"
+    rows_by_target: dict[str, list[str]] = {}
+    seen: set[str] = set()
+    for task in parse_task_lines(todo):
+        if task.task_file == "TODO.md" or task.task_file in seen or task.section not in MANAGER_TASK_STATE_LIVE_SECTIONS:
+            continue
+        seen.add(task.task_file)
+        state_path = resolve_task_path(root, task.task_file)
+        metadata = read_task_metadata(state_path)
+        if metadata is None or not metadata.is_manager or not metadata.pending_task_items or metadata.runat == "retired":
+            continue
+        rows = rows_by_target.setdefault(metadata.runat, [])
+        for item in metadata.pending_task_items:
+            rows.append(f"manager-pending-item: task={task.task_file} item={truncate_content(item, PENDING_CONTENT_CHAR_LIMIT)}")
+    reminders: dict[str, str] = {}
+    for target, rows in rows_by_target.items():
+        visible_rows = rows[:MANAGER_TASK_STATE_REMINDER_LIMIT]
+        if len(rows) > MANAGER_TASK_STATE_REMINDER_LIMIT:
+            visible_rows.append(f"manager-pending-item: omitted={len(rows) - MANAGER_TASK_STATE_REMINDER_LIMIT}")
+        reminders[target] = "\n".join([MANAGER_PENDING_ITEMS_REMINDER_HEADER, *visible_rows])
+    return reminders
 
 
 def reminder_task_owned_by_manager(root: Path, task: TaskLine, manager_target: str, state_path: Path | None) -> bool:
@@ -2507,6 +2569,7 @@ def main(argv: list[str]) -> int:
                 text = periodic_status_text(args, result)
                 if text is not None and args.manager_target:
                     _ = send_delivery_text("idle status delivery", text, args.manager_target)
+                _ = push_manager_pending_item_reminders(args)
                 if worktree_run is None and (worktree_command := worktree_check_command(args.root)) is not None:
                     worktree_run = start_command("worktree check", worktree_command, MANAGER_WORKTREE_CHECK_TIMEOUT_S)
                 idle_status_run = None

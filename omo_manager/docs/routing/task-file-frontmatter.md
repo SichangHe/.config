@@ -56,13 +56,15 @@ ALL other fields are required.
 
 ## helper behavior
 
+Managers normally record a newly delivered `(pending)` block with `omo_record_pending.py --pending-file TASK.md --line LINE --item ITEM [--item ITEM ...]`. Use `--ack-human` for human-origin requests so the script emails the human after it records the items and removes the consumed `(pending)` marker. Use `--task-file WORKER_TASK.md` to record the pending items on a separate running or blocked worker task. If no pending task item should be added, or an existing pending item must be edited, edit the task file directly instead; for human-origin requests, email the human manually after that edit.
+
 Managers change `status` with `omo_task_status.py TASK.md running|blocked|done`. Use `--root ROOT` when the task path is relative to a non-default work-log root. Use `--blocked-on TEXT` only with `blocked`. The script rejects status changes while any live `(pending)` marker remains, and rejects `done` while `pending_task_items` is nonempty with a reminder to verify each item is actually complete or cancelled before removing it. When it switches a task to `done`, it closes the task `runat` Codex pane, appends the standard close note with the captured session id when available, and prints a reminder to email the human.
 
 `omo_task.py` creates new task files with correct placeholder frontmatter. `status` is `running`; `managerat` is the current tmux window; `runat`, `tool`, `is_manager` are mandatory arguments passed in; `pending_task_items` is empty. After a successful return, this script reminds the caller to fill in `pending_task_items`.
 
 `omo_agent_status.py` only reads from frontmatter.
 
-`omo_pending_watch.py` scans for `(pending)` markers and dispatches lines from there to the end of the task file. Worker task files route normal pending blocks to `managerat`; manager task files route normal pending blocks to their own `runat`. It then remembers the dispatch in process memory before possibly re-dispatching. The target manager is responsible for recording `pending_task_items`, removing the `(pending)` marker, and routing the work. Worker `runat` is used for direct-message worker delivery only.
+`omo_pending_watch.py` scans for `(pending)` markers and dispatches lines from there to the end of the task file. Worker task files route normal pending blocks to `managerat`; manager task files route normal pending blocks to their own `runat`. It then remembers the dispatch in process memory before possibly re-dispatching. The target manager records `pending_task_items` with `omo_record_pending.py`, which removes the consumed pending marker after validating the file and line still match. Worker `runat` is used for direct-message worker delivery only.
 
 `omo_report.sh` reads the reporting worker task file, finds its `managerat`, and appends the `(pending)` report block to that manager's task file. If `managerat` is the main manager target, the destination is the dated `work_manager_YYYY-MM-DD.md` file.
 

@@ -67,7 +67,15 @@ def assert_concise_agent_report(test: unittest.TestCase, report_text: str, *, ag
     test.assertNotIn("tmux_window_name=", header)
 
 
-def task_frontmatter(status: str = "running", runat: str = "wl:2", managerat: str = "wl:1", *, is_manager: bool = False, blocked_on: str = "") -> str:
+def task_frontmatter(
+    status: str = "running",
+    runat: str = "wl:2",
+    managerat: str = "wl:1",
+    *,
+    is_manager: bool = False,
+    blocked_on: str = "",
+    pending_items: tuple[str, ...] = (),
+) -> str:
     lines = [
         "---",
         "version: v1.0.0",
@@ -81,10 +89,14 @@ def task_frontmatter(status: str = "running", runat: str = "wl:2", managerat: st
             "tool: codex",
             f"managerat: {managerat}",
             f"is_manager: {str(is_manager).lower()}",
-            "pending_task_items: []",
-            "---",
         ]
     )
+    if pending_items:
+        lines.append("pending_task_items:")
+        lines.extend(f"  - {item}" for item in pending_items)
+    else:
+        lines.append("pending_task_items: []")
+    lines.append("---")
     return "\n".join(lines) + "\n"
 
 
@@ -545,7 +557,9 @@ class PendingMarkerTests(unittest.TestCase):
                 self.assertTrue(watcher.scan_once(args, {}, [path]))
             self.assertEqual(["vl:32", "wl:1.0"], [target for target, _message in calls])
             escalated = calls[1][1]
-            self.assertTrue(escalated.startswith("Immediately record every pending item, then ack human, then remove `(pending)` in below file, then dispatch the task:"))
+            self.assertTrue(escalated.startswith("Normally record pending items and remove the consumed `(pending)` marker by running:"))
+            self.assertIn("omo_record_pending.py", escalated)
+            self.assertIn("--ack-human", escalated)
             self.assertIn("Delivery to resolved target `vl:32` failed: target is not a Codex pane: vl:32.", escalated)
             self.assertIn("<snippet file=\"vl_vlhsplit_10046.md:11-12\">", escalated)
 
@@ -4378,7 +4392,8 @@ class PendingMarkerTests(unittest.TestCase):
             with redirect_stdout(out):
                 self.assertTrue(scan_once(args, seen, [path]))
             text = out.getvalue()
-            self.assertIn("Immediately record every pending item, then ack human", text)
+            self.assertIn("Normally record pending items and remove the consumed `(pending)` marker by running:", text)
+            self.assertIn("--ack-human", text)
             self.assertIn("<snippet file=\"work_manager_", text)
             self.assertIn("(from email manager_mail/4002.txt)", text)
 
@@ -4420,7 +4435,8 @@ class PendingMarkerTests(unittest.TestCase):
             with redirect_stdout(out):
                 self.assertTrue(scan_once(args, {}, [path]))
             text = out.getvalue()
-            self.assertIn("Immediately record every pending item, then ack human", text)
+            self.assertIn("Normally record pending items and remove the consumed `(pending)` marker by running:", text)
+            self.assertIn("--ack-human", text)
             self.assertIn("Reminder: stay high level; route concrete work to agents.", text)
 
     def test_pending_watch_skips_manager_policy_reminder_when_not_selected(self) -> None:
@@ -4446,7 +4462,8 @@ class PendingMarkerTests(unittest.TestCase):
             with redirect_stdout(out):
                 self.assertTrue(scan_once(args, {}, [path]))
             text = out.getvalue()
-            self.assertIn("Immediately record every pending item, then ack human", text)
+            self.assertIn("Normally record pending items and remove the consumed `(pending)` marker by running:", text)
+            self.assertIn("--ack-human", text)
             self.assertNotIn("Reminder:", text)
 
     def test_email_pending_ref_can_add_email_policy_reminder(self) -> None:
@@ -4530,7 +4547,8 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertIn("<snippet file=\"task.md:2-4\">\n(pending)\n", text)
             self.assertRegex(text, r"…\d+chars…")
             self.assertIn("secret-tail", text)
-            self.assertIn("Immediately record every pending item, then ack human, then remove `(pending)` in below file, then dispatch the task:", text)
+            self.assertIn("Normally record pending items and remove the consumed `(pending)` marker by running:", text)
+            self.assertIn("--ack-human", text)
 
     def test_email_pending_push_attaches_email_content(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -4638,8 +4656,9 @@ class PendingMarkerTests(unittest.TestCase):
             with redirect_stdout(out):
                 self.assertTrue(watcher.scan_once(args, {}, [path]))
             text = out.getvalue()
-            self.assertIn("Immediately record every pending item, then don't ack human, then remove `(pending)` in below file, then dispatch the task:", text)
-            self.assertNotIn("then ack human", text)
+            self.assertIn("Normally record pending items and remove the consumed `(pending)` marker by running:", text)
+            self.assertIn("Do not pass `--ack-human`", text)
+            self.assertNotIn("Use `--ack-human`", text)
             self.assertIn(f"<snippet file=\"helper_audit_agent_9580.md:1-2\">\n(pending)\n(from agent {report})", text)
             self.assertNotIn(f"(from agent hcfg:1 {report})", text)
             self.assertIn(f"<snippet file=\"{report}:1-4\">", text)
@@ -4671,8 +4690,9 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual("wl:1", calls[1][calls[1].index("--manager-target") + 1])
             self.assertEqual("Subject: worker note\n\nPlease inspect this directly.", calls[0][1])
             self.assertNotIn("Immediately record", calls[0][1])
-            self.assertIn("Immediately record every pending item, then ack human, then remove `(pending)` in below file; this message is already dispatched to the agent, this is FYI:", calls[1][1])
-            self.assertNotIn("ack-human", calls[1][1])
+            self.assertIn("Normally record pending items and remove the consumed `(pending)` marker by running:", calls[1][1])
+            self.assertIn("this message is already dispatched to the agent, this is FYI", calls[1][1])
+            self.assertIn("--ack-human", calls[1][1])
             self.assertNotIn("DM!!!", calls[0][1])
             self.assertNotIn('<snippet file="worker.md:', calls[0][1])
             self.assertIn('<snippet file="worker.md:', calls[1][1])
@@ -4960,8 +4980,9 @@ class PendingMarkerTests(unittest.TestCase):
             with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
                 self.assertTrue(watcher.scan_once(args, {}, [path]))
             self.assertEqual(["wl:2", "wl:1"], [call[call.index("--manager-target") + 1] for call in calls])
-            self.assertIn("then don't ack human, then remove `(pending)` in below file; this message is already dispatched to the agent, this is FYI:", calls[1][1])
-            self.assertNotIn("then ack human, then remove `(pending)` in below file; this message is already dispatched to the agent, this is FYI:", calls[1][1])
+            self.assertIn("Do not pass `--ack-human`", calls[1][1])
+            self.assertIn("this message is already dispatched to the agent, this is FYI", calls[1][1])
+            self.assertNotIn("Use `--ack-human`", calls[1][1])
 
     def test_agent_report_dm_sends_only_report_message_body_to_worker(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -5389,7 +5410,7 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual("wl:1", calls[1][calls[1].index("--manager-target") + 1])
             self.assertNotIn("--pending-file", calls[1])
             self.assertIn("this message is already dispatched to the agent, this is FYI", calls[1][1])
-            self.assertNotIn("ack-human", calls[1][1])
+            self.assertIn("Use `--ack-human`", calls[1][1])
 
     def test_email_dm_uses_managerat_without_global_manager_target(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -5679,7 +5700,7 @@ class PendingMarkerTests(unittest.TestCase):
                 self.assertTrue(watcher.scan_once(args, {}, [path]))
             manager_text = calls[1][1]
             self.assertIn("this message is already dispatched to the agent, this is FYI", manager_text)
-            self.assertNotIn("ack-human", manager_text)
+            self.assertIn("Use `--ack-human`", manager_text)
             self.assertNotIn("Reminder:", manager_text)
             self.assertNotIn("acknowledge human email first, then delegate", manager_text)
 
@@ -6046,6 +6067,54 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertNotIn("blocked_task.md", text)
             self.assertNotIn("done_task.md", text)
             self.assertIn("Single-tag enforcement is intentionally not checked.", text)
+
+    def test_manager_pending_item_reminders_route_to_manager_runat(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "TODO.md").write_text(
+                "current:\n"
+                "manager_task.md wl:2\n"
+                "worker_task.md wl:3\n",
+                encoding="utf-8",
+            )
+            _ = (root / "manager_task.md").write_text(
+                task_frontmatter(runat="wl:2", managerat="wl:1", is_manager=True, pending_items=("delegate audit work",)),
+                encoding="utf-8",
+            )
+            _ = (root / "worker_task.md").write_text(
+                task_frontmatter(runat="wl:3", managerat="wl:1", pending_items=("worker-owned item",)),
+                encoding="utf-8",
+            )
+
+            reminders = watcher.manager_pending_item_reminder_texts(root)
+
+            self.assertEqual(["wl:2"], sorted(reminders))
+            text = reminders["wl:2"]
+            self.assertIn("manager pending-item reminder: manager task files should not keep `pending_task_items`.", text)
+            self.assertIn("manager-pending-item: task=manager_task.md item=delegate audit work", text)
+            self.assertNotIn("worker-owned item", text)
+
+    def test_maybe_push_idle_status_sends_manager_pending_items_to_runat(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "TODO.md").write_text("current:\nmanager_task.md wl:2\n", encoding="utf-8")
+            _ = (root / "manager_task.md").write_text(
+                task_frontmatter(runat="wl:2", managerat="wl:1", is_manager=True, pending_items=("delegate audit work",)),
+                encoding="utf-8",
+            )
+            out = StringIO()
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, True, manager_target="wl:1")
+
+            with redirect_stdout(out):
+                self.assertTrue(watcher.maybe_push_idle_status(args, 100.0, 131.0))
+
+            text = out.getvalue()
+            self.assertIn("manager-pending-item: task=manager_task.md item=delegate audit work", text)
+            self.assertNotIn("manager task-state reminder", text)
 
     def test_periodic_status_text_ignores_artifact_paths_in_todo_notes(self) -> None:
         from omo_manager import omo_pending_watch as watcher

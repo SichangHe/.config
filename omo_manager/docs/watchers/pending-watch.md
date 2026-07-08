@@ -35,9 +35,10 @@
 - pending ref semantics
   - scans Markdown for literal `(pending)` markers outside fenced code
   - inspects each pending block for explicit source markers
-  - normal manager deliveries start with an imperative instruction line
-  - human-origin manager deliveries start ``Immediately record every pending item, then ack human, then remove `(pending)`, then dispatch the task:``
-  - agent-origin manager deliveries start ``Immediately record every pending item, then don't ack human, then remove `(pending)`, then dispatch the task:``
+  - normal manager deliveries start by telling the manager to run `omo_record_pending.py`
+  - human-origin manager deliveries include `--ack-human` so recording the pending items also emails the human
+  - agent-origin manager deliveries say to omit `--ack-human`
+  - if no pending task item should be added, or an existing pending item must be edited, the manager edits the task file directly instead; human-origin direct edits still need a manual human email
   - includes the pending line and content from that line to end of file
   - labels pending content as `<snippet file="PATH:START-END">`
   - truncates long content to 2000 chars by keeping start and end with `…Nchars…` in the middle
@@ -59,8 +60,8 @@
   - legacy prose metadata remains recognized only for main manager task files and old explicit source markers
   - a pending block or any readable linked file starting or ending with standalone `DM`, after quote lines are ignored and edge punctuation/whitespace is trimmed, is delivered to the task frontmatter `runat` worker target when that target is safely distinct from the manager target
   - `DM only` follows the same marker rules as `DM` but does not send the manager FYI copy after successful worker delivery
-  - successful DM worker delivery also sends the manager an FYI copy that starts ``Immediately record every pending item, then ack human, then remove `(pending)`; this message is already dispatched to the agent, this is FYI:``
-  - agent-origin DM manager FYI copies say ``don't ack human`` instead of ``ack human``
+  - successful DM worker delivery also sends the manager an FYI copy that starts with the same `omo_record_pending.py` instruction and ends ``this message is already dispatched to the agent, this is FYI:``
+  - agent-origin DM manager FYI copies say to omit `--ack-human`
   - worker DM delivery contains only the cleaned message text
   - worker DM delivery does not include manager instructions, task-file snippets, source snippets, or XML-style wrappers
   - worker DM delivery strips standalone file-pointer lines after including readable file content, and extracts only the `message:` body from `omo_report.sh` agent report files
@@ -69,7 +70,9 @@
   - same-process DM manager-FYI retry does not resend the worker copy after worker delivery succeeds
 
 - manager delivery example
-  - ``Immediately record every pending item, then don't ack human, then remove `(pending)`, then dispatch the task:``
+  - ``Normally record pending items and remove the consumed `(pending)` marker by running:``
+  - ``omo_record_pending.py --pending-file helper_audit_agent_9580.md --line 156 --item PENDING_ITEM_TEXT [--item ...] [--task-file TARGET_TASK.md]``
+  - ``Do not pass `--ack-human`; agent-origin reports do not need a human acknowledgement. If there is no pending task item to add, or you need to edit an existing pending item, edit the task file directly instead. Then dispatch the task:``
   - `<snippet file="helper_audit_agent_9580.md:156-157">`
   - `(pending)`
   - `(from agent /tmp/omo-agent-messages-30033/agent_running_450901fc7c538b93789982a05ef20df3651c465ebf7f86eb641b75d6b6c5a9da.md)`
@@ -85,7 +88,9 @@
   - `</status>`
 
 - dm fyi example
-  - ``Immediately record every pending item, then ack human, then remove `(pending)`; this message is already dispatched to the agent, this is FYI:``
+  - ``Normally record pending items and remove the consumed `(pending)` marker by running:``
+  - ``omo_record_pending.py --pending-file worker.md --line 11 --item PENDING_ITEM_TEXT [--item ...] [--task-file TARGET_TASK.md] --ack-human``
+  - ``Use `--ack-human` so the script emails the human after recording. If there is no pending task item to add, or you need to edit an existing pending item, edit the task file directly instead and email the human manually. This message is already dispatched to the agent, this is FYI:``
   - `<snippet file="worker.md:11-12">`
   - `(pending)`
   - `(record and delegate manager_mail/4002.txt)`
@@ -100,6 +105,7 @@
   - detects `untracked_agent` panes when a non-`h*` tmux session contains a running, ready, errored, or stuck Codex pane that no task file owns
   - agent-problem prompts start with a direct helper instruction and do not need human acknowledgement
   - email pending refs remain `origin=human source=email action=ack-human`
+  - idle manager checks directly remind each manager task file's `runat` pane when that manager file still has `pending_task_items`, because managers should move those items into worker task files
 
 - agent-problem prompt format
   - starts with ``Handle ALL omo_pending_watch agent problems below; only email human if you cannot handle them:``
@@ -129,6 +135,7 @@
   - manager self-problem rows and matching `unstuck:` rows are logged and filtered by the watcher so they are not pasted back into the manager prompt
   - `human_request` status rows are filtered from agent-problem prompts because live `(pending)` blocks are dispatched through the pending-marker path
   - manager compaction reminders say ``Unless you know the exact content of MANAGER.md, read it. Normally, don't ack human``
+  - manager pending-item reminders say manager task files should not keep `pending_task_items`; they are sent to that manager task file's `runat` pane
   - `TODO.md` length reminders point to `docs/monthly-archive.md`
   - dirty worktree reminders name the dirty repo path, omit raw status/category fields, tell managers to let workers commit their own changes, and tell managers to commit task files themselves without routing task-file cleanup to workers
   - identical problem output is keyed by SHA-256 in process-local time-bounded delivery memory and is repeated at most once per `--agent-problem-repeat-s` seconds, default `1800`

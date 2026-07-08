@@ -7,6 +7,7 @@ This directory is non-authoritative helper documentation. Manager operating inst
 - `quiet-checks.md` low-token aggregate check helpers
 - `agent-reports.md` durable agent-to-manager reports through `omo_report.sh`
 - `report-routing-human-answers.md` concise answers about report routing, `seen`, watcher restart, unsticking, and digests
+- `omo_record_pending.py` records pending items from a delivered `(pending)` block, removes that marker, and optionally emails the human
 - `omo_task_status.py` updates task frontmatter `status` and rejects unsafe transitions
 - `tmux-send.md` safe tmux paste and async delivery through `omo_tmux_send.py`
 
