@@ -130,7 +130,7 @@
   - `human_request` status rows are filtered from agent-problem prompts because live `(pending)` blocks are dispatched through the pending-marker path
   - manager compaction reminders say ``Unless you know the exact content of MANAGER.md, read it. Normally, don't ack human``
   - `TODO.md` length reminders point to `docs/monthly-archive.md`
-  - dirty worktree reminders name the dirty repo path and omit raw status/category fields
+  - dirty worktree reminders name the dirty repo path, omit raw status/category fields, and tell managers to commit task files themselves without routing task-file cleanup to workers
   - identical problem output is keyed by SHA-256 in process-local time-bounded delivery memory and is repeated at most once per `--agent-problem-repeat-s` seconds, default `1800`
   - digest idle delivery uses a separate human-contact clock: if `manager_digest.md` has content and the newest `manager_mail/*.txt` is at least `--digest-idle-after-s` seconds old, default `3600`, it runs `scripts/manager-digest deliver`
 

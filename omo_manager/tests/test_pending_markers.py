@@ -5976,7 +5976,12 @@ class PendingMarkerTests(unittest.TestCase):
             "repo=/tmp/work_logs status=?? path=new_task.md category=manager-doc-or-task-change\n"
         )
 
-        self.assertIn("omo_pending_watch detected /tmp/work_logs is dirty.", text)
+        self.assertIn(
+            "omo_pending_watch detected /tmp/work_logs is dirty. Clean it up. "
+            "Commit all task files yourself. Remember NEVER to tell workers about task files.",
+            text,
+        )
+        self.assertNotIn("let every agent commit their changes", text)
         self.assertIn("work_manager_today.md", text)
         self.assertIn("new_task.md", text)
         self.assertNotIn("status=M", text)
@@ -6009,7 +6014,12 @@ class PendingMarkerTests(unittest.TestCase):
 
         text = watcher.worktree_reminder_text_from_result(result, Path("/tmp/work_logs"))
 
-        self.assertIn("omo_pending_watch detected /tmp/work_logs is dirty.", text)
+        self.assertIn(
+            "omo_pending_watch detected /tmp/work_logs is dirty. Clean it up. "
+            "Commit all task files yourself. Remember NEVER to tell workers about task files.",
+            text,
+        )
+        self.assertNotIn("let every agent commit their changes", text)
         self.assertIn("work_manager_today.md", text)
 
     def test_periodic_status_text_reminds_about_non_terminal_task_state(self) -> None:

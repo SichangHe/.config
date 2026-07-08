@@ -1550,7 +1550,10 @@ def worktree_line_value(line: str, key: str) -> str:
 
 
 def manager_worktree_reminder_header(repo: Path | str) -> str:
-    return f"omo_pending_watch detected {repo} is dirty. Clean it up, let every agent commit their changes."
+    return (
+        f"omo_pending_watch detected {repo} is dirty. Clean it up. "
+        "Commit all task files yourself. Remember NEVER to tell workers about task files."
+    )
 
 
 def manager_worktree_reminder_from_output(output: str, root: Path | None = None) -> str:
