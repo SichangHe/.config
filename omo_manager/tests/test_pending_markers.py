@@ -6680,6 +6680,120 @@ class PendingMarkerTests(unittest.TestCase):
         self.assertIn("omo_pending_watch agent problems:", text)
         self.assertIn("Reminder: delegate work; do not do worker work in the manager.", text)
 
+    def test_agent_problem_check_routes_manager_self_problem_to_active_manager(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "TODO.md").write_text("current:\nrescue_manager.md wl:2\nsame_manager.md wl:1\nworker.md wl:3\n", encoding="utf-8")
+            _ = (root / "rescue_manager.md").write_text(task_frontmatter(runat="wl:2", managerat="wl:1.0", is_manager=True), encoding="utf-8")
+            _ = (root / "same_manager.md").write_text(task_frontmatter(runat="wl:1", managerat="wl:1.0", is_manager=True), encoding="utf-8")
+            _ = (root / "worker.md").write_text(task_frontmatter(runat="wl:3", managerat="wl:1.0"), encoding="utf-8")
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1.0", agent_problem_repeat_s=300.0, reminder_choice=lambda targets: targets[0])
+            result = watcher.CommandOutput(
+                "agent-problems",
+                3,
+                "agent-problems: error=1\nerror: task=manager evidence=target=wl:1.0 role=manager output=Selected model is at capacity\n",
+                "",
+            )
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(capture_delivery_call(command))
+                return subprocess.CompletedProcess(command, 0)
+
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run), patch.object(watcher, "email_human_manager_problem", side_effect=AssertionError("unexpected human email")):
+                self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
+            self.assertEqual(1, len(calls))
+            self.assertEqual("wl:2", calls[0][calls[0].index("--manager-target") + 1])
+            pushed_text = calls[0][1]
+            self.assertIn("main-manager-problem: target=wl:1.0", pushed_text)
+            self.assertIn("manager-action: inspect/fix/restart main manager target wl:1.0", pushed_text)
+            self.assertIn("manager-problems: error=1", pushed_text)
+            self.assertIn("error: task=manager evidence=target=wl:1.0 role=manager", pushed_text)
+            self.assertNotIn("worker.md", pushed_text)
+
+    def test_agent_problem_check_can_route_manager_self_problem_to_running_low_priority_manager(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "TODO.md").write_text("current:\nsame_manager.md wl:1\nlow priority:\nrescue_manager.md wl:2\n", encoding="utf-8")
+            _ = (root / "same_manager.md").write_text(task_frontmatter(runat="wl:1", managerat="wl:1.0", is_manager=True), encoding="utf-8")
+            _ = (root / "rescue_manager.md").write_text(task_frontmatter(runat="wl:2", managerat="wl:1.0", is_manager=True), encoding="utf-8")
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1.0", agent_problem_repeat_s=300.0, reminder_choice=lambda targets: targets[0])
+            result = watcher.CommandOutput(
+                "agent-problems",
+                3,
+                "agent-problems: error=1\nerror: task=manager evidence=target=wl:1.0 role=manager output=Selected model is at capacity\n",
+                "",
+            )
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(capture_delivery_call(command))
+                return subprocess.CompletedProcess(command, 0)
+
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run), patch.object(watcher, "email_human_manager_problem", side_effect=AssertionError("unexpected human email")):
+                self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
+            self.assertEqual(1, len(calls))
+            self.assertEqual("wl:2", calls[0][calls[0].index("--manager-target") + 1])
+
+    def test_agent_problem_check_tries_next_peer_manager_when_first_delivery_fails(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "TODO.md").write_text("current:\nfirst_manager.md wl:2\nsecond_manager.md wl:3\n", encoding="utf-8")
+            _ = (root / "first_manager.md").write_text(task_frontmatter(runat="wl:2", managerat="wl:1.0", is_manager=True), encoding="utf-8")
+            _ = (root / "second_manager.md").write_text(task_frontmatter(runat="wl:3", managerat="wl:1.0", is_manager=True), encoding="utf-8")
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1.0", agent_problem_repeat_s=300.0, reminder_choice=lambda targets: targets[0])
+            result = watcher.CommandOutput(
+                "agent-problems",
+                3,
+                "agent-problems: error=1\nerror: task=manager evidence=target=wl:1.0 role=manager output=Selected model is at capacity\n",
+                "",
+            )
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(capture_delivery_call(command))
+                target = command[command.index("--target") + 1]
+                return subprocess.CompletedProcess(command, 2 if target == "wl:2" else 0)
+
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run), patch.object(watcher, "email_human_manager_problem", side_effect=AssertionError("unexpected human email")):
+                self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
+            self.assertEqual(["wl:2", "wl:3"], [call[call.index("--manager-target") + 1] for call in calls])
+
+    def test_agent_problem_check_keeps_worker_owner_routing_with_manager_self_problem(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "TODO.md").write_text("current:\nrescue_manager.md wl:2\nowner_manager.md wl:3\n", encoding="utf-8")
+            _ = (root / "rescue_manager.md").write_text(task_frontmatter(runat="wl:2", managerat="wl:1.0", is_manager=True), encoding="utf-8")
+            _ = (root / "owner_manager.md").write_text(task_frontmatter(runat="wl:3", managerat="wl:1.0", is_manager=True), encoding="utf-8")
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1.0", agent_problem_repeat_s=300.0, reminder_choice=lambda targets: targets[0])
+            result = watcher.CommandOutput(
+                "agent-problems",
+                3,
+                "agent-problems: error=2\n"
+                "error: task=manager evidence=target=wl:1.0 role=manager output=Selected model is at capacity\n"
+                "error: task=worker.md evidence=target=wl:4 output=worker failed owner_target=wl:3\n",
+                "",
+            )
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(capture_delivery_call(command))
+                return subprocess.CompletedProcess(command, 0)
+
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run), patch.object(watcher, "email_human_manager_problem", side_effect=AssertionError("unexpected human email")):
+                self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
+            self.assertEqual(["wl:2", "wl:3"], [call[call.index("--manager-target") + 1] for call in calls])
+            self.assertIn("main-manager-problem: target=wl:1.0", calls[0][1])
+            self.assertIn("worker.md wl:4 <output>worker failed</output>", calls[1][1])
+
     def test_agent_problem_check_emails_human_for_manager_self_stuck_prompt(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 

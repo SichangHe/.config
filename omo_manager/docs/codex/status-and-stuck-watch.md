@@ -1,4 +1,4 @@
-# codex status and stuck watcher
+# codex status and stuck handling
 
 `omo_codex_status.py` reads a tmux window tail and reports `not_codex`, `running`, `error`, `ready`, or `stuck_input` plus the current response tail.
 
@@ -10,6 +10,8 @@ It reports `stuck_input` when the current Codex input box contains non-placehold
 
 `submit_stuck_input_if_present` rechecks the current screen, waits on tmux output while Codex is compacting, sends Enter only when the latest `stuck_input` screen is submit-safe, and otherwise returns `not_safe:REASON`.
 
-`omo_stuck_watch.py` reads registered agent panes plus optional `--manager-target`, calls the status helper, stores tail hashes so repeated runs can tell whether visible output changed, and uses `submit_stuck_input_if_present` for `stuck_input` panes.
+Active stuck handling runs through the pending watcher. `omo_pending_watch.py` runs `omo_agent_status.py --problems-only` on its agent-problem interval; that status pass reports `stuck_input` rows and calls `submit_stuck_input_if_present` for non-blocked panes when the latest screen is submit-safe.
 
-It sends Enter at most once per target per pass, logs `unstick=sent_enter`, `unstick=already_sent`, `unstick=not_safe:REASON`, `unstick=failed`, or `unstick=disabled:no_auto_unstick`, and accepts `--no-auto-unstick` for diagnostics. One-shot mode is the default; watch mode is `omo_stuck_watch.py --watch --registry PATH --state PATH --manager-target TARGET`. It has no `--root` or `--once` flags.
+Successful status-pass submits are emitted as `unstuck: target=TARGET task=TASK action=sent_enter` and tracked by pending watcher delivery memory. Still-stuck panes are reported to the owning manager after the remembered Enter attempts are exhausted.
+
+`omo_stuck_watch.py` remains available for manual diagnostics. It reads registered agent panes plus optional `--manager-target`, calls the status helper, stores tail hashes so repeated runs can tell whether visible output changed, and accepts `--no-auto-unstick`. One-shot mode is the default; watch mode is `omo_stuck_watch.py --watch --root ROOT --registry PATH --state PATH --manager-target TARGET`. `omo_manager_setup_watchers.sh` does not start it; setup refresh may stop same-root watch-mode instances left by old setup, and normal setup creates no `stuck-watch.log`.

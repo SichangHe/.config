@@ -22,7 +22,6 @@ env_state_dir="${OMO_MANAGER_STATE_DIR+x}${OMO_MANAGER_STATE_DIR-}"
 env_mail_dir="${OMO_MANAGER_MAIL_DIR+x}${OMO_MANAGER_MAIL_DIR-}"
 env_email_enable="${OMO_MANAGER_ENABLE_EMAIL_WATCHER+x}${OMO_MANAGER_ENABLE_EMAIL_WATCHER-}"
 env_email_config="${OMO_EMAIL_CONFIG_PATH+x}${OMO_EMAIL_CONFIG_PATH-}"
-env_stuck_enable="${OMO_MANAGER_ENABLE_STUCK_WATCHER+x}${OMO_MANAGER_ENABLE_STUCK_WATCHER-}"
 local_env="${OMO_MANAGER_LOCAL_ENV:-$HOME/.config/omo_manager/local.env}"
 if [ -f "$local_env" ]; then
   # shellcheck disable=SC1090
@@ -35,14 +34,12 @@ fi
 [ -n "$env_mail_dir" ] && OMO_MANAGER_MAIL_DIR="${env_mail_dir#x}"
 [ -n "$env_email_enable" ] && OMO_MANAGER_ENABLE_EMAIL_WATCHER="${env_email_enable#x}"
 [ -n "$env_email_config" ] && OMO_EMAIL_CONFIG_PATH="${env_email_config#x}"
-[ -n "$env_stuck_enable" ] && OMO_MANAGER_ENABLE_STUCK_WATCHER="${env_stuck_enable#x}"
 root="${OMO_WORK_LOGS_ROOT:-$HOME/work_logs}"
 manager_url="${OMO_MANAGER_URL:-}"
 manager_target="${OMO_MANAGER_TMUX_TARGET:-}"
 state_base="${XDG_STATE_HOME:-$HOME/.local/state}/omo-manager"
 state_dir="${OMO_MANAGER_STATE_DIR:-$state_base}"
 email_enable="${OMO_MANAGER_ENABLE_EMAIL_WATCHER:-auto}"
-stuck_enable="${OMO_MANAGER_ENABLE_STUCK_WATCHER:-true}"
 email_config="${OMO_EMAIL_CONFIG_PATH:-$HOME/.config/himalaya/config.toml}"
 mail_dir="${OMO_MANAGER_MAIL_DIR:-$root/manager_mail}"
 email_supervisor_startup_grace_s="${OMO_MANAGER_EMAIL_SUPERVISOR_STARTUP_GRACE_S:-2}"
@@ -66,7 +63,7 @@ pkill -f "[e]mail_idle_watcher.py" >/dev/null 2>&1 || true
 pkill -f "[p]ending-watch-supervisor .*--root ${root}" >/dev/null 2>&1 || true
 pkill -f "[o]mo_pending_watch.py .*--root ${root}" >/dev/null 2>&1 || true
 pkill -f "[e]mail_idle_watcher.py .*--root ${root}" >/dev/null 2>&1 || true
-pkill -f "[o]mo_stuck_watch.py .*--watch" >/dev/null 2>&1 || true
+pkill -f "[o]mo_stuck_watch.py .*--root ${root} .*--watch" >/dev/null 2>&1 || true
 pending_args=(--root "$root")
 setsid bash -c '
 while :; do
@@ -78,18 +75,6 @@ done
 ' pending-watch-supervisor "${uv_run[@]}" "$helper_dir/omo_pending_watch.py" "${pending_args[@]}" >>"$state_dir/pending-watch.log" 2>&1 &
 pending_pid=$!
 echo "started pending watcher supervisor pid=$pending_pid log=$state_dir/pending-watch.log"
-stuck_pid=""
-case "$stuck_enable" in
-  1|true|yes)
-    stuck_args=(--root "$root" --watch --interval-s "${OMO_MANAGER_STUCK_INTERVAL_S:-60}" --stale-after-s "${OMO_MANAGER_STUCK_STALE_AFTER_S:-900}" --max-iterations "${OMO_MANAGER_STUCK_MAX_ITERATIONS:-10000}")
-    [ -n "$manager_target" ] && stuck_args+=(--manager-target "$manager_target")
-    setsid "${uv_run[@]}" "$helper_dir/omo_stuck_watch.py" "${stuck_args[@]}" >>"$state_dir/stuck-watch.log" 2>&1 &
-    stuck_pid=$!
-    echo "started stuck watcher pid=$stuck_pid log=$state_dir/stuck-watch.log"
-    ;;
-  0|false|no) echo "skipped stuck watcher; OMO_MANAGER_ENABLE_STUCK_WATCHER=false" ;;
-  *) echo "OMO_MANAGER_ENABLE_STUCK_WATCHER must be true or false" >&2; exit 2 ;;
-esac
 start_email=0
 case "$email_enable" in
   1|true|yes) start_email=1 ;;
@@ -126,9 +111,6 @@ else
 fi
 sleep 0.2
 kill -0 "$pending_pid" 2>/dev/null || { echo "pending watcher failed to stay running; see $state_dir/pending-watch.log" >&2; exit 1; }
-if [ -n "$stuck_pid" ]; then
-  kill -0 "$stuck_pid" 2>/dev/null || { echo "stuck watcher failed to stay running; see $state_dir/stuck-watch.log" >&2; exit 1; }
-fi
 if [ "$start_email" -eq 1 ]; then
   sleep "$email_supervisor_startup_grace_s"
   if ! kill -0 "$email_pid" 2>/dev/null; then

@@ -1966,6 +1966,70 @@ def manager_human_email_problem_output(output: str, manager_target: str = "") ->
     return "\n".join([f"manager-problems: {' '.join(parts)}", *kept])
 
 
+def manager_problem_targets(output: str, manager_target: str = "") -> set[str]:
+    targets = {manager_target} if manager_target else set()
+    for line in output.splitlines()[1:]:
+        target = problem_line_target(line)
+        if target:
+            targets.add(target)
+    return targets
+
+
+def active_manager_problem_targets(root: Path, output: str, manager_target: str = "") -> list[str]:
+    seen_files: set[str] = set()
+    seen_targets: set[str] = set()
+    targets: list[str] = []
+    problem_targets = manager_problem_targets(output, manager_target)
+    for task in parse_task_lines(root / "TODO.md"):
+        if task.task_file == "TODO.md" or task.task_file in seen_files or task.section not in MANAGER_TASK_STATE_LIVE_SECTIONS:
+            continue
+        seen_files.add(task.task_file)
+        state_path = resolve_task_path(root, task.task_file)
+        state = scan_task_state(state_path) if state_path is not None else None
+        if state is None or state.status != "running" or not state.is_manager or not state.target:
+            continue
+        if any(same_tmux_target(state.target, problem_target) for problem_target in problem_targets):
+            continue
+        target_key = canonical_target(state.target)
+        if target_key in seen_targets:
+            continue
+        seen_targets.add(target_key)
+        targets.append(state.target)
+    return targets
+
+
+def manager_problem_route_text(args: Args, output: str) -> str:
+    target = args.manager_target or "unset"
+    return "\n".join(
+        [
+            AGENT_PROBLEM_SOURCE_LINE,
+            HELPER_NOTICE_INSTRUCTION,
+            f"main-manager-problem: target={target}",
+            f"manager-action: inspect/fix/restart main manager target {target}; restore normal manager delivery, then continue routing.",
+            output,
+        ]
+    )
+
+
+def route_or_email_manager_problem(args: Args, output: str) -> bool:
+    if not output:
+        return False
+    targets = active_manager_problem_targets(args.root, output, args.manager_target)
+    if not targets:
+        return email_human_manager_problem(args, output)
+    route_target = args.reminder_choice(targets)
+    targets = [route_target, *(target for target in targets if target != route_target)]
+    text = manager_problem_route_text(args, output)
+    for target in targets:
+        if args.dry_run:
+            print(f"manager problem route due: target={target}\n{text}", flush=True)
+            return True
+        result = try_send_delivery_text("manager problem routing", text, target)
+        if result.status == 0:
+            return True
+    return email_human_manager_problem(args, output)
+
+
 def email_human_manager_problem(args: Args, output: str) -> bool:
     if not output:
         return False
@@ -2037,12 +2101,12 @@ def handle_agent_problem_result(args: Args, seen: dict[str, float], result: Comm
     output = filter_manager_compaction_output(output, args.manager_target) or ""
     if not output:
         return compaction_changed
-    manager_email_output = manager_human_email_problem_output(output, args.manager_target)
-    manager_email_sent = email_human_manager_problem(args, manager_email_output)
+    manager_problem_output = manager_human_email_problem_output(output, args.manager_target)
+    manager_problem_sent = route_or_email_manager_problem(args, manager_problem_output)
     output = filter_manager_self_problem_output(output, args.manager_target) or ""
     if not output:
-        return manager_email_sent or compaction_changed
-    changed = manager_email_sent or compaction_changed
+        return manager_problem_sent or compaction_changed
+    changed = manager_problem_sent or compaction_changed
     for owner_target, dispatch in agent_problem_output_by_owner(args, seen, output, now_wall_s).items():
         digest = hashlib.sha256(f"{owner_target}\n{dispatch.digest_text}".encode("utf-8")).hexdigest()[:16]
         key = f"agent-problem:{digest}"
