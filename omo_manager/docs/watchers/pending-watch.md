@@ -111,11 +111,11 @@
     - ``Handle ALL omo_pending_watch agent problems below; only email human if you cannot handle them:``
     - ``1 not codex; check if agent failed to launch:``
     - ``vl_langdoc_9160.md vl:32 <output>...</output>``
-    - ``16 ready and not blocked; consider closing them:``
+    - ``16 ready and not blocked; consider resuming or closing them:``
     - ``vl:11 <output>...</output>``
     - ``6 have their input being stuck; unstick or restart them:``
     - ``vl:37 <input>Manager correction: ignore the earlier Read first item for MANAGER.md.</input>``
-    - ``1 not tracked in any task file; ask them what their task is, or consider closing them:``
+    - ``1 not tracked in any task file; ask them what their task is, or consider resuming or closing them:``
     - ``vl:41 <output>Implemented and privately reported.</output>``
     - ``1 are marked `done` but remain open; either close the agents or correct the task status:``
     - ``task_name.md``

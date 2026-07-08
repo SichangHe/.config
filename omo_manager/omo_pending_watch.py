@@ -1863,9 +1863,9 @@ def problem_section(status: str, rows: list[ProblemRow]) -> list[str]:
         "error": f"{len(rows)} have visible errors; inspect the pane, fix the error, or restart them:",
         "manager_compaction": f"{len(rows)} are compacting; reread MANAGER.md after compaction unless the summary already included it:",
         "manager_waiting_subagent": f"{len(rows)} managers are waiting on a subagent and could not be interrupted automatically; inspect or interrupt them:",
-        "ready": f"{len(rows)} ready and not blocked; consider closing them:",
+        "ready": f"{len(rows)} ready and not blocked; consider resuming or closing them:",
         "stuck_input": f"{len(rows)} have their input being stuck; unstick or restart them:",
-        "untracked_agent": f"{len(rows)} not tracked in any task file; ask them what their task is, or consider closing them:",
+        "untracked_agent": f"{len(rows)} not tracked in any task file; ask them what their task is, or consider resuming or closing them:",
         "done-stale": f"{len(rows)} are marked `done` but remain open; either close the agents or correct the task status:",
     }
     lines = ["", headings[status]]

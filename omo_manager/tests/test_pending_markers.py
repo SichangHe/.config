@@ -6344,7 +6344,7 @@ class PendingMarkerTests(unittest.TestCase):
         with redirect_stdout(out):
             self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
         text = out.getvalue()
-        self.assertIn("1 not tracked in any task file; ask them what their task is, or consider closing them:", text)
+        self.assertIn("1 not tracked in any task file; ask them what their task is, or consider resuming or closing them:", text)
         self.assertIn("vl:11 <output>Implemented and privately reported</output>", text)
         self.assertNotIn("role=tmux_unmanaged", text)
 
