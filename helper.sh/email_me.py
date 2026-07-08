@@ -31,9 +31,10 @@ MANAGER_DIR = Path(__file__).resolve().parents[1] / "omo_manager"
 if MANAGER_DIR.is_dir():
     sys.path.insert(0, str(MANAGER_DIR))
 try:
-    from omo_email_subject import SubjectInputError, normalized_subject_key, prepare_subject, prepare_subject_and_headers, reply_headers_for_subject, strip_leading_tmux_tags
+    from omo_email_subject import SubjectInputError, canonical_tmux_target, normalized_subject_key, prepare_subject, prepare_subject_and_headers, reply_headers_for_subject, strip_leading_tmux_tags
 except ImportError:
     SubjectInputError = ValueError
+    canonical_tmux_target = None
     normalized_subject_key = None
     prepare_subject = None
     prepare_subject_and_headers = None
@@ -147,6 +148,7 @@ def parse_args(argv: list[str]) -> CliArgs:
 
 
 def normalize_subject(title: str, tmux_target: str = "") -> str:
+    tmux_target = canonical_email_tmux_target(tmux_target)
     if prepare_subject is not None:
         try:
             return prepare_subject(title, tmux_target)
@@ -221,17 +223,27 @@ def valid_tmux_target(target: str) -> bool:
     return bool(TMUX_WINDOW_RE.fullmatch(target))
 
 
+def canonical_email_tmux_target(target: str) -> str:
+    if canonical_tmux_target is not None:
+        return canonical_tmux_target(target)
+    clean_target = target.strip()
+    window_target, dot, pane = clean_target.rpartition(".")
+    if dot and pane == "0" and ":" in window_target:
+        return window_target
+    return clean_target
+
+
 def env_tmux_target() -> str | None:
     target = os.environ.get("OMO_AGENT_TMUX_TARGET", "").strip()
     if valid_tmux_target(target):
-        return target
+        return canonical_email_tmux_target(target)
     return None
 
 
 def env_manager_tmux_target() -> str | None:
     target = os.environ.get("OMO_MANAGER_TMUX_TARGET", "").strip()
     if valid_tmux_target(target):
-        return target
+        return canonical_email_tmux_target(target)
     return None
 
 
@@ -239,7 +251,7 @@ def footer_tmux_target(explicit_tmux_target: str | None = None, manager_human: b
     if explicit_tmux_target is not None:
         if not valid_tmux_target(explicit_tmux_target):
             raise ValueError("tmux target must have shape session:window or session:window.pane.")
-        return explicit_tmux_target
+        return canonical_email_tmux_target(explicit_tmux_target)
     if manager_human:
         return env_manager_tmux_target() or env_tmux_target() or current_tmux_window()
     return env_tmux_target() or current_tmux_window()

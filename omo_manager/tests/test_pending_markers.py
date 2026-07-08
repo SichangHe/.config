@@ -1767,6 +1767,9 @@ class PendingMarkerTests(unittest.TestCase):
         self.assertEqual("Re: [a] [wl:7] Topic", prepare_subject("Re: [a] wl:9 pb:1 vl:2 Topic", "wl:7"))
         self.assertEqual("Re: [a] [wl:7] Topic", prepare_subject("Re: [a] [wl:9] [pb:1] [vl:2] Topic", "wl:7"))
         self.assertEqual("Re: [a] [vl:15] Topic", prepare_subject("Re: [wl:9] [pb:1] [vl:2] Topic", "vl:15"))
+        self.assertEqual("[a] [wl:7] Topic", manager_subject_w_target("Topic", "wl:7.0"))
+        self.assertEqual("Re: [a] [wl:7] Topic", prepare_subject("Re: [a] Topic", "wl:7.0"))
+        self.assertEqual("[a] [wl:7.1] Topic", manager_subject_w_target("Topic", "wl:7.1"))
         self.assertEqual("[a] Topic", prepare_subject("Topic", "not-a-target"))
 
     def test_email_subject_target_keeps_recent_thread_lookup_key_untargeted(self) -> None:

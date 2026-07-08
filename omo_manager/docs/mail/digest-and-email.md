@@ -15,7 +15,7 @@ PB news digest:
 
 Before sending, recent-thread lookup strips repeated `Re:` plus `[a]`, `[omo_manager]`, legacy `[omo]`, and leading tmux window/pane subject tags. When a match is found in the recent window, the outgoing subject becomes `Re: [a] [TARGET] SUBJECT` and the message includes `In-Reply-To` and `References` headers from the matched self-sent mail.
 
-Reply subject preparation strips old tmux tags before prepending the selected current bracketed tag. For manager-human sends, the selected tag and footer target prefer explicit `--tmux-target` or `--sender-tmux-target`, then `OMO_MANAGER_TMUX_TARGET`, then the agent/current tmux fallback; sending fails when no valid target is available.
+Reply subject preparation strips old tmux tags before prepending the selected current bracketed tag. For manager-human sends, the selected tag and footer target prefer explicit `--tmux-target` or `--sender-tmux-target`, then `OMO_MANAGER_TMUX_TARGET`, then the agent/current tmux fallback; sending fails when no valid target is available. A zero-pane target such as `hcfg:1.0` is rendered as `hcfg:1`; nonzero panes keep their pane suffix.
 
 `omo_manager_setup_watchers.sh` loads `local.env`, exports the manager environment for pending watcher helpers, and passes explicit manager flags only to helpers that still require them. Lookup failures are non-critical and fall back to a normal `[a] [TARGET] SUBJECT` send.
 

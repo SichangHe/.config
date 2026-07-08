@@ -14,6 +14,6 @@ New human email pending blocks write `(record and delegate manager_mail/UID.txt)
 
 Stored `manager_mail/UID.txt` files keep the body and a normalized subject, omitting redundant self `From`, `Date`, and `UID` headers because the source marker/file name already identify the message. Human `Re: [a] ...` and old `Re: [omo_manager] ...` subjects are stored as `Re: ...` so task-file matching sees the same subject shape the manager originally used.
 
-Leading full tmux window or pane subject tags such as `wl:9`, `[pb:1]`, and stacked `Re: wl:9 wl:6 ...` forms are routing metadata and are stripped before storage or pending presentation. Reply subjects addressed to a task by full tmux target are appended to that task file and pushed to that task's `runat:` target.
+Leading full tmux window or pane subject tags such as `wl:9`, `[pb:1]`, and stacked `Re: wl:9 wl:6 ...` forms are routing metadata and are stripped before storage or pending presentation. Window targets and zero-pane targets are aliases, so `hcfg:1` and `hcfg:1.0` match the same task. Reply subjects addressed to a manager task by full tmux target are appended to that manager task file; reply subjects addressed to a worker task route through that worker's `managerat`.
 
 `omo_pending_watch.py` remains the durable delivery path for pending Markdown refs.

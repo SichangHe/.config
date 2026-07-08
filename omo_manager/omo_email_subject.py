@@ -145,9 +145,17 @@ def manager_subject(base: str) -> str:
     return f"{SHORT_MANAGER_TAG} {base.strip()}"
 
 
+def canonical_tmux_target(tmux_target: str) -> str:
+    clean_target = tmux_target.strip()
+    window_target, dot, pane = clean_target.rpartition(".")
+    if dot and pane == "0" and ":" in window_target:
+        return window_target
+    return clean_target
+
+
 def manager_subject_w_target(base: str, tmux_target: str = "", reply: bool = False) -> str:
     clean_base = strip_leading_tmux_tags(base.strip())
-    clean_target = tmux_target.strip()
+    clean_target = canonical_tmux_target(tmux_target)
     bracketed_target = f"[{clean_target}]"
     if clean_target and TMUX_TARGET_RE.fullmatch(clean_target) and not clean_base.startswith(f"{bracketed_target} "):
         clean_base = f"{bracketed_target} {clean_base}"
