@@ -199,7 +199,7 @@ raise SystemExit(2)
 PY
 if [ ! -f "$message_file" ]; then echo "message file not found" >&2; exit 2; fi
 if [ ! -f "$path_real" ]; then echo "task file not found" >&2; exit 2; fi
-append_path_real=$(python3 - "$root_real" "$path_real" "$manager_target" <<'PY'
+append_info=$(python3 - "$root_real" "$path_real" "$manager_target" <<'PY'
 from __future__ import annotations
 import re
 import sys
@@ -257,6 +257,9 @@ def main_manager_file() -> Path:
     today = datetime.now().astimezone().strftime("%Y-%m-%d")
     return root / f"work_manager_{today}.md"
 
+def print_route(path: Path, note: str = "") -> None:
+    print(f"{path}\t{note}")
+
 def active_task_refs() -> list[Path]:
     todo = root / "TODO.md"
     try:
@@ -288,10 +291,10 @@ def active_task_refs() -> list[Path]:
 metadata = parse_frontmatter(task_path)
 if metadata is None:
     if task_path.name == "work_manager.md":
-        print(main_manager_file())
+        print_route(main_manager_file())
         raise SystemExit(0)
     if task_path.name.startswith("work_manager_"):
-        print(task_path)
+        print_route(task_path)
         raise SystemExit(0)
     print("task frontmatter is required to route report", file=sys.stderr)
     raise SystemExit(2)
@@ -300,10 +303,10 @@ if not TARGET_RE.fullmatch(managerat):
     print("task frontmatter `managerat` must be a tmux target", file=sys.stderr)
     raise SystemExit(2)
 if same_tmux_target(managerat, main_target):
-    print(main_manager_file())
+    print_route(main_manager_file())
     raise SystemExit(0)
 if is_named_main_manager_target(managerat):
-    print(main_manager_file())
+    print_route(main_manager_file())
     raise SystemExit(0)
 for candidate in active_task_refs():
     candidate_metadata = parse_frontmatter(candidate)
@@ -311,12 +314,15 @@ for candidate in active_task_refs():
         continue
     runat = candidate_metadata.get("runat", "")
     if same_tmux_target(runat, managerat):
-        print(candidate)
+        print_route(candidate)
         raise SystemExit(0)
-print(f"manager task file not found for managerat {managerat}", file=sys.stderr)
-raise SystemExit(2)
+note = f"Target manager `{managerat}` has no active manager task file. Main manager: find where that manager moved or reassign this report."
+print_route(main_manager_file(), note)
 PY
 )
+IFS=$'\t' read -r append_path_real route_note <<EOF
+$append_info
+EOF
 mkdir -p "$(dirname "$append_path_real")"
 stamp=$(date '+%H:%M')
 append_kv() {
@@ -369,7 +375,7 @@ old_legacy_source_match="$old_legacy_source_line"
 if [ "$old_source_line" != "${old_source_prefix}]" ]; then
   old_legacy_source_match=""
 fi
-pointer_info=$(python3 - "$message_file" "$agent" "$status" "$stamp" "$path_real" "$pointer_label" <<'PY'
+pointer_info=$(python3 - "$message_file" "$agent" "$status" "$stamp" "$path_real" "$pointer_label" "$route_note" <<'PY'
 from __future__ import annotations
 import hashlib
 import os
@@ -381,6 +387,7 @@ message_path = Path(sys.argv[1])
 agent, status, stamp = sys.argv[2:5]
 task_path = Path(sys.argv[5])
 pointer_label = sys.argv[6]
+route_note = sys.argv[7]
 message_bytes = message_path.read_bytes()
 message_hash = hashlib.sha256(message_bytes).hexdigest()
 
@@ -397,17 +404,21 @@ task_basename = safe_label(task_path.name)
 reports_dir = Path("/tmp") / f"omo-agent-messages-{os.getuid()}"
 reports_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
 reports_dir.chmod(0o700)
-report_key = hashlib.sha256(b"\0".join([message_bytes, agent.encode(), status.encode(), label.encode(), str(task_path).encode()])).hexdigest()
+report_key_parts = [message_bytes, agent.encode(), status.encode(), label.encode(), str(task_path).encode()]
+if route_note:
+    report_key_parts.append(route_note.encode())
+report_key = hashlib.sha256(b"\0".join(report_key_parts)).hexdigest()
 report_path = reports_dir / f"{safe_part(agent)}_{safe_part(status)}_{report_key}.md"
 pointer_line = f"(from agent {label} {report_path})"
 sent_line = f"(sent from {agent} via omo_report.sh tmux={label} time={stamp} task-file={task_basename})"
-header = "\n".join(
-    [
+header_lines = [
         sent_line,
         f"[message-sha256: {message_hash}]",
-        "message:",
-    ]
-).encode("utf-8") + b"\n"
+]
+if route_note:
+    header_lines.extend(["route-warning:", route_note])
+header_lines.append("message:")
+header = "\n".join(header_lines).encode("utf-8") + b"\n"
 body = header + message_bytes
 if report_path.exists():
     current = report_path.read_bytes()

@@ -3894,7 +3894,81 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertNotIn("(pending)", worker_task.read_text(encoding="utf-8"))
             self.assertFalse(dated_manager_file(root).exists())
             report_text = agent_pointer_paths(manager_text)[0].read_text(encoding="utf-8")
+            expected_key = hashlib.sha256(b"\0".join([b"worker done\n", b"worker-agent", b"done", b"vl:2", str(worker_task.resolve(strict=False)).encode()])).hexdigest()
+            self.assertTrue(str(agent_pointer_paths(manager_text)[0]).endswith(f"worker-agent_done_{expected_key}.md"))
             assert_concise_agent_report(self, report_text, agent="worker-agent", tmux="vl:2", task_file="worker.md", message=b"worker done\n")
+
+    def test_omo_report_escalates_missing_manager_task_to_main_manager(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            root.mkdir()
+            msg = Path(tmp) / "msg.md"
+            msg.write_text("worker done\n", encoding="utf-8")
+            worker_task = write_report_worker_task(root, "worker.md", runat="vl:2", managerat="vl:15")
+            (root / "TODO.md").write_text("current:\nworker.md vl:2\n", encoding="utf-8")
+
+            result = subprocess.run(
+                omo_report_command(agent="worker-agent", message_file=msg),
+                cwd=tmp,
+                env=report_test_env(tmp, OMO_FAKE_TMUX_INFO="vl\t2\t0\t%report\tworker\n"),
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+
+            self.assertEqual("", result.stderr)
+            self.assertEqual(0, result.returncode)
+            manager_text = dated_manager_file(root).read_text(encoding="utf-8")
+            self.assertIn("(pending)", manager_text)
+            self.assertRegex(manager_text, re.compile(r"^\(from agent vl:2 /tmp/omo-agent-messages-\d+/worker-agent_done_[0-9a-f]{64}\.md\)$", re.MULTILINE))
+            self.assertNotIn("(pending)", worker_task.read_text(encoding="utf-8"))
+            report_text = agent_pointer_paths(manager_text)[0].read_text(encoding="utf-8")
+            self.assertIn("route-warning:\nTarget manager `vl:15` has no active manager task file. Main manager: find where that manager moved or reassign this report.\nmessage:\nworker done\n", report_text)
+
+    def test_omo_report_keeps_escalated_report_file_when_manager_returns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            root.mkdir()
+            msg = Path(tmp) / "msg.md"
+            msg.write_text("worker done\n", encoding="utf-8")
+            _ = write_report_worker_task(root, "worker.md", runat="vl:2", managerat="vl:15")
+            (root / "TODO.md").write_text("current:\nworker.md vl:2\n", encoding="utf-8")
+            env = report_test_env(tmp, OMO_FAKE_TMUX_INFO="vl\t2\t0\t%report\tworker\n")
+
+            first = subprocess.run(
+                omo_report_command(agent="worker-agent", message_file=msg),
+                cwd=tmp,
+                env=env,
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+            self.assertEqual("", first.stderr)
+            self.assertEqual(0, first.returncode)
+            main_report_path = agent_pointer_paths(dated_manager_file(root).read_text(encoding="utf-8"))[0]
+            self.assertIn("route-warning:\nTarget manager `vl:15` has no active manager task file.", main_report_path.read_text(encoding="utf-8"))
+
+            manager_task = root / "manager.md"
+            manager_task.write_text(task_frontmatter(runat="vl:15", managerat="main:0.0", is_manager=True), encoding="utf-8")
+            (root / "TODO.md").write_text("current:\nmanager.md vl:15\nworker.md vl:2\n", encoding="utf-8")
+            second = subprocess.run(
+                omo_report_command(agent="worker-agent", message_file=msg),
+                cwd=tmp,
+                env=env,
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+
+            self.assertEqual("", second.stderr)
+            self.assertEqual(0, second.returncode)
+            submanager_report_path = agent_pointer_paths(manager_task.read_text(encoding="utf-8"))[0]
+            self.assertNotEqual(main_report_path, submanager_report_path)
+            self.assertIn("route-warning:\nTarget manager `vl:15` has no active manager task file.", main_report_path.read_text(encoding="utf-8"))
+            self.assertNotIn("route-warning:", submanager_report_path.read_text(encoding="utf-8"))
 
     def test_omo_report_inferred_main_manager_task_routes_to_dated_log(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
