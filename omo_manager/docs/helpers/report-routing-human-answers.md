@@ -30,8 +30,10 @@
   - `port` remains only the optional server port
   - this registry parsing does not choose a manager route
 
-- `--manager-target`
-  - unnecessary for `omo_report.sh`
+- `omo_report.sh` route flags
+  - `--task-file`, `--root`, and `--manager-target` are unnecessary for `omo_report.sh`
+  - worker reports should not use manual route flags
   - report routing reads the worker task file, uses `managerat`, and writes the pending block into the manager task file
+  - managers should not tell workers task-file paths for reporting
   - still used by pending/status delivery as a live pane routing filter
   - broader pruning, common-module extraction, and uv wrapper work should be separate from the urgent report route fix

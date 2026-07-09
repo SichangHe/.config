@@ -672,7 +672,7 @@ def main(argv: list[str]) -> int:
         if tmux_target:
             print(tmux_target)
         if not existed:
-            print("reminder: fill pending_task_items in task frontmatter.")
+            print("reminder: fill pending_task_items in task frontmatter. Use omo_task_edit.py pending-add or omo_record_pending.py --task-file; do not hand-edit.")
     except Exception as exc:
         print(f"omo_task: {exc}", file=sys.stderr)
         return 1

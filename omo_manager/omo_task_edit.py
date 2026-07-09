@@ -1,0 +1,532 @@
+#!/usr/bin/env python3
+"""Safely edit task-file pending items and append task comments."""
+from __future__ import annotations
+
+import argparse
+import os
+import subprocess
+import sys
+import tempfile
+from dataclasses import dataclass
+from pathlib import Path
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from omo_manager.omo_agent_status import DEFAULT_ROOT
+from omo_manager.omo_agent_status import TaskFrontmatterError
+from omo_manager.omo_agent_status import TaskMetadata
+from omo_manager.omo_agent_status import parse_task_metadata
+from omo_manager.omo_task_status import replace_if_unchanged
+from omo_manager.omo_task_status import task_path
+
+PENDING_MARKER = "(pending)"
+REMOVE_REMINDER = "Verify the removed pending item was actually done or cancelled; consider evaluator agents for uncertain verification."
+EMAIL_HELPER = Path(__file__).resolve().parents[1] / "helper.sh" / "email_me.py"
+
+COMMAND_ALIASES = {
+    "list": "pending-list",
+    "add": "pending-add",
+    "replace": "pending-replace",
+    "update": "pending-replace",
+    "remove": "pending-remove",
+    "comment": "comment-add",
+}
+
+
+@dataclass(frozen=True)
+class Args:
+    root: Path
+    task_file: Path | None
+    command: str
+    items: tuple[str, ...] = ()
+    old_item: str = ""
+    new_item: str = ""
+    comment: str = ""
+    line: int = 0
+    ack_human: bool = False
+    email_file: Path | None = None
+    source_file: Path | None = None
+    target_file: Path | None = None
+    message_file: Path | None = None
+
+
+@dataclass(frozen=True)
+class PendingListBounds:
+    field_idx: int
+    list_end: int
+
+
+class ParsedArgs(argparse.Namespace):
+    root: Path = DEFAULT_ROOT
+    command: str
+    task_file: Path | None = None
+    item: list[str] | str | None = None
+    old_item: str = ""
+    new_item: str = ""
+    comment: str = ""
+    message: str | None = None
+    legacy_message: str | None = None
+    line: int = 0
+    ack_human: bool = False
+    email_file: Path | None = None
+    from_file: Path | None = None
+    to_file: Path | None = None
+    message_file: Path | None = None
+
+
+def parse_args(argv: list[str]) -> Args:
+    parser = argparse.ArgumentParser(description=__doc__)
+    _ = parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    summary_parser = subparsers.add_parser("summary", help="Print task frontmatter summary and pending_task_items.")
+    summary_parser.set_defaults(command="summary")
+    _ = summary_parser.add_argument("task_file", type=Path)
+
+    list_parser = subparsers.add_parser("pending-list", aliases=["list"], help="Print pending_task_items, one item per line.")
+    list_parser.set_defaults(command="pending-list")
+    _ = list_parser.add_argument("task_file", type=Path)
+
+    add_parser = subparsers.add_parser("pending-add", aliases=["add"], help="Append one or more pending_task_items.")
+    add_parser.set_defaults(command="pending-add")
+    _ = add_parser.add_argument("task_file", type=Path)
+    _ = add_parser.add_argument("--item", action="append", required=True, help="Pending task item to add. Pass once per item.")
+
+    replace_parser = subparsers.add_parser("pending-replace", aliases=["replace", "update"], help="Replace one exact pending_task_item.")
+    replace_parser.set_defaults(command="pending-replace")
+    _ = replace_parser.add_argument("task_file", type=Path)
+    _ = replace_parser.add_argument("--old-item", required=True, help="Existing pending task item text.")
+    _ = replace_parser.add_argument("--new-item", required=True, help="Replacement pending task item text.")
+
+    remove_parser = subparsers.add_parser("pending-remove", aliases=["remove"], help="Remove one or more exact pending_task_items.")
+    remove_parser.set_defaults(command="pending-remove")
+    _ = remove_parser.add_argument("task_file", type=Path)
+    _ = remove_parser.add_argument("--item", action="append", required=True, help="Pending task item to remove. Pass once per item.")
+
+    move_parser = subparsers.add_parser("pending-move", help="Move one pending_task_item from one task file to another.")
+    move_parser.set_defaults(command="pending-move")
+    _ = move_parser.add_argument("--from", dest="from_file", type=Path, required=True, help="Source task file containing the pending item.")
+    _ = move_parser.add_argument("--to", dest="to_file", type=Path, required=True, help="Destination task file that should receive the pending item.")
+    _ = move_parser.add_argument("--item", required=True, help="Pending task item to move.")
+
+    marker_clear_parser = subparsers.add_parser("pending-marker-clear", help="Remove one pending marker without adding pending_task_items.")
+    marker_clear_parser.set_defaults(command="pending-marker-clear")
+    _ = marker_clear_parser.add_argument("task_file", type=Path)
+    _ = marker_clear_parser.add_argument("--line", type=int, required=True, help="One-based line number whose stripped content is `(pending)`.")
+    _ = marker_clear_parser.add_argument("--comment", required=True, help="One-line parenthesized comment evidence explaining why no item was added.")
+    _ = marker_clear_parser.add_argument("--ack-human", action="store_true", help="Email the human that no pending item was added.")
+    _ = marker_clear_parser.add_argument("--email-file", type=Path, help="Stored `manager_mail/*.txt` file whose `Subject:` header should be used for the human acknowledgement.")
+
+    comment_parser = subparsers.add_parser("comment-add", aliases=["comment"], help="Append a parenthesized comment line to a task file.")
+    comment_parser.set_defaults(command="comment-add")
+    _ = comment_parser.add_argument("task_file", type=Path)
+    _ = comment_parser.add_argument("legacy_message", nargs="?", help="Compatibility positional comment text.")
+    _ = comment_parser.add_argument("--message", help="One-line comment text to append.")
+
+    delegate_parser = subparsers.add_parser("delegate-message", help="Append a DM-only pending block to a worker task file.")
+    delegate_parser.set_defaults(command="delegate-message")
+    _ = delegate_parser.add_argument("task_file", type=Path)
+    _ = delegate_parser.add_argument("--message-file", type=Path, required=True, help="File containing the worker direct-message body.")
+
+    parsed = parser.parse_args(argv, namespace=ParsedArgs())
+    try:
+        root = parsed.root.resolve()
+        command = canonical_command(parsed.command)
+        if command == "pending-add":
+            items = normalized_items(tuple(parsed.item or ()))
+            return Args(root, parsed.task_file, command, items=items)
+        if command == "pending-replace":
+            return Args(root, parsed.task_file, command, old_item=normalized_item(parsed.old_item), new_item=normalized_item(parsed.new_item))
+        if command == "pending-remove":
+            items = normalized_items(tuple(parsed.item or ()))
+            return Args(root, parsed.task_file, command, items=items)
+        if command == "pending-move":
+            if parsed.from_file is None or parsed.to_file is None:
+                parser.error("pending-move requires --from and --to.")
+            if not isinstance(parsed.item, str):
+                parser.error("pending-move requires --item.")
+            return Args(root, None, command, items=(normalized_item(parsed.item),), source_file=parsed.from_file, target_file=parsed.to_file)
+        if command == "pending-marker-clear":
+            if parsed.line < 1:
+                parser.error("--line must be positive.")
+            return Args(root, parsed.task_file, command, comment=normalized_comment_message(parsed.comment), line=parsed.line, ack_human=parsed.ack_human, email_file=parsed.email_file)
+        if command == "comment-add":
+            message = parsed.message if parsed.message is not None else parsed.legacy_message
+            if message is None:
+                parser.error("comment-add requires --message.")
+            return Args(root, parsed.task_file, command, comment=normalized_comment_message(message))
+        if command == "delegate-message":
+            return Args(root, parsed.task_file, command, message_file=parsed.message_file)
+    except argparse.ArgumentTypeError as exc:
+        parser.error(str(exc))
+    return Args(root, parsed.task_file, command)
+
+
+def canonical_command(command: str) -> str:
+    return COMMAND_ALIASES.get(command, command)
+
+
+def normalized_item(item: str) -> str:
+    if "\n" in item or "\r" in item:
+        raise argparse.ArgumentTypeError("pending task item must be one line.")
+    value = item.strip()
+    if not value:
+        raise argparse.ArgumentTypeError("pending task item must not be empty.")
+    return value
+
+
+def normalized_items(items: tuple[str, ...]) -> tuple[str, ...]:
+    if not items:
+        raise argparse.ArgumentTypeError("at least one pending task item is required.")
+    return tuple(normalized_item(item) for item in items)
+
+
+def normalized_comment_message(comment: str) -> str:
+    if "\n" in comment or "\r" in comment:
+        raise argparse.ArgumentTypeError("comment must be one line.")
+    value = comment.strip()
+    if not value:
+        raise argparse.ArgumentTypeError("comment must not be empty.")
+    if value.startswith("(") and value.endswith(")"):
+        if not value[1:-1].strip():
+            raise argparse.ArgumentTypeError("comment must not be empty.")
+    return value
+
+
+def normalized_comment(comment: str) -> str:
+    value = normalized_comment_message(comment)
+    if value.casefold() == "pending":
+        raise argparse.ArgumentTypeError("comment must not create a live `(pending)` marker.")
+    if value.startswith("(") and value.endswith(")"):
+        return f"(manager note: {value})"
+    return f"({value})"
+
+
+def normalized_message_file(path: Path) -> Path:
+    value = path.expanduser()
+    if not value.is_absolute():
+        value = Path.cwd() / value
+    return value.resolve(strict=False)
+
+
+def message_file_text(path: Path) -> str:
+    value = path.read_text(encoding="utf-8")
+    if not value.strip():
+        raise TaskFrontmatterError("message file must not be empty.")
+    return value
+
+
+def subject_from_email_file(path: Path) -> str:
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            break
+        key, sep, value = line.partition(":")
+        if sep and key.casefold() == "subject":
+            subject = value.strip()
+            if subject:
+                return subject
+            break
+    raise TaskFrontmatterError("email file has no nonempty `Subject:` header.")
+
+
+def marker_clear_ack_subject(email_path: Path | None) -> str:
+    if email_path is not None:
+        return subject_from_email_file(email_path)
+    return "Request acknowledged"
+
+
+def marker_clear_ack_body(comment: str) -> str:
+    return f"No pending item was added.\nReason: {comment}\n"
+
+
+def send_marker_clear_ack(comment: str, email_path: Path | None) -> None:
+    with tempfile.TemporaryDirectory(prefix="omo-task-edit-") as tmp:
+        subject_path = Path(tmp) / "subject.txt"
+        body_path = Path(tmp) / "body.md"
+        subject_path.write_text(marker_clear_ack_subject(email_path) + "\n", encoding="utf-8")
+        body_path.write_text(marker_clear_ack_body(comment), encoding="utf-8")
+        subprocess.run([str(EMAIL_HELPER), "--manager-human", "--subject-file", str(subject_path), "--message-file", str(body_path)], check=True)
+
+
+def require_metadata(text: str) -> TaskMetadata:
+    metadata = parse_task_metadata(text)
+    if metadata is None:
+        raise TaskFrontmatterError("task file has no frontmatter.")
+    return metadata
+
+
+def require_task_file(task_file: Path | None) -> Path:
+    if task_file is None:
+        raise TaskFrontmatterError("task file is required.")
+    return task_file
+
+
+def frontmatter_closing_idx(lines: list[str]) -> int:
+    if not lines or lines[0].strip() != "---":
+        raise TaskFrontmatterError("task file has no frontmatter.")
+    for idx, line in enumerate(lines[1:], start=1):
+        if line.strip() == "---":
+            return idx
+    raise TaskFrontmatterError("task frontmatter opening marker has no closing marker.")
+
+
+def pending_list_bounds(lines: list[str]) -> PendingListBounds:
+    closing_idx = frontmatter_closing_idx(lines)
+    for idx in range(1, closing_idx):
+        key, sep, _value = lines[idx].rstrip("\r\n").partition(":")
+        if sep and key == "pending_task_items":
+            list_end = idx + 1
+            while list_end < closing_idx and lines[list_end].startswith("  - "):
+                list_end += 1
+            return PendingListBounds(idx, list_end)
+    raise TaskFrontmatterError("task file has no `pending_task_items` frontmatter field.")
+
+
+def line_newline(line: str) -> str:
+    if line.endswith("\r\n"):
+        return "\r\n"
+    if line.endswith("\n"):
+        return "\n"
+    return "\n"
+
+
+def preferred_newline(text: str) -> str:
+    return "\r\n" if "\r\n" in text else "\n"
+
+
+def render_pending_items(text: str, items: tuple[str, ...]) -> str:
+    lines = text.splitlines(keepends=True)
+    bounds = pending_list_bounds(lines)
+    newline = line_newline(lines[bounds.field_idx])
+    if items:
+        replacement = [f"pending_task_items:{newline}", *(f"  - {item}{newline}" for item in items)]
+    else:
+        replacement = [f"pending_task_items: []{newline}"]
+    lines[bounds.field_idx : bounds.list_end] = replacement
+    updated = "".join(lines)
+    _ = require_metadata(updated)
+    return updated
+
+
+def add_pending_items(text: str, items: tuple[str, ...]) -> tuple[str, int]:
+    requested = normalized_items(items)
+    metadata = require_metadata(text)
+    if metadata.status == "done":
+        raise TaskFrontmatterError("task is already done; do not add pending task items to done tasks.")
+    existing = list(metadata.pending_task_items)
+    seen = set(existing)
+    missing: list[str] = []
+    for item in requested:
+        if item in seen:
+            continue
+        missing.append(item)
+        seen.add(item)
+    if not missing:
+        return text, 0
+    return render_pending_items(text, (*existing, *missing)), len(missing)
+
+
+def replace_pending_item(text: str, old_item: str, new_item: str) -> tuple[str, bool]:
+    metadata = require_metadata(text)
+    if metadata.status == "done":
+        raise TaskFrontmatterError("task is already done; do not replace pending task items on done tasks.")
+    old_value = normalized_item(old_item)
+    new_value = normalized_item(new_item)
+    items = list(metadata.pending_task_items)
+    matches = [idx for idx, item in enumerate(items) if item == old_value]
+    if not matches:
+        raise TaskFrontmatterError("pending task item not found.")
+    if len(matches) > 1:
+        raise TaskFrontmatterError("pending task item appears multiple times; remove duplicates before replacing it.")
+    if old_value == new_value:
+        return text, False
+    if new_value in items:
+        raise TaskFrontmatterError("replacement pending task item already exists.")
+    items[matches[0]] = new_value
+    return render_pending_items(text, tuple(items)), True
+
+
+def remove_pending_items(text: str, items: tuple[str, ...]) -> tuple[str, int]:
+    metadata = require_metadata(text)
+    requested = normalized_items(items)
+    current = list(metadata.pending_task_items)
+    missing = [item for item in requested if item not in current]
+    if missing:
+        raise TaskFrontmatterError(f"pending task item not found: {missing[0]}")
+    remove_set = set(requested)
+    remaining = tuple(item for item in current if item not in remove_set)
+    removed_count = len(current) - len(remaining)
+    return render_pending_items(text, remaining), removed_count
+
+
+def append_comment(text: str, comment: str) -> str:
+    _ = require_metadata(text)
+    value = normalized_comment(comment)
+    return append_comment_line(text, value)
+
+
+def append_comment_line(text: str, comment_line: str) -> str:
+    newline = preferred_newline(text)
+    separator = "" if not text or text.endswith("\n") else newline
+    return f"{text}{separator}{comment_line}{newline}"
+
+
+def summary_text(text: str) -> str:
+    metadata = require_metadata(text)
+    lines = [
+        f"status: {metadata.status}",
+        f"runat: {metadata.runat}",
+        f"managerat: {metadata.managerat}",
+        f"is_manager: {str(metadata.is_manager).lower()}",
+    ]
+    if metadata.pending_task_items:
+        lines.append("pending_task_items:")
+        lines.extend(f"  - {item}" for item in metadata.pending_task_items)
+    else:
+        lines.append("pending_task_items: []")
+    return "\n".join(lines) + "\n"
+
+
+def line_is_pending_marker(text: str, line_number: int) -> bool:
+    lines = text.splitlines()
+    return 1 <= line_number <= len(lines) and lines[line_number - 1].strip() == PENDING_MARKER
+
+
+def comment_line_exists(text: str, comment_line: str) -> bool:
+    return any(line.strip() == comment_line for line in text.splitlines())
+
+
+def remove_pending_marker_line(text: str, line_number: int) -> str:
+    lines = text.splitlines(keepends=True)
+    if line_number < 1 or line_number > len(lines):
+        raise TaskFrontmatterError("pending line number is outside the file.")
+    if lines[line_number - 1].strip() != PENDING_MARKER:
+        raise TaskFrontmatterError("specified line does not contain `(pending)`.")
+    del lines[line_number - 1]
+    return "".join(lines)
+
+
+def clear_pending_marker(text: str, line_number: int, comment: str) -> tuple[str, bool]:
+    comment_line = normalized_comment(comment)
+    if line_is_pending_marker(text, line_number):
+        updated = remove_pending_marker_line(text, line_number)
+        if comment_line_exists(updated, comment_line):
+            return updated, True
+        return append_comment_line(updated, comment_line), True
+    if comment_line_exists(text, comment_line):
+        return text, False
+    raise TaskFrontmatterError("specified line does not contain `(pending)`.")
+
+
+def move_pending_item(source_text: str, target_text: str, item: str) -> tuple[str, str, int, int]:
+    value = normalized_item(item)
+    _ = require_metadata(source_text)
+    target_metadata = require_metadata(target_text)
+    if target_metadata.status == "done":
+        raise TaskFrontmatterError("destination task is already done; do not move pending task items to done tasks.")
+    updated_source, removed_count = remove_pending_items(source_text, (value,))
+    updated_target, added_count = add_pending_items(target_text, (value,))
+    return updated_source, updated_target, removed_count, added_count
+
+
+def append_delegate_message(text: str, message: str) -> str:
+    metadata = require_metadata(text)
+    if metadata.status == "done":
+        raise TaskFrontmatterError("task is already done; do not delegate new messages to done tasks.")
+    if metadata.is_manager:
+        raise TaskFrontmatterError("delegate-message requires a worker task file, not a manager task file.")
+    newline = preferred_newline(text)
+    separator = "" if not text or text.endswith("\n") else newline
+    message_text = message if message.endswith("\n") else f"{message}{newline}"
+    return f"{text}{separator}{PENDING_MARKER}{newline}DM only{newline}(from manager omo_task_edit delegate-message){newline}{message_text}"
+
+
+def write_if_changed(path: Path, text: str, updated: str, before: os.stat_result) -> None:
+    if updated != text:
+        replace_if_unchanged(path, updated, before)
+
+
+def run(args: Args) -> int:
+    try:
+        command = canonical_command(args.command)
+        if command == "pending-move":
+            if args.source_file is None or args.target_file is None:
+                raise TaskFrontmatterError("pending-move requires source and destination task files.")
+            source_path = task_path(args.root, args.source_file)
+            target_path = task_path(args.root, args.target_file)
+            if source_path == target_path:
+                raise TaskFrontmatterError("source and destination task files must be different.")
+            source_before = source_path.stat()
+            target_before = target_path.stat()
+            source_text = source_path.read_text(encoding="utf-8")
+            target_text = target_path.read_text(encoding="utf-8")
+            if len(args.items) != 1:
+                raise TaskFrontmatterError("pending-move requires exactly one pending item.")
+            updated_source, updated_target, removed_count, added_count = move_pending_item(source_text, target_text, args.items[0])
+            write_if_changed(target_path, target_text, updated_target, target_before)
+            write_if_changed(source_path, source_text, updated_source, source_before)
+            added_note = "already present in destination" if added_count == 0 else "added to destination"
+            print(f"moved {removed_count} pending item(s) from {source_path.name} to {target_path.name}; {added_note}")
+            return 0
+
+        path = task_path(args.root, require_task_file(args.task_file))
+        before = path.stat()
+        text = path.read_text(encoding="utf-8")
+        if command == "summary":
+            print(summary_text(text), end="")
+            return 0
+        if command == "pending-list":
+            for item in require_metadata(text).pending_task_items:
+                print(item)
+            return 0
+        if command == "pending-add":
+            updated, count = add_pending_items(text, args.items)
+            write_if_changed(path, text, updated, before)
+            print(f"added {count} pending item(s) to {path.name}")
+            return 0
+        if command == "pending-replace":
+            updated, changed = replace_pending_item(text, args.old_item, args.new_item)
+            write_if_changed(path, text, updated, before)
+            action = "replaced" if changed else "left unchanged"
+            print(f"{action} pending item in {path.name}")
+            return 0
+        if command == "pending-remove":
+            updated, count = remove_pending_items(text, args.items)
+            write_if_changed(path, text, updated, before)
+            print(f"removed {count} pending item(s) from {path.name}; {REMOVE_REMINDER}")
+            return 0
+        if command == "pending-marker-clear":
+            email_path = task_path(args.root, args.email_file) if args.email_file is not None else None
+            updated, changed = clear_pending_marker(text, args.line, args.comment)
+            write_if_changed(path, text, updated, before)
+            if args.ack_human:
+                send_marker_clear_ack(args.comment, email_path)
+            action = "removed" if changed else "already removed"
+            print(f"{action} `(pending)` from {path.name}:{args.line}; no pending item added")
+            return 0
+        if command == "comment-add":
+            updated = append_comment(text, args.comment)
+            write_if_changed(path, text, updated, before)
+            print(f"appended comment to {path.name}")
+            return 0
+        if command == "delegate-message":
+            if args.message_file is None:
+                raise TaskFrontmatterError("delegate-message requires --message-file.")
+            message = message_file_text(normalized_message_file(args.message_file))
+            updated = append_delegate_message(text, message)
+            write_if_changed(path, text, updated, before)
+            print(f"appended DM-only pending message to {path.name}")
+            return 0
+        raise TaskFrontmatterError(f"unknown command: {command}")
+    except (OSError, TaskFrontmatterError, subprocess.CalledProcessError, argparse.ArgumentTypeError) as exc:
+        print(f"omo_task_edit.py: {exc}", file=sys.stderr)
+        return 2
+
+
+def main(argv: list[str] | None = None) -> int:
+    return run(parse_args(sys.argv[1:] if argv is None else argv))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

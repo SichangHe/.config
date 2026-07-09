@@ -84,6 +84,7 @@ EMAIL_CONTENT_CHAR_LIMIT = PENDING_CONTENT_CHAR_LIMIT
 ROUTED_PREFIXES = ("(manager handled:", "(manager routed:")
 EMAIL_SOURCE_PREFIXES = ("(record and delegate ", "(from email ", "[source: email ")
 AGENT_SOURCE_PREFIXES = ("[omo-message-source: origin=agent ", "(from agent ")
+MANAGER_SOURCE_PREFIXES = ("(from manager ",)
 FILE_REF_RE = re.compile(r"(?<![\w@.-])((?:/)?(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+\.[A-Za-z0-9_.-]+|[A-Za-z0-9_.-]+\.(?:md|txt|json|yaml|yml|toml|py|sh))(?![\w/.-])")
 LIST_POINTER_PREFIX_RE = re.compile(r"^(?:[-*+]|\d+[.)])\s+")
 CHECKBOX_POINTER_PREFIX_RE = re.compile(r"^\[[ xX]\]\s+")
@@ -662,6 +663,8 @@ def marker_origin_source(block_lines: list[str]) -> tuple[str, str]:
     """Classify who created a pending block from explicit source markers."""
 
     stripped_lines = [line.strip() for line in block_lines]
+    if any(line.startswith(MANAGER_SOURCE_PREFIXES) for line in stripped_lines):
+        return "agent", "manager"
     if any(line.startswith(AGENT_SOURCE_PREFIXES) for line in stripped_lines):
         return "agent", "agent"
     if any(line.startswith(EMAIL_SOURCE_PREFIXES) for line in stripped_lines):
@@ -1041,11 +1044,11 @@ def manager_pending_instruction(marker: Marker, after_recording: str = "Then dis
     if marker.origin == "human":
         quote_note = "Choose `--item` values by quoting the human's words as much as possible."
         flag_note = "Use `--ack-human` so the script emails the human after recording."
-        fallback_note = "If there is no pending task item to add, or you need to edit an existing pending item, edit the task file directly instead and email the human manually."
+        fallback_note = "If there is no pending task item to add, use `omo_task_edit.py pending-marker-clear` with `--comment`, `--ack-human`, and the same `--email-file` when shown above; for existing pending-item edits, use `omo_task_edit.py pending-replace` or `omo_task_edit.py pending-remove`."
     else:
         quote_note = "Choose `--item` values by quoting the request's words as much as possible."
         flag_note = "Do not pass `--ack-human`; agent-origin reports do not need a human acknowledgement."
-        fallback_note = "If there is no pending task item to add, or you need to edit an existing pending item, edit the task file directly instead."
+        fallback_note = "If there is no pending task item to add, use `omo_task_edit.py pending-marker-clear` with `--comment`; for existing pending-item edits, use `omo_task_edit.py pending-replace` or `omo_task_edit.py pending-remove`."
     return (
         "Normally record pending items and remove the consumed `(pending)` marker by running:\n"
         f"`{command}`\n"
@@ -1106,7 +1109,7 @@ def clean_direct_message_lines(text: str) -> str:
     lines = []
     for line in strip_direct_markers(text).splitlines():
         stripped = line.strip()
-        if stripped.startswith(EMAIL_SOURCE_PREFIXES) or stripped.startswith(AGENT_SOURCE_PREFIXES):
+        if stripped.startswith(EMAIL_SOURCE_PREFIXES) or stripped.startswith(AGENT_SOURCE_PREFIXES) or stripped.startswith(MANAGER_SOURCE_PREFIXES):
             continue
         lines.append(line)
     return strip_direct_markers("\n".join(lines))

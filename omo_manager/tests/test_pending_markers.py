@@ -4859,6 +4859,12 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertNotIn("\nDM only\n", calls[0][1])
             self.assertNotIn("\n(pending)\n", calls[0][1])
 
+    def test_pending_block_dm_only_strips_manager_source_marker_for_worker(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        self.assertEqual("Please inspect directly.", watcher.clean_direct_message_lines("(pending)\nDM only\n(from manager omo_task_edit delegate-message)\nPlease inspect directly."))
+        self.assertEqual(("agent", "manager"), watcher.marker_origin_source(["(pending)", "DM only", "(from manager omo_task_edit delegate-message)", "Please inspect directly."]))
+
     def test_direct_marker_stripping_preserves_same_line_payload_syntax(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 

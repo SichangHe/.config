@@ -58,7 +58,7 @@ def parse_args(argv: list[str]) -> Args:
     except argparse.ArgumentTypeError as exc:
         parser.error(str(exc))
     if not items:
-        parser.error("at least one --item is required; directly edit the task file for no-item acknowledgements or existing-item edits.")
+        parser.error("at least one --item is required; use omo_task_edit.py pending-marker-clear for no-item acknowledgements or omo_task_edit.py pending-replace/pending-remove for existing-item edits.")
     return Args(parsed.root.resolve(), parsed.pending_file, parsed.line, parsed.task_file or parsed.pending_file, items, parsed.ack_human, parsed.email_file)
 
 

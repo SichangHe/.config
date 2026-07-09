@@ -22,6 +22,8 @@ omo_tmux_send.py --target cfg:1.0 --message-file "$prompt_file"
 omo_task.py --task-file x.md --tmux-session cfg --workdir /repo --prompt-file "$prompt_file"
 ```
 
+For worker prompts, keep task-file paths out of the prompt body. Workers report with `omo_report.sh` from their tmux pane and do not need `--task-file`, `--root`, `--manager-target`, or other manual route flags.
+
 For prompts, it reads `--message-file`, writes the payload to a private `0600` temp file, loads that file into a tmux buffer, pastes the buffer to the target, and uses `send-keys` only for final Enter keys.
 
 Before paste, it sends a separate Enter when the target is classified as `stuck_input` and the current input is safe to submit, then continues with the normal send path. The helper supports Codex `running`, `ready`, and `stuck_input` states; it rejects non-Codex and Codex error panes. Compaction no longer blocks delivery because Codex accepts pending input while compacting.

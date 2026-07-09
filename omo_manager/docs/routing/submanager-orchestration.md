@@ -13,7 +13,8 @@ ownership
   - project brief/state/log files
   - worker routing for that project
   - compact summary for main
-- worker owns task files and reports
+- manager owns task-file bookkeeping
+- worker owns implementation artifacts and reports through `omo_report.sh`
 
 main registry
 - file: `manager_projects.md`
