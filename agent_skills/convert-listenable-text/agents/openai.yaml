@@ -1,0 +1,4 @@
+interface:
+  display_name: "Convert Listenable Text"
+  short_description: "Prepare text for clear text-to-speech"
+  default_prompt: "Use $convert-listenable-text to rewrite this source text for clear text-to-speech playback."
