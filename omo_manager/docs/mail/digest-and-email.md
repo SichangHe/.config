@@ -11,7 +11,7 @@ PB news digest:
 - when the human asks, run `scripts/manager-digest deliver` immediately from `/ssd1/sichangheagent/work_logs`
 - the delivery script clears the manager queue only after a successful send
 
-`email_me.py --manager-human` is the human email sender. New manager-human subjects use `[a] [TARGET]`; old `[omo_manager]` subjects remain accepted and canonicalized to `[a]`.
+`email_me.py --manager-human` is the human email sender. New manager-human subjects use `[a] [TARGET]`; old `[omo_manager]` subjects remain accepted and canonicalized to `[a]`. Subjects must be passed with `--subject-file` or explicit `--subject`; positional subjects are refused so a body draft path cannot accidentally become the email subject.
 
 Before sending, recent-thread lookup strips repeated `Re:` plus `[a]`, `[omo_manager]`, legacy `[omo]`, and leading tmux window/pane subject tags. When a match is found in the recent window, the outgoing subject becomes `Re: [a] [TARGET] SUBJECT` and the message includes `In-Reply-To` and `References` headers from the matched self-sent mail.
 

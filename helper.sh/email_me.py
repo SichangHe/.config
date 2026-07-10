@@ -69,8 +69,8 @@ class CliArgs:
 
 
 class ParsedArgs(argparse.Namespace):
-    title: str | None = None
-    content: str = ""
+    subject: str | None = None
+    legacy_args: list[str]
     subject_file: Path | None = None
     message_file: Path | None = None
     dry_run: bool = False
@@ -82,15 +82,15 @@ class ParsedArgs(argparse.Namespace):
 
 def parse_args(argv: list[str]) -> CliArgs:
     parser = argparse.ArgumentParser(
-        usage="email_me.py [--dry-run] [--subject-file FILE | SUBJECT] [--message-file FILE]",
+        usage="email_me.py [--dry-run] (--subject TEXT | --subject-file FILE) [--message-file FILE]",
         description=(
             "Email the human with manager-safe subject handling. The body accepts Markdown input, but plain text is preferred. "
             "Reads the email body from standard input by default; "
             "use --message-file for a saved body. Do not pass body text as a shell argument."
         ),
     )
-    _ = parser.add_argument("title", metavar="SUBJECT", type=str, nargs="?", help="Email subject/title.")
-    _ = parser.add_argument("content", nargs="?", type=str, help=argparse.SUPPRESS)
+    _ = parser.add_argument("legacy_args", nargs="*", help=argparse.SUPPRESS)
+    _ = parser.add_argument("--subject", help="Email subject/title.")
     _ = parser.add_argument("--subject-file", type=Path, help="Read the email subject from this one-line file instead of an argument.")
     _ = parser.add_argument("--message-file", type=Path, help="Read the email body from this file instead of stdin.")
     _ = parser.add_argument("--dry-run", action="store_true", help="Validate without sending.")
@@ -99,9 +99,11 @@ def parse_args(argv: list[str]) -> CliArgs:
     _ = parser.add_argument("--sender-tmux-target", dest="sender_tmux_target", help="Alias for --tmux-target; useful when forwarding or compressing mail while preserving the source owner tag.")
     _ = parser.add_argument("--manager-human", action="store_true", help=argparse.SUPPRESS)
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
-    if parsed.title is not None and parsed.subject_file is not None:
-        parser.error("pass email subject by argument or --subject-file, not both.")
-    if parsed.title is None and parsed.subject_file is None:
+    if parsed.legacy_args:
+        parser.error("pass email subject with --subject or --subject-file; pass email body by standard input or --message-file.")
+    if parsed.subject is not None and parsed.subject_file is not None:
+        parser.error("pass email subject with --subject or --subject-file, not both.")
+    if parsed.subject is None and parsed.subject_file is None:
         parser.error("email subject required.")
     if parsed.subject_file is not None:
         try:
@@ -117,15 +119,8 @@ def parse_args(argv: list[str]) -> CliArgs:
         if "\r" in title or "\0" in title:
             parser.error("subject file must contain exactly one text line.")
     else:
-        assert parsed.title is not None
-        title = parsed.title
-    if parsed.content is not None and parsed.message_file is not None:
-        parser.error("pass email body by standard input or --message-file, not both.")
-    if parsed.content is not None:
-        parser.error(
-            "pass email body by standard input or --message-file, not as a shell argument; "
-            "shells can expand $, backticks, command substitutions, and redirection-like text before this helper runs."
-        )
+        assert parsed.subject is not None
+        title = parsed.subject
     if parsed.message_file is not None:
         try:
             content = parsed.message_file.read_text(encoding="utf-8")

@@ -328,29 +328,29 @@ class EmailMeTests(unittest.TestCase):
 
     def test_parse_args_reads_body_from_stdin_by_default(self) -> None:
         with patch.object(sys, "stdin", StringIO(SHELL_SENSITIVE_BODY)):
-            args = email_me.parse_args(["hi"])
+            args = email_me.parse_args(["--subject", "hi"])
         self.assertEqual("hi", args.title)
         self.assertEqual(SHELL_SENSITIVE_BODY, args.content)
         self.assertTrue(args.add_pwd_footer)
 
     def test_parse_args_can_disable_pwd_footer(self) -> None:
         with patch.object(sys, "stdin", StringIO("body\n")):
-            args = email_me.parse_args(["--no-pwd-footer", "hi"])
+            args = email_me.parse_args(["--no-pwd-footer", "--subject", "hi"])
         self.assertFalse(args.add_pwd_footer)
 
     def test_parse_args_accepts_explicit_tmux_target(self) -> None:
         with patch.object(sys, "stdin", StringIO("body\n")):
-            args = email_me.parse_args(["--tmux-target", "wl:7", "hi"])
+            args = email_me.parse_args(["--tmux-target", "wl:7", "--subject", "hi"])
         self.assertEqual("wl:7", args.tmux_target)
 
     def test_parse_args_accepts_sender_tmux_target_alias(self) -> None:
         with patch.object(sys, "stdin", StringIO("body\n")):
-            args = email_me.parse_args(["--sender-tmux-target", "wl:7", "hi"])
+            args = email_me.parse_args(["--sender-tmux-target", "wl:7", "--subject", "hi"])
         self.assertEqual("wl:7", args.tmux_target)
 
     def test_parse_args_rejects_malformed_tmux_target(self) -> None:
         with patch.object(sys, "stdin", StringIO("body\n")), patch("sys.stderr", new_callable=StringIO) as stderr, self.assertRaises(SystemExit) as raised:
-            email_me.parse_args(["--tmux-target", "wl:bad", "hi"])
+            email_me.parse_args(["--tmux-target", "wl:bad", "--subject", "hi"])
         self.assertEqual(2, raised.exception.code)
         self.assertIn("session:window", stderr.getvalue())
 
@@ -362,17 +362,18 @@ class EmailMeTests(unittest.TestCase):
         self.assertIn("body accepts Markdown input", help_text)
         self.assertIn("plain text is preferred", help_text)
 
-    def test_parse_args_rejects_positional_body(self) -> None:
+    def test_parse_args_rejects_positional_arguments(self) -> None:
         with patch("sys.stderr", new_callable=StringIO) as stderr, self.assertRaises(SystemExit) as raised:
-            email_me.parse_args(["hi", "legacy body"])
+            email_me.parse_args(["draft.md"])
         self.assertEqual(2, raised.exception.code)
-        self.assertIn("not as a shell argument", stderr.getvalue())
+        self.assertIn("--subject or --subject-file", stderr.getvalue())
+        self.assertIn("--message-file", stderr.getvalue())
 
     def test_parse_args_reads_message_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "body.md"
             path.write_text(SHELL_SENSITIVE_BODY, encoding="utf-8")
-            args = email_me.parse_args(["hi", "--message-file", str(path)])
+            args = email_me.parse_args(["--subject", "hi", "--message-file", str(path)])
         self.assertEqual(SHELL_SENSITIVE_BODY, args.content)
 
     def test_parse_args_reads_subject_file(self) -> None:
@@ -396,13 +397,13 @@ class EmailMeTests(unittest.TestCase):
 
     def test_dry_run_does_not_require_smtp_credentials(self) -> None:
         with patch.object(sys, "stdin", StringIO("body\n")), patch("sys.stdout", new_callable=StringIO) as stdout:
-            result = email_me.main(["--dry-run", "hi"])
+            result = email_me.main(["--dry-run", "--subject", "hi"])
         self.assertEqual(0, result)
         self.assertIn("dry-run: email not sent", stdout.getvalue())
 
     def test_dry_run_can_omit_pwd_footer(self) -> None:
         with patch.object(sys, "stdin", StringIO("body\n")), patch("sys.stdout", new_callable=StringIO) as stdout:
-            result = email_me.main(["--dry-run", "--no-pwd-footer", "hi"])
+            result = email_me.main(["--dry-run", "--no-pwd-footer", "--subject", "hi"])
         self.assertEqual(0, result)
         self.assertIn("body-bytes=5", stdout.getvalue())
 
