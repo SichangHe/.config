@@ -13,12 +13,13 @@ from typing import Any
 
 TOKEN_KEYS = ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens")
 DEFAULT_PRICE_TABLE = {
-    "source": "https://openai.com/api/pricing/",
-    "source_accessed": "2026-06-30",
+    "source": "https://platform.openai.com/docs/pricing",
+    "source_accessed": "2026-07-12",
     "unit": "usd_per_1m_tokens",
     "notes": [
-        "OpenAI pricing page read via browser tool on 2026-06-30; local urllib received HTTP 403.",
-        "Page lists GPT-5.5 with Input $5.00, Cached input $0.50, Output $30.00 per 1M tokens.",
+        "OpenAI API pricing page read via browser tool on 2026-07-12.",
+        "Rows use standard short-context flagship model prices.",
+        "GPT-5.5 is retained as a historical row for older raw session files.",
         "Reasoning output tokens are output tokens in Codex token_count totals; the table does not price them separately.",
     ],
     "prices": [
@@ -29,6 +30,33 @@ DEFAULT_PRICE_TABLE = {
             "input_tokens": "5.00",
             "cached_input_tokens": "0.50",
             "output_tokens": "30.00",
+            "reasoning_output_tokens": "0",
+        },
+        {
+            "provider": "openai",
+            "model": "gpt-5.6-sol",
+            "effective_date": "2026-07-12",
+            "input_tokens": "5.00",
+            "cached_input_tokens": "0.50",
+            "output_tokens": "30.00",
+            "reasoning_output_tokens": "0",
+        },
+        {
+            "provider": "openai",
+            "model": "gpt-5.6-terra",
+            "effective_date": "2026-07-12",
+            "input_tokens": "2.50",
+            "cached_input_tokens": "0.25",
+            "output_tokens": "15.00",
+            "reasoning_output_tokens": "0",
+        },
+        {
+            "provider": "openai",
+            "model": "gpt-5.6-luna",
+            "effective_date": "2026-07-12",
+            "input_tokens": "1.00",
+            "cached_input_tokens": "0.10",
+            "output_tokens": "6.00",
             "reasoning_output_tokens": "0",
         },
     ],

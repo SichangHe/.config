@@ -1,7 +1,7 @@
 ---
 description: "Read-only reviewer. Critique rewritten code without editing."
 mode: subagent
-model: openai/gpt-5.5
+model: openai/gpt-5.6-terra
 variant: xhigh
 temperature: 0.1
 tools:

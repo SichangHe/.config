@@ -24,7 +24,7 @@ config_allowed() {
   [[ "$spec" == *=* && "$spec" != *$'\n'* && "$spec" != *$'\r'* ]] || return 1
   [[ "$(config_key "$spec")" == "model_reasoning_effort" ]] || return 1
   case "$(trim "${spec#*=}")" in
-    low|medium|high|xhigh|'"low"'|'"medium"'|'"high"'|'"xhigh"'|"'low'"|"'medium'"|"'high'"|"'xhigh'") return 0 ;;
+    low|medium|high|xhigh|max|ultra|'"low"'|'"medium"'|'"high"'|'"xhigh"'|'"max"'|'"ultra"'|"'low'"|"'medium'"|"'high'"|"'xhigh'"|"'max'"|"'ultra'") return 0 ;;
     *) return 1 ;;
   esac
 }

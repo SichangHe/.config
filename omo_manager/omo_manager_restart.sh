@@ -24,7 +24,7 @@ root="${OMO_WORK_LOGS_ROOT:-$HOME/work_logs}"
 state_dir="${OMO_MANAGER_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/omo-manager}"
 workdir="${OMO_MANAGER_WORKDIR:-$root}"
 tmux_target="${OMO_MANAGER_TMUX_TARGET:-omo-manager:0.0}"
-manager_model="${OMO_MANAGER_MODEL:-openai/gpt-5.5}"
+manager_model="${OMO_MANAGER_MODEL:-openai/gpt-5.6-terra}"
 startup_prompt=1
 refresh_watchers=1
 dry_run=0
@@ -43,7 +43,7 @@ Options:
   --state-dir DIR         Private state/log dir (default: OMO_MANAGER_STATE_DIR or ~/.local/state/omo-manager)
   --workdir DIR           Directory where manager OpenCode should run (default: root)
   --tmux-target TARGET    Existing pane or manager session pane (default: OMO_MANAGER_TMUX_TARGET or omo-manager:0.0)
-  --model MODEL           OpenCode model for the manager (default: OMO_MANAGER_MODEL or openai/gpt-5.5)
+  --model MODEL           OpenCode model for the manager (default: OMO_MANAGER_MODEL or openai/gpt-5.6-terra)
   --no-startup-prompt     Do not submit the post-restart work-log MANAGER.md prompt
   --no-refresh-watchers   Do not run omo_manager_setup_watchers.sh after health succeeds
   --force-port            Kill any non-manager listener still occupying the manager port after Ctrl-C

@@ -96,7 +96,7 @@ class ParsedArgs(argparse.Namespace):
     opencode_bin: Path = Path.home() / ".opencode" / "bin" / "opencode"
     prepare_smoke_image: str = "run"
     smoke_timeout_s: int = 60
-    smoke_command: str = "opencode run --pure --model openai/gpt-5.5 'Reply with exactly: yes'"
+    smoke_command: str = "opencode run --pure --model openai/gpt-5.6-terra 'Reply with exactly: yes'"
     expected_output: str = "yes"
     all_candidates: bool = False
     refreshed_output_dir: Path | None = None
@@ -119,7 +119,7 @@ def parse_args(argv: list[str]) -> CliArgs:
     _ = parser.add_argument("--smoke-timeout-s", type=int, default=60)
     _ = parser.add_argument(
         "--smoke-command",
-        default="opencode run --pure --model openai/gpt-5.5 'Reply with exactly: yes'",
+        default="opencode run --pure --model openai/gpt-5.6-terra 'Reply with exactly: yes'",
     )
     _ = parser.add_argument("--expected-output", default="yes")
     _ = parser.add_argument("--all-candidates", action="store_true")

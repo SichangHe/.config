@@ -91,7 +91,7 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--no-link", action="store_true")
     _ = parser.add_argument("--dry-run", action="store_true")
     _ = parser.add_argument("--session-id", default="", help="Codex session id to resume in a new worker window.")
-    _ = parser.add_argument("--reasoning-effort", choices=("low", "medium", "high", "xhigh"), default="", help="Start Codex with `model_reasoning_effort` for this worker.")
+    _ = parser.add_argument("--reasoning-effort", choices=("low", "medium", "high", "xhigh", "max", "ultra"), default="", help="Start Codex with `model_reasoning_effort` for this worker.")
     _ = parser.add_argument("--codex-flag", action="append", help="Extra raw Codex argv token. Repeat for flags and values; use `--codex-flag=--flag` when the token starts with `--`.")
     _ = parser.add_argument("--manager-target", default="", help="Optional manager owner target to write as `managerat:` task metadata.")
     _ = parser.add_argument("--prelaunch-source", type=Path, help="Readable shell script to source before launching the worker command.")

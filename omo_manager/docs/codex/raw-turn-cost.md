@@ -23,9 +23,9 @@
   - default table is bundled in the script
   - override with `--prices prices.json`
   - export the bundled editable shape with `--dump-default-prices`
-  - default source is `https://openai.com/api/pricing/`, accessed 2026-06-30
-  - local direct Python fetch hit HTTP 403, so the current default came from browser-tool access
-  - page text used: `GPT-5.5`, `Input $5.00`, `Cached input $0.50`, `Output $30.00`
+  - default source is `https://platform.openai.com/docs/pricing/`, accessed 2026-07-12
+  - current bundled rows cover `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`
+  - the historical `gpt-5.5` row is retained so older raw session files still price correctly
   - unit is USD per 1M tokens
   - reasoning output is counted separately but is not priced separately because it is already part of output tokens
 - example

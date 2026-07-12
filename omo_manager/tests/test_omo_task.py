@@ -1,5 +1,7 @@
 import contextlib
 import io
+import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -484,11 +486,53 @@ class OmoTaskTests(unittest.TestCase):
             codex_cmd(reasoning_effort="xhigh", codex_flags=("--profile", "deep-review"), tool="pcodx"),
         )
 
+    def test_pcodx_wrapper_allows_new_reasoning_efforts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            bun = bin_dir / "bun"
+            bun.write_text("#!/usr/bin/env bash\nprintf 'developer instructions\\n'\n", encoding="utf-8")
+            bun.chmod(0o700)
+            captured = root / "captured.txt"
+            bunx = bin_dir / "bunx"
+            bunx.write_text(f"#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > {captured}\n", encoding="utf-8")
+            bunx.chmod(0o700)
+            env = {
+                **os.environ,
+                "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                "PCODX_POC_ROOT": str(root / "pcodx"),
+                "PCODX_RUN_DIR": str(root / "run"),
+            }
+
+            result = subprocess.run(
+                [str(PCODX_WRAPPER), "--config", 'model_reasoning_effort="max"', "--config=model_reasoning_effort='ultra'", "prompt"],
+                env=env,
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+
+            self.assertEqual("", result.stderr)
+            self.assertEqual(0, result.returncode)
+            sent = captured.read_text(encoding="utf-8")
+            self.assertIn('model_reasoning_effort="max"', sent)
+            self.assertIn("model_reasoning_effort='ultra'", sent)
+            self.assertIn("prompt\n", sent)
+
     def test_parse_args_accepts_repeatable_codex_flags(self) -> None:
         args = parse_args(["--task-file", "x.md", "--reasoning-effort", "xhigh", "--codex-flag=--profile", "--codex-flag", "deep-review"])
         self.assertEqual("xhigh", args.reasoning_effort)
         self.assertEqual(("--profile", "deep-review"), args.codex_flags)
         self.assertEqual(DEFAULT_TOOL, args.tool)
+
+    def test_parse_args_accepts_new_reasoning_efforts(self) -> None:
+        for effort in ("max", "ultra"):
+            with self.subTest(effort=effort):
+                args = parse_args(["--task-file", "x.md", "--reasoning-effort", effort])
+                self.assertEqual(effort, args.reasoning_effort)
+                self.assertIn(f'model_reasoning_effort="{effort}"', codex_cmd(reasoning_effort=effort))
 
     def test_parse_args_accepts_prelaunch_source(self) -> None:
         args = parse_args(["--task-file", "x.md", "--prelaunch-source", "/tmp/pre launch.sh"])
