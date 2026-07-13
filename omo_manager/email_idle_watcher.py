@@ -29,18 +29,26 @@ from urllib.parse import urlparse
 try:
     from .omo_email_subject import subject_base
     from .omo_agent_status import TaskFrontmatterError, parse_task_metadata
-    from .omo_tmux_send import CodexSendOptions, DEFAULT_TMUX_ENTER_COUNT, send_to_codex
+    from .omo_pending_watch import text_marks_dm, text_marks_dm_only
+    from .omo_tmux_send import CodexSendOptions, DEFAULT_TMUX_ENTER_COUNT, require_sendable_codex_target, send_to_codex
 except ImportError:
     try:
         from omo_email_subject import subject_base
         from omo_agent_status import TaskFrontmatterError, parse_task_metadata
-        from omo_tmux_send import CodexSendOptions, DEFAULT_TMUX_ENTER_COUNT, send_to_codex
+        from omo_pending_watch import text_marks_dm, text_marks_dm_only
+        from omo_tmux_send import CodexSendOptions, DEFAULT_TMUX_ENTER_COUNT, require_sendable_codex_target, send_to_codex
     except ImportError:
         subject_base = None
         TaskFrontmatterError = ValueError
 
         def parse_task_metadata(_text: str) -> object:
             return None
+
+        def text_marks_dm(_text: str) -> bool:
+            return False
+
+        def text_marks_dm_only(_text: str) -> bool:
+            return False
 
 
 def default_state_dir() -> Path:
@@ -116,6 +124,7 @@ class EmailRoute:
     manager_file: Path
     manager_target: str
     routed_target: str = ""
+    direct_delivery: bool = False
 
 
 _email_push_queue: queue.Queue[EmailPush] = queue.Queue()
@@ -421,6 +430,36 @@ def current_route_for_owner(args: Args, owner_target: str) -> EmailRoute | None:
     return EmailRoute(owner_file, owner_target, owner_target)
 
 
+def sendable_codex_target(target: str) -> bool:
+    if not target:
+        return False
+    try:
+        require_sendable_codex_target(target)
+    except Exception:
+        return False
+    return True
+
+
+def fallback_manager_target_for_file(args: Args, manager_file: Path, requested_target: str) -> str:
+    if not requested_target or sendable_codex_target(requested_target):
+        return requested_target
+    try:
+        manager_text = manager_file.read_text(encoding="utf-8")
+        metadata = parse_task_metadata(manager_text) if manager_text else None
+    except (OSError, TaskFrontmatterError):
+        metadata = None
+    owner_target = metadata.managerat if metadata is not None else ""
+    if owner_target and owner_target not in target_aliases(requested_target):
+        owner_route = current_route_for_owner(args, owner_target)
+        if owner_route is not None and sendable_codex_target(owner_route.manager_target):
+            logging.warning("email route target is not sendable; using owner manager: task=%s target=%s owner=%s", manager_file, requested_target, owner_route.manager_target)
+            return owner_route.manager_target
+    if requested_target not in target_aliases(args.manager_target) and sendable_codex_target(args.manager_target):
+        logging.warning("email route target is not sendable; using default manager: task=%s target=%s default=%s", manager_file, requested_target, args.manager_target)
+        return args.manager_target
+    return requested_target
+
+
 def task_file_for_target_in_candidates(root: Path, tmux_target: str, candidates: list[Path]) -> Path | None:
     aliases = target_aliases(tmux_target)
     seen: set[Path] = set()
@@ -455,7 +494,8 @@ def inactive_task_files_for_target(root: Path, tmux_target: str) -> list[Path]:
     return matches
 
 
-def email_route(args: Args, subject: str) -> EmailRoute:
+def email_route(args: Args, subject: str, body: str = "") -> EmailRoute:
+    direct_worker_reply = text_marks_dm(body) or text_marks_dm_only(body)
     tmux_target = subject_manager_target(subject)
     if not tmux_target:
         return EmailRoute(current_manager_file(args), args.manager_target)
@@ -480,7 +520,9 @@ def email_route(args: Args, subject: str) -> EmailRoute:
     except TaskFrontmatterError:
         metadata = None
     if metadata is not None and metadata.is_manager:
-        return EmailRoute(manager_file, tmux_target, tmux_target)
+        return EmailRoute(manager_file, fallback_manager_target_for_file(args, manager_file, tmux_target), tmux_target)
+    if metadata is not None and direct_worker_reply:
+        return EmailRoute(manager_file, metadata.runat, direct_delivery=True)
     owner_target = metadata.managerat if metadata is not None else ""
     if owner_target and owner_target not in target_aliases(tmux_target):
         owner_route = current_route_for_owner(args, owner_target)
@@ -488,7 +530,7 @@ def email_route(args: Args, subject: str) -> EmailRoute:
             logging.warning("managerat target did not map to a task file; using default manager: task=%s managerat=%s", manager_file, owner_target)
             return EmailRoute(current_manager_file(args), args.manager_target)
         return owner_route
-    return EmailRoute(manager_file, tmux_target, tmux_target)
+    return EmailRoute(manager_file, fallback_manager_target_for_file(args, manager_file, tmux_target), tmux_target)
 
 
 def manager_target_for_file(args: Args, manager_file: Path) -> str:
@@ -525,7 +567,8 @@ def routed_target_for_pending_line(path: Path, line_no: int) -> str:
 
 def args_for_manager_file(args: Args, manager_file: Path, pending_line: int = 0) -> Args:
     routed_target = routed_target_for_pending_line(manager_file, pending_line) if pending_line > 0 else ""
-    return replace(args, manager_file=manager_file, manager_target=routed_target or manager_target_for_file(args, manager_file))
+    manager_target = fallback_manager_target_for_file(args, manager_file, routed_target or manager_target_for_file(args, manager_file))
+    return replace(args, manager_file=manager_file, manager_target=manager_target)
 
 
 def is_recovery_subject(subject: str) -> bool:
@@ -684,6 +727,30 @@ def source_marker_consumed_by_routed_prose(lines: list[str], source_idx: int) ->
         if stripped.startswith(("(", "#")):
             return False
     return False
+
+
+def source_marker_consumed_by_direct_dm_only(root: Path, txt_path: Path, task_path: Path, lines: list[str], source_idx: int) -> bool:
+    try:
+        text = txt_path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    if not text_marks_dm_only(text):
+        return False
+    try:
+        metadata = parse_task_metadata("\n".join(lines) + "\n") if lines else None
+    except TaskFrontmatterError:
+        return False
+    if metadata is None or metadata.is_manager:
+        return False
+    for prior_idx in range(source_idx - 1, -1, -1):
+        stripped = lines[prior_idx].strip()
+        if not stripped:
+            continue
+        if stripped == "(pending)":
+            return False
+        if stripped.startswith(("(", "#")):
+            break
+    return task_path.exists()
 
 
 def consumed_source_reference_line(stripped: str, ref: str) -> bool:
@@ -849,6 +916,8 @@ def existing_consumed_source_line(root: Path, txt_path: Path, manager_file: Path
             if consumed_source_reference_line(stripped, ref):
                 return idx + 1
             if stripped in source_lines and source_marker_consumed_by_routed_prose(lines, idx):
+                return idx + 1
+            if stripped in source_lines and source_marker_consumed_by_direct_dm_only(root, txt_path, path, lines, idx):
                 return idx + 1
     return None
 
@@ -1502,6 +1571,7 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
             ignored_uids.add(uid)
             ignored_changed = True
             continue
+        body_text = message_text(msg)
         txt_path = write_mail(args, uid, msg, sender, subject)
         logging.info("email stored: uid=%s path=%s subject=%r", uid, source_ref(args.root, txt_path), subject)
         if is_recovery_subject(subject):
@@ -1514,10 +1584,10 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
             mark_seen_after_human_intake(client, uid, args, msg)
             handled = True
         else:
-            route = email_route(args, subject)
+            route = email_route(args, subject, body_text)
             route_args = replace(args, manager_file=route.manager_file, manager_target=route.manager_target)
             pending_line = append_pending(args.root, txt_path, route.manager_file, route.routed_target)
-            if push_email_ref(route_args, pending_line):
+            if route.direct_delivery or push_email_ref(route_args, pending_line):
                 unaccepted_pending_uids.discard(uid)
                 unaccepted_changed = True
                 processed_uids.add(uid)

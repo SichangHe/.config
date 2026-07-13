@@ -1427,6 +1427,176 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertIn("(manager routed: wl:1)", submanager.read_text(encoding="utf-8"))
             self.assertFalse((root / "work_manager_today.md").exists())
 
+    def test_email_watcher_direct_dm_reply_goes_to_worker_task_file(self) -> None:
+        from email.message import EmailMessage
+        from omo_manager import email_idle_watcher as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            submanager = root / "submanager.md"
+            worker = root / "worker.md"
+            _ = submanager.write_text(task_frontmatter(runat="wl:1", managerat="main:0.0", is_manager=True), encoding="utf-8")
+            _ = worker.write_text(task_frontmatter(runat="wl:2", managerat="wl:1"), encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nsubmanager.md wl 1\nworker.md wl 2\n", encoding="utf-8")
+            msg = EmailMessage()
+            msg["From"] = "Human <me@example.com>"
+            msg["Subject"] = "Re: [a] [wl:2] manager update"
+            msg.set_content("Please handle this directly. DM only\n")
+            pushes: list[tuple[Path | None, str, int]] = []
+
+            class Client:
+                stores: list[tuple[object, ...]] = []
+
+                def uid(self, command: str, *args: object) -> tuple[str, list[object]]:
+                    if command == "search":
+                        if "SINCE" in args:
+                            return "OK", [b""]
+                        return "OK", [b"22"]
+                    if command == "fetch":
+                        return "OK", [(b"RFC822", msg.as_bytes())]
+                    if command == "store":
+                        self.stores.append(args)
+                        return "OK", [b""]
+                    raise AssertionError(command)
+
+            old_push = watcher.push_email_ref
+
+            def push(push_args: watcher.Args, line_no: int) -> bool:
+                pushes.append((push_args.manager_file, push_args.manager_target, line_no))
+                return True
+
+            watcher.push_email_ref = push
+            try:
+                client = Client()
+                args = watcher.Args(root, "", root / "manager_mail", state, root / "work_manager_today.md", True, "me@example.com", 0, Path("/bin/false"), manager_target="main:0.0")
+                watcher.handle_unseen(client, args)
+            finally:
+                watcher.push_email_ref = old_push
+            self.assertEqual([], pushes)
+            self.assertIn("(pending)\n(record and delegate manager_mail/22.txt)\n", worker.read_text(encoding="utf-8"))
+            self.assertNotIn("manager_mail/22.txt", submanager.read_text(encoding="utf-8"))
+            self.assertEqual([("22", "+FLAGS", r"(\Seen)")], client.stores)
+            self.assertFalse((root / "work_manager_today.md").exists())
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(capture_delivery_call(command))
+                return subprocess.CompletedProcess(command, 0)
+
+            pending_args = Args(
+                root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=False, manager_target="main:0.0"
+            )
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+                self.assertTrue(pending_watcher.scan_once(pending_args, {}, [worker]))
+            self.assertEqual(["wl:2"], [call[call.index("--manager-target") + 1] for call in calls])
+            self.assertIn("Please handle this directly.", calls[0][1])
+            self.assertNotIn("DM only", calls[0][1])
+            self.assertNotIn("(pending)", calls[0][1])
+            self.assertNotIn("(pending)", worker.read_text(encoding="utf-8"))
+            processed_path = state / "email-processed-uids.tsv"
+            processed_path.unlink(missing_ok=True)
+
+            class RecoveryClient:
+                stores: list[tuple[object, ...]] = []
+
+                def uid(self, command: str, *args: object) -> tuple[str, list[object]]:
+                    if command == "search":
+                        if "SINCE" in args:
+                            return "OK", [b""]
+                        return "OK", [b"22"]
+                    if command == "fetch":
+                        raise AssertionError("consumed direct DM-only source should not be refetched")
+                    if command == "store":
+                        self.stores.append(args)
+                        return "OK", [b""]
+                    raise AssertionError(command)
+
+            watcher.handle_unseen(RecoveryClient(), args)
+            self.assertEqual(1, worker.read_text(encoding="utf-8").count("manager_mail/22.txt"))
+            self.assertNotIn("(pending)", worker.read_text(encoding="utf-8"))
+
+    def test_email_watcher_direct_dm_reply_copies_worker_manager(self) -> None:
+        from email.message import EmailMessage
+        from omo_manager import email_idle_watcher as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            submanager = root / "submanager.md"
+            worker = root / "worker.md"
+            _ = submanager.write_text(task_frontmatter(runat="wl:1", managerat="main:0.0", is_manager=True), encoding="utf-8")
+            _ = worker.write_text(task_frontmatter(runat="wl:2", managerat="wl:1"), encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nsubmanager.md wl 1\nworker.md wl 2\n", encoding="utf-8")
+            msg = EmailMessage()
+            msg["From"] = "Human <me@example.com>"
+            msg["Subject"] = "Re: [a] [wl:2] manager update"
+            msg.set_content("Please handle this directly. DM\n")
+
+            class Client:
+                stores: list[tuple[object, ...]] = []
+
+                def uid(self, command: str, *args: object) -> tuple[str, list[object]]:
+                    if command == "search":
+                        if "SINCE" in args:
+                            return "OK", [b""]
+                        return "OK", [b"23"]
+                    if command == "fetch":
+                        return "OK", [(b"RFC822", msg.as_bytes())]
+                    if command == "store":
+                        self.stores.append(args)
+                        return "OK", [b""]
+                    raise AssertionError(command)
+
+            pushes: list[tuple[Path | None, str, int]] = []
+            old_push = watcher.push_email_ref
+
+            def push(push_args: watcher.Args, line_no: int) -> bool:
+                pushes.append((push_args.manager_file, push_args.manager_target, line_no))
+                return True
+
+            watcher.push_email_ref = push
+            try:
+                client = Client()
+                args = watcher.Args(root, "", root / "manager_mail", state, root / "work_manager_today.md", True, "me@example.com", 0, Path("/bin/false"), manager_target="main:0.0")
+                watcher.handle_unseen(client, args)
+            finally:
+                watcher.push_email_ref = old_push
+            self.assertEqual([], pushes)
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(capture_delivery_call(command))
+                return subprocess.CompletedProcess(command, 0)
+
+            pending_args = Args(
+                root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=False, manager_target="main:0.0"
+            )
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+                self.assertTrue(pending_watcher.scan_once(pending_args, {}, [worker]))
+            self.assertEqual(["wl:2", "wl:1"], [call[call.index("--manager-target") + 1] for call in calls])
+            self.assertIn("Please handle this directly.", calls[0][1])
+            self.assertNotIn("DM\n", calls[0][1])
+            self.assertIn("this message is already dispatched to the agent, this is FYI", calls[1][1])
+            self.assertIn("--ack-human", calls[1][1])
+            self.assertIn("--email-file manager_mail/23.txt", calls[1][1])
+
+    def test_email_watcher_leading_dm_reply_goes_to_worker_task_file(self) -> None:
+        from omo_manager import email_idle_watcher as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            submanager = root / "submanager.md"
+            worker = root / "worker.md"
+            _ = submanager.write_text(task_frontmatter(runat="wl:1", managerat="main:0.0", is_manager=True), encoding="utf-8")
+            _ = worker.write_text(task_frontmatter(runat="wl:2", managerat="wl:1"), encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nsubmanager.md wl 1\nworker.md wl 2\n", encoding="utf-8")
+            args = watcher.Args(root, "", root / "manager_mail", root / "state", root / "work_manager_today.md", True, "me@example.com", 0, Path("/bin/false"), manager_target="main:0.0")
+            route = watcher.email_route(args, "Re: [a] [wl:2] manager update", "DM: please handle this directly.")
+            self.assertEqual(worker, route.manager_file)
+            self.assertEqual("wl:2", route.manager_target)
+            self.assertTrue(route.direct_delivery)
+
     def test_managerat_can_route_addressed_worker_mail_to_main_manager(self) -> None:
         from omo_manager import email_idle_watcher as watcher
 
