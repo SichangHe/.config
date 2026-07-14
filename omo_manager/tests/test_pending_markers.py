@@ -7381,7 +7381,9 @@ class PendingMarkerTests(unittest.TestCase):
                 self.assertTrue(watcher.scan_once(args, seen, [todo]))
             text = out.getvalue()
             self.assertIn("omo_pending_watch detected TODO.md with 201 lines is too long.", text)
-            self.assertIn("Move done material to YYYYMM/old_todos.md", text)
+            self.assertIn("docs/monthly-archive.md", text)
+            self.assertIn("keep only the newest 20 `previous` tasks in TODO.md", text)
+            self.assertIn("move older `previous` tasks to YYYYMM/old_todos.md", text)
             todo.write_text(todo.read_text(encoding="utf-8") + "another line\n", encoding="utf-8")
             out = StringIO()
             with redirect_stdout(out):
@@ -7396,6 +7398,7 @@ class PendingMarkerTests(unittest.TestCase):
                 self.assertTrue(watcher.scan_once(args, seen, [todo]))
             text = out.getvalue()
             self.assertIn("omo_pending_watch detected TODO.md with 201 lines is too long.", text)
+            self.assertIn("keep only the newest 20 `previous` tasks in TODO.md", text)
 
     def test_pending_delivery_launch_failure_is_retryable(self) -> None:
         from omo_manager import omo_pending_watch as watcher

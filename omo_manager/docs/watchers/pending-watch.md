@@ -142,7 +142,7 @@
   - manager compaction reminders say ``Unless you know the exact content of MANAGER.md, read it. Normally, don't ack human``
   - manager pending-item reminders say manager task files should not keep `pending_task_items`; they are sent to that manager task file's `runat` pane
   - worker pending-item size reminders are sent to `managerat` when a live worker task file has 10 or more `pending_task_items`; the manager should verify completed or cancelled items and remove them with `omo_task_edit.py pending-remove`
-  - `TODO.md` length reminders point to `docs/monthly-archive.md`
+  - `TODO.md` length reminders tell managers to keep only the newest 20 `previous` tasks in `TODO.md` and move older `previous` tasks to `YYYYMM/old_todos.md`
   - dirty worktree reminders name the dirty repo path, omit raw status/category fields, tell managers to let workers commit their own changes, and tell managers to commit task files themselves without routing task-file cleanup to workers
   - identical problem output is keyed by SHA-256 in process-local time-bounded delivery memory and is repeated at most once per `--agent-problem-repeat-s` seconds, default `1800`
   - digest idle delivery uses a separate human-contact clock: if `manager_digest.md` has content and the newest `manager_mail/*.txt` is at least `--digest-idle-after-s` seconds old, default `3600`, it runs `scripts/manager-digest deliver`

@@ -94,7 +94,10 @@ AGENT_POINTER_WITH_TARGET_RE = re.compile(r"^\(from agent ([A-Za-z][A-Za-z0-9_-]
 AGENT_MESSAGE_DIR_RE = re.compile(r"^/tmp/omo-agent-messages-[^/]+/")
 AGENT_PROBLEM_HEADER = "Handle ALL omo_pending_watch agent problems below; only email human if you cannot handle them:"
 MANAGER_COMPACTION_REMINDER = "Unless you know the exact content of MANAGER.md, read it. Normally, don't ack human"
-TODO_LENGTH_REMINDER = "omo_pending_watch detected TODO.md with {n_lines} lines is too long. Move done material to YYYYMM/old_todos.md per docs/monthly-archive.md."
+TODO_LENGTH_REMINDER = (
+    "omo_pending_watch detected TODO.md with {n_lines} lines is too long. "
+    "Archive old completed tasks per docs/monthly-archive.md; keep only the newest 20 `previous` tasks in TODO.md and move older `previous` tasks to YYYYMM/old_todos.md."
+)
 MANAGER_TASK_STATE_REMINDER_HEADER = (
     "manager task-state reminder: MANAGER.md requires each manager-owned task to have frontmatter `status: running`, `status: done`, or `status: blocked` while the manager is idle. "
     "Start/resume the task, mark it done, or block it with a reason. Single-tag enforcement is intentionally not checked."
