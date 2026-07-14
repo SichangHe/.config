@@ -926,16 +926,24 @@ def text_has_edge_marker(text: str, marker: str, *, case_sensitive: bool = True)
     return False
 
 
+def active_text_has_edge_marker(text: str, marker: str, *, case_sensitive: bool = True) -> bool:
+    lines = unquoted_pending_content(text).splitlines()
+    edge_indices = active_content_edge_indices(lines)
+    if edge_indices is None:
+        return False
+    return any(not line_is_markdown_indented_code(lines[idx]) and text_has_edge_marker(lines[idx], marker, case_sensitive=case_sensitive) for idx in edge_indices)
+
+
 def text_marks_dm(text: str) -> bool:
-    return text_has_edge_marker(text, "DM", case_sensitive=False)
+    return active_text_has_edge_marker(text, "DM", case_sensitive=False)
 
 
 def text_marks_dm_only(text: str) -> bool:
-    return text_has_edge_marker(text, "DM only", case_sensitive=False)
+    return active_text_has_edge_marker(text, "DM only", case_sensitive=False)
 
 
 def text_marks_for_manager(text: str) -> bool:
-    return text_has_edge_marker(text, FOR_MANAGER_MARKER, case_sensitive=False)
+    return active_text_has_edge_marker(text, FOR_MANAGER_MARKER, case_sensitive=False)
 
 
 def strip_edge_marker(text: str, marker: str) -> str:
@@ -1014,12 +1022,28 @@ def active_content_edge_indices(lines: Sequence[str]) -> tuple[int, int] | None:
     return active[0], active[-1]
 
 
+def line_is_markdown_indented_code(line: str) -> bool:
+    return line.startswith("    ") or line.startswith("\t")
+
+
+def join_without_outer_blank_lines(lines: Sequence[str]) -> str:
+    start = 0
+    end = len(lines)
+    while start < end and not lines[start].strip():
+        start += 1
+    while end > start and not lines[end - 1].strip():
+        end -= 1
+    return "\n".join(lines[start:end])
+
+
 def strip_active_edge_marker_once(text: str, marker: str) -> tuple[str, bool]:
     lines = text.splitlines()
     edge_indices = active_content_edge_indices(lines)
     if edge_indices is None:
-        return "\n".join(lines).strip(), False
+        return join_without_outer_blank_lines(lines), False
     for idx in edge_indices:
+        if line_is_markdown_indented_code(lines[idx]):
+            continue
         if text_has_edge_marker(lines[idx], marker, case_sensitive=False):
             before = lines[idx]
             if edge_indices[0] == edge_indices[1]:
@@ -1032,8 +1056,8 @@ def strip_active_edge_marker_once(text: str, marker: str) -> tuple[str, bool]:
                 continue
             if not lines[idx]:
                 del lines[idx]
-            return "\n".join(lines).strip(), True
-    return "\n".join(lines).strip(), False
+            return join_without_outer_blank_lines(lines), True
+    return join_without_outer_blank_lines(lines), False
 
 
 def strip_direct_markers(text: str) -> str:
@@ -1150,7 +1174,7 @@ def direct_message_block_text(marker: Marker, attachments: Sequence[SourceAttach
         if is_standalone_source_pointer(line, attachment_sources):
             continue
         lines.append(line)
-    return display_pending_tail("\n".join(lines)).strip()
+    return join_without_outer_blank_lines(display_pending_tail("\n".join(lines)).splitlines())
 
 
 def agent_report_message_text(text: str) -> str:
@@ -1278,6 +1302,33 @@ def pending_marker_present(root: Path, pending_file: Path, pending_line: int, pe
     return pending_tail_digest(pending_file, pending_line, pending_tail) == pending_digest
 
 
+def remove_direct_routing_header(lines: list[str], idx: int) -> None:
+    """Remove `DM only` routing metadata after a delivered marker is cleared."""
+
+    stripped_direct_marker = False
+    while idx < len(lines):
+        stripped = lines[idx].strip()
+        if stripped in PENDING_MARKERS:
+            return
+        if stripped.startswith(EMAIL_SOURCE_PREFIXES):
+            idx += 1
+            continue
+        if not stripped or stripped.startswith(AGENT_SOURCE_PREFIXES) or stripped.startswith(MANAGER_SOURCE_PREFIXES):
+            del lines[idx]
+            continue
+        if stripped_direct_marker:
+            return
+        original = lines[idx]
+        updated = strip_direct_markers(original)
+        if updated == original:
+            return
+        stripped_direct_marker = True
+        if updated:
+            lines[idx] = updated
+            return
+        del lines[idx]
+
+
 def clear_pending_marker_if_current(root: Path, marker: Marker) -> bool:
     """Remove one delivered `DM only` marker after verifying the pending tail."""
 
@@ -1294,6 +1345,7 @@ def clear_pending_marker_if_current(root: Path, marker: Marker) -> bool:
         if pending_tail_digest(marker.file, marker.line, pending_tail) != marker.digest:
             return False
         del lines[idx]
+        remove_direct_routing_header(lines, idx)
         updated = "\n".join(lines) + ("\n" if text.endswith("\n") else "")
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False) as handle:
             _ = handle.write(updated)

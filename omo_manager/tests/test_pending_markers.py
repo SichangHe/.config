@@ -5056,7 +5056,8 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertNotIn("this message is already dispatched to the agent, this is FYI", calls[0][1])
             text = path.read_text(encoding="utf-8")
             self.assertNotIn("(pending)", text)
-            self.assertIn("DM only: please inspect directly", text)
+            self.assertNotIn("DM only", text)
+            self.assertIn("please inspect directly", text)
 
     def test_pending_block_dm_only_strips_case_and_punctuation_for_worker(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -5112,6 +5113,39 @@ class PendingMarkerTests(unittest.TestCase):
 
         self.assertEqual("Please inspect directly.", watcher.clean_direct_message_lines("(pending)\nDM only\n(from manager omo_task_edit delegate-message)\nPlease inspect directly."))
         self.assertEqual(("agent", "manager"), watcher.marker_origin_source(["(pending)", "DM only", "(from manager omo_task_edit delegate-message)", "Please inspect directly."]))
+
+    def test_pending_block_dm_only_clears_manager_delegation_header(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "worker.md"
+            path.write_text(
+                f"{task_frontmatter(runat='wl:2', managerat='wl:1')}\n"
+                "(pending)\n"
+                "DM only\n"
+                "(from manager omo_task_edit delegate-message)\n"
+                "Please inspect directly.\n",
+                encoding="utf-8",
+            )
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(capture_delivery_call(command))
+                return subprocess.CompletedProcess(command, 0)
+
+            args = Args(
+                root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=False, manager_target="main:0.0"
+            )
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+                self.assertTrue(watcher.scan_once(args, {}, [path]))
+            self.assertEqual(["wl:2"], [call[call.index("--manager-target") + 1] for call in calls])
+            self.assertEqual("Please inspect directly.", calls[0][1])
+            text = path.read_text(encoding="utf-8")
+            self.assertNotIn("(pending)", text)
+            self.assertNotIn("DM only", text)
+            self.assertNotIn("(from manager omo_task_edit delegate-message)", text)
+            self.assertIn("Please inspect directly.", text)
 
     def test_direct_marker_stripping_preserves_same_line_payload_syntax(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -5217,6 +5251,106 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertIn("second", calls[1][1])
             self.assertNotIn("DM only", calls[1][1])
             self.assertNotIn("(pending)", path.read_text(encoding="utf-8"))
+
+    def test_dm_only_cleanup_preserves_email_source_and_later_pending_block(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mail = root / "manager_mail" / "22.txt"
+            mail.parent.mkdir()
+            mail.write_text("Subject: first\n\nPlease inspect first.\n", encoding="utf-8")
+            path = root / "worker.md"
+            path.write_text(
+                f"{task_frontmatter(runat='wl:2', managerat='wl:1')}\n"
+                "(pending)\n"
+                "DM only\n"
+                "(record and delegate manager_mail/22.txt)\n"
+                "Please inspect first.\n"
+                "(pending)\n"
+                "DM only: second\n",
+                encoding="utf-8",
+            )
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(capture_delivery_call(command))
+                return subprocess.CompletedProcess(command, 0)
+
+            args = Args(
+                root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=False, manager_target="main:0.0"
+            )
+            seen: dict[str, float] = {}
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+                self.assertTrue(watcher.scan_once(args, seen, [path]))
+                self.assertTrue(watcher.scan_once(args, seen, [path]))
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("(record and delegate manager_mail/22.txt)", text)
+            self.assertIn("Please inspect first.", text)
+            self.assertNotIn("\nDM only\n(record and delegate manager_mail/22.txt)", text)
+            self.assertNotIn("(pending)", text)
+            self.assertEqual(["wl:2", "wl:2"], [call[call.index("--manager-target") + 1] for call in calls])
+            self.assertIn("Please inspect first.", calls[0][1])
+            self.assertIn("second", calls[1][1])
+
+    def test_dm_only_cleanup_preserves_indented_body_marker_text(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "worker.md"
+            path.write_text(
+                f"{task_frontmatter(runat='wl:2', managerat='wl:1')}\n"
+                "(pending)\n"
+                "DM only\n"
+                "    DM only\n"
+                "Please inspect directly.\n",
+                encoding="utf-8",
+            )
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(capture_delivery_call(command))
+                return subprocess.CompletedProcess(command, 0)
+
+            args = Args(
+                root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=False, manager_target="main:0.0"
+            )
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+                self.assertTrue(watcher.scan_once(args, {}, [path]))
+            self.assertEqual("    DM only\nPlease inspect directly.", calls[0][1])
+            text = path.read_text(encoding="utf-8")
+            self.assertNotIn("(pending)", text)
+            self.assertIn("    DM only\nPlease inspect directly.", text)
+            self.assertNotIn("\nDM only\n    DM only", text)
+
+    def test_indented_dm_only_content_does_not_trigger_direct_delivery(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "worker.md"
+            path.write_text(
+                f"{task_frontmatter(runat='wl:2', managerat='wl:1')}\n"
+                "(pending)\n"
+                "    DM only\n"
+                "Please inspect directly.\n",
+                encoding="utf-8",
+            )
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(capture_delivery_call(command))
+                return subprocess.CompletedProcess(command, 0)
+
+            args = Args(
+                root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=False, manager_target="main:0.0"
+            )
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+                self.assertTrue(watcher.scan_once(args, {}, [path]))
+            self.assertEqual(["wl:1"], [call[call.index("--manager-target") + 1] for call in calls])
+            self.assertIn("    DM only", calls[0][1])
+            self.assertIn("(pending)", path.read_text(encoding="utf-8"))
 
     def test_agent_origin_dm_manager_fyi_says_do_not_ack_human(self) -> None:
         from omo_manager import omo_pending_watch as watcher
