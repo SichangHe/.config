@@ -91,7 +91,7 @@ CLOSE_TARGET_RE = re.compile(r"\btmux target [`']?([A-Za-z][A-Za-z0-9_-]*:\d+(?:
 PERSISTENT_ROLE_RE = re.compile(r"\bpersistent\b.*\brole\b")
 HUMAN_WAIT_RE = re.compile(
     r"""
-    \bwaiting\s+for\s+next\s+human(?!-readable)\b[\w\s`'":;,.()/.-]{0,120}\b(?:review|input|discussion)\b
+    \bwaiting\s+for\s+next\s+human(?!-readable)\b[\w\s`'":;,.()/.-]{0,120}\b(?:review|input|discussion|approval)\b
     |
     \bhuman[- ]pending\b
     |
@@ -106,6 +106,8 @@ HUMAN_WAIT_RE = re.compile(
     \bhuman\s+interactive\b[\w\s`'":;,.()/.-]{0,80}\b(?:walkthrough|review|discussion)\b
     |
     \bhuman\s+discussion\b
+    |
+    \bhuman\s+approval\b
     """,
     re.IGNORECASE | re.VERBOSE,
 )
