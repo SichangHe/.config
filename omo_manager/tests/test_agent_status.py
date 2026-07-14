@@ -1128,6 +1128,171 @@ class AgentStatusTests(unittest.TestCase):
             self.assertIn("reason=waiting on human API key", text)
             self.assertIn("owner_target=wl:16", text)
 
+    def test_problems_only_skips_ready_hvl_concrete_human_review_wait(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\ndocs.md hvl 5\n", encoding="utf-8")
+            _ = (root / "docs.md").write_text(
+                task_frontmatter("blocked", runat="hvl:5", managerat="vl:5", blocked_on="waiting for next human guidance-doc review input"),
+                encoding="utf-8",
+            )
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertEqual("", out.getvalue())
+
+    def test_problems_only_skips_ready_human_review_wait_with_stage_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nstages.md hvl 6\n", encoding="utf-8")
+            _ = (root / "stages.md").write_text(
+                task_frontmatter("blocked", runat="hvl:6", managerat="vl:9", blocked_on="waiting for next human stage-review input"),
+                encoding="utf-8",
+            )
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertEqual("", out.getvalue())
+
+    def test_problems_only_reports_ready_non_hvl_human_review_wait(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nworker.md cfg 5\n", encoding="utf-8")
+            _ = (root / "worker.md").write_text(
+                task_frontmatter("blocked", runat="cfg:5", managerat="vl:9", blocked_on="human-facing review waits in the live pane"),
+                encoding="utf-8",
+            )
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertIn("blocked_idle: task=worker.md", out.getvalue())
+
+    def test_problems_only_reports_hvl_human_readable_review_wait(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nhvl.md hvl 5\n", encoding="utf-8")
+            _ = (root / "hvl.md").write_text(
+                task_frontmatter("blocked", runat="hvl:5", managerat="vl:9", blocked_on="waiting for a human-readable review summary"),
+                encoding="utf-8",
+            )
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertIn("blocked_idle: task=hvl.md", out.getvalue())
+
+    def test_problems_only_reports_hvl_indirect_review_wait(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nvl_hvl_mgr_11264.md vl 5\n", encoding="utf-8")
+            _ = (root / "vl_hvl_mgr_11264.md").write_text(
+                task_frontmatter("blocked", runat="vl:5", managerat="vl:9", blocked_on="waiting for CI; a human will receive the review summary"),
+                encoding="utf-8",
+            )
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertIn("blocked_idle: task=vl_hvl_mgr_11264.md", out.getvalue())
+
+    def test_problems_only_skips_manager_human_facing_review_waits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nvl_hvl_mgr_11264.md vl 5\n", encoding="utf-8")
+            _ = (root / "vl_hvl_mgr_11264.md").write_text(
+                task_frontmatter("blocked", runat="vl:5", managerat="vl:9", blocked_on="human-facing review waits in ml_hvl_docs2_10734.md and ml_hvl_restart_10848.md", is_manager=True),
+                encoding="utf-8",
+            )
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertEqual("", out.getvalue())
+
+    def test_problems_only_skips_hvl_direct_human_discussion_wait(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nvl_fail_review_9758.md hvl 2\n", encoding="utf-8")
+            _ = (root / "vl_fail_review_9758.md").write_text(
+                task_frontmatter("blocked", runat="hvl:2", managerat="vl:1", blocked_on="human-facing interactive 9579 failure/process review is waiting on direct human discussion in hvl:2"),
+                encoding="utf-8",
+            )
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertEqual("", out.getvalue())
+
+    def test_problems_only_skips_vl_human_pending_wait(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nvl_late_walk_8951.md vl 17\n", encoding="utf-8")
+            _ = (root / "vl_late_walk_8951.md").write_text(
+                task_frontmatter("blocked", runat="vl:17", managerat="vl:1", blocked_on="human-pending after organized limitation explanation email"),
+                encoding="utf-8",
+            )
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertEqual("", out.getvalue())
+
+    def test_problems_only_skips_hvl_review_waiting_variant(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nvl_hvl_mgr_11264.md vl 5\n", encoding="utf-8")
+            _ = (root / "vl_hvl_mgr_11264.md").write_text(
+                task_frontmatter("blocked", runat="vl:5", managerat="vl:9", blocked_on="human-facing review waiting for the human"),
+                encoding="utf-8",
+            )
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertEqual("", out.getvalue())
+
+    def test_problems_only_skips_hvl_review_wait_case_variant(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nvl_hvl_mgr_11264.md vl 5\n", encoding="utf-8")
+            _ = (root / "vl_hvl_mgr_11264.md").write_text(
+                task_frontmatter("blocked", runat="vl:5", managerat="vl:9", blocked_on="Human-facing review waits in the live panes"),
+                encoding="utf-8",
+            )
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertEqual("", out.getvalue())
+
+    def test_problems_only_reports_error_for_human_review_wait(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\ndocs.md hvl 5\n", encoding="utf-8")
+            _ = (root / "docs.md").write_text(
+                task_frontmatter("blocked", runat="hvl:5", managerat="vl:5", blocked_on="waiting for next human guidance-doc review input"),
+                encoding="utf-8",
+            )
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("error", ["traceback"])), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertIn("error: task=docs.md", out.getvalue())
+
     def test_problems_only_does_not_count_running_blocked_vl_target_as_idle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

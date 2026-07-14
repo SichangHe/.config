@@ -89,6 +89,26 @@ STATUS_DETAIL_RE = re.compile(r"^\((pending|running|done|blocked)(?::\s*([^)]*))
 RUNAT_RE = re.compile(r"^runat:\s+([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\b")
 CLOSE_TARGET_RE = re.compile(r"\btmux target [`']?([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)[`']?")
 PERSISTENT_ROLE_RE = re.compile(r"\bpersistent\b.*\brole\b")
+HUMAN_WAIT_RE = re.compile(
+    r"""
+    \bwaiting\s+for\s+next\s+human(?!-readable)\b[\w\s`'":;,.()/.-]{0,120}\b(?:review|input|discussion)\b
+    |
+    \bhuman[- ]pending\b
+    |
+    \bdirect\s+human\s+discussion\b
+    |
+    \bhuman\s+is\s+still\s+talking\b
+    |
+    \bhuman(?!-readable)-facing\b[\w\s`'":;,.()/.-]{0,120}\b(?:waits?|review|discussion|interactive)\b
+    |
+    \bhuman\s+direct\b[\w\s`'":;,.()/.-]{0,80}\b(?:review|discussion)\b
+    |
+    \bhuman\s+interactive\b[\w\s`'":;,.()/.-]{0,80}\b(?:walkthrough|review|discussion)\b
+    |
+    \bhuman\s+discussion\b
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
 MANAGER_MD_REREAD_RE = re.compile(r"\b(?:re-?read|read)\b[^.\n?!;]{0,80}\bMANAGER\.md\b|\bMANAGER\.md\b[^.\n?!;]{0,80}\b(?:re-?read|read)\b", re.IGNORECASE)
 MANAGER_MD_REREAD_NEGATIVE_RE = re.compile(
     r"\b(?:did not|didn't|not|never|without|failed to|fails to|hasn't|haven't|hadn't|no need to|no need)\b[^.\n?!;]{0,80}\b(?:re-?read|read)\b[^.\n?!;]{0,80}\bMANAGER\.md\b|"
@@ -238,6 +258,14 @@ def is_current_vl_supervisor(task_file: str) -> bool:
 def is_recorded_persistent_manager_wait(task: TaskLine, state: TaskState) -> bool:
     reason = state.reason.lower()
     return state.is_manager and bool(state.reason) and (is_current_vl_supervisor(task.task_file) or ("persistent" in reason and ("manager" in reason or "submanager" in reason or "role" in reason)))
+
+
+def is_hvl_human_wait(task: TaskLine, state: TaskState, target: str) -> bool:
+    """Return whether an hVL/VL blocked task is expected to wait for the human."""
+
+    if not task_line_is_vl(task) and target_session(target) != "hvl":
+        return False
+    return HUMAN_WAIT_RE.search(state.reason) is not None
 
 
 def canonical_target(target: str) -> str:
@@ -798,6 +826,8 @@ def add_blocked_idle_vl_row(root: Path, task: TaskLine, role: str, rows: list[St
         classified = classify_target(task.task_file, target, state.persistent_role, state.status, auto_unstick, role, unstick_by_target, auto_unstick_disabled_reason)
         idle_status = classified.status
         if idle_status == "running":
+            return
+        if idle_status == "ready" and is_hvl_human_wait(task, state, target):
             return
         if is_recorded_persistent_manager_wait(task, state) and idle_status not in {"error", "not_codex", "stuck_input"}:
             return
