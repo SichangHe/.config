@@ -4640,6 +4640,8 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertIn("--ack-human", text)
             self.assertIn("--email-file manager_mail/4002.txt", text)
             self.assertIn("Choose `--item` values by quoting the human's words as much as possible.", text)
+            self.assertIn("--clear-kind report-only|duplicate|cancelled|superseded", text)
+            self.assertIn("--clear-kind existing-owner-item --owner-task-file TASK.md --owner-item ITEM", text)
             self.assertIn("<snippet file=\"work_manager_", text)
             self.assertIn("(from email manager_mail/4002.txt)", text)
 
@@ -4683,6 +4685,7 @@ class PendingMarkerTests(unittest.TestCase):
             text = out.getvalue()
             self.assertIn("Normally record pending items and remove the consumed `(pending)` marker by running:", text)
             self.assertIn("--ack-human", text)
+            self.assertIn("--clear-kind report-only|duplicate|cancelled|superseded", text)
             self.assertIn("Reminder: stay high level; route concrete work to agents.", text)
 
     def test_pending_watch_skips_manager_policy_reminder_when_not_selected(self) -> None:
@@ -4940,6 +4943,7 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertIn("this message is already dispatched to the agent, this is FYI", calls[1][1])
             self.assertIn("--ack-human", calls[1][1])
             self.assertIn("--email-file manager_mail/4002.txt", calls[1][1])
+            self.assertIn("--clear-kind report-only|duplicate|cancelled|superseded", calls[1][1])
             self.assertNotIn("DM!!!", calls[0][1])
             self.assertNotIn('<snippet file="worker.md:', calls[0][1])
             self.assertIn('<snippet file="worker.md:', calls[1][1])

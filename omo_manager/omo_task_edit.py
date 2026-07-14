@@ -23,6 +23,10 @@ from omo_manager.omo_task_status import task_path
 PENDING_MARKER = "(pending)"
 REMOVE_REMINDER = "Verify the removed pending item was actually done or cancelled; consider evaluator agents for uncertain verification."
 EMAIL_HELPER = Path(__file__).resolve().parents[1] / "helper.sh" / "email_me.py"
+CLEAR_KINDS = {"cancelled", "duplicate", "existing-owner-item", "report-only", "superseded"}
+EMAIL_SOURCE_PREFIXES = ("(record and delegate ", "(from email ", "[source: email ")
+AGENT_SOURCE_PREFIXES = ("[omo-message-source: origin=agent ", "(from agent ")
+MANAGER_SOURCE_PREFIXES = ("(from manager ",)
 
 COMMAND_ALIASES = {
     "list": "pending-list",
@@ -49,6 +53,9 @@ class Args:
     source_file: Path | None = None
     target_file: Path | None = None
     message_file: Path | None = None
+    clear_kind: str = ""
+    owner_task_file: Path | None = None
+    owner_item: str = ""
 
 
 @dataclass(frozen=True)
@@ -73,6 +80,9 @@ class ParsedArgs(argparse.Namespace):
     from_file: Path | None = None
     to_file: Path | None = None
     message_file: Path | None = None
+    clear_kind: str = ""
+    owner_task_file: Path | None = None
+    owner_item: str = ""
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -117,6 +127,9 @@ def parse_args(argv: list[str]) -> Args:
     _ = marker_clear_parser.add_argument("--comment", required=True, help="One-line parenthesized comment evidence explaining why no item was added.")
     _ = marker_clear_parser.add_argument("--ack-human", action="store_true", help="Email the human that no pending item was added.")
     _ = marker_clear_parser.add_argument("--email-file", type=Path, help="Stored `manager_mail/*.txt` file whose `Subject:` header should be used for the human acknowledgement.")
+    _ = marker_clear_parser.add_argument("--clear-kind", choices=sorted(CLEAR_KINDS), help="Semantic reason required for human-origin markers.")
+    _ = marker_clear_parser.add_argument("--owner-task-file", type=Path, help="Active owner task file containing --owner-item; required for --clear-kind existing-owner-item.")
+    _ = marker_clear_parser.add_argument("--owner-item", help="Exact existing pending item already tracking this request.")
 
     comment_parser = subparsers.add_parser("comment-add", aliases=["comment"], help="Append a parenthesized comment line to a task file.")
     comment_parser.set_defaults(command="comment-add")
@@ -150,7 +163,26 @@ def parse_args(argv: list[str]) -> Args:
         if command == "pending-marker-clear":
             if parsed.line < 1:
                 parser.error("--line must be positive.")
-            return Args(root, parsed.task_file, command, comment=normalized_comment_message(parsed.comment), line=parsed.line, ack_human=parsed.ack_human, email_file=parsed.email_file)
+            if parsed.ack_human and not parsed.clear_kind:
+                parser.error("--clear-kind is required with --ack-human.")
+            if parsed.clear_kind == "existing-owner-item":
+                if parsed.owner_task_file is None or not parsed.owner_item:
+                    parser.error("--clear-kind existing-owner-item requires --owner-task-file and --owner-item.")
+                return Args(
+                    root,
+                    parsed.task_file,
+                    command,
+                    comment=normalized_comment_message(parsed.comment),
+                    line=parsed.line,
+                    ack_human=parsed.ack_human,
+                    email_file=parsed.email_file,
+                    clear_kind=parsed.clear_kind,
+                    owner_task_file=parsed.owner_task_file,
+                    owner_item=normalized_item(parsed.owner_item),
+                )
+            if parsed.owner_task_file is not None or parsed.owner_item:
+                parser.error("--owner-task-file and --owner-item are only valid with --clear-kind existing-owner-item.")
+            return Args(root, parsed.task_file, command, comment=normalized_comment_message(parsed.comment), line=parsed.line, ack_human=parsed.ack_human, email_file=parsed.email_file, clear_kind=parsed.clear_kind)
         if command == "comment-add":
             message = parsed.message if parsed.message is not None else parsed.legacy_message
             if message is None:
@@ -236,16 +268,17 @@ def marker_clear_ack_subject(email_path: Path | None) -> str:
     return "Request acknowledged"
 
 
-def marker_clear_ack_body(comment: str) -> str:
-    return f"No pending item was added.\nReason: {comment}\n"
+def marker_clear_ack_body(comment: str, clear_kind: str = "") -> str:
+    classification = f"Classification: {clear_kind}\n" if clear_kind else ""
+    return f"No pending item was added.\n{classification}Reason: {comment}\n"
 
 
-def send_marker_clear_ack(comment: str, email_path: Path | None) -> None:
+def send_marker_clear_ack(comment: str, email_path: Path | None, clear_kind: str = "") -> None:
     with tempfile.TemporaryDirectory(prefix="omo-task-edit-") as tmp:
         subject_path = Path(tmp) / "subject.txt"
         body_path = Path(tmp) / "body.md"
         subject_path.write_text(marker_clear_ack_subject(email_path) + "\n", encoding="utf-8")
-        body_path.write_text(marker_clear_ack_body(comment), encoding="utf-8")
+        body_path.write_text(marker_clear_ack_body(comment, clear_kind), encoding="utf-8")
         subprocess.run([str(EMAIL_HELPER), "--manager-human", "--subject-file", str(subject_path), "--message-file", str(body_path)], check=True)
 
 
@@ -407,8 +440,47 @@ def remove_pending_marker_line(text: str, line_number: int) -> str:
     return "".join(lines)
 
 
-def clear_pending_marker(text: str, line_number: int, comment: str) -> tuple[str, bool]:
-    comment_line = normalized_comment(comment)
+def pending_block_lines(text: str, line_number: int) -> list[str]:
+    lines = text.splitlines()
+    if line_number < 1 or line_number > len(lines):
+        raise TaskFrontmatterError("pending line number is outside the file.")
+    if lines[line_number - 1].strip() != PENDING_MARKER:
+        raise TaskFrontmatterError("specified line does not contain `(pending)`.")
+    end_idx = len(lines)
+    for idx in range(line_number, len(lines)):
+        if lines[idx].strip() == PENDING_MARKER:
+            end_idx = idx
+            break
+    return lines[line_number - 1 : end_idx]
+
+
+def pending_block_is_human_origin(block_lines: list[str]) -> bool:
+    stripped_lines = [line.strip() for line in block_lines]
+    if any(line.startswith(MANAGER_SOURCE_PREFIXES) for line in stripped_lines):
+        return False
+    if any(line.startswith(AGENT_SOURCE_PREFIXES) for line in stripped_lines):
+        return False
+    if any(line.startswith(EMAIL_SOURCE_PREFIXES) for line in stripped_lines):
+        return True
+    return True
+
+
+def clear_comment(comment: str, clear_kind: str = "") -> str:
+    if clear_kind:
+        return f"{clear_kind}: {comment}"
+    return comment
+
+
+def clear_record_line(line_number: int, comment: str, clear_kind: str = "") -> str:
+    return normalized_comment(f"pending marker cleared line={line_number}: {clear_comment(comment, clear_kind)}")
+
+
+def clear_ack_sent_line(line_number: int, comment: str, clear_kind: str = "") -> str:
+    return normalized_comment(f"human ack sent for pending marker clear line={line_number}: {clear_comment(comment, clear_kind)}")
+
+
+def clear_pending_marker(text: str, line_number: int, comment: str, clear_kind: str = "") -> tuple[str, bool]:
+    comment_line = clear_record_line(line_number, comment, clear_kind)
     if line_is_pending_marker(text, line_number):
         updated = remove_pending_marker_line(text, line_number)
         if comment_line_exists(updated, comment_line):
@@ -417,6 +489,72 @@ def clear_pending_marker(text: str, line_number: int, comment: str) -> tuple[str
     if comment_line_exists(text, comment_line):
         return text, False
     raise TaskFrontmatterError("specified line does not contain `(pending)`.")
+
+
+def marker_clear_recorded(text: str, line_number: int, comment: str, clear_kind: str) -> bool:
+    return comment_line_exists(text, clear_record_line(line_number, comment, clear_kind))
+
+
+def marker_clear_ack_sent(text: str, line_number: int, comment: str, clear_kind: str) -> bool:
+    return comment_line_exists(text, clear_ack_sent_line(line_number, comment, clear_kind))
+
+
+def append_marker_clear_ack_sent(text: str, line_number: int, comment: str, clear_kind: str) -> str:
+    comment_line = clear_ack_sent_line(line_number, comment, clear_kind)
+    if comment_line_exists(text, comment_line):
+        return text
+    return append_comment_line(text, comment_line)
+
+
+def remove_marker_clear_ack_sent(text: str, line_number: int, comment: str, clear_kind: str) -> str:
+    comment_line = clear_ack_sent_line(line_number, comment, clear_kind)
+    lines = text.splitlines(keepends=True)
+    for idx, line in enumerate(lines):
+        if line.strip() == comment_line:
+            del lines[idx]
+            return "".join(lines)
+    return text
+
+
+def validate_clear_kind_value(clear_kind: str) -> None:
+    if clear_kind and clear_kind not in CLEAR_KINDS:
+        raise TaskFrontmatterError("human-origin marker clear has invalid `--clear-kind`.")
+
+
+def validate_marker_clear_semantics(args: Args, text: str) -> None:
+    validate_clear_kind_value(args.clear_kind)
+    human_origin = args.ack_human or pending_block_is_human_origin(pending_block_lines(text, args.line))
+    if not human_origin:
+        return
+    if not args.clear_kind:
+        raise TaskFrontmatterError("human-origin marker clear requires `--clear-kind` so the cleared request has semantic evidence.")
+    if args.clear_kind != "existing-owner-item":
+        return
+    if args.owner_task_file is None or not args.owner_item:
+        raise TaskFrontmatterError("`--clear-kind existing-owner-item` requires `--owner-task-file` and `--owner-item`.")
+    owner_path = task_path(args.root, args.owner_task_file)
+    metadata = require_metadata(owner_path.read_text(encoding="utf-8"))
+    if metadata.status == "done":
+        raise TaskFrontmatterError("owner task is already done; cite an active owner task item before clearing the human-origin marker.")
+    if args.owner_item not in metadata.pending_task_items:
+        raise TaskFrontmatterError("owner task does not contain the cited pending item.")
+
+
+def send_marker_clear_ack_once(path: Path, args: Args, email_path: Path | None) -> None:
+    current_before = path.stat()
+    current_text = path.read_text(encoding="utf-8")
+    if marker_clear_ack_sent(current_text, args.line, args.comment, args.clear_kind):
+        return
+    updated = append_marker_clear_ack_sent(current_text, args.line, args.comment, args.clear_kind)
+    write_if_changed(path, current_text, updated, current_before)
+    try:
+        send_marker_clear_ack(args.comment, email_path, args.clear_kind)
+    except (OSError, subprocess.CalledProcessError):
+        rollback_before = path.stat()
+        rollback_text = path.read_text(encoding="utf-8")
+        rolled_back = remove_marker_clear_ack_sent(rollback_text, args.line, args.comment, args.clear_kind)
+        write_if_changed(path, rollback_text, rolled_back, rollback_before)
+        raise
 
 
 def move_pending_item(source_text: str, target_text: str, item: str) -> tuple[str, str, int, int]:
@@ -498,10 +636,19 @@ def run(args: Args) -> int:
             return 0
         if command == "pending-marker-clear":
             email_path = task_path(args.root, args.email_file) if args.email_file is not None else None
-            updated, changed = clear_pending_marker(text, args.line, args.comment)
+            validate_clear_kind_value(args.clear_kind)
+            if marker_clear_recorded(text, args.line, args.comment, args.clear_kind):
+                if args.ack_human and not marker_clear_ack_sent(text, args.line, args.comment, args.clear_kind) and line_is_pending_marker(text, args.line):
+                    raise TaskFrontmatterError("cannot retry human acknowledgement while a new live `(pending)` marker is at the original line.")
+                if args.ack_human:
+                    send_marker_clear_ack_once(path, args, email_path)
+                print(f"already removed `(pending)` from {path.name}:{args.line}; no pending item added")
+                return 0
+            validate_marker_clear_semantics(args, text)
+            updated, changed = clear_pending_marker(text, args.line, args.comment, args.clear_kind)
             write_if_changed(path, text, updated, before)
             if args.ack_human:
-                send_marker_clear_ack(args.comment, email_path)
+                send_marker_clear_ack_once(path, args, email_path)
             action = "removed" if changed else "already removed"
             print(f"{action} `(pending)` from {path.name}:{args.line}; no pending item added")
             return 0

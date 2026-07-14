@@ -1070,7 +1070,7 @@ def manager_pending_instruction(marker: Marker, after_recording: str = "Then dis
     if marker.origin == "human":
         quote_note = "Choose `--item` values by quoting the human's words as much as possible."
         flag_note = "Use `--ack-human` so the script emails the human after recording."
-        fallback_note = "If there is no pending task item to add, use `omo_task_edit.py pending-marker-clear` with `--comment`, `--ack-human`, and the same `--email-file` when shown above; for existing pending-item edits, use `omo_task_edit.py pending-replace` or `omo_task_edit.py pending-remove`."
+        fallback_note = "If no new pending task item should be added, use `omo_task_edit.py pending-marker-clear` with `--comment`, `--clear-kind report-only|duplicate|cancelled|superseded`, `--ack-human`, and the same `--email-file` when shown above; if an active owner task already tracks it, use `--clear-kind existing-owner-item --owner-task-file TASK.md --owner-item ITEM`. Existing pending-item cleanup uses `omo_task_edit.py pending-replace` or `omo_task_edit.py pending-remove`."
     else:
         quote_note = "Choose `--item` values by quoting the request's words as much as possible."
         flag_note = "Do not pass `--ack-human`; agent-origin reports do not need a human acknowledgement."

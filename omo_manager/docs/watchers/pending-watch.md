@@ -41,7 +41,7 @@
   - human-origin manager deliveries tell the manager to quote the human's words as much as possible when choosing `--item` values
   - agent-origin manager deliveries tell the manager to quote the request's words as much as possible when choosing `--item` values
   - agent-origin manager deliveries say to omit `--ack-human`
-  - if no pending task item should be added, manager deliveries point to `omo_task_edit.py pending-marker-clear`; existing pending-item cleanup uses `omo_task_edit.py pending-replace` or `omo_task_edit.py pending-remove`; human-origin cleanup still needs a manual human email when no helper sends one
+  - if no pending task item should be added, manager deliveries point to `omo_task_edit.py pending-marker-clear`; human-origin clears require `--clear-kind`, and `existing-owner-item` verifies the cited active owner task item; existing pending-item cleanup uses `omo_task_edit.py pending-replace` or `omo_task_edit.py pending-remove`
   - includes the pending line and content from that line to end of file
   - labels pending content as `<snippet file="PATH:START-END">`
   - truncates long content to 2000 chars by keeping start and end with `…Nchars…` in the middle
@@ -93,7 +93,7 @@
 - dm fyi example
   - ``Normally record pending items and remove the consumed `(pending)` marker by running:``
   - ``omo_record_pending.py --pending-file worker.md --line 11 --item PENDING_ITEM_TEXT [--item ...] [--task-file TARGET_TASK.md] --email-file manager_mail/4002.txt --ack-human``
-  - ``Choose `--item` values by quoting the human's words as much as possible. Use `--ack-human` so the script emails the human after recording. If there is no pending task item to add, run `omo_task_edit.py pending-marker-clear`; existing pending-item cleanup uses `omo_task_edit.py pending-replace` or `omo_task_edit.py pending-remove`; email the human manually when no helper sends one. This message is already dispatched to the agent, this is FYI:``
+  - ``Choose `--item` values by quoting the human's words as much as possible. Use `--ack-human` so the script emails the human after recording. If no new pending task item should be added, use `omo_task_edit.py pending-marker-clear` with `--comment`, `--clear-kind report-only|duplicate|cancelled|superseded`, `--ack-human`, and the same `--email-file` when shown above; if an active owner task already tracks it, use `--clear-kind existing-owner-item --owner-task-file TASK.md --owner-item ITEM`. Existing pending-item cleanup uses `omo_task_edit.py pending-replace` or `omo_task_edit.py pending-remove`. This message is already dispatched to the agent, this is FYI:``
   - `<snippet file="worker.md:11-12">`
   - `(pending)`
   - `(record and delegate manager_mail/4002.txt)`

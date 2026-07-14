@@ -56,12 +56,19 @@ unchanged since it was read.
 - escape existing outer parentheses by wrapping the exact text as
   `(manager note: TEXT)`
 
-`pending-marker-clear TASK.md --line LINE --comment TEXT [--ack-human] [--email-file manager_mail/N.txt]`
+`pending-marker-clear TASK.md --line LINE --comment TEXT [--ack-human] [--email-file manager_mail/N.txt] [--clear-kind KIND]`
 - remove the `(pending)` marker at `LINE` without adding items
 - require `--comment` so retry/idempotency has durable evidence
-- append a parenthesized comment explaining why no new item was added
+- append a line-bound parenthesized comment explaining why no new item was added
+- for human-origin markers, require `--clear-kind`
 - if `--ack-human` is present, send a short human email saying no pending item
-  was added
+  was added, the classification, and the reason
+- before sending that email, append a human-ack-sent comment so retries do not
+  send duplicate acknowledgements; remove that comment if the email command
+  reports failure
+- for `--clear-kind existing-owner-item`, require
+  `--owner-task-file OWNER.md --owner-item ITEM` and verify that `OWNER.md` is
+  active and still has `ITEM`
 - use `--email-file manager_mail/N.txt` when present so the acknowledgement
   stays in the original email thread
 
