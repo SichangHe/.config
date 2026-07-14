@@ -1243,6 +1243,15 @@ def marker_fyi_text(marker: Marker, attachments: Sequence[SourceAttachment]) -> 
     return "\n".join(parts)
 
 
+def direct_message_fallback_text(marker: Marker, attachments: Sequence[SourceAttachment], marker_name: str, reason: str) -> str:
+    parts = [
+        f"Direct-message routing failed: pending block or linked file starts or ends with `{marker_name}`, but {reason}.",
+        "Do not record this routing marker as a pending_task_item. Identify the intended worker task, deliver the message there, then clear this pending marker with `omo_task_edit.py pending-marker-clear`.",
+    ]
+    parts.extend(marker_snippet_parts(marker, attachments))
+    return "\n".join(parts)
+
+
 def find_markers(root: Path, files: list[Path]) -> list[Marker]:
     """Find unresolved `(pending)` blocks outside Markdown code fences."""
 
@@ -1451,10 +1460,11 @@ def push_dm_ref(args: Args, seen: dict[str, float], now_s: float, marker: Marker
     marker_name = "DM" if copy_manager else "DM only"
     marker_key = marker_seen_key(args, marker, attachments)
     if not worker_target:
-        text = marker_delivery_text(
+        text = direct_message_fallback_text(
             marker,
             attachments,
-            f"direct-message fallback: pending block or linked file starts or ends with `{marker_name}`, but no safe worker `runat:` target was found; delivering to the manager for routing.",
+            marker_name,
+            "no safe worker `runat:` target was found",
         )
         return push_marker_text_or_escalate(
             args,

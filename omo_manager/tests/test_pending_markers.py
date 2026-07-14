@@ -6288,7 +6288,42 @@ class PendingMarkerTests(unittest.TestCase):
                 self.assertTrue(watcher.scan_once(args, {}, [path]))
             self.assertEqual(1, len(calls))
             self.assertEqual("main:0.0", calls[0][calls[0].index("--manager-target") + 1])
-            self.assertIn("direct-message fallback: pending block or linked file starts or ends with `DM`, but no safe worker `runat:` target was found; delivering to the manager for routing.", calls[0][1])
+            self.assertIn("Direct-message routing failed: pending block or linked file starts or ends with `DM`, but no safe worker `runat:` target was found.", calls[0][1])
+            self.assertIn("Do not record this routing marker as a pending_task_item.", calls[0][1])
+            self.assertIn('<snippet file="work_manager_today.md:1-2">', calls[0][1])
+            self.assertIn('<snippet file="manager_mail/4002.txt:1-1">', calls[0][1])
+            self.assertIn("Please route this. DM.", calls[0][1])
+            self.assertNotIn("omo_record_pending.py", calls[0][1])
+
+    def test_email_dm_only_pending_fallback_does_not_prompt_pending_item(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mail = root / "manager_mail" / "4002.txt"
+            mail.parent.mkdir()
+            mail.write_text("Please route this. DM only.\n", encoding="utf-8")
+            path = root / "work_manager_today.md"
+            path.write_text("(pending)\n(record and delegate manager_mail/4002.txt)\n", encoding="utf-8")
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(capture_delivery_call(command))
+                return subprocess.CompletedProcess(command, 0)
+
+            args = Args(
+                root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=False, manager_target="main:0.0"
+            )
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+                self.assertTrue(watcher.scan_once(args, {}, [path]))
+            self.assertEqual(1, len(calls))
+            self.assertEqual("main:0.0", calls[0][calls[0].index("--manager-target") + 1])
+            self.assertIn("Direct-message routing failed: pending block or linked file starts or ends with `DM only`, but no safe worker `runat:` target was found.", calls[0][1])
+            self.assertIn("Do not record this routing marker as a pending_task_item.", calls[0][1])
+            self.assertIn('<snippet file="work_manager_today.md:1-2">', calls[0][1])
+            self.assertIn('<snippet file="manager_mail/4002.txt:1-1">', calls[0][1])
+            self.assertIn("Please route this. DM only.", calls[0][1])
+            self.assertNotIn("omo_record_pending.py", calls[0][1])
 
     def test_email_attachment_error_does_not_mark_marker_seen(self) -> None:
         from omo_manager import omo_pending_watch as watcher
