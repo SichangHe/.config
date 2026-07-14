@@ -301,6 +301,7 @@ class DeliveryFailureFallback:
     text: str
     options: CodexSendOptions
     success_event: DeliverySuccessEvent | None = None
+    pending_guard: PendingGuard | None = None
 
 
 DELIVERY_SUCCESS_EVENTS: SimpleQueue[DeliverySuccessEvent] = SimpleQueue()
@@ -347,10 +348,18 @@ def log_send_result(future: Future[None], success_event: DeliverySuccessEvent | 
     except Exception as exc:
         print(f"omo_pending_watch: async delivery failed: {exc}", file=sys.stderr)
         result = DeliveryResult(1, str(exc))
-        if failure_fallback is not None and target_unavailable(result):
+        if failure_fallback is not None:
+            if failure_fallback.pending_guard is not None and not pending_marker_present(
+                failure_fallback.pending_guard.root,
+                failure_fallback.pending_guard.pending_file,
+                failure_fallback.pending_guard.pending_line,
+                failure_fallback.pending_guard.pending_digest,
+            ):
+                print("omo_pending_watch: async fallback skipped; pending marker cleared before fallback paste", file=sys.stderr)
+                return
             text = with_failed_target_escalation(failure_fallback.text, failure_fallback.failed_target, result)
             try:
-                _ = submit_send(failure_fallback.target, text, failure_fallback.options, success_event=failure_fallback.success_event)
+                _ = submit_send(failure_fallback.target, text, failure_fallback.options, pending_guard=failure_fallback.pending_guard, success_event=failure_fallback.success_event)
             except Exception as fallback_exc:
                 print(f"omo_pending_watch: async fallback delivery failed: {fallback_exc}", file=sys.stderr)
         return
@@ -766,6 +775,10 @@ def dm_worker_seen_key(args: Args, marker: Marker, worker_target: str, attachmen
     dm = int(marker_is_dm(marker, attachments))
     dm_only = int(marker_is_dm_only(marker, attachments))
     return f"{args.root}:{marker.file}:{marker.line}:{marker.digest}:dm-worker:{canonical_target(worker_target)}:{attachment_payload_digest(payload)}:dm:{dm}:dm-only:{dm_only}"
+
+
+def dm_worker_failure_seen_key(args: Args, marker: Marker, worker_target: str, attachments: Sequence[SourceAttachment]) -> str:
+    return f"{dm_worker_seen_key(args, marker, worker_target, attachments)}:delivery-failure"
 
 
 def attachment_error_seen_key(args: Args, marker: Marker, attachments: Sequence[SourceAttachment]) -> str:
@@ -1367,7 +1380,17 @@ def clear_pending_marker_if_current(root: Path, marker: Marker) -> bool:
             tmp_path.unlink(missing_ok=True)
 
 
-def push_marker_delivery(args: Args, marker: Marker, text: str, manager_target: str, success_event: DeliverySuccessEvent | None = None) -> DeliveryResult:
+def push_marker_delivery(
+    args: Args,
+    marker: Marker,
+    text: str,
+    manager_target: str,
+    success_event: DeliverySuccessEvent | None = None,
+    *,
+    failure_fallback_target: str = "",
+    failure_fallback_text: str | None = None,
+    failure_success_event: DeliverySuccessEvent | None = None,
+) -> DeliveryResult:
     if args.dry_run:
         print(text)
         return DeliveryResult(0)
@@ -1381,6 +1404,9 @@ def push_marker_delivery(args: Args, marker: Marker, text: str, manager_target: 
             pending_line=marker.line,
             pending_digest=marker.digest,
             success_event=success_event,
+            failure_fallback_target=failure_fallback_target,
+            failure_fallback_text=failure_fallback_text,
+            failure_success_event=failure_success_event,
         )
     return DeliveryResult(1, "missing delivery target")
 
@@ -1402,7 +1428,7 @@ def main_manager_fallback_target(args: Args, failed_target: str) -> str:
 
 def with_failed_target_escalation(text: str, failed_target: str, result: DeliveryResult) -> str:
     detail = result.error or f"status {result.status}"
-    prefix = f"Delivery to resolved target `{failed_target}` failed: {detail}. Main manager action required: fix the stale task target or restart the owning manager, then handle this message."
+    prefix = f"Delivery to resolved target `{failed_target}` failed: {detail}. Manager action required: inspect the target, fix the destination if stale, then handle this message."
     first, sep, rest = text.partition("\n")
     if not sep:
         return f"{text}\n{prefix}"
@@ -1410,10 +1436,10 @@ def with_failed_target_escalation(text: str, failed_target: str, result: Deliver
 
 
 def push_marker_text_or_escalate(args: Args, marker: Marker, text: str, manager_target: str, success_event: DeliverySuccessEvent | None = None) -> int:
-    result = push_marker_delivery(args, marker, text, manager_target, success_event)
+    fallback_target = main_manager_fallback_target(args, manager_target)
+    result = push_marker_delivery(args, marker, text, manager_target, success_event, failure_fallback_target=fallback_target)
     if result.status in {0, ASYNC_DELIVERY_STARTED} or not target_unavailable(result):
         return result.status
-    fallback_target = main_manager_fallback_target(args, manager_target)
     if not fallback_target:
         return result.status
     return push_marker_delivery(args, marker, with_failed_target_escalation(text, manager_target, result), fallback_target, success_event).status
@@ -1439,10 +1465,19 @@ def push_dm_ref(args: Args, seen: dict[str, float], now_s: float, marker: Marker
         )
     worker_text = marker_worker_dm_text(marker, attachments)
     worker_key = dm_worker_seen_key(args, marker, worker_target, attachments)
+    worker_failure_key = dm_worker_failure_seen_key(args, marker, worker_target, attachments)
     worker_seen = seen_contains(seen, worker_key, now_s)
     worker_status = 0
-    if not worker_seen:
-        worker_status = push_marker_text(
+    worker_failure_seen = seen_contains(seen, worker_failure_key, now_s)
+    if not worker_seen and worker_failure_seen:
+        return 1
+    if not worker_seen and not worker_failure_seen:
+        failure_text = marker_delivery_text(
+            marker,
+            attachments,
+            f"direct-message delivery failed: worker target `{worker_target}` did not receive this message; manager action required to inspect or restart the target, then handle the human request.",
+        )
+        result = push_marker_delivery(
             args,
             marker,
             worker_text,
@@ -1454,7 +1489,11 @@ def push_dm_ref(args: Args, seen: dict[str, float], now_s: float, marker: Marker
                 clear_root=args.root if not copy_manager else None,
                 clear_marker=marker if not copy_manager else None,
             ),
+            failure_fallback_target=manager_target,
+            failure_fallback_text=with_manager_policy_reminder(args, failure_text, reminders),
+            failure_success_event=DeliverySuccessEvent(seen_keys=(worker_failure_key,), seen_at_s=now_s),
         )
+        worker_status = result.status
         if worker_status not in {0, ASYNC_DELIVERY_STARTED}:
             text = marker_delivery_text(
                 marker,
@@ -1484,6 +1523,7 @@ def push_dm_ref(args: Args, seen: dict[str, float], now_s: float, marker: Marker
         manager_text,
         manager_target,
         DeliverySuccessEvent(seen_keys=(marker_key,), seen_at_s=now_s),
+        marker=marker,
     )
     if manager_status == 0 and worker_status == ASYNC_DELIVERY_STARTED:
         return ASYNC_DELIVERY_STARTED
@@ -1539,7 +1579,7 @@ def push_manager_text(args: Args, text: str, success_event: DeliverySuccessEvent
     return try_send_delivery_text("manager delivery", text, args.manager_target, success_event=success_event).status
 
 
-def push_manager_text_to_target(args: Args, text: str, manager_target: str, success_event: DeliverySuccessEvent | None = None) -> int:
+def push_manager_text_to_target(args: Args, text: str, manager_target: str, success_event: DeliverySuccessEvent | None = None, *, marker: Marker | None = None) -> int:
     scoped_args = replace(args, manager_target=manager_target)
     if scoped_args.dry_run:
         print(text)
@@ -1554,12 +1594,24 @@ def push_manager_text_to_target(args: Args, text: str, manager_target: str, succ
         scoped_args.manager_target,
         success_event=success_event,
         failure_fallback_target=fallback_target,
+        failure_pending_guard=PendingGuard(args.root, marker.file, marker.line, marker.digest) if marker is not None else None,
     )
     if result.status in {0, ASYNC_DELIVERY_STARTED} or not target_unavailable(result):
         return result.status
     if not fallback_target:
         return result.status
-    return try_send_delivery_text("manager delivery", with_failed_target_escalation(text, scoped_args.manager_target, result), fallback_target, success_event=success_event).status
+    if marker is not None and not pending_marker_present(args.root, marker.file, marker.line, marker.digest):
+        return result.status
+    return try_send_delivery_text(
+        "manager delivery",
+        with_failed_target_escalation(text, scoped_args.manager_target, result),
+        fallback_target,
+        root=args.root if marker is not None else None,
+        pending_file=marker.file if marker is not None else None,
+        pending_line=marker.line if marker is not None else 0,
+        pending_digest=marker.digest if marker is not None else "",
+        success_event=success_event,
+    ).status
 
 
 def send_delivery_text(
@@ -1588,6 +1640,9 @@ def try_send_delivery_text(
     submit_verify_timeout_s: float = DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S,
     success_event: DeliverySuccessEvent | None = None,
     failure_fallback_target: str = "",
+    failure_fallback_text: str | None = None,
+    failure_success_event: DeliverySuccessEvent | None = None,
+    failure_pending_guard: PendingGuard | None = None,
 ) -> DeliveryResult:
     if root is not None and pending_file is not None and not pending_marker_present(root, pending_file, pending_line, pending_digest):
         print(f"omo_pending_watch: {name} skipped; pending marker cleared before tmux paste", file=sys.stderr)
@@ -1601,7 +1656,7 @@ def try_send_delivery_text(
         True,
     )
     failure_fallback = (
-        DeliveryFailureFallback(target, failure_fallback_target, text, options, success_event)
+        DeliveryFailureFallback(target, failure_fallback_target, failure_fallback_text or text, options, failure_success_event or success_event, failure_pending_guard or pending_guard)
         if failure_fallback_target and not same_tmux_target(target, failure_fallback_target)
         else None
     )

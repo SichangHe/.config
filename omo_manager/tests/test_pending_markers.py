@@ -4975,6 +4975,176 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual(["wl:2", "wl:1"], [target for target, _message in sends])
             self.assertEqual({}, seen)
 
+    def test_dm_only_async_worker_failure_notifies_manager_without_clearing_marker(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "worker.md"
+            path.write_text(f"{task_frontmatter(runat='wl:2', managerat='wl:1')}\n(pending)\nDM only\nPlease inspect this directly.\n", encoding="utf-8")
+            worker_future: Future[None] = Future()
+            fallback_future: Future[None] = Future()
+            submitted: list[tuple[str, str, watcher.DeliverySuccessEvent | None, watcher.DeliveryFailureFallback | None]] = []
+
+            def fake_send_to_codex(
+                target: str,
+                message: str,
+                _options: watcher.CodexSendOptions,
+                *,
+                pending_guard: watcher.PendingGuard | None = None,
+                success_event: watcher.DeliverySuccessEvent | None = None,
+                failure_fallback: watcher.DeliveryFailureFallback | None = None,
+            ) -> Future[None]:
+                self.assertIsNotNone(pending_guard)
+                submitted.append((target, message, success_event, failure_fallback))
+                self.assertEqual("wl:2", target)
+                return worker_future
+
+            def fake_submit(
+                target: str,
+                message: str,
+                _options: watcher.CodexSendOptions,
+                pending_guard: watcher.PendingGuard | None = None,
+                success_event: watcher.DeliverySuccessEvent | None = None,
+                failure_fallback: watcher.DeliveryFailureFallback | None = None,
+            ) -> Future[None]:
+                self.assertIsNotNone(pending_guard)
+                self.assertIsNone(failure_fallback)
+                submitted.append((target, message, success_event, failure_fallback))
+                self.assertEqual("wl:1", target)
+                return fallback_future
+
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/missing-status.py"), False, False, manager_target="main:0.0")
+            seen: dict[str, float] = {}
+            with patch("omo_manager.omo_pending_watch.send_to_codex", side_effect=fake_send_to_codex), patch("omo_manager.omo_pending_watch.submit_send", side_effect=fake_submit):
+                self.assertTrue(watcher.scan_once(args, seen, [path]))
+                self.assertEqual({}, seen)
+                worker_future.set_exception(RuntimeError("Codex paste not verified after 5s"))
+                watcher.log_send_result(worker_future, submitted[0][2], submitted[0][3])
+                self.assertEqual(2, len(submitted))
+                self.assertIn("Delivery to resolved target `wl:2` failed: Codex paste not verified after 5s.", submitted[1][1])
+                self.assertIn("direct-message delivery failed: worker target `wl:2` did not receive this message", submitted[1][1])
+                fallback_future.set_result(None)
+                watcher.log_send_result(fallback_future, submitted[1][2])
+                self.assertTrue(watcher.drain_delivery_successes(args, seen, 1001.0))
+            self.assertIn("(pending)", path.read_text(encoding="utf-8"))
+            self.assertTrue(any(key.endswith(":delivery-failure") for key in seen))
+            self.assertFalse(any(":dm-worker:" in key and not key.endswith(":delivery-failure") for key in seen))
+            submitted.clear()
+            with patch("omo_manager.omo_pending_watch.send_to_codex", side_effect=AssertionError("unexpected resend")), patch(
+                "omo_manager.omo_pending_watch.submit_send",
+                side_effect=AssertionError("unexpected fallback"),
+            ):
+                self.assertFalse(watcher.scan_once(args, seen, [path]))
+            self.assertIn("(pending)", path.read_text(encoding="utf-8"))
+
+    def test_normal_dm_async_worker_failure_notifies_manager_without_worker_success(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "worker.md"
+            path.write_text(f"{task_frontmatter(runat='wl:2', managerat='wl:1')}\n(pending)\nDM\nPlease inspect this directly.\n", encoding="utf-8")
+            worker_future: Future[None] = Future()
+            manager_copy_future: Future[None] = Future()
+            fallback_future: Future[None] = Future()
+            submitted: list[tuple[str, str, watcher.DeliverySuccessEvent | None, watcher.DeliveryFailureFallback | None]] = []
+
+            def fake_send_to_codex(
+                target: str,
+                message: str,
+                _options: watcher.CodexSendOptions,
+                *,
+                pending_guard: watcher.PendingGuard | None = None,
+                success_event: watcher.DeliverySuccessEvent | None = None,
+                failure_fallback: watcher.DeliveryFailureFallback | None = None,
+            ) -> Future[None]:
+                submitted.append((target, message, success_event, failure_fallback))
+                if target == "wl:2":
+                    self.assertIsNotNone(pending_guard)
+                    return worker_future
+                self.assertEqual("wl:1", target)
+                self.assertIsNone(pending_guard)
+                return manager_copy_future
+
+            def fake_submit(
+                target: str,
+                message: str,
+                _options: watcher.CodexSendOptions,
+                pending_guard: watcher.PendingGuard | None = None,
+                success_event: watcher.DeliverySuccessEvent | None = None,
+                failure_fallback: watcher.DeliveryFailureFallback | None = None,
+            ) -> Future[None]:
+                self.assertIsNotNone(pending_guard)
+                self.assertIsNone(failure_fallback)
+                submitted.append((target, message, success_event, failure_fallback))
+                self.assertEqual("wl:1", target)
+                return fallback_future
+
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/missing-status.py"), False, False, manager_target="main:0.0")
+            seen: dict[str, float] = {}
+            with patch("omo_manager.omo_pending_watch.send_to_codex", side_effect=fake_send_to_codex), patch("omo_manager.omo_pending_watch.submit_send", side_effect=fake_submit):
+                self.assertTrue(watcher.scan_once(args, seen, [path]))
+                self.assertEqual(["wl:2", "wl:1"], [target for target, _message, _event, _fallback in submitted])
+                worker_future.set_exception(RuntimeError("Codex paste not verified after 5s"))
+                watcher.log_send_result(worker_future, submitted[0][2], submitted[0][3])
+                self.assertEqual(3, len(submitted))
+                self.assertIn("direct-message delivery failed: worker target `wl:2` did not receive this message", submitted[2][1])
+                manager_copy_future.set_result(None)
+                watcher.log_send_result(manager_copy_future, submitted[1][2], submitted[1][3])
+                fallback_future.set_result(None)
+                watcher.log_send_result(fallback_future, submitted[2][2])
+                self.assertTrue(watcher.drain_delivery_successes(args, seen, 1001.0))
+            self.assertTrue(any(key.endswith(":delivery-failure") for key in seen))
+            self.assertFalse(any(":dm-worker:" in key and not key.endswith(":delivery-failure") for key in seen))
+            submitted.clear()
+            with patch("omo_manager.omo_pending_watch.send_to_codex", side_effect=AssertionError("unexpected resend")), patch(
+                "omo_manager.omo_pending_watch.submit_send",
+                side_effect=AssertionError("unexpected fallback"),
+            ):
+                self.assertFalse(watcher.scan_once(args, seen, [path]))
+
+    def test_normal_dm_manager_copy_fallback_skips_cleared_pending_marker(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "worker.md"
+            path.write_text(f"{task_frontmatter(runat='wl:2', managerat='vl:64')}\n(pending)\nDM\nPlease inspect this directly.\n", encoding="utf-8")
+            worker_future: Future[None] = Future()
+            manager_copy_future: Future[None] = Future()
+            submitted: list[tuple[str, str, watcher.DeliverySuccessEvent | None, watcher.DeliveryFailureFallback | None]] = []
+
+            def fake_send_to_codex(
+                target: str,
+                message: str,
+                _options: watcher.CodexSendOptions,
+                *,
+                pending_guard: watcher.PendingGuard | None = None,
+                success_event: watcher.DeliverySuccessEvent | None = None,
+                failure_fallback: watcher.DeliveryFailureFallback | None = None,
+            ) -> Future[None]:
+                submitted.append((target, message, success_event, failure_fallback))
+                if target == "wl:2":
+                    self.assertIsNotNone(pending_guard)
+                    return worker_future
+                self.assertEqual("vl:64", target)
+                self.assertIsNone(pending_guard)
+                return manager_copy_future
+
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/missing-status.py"), False, False, manager_target="wl:1")
+            seen: dict[str, float] = {}
+            with patch("omo_manager.omo_pending_watch.send_to_codex", side_effect=fake_send_to_codex):
+                self.assertTrue(watcher.scan_once(args, seen, [path]))
+                self.assertEqual(["wl:2", "vl:64"], [target for target, _message, _event, _fallback in submitted])
+                path.write_text(f"{task_frontmatter(runat='wl:2', managerat='vl:64')}\nDM\nPlease inspect this directly.\n", encoding="utf-8")
+                manager_copy_future.set_exception(RuntimeError("Codex paste not verified after 5s"))
+                err = StringIO()
+                with patch("omo_manager.omo_pending_watch.submit_send", side_effect=AssertionError("unexpected fallback")), redirect_stderr(err):
+                    watcher.log_send_result(manager_copy_future, submitted[1][2], submitted[1][3])
+                self.assertIn("async fallback skipped; pending marker cleared before fallback paste", err.getvalue())
+            self.assertEqual({}, seen)
+
     def test_pending_block_dm_pushes_worker_without_task_file_snippet(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
@@ -7564,6 +7734,97 @@ class PendingMarkerTests(unittest.TestCase):
             seen: dict[str, float] = {}
             with patch("omo_manager.omo_pending_watch.send_to_codex", return_value=object()):
                 self.assertTrue(watcher.scan_once(args, seen, [path]))
+            self.assertEqual({}, seen)
+
+    def test_pending_delivery_async_failure_falls_back_to_main_manager(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            path.write_text(f"{task_frontmatter(runat='wl:2', managerat='vl:64')}\n(pending)\nplease route\n", encoding="utf-8")
+            owner_future: Future[None] = Future()
+            fallback_future: Future[None] = Future()
+            submitted: list[tuple[str, str, watcher.DeliverySuccessEvent | None, watcher.DeliveryFailureFallback | None]] = []
+
+            def fake_send_to_codex(
+                target: str,
+                message: str,
+                _options: watcher.CodexSendOptions,
+                *,
+                pending_guard: watcher.PendingGuard | None = None,
+                success_event: watcher.DeliverySuccessEvent | None = None,
+                failure_fallback: watcher.DeliveryFailureFallback | None = None,
+            ) -> Future[None]:
+                self.assertIsNotNone(pending_guard)
+                submitted.append((target, message, success_event, failure_fallback))
+                self.assertEqual("vl:64", target)
+                return owner_future
+
+            def fake_submit(
+                target: str,
+                message: str,
+                _options: watcher.CodexSendOptions,
+                pending_guard: watcher.PendingGuard | None = None,
+                success_event: watcher.DeliverySuccessEvent | None = None,
+                failure_fallback: watcher.DeliveryFailureFallback | None = None,
+            ) -> Future[None]:
+                self.assertIsNotNone(pending_guard)
+                self.assertIsNone(failure_fallback)
+                submitted.append((target, message, success_event, failure_fallback))
+                self.assertEqual("wl:1", target)
+                return fallback_future
+
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/missing-status.py"), False, False, manager_target="wl:1")
+            seen: dict[str, float] = {}
+            with patch("omo_manager.omo_pending_watch.send_to_codex", side_effect=fake_send_to_codex), patch("omo_manager.omo_pending_watch.submit_send", side_effect=fake_submit):
+                self.assertTrue(watcher.scan_once(args, seen, [path]))
+                self.assertEqual({}, seen)
+                owner_future.set_exception(RuntimeError("Codex paste not verified after 5s"))
+                watcher.log_send_result(owner_future, submitted[0][2], submitted[0][3])
+                self.assertEqual(2, len(submitted))
+                self.assertEqual("wl:1", submitted[1][0])
+                self.assertIn("Delivery to resolved target `vl:64` failed: Codex paste not verified after 5s.", submitted[1][1])
+                self.assertIn("please route", submitted[1][1])
+                fallback_future.set_result(None)
+                watcher.log_send_result(fallback_future, submitted[1][2])
+                self.assertTrue(watcher.drain_delivery_successes(args, seen, 1001.0))
+            self.assertIn(watcher.marker_seen_key(args, watcher.find_markers(root, [path])[0], []), seen)
+
+    def test_async_fallback_skips_cleared_pending_marker(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            path.write_text(f"{task_frontmatter(runat='wl:2', managerat='vl:64')}\n(pending)\nplease route\n", encoding="utf-8")
+            owner_future: Future[None] = Future()
+            submitted: list[tuple[str, str, watcher.DeliverySuccessEvent | None, watcher.DeliveryFailureFallback | None]] = []
+
+            def fake_send_to_codex(
+                target: str,
+                message: str,
+                _options: watcher.CodexSendOptions,
+                *,
+                pending_guard: watcher.PendingGuard | None = None,
+                success_event: watcher.DeliverySuccessEvent | None = None,
+                failure_fallback: watcher.DeliveryFailureFallback | None = None,
+            ) -> Future[None]:
+                self.assertIsNotNone(pending_guard)
+                submitted.append((target, message, success_event, failure_fallback))
+                self.assertEqual("vl:64", target)
+                return owner_future
+
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/missing-status.py"), False, False, manager_target="wl:1")
+            seen: dict[str, float] = {}
+            with patch("omo_manager.omo_pending_watch.send_to_codex", side_effect=fake_send_to_codex):
+                self.assertTrue(watcher.scan_once(args, seen, [path]))
+                path.write_text(f"{task_frontmatter(runat='wl:2', managerat='vl:64')}\nplease route\n", encoding="utf-8")
+                owner_future.set_exception(RuntimeError("pending marker cleared before tmux paste"))
+                err = StringIO()
+                with patch("omo_manager.omo_pending_watch.submit_send", side_effect=AssertionError("unexpected fallback")), redirect_stderr(err):
+                    watcher.log_send_result(owner_future, submitted[0][2], submitted[0][3])
+                self.assertIn("async fallback skipped; pending marker cleared before fallback paste", err.getvalue())
             self.assertEqual({}, seen)
 
     def test_delivery_success_event_records_seen_key_on_watcher_thread(self) -> None:
