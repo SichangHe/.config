@@ -366,6 +366,9 @@ def todo_task_candidates(root: Path) -> list[Path]:
     return candidates
 
 
+ACTIVE_TODO_SECTIONS = {"current", "human pending", "low priority"}
+
+
 def current_todo_task_candidates(root: Path) -> list[Path]:
     todo = root / "TODO.md"
     if not todo.exists():
@@ -377,15 +380,16 @@ def current_todo_task_candidates(root: Path) -> list[Path]:
         return []
     candidates: list[Path] = []
     seen: set[Path] = set()
-    in_current = False
+    in_active_section = False
     for line in lines:
         stripped = line.strip().casefold()
-        if stripped == "current:":
-            in_current = True
+        section = stripped[:-1] if stripped.endswith(":") else ""
+        if section in ACTIVE_TODO_SECTIONS:
+            in_active_section = True
             continue
-        if stripped.endswith(":") and stripped != "current:":
-            in_current = False
-        if not in_current:
+        if stripped.endswith(":"):
+            in_active_section = False
+        if not in_active_section:
             continue
         for match in re.findall(r"`?([A-Za-z0-9_./-]+\.md)`?", line):
             path = (root / match).resolve(strict=False)

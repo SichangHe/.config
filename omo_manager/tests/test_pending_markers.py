@@ -1516,6 +1516,117 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual(1, worker.read_text(encoding="utf-8").count("manager_mail/22.txt"))
             self.assertNotIn("(pending)", worker.read_text(encoding="utf-8"))
 
+    def test_email_watcher_direct_dm_reply_finds_human_pending_worker_task(self) -> None:
+        from email.message import EmailMessage
+        from omo_manager import email_idle_watcher as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            manager = root / "submanager.md"
+            worker = root / "helper_audit_agent_9580.md"
+            _ = manager.write_text(task_frontmatter(runat="wl:16", managerat="wl:1", is_manager=True), encoding="utf-8")
+            _ = worker.write_text(task_frontmatter(runat="hcfg:1", managerat="wl:16"), encoding="utf-8")
+            _ = (root / "TODO.md").write_text(
+                "current:\n"
+                "submanager.md wl:16\n"
+                "\n"
+                "human pending:\n"
+                "helper_audit_agent_9580.md\n"
+                "\n"
+                "previous:\n"
+                "old.md closed\n",
+                encoding="utf-8",
+            )
+            msg = EmailMessage()
+            msg["From"] = "Human <me@example.com>"
+            msg["Subject"] = "Re: [a] [hcfg:1] DM only fallback fix drafted"
+            msg.set_content("Please handle this directly. DM only\n")
+
+            class Client:
+                stores: list[tuple[object, ...]] = []
+
+                def uid(self, command: str, *args: object) -> tuple[str, list[object]]:
+                    if command == "search":
+                        if "SINCE" in args:
+                            return "OK", [b""]
+                        return "OK", [b"11329"]
+                    if command == "fetch":
+                        return "OK", [(b"RFC822", msg.as_bytes())]
+                    if command == "store":
+                        self.stores.append(args)
+                        return "OK", [b""]
+                    raise AssertionError(command)
+
+            pushes: list[tuple[Path | None, str, int]] = []
+            old_push = watcher.push_email_ref
+
+            def push(push_args: watcher.Args, line_no: int) -> bool:
+                pushes.append((push_args.manager_file, push_args.manager_target, line_no))
+                return True
+
+            watcher.push_email_ref = push
+            try:
+                client = Client()
+                args = watcher.Args(root, "", root / "manager_mail", state, root / "work_manager_today.md", True, "me@example.com", 0, Path("/bin/false"), manager_target="wl:1")
+                watcher.handle_unseen(client, args)
+            finally:
+                watcher.push_email_ref = old_push
+            self.assertEqual([], pushes)
+            self.assertIn("(pending)\n(record and delegate manager_mail/11329.txt)\n", worker.read_text(encoding="utf-8"))
+            self.assertNotIn("manager_mail/11329.txt", manager.read_text(encoding="utf-8"))
+            self.assertEqual([("11329", "+FLAGS", r"(\Seen)")], client.stores)
+
+    def test_email_watcher_low_priority_task_is_active_for_dm_reply_routing(self) -> None:
+        from omo_manager import email_idle_watcher as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            worker = root / "low_worker.md"
+            _ = worker.write_text(task_frontmatter(runat="hcfg:9", managerat="wl:16"), encoding="utf-8")
+            _ = (root / "TODO.md").write_text(
+                "current:\n"
+                "\n"
+                "low priority:\n"
+                "low_worker.md\n"
+                "\n"
+                "previous:\n"
+                "old.md hcfg:9\n",
+                encoding="utf-8",
+            )
+            args = watcher.Args(root, "", root / "manager_mail", root / "state", root / "work_manager_today.md", True, "me@example.com", 0, Path("/bin/false"), manager_target="wl:1")
+
+            route = watcher.email_route(args, "Re: [a] [hcfg:9] low task", "Please handle this directly. DM only\n")
+
+            self.assertEqual(worker, route.manager_file)
+            self.assertEqual("hcfg:9", route.manager_target)
+            self.assertTrue(route.direct_delivery)
+
+    def test_email_watcher_previous_task_is_not_active_for_dm_reply_routing(self) -> None:
+        from omo_manager import email_idle_watcher as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            previous = root / "previous_worker.md"
+            current_manager = root / "work_manager_today.md"
+            _ = previous.write_text(task_frontmatter(runat="hcfg:9", managerat="wl:16"), encoding="utf-8")
+            _ = current_manager.write_text(task_frontmatter(runat="wl:1", managerat="wl:1", is_manager=True), encoding="utf-8")
+            _ = (root / "TODO.md").write_text(
+                "current:\n"
+                "work_manager_today.md wl:1\n"
+                "\n"
+                "previous:\n"
+                "previous_worker.md hcfg:9\n",
+                encoding="utf-8",
+            )
+            args = watcher.Args(root, "", root / "manager_mail", root / "state", current_manager, True, "me@example.com", 0, Path("/bin/false"), manager_target="wl:1")
+
+            route = watcher.email_route(args, "Re: [a] [hcfg:9] old task", "Please handle this directly. DM only\n")
+
+            self.assertEqual(current_manager, route.manager_file)
+            self.assertEqual("wl:1", route.manager_target)
+            self.assertFalse(route.direct_delivery)
+
     def test_email_watcher_direct_dm_reply_copies_worker_manager(self) -> None:
         from email.message import EmailMessage
         from omo_manager import email_idle_watcher as watcher
@@ -6290,6 +6401,8 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual("main:0.0", calls[0][calls[0].index("--manager-target") + 1])
             self.assertIn("Direct-message routing failed: pending block or linked file starts or ends with `DM`, but no safe worker `runat:` target was found.", calls[0][1])
             self.assertIn("Do not record this routing marker as a pending_task_item.", calls[0][1])
+            self.assertIn("reinstating the worker agent or correcting the routing", calls[0][1])
+            self.assertIn("report this routing error to the human", calls[0][1])
             self.assertIn('<snippet file="work_manager_today.md:1-2">', calls[0][1])
             self.assertIn('<snippet file="manager_mail/4002.txt:1-1">', calls[0][1])
             self.assertIn("Please route this. DM.", calls[0][1])
@@ -6320,6 +6433,8 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual("main:0.0", calls[0][calls[0].index("--manager-target") + 1])
             self.assertIn("Direct-message routing failed: pending block or linked file starts or ends with `DM only`, but no safe worker `runat:` target was found.", calls[0][1])
             self.assertIn("Do not record this routing marker as a pending_task_item.", calls[0][1])
+            self.assertIn("reinstating the worker agent or correcting the routing", calls[0][1])
+            self.assertIn("report this routing error to the human", calls[0][1])
             self.assertIn('<snippet file="work_manager_today.md:1-2">', calls[0][1])
             self.assertIn('<snippet file="manager_mail/4002.txt:1-1">', calls[0][1])
             self.assertIn("Please route this. DM only.", calls[0][1])

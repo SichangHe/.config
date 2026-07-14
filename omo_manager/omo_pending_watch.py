@@ -1246,7 +1246,7 @@ def marker_fyi_text(marker: Marker, attachments: Sequence[SourceAttachment]) -> 
 def direct_message_fallback_text(marker: Marker, attachments: Sequence[SourceAttachment], marker_name: str, reason: str) -> str:
     parts = [
         f"Direct-message routing failed: pending block or linked file starts or ends with `{marker_name}`, but {reason}.",
-        "Do not record this routing marker as a pending_task_item. Identify the intended worker task, deliver the message there, then clear this pending marker with `omo_task_edit.py pending-marker-clear`.",
+        "Do not record this routing marker as a pending_task_item. If you can resolve the error by reinstating the worker agent or correcting the routing, do that, deliver the message to the intended worker, then clear this pending marker with `omo_task_edit.py pending-marker-clear`. If you cannot resolve it, report this routing error to the human.",
     ]
     parts.extend(marker_snippet_parts(marker, attachments))
     return "\n".join(parts)
