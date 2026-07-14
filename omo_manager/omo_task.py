@@ -9,6 +9,7 @@ import shlex
 import subprocess
 import sys
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -35,6 +36,12 @@ SHELL_COMMANDS = {"bash", "dash", "fish", "sh", "zsh"}
 BULLET_MARKERS = ("- ", "* ")
 PENDING_TASK_ITEMS_MARKER = "(above are pending task items)"
 TASK_METADATA_PREFIXES = ("managerat:",)
+CODEX_LAUNCH_STARTED = "started"
+CODEX_LAUNCH_UPDATED = "updated"
+CODEX_LAUNCH_MARKER_PREFIX = "[omo:"
+CODEX_LAUNCH_MARKER_DRY_RUN = f"{CODEX_LAUNCH_MARKER_PREFIX}DRY]"
+CODEX_UPDATE_PROMPT_MARKERS = ("update available!", "update now", "press enter to continue")
+CODEX_UPDATE_SUCCESS_MARKERS = ("update ran successfully", "please restart codex")
 
 
 @dataclass(frozen=True)
@@ -466,13 +473,18 @@ def shell_cmd(command: str) -> str:
     return "bash -lc " + shlex.quote(command)
 
 
-def worker_command(command: str, tmux_target: str, prelaunch_source: Path | None = None) -> str:
+def worker_command(command: str, tmux_target: str, prelaunch_source: Path | None = None, launch_marker: str = "") -> str:
     exports = {"OMO_AGENT_TMUX_TARGET": tmux_target}
     export_text = " ".join(f"{key}={shlex.quote(value)}" for key, value in exports.items())
-    launch = f"export {export_text} && exec {command}"
+    marker = f" && printf '%s\\n' {shlex.quote(launch_marker)}" if launch_marker else ""
+    launch = f"export {export_text}{marker} && exec {command}"
     if prelaunch_source is None:
         return launch
     return f"source {shlex.quote(str(prelaunch_source))} && {launch}"
+
+
+def new_launch_marker() -> str:
+    return f"{CODEX_LAUNCH_MARKER_PREFIX}{uuid.uuid4().hex[:6]}]"
 
 
 def tmux(args: list[str], check: bool = False) -> subprocess.CompletedProcess[str]:
@@ -490,21 +502,60 @@ def wait_shell(target: str, timeout_s: float = 5.0) -> None:
         if current_command(target) in SHELL_COMMANDS:
             return
         time.sleep(0.25)
+    raise RuntimeError(f"tmux target {target} did not return to shell after {timeout_s:g}s.")
 
 
-def wait_command_started(target: str, timeout_s: float = 5.0) -> None:
+def lines_after_launch_marker(lines: list[str], launch_marker: str) -> list[str] | None:
+    if not launch_marker:
+        return lines
+    for idx in range(len(lines) - 1, -1, -1):
+        if lines[idx].strip() == launch_marker:
+            return lines[idx + 1 :]
+    return None
+
+
+def has_codex_update_prompt(lines: list[str]) -> bool:
+    text = "\n".join(lines).casefold()
+    return all(marker in text for marker in CODEX_UPDATE_PROMPT_MARKERS)
+
+
+def has_codex_update_success(lines: list[str]) -> bool:
+    text = "\n".join(lines).casefold()
+    return all(marker in text for marker in CODEX_UPDATE_SUCCESS_MARKERS)
+
+
+def wait_codex_update_finished(target: str, launch_marker: str, timeout_s: float = 120.0) -> str:
+    deadline_s = time.monotonic() + timeout_s
+    while time.monotonic() < deadline_s:
+        lines = lines_after_launch_marker(tail(target, 200), launch_marker)
+        if lines is not None and has_codex_update_success(lines):
+            return CODEX_LAUNCH_UPDATED
+        time.sleep(0.25)
+    raise RuntimeError(f"Codex update did not finish after {timeout_s:g}s.")
+
+
+def wait_command_started(target: str, timeout_s: float = 5.0, launch_marker: str = "") -> str:
     deadline_s = time.monotonic() + timeout_s
     last_command = ""
     last_status = "unknown"
+    saw_non_shell = False
     while time.monotonic() < deadline_s:
-        lines = tail(target, 80)
-        last_status = status(lines, current_block(lines))
-        if last_status != "not_codex":
-            return
+        lines = lines_after_launch_marker(tail(target, 200), launch_marker)
+        if lines is None:
+            last_status = "launch marker not visible"
+        else:
+            if has_codex_update_prompt(lines):
+                _ = tmux(["send-keys", "-t", target, "Enter"], check=True)
+                return wait_codex_update_finished(target, launch_marker)
+            last_status = status(lines, current_block(lines))
+            if last_status != "not_codex":
+                return CODEX_LAUNCH_STARTED
         last_command = current_command(target)
         if last_command and last_command not in SHELL_COMMANDS:
-            return
+            saw_non_shell = True
         time.sleep(0.05)
+    if saw_non_shell:
+        return CODEX_LAUNCH_STARTED
     raise RuntimeError(f"Codex launch not verified after {timeout_s:g}s: pane command={last_command or 'unknown'}, status={last_status}")
 
 
@@ -517,9 +568,15 @@ def start_codex(target: str, args: Args) -> None:
     vl_agent = is_vl_agent(args.task_file, target)
     if vl_agent and args.prompt_file is None:
         raise ValueError("VL launches require --prompt-file so the end-goal and reviewer guidance has task-local context.")
-    command = shell_cmd(worker_command(codex_cmd(args.session_id, args.reasoning_effort, args.codex_flags, args.prompt_file, effective_tool(args), vl_agent), target, args.prelaunch_source))
-    _ = tmux(["send-keys", "-t", target, command, "Enter"], check=True)
-    wait_command_started(target)
+    command = codex_cmd(args.session_id, args.reasoning_effort, args.codex_flags, args.prompt_file, effective_tool(args), vl_agent)
+    for attempt in range(2):
+        launch_marker = new_launch_marker()
+        shell_launch = shell_cmd(worker_command(command, target, args.prelaunch_source, launch_marker))
+        _ = tmux(["send-keys", "-t", target, shell_launch, "Enter"], check=True)
+        if wait_command_started(target, launch_marker=launch_marker) != CODEX_LAUNCH_UPDATED:
+            return
+        wait_shell(target, timeout_s=15.0)
+    raise RuntimeError("Codex update completed but relaunch showed the update prompt again.")
 
 
 def new_window(args: Args) -> str:
@@ -610,7 +667,7 @@ def dry_run(args: Args) -> None:
         command = ["tmux", *new_window_command(args)]
         print("tmux: " + " ".join(shlex.quote(part) for part in command))
         launch_target = f"{args.tmux_session}:DRYRUN"
-        launch = ["tmux", "send-keys", "-t", launch_target, shell_cmd(worker_command(codex_cmd(args.session_id, args.reasoning_effort, args.codex_flags, args.prompt_file, effective_tool(args), is_vl_agent(args.task_file, launch_target)), launch_target, args.prelaunch_source)), "Enter"]
+        launch = ["tmux", "send-keys", "-t", launch_target, shell_cmd(worker_command(codex_cmd(args.session_id, args.reasoning_effort, args.codex_flags, args.prompt_file, effective_tool(args), is_vl_agent(args.task_file, launch_target)), launch_target, args.prelaunch_source, CODEX_LAUNCH_MARKER_DRY_RUN)), "Enter"]
         print("tmux: " + " ".join(shlex.quote(part) for part in launch))
 
 

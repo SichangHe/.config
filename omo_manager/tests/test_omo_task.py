@@ -8,7 +8,31 @@ from pathlib import Path
 from unittest.mock import patch
 
 from omo_manager.omo_agent_status import parse_task_metadata
-from omo_manager.omo_task import Args, DEFAULT_TOOL, DEFAULT_WORKER_INSTRUCTIONS, PCODX_WRAPPER, PENDING_TASK_ITEMS_MARKER, VL_WORKER_INSTRUCTIONS, codex_cmd, effective_tool, ensure_task_file, is_vl_agent, link_todo, main, new_window, parse_args, runat_goal_tree_error, runat_header_error, start_codex, validate_inputs, validate_runat_goal_tree, wait_command_started
+from omo_manager.omo_task import (
+    CODEX_LAUNCH_STARTED,
+    CODEX_LAUNCH_UPDATED,
+    Args,
+    DEFAULT_TOOL,
+    DEFAULT_WORKER_INSTRUCTIONS,
+    PCODX_WRAPPER,
+    PENDING_TASK_ITEMS_MARKER,
+    VL_WORKER_INSTRUCTIONS,
+    codex_cmd,
+    effective_tool,
+    ensure_task_file,
+    is_vl_agent,
+    link_todo,
+    main,
+    new_window,
+    parse_args,
+    runat_goal_tree_error,
+    runat_header_error,
+    start_codex,
+    validate_inputs,
+    validate_runat_goal_tree,
+    wait_command_started,
+    wait_shell,
+)
 
 
 VALID_GOAL_TREE = "implement manager check\n- reject missing task goal tree\n"
@@ -667,9 +691,12 @@ class OmoTaskTests(unittest.TestCase):
             source_idx = launch_line.index("source ")
             prelaunch_idx = launch_line.index(str(prelaunch))
             export_idx = launch_line.index("export OMO_AGENT_TMUX_TARGET=cfg:DRYRUN")
+            marker_idx = launch_line.index("[omo:DRY]")
             exec_idx = launch_line.index("exec bunx @openai/codex")
             self.assertLess(source_idx, prelaunch_idx)
             self.assertLess(prelaunch_idx, export_idx)
+            self.assertLess(export_idx, marker_idx)
+            self.assertLess(marker_idx, exec_idx)
             self.assertLess(export_idx, exec_idx)
 
     def test_session_resume_ignores_existing_pcodx_task_tool_by_default(self) -> None:
@@ -724,7 +751,41 @@ class OmoTaskTests(unittest.TestCase):
             self.assertIn('resume 11111111-1111-1111-1111-111111111111', command[3])
             self.assertIn('$(cat --', command[3])
             self.assertEqual('Enter', command[4])
-            wait_command_started_mock.assert_called_once_with('cfg:7')
+            wait_command_started_mock.assert_called_once()
+            self.assertEqual("cfg:7", wait_command_started_mock.call_args.args[0])
+            launch_marker = wait_command_started_mock.call_args.kwargs["launch_marker"]
+            self.assertRegex(launch_marker, r"^\[omo:[0-9a-f]{6}\]$")
+            self.assertLessEqual(len(launch_marker), 12)
+
+    def test_start_codex_relaunches_after_runtime_update(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            prompt = Path(tmp) / "prompt.md"
+            args = Args(Path(tmp), "x.md", "cfg", "", "codex", Path(tmp), "x", prompt, False, False, "", "", ())
+            with (
+                patch("omo_manager.omo_task.tmux") as tmux,
+                patch("omo_manager.omo_task.wait_command_started", side_effect=[CODEX_LAUNCH_UPDATED, CODEX_LAUNCH_STARTED]),
+                patch("omo_manager.omo_task.wait_shell") as wait_shell,
+            ):
+                start_codex("cfg:7", args)
+        sent = [call.args[0] for call in tmux.call_args_list]
+        self.assertEqual(2, len(sent))
+        self.assertNotEqual(sent[0], sent[1])
+        self.assertIn("bunx @openai/codex", sent[0][3])
+        self.assertIn("bunx @openai/codex", sent[1][3])
+        wait_shell.assert_called_once_with("cfg:7", timeout_s=15.0)
+
+    def test_start_codex_stops_when_update_does_not_return_to_shell(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            prompt = Path(tmp) / "prompt.md"
+            args = Args(Path(tmp), "x.md", "cfg", "", "codex", Path(tmp), "x", prompt, False, False, "", "", ())
+            with (
+                patch("omo_manager.omo_task.tmux") as tmux,
+                patch("omo_manager.omo_task.wait_command_started", return_value=CODEX_LAUNCH_UPDATED),
+                patch("omo_manager.omo_task.wait_shell", side_effect=RuntimeError("no shell")),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "no shell"):
+                    start_codex("cfg:7", args)
+        self.assertEqual(1, tmux.call_count)
 
     def test_start_codex_sources_prelaunch_before_worker_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -738,9 +799,12 @@ class OmoTaskTests(unittest.TestCase):
             source_idx = command.index("source ")
             prelaunch_idx = command.index(str(prelaunch))
             export_idx = command.index("export OMO_AGENT_TMUX_TARGET=cfg:7")
+            marker_idx = command.index("printf ")
             exec_idx = command.index("exec bunx @openai/codex")
             self.assertLess(source_idx, prelaunch_idx)
             self.assertLess(prelaunch_idx, export_idx)
+            self.assertLess(export_idx, marker_idx)
+            self.assertLess(marker_idx, exec_idx)
             self.assertLess(export_idx, exec_idx)
 
     def test_start_codex_adds_vl_guidance_for_vl_target(self) -> None:
@@ -763,10 +827,116 @@ class OmoTaskTests(unittest.TestCase):
             wait_command_started('cfg:7')
             sleep.assert_not_called()
 
+    def test_wait_command_started_updates_codex_runtime(self) -> None:
+        launch_marker = "[omo-task-launch:test]"
+        update_prompt = [
+            launch_marker,
+            "Update available! 0.144.1 -> 0.144.3",
+            "1. Update now",
+            "Press Enter to continue...",
+        ]
+        update_success = [
+            launch_marker,
+            "Update ran successfully! Please restart Codex.",
+        ]
+        with (
+            patch("omo_manager.omo_task.tail", side_effect=[update_prompt, update_success]),
+            patch("omo_manager.omo_task.tmux") as tmux,
+            patch("omo_manager.omo_task.time.sleep") as sleep,
+        ):
+            result = wait_command_started("cfg:7", launch_marker=launch_marker)
+        self.assertEqual(CODEX_LAUNCH_UPDATED, result)
+        tmux.assert_called_once_with(["send-keys", "-t", "cfg:7", "Enter"], check=True)
+        sleep.assert_not_called()
+
+    def test_wait_command_started_ignores_stale_update_prompt_before_launch_marker(self) -> None:
+        launch_marker = "[omo-task-launch:test]"
+        lines = [
+            "Update available! 0.144.1 -> 0.144.3",
+            "1. Update now",
+            "Press enter to continue",
+            "Update ran successfully! Please restart Codex.",
+            launch_marker,
+            "› Use /skills to list available skills",
+            "  gpt-5.6-luna low",
+        ]
+        with (
+            patch("omo_manager.omo_task.tail", return_value=lines),
+            patch("omo_manager.omo_task.current_command", return_value="bash"),
+            patch("omo_manager.omo_task.tmux") as tmux,
+            patch("omo_manager.omo_task.time.sleep") as sleep,
+        ):
+            result = wait_command_started("cfg:7", launch_marker=launch_marker)
+        self.assertEqual(CODEX_LAUNCH_STARTED, result)
+        tmux.assert_not_called()
+        sleep.assert_not_called()
+
+    def test_wait_command_started_accepts_marker_after_long_prelaunch_output(self) -> None:
+        launch_marker = "[omo:test]"
+        lines = [f"prelaunch line {idx}" for idx in range(300)]
+        lines.extend([launch_marker, "› Use /skills to list available skills", "  gpt-5.6-luna low"])
+        with (
+            patch("omo_manager.omo_task.tail", return_value=lines[-200:]),
+            patch("omo_manager.omo_task.current_command", return_value="bash"),
+            patch("omo_manager.omo_task.tmux") as tmux,
+            patch("omo_manager.omo_task.time.sleep") as sleep,
+        ):
+            result = wait_command_started("cfg:7", launch_marker=launch_marker)
+        self.assertEqual(CODEX_LAUNCH_STARTED, result)
+        tmux.assert_not_called()
+        sleep.assert_not_called()
+
+    def test_wait_command_started_does_not_use_stale_update_prompt_without_launch_marker(self) -> None:
+        lines = [
+            "Update available! 0.144.1 -> 0.144.3",
+            "1. Update now",
+            "Press Enter to continue...",
+            "Update ran successfully! Please restart Codex.",
+        ]
+        with (
+            patch("omo_manager.omo_task.tail", return_value=lines),
+            patch("omo_manager.omo_task.current_command", return_value="bash"),
+            patch("omo_manager.omo_task.tmux") as tmux,
+            patch("omo_manager.omo_task.time.monotonic", side_effect=[0, 6]),
+            patch("omo_manager.omo_task.time.sleep"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "Codex launch not verified"):
+                wait_command_started("cfg:7", launch_marker="[omo-task-launch:new]")
+        tmux.assert_not_called()
+
+    def test_wait_command_started_does_not_reuse_prior_attempt_marker(self) -> None:
+        lines = [
+            "[omo:old123]",
+            "Update available! 0.144.1 -> 0.144.3",
+            "1. Update now",
+            "Press Enter to continue...",
+            "Update ran successfully! Please restart Codex.",
+        ]
+        with (
+            patch("omo_manager.omo_task.tail", return_value=lines),
+            patch("omo_manager.omo_task.current_command", return_value="bash"),
+            patch("omo_manager.omo_task.tmux") as tmux,
+            patch("omo_manager.omo_task.time.monotonic", side_effect=[0, 6]),
+            patch("omo_manager.omo_task.time.sleep"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "Codex launch not verified"):
+                wait_command_started("cfg:7", launch_marker="[omo:new456]")
+        tmux.assert_not_called()
+
     def test_wait_command_started_fails_when_shell_remains_active(self) -> None:
         with patch('omo_manager.omo_task.tail', return_value=[]), patch('omo_manager.omo_task.current_command', return_value='bash'), patch('omo_manager.omo_task.time.monotonic', side_effect=[0, 6]), patch('omo_manager.omo_task.time.sleep'):
             with self.assertRaisesRegex(RuntimeError, 'Codex launch not verified'):
                 wait_command_started('cfg:7')
+
+    def test_wait_shell_fails_when_shell_never_returns(self) -> None:
+        with (
+            patch("omo_manager.omo_task.current_command", return_value="codex"),
+            patch("omo_manager.omo_task.time.monotonic", side_effect=[0, 1, 6]),
+            patch("omo_manager.omo_task.time.sleep") as sleep,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "did not return to shell"):
+                wait_shell("cfg:7")
+        sleep.assert_called_once_with(0.25)
 
     def test_main_dry_run_does_not_mutate_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
