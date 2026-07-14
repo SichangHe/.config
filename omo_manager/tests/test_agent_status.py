@@ -1113,7 +1113,7 @@ class AgentStatusTests(unittest.TestCase):
             self.assertIn("blocked_idle: task=vl_worker.md evidence=target=vl:9 role=blocked_idle_vl_dependency", text)
             self.assertIn("image lacks codex", text)
 
-    def test_problems_only_reports_blocked_idle_to_explicit_owner(self) -> None:
+    def test_problems_only_reports_blocked_idle_to_explicit_owner_regardless_of_manager_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             registry = root / "sessions.json"
@@ -1122,9 +1122,7 @@ class AgentStatusTests(unittest.TestCase):
             _ = (root / "worker.md").write_text(task_frontmatter("blocked", runat="cfg:1", managerat="wl:16", blocked_on="waiting on human API key"), encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(out):
-                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "wl:17"]))
-            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(out := StringIO()):
-                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "wl:16"]))
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "wl:17"]))
             text = out.getvalue()
             self.assertIn("blocked_idle: task=worker.md", text)
             self.assertIn("reason=waiting on human API key", text)
@@ -1142,7 +1140,7 @@ class AgentStatusTests(unittest.TestCase):
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             self.assertEqual("", out.getvalue())
 
-    def test_main_manager_problems_only_excludes_vl_worker_owned_by_active_submanager(self) -> None:
+    def test_problems_only_includes_worker_owned_by_another_manager(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             registry = root / "sessions.json"
@@ -1155,10 +1153,13 @@ class AgentStatusTests(unittest.TestCase):
 
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", side_effect=fake_inspect), redirect_stdout(out):
-                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "wl:16.0"]))
-            self.assertEqual("", out.getvalue())
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "wl:16.0"]))
+            text = out.getvalue()
+            self.assertIn("agent-problems: blocked_idle=1", text)
+            self.assertIn("blocked_idle: task=vl_worker.md evidence=target=vl:1 role=blocked_idle_vl task_status=blocked", text)
+            self.assertIn("owner_target=vl:15", text)
 
-    def test_main_manager_problems_only_excludes_vl_worker_owned_by_bulleted_submanager(self) -> None:
+    def test_problems_only_includes_bulleted_worker_owned_by_another_manager(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             registry = root / "sessions.json"
@@ -1171,8 +1172,11 @@ class AgentStatusTests(unittest.TestCase):
 
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", side_effect=fake_inspect), redirect_stdout(out):
-                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "wl:16.0"]))
-            self.assertEqual("", out.getvalue())
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "wl:16.0"]))
+            text = out.getvalue()
+            self.assertIn("agent-problems: blocked_idle=1", text)
+            self.assertIn("blocked_idle: task=vl_worker.md evidence=target=vl:1 role=blocked_idle_vl task_status=blocked", text)
+            self.assertIn("owner_target=vl:15", text)
 
     def test_vl_submanager_problems_only_includes_vl_worker_without_managerat(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1599,7 +1603,7 @@ class AgentStatusTests(unittest.TestCase):
             self.assertIn("agent-problems: untracked_agent=1", text)
             self.assertIn("untracked_agent: task=tmux:vl:15 evidence=target=vl:15 role=tmux_unmanaged output=working", text)
 
-    def test_root_manager_keeps_non_vl_untracked_agent_when_vl_manager_exists(self) -> None:
+    def test_root_manager_reports_untracked_agents_for_all_owner_sessions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             registry = root / "sessions.json"
@@ -1611,7 +1615,8 @@ class AgentStatusTests(unittest.TestCase):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "wl:16"]))
             text = out.getvalue()
             self.assertIn("untracked_agent: task=tmux:wl:22 evidence=target=wl:22 role=tmux_unmanaged", text)
-            self.assertNotIn("tmux:vl:30", text)
+            self.assertIn("untracked_agent: task=tmux:vl:30 evidence=target=vl:30 role=tmux_unmanaged", text)
+            self.assertIn("owner_target=vl:15", text)
             self.assertNotIn("h:2", text)
 
     def test_manager_view_skips_valid_self_routed_submanager_tmux_pane(self) -> None:
@@ -1726,7 +1731,7 @@ class AgentStatusTests(unittest.TestCase):
             _ = (root / "TODO.md").write_text("current:\nactive.md vl 15\n", encoding="utf-8")
             report = Report("stuck_input", ["› manager prompt"], "manager prompt", True)
             out = StringIO()
-            with patch("omo_manager.omo_agent_status.tmux_list_panes", return_value=["vl:15", "wl:2"]), patch("omo_manager.omo_agent_status.inspect", return_value=report), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present", return_value="sent_enter") as unstick, redirect_stdout(out):
+            with patch("omo_manager.omo_agent_status.tmux_list_panes", return_value=["vl:15"]), patch("omo_manager.omo_agent_status.inspect", return_value=report), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present", return_value="sent_enter") as unstick, redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "vl:15"]))
             unstick.assert_called_once_with("vl:15", report)
             text = out.getvalue()

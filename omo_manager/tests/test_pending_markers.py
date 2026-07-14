@@ -6712,6 +6712,35 @@ class PendingMarkerTests(unittest.TestCase):
         self.assertEqual("wl:17", calls[0][calls[0].index("--manager-target") + 1])
         self.assertIn("owned.md cfg:1", calls[0][1])
 
+    def test_agent_problem_check_does_not_treat_same_target_worker_as_manager_self(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:16", agent_problem_repeat_s=300.0)
+        result = watcher.CommandOutput(
+            "agent-problems",
+            3,
+            "\n".join(
+                [
+                    "agent-problems: error=1 stuck_input=1",
+                    "error: task=owned.md evidence=target=wl:16 output=worker error owner_target=vl:15",
+                    "stuck_input: task=other.md evidence=target=wl:16 task_status=running input=queued prompt unstick=not_safe:plan_prompt owner_target=vl:15",
+                ]
+            ),
+            "",
+        )
+        calls: list[list[str]] = []
+
+        def fake_run(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            calls.append(capture_delivery_call(command))
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run), patch.object(watcher, "email_human_manager_problem", side_effect=AssertionError("unexpected human email")):
+            self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
+        self.assertEqual(1, len(calls))
+        self.assertEqual("vl:15", calls[0][calls[0].index("--manager-target") + 1])
+        self.assertIn("owned.md wl:16 <output>worker error</output>", calls[0][1])
+        self.assertIn("other.md wl:16 <input>queued prompt</input>", calls[0][1])
+
     def test_agent_problem_check_clears_enter_attempts_after_target_is_no_longer_stuck(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
@@ -6770,45 +6799,6 @@ class PendingMarkerTests(unittest.TestCase):
         self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 1002.0))
         self.assertEqual({}, seen)
 
-    def test_filter_vl_problem_output_keeps_owner_routed_vl_rows(self) -> None:
-        from omo_manager import omo_pending_watch as watcher
-
-        output = "\n".join(
-            [
-                "agent-problems: blocked_idle=1 done-registry-stale=1 ready=1",
-                "manager-action: blocked_idle>0 inspect blocked agents, unblock if possible, or route the exact blocker",
-                "blocked_idle: task=other.md evidence=target=wl:3 task_status=blocked idle_status=ready reason=waiting",
-                "done-stale: task=plain.md evidence=session registry still has a completed task; close it if the pane is still open or prune the registry row owner_target=vl:15",
-                "ready: task=main.md evidence=target=wl:2 output=idle",
-            ]
-        )
-
-        text = watcher.filter_vl_problem_output(output, "vl:15.0")
-
-        self.assertIn("agent-problems: done-registry-stale=1", text)
-        self.assertIn("manager-action: done-registry-stale>0", text)
-        self.assertNotIn("blocked_idle>0", text)
-        self.assertIn("done-stale: task=plain.md", text)
-        self.assertIn("owner_target=vl:15", text)
-        self.assertNotIn("main.md", text)
-        self.assertNotIn("other.md", text)
-
-    def test_filter_vl_problem_output_keeps_owner_routed_unstuck(self) -> None:
-        from omo_manager import omo_pending_watch as watcher
-
-        output = "\n".join(
-            [
-                "agent-problems: stuck_input=1",
-                "stuck_input: task=plain.md evidence=target=cfg:1 task_status=running unstick=sent_enter owner_target=vl:15",
-                "unstuck: target=cfg:1 task=plain.md action=sent_enter",
-            ]
-        )
-
-        text = watcher.filter_vl_problem_output(output, "vl:15")
-
-        self.assertIn("stuck_input: task=plain.md", text)
-        self.assertIn("unstuck: target=cfg:1 task=plain.md action=sent_enter", text)
-
     def test_filter_manager_self_problem_output_drops_human_request(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
@@ -6839,7 +6829,7 @@ class PendingMarkerTests(unittest.TestCase):
 
         self.assertIsNone(text)
 
-    def test_agent_problem_check_forwards_vl_rows_to_active_submanager(self) -> None:
+    def test_agent_problem_check_routes_owner_tagged_rows_to_their_manager(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -6847,17 +6837,12 @@ class PendingMarkerTests(unittest.TestCase):
             status_script = root / "status.py"
             _ = status_script.write_text(
                 "#!/usr/bin/env python3\n"
-                "import sys\n"
-                "target = sys.argv[sys.argv.index('--manager-target') + 1] if '--manager-target' in sys.argv else ''\n"
-                "if target == 'vl:15':\n"
-                "    print('agent-problems: blocked_idle=1 ready=1 error=1 human_request=1')\n"
-                "    print('manager-action: blocked_idle>0 inspect blocked agents')\n"
-                "    print('blocked_idle: task=vl_worker.md evidence=target=vl:1 role=blocked_idle_vl task_status=blocked idle_status=ready reason=waiting')\n"
-                "    print('ready: task=vl_owned.md evidence=target=vl:2 output=owned owner_target=vl:15')\n"
-                "    print('human_request: task=vl_done.md evidence=pending_item=clear human-facing terms')\n"
-                "    print('error: task=main.md evidence=target=wl:2 output=main noise')\n"
-                "    raise SystemExit(3)\n"
-                "raise SystemExit(0)\n",
+                "print('agent-problems: blocked_idle=1 ready=1 human_request=1')\n"
+                "print('manager-action: blocked_idle>0 inspect blocked agents')\n"
+                "print('blocked_idle: task=vl_worker.md evidence=target=vl:1 role=blocked_idle_vl task_status=blocked idle_status=ready reason=waiting owner_target=vl:15')\n"
+                "print('ready: task=vl_owned.md evidence=target=vl:2 output=owned owner_target=vl:15')\n"
+                "print('human_request: task=vl_done.md evidence=pending_item=clear human-facing terms owner_target=vl:15')\n"
+                "raise SystemExit(3)\n",
                 encoding="utf-8",
             )
             status_script.chmod(0o700)
@@ -6880,49 +6865,8 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertIn("vl_worker.md vl:1 <blocked_on>waiting</blocked_on>", pushed_text)
             self.assertIn("vl_owned.md vl:2 <output>owned</output>", pushed_text)
             self.assertNotIn("vl_done.md", pushed_text)
-            self.assertNotIn("main.md", pushed_text)
 
-    def test_vl_agent_problem_check_suppresses_mixed_report_until_blocked_backoff_due(self) -> None:
-        from omo_manager import omo_pending_watch as watcher
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            status_script = root / "status.py"
-            _ = status_script.write_text(
-                "#!/usr/bin/env python3\n"
-                "import sys\n"
-                "target = sys.argv[sys.argv.index('--manager-target') + 1] if '--manager-target' in sys.argv else ''\n"
-                "if target == 'vl:15':\n"
-                "    print('agent-problems: blocked_idle=1 ready=1')\n"
-                "    print('blocked_idle: task=vl_worker.md evidence=target=vl:1 task_status=blocked idle_status=ready reason=waiting')\n"
-                "    print('ready: task=vl_ready.md evidence=target=vl:2 output=idle')\n"
-                "    raise SystemExit(3)\n"
-                "raise SystemExit(0)\n",
-                encoding="utf-8",
-            )
-            status_script.chmod(0o700)
-            _ = (root / "TODO.md").write_text("current:\nvl_submanager_current_8653.md vl:15\n", encoding="utf-8")
-            _ = (root / "vl_submanager_current_8653.md").write_text(task_frontmatter(runat="vl:15", managerat="wl:16.0", is_manager=True), encoding="utf-8")
-            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, status_script, False, False, manager_target="wl:16.0", agent_problem_repeat_s=1800.0)
-            seen: dict[str, float] = {}
-            calls: list[list[str]] = []
-            real_run = subprocess.run
-
-            def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-                if command and command[0] == str(status_script):
-                    return real_run(command, **kwargs)
-                calls.append(capture_delivery_call(command))
-                return subprocess.CompletedProcess(command, 0)
-
-            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
-                self.assertTrue(watcher.maybe_push_vl_agent_problems(args, seen, 10000.0))
-                self.assertFalse(watcher.maybe_push_vl_agent_problems(args, seen, 10599.0))
-                self.assertTrue(watcher.maybe_push_vl_agent_problems(args, seen, 10600.0))
-            self.assertEqual(2, len(calls))
-            self.assertEqual(2, sum("vl_worker.md vl:1 <blocked_on>waiting</blocked_on>" in call[1] for call in calls))
-            self.assertEqual(2, sum("vl_ready.md vl:2 <output>idle</output>" in call[1] for call in calls))
-
-    def test_agent_problem_check_unscoped_owner_routing_does_not_duplicate_vl_side_push(self) -> None:
+    def test_agent_problem_check_routes_rows_to_owner_despite_manager_target(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -6938,7 +6882,7 @@ class PendingMarkerTests(unittest.TestCase):
             status_script.chmod(0o700)
             _ = (root / "TODO.md").write_text("current:\nvl_submanager_current_8653.md vl:15\nvl_worker.md vl:1\n", encoding="utf-8")
             _ = (root / "vl_submanager_current_8653.md").write_text(task_frontmatter(runat="vl:15", managerat="wl:16.0", is_manager=True), encoding="utf-8")
-            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, status_script, False, False, agent_problem_repeat_s=300.0)
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, status_script, False, False, manager_target="wl:16.0", agent_problem_repeat_s=300.0)
             calls: list[list[str]] = []
             real_run = subprocess.run
 
@@ -7135,7 +7079,7 @@ class PendingMarkerTests(unittest.TestCase):
         self.assertNotIn("manager human email due: manager watcher detected manager error", text)
         self.assertNotIn("manager agent problem: running task marker needs attention.", text)
 
-    def test_agent_problem_check_emails_human_for_manager_target_alias_stuck_prompt(self) -> None:
+    def test_agent_problem_check_routes_worker_alias_prompt_to_manager(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
         args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, True, manager_target="wl:1.0", agent_problem_repeat_s=300.0)
@@ -7149,10 +7093,10 @@ class PendingMarkerTests(unittest.TestCase):
         with redirect_stdout(out):
             self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
         text = out.getvalue()
-        self.assertIn("manager human email due: manager watcher detected manager error", text)
-        self.assertIn("agent-problems: stuck_input=1", text)
-        self.assertIn("stuck_input: task=active.md evidence=target=wl:1", text)
-        self.assertIn("suppressed manager self-problem report", text)
+        self.assertIn("Handle ALL omo_pending_watch agent problems below; only email human if you cannot handle them:", text)
+        self.assertIn("active.md wl:1 <input>Create a plan? shift + tab use Plan mode esc dismiss</input>", text)
+        self.assertNotIn("manager human email due: manager watcher detected manager error", text)
+        self.assertNotIn("suppressed manager self-problem report", text)
         self.assertNotIn("manager agent problem: running task marker needs attention.", text)
 
     def test_agent_problem_check_reminds_manager_after_compaction_once(self) -> None:
@@ -7265,7 +7209,7 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertIn("agent-problems: error=1", body)
             self.assertIn("error: task=manager evidence=target=wl:1.0 role=manager", body)
 
-    def test_agent_problem_check_suppresses_manager_target_alias_prompt(self) -> None:
+    def test_agent_problem_check_suppresses_worker_alias_sent_enter_until_retry_limit(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
         args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, True, manager_target="wl:1.0", agent_problem_repeat_s=300.0)
@@ -7279,7 +7223,7 @@ class PendingMarkerTests(unittest.TestCase):
         with redirect_stdout(out):
             self.assertFalse(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
         text = out.getvalue()
-        self.assertIn("suppressed manager self-problem report", text)
+        self.assertEqual("", text)
         self.assertNotIn("manager agent problem: running task marker needs attention.", text)
         self.assertNotIn("unstuck:", text)
 

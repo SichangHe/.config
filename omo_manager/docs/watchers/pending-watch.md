@@ -101,6 +101,8 @@
 
 - agent-problem routing
   - runs `omo_agent_status.py --problems-only` every `--agent-problem-interval-s` seconds, default `300`
+  - scans all task owners; `OMO_MANAGER_TMUX_TARGET` only adds the main-manager self-check
+  - dispatches each problem group to the row's `owner_target`, falling back to `OMO_MANAGER_TMUX_TARGET` only when no owner is known
   - detects task files with frontmatter `status: running` whose pane is `error`, `not_codex`, `ready`, or `stuck_input`
   - detects blocked persistent-role task files from frontmatter whose pane is `error`, `not_codex`, or `stuck_input`
   - detects manager pane problems when `OMO_MANAGER_TMUX_TARGET` is set
@@ -130,7 +132,7 @@
     - ``task_name.md``
 
 - scoped maintenance
-  - when a current `vl_submanager_current_*` or `vl_supervisor_current_*` task exists, the root watcher also runs a VL-owned problem pass and sends only VL-scoped problem rows to that submanager target
+  - all manager-owned worker rows are handled by the same owner-routed problem scan
   - non-blocked panes classified as `stuck_input` are submitted with Enter when the Codex status helper says the visible input is safe
   - first and second successful Enter attempts are remembered and suppressed; the third still-stuck report is sent to the owning manager
   - remembered Enter attempts are cleared when that target is no longer reported as stuck

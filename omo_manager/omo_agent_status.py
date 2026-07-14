@@ -1163,7 +1163,8 @@ def format_problem_summary(rows: list[StatusRow], completed_stale: set[str] | di
 def main(argv: list[str]) -> int:
     try:
         args = parse_args(argv)
-        current, done, _human_pending = load_task_state(args.root, args.manager_target)
+        task_args = replace(args, manager_target="")
+        current, done, _human_pending = load_task_state(args.root)
         records = session_records(args.registry)
         tasks = list(current.values())
         if args.problems_only:
@@ -1181,37 +1182,37 @@ def main(argv: list[str]) -> int:
                 rows.append(manager_row)
                 if manager_row.target:
                     inspected_targets.add(manager_row.target)
-            untracked_rows = current_untracked_task_rows(args, inspected_targets, auto_unstick, unstick_by_target, auto_unstick_disabled_reason)
+            untracked_rows = current_untracked_task_rows(task_args, inspected_targets, auto_unstick, unstick_by_target, auto_unstick_disabled_reason)
             rows.extend(untracked_rows)
             inspected_targets.update(row.target for row in untracked_rows if row.target)
-            rows.extend(pending_task_item_rows(args.root, args.manager_target))
-            blocked_idle_rows = blocked_idle_vl_task_rows(args.root, args.manager_target, auto_unstick, unstick_by_target, auto_unstick_disabled_reason, inspected_targets)
+            rows.extend(pending_task_item_rows(args.root))
+            blocked_idle_rows = blocked_idle_vl_task_rows(args.root, "", auto_unstick, unstick_by_target, auto_unstick_disabled_reason, inspected_targets)
             rows.extend(blocked_idle_rows)
             inspected_targets.update(row.target for row in blocked_idle_rows if row.target)
             inspected_task_files = {row.task_file for row in blocked_idle_rows}
-            generic_blocked_idle_rows = blocked_idle_task_rows(args.root, args.manager_target, auto_unstick, unstick_by_target, auto_unstick_disabled_reason, inspected_targets, inspected_task_files)
+            generic_blocked_idle_rows = blocked_idle_task_rows(args.root, "", auto_unstick, unstick_by_target, auto_unstick_disabled_reason, inspected_targets, inspected_task_files)
             rows.extend(generic_blocked_idle_rows)
             inspected_targets.update(row.target for row in generic_blocked_idle_rows if row.target)
             inspected_tasks = [*tasks]
             inspected_targets.update(display_target(task, choose_session(task, records)) for task in inspected_tasks)
-            unmanaged_rows = registry_unmanaged_problem_rows(args, records, inspected_targets, auto_unstick, unstick_by_target, auto_unstick_disabled_reason)
+            unmanaged_rows = registry_unmanaged_problem_rows(task_args, records, inspected_targets, auto_unstick, unstick_by_target, auto_unstick_disabled_reason)
             rows.extend(unmanaged_rows)
             inspected_targets.update(record.target for record in records if record.target)
             inspected_targets.update(row.target for row in unmanaged_rows if row.target)
-            todo_rows = todo_unmanaged_problem_rows(args, inspected_targets, auto_unstick, unstick_by_target, auto_unstick_disabled_reason)
+            todo_rows = todo_unmanaged_problem_rows(task_args, inspected_targets, auto_unstick, unstick_by_target, auto_unstick_disabled_reason)
             rows.extend(todo_rows)
-            inspected_targets.update(owned_todo_targets(args))
+            inspected_targets.update(owned_todo_targets(task_args))
             inspected_targets.update(current_task_targets(args.root))
             inspected_targets.update(row.target for row in todo_rows if row.target)
-            tmux_rows = tmux_unmanaged_problem_rows(args, inspected_targets, auto_unstick, unstick_by_target, auto_unstick_disabled_reason)
+            tmux_rows = tmux_unmanaged_problem_rows(task_args, inspected_targets, auto_unstick, unstick_by_target, auto_unstick_disabled_reason)
             rows.extend(tmux_rows)
             inspected_targets.update(row.target for row in tmux_rows if row.target)
             rows = add_owner_to_status_rows(args.root, rows)
         else:
-            untracked_rows = current_untracked_task_rows(args, inspected_targets, auto_unstick, unstick_by_target, auto_unstick_disabled_reason)
+            untracked_rows = current_untracked_task_rows(task_args, inspected_targets, auto_unstick, unstick_by_target, auto_unstick_disabled_reason)
             rows.extend(untracked_rows)
             inspected_targets.update(row.target for row in untracked_rows if row.target)
-            rows.extend(blocked_idle_vl_task_rows(args.root, args.manager_target))
+            rows.extend(blocked_idle_vl_task_rows(args.root, ""))
         completed_stale = {record.task_file for record in records if record.task_file in done}
         pruned_count = registry_prune(args, completed_stale) if args.prune_completed else 0
         if args.problems_only:

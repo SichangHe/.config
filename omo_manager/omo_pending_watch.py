@@ -34,7 +34,6 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from omo_manager.omo_agent_status import TaskLine
-from omo_manager.omo_agent_status import active_vl_submanager_target
 from omo_manager.omo_agent_status import effective_owner_target
 from omo_manager.omo_agent_status import is_main_manager_task_file
 from omo_manager.omo_agent_status import parse_task_lines
@@ -2002,96 +2001,6 @@ def filtered_problem_output(body_lines: list[str], *, suppress_message: str = ""
     return "\n".join([count_line, *manager_actions_for_problem_lines(body_lines), *body_lines])
 
 
-def filter_vl_problem_output(output: str, owner_target: str = "") -> str:
-    lines = output.splitlines()
-    if not lines or not lines[0].startswith("agent-problems:"):
-        return ""
-    kept: list[str] = []
-    kept_targets: set[str] = set()
-    for line in lines[1:]:
-        if line.startswith("manager-action: "):
-            continue
-        if re.match(r"^(?:not_codex|blocked_idle|error|manager_compaction|ready|stuck_input|untracked_agent): task=(?:vl_|[^ ]*/vl_|tmux:vl:)", line):
-            kept.append(line)
-            target = problem_line_target(line)
-            if target:
-                kept_targets.add(canonical_target(target))
-            continue
-        if re.match(r"^(?:not_codex|blocked_idle|error|manager_compaction|ready|stuck_input|untracked_agent): task=\S+ evidence=.*\btarget=vl:", line):
-            kept.append(line)
-            target = problem_line_target(line)
-            if target:
-                kept_targets.add(canonical_target(target))
-            continue
-        if owner_target and problem_line_owner_target(line) and same_tmux_target(problem_line_owner_target(line), owner_target):
-            kept.append(line)
-            target = problem_line_target(line)
-            if target:
-                kept_targets.add(canonical_target(target))
-            continue
-        if line.startswith("done-stale: task=vl_") or line.startswith("done-stale: task=") and "/vl_" in line:
-            kept.append(line)
-    for line in lines[1:]:
-        if not line.startswith("unstuck: "):
-            continue
-        target = canonical_target(problem_line_target(line))
-        if target_session(target) == "vl" or target in kept_targets:
-            kept.append(line)
-    text = filtered_problem_output(kept)
-    if text is None:
-        return ""
-    return text
-
-
-def maybe_push_vl_agent_problems(args: Args, seen: dict[str, float], now_wall_s: float) -> bool:
-    """Route VL-owned status problems to the active VL submanager."""
-
-    if not args.manager_target:
-        return False
-    vl_target = active_vl_submanager_target(args.root)
-    if not vl_target or same_tmux_target(vl_target, args.manager_target):
-        return False
-    vl_args = replace(args, manager_target=vl_target)
-    try:
-        result = subprocess.run(status_command(vl_args, True), capture_output=True, text=True, timeout=DEFAULT_AGENT_PROBLEM_TIMEOUT_S, check=False)
-    except (OSError, subprocess.SubprocessError) as exc:
-        print(f"omo_pending_watch: VL agent problem check failed: {exc}", file=sys.stderr)
-        return False
-    if result.returncode == 0:
-        return False
-    if result.returncode != 3:
-        print(f"omo_pending_watch: VL agent problem check exited status={result.returncode}: {result.stderr.strip()}", file=sys.stderr)
-        return False
-    output = filter_vl_problem_output(result.stdout.strip(), vl_target)
-    if not output:
-        return False
-    if result.stderr.strip():
-        output = f"{output}\nstderr:\n{result.stderr.strip()}".strip()
-    has_unstuck = any(line.startswith("unstuck: ") for line in output.splitlines())
-    owner_outputs = agent_problem_output_by_owner(vl_args, seen, output, now_wall_s, backoff_owner_target=vl_target)
-    dispatch = owner_outputs.get(vl_target) or next(iter(owner_outputs.values()), None)
-    if dispatch is None:
-        return False
-    digest = hashlib.sha256(f"{vl_target}\n{dispatch.digest_text}".encode("utf-8")).hexdigest()[:16]
-    key = f"vl-agent-problem:{digest}"
-    if not dispatch.blocked_idle_lines and not has_unstuck and now_wall_s - seen_get(seen, key, now_s=now_wall_s) < args.agent_problem_repeat_s:
-        return False
-    text = dispatch.text
-    event = DeliverySuccessEvent(
-        seen_keys=(key,),
-        blocked_idle_lines=dispatch.blocked_idle_lines,
-        seen_at_s=now_wall_s,
-    )
-    status = push_manager_text(vl_args, text, event)
-    if not delivery_accepted(status):
-        return False
-    if status == 0:
-        for backoff_owner, line in dispatch.blocked_idle_lines:
-            remember_blocked_idle_report(vl_args, seen, backoff_owner, line, now_wall_s)
-        remember_seen(seen, key, now_wall_s)
-    return True
-
-
 def target_aliases(target: str) -> set[str]:
     return {target, target[:-2] if target.endswith(".0") else f"{target}.0"} if target else set()
 
@@ -2150,30 +2059,28 @@ def filter_manager_self_status_output(output: str, manager_target: str = "") -> 
 
 
 def manager_self_problem_line(line: str, manager_target: str = "") -> bool:
+    del manager_target
     if re.match(r"^(?:blocked_idle|error|manager_waiting_subagent|not_codex|ready|stuck_input): task=manager evidence=.*\brole=manager\b", line):
         return True
-    if re.match(r"^(?:blocked_idle|error|manager_waiting_subagent|not_codex|ready|stuck_input): task=\S+ evidence=target=", line) is None:
-        return False
-    return same_tmux_target(evidence_target(line), manager_target)
+    return False
 
 
 def manager_human_email_problem_line(line: str, manager_target: str = "") -> bool:
+    del manager_target
     if line.startswith("stuck_input: "):
         unstick_match = re.search(r"\bunstick=(\S+)$", line)
         if unstick_match is not None and not unstick_match.group(1).startswith("not_safe:"):
             return False
     if re.match(r"^(?:error|manager_waiting_subagent|not_codex|stuck_input): task=manager evidence=.*\brole=manager\b", line):
         return True
-    if re.match(r"^(?:error|manager_waiting_subagent|not_codex|stuck_input): task=\S+ evidence=target=", line) is None:
-        return False
-    return same_tmux_target(evidence_target(line), manager_target)
+    return False
 
 
 def manager_self_unstuck_line(line: str, manager_target: str = "") -> bool:
+    del manager_target
     if re.match(r"^unstuck: target=\S+ task=manager action=sent_enter$", line):
         return True
-    match = re.match(r"^unstuck: target=(\S+) task=\S+ action=sent_enter$", line)
-    return bool(match is not None and same_tmux_target(match.group(1), manager_target))
+    return False
 
 
 def manager_compaction_line(line: str, manager_target: str = "") -> bool:
@@ -2351,8 +2258,7 @@ def maybe_push_agent_problems(args: Args, seen: dict[str, float], now_wall_s: fl
     except (OSError, subprocess.SubprocessError) as exc:
         print(f"omo_pending_watch: agent problem check failed: {exc}", file=sys.stderr)
         return False
-    changed = maybe_push_vl_agent_problems(args, seen, now_wall_s)
-    return handle_agent_problem_result(args, seen, CommandOutput("agent-problems", result.returncode, result.stdout, result.stderr), now_wall_s) or changed
+    return handle_agent_problem_result(args, seen, CommandOutput("agent-problems", result.returncode, result.stdout, result.stderr), now_wall_s)
 
 
 def handle_agent_problem_result(args: Args, seen: dict[str, float], result: CommandOutput, now_wall_s: float) -> bool:
