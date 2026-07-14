@@ -141,6 +141,7 @@
   - `human_request` status rows are filtered from agent-problem prompts because live `(pending)` blocks are dispatched through the pending-marker path
   - manager compaction reminders say ``Unless you know the exact content of MANAGER.md, read it. Normally, don't ack human``
   - manager pending-item reminders say manager task files should not keep `pending_task_items`; they are sent to that manager task file's `runat` pane
+  - worker pending-item size reminders are sent to `managerat` when a live worker task file has 10 or more `pending_task_items`; the manager should verify completed or cancelled items and remove them with `omo_task_edit.py pending-remove`
   - `TODO.md` length reminders point to `docs/monthly-archive.md`
   - dirty worktree reminders name the dirty repo path, omit raw status/category fields, tell managers to let workers commit their own changes, and tell managers to commit task files themselves without routing task-file cleanup to workers
   - identical problem output is keyed by SHA-256 in process-local time-bounded delivery memory and is repeated at most once per `--agent-problem-repeat-s` seconds, default `1800`

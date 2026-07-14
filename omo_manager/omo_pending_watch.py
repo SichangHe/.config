@@ -103,9 +103,15 @@ MANAGER_PENDING_ITEMS_REMINDER_HEADER = (
     "manager pending-item reminder: manager task files should not keep `pending_task_items`. "
     "Move each item into worker task files, then clear the manager list."
 )
+WORKER_PENDING_ITEMS_REMINDER_HEADER = (
+    "worker pending-item reminder: these task files have large `pending_task_items` lists. "
+    "Review each list, verify completed or cancelled items, remove them with `omo_task_edit.py pending-remove`, and split still-open work into worker tasks if needed."
+)
 MANAGER_TASK_STATE_OK = {"running", "done", "blocked"}
 MANAGER_TASK_STATE_REMINDER_LIMIT = 20
 MANAGER_TASK_STATE_LIVE_SECTIONS = {"todo:current", "todo:human pending", "todo:low priority"}
+WORKER_PENDING_ITEMS_WARNING_THRESHOLD = 10
+WORKER_PENDING_ITEMS_SAMPLE_LIMIT = 3
 MANAGER_WORKTREE_REMINDER_LIMIT = 20
 MANAGER_WORKTREE_CHECK_TIMEOUT_S = 10
 MANAGER_POLICY_REMINDER_RATE = 0.125
@@ -1580,6 +1586,8 @@ def push_manager_pending_item_reminders(args: Args) -> bool:
     changed = False
     for target, reminder_text in manager_pending_item_reminder_texts(args.root).items():
         changed = delivery_accepted(push_manager_text_to_target(args, reminder_text, target)) or changed
+    for target, reminder_text in worker_pending_item_reminder_texts(args.root).items():
+        changed = delivery_accepted(push_manager_text_to_target(args, reminder_text, target)) or changed
     return changed
 
 
@@ -1634,6 +1642,40 @@ def manager_pending_item_reminder_texts(root: Path) -> dict[str, str]:
         if len(rows) > MANAGER_TASK_STATE_REMINDER_LIMIT:
             visible_rows.append(f"manager-pending-item: omitted={len(rows) - MANAGER_TASK_STATE_REMINDER_LIMIT}")
         reminders[target] = "\n".join([MANAGER_PENDING_ITEMS_REMINDER_HEADER, *visible_rows])
+    return reminders
+
+
+def worker_pending_item_reminder_texts(root: Path) -> dict[str, str]:
+    todo = root / "TODO.md"
+    rows_by_target: dict[str, list[list[str]]] = {}
+    seen: set[str] = set()
+    for task in parse_task_lines(todo):
+        if task.task_file == "TODO.md" or task.task_file in seen or task.section not in MANAGER_TASK_STATE_LIVE_SECTIONS:
+            continue
+        seen.add(task.task_file)
+        state_path = resolve_task_path(root, task.task_file)
+        metadata = read_task_metadata(state_path)
+        if metadata is None or metadata.is_manager or metadata.runat == "retired":
+            continue
+        n_items = len(metadata.pending_task_items)
+        if n_items < WORKER_PENDING_ITEMS_WARNING_THRESHOLD:
+            continue
+        owner = effective_owner_target(root, task, state_path)
+        if not owner:
+            continue
+        rows = [f"worker-pending-items: task={task.task_file} status={metadata.status} count={n_items}"]
+        for item in metadata.pending_task_items[:WORKER_PENDING_ITEMS_SAMPLE_LIMIT]:
+            rows.append(f"worker-pending-item: task={task.task_file} item={truncate_content(item, PENDING_CONTENT_CHAR_LIMIT)}")
+        n_omitted = n_items - WORKER_PENDING_ITEMS_SAMPLE_LIMIT
+        if n_omitted > 0:
+            rows.append(f"worker-pending-item: task={task.task_file} omitted={n_omitted}")
+        rows_by_target.setdefault(owner, []).append(rows)
+    reminders: dict[str, str] = {}
+    for target, task_rows in rows_by_target.items():
+        visible_rows = [line for rows in task_rows[:MANAGER_TASK_STATE_REMINDER_LIMIT] for line in rows]
+        if len(task_rows) > MANAGER_TASK_STATE_REMINDER_LIMIT:
+            visible_rows.append(f"worker-pending-tasks: omitted={len(task_rows) - MANAGER_TASK_STATE_REMINDER_LIMIT}")
+        reminders[target] = "\n".join([WORKER_PENDING_ITEMS_REMINDER_HEADER, *visible_rows])
     return reminders
 
 
