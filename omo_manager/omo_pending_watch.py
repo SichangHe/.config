@@ -285,6 +285,15 @@ class DeliverySuccessEvent:
     clear_marker: Marker | None = None
 
 
+@dataclass(frozen=True)
+class DeliveryFailureFallback:
+    failed_target: str
+    target: str
+    text: str
+    options: CodexSendOptions
+    success_event: DeliverySuccessEvent | None = None
+
+
 DELIVERY_SUCCESS_EVENTS: SimpleQueue[DeliverySuccessEvent] = SimpleQueue()
 PENDING_SENDS: set[Future[None]] = set()
 PENDING_SENDS_LOCK = Lock()
@@ -321,13 +330,20 @@ def run_verified_send(target: str, message: str, options: CodexSendOptions, pend
     verified_send_to_codex(target, message, options, before_paste=before_paste if pending_guard is not None else None)
 
 
-def log_send_result(future: Future[None], success_event: DeliverySuccessEvent | None = None) -> None:
+def log_send_result(future: Future[None], success_event: DeliverySuccessEvent | None = None, failure_fallback: DeliveryFailureFallback | None = None) -> None:
     """Log delivery failure or queue success-side effects for the main loop."""
 
     try:
         _ = future.result()
     except Exception as exc:
         print(f"omo_pending_watch: async delivery failed: {exc}", file=sys.stderr)
+        result = DeliveryResult(1, str(exc))
+        if failure_fallback is not None and target_unavailable(result):
+            text = with_failed_target_escalation(failure_fallback.text, failure_fallback.failed_target, result)
+            try:
+                _ = submit_send(failure_fallback.target, text, failure_fallback.options, success_event=failure_fallback.success_event)
+            except Exception as fallback_exc:
+                print(f"omo_pending_watch: async fallback delivery failed: {fallback_exc}", file=sys.stderr)
         return
     if success_event is not None:
         DELIVERY_SUCCESS_EVENTS.put(success_event)
@@ -344,13 +360,14 @@ def submit_send(
     options: CodexSendOptions,
     pending_guard: PendingGuard | None = None,
     success_event: DeliverySuccessEvent | None = None,
+    failure_fallback: DeliveryFailureFallback | None = None,
 ) -> Future[None]:
     """Submit verified tmux delivery without forking a helper process."""
 
     future = send_executor().submit(run_verified_send, target, message, options, pending_guard)
     with PENDING_SENDS_LOCK:
         PENDING_SENDS.add(future)
-    future.add_done_callback(lambda completed: (log_send_result(completed, success_event), forget_send(completed)))
+    future.add_done_callback(lambda completed: (log_send_result(completed, success_event, failure_fallback), forget_send(completed)))
     return future
 
 
@@ -361,6 +378,7 @@ def send_to_codex(
     *,
     pending_guard: PendingGuard | None = None,
     success_event: DeliverySuccessEvent | None = None,
+    failure_fallback: DeliveryFailureFallback | None = None,
 ) -> Future[None] | None:
     """Validate a target synchronously, then deliver through a background thread."""
 
@@ -369,7 +387,7 @@ def send_to_codex(
         print(message)
         return None
     require_sendable_codex_target(target, inspect_lines_for_message(message))
-    return submit_send(target, message, selected, pending_guard, success_event)
+    return submit_send(target, message, selected, pending_guard, success_event, failure_fallback)
 
 
 def drain_delivery_successes(args: Args, seen: dict[str, float], now_wall_s: float) -> bool:
@@ -1468,10 +1486,16 @@ def push_manager_text_to_target(args: Args, text: str, manager_target: str, succ
     if not scoped_args.manager_target:
         print("omo_pending_watch: OMO_MANAGER_TMUX_TARGET is required outside --dry-run", file=sys.stderr)
         return 1
-    result = try_send_delivery_text("manager delivery", text, scoped_args.manager_target, success_event=success_event)
+    fallback_target = main_manager_fallback_target(args, scoped_args.manager_target)
+    result = try_send_delivery_text(
+        "manager delivery",
+        text,
+        scoped_args.manager_target,
+        success_event=success_event,
+        failure_fallback_target=fallback_target,
+    )
     if result.status in {0, ASYNC_DELIVERY_STARTED} or not target_unavailable(result):
         return result.status
-    fallback_target = main_manager_fallback_target(args, scoped_args.manager_target)
     if not fallback_target:
         return result.status
     return try_send_delivery_text("manager delivery", with_failed_target_escalation(text, scoped_args.manager_target, result), fallback_target, success_event=success_event).status
@@ -1502,24 +1526,32 @@ def try_send_delivery_text(
     pending_digest: str = "",
     submit_verify_timeout_s: float = DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S,
     success_event: DeliverySuccessEvent | None = None,
+    failure_fallback_target: str = "",
 ) -> DeliveryResult:
     if root is not None and pending_file is not None and not pending_marker_present(root, pending_file, pending_line, pending_digest):
         print(f"omo_pending_watch: {name} skipped; pending marker cleared before tmux paste", file=sys.stderr)
         return DeliveryResult(1, "pending marker cleared before tmux paste")
     pending_guard = PendingGuard(root, pending_file, pending_line, pending_digest) if root is not None and pending_file is not None else None
+    options = CodexSendOptions(
+        DEFAULT_TMUX_ENTER_COUNT,
+        0.15,
+        False,
+        submit_verify_timeout_s,
+        True,
+    )
+    failure_fallback = (
+        DeliveryFailureFallback(target, failure_fallback_target, text, options, success_event)
+        if failure_fallback_target and not same_tmux_target(target, failure_fallback_target)
+        else None
+    )
     try:
         async_job = send_to_codex(
             target,
             text,
-            CodexSendOptions(
-                DEFAULT_TMUX_ENTER_COUNT,
-                0.15,
-                False,
-                submit_verify_timeout_s,
-                True,
-            ),
+            options,
             pending_guard=pending_guard,
             success_event=success_event,
+            failure_fallback=failure_fallback,
         )
     except subprocess.CalledProcessError as exc:
         print(f"omo_pending_watch: {name} failed: {exc}", file=sys.stderr)

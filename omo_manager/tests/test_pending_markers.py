@@ -7362,6 +7362,144 @@ class PendingMarkerTests(unittest.TestCase):
 
         self.assertIn("delivery-key", seen)
 
+    def test_manager_delivery_to_owner_sets_async_main_fallback(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/missing-status.py"), False, False, manager_target="wl:1")
+        event = watcher.DeliverySuccessEvent(seen_keys=("agent-problem:abc",), seen_at_s=1000.0)
+        future: Future[None] = Future()
+        future.set_result(None)
+        captured: dict[str, object] = {}
+
+        def fake_send_to_codex(
+            target: str,
+            message: str,
+            options: watcher.CodexSendOptions,
+            *,
+            pending_guard: watcher.PendingGuard | None = None,
+            success_event: watcher.DeliverySuccessEvent | None = None,
+            failure_fallback: watcher.DeliveryFailureFallback | None = None,
+        ) -> Future[None]:
+            captured["target"] = target
+            captured["message"] = message
+            captured["pending_guard"] = pending_guard
+            captured["success_event"] = success_event
+            captured["failure_fallback"] = failure_fallback
+            return future
+
+        with patch("omo_manager.omo_pending_watch.send_to_codex", side_effect=fake_send_to_codex):
+            self.assertEqual(watcher.ASYNC_DELIVERY_STARTED, watcher.push_manager_text_to_target(args, "body", "vl:64", event))
+        fallback = captured["failure_fallback"]
+        self.assertIsInstance(fallback, watcher.DeliveryFailureFallback)
+        assert isinstance(fallback, watcher.DeliveryFailureFallback)
+        self.assertEqual("vl:64", fallback.failed_target)
+        self.assertEqual("wl:1", fallback.target)
+        self.assertEqual("body", fallback.text)
+        self.assertIs(event, fallback.success_event)
+
+    def test_async_manager_delivery_unavailable_falls_back_to_main_manager(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        future: Future[None] = Future()
+        future.set_exception(RuntimeError("target is not a Codex pane after submit: vl:64"))
+        event = watcher.DeliverySuccessEvent(seen_keys=("agent-problem:abc",), seen_at_s=1000.0)
+        fallback = watcher.DeliveryFailureFallback(
+            "vl:64",
+            "wl:1",
+            "Handle ALL omo_pending_watch agent problems below; only email human if you cannot handle them:\n\n1 ready and not blocked; consider resuming or closing them:\nworker.md vl:2 <output>idle</output>",
+            watcher.CodexSendOptions(2, 0.15, False),
+            event,
+        )
+        calls: list[tuple[str, str, watcher.DeliverySuccessEvent | None]] = []
+        fallback_future: Future[None] = Future()
+        fallback_future.set_result(None)
+
+        def fake_submit(
+            target: str,
+            message: str,
+            _options: watcher.CodexSendOptions,
+            pending_guard: watcher.PendingGuard | None = None,
+            success_event: watcher.DeliverySuccessEvent | None = None,
+            failure_fallback: watcher.DeliveryFailureFallback | None = None,
+        ) -> Future[None]:
+            self.assertIsNone(pending_guard)
+            self.assertIsNone(failure_fallback)
+            calls.append((target, message, success_event))
+            return fallback_future
+
+        err = StringIO()
+        with patch("omo_manager.omo_pending_watch.submit_send", side_effect=fake_submit), redirect_stderr(err):
+            watcher.log_send_result(future, failure_fallback=fallback)
+        self.assertEqual(1, len(calls))
+        self.assertEqual("wl:1", calls[0][0])
+        self.assertIn("Delivery to resolved target `vl:64` failed:", calls[0][1])
+        self.assertIn("worker.md vl:2 <output>idle</output>", calls[0][1])
+        self.assertIs(event, calls[0][2])
+        self.assertIn("async delivery failed: target is not a Codex pane after submit: vl:64", err.getvalue())
+
+    def test_agent_problem_owner_async_failure_falls_back_and_records_seen_after_main_success(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1", agent_problem_repeat_s=300.0)
+        result = watcher.CommandOutput(
+            "agent-problems",
+            3,
+            "\n".join(
+                [
+                    "agent-problems: ready=1",
+                    "ready: task=worker.md evidence=target=vl:2 task_status=running output=idle owner_target=vl:64",
+                ]
+            ),
+            "",
+        )
+        seen: dict[str, float] = {}
+        owner_future: Future[None] = Future()
+        main_future: Future[None] = Future()
+        submitted: list[tuple[str, str, watcher.DeliverySuccessEvent | None, watcher.DeliveryFailureFallback | None]] = []
+
+        def fake_send_to_codex(
+            target: str,
+            message: str,
+            _options: watcher.CodexSendOptions,
+            *,
+            pending_guard: watcher.PendingGuard | None = None,
+            success_event: watcher.DeliverySuccessEvent | None = None,
+            failure_fallback: watcher.DeliveryFailureFallback | None = None,
+        ) -> Future[None]:
+            self.assertIsNone(pending_guard)
+            submitted.append((target, message, success_event, failure_fallback))
+            self.assertEqual("vl:64", target)
+            return owner_future
+
+        def fake_submit(
+            target: str,
+            message: str,
+            _options: watcher.CodexSendOptions,
+            pending_guard: watcher.PendingGuard | None = None,
+            success_event: watcher.DeliverySuccessEvent | None = None,
+            failure_fallback: watcher.DeliveryFailureFallback | None = None,
+        ) -> Future[None]:
+            self.assertIsNone(pending_guard)
+            self.assertIsNone(failure_fallback)
+            submitted.append((target, message, success_event, failure_fallback))
+            self.assertEqual("wl:1", target)
+            return main_future
+
+        with patch("omo_manager.omo_pending_watch.send_to_codex", side_effect=fake_send_to_codex), patch("omo_manager.omo_pending_watch.submit_send", side_effect=fake_submit):
+            self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 1000.0))
+            self.assertEqual({}, seen)
+            owner_future.set_exception(RuntimeError("target is not a Codex pane after submit: vl:64"))
+            watcher.log_send_result(owner_future, submitted[0][2], submitted[0][3])
+            self.assertEqual({}, seen)
+            self.assertEqual(2, len(submitted))
+            self.assertEqual("wl:1", submitted[1][0])
+            self.assertIn("Delivery to resolved target `vl:64` failed:", submitted[1][1])
+            self.assertIn("worker.md vl:2 <output>idle</output>", submitted[1][1])
+            main_future.set_result(None)
+            watcher.log_send_result(main_future, submitted[1][2])
+            self.assertTrue(watcher.drain_delivery_successes(args, seen, 1001.0))
+        self.assertTrue(any(key.startswith("agent-problem:") for key in seen))
+
     def test_manager_delivery_launch_failure_is_retryable(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
