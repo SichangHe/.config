@@ -86,6 +86,121 @@ class CodexStopTests(unittest.TestCase):
         self.assertIn("session_id: `11111111-2222-3333-4444-555555555555`", text)
         self.assertNotIn("codex resume", text)
 
+    def test_record_close_does_not_duplicate_existing_close_note(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            _ = task.write_text("runat: cfg:1 codex\n", encoding="utf-8")
+            args = Args("cfg:1.0", 0.0, 10, False, False, root, "task.md")
+
+            record_close(args, "11111111-2222-3333-4444-555555555555")
+            record_close(args, "11111111-2222-3333-4444-555555555555")
+
+            text = task.read_text(encoding="utf-8")
+        self.assertEqual(1, text.count("manager closed Codex agent"))
+
+    def test_record_close_ignores_unrelated_session_id_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            _ = task.write_text(
+                "runat: cfg:1 codex\n"
+                "prior note with session_id: `11111111-2222-3333-4444-555555555555`\n",
+                encoding="utf-8",
+            )
+
+            record_close(
+                Args("cfg:1.0", 0.0, 10, False, False, root, "task.md"),
+                "11111111-2222-3333-4444-555555555555",
+            )
+
+            text = task.read_text(encoding="utf-8")
+        self.assertEqual(1, text.count("manager closed Codex agent"))
+
+    def test_record_close_ignores_malformed_close_note_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            _ = task.write_text(
+                "runat: cfg:1 codex\n"
+                "(manager closed Codex agent text with tmux target `cfg:1.0` and session_id: `11111111-2222-3333-4444-555555555555`.)\n",
+                encoding="utf-8",
+            )
+
+            record_close(
+                Args("cfg:1.0", 0.0, 10, False, False, root, "task.md"),
+                "11111111-2222-3333-4444-555555555555",
+            )
+
+            text = task.read_text(encoding="utf-8")
+        self.assertEqual(2, text.count("manager closed Codex agent"))
+
+    def test_record_close_ignores_forged_close_note_timestamp(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            _ = task.write_text(
+                "runat: cfg:1 codex\n"
+                "(manager closed Codex agent fabricated-record; tmux target `cfg:1.0`; session_id: `11111111-2222-3333-4444-555555555555`.)\n",
+                encoding="utf-8",
+            )
+
+            record_close(
+                Args("cfg:1.0", 0.0, 10, False, False, root, "task.md"),
+                "11111111-2222-3333-4444-555555555555",
+            )
+
+            text = task.read_text(encoding="utf-8")
+        self.assertEqual(2, text.count("manager closed Codex agent"))
+
+    def test_record_close_requires_unmodified_close_note_line(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            _ = task.write_text(
+                "runat: cfg:1 codex\n"
+                " (manager closed Codex agent 07-14 11:00 PDT; tmux target `cfg:1.0`; session_id: `11111111-2222-3333-4444-555555555555`.)\n",
+                encoding="utf-8",
+            )
+
+            record_close(
+                Args("cfg:1.0", 0.0, 10, False, False, root, "task.md"),
+                "11111111-2222-3333-4444-555555555555",
+            )
+
+            text = task.read_text(encoding="utf-8")
+        self.assertEqual(2, text.count("manager closed Codex agent"))
+
+    def test_record_close_ignores_no_session_note_for_different_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            _ = task.write_text(
+                "runat: cfg:1 codex\n"
+                "(manager closed Codex agent 07-14 11:00 PDT; tmux target `cfg:2.0`; Codex session id not found in captured tmux output.)\n",
+                encoding="utf-8",
+            )
+
+            record_close(Args("cfg:1.0", 0.0, 10, False, False, root, "task.md"), "")
+
+            text = task.read_text(encoding="utf-8")
+        self.assertEqual(2, text.count("manager closed Codex agent"))
+
+    def test_record_close_retry_after_partial_failure_does_not_duplicate_close_note(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            _ = task.write_text("runat: cfg:1 codex\n", encoding="utf-8")
+            args = Args("cfg:1.0", 0.0, 10, False, False, root, "task.md")
+
+            with patch("omo_manager.omo_codex_stop.move_todo_to_previous", side_effect=RuntimeError("TODO locked")):
+                with self.assertRaisesRegex(RuntimeError, "TODO locked"):
+                    record_close(args, "11111111-2222-3333-4444-555555555555")
+            record_close(args, "11111111-2222-3333-4444-555555555555")
+
+            text = task.read_text(encoding="utf-8")
+        self.assertEqual(1, text.count("manager closed Codex agent"))
+
     def test_record_close_moves_todo_current_entry_to_previous(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

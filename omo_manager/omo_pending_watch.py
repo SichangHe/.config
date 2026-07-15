@@ -108,7 +108,7 @@ MANAGER_PENDING_ITEMS_REMINDER_HEADER = (
 )
 WORKER_PENDING_ITEMS_REMINDER_HEADER = (
     "worker pending-item reminder: these task files have large `pending_task_items` lists. "
-    "Review each list, verify completed or cancelled items, remove them with `omo_task_edit.py pending-remove`, and split still-open work into worker tasks if needed."
+    "Review each list, verify completed or cancelled items, remove them with `omo_task_edit.py pending-remove --evidence TEXT`, and split still-open work into worker tasks if needed."
 )
 MANAGER_TASK_STATE_OK = {"running", "done", "blocked"}
 MANAGER_TASK_STATE_REMINDER_LIMIT = 20
@@ -1125,11 +1125,11 @@ def manager_pending_instruction(marker: Marker, after_recording: str = "Then dis
     if marker.origin == "human":
         quote_note = "Choose `--item` values by quoting the human's words as much as possible."
         flag_note = "Use `--ack-human` so the script emails the human after recording."
-        fallback_note = "If no new pending task item should be added, use `omo_task_edit.py pending-marker-clear` with `--comment`, `--clear-kind report-only|duplicate|cancelled|superseded`, `--ack-human`, and the same `--email-file` when shown above; if an active owner task already tracks it, use `--clear-kind existing-owner-item --owner-task-file TASK.md --owner-item ITEM`. Existing pending-item cleanup uses `omo_task_edit.py pending-replace` or `omo_task_edit.py pending-remove`."
+        fallback_note = "If no new pending task item should be added, use `omo_task_edit.py pending-marker-clear` with `--comment`, `--clear-kind report-only|duplicate|cancelled|superseded`, `--ack-human`, and the same `--email-file` when shown above; if an active owner task already tracks it, use `--clear-kind existing-owner-item --owner-task-file TASK.md --owner-item ITEM`. Existing pending-item cleanup uses `omo_task_edit.py pending-replace` or `omo_task_edit.py pending-remove --evidence TEXT`."
     else:
         quote_note = "Choose `--item` values by quoting the request's words as much as possible."
         flag_note = "Do not pass `--ack-human`; agent-origin reports do not need a human acknowledgement."
-        fallback_note = "If there is no pending task item to add, use `omo_task_edit.py pending-marker-clear` with `--comment`; for existing pending-item edits, use `omo_task_edit.py pending-replace` or `omo_task_edit.py pending-remove`."
+        fallback_note = "If there is no pending task item to add, use `omo_task_edit.py pending-marker-clear` with `--comment`; for existing pending-item edits, use `omo_task_edit.py pending-replace` or `omo_task_edit.py pending-remove --evidence TEXT`."
     return (
         "Normally record pending items and remove the consumed `(pending)` marker by running:\n"
         f"`{command}`\n"

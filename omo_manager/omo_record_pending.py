@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import subprocess
 import sys
 import tempfile
@@ -86,8 +87,36 @@ def pending_marker_at_line(text: str, line_number: int) -> bool:
     return 1 <= line_number <= len(lines) and lines[line_number - 1].strip() == PENDING_MARKER
 
 
-def has_pending_marker(text: str) -> bool:
-    return any(line.strip() == PENDING_MARKER for line in text.splitlines())
+def items_digest(items: tuple[str, ...]) -> str:
+    return hashlib.sha256("\0".join(items).encode("utf-8")).hexdigest()[:16]
+
+
+def recorded_line(line: int, items: tuple[str, ...]) -> str:
+    return f"(pending items recorded line={line}: n={len(items)} sha256={items_digest(items)})"
+
+
+def ack_sent_line(line: int, items: tuple[str, ...]) -> str:
+    return f"(human ack sent for pending items line={line}: n={len(items)} sha256={items_digest(items)})"
+
+
+def line_exists(text: str, line: str) -> bool:
+    return any(value.strip() == line for value in text.splitlines())
+
+
+def append_line_once(text: str, line: str) -> str:
+    if line_exists(text, line):
+        return text
+    separator = "" if not text or text.endswith("\n") else "\n"
+    return f"{text}{separator}{line}\n"
+
+
+def remove_line_once(text: str, line: str) -> str:
+    lines = text.splitlines(keepends=True)
+    for idx, value in enumerate(lines):
+        if value.strip() == line:
+            del lines[idx]
+            return "".join(lines)
+    return text
 
 
 def item_lines(items: tuple[str, ...]) -> list[str]:
@@ -136,13 +165,18 @@ def add_pending_items(text: str, items: tuple[str, ...]) -> str:
 
 def update_texts(pending_text: str, target_text: str, same_file: bool, line: int, items: tuple[str, ...]) -> tuple[str, str]:
     if same_file:
-        updated = add_pending_items(remove_pending_line(pending_text, line), items)
+        updated = append_line_once(add_pending_items(remove_pending_line(pending_text, line), items), recorded_line(line, items))
         return updated, updated
-    return remove_pending_line(pending_text, line), add_pending_items(target_text, items)
+    return append_line_once(remove_pending_line(pending_text, line), recorded_line(line, items)), add_pending_items(target_text, items)
 
 
 def retry_already_recorded(pending_text: str, target_text: str, line: int, items: tuple[str, ...]) -> bool:
-    return not pending_marker_at_line(pending_text, line) and not has_pending_marker(pending_text) and all_items_recorded(target_text, items)
+    return not pending_marker_at_line(pending_text, line) and line_exists(pending_text, recorded_line(line, items)) and all_items_recorded(target_text, items)
+
+
+def reject_retry_over_new_marker(pending_text: str, line: int, items: tuple[str, ...]) -> None:
+    if pending_marker_at_line(pending_text, line) and line_exists(pending_text, recorded_line(line, items)):
+        raise TaskFrontmatterError("cannot retry pending record while a new live `(pending)` marker is at the original line.")
 
 
 def subject_from_email_file(path: Path) -> str:
@@ -178,6 +212,25 @@ def send_human_ack(items: tuple[str, ...], email_path: Path | None) -> None:
         subprocess.run([str(EMAIL_HELPER), "--manager-human", "--subject-file", str(subject_path), "--message-file", str(body_path)], check=True)
 
 
+def send_human_ack_once(pending_path: Path, args: Args, email_path: Path | None) -> None:
+    before = pending_path.stat()
+    text = pending_path.read_text(encoding="utf-8")
+    marker = ack_sent_line(args.line, args.items)
+    if line_exists(text, marker):
+        return
+    if pending_marker_at_line(text, args.line):
+        raise TaskFrontmatterError("cannot retry human acknowledgement while a new live `(pending)` marker is at the original line.")
+    updated = append_line_once(text, marker)
+    replace_if_unchanged(pending_path, updated, before)
+    try:
+        send_human_ack(args.items, email_path)
+    except (OSError, subprocess.CalledProcessError):
+        rollback_before = pending_path.stat()
+        rollback_text = pending_path.read_text(encoding="utf-8")
+        replace_if_unchanged(pending_path, remove_line_once(rollback_text, marker), rollback_before)
+        raise
+
+
 def run(args: Args) -> int:
     try:
         pending_path = task_path(args.root, args.pending_file)
@@ -188,9 +241,10 @@ def run(args: Args) -> int:
         same_file = pending_path == target_path
         pending_text = pending_path.read_text(encoding="utf-8")
         target_text = pending_text if same_file else target_path.read_text(encoding="utf-8")
+        reject_retry_over_new_marker(pending_text, args.line, args.items)
         if retry_already_recorded(pending_text, target_text, args.line, args.items):
             if args.ack_human:
-                send_human_ack(args.items, email_path)
+                send_human_ack_once(pending_path, args, email_path)
             print(f"recorded {len(args.items)} pending item(s) in {target_path.name}; `(pending)` was already removed from {pending_path.name}:{args.line}")
             return 0
         updated_pending, updated_target = update_texts(pending_text, target_text, same_file, args.line, args.items)
@@ -200,7 +254,7 @@ def run(args: Args) -> int:
             replace_if_unchanged(target_path, updated_target, target_before)
             replace_if_unchanged(pending_path, updated_pending, pending_before)
         if args.ack_human:
-            send_human_ack(args.items, email_path)
+            send_human_ack_once(pending_path, args, email_path)
     except (OSError, TaskFrontmatterError, subprocess.CalledProcessError, argparse.ArgumentTypeError) as exc:
         print(f"omo_record_pending.py: {exc}", file=sys.stderr)
         return 2

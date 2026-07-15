@@ -254,12 +254,25 @@ def close_note(target: str, session_id: str, now: datetime | None = None) -> str
     )
 
 
+def has_close_note(text: str, target: str, session_id: str) -> bool:
+    stamp_pattern = r"\d{2}-\d{2} \d{2}:\d{2} [A-Za-z0-9_+\-]+"
+    target_pattern = re.escape(target)
+    if session_id:
+        session_pattern = rf"session_id: `{re.escape(session_id)}`"
+    else:
+        session_pattern = "Codex session id not found in captured tmux output"
+    pattern = re.compile(rf"^\(manager closed Codex agent {stamp_pattern}; tmux target `{target_pattern}`; {session_pattern}\.\)$")
+    return any(pattern.fullmatch(line) for line in text.splitlines())
+
+
 def record_close(args: Args, session_id: str) -> None:
     if not args.task_file or args.dry_run:
         return
     path = task_path(args.root, args.task_file)
-    with path.open("a", encoding="utf-8") as handle:
-        _ = handle.write(close_note(args.target, session_id))
+    text = path.read_text(encoding="utf-8")
+    if not has_close_note(text, args.target, session_id):
+        with path.open("a", encoding="utf-8") as handle:
+            _ = handle.write(close_note(args.target, session_id))
     move_todo_to_previous(args.root, args.task_file)
 
 

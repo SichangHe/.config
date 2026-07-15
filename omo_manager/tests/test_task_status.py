@@ -11,6 +11,7 @@ from unittest.mock import patch
 from omo_manager.omo_agent_status import TaskFrontmatterError
 from omo_manager.omo_task_status import DONE_REMINDER
 from omo_manager.omo_task_status import StopArgs
+from omo_manager.omo_task_status import parse_args
 from omo_manager.omo_task_status import run
 from omo_manager.omo_task_status import update_frontmatter_status
 from omo_manager.omo_task_status import Args as StatusArgs
@@ -139,18 +140,184 @@ class TaskStatusTests(unittest.TestCase):
             self.assertIn("Closed wl:2; session_id: session-1.", stdout.getvalue())
             self.assertIn(DONE_REMINDER, stdout.getvalue())
 
-    def test_cli_done_reports_failure_when_close_fails_after_write(self) -> None:
+    def test_cli_done_failure_marks_blocked_when_close_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "task.md"
-            path.write_text(task_frontmatter() + "body\n", encoding="utf-8")
+            original = task_frontmatter() + "body\n"
+            path.write_text(original, encoding="utf-8")
             stderr = io.StringIO()
 
             with patch("omo_manager.omo_task_status.stop_done_agent", side_effect=RuntimeError("tmux target not found")), redirect_stderr(stderr):
                 exit_code = run(StatusArgs(Path(tmp), Path("task.md"), "done", ""))
 
             self.assertEqual(2, exit_code)
-            self.assertIn("status: done\nrunat:", path.read_text(encoding="utf-8"))
+            self.assertNotEqual(original, path.read_text(encoding="utf-8"))
+            self.assertIn("status: blocked\nblocked_on: done_close_failed: tmux target not found\n", path.read_text(encoding="utf-8"))
             self.assertIn("failed to close done agent", stderr.getvalue())
+
+    def test_cli_done_marks_blocked_when_close_bookkeeping_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "task.md"
+            path.write_text(task_frontmatter() + "body\n", encoding="utf-8")
+            stderr = io.StringIO()
+
+            with patch("omo_manager.omo_task_status.stop_done_agent", return_value=(StopArgs("wl:2", 10.0, 2000, False, False, Path(tmp), "task.md", True, 0.0), "session-1")), patch(
+                "omo_manager.omo_task_status.record_close",
+                side_effect=RuntimeError("TODO locked"),
+            ), redirect_stderr(stderr):
+                exit_code = run(StatusArgs(Path(tmp), Path("task.md"), "done", ""))
+
+            self.assertEqual(2, exit_code)
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("status: blocked\nblocked_on: done_close_bookkeeping_failed: TODO locked\n", text)
+            self.assertIn("done close bookkeeping failed", stderr.getvalue())
+
+    def test_cli_done_bookkeeping_failure_normalizes_newlines(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "task.md"
+            path.write_text(task_frontmatter() + "body\n", encoding="utf-8")
+
+            with patch("omo_manager.omo_task_status.stop_done_agent", return_value=(StopArgs("wl:2", 10.0, 2000, False, False, Path(tmp), "task.md", True, 0.0), "session-1")), patch(
+                "omo_manager.omo_task_status.record_close",
+                side_effect=RuntimeError("line one\nline two"),
+            ), redirect_stderr(io.StringIO()):
+                exit_code = run(StatusArgs(Path(tmp), Path("task.md"), "done", ""))
+
+            self.assertEqual(2, exit_code)
+            self.assertIn("status: blocked\nblocked_on: done_close_bookkeeping_failed: line one line two\n", path.read_text(encoding="utf-8"))
+
+    def test_cli_done_write_failure_after_close_leaves_blocked_in_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "task.md"
+            original = task_frontmatter() + "body\n"
+            path.write_text(original, encoding="utf-8")
+
+            def flaky_replace(target: Path, text: str, before: object) -> None:
+                if "status: done" in text:
+                    raise RuntimeError("write raced")
+                target.write_text(text, encoding="utf-8")
+
+            with patch("omo_manager.omo_task_status.stop_done_agent", return_value=(StopArgs("wl:2", 10.0, 2000, False, False, Path(tmp), "task.md", True, 0.0), "session-1")), patch(
+                "omo_manager.omo_task_status.replace_if_unchanged",
+                side_effect=flaky_replace,
+            ), redirect_stderr(io.StringIO()):
+                exit_code = run(StatusArgs(Path(tmp), Path("task.md"), "done", ""))
+
+            self.assertEqual(2, exit_code)
+            text = path.read_text(encoding="utf-8")
+            self.assertNotEqual(original, text)
+            self.assertIn("status: blocked\nblocked_on: done_close_in_progress: manager is closing the agent before marking done\n", text)
+            self.assertIn("session_id: `session-1`", text)
+            self.assertNotIn("status: done", text)
+
+    def test_cli_finish_closed_done_records_bookkeeping_without_closing_again(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "task.md"
+            path.write_text(task_frontmatter(status="blocked", blocked_on="done_close_bookkeeping_failed: TODO locked") + "body\n", encoding="utf-8")
+            stdout = io.StringIO()
+            close_calls: list[tuple[StopArgs, str]] = []
+
+            def fake_record(args: StopArgs, session_id: str) -> None:
+                close_calls.append((args, session_id))
+
+            with patch("omo_manager.omo_task_status.stop_done_agent", side_effect=AssertionError("should not stop twice")), patch(
+                "omo_manager.omo_task_status.record_close",
+                side_effect=fake_record,
+            ), redirect_stdout(stdout):
+                exit_code = run(StatusArgs(Path(tmp), Path("task.md"), "done", "", True, "session-1"))
+
+            self.assertEqual(0, exit_code)
+            self.assertIn("status: done\nrunat:", path.read_text(encoding="utf-8"))
+            self.assertNotIn("blocked_on:", path.read_text(encoding="utf-8"))
+            self.assertEqual(1, len(close_calls))
+            self.assertEqual("session-1", close_calls[0][1])
+            self.assertIn("Closed wl:2; session_id: session-1.", stdout.getvalue())
+            self.assertIn(DONE_REMINDER, stdout.getvalue())
+
+    def test_cli_finish_closed_done_failure_stays_blocked_retryable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "task.md"
+            path.write_text(task_frontmatter(status="blocked", blocked_on="done_close_bookkeeping_failed: TODO locked") + "body\n", encoding="utf-8")
+            stderr = io.StringIO()
+
+            with patch("omo_manager.omo_task_status.record_close", side_effect=RuntimeError("TODO still locked")), redirect_stderr(stderr):
+                exit_code = run(StatusArgs(Path(tmp), Path("task.md"), "done", "", True, "session-1"))
+
+            self.assertEqual(2, exit_code)
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("status: blocked\nblocked_on: done_close_bookkeeping_failed: TODO still locked\n", text)
+            self.assertIn("done close bookkeeping retry failed", stderr.getvalue())
+
+    def test_cli_finish_closed_done_allows_close_in_progress_with_close_note(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "task.md"
+            path.write_text(
+                task_frontmatter(status="blocked", blocked_on="done_close_in_progress: manager is closing the agent before marking done")
+                + "body\n"
+                + "(manager closed Codex agent 07-14 11:00 PDT; tmux target `wl:2`; session_id: `session-1`.)\n",
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+
+            with patch("omo_manager.omo_task_status.stop_done_agent", side_effect=AssertionError("should not stop twice")), redirect_stdout(stdout):
+                exit_code = run(StatusArgs(Path(tmp), Path("task.md"), "done", "", True, "session-1"))
+
+            self.assertEqual(0, exit_code)
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("status: done\nrunat:", text)
+            self.assertNotIn("blocked_on:", text)
+            self.assertIn("Closed wl:2; session_id: session-1.", stdout.getvalue())
+
+    def test_cli_finish_closed_done_rejects_pre_close_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "task.md"
+            original = task_frontmatter(status="blocked", blocked_on="done_close_failed: tmux target not found") + "body\n"
+            path.write_text(original, encoding="utf-8")
+            stderr = io.StringIO()
+
+            with redirect_stderr(stderr):
+                exit_code = run(StatusArgs(Path(tmp), Path("task.md"), "done", "", True, "session-1"))
+
+            self.assertEqual(2, exit_code)
+            self.assertEqual(original, path.read_text(encoding="utf-8"))
+            self.assertIn("requires a task blocked by failed done close", stderr.getvalue())
+
+    def test_cli_finish_closed_done_rejects_invalid_bookkeeping_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "task.md"
+            original = task_frontmatter(status="blocked", blocked_on="done_close_bookkeeping_failedly: forged") + "body\n"
+            path.write_text(original, encoding="utf-8")
+            stderr = io.StringIO()
+
+            with redirect_stderr(stderr):
+                exit_code = run(StatusArgs(Path(tmp), Path("task.md"), "done", "", True, "session-1"))
+
+            self.assertEqual(2, exit_code)
+            self.assertEqual(original, path.read_text(encoding="utf-8"))
+            self.assertIn("requires a task blocked by failed done close", stderr.getvalue())
+
+    def test_cli_finish_closed_done_rejects_close_in_progress_without_close_note(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "task.md"
+            original = task_frontmatter(status="blocked", blocked_on="done_close_in_progress: manager is closing the agent before marking done") + "body\n"
+            path.write_text(original, encoding="utf-8")
+            stderr = io.StringIO()
+
+            with redirect_stderr(stderr):
+                exit_code = run(StatusArgs(Path(tmp), Path("task.md"), "done", "", True, "session-1"))
+
+            self.assertEqual(2, exit_code)
+            self.assertEqual(original, path.read_text(encoding="utf-8"))
+            self.assertIn("requires a task blocked by failed done close", stderr.getvalue())
+
+    def test_parse_finish_closed_done_without_status(self) -> None:
+        args = parse_args(["--root", "/tmp/work", "--finish-closed-done", "--session-id", "session-1", "task.md"])
+
+        self.assertEqual(Path("/tmp/work"), args.root)
+        self.assertEqual(Path("task.md"), args.task_file)
+        self.assertEqual("done", args.status)
+        self.assertTrue(args.finish_closed_done)
+        self.assertEqual("session-1", args.session_id)
 
     def test_cli_running_has_no_done_reminder(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

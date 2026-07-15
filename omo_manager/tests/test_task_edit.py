@@ -128,12 +128,27 @@ class TaskEditTests(unittest.TestCase):
             stdout = io.StringIO()
 
             with redirect_stdout(stdout):
-                exit_code = run(Args(root, Path("task.md"), "pending-remove", items=("finish review",)))
+                exit_code = run(Args(root, Path("task.md"), "pending-remove", items=("finish review",), evidence="review passed"))
 
             self.assertEqual(0, exit_code)
-            self.assertEqual(task_frontmatter() + "body\n", task.read_text(encoding="utf-8"))
+            self.assertEqual(task_frontmatter() + "body\n(verified removed pending item: review passed)\n", task.read_text(encoding="utf-8"))
             self.assertIn(REMOVE_REMINDER, stdout.getvalue())
             self.assertIn("evaluator agents", stdout.getvalue())
+
+    def test_pending_remove_requires_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            original = task_frontmatter(pending_items=("finish review",)) + "body\n"
+            task.write_text(original, encoding="utf-8")
+            stderr = io.StringIO()
+
+            with redirect_stderr(stderr):
+                exit_code = run(Args(root, Path("task.md"), "pending-remove", items=("finish review",)))
+
+            self.assertEqual(2, exit_code)
+            self.assertEqual(original, task.read_text(encoding="utf-8"))
+            self.assertIn("comment must not be empty", stderr.getvalue())
 
     def test_appends_parenthesized_comment_wraps_existing_parentheses_and_rejects_empty_comment(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -487,7 +502,7 @@ class TaskEditTests(unittest.TestCase):
     def test_aliases_parse_to_canonical_commands(self) -> None:
         self.assertEqual("pending-list", parse_args(["list", "task.md"]).command)
         self.assertEqual("pending-add", parse_args(["add", "task.md", "--item", "new"]).command)
-        self.assertEqual("pending-remove", parse_args(["remove", "task.md", "--item", "old"]).command)
+        self.assertEqual("pending-remove", parse_args(["remove", "task.md", "--item", "old", "--evidence", "done"]).command)
         args = parse_args(["update", "task.md", "--old-item", "old", "--new-item", "new"])
 
         self.assertEqual("pending-replace", args.command)

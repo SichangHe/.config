@@ -41,7 +41,7 @@
   - human-origin manager deliveries tell the manager to quote the human's words as much as possible when choosing `--item` values
   - agent-origin manager deliveries tell the manager to quote the request's words as much as possible when choosing `--item` values
   - agent-origin manager deliveries say to omit `--ack-human`
-  - if no pending task item should be added, manager deliveries point to `omo_task_edit.py pending-marker-clear`; human-origin clears require `--clear-kind`, and `existing-owner-item` verifies the cited active owner task item; existing pending-item cleanup uses `omo_task_edit.py pending-replace` or `omo_task_edit.py pending-remove`
+  - if no pending task item should be added, manager deliveries point to `omo_task_edit.py pending-marker-clear`; human-origin clears require `--clear-kind`, and `existing-owner-item` verifies the cited active owner task item; existing pending-item cleanup uses `omo_task_edit.py pending-replace` or `omo_task_edit.py pending-remove --evidence TEXT`
   - includes the pending line and content from that line to end of file
   - labels pending content as `<snippet file="PATH:START-END">`
   - truncates long content to 2000 chars by keeping start and end with `…Nchars…` in the middle
@@ -75,7 +75,7 @@
 - manager delivery example
   - ``Normally record pending items and remove the consumed `(pending)` marker by running:``
   - ``omo_record_pending.py --pending-file helper_audit_agent_9580.md --line 156 --item PENDING_ITEM_TEXT [--item ...] [--task-file TARGET_TASK.md]``
-  - ``Choose `--item` values by quoting the request's words as much as possible. Do not pass `--ack-human`; agent-origin reports do not need a human acknowledgement. If there is no pending task item to add, run `omo_task_edit.py pending-marker-clear`; existing pending-item cleanup uses `omo_task_edit.py pending-replace` or `omo_task_edit.py pending-remove`. Then dispatch the task:``
+  - ``Choose `--item` values by quoting the request's words as much as possible. Do not pass `--ack-human`; agent-origin reports do not need a human acknowledgement. If there is no pending task item to add, run `omo_task_edit.py pending-marker-clear`; existing pending-item cleanup uses `omo_task_edit.py pending-replace` or `omo_task_edit.py pending-remove --evidence TEXT`. Then dispatch the task:``
   - `<snippet file="helper_audit_agent_9580.md:156-157">`
   - `(pending)`
   - `(from agent /tmp/omo-agent-messages-30033/agent_running_450901fc7c538b93789982a05ef20df3651c465ebf7f86eb641b75d6b6c5a9da.md)`
@@ -93,7 +93,7 @@
 - dm fyi example
   - ``Normally record pending items and remove the consumed `(pending)` marker by running:``
   - ``omo_record_pending.py --pending-file worker.md --line 11 --item PENDING_ITEM_TEXT [--item ...] [--task-file TARGET_TASK.md] --email-file manager_mail/4002.txt --ack-human``
-  - ``Choose `--item` values by quoting the human's words as much as possible. Use `--ack-human` so the script emails the human after recording. If no new pending task item should be added, use `omo_task_edit.py pending-marker-clear` with `--comment`, `--clear-kind report-only|duplicate|cancelled|superseded`, `--ack-human`, and the same `--email-file` when shown above; if an active owner task already tracks it, use `--clear-kind existing-owner-item --owner-task-file TASK.md --owner-item ITEM`. Existing pending-item cleanup uses `omo_task_edit.py pending-replace` or `omo_task_edit.py pending-remove`. This message is already dispatched to the agent, this is FYI:``
+  - ``Choose `--item` values by quoting the human's words as much as possible. Use `--ack-human` so the script emails the human after recording. If no new pending task item should be added, use `omo_task_edit.py pending-marker-clear` with `--comment`, `--clear-kind report-only|duplicate|cancelled|superseded`, `--ack-human`, and the same `--email-file` when shown above; if an active owner task already tracks it, use `--clear-kind existing-owner-item --owner-task-file TASK.md --owner-item ITEM`. Existing pending-item cleanup uses `omo_task_edit.py pending-replace` or `omo_task_edit.py pending-remove --evidence TEXT`. This message is already dispatched to the agent, this is FYI:``
   - `<snippet file="worker.md:11-12">`
   - `(pending)`
   - `(record and delegate manager_mail/4002.txt)`
@@ -141,7 +141,7 @@
   - `human_request` status rows are filtered from agent-problem prompts because live `(pending)` blocks are dispatched through the pending-marker path
   - manager compaction reminders say ``Unless you know the exact content of MANAGER.md, read it. Normally, don't ack human``
   - manager pending-item reminders say manager task files should not keep `pending_task_items`; they are sent to that manager task file's `runat` pane
-  - worker pending-item size reminders are sent to `managerat` when a live worker task file has 10 or more `pending_task_items`; the manager should verify completed or cancelled items and remove them with `omo_task_edit.py pending-remove`
+  - worker pending-item size reminders are sent to `managerat` when a live worker task file has 10 or more `pending_task_items`; the manager should verify completed or cancelled items and remove them with `omo_task_edit.py pending-remove --evidence TEXT`
   - `TODO.md` length reminders tell managers to keep only the newest 20 `previous` tasks in `TODO.md` and move older `previous` tasks to `YYYYMM/old_todos.md`
   - dirty worktree reminders name the dirty repo path, omit raw status/category fields, tell managers to let workers commit their own changes, and tell managers to commit task files themselves without routing task-file cleanup to workers
   - identical problem output is keyed by SHA-256 in process-local time-bounded delivery memory and is repeated at most once per `--agent-problem-repeat-s` seconds, default `1800`

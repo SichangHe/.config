@@ -9,6 +9,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from omo_manager.omo_record_pending import Args
+from omo_manager.omo_record_pending import ack_sent_line
+from omo_manager.omo_record_pending import recorded_line
 from omo_manager.omo_record_pending import run
 
 
@@ -178,6 +180,30 @@ class RecordPendingTests(unittest.TestCase):
             self.assertIn("--manager-human", commands[0])
             self.assertIn("already removed", stdout.getvalue())
 
+    def test_ack_human_retry_ignores_unrelated_later_pending_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            task.write_text(task_frontmatter() + "(pending)\nPlease do it.\n", encoding="utf-8")
+            args = Args(root, Path("task.md"), 10, Path("task.md"), ("finish review",), True)
+
+            def fail_email(command: list[str], check: bool) -> None:
+                raise subprocess.CalledProcessError(1, command)
+
+            with patch("omo_manager.omo_record_pending.subprocess.run", side_effect=fail_email):
+                self.assertEqual(2, run(args))
+            task.write_text(task.read_text(encoding="utf-8") + "(pending)\nNew unrelated request.\n", encoding="utf-8")
+            commands: list[list[str]] = []
+
+            def send_email(command: list[str], check: bool) -> None:
+                commands.append(command)
+
+            with patch("omo_manager.omo_record_pending.subprocess.run", side_effect=send_email):
+                self.assertEqual(0, run(args))
+
+            self.assertEqual(1, len(commands))
+            self.assertIn("(pending)\nNew unrelated request.\n", task.read_text(encoding="utf-8"))
+
     def test_ack_human_retry_rejects_shifted_live_pending_marker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -196,6 +222,53 @@ class RecordPendingTests(unittest.TestCase):
             self.assertEqual(2, exit_code)
             self.assertEqual([], commands)
             self.assertIn("(pending)\n", manager.read_text(encoding="utf-8"))
+
+    def test_ack_human_retry_rejects_new_marker_at_recorded_line(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = root / "manager.md"
+            worker = root / "worker.md"
+            items = ("new worker item",)
+            original = task_frontmatter(is_manager=True) + "(pending)\nNew unrelated request.\n" + recorded_line(10, items) + "\n"
+            manager.write_text(original, encoding="utf-8")
+            worker.write_text(task_frontmatter(pending_items=items) + "body\n", encoding="utf-8")
+            commands: list[list[str]] = []
+
+            def send_email(command: list[str], check: bool) -> None:
+                commands.append(command)
+
+            with patch("omo_manager.omo_record_pending.subprocess.run", side_effect=send_email):
+                exit_code = run(Args(root, Path("manager.md"), 10, Path("worker.md"), items, True))
+
+            self.assertEqual(2, exit_code)
+            self.assertEqual([], commands)
+            self.assertEqual(original, manager.read_text(encoding="utf-8"))
+
+    def test_ack_human_retry_succeeds_after_oserror_email_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            task.write_text(task_frontmatter() + "(pending)\nPlease do it.\n", encoding="utf-8")
+            args = Args(root, Path("task.md"), 10, Path("task.md"), ("finish review",), True)
+
+            def fail_email(command: list[str], check: bool) -> None:
+                raise OSError("mail helper missing")
+
+            with patch("omo_manager.omo_record_pending.subprocess.run", side_effect=fail_email):
+                self.assertEqual(2, run(args))
+            text_after_failure = task.read_text(encoding="utf-8")
+            self.assertIn(recorded_line(10, ("finish review",)), text_after_failure)
+            self.assertNotIn(ack_sent_line(10, ("finish review",)), text_after_failure)
+            commands: list[list[str]] = []
+
+            def send_email(command: list[str], check: bool) -> None:
+                commands.append(command)
+
+            with patch("omo_manager.omo_record_pending.subprocess.run", side_effect=send_email):
+                self.assertEqual(0, run(args))
+
+            self.assertEqual(1, len(commands))
+            self.assertIn(ack_sent_line(10, ("finish review",)), task.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

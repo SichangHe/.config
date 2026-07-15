@@ -16,6 +16,7 @@ from omo_manager.omo_agent_status import TASK_FRONTMATTER_STATUSES
 from omo_manager.omo_agent_status import TaskFrontmatterError
 from omo_manager.omo_agent_status import DEFAULT_ROOT
 from omo_manager.omo_codex_stop import Args as StopArgs
+from omo_manager.omo_codex_stop import has_close_note
 from omo_manager.omo_codex_stop import record_close
 from omo_manager.omo_codex_stop import stop
 from omo_manager.omo_agent_status import frontmatter_parts
@@ -23,6 +24,9 @@ from omo_manager.omo_agent_status import parse_task_metadata
 
 PENDING_MARKER = "(pending)"
 DONE_REMINDER = "Status set to done. Remember to email the human."
+BOOKKEEPING_FAILED_PREFIX = "done_close_bookkeeping_failed"
+CLOSE_FAILED_PREFIX = "done_close_failed"
+DONE_CLOSE_IN_PROGRESS = "done_close_in_progress: manager is closing the agent before marking done"
 
 
 @dataclass(frozen=True)
@@ -31,22 +35,36 @@ class Args:
     task_file: Path
     status: str
     blocked_on: str
+    finish_closed_done: bool = False
+    session_id: str = ""
 
 
 class ParsedArgs(argparse.Namespace):
     root: Path = DEFAULT_ROOT
     task_file: Path
-    status: str
+    status: str = ""
     blocked_on: str = ""
+    finish_closed_done: bool = False
+    session_id: str = ""
 
 
 def parse_args(argv: list[str]) -> Args:
     parser = argparse.ArgumentParser(description=__doc__)
     _ = parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
+    _ = parser.add_argument("--finish-closed-done", action="store_true", help="Finish done bookkeeping after the agent was already closed by a failed prior run.")
+    _ = parser.add_argument("--session-id", default="", help="Session id captured by the prior close, if available.")
     _ = parser.add_argument("task_file", type=Path)
-    _ = parser.add_argument("status", choices=sorted(TASK_FRONTMATTER_STATUSES))
+    _ = parser.add_argument("status", nargs="?", choices=sorted(TASK_FRONTMATTER_STATUSES))
     _ = parser.add_argument("--blocked-on", default="", help="Required when setting status to `blocked`; removed for all other statuses.")
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
+    if parsed.finish_closed_done:
+        if parsed.status not in {None, "", "done"}:
+            parser.error("--finish-closed-done only supports status `done`.")
+        return Args(parsed.root.resolve(), parsed.task_file, "done", parsed.blocked_on.strip(), True, parsed.session_id.strip())
+    if not parsed.status:
+        parser.error("status is required unless --finish-closed-done is used.")
+    if parsed.session_id:
+        parser.error("--session-id is only valid with --finish-closed-done.")
     return Args(parsed.root.resolve(), parsed.task_file, parsed.status, parsed.blocked_on.strip())
 
 
@@ -156,21 +174,86 @@ def done_close_message(target: str, session_id: str) -> str:
     return f"Closed {target}; Codex session id not found."
 
 
+def done_bookkeeping_failed_reason(exc: Exception) -> str:
+    reason = " ".join(str(exc).split())
+    return f"{BOOKKEEPING_FAILED_PREFIX}: {reason or exc.__class__.__name__}"
+
+
+def is_bookkeeping_failed_reason(blocked_on: str) -> bool:
+    return blocked_on == BOOKKEEPING_FAILED_PREFIX or blocked_on.startswith(f"{BOOKKEEPING_FAILED_PREFIX}: ")
+
+
+def done_close_failed_reason(exc: Exception) -> str:
+    reason = " ".join(str(exc).split())
+    return f"{CLOSE_FAILED_PREFIX}: {reason or exc.__class__.__name__}"
+
+
+def mark_done_bookkeeping_failed(path: Path, exc: Exception) -> None:
+    rollback_before = path.stat()
+    rollback_text = path.read_text(encoding="utf-8")
+    rollback = update_frontmatter_status(rollback_text, "blocked", done_bookkeeping_failed_reason(exc))
+    replace_if_unchanged(path, rollback, rollback_before)
+
+
+def finish_closed_done(args: Args, path: Path, text: str, before: os.stat_result) -> tuple[str, str]:
+    metadata = parse_task_metadata(text)
+    if metadata is None:
+        raise TaskFrontmatterError("task file has no frontmatter.")
+    retryable_blocker = is_bookkeeping_failed_reason(metadata.blocked_on) or (
+        metadata.blocked_on == DONE_CLOSE_IN_PROGRESS and has_close_note(text, metadata.runat, args.session_id)
+    )
+    if metadata.status != "blocked" or not retryable_blocker:
+        raise TaskFrontmatterError("--finish-closed-done requires a task blocked by failed done close or close bookkeeping.")
+    _ = update_frontmatter_status(text, "done", "")
+    close_args = StopArgs(metadata.runat, 10.0, 2000, False, False, args.root, path.relative_to(args.root).as_posix(), True, 0.0)
+    try:
+        record_close(close_args, args.session_id)
+    except Exception as exc:
+        mark_done_bookkeeping_failed(path, exc)
+        raise TaskFrontmatterError(f"done close bookkeeping retry failed; task marked blocked for retry: {exc}") from exc
+    after = path.stat()
+    updated = update_frontmatter_status(path.read_text(encoding="utf-8"), "done", "")
+    replace_if_unchanged(path, updated, after)
+    return metadata.runat, args.session_id
+
+
 def run(args: Args) -> int:
+    target = ""
+    session_id = ""
     try:
         path = task_path(args.root, args.task_file)
         before = path.stat()
         text = path.read_text(encoding="utf-8")
-        metadata = parse_task_metadata(text)
-        target = metadata.runat if metadata is not None and args.status == "done" else ""
-        updated = update_frontmatter_status(text, args.status, args.blocked_on)
-        close_args: StopArgs | None = None
-        session_id = ""
-        replace_if_unchanged(path, updated, before)
-        if target:
-            close_args, session_id = stop_done_agent(args.root, path, target)
-        if close_args is not None:
-            record_close(close_args, session_id)
+        if args.finish_closed_done:
+            target, session_id = finish_closed_done(args, path, text, before)
+        else:
+            metadata = parse_task_metadata(text)
+            target = metadata.runat if metadata is not None and args.status == "done" else ""
+            updated = update_frontmatter_status(text, args.status, args.blocked_on)
+            close_args: StopArgs | None = None
+            if target:
+                in_progress = update_frontmatter_status(text, "blocked", DONE_CLOSE_IN_PROGRESS)
+                replace_if_unchanged(path, in_progress, before)
+                try:
+                    close_args, session_id = stop_done_agent(args.root, path, target)
+                except Exception as exc:
+                    rollback_before = path.stat()
+                    rollback_text = path.read_text(encoding="utf-8")
+                    rollback = update_frontmatter_status(rollback_text, "blocked", done_close_failed_reason(exc))
+                    replace_if_unchanged(path, rollback, rollback_before)
+                    raise
+                before = path.stat()
+            if close_args is None:
+                replace_if_unchanged(path, updated, before)
+            else:
+                try:
+                    record_close(close_args, session_id)
+                except Exception as exc:
+                    mark_done_bookkeeping_failed(path, exc)
+                    raise TaskFrontmatterError(f"done close bookkeeping failed after closing agent; task marked blocked for retry: {exc}") from exc
+                before = path.stat()
+                updated = update_frontmatter_status(path.read_text(encoding="utf-8"), args.status, args.blocked_on)
+                replace_if_unchanged(path, updated, before)
     except (OSError, TaskFrontmatterError) as exc:
         print(f"omo_task_status.py: {exc}", file=sys.stderr)
         return 2

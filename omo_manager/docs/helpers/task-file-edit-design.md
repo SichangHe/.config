@@ -38,8 +38,9 @@ unchanged since it was read.
 - reject missing or ambiguous old item
 - reject done tasks
 
-`pending-remove TASK.md --item TEXT [--item TEXT ...]`
+`pending-remove TASK.md --item TEXT [--item TEXT ...] --evidence TEXT`
 - remove one or more existing pending items
+- append the evidence as a task comment
 - print a reminder that the manager must verify the item is actually done or
   cancelled, possibly by using evaluator agents
 

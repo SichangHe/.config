@@ -47,6 +47,7 @@ class Args:
     old_item: str = ""
     new_item: str = ""
     comment: str = ""
+    evidence: str = ""
     line: int = 0
     ack_human: bool = False
     email_file: Path | None = None
@@ -72,6 +73,7 @@ class ParsedArgs(argparse.Namespace):
     old_item: str = ""
     new_item: str = ""
     comment: str = ""
+    evidence: str = ""
     message: str | None = None
     legacy_message: str | None = None
     line: int = 0
@@ -113,6 +115,7 @@ def parse_args(argv: list[str]) -> Args:
     remove_parser.set_defaults(command="pending-remove")
     _ = remove_parser.add_argument("task_file", type=Path)
     _ = remove_parser.add_argument("--item", action="append", required=True, help="Pending task item to remove. Pass once per item.")
+    _ = remove_parser.add_argument("--evidence", required=True, help="One-line evidence that the removed item is complete or cancelled.")
 
     move_parser = subparsers.add_parser("pending-move", help="Move one pending_task_item from one task file to another.")
     move_parser.set_defaults(command="pending-move")
@@ -153,7 +156,7 @@ def parse_args(argv: list[str]) -> Args:
             return Args(root, parsed.task_file, command, old_item=normalized_item(parsed.old_item), new_item=normalized_item(parsed.new_item))
         if command == "pending-remove":
             items = normalized_items(tuple(parsed.item or ()))
-            return Args(root, parsed.task_file, command, items=items)
+            return Args(root, parsed.task_file, command, items=items, evidence=normalized_comment_message(parsed.evidence))
         if command == "pending-move":
             if parsed.from_file is None or parsed.to_file is None:
                 parser.error("pending-move requires --from and --to.")
@@ -393,6 +396,11 @@ def remove_pending_items(text: str, items: tuple[str, ...]) -> tuple[str, int]:
     return render_pending_items(text, remaining), removed_count
 
 
+def pending_remove_evidence_comment(n_items: int, evidence: str) -> str:
+    noun = "item" if n_items == 1 else "items"
+    return f"verified removed pending {noun}: {evidence}"
+
+
 def append_comment(text: str, comment: str) -> str:
     _ = require_metadata(text)
     value = normalized_comment(comment)
@@ -630,7 +638,9 @@ def run(args: Args) -> int:
             print(f"{action} pending item in {path.name}")
             return 0
         if command == "pending-remove":
+            evidence = normalized_comment_message(args.evidence)
             updated, count = remove_pending_items(text, args.items)
+            updated = append_comment(updated, pending_remove_evidence_comment(count, evidence))
             write_if_changed(path, text, updated, before)
             print(f"removed {count} pending item(s) from {path.name}; {REMOVE_REMINDER}")
             return 0
