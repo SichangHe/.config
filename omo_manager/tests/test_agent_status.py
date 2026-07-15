@@ -1140,6 +1140,63 @@ class AgentStatusTests(unittest.TestCase):
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "wl:17"]))
             self.assertEqual("", out.getvalue())
 
+    def test_problems_only_skips_human_helper_direction_wait(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nhelper_audit_agent_9580.md hcfg 1\n", encoding="utf-8")
+            _ = (root / "helper_audit_agent_9580.md").write_text(task_frontmatter("blocked", runat="hcfg:1", managerat="wl:16", blocked_on="future human/helper audit direction"), encoding="utf-8")
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "wl:16"]))
+            self.assertEqual("", out.getvalue())
+
+    def test_problems_only_reports_error_for_human_helper_direction_wait(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nhelper_audit_agent_9580.md hcfg 1\n", encoding="utf-8")
+            _ = (root / "helper_audit_agent_9580.md").write_text(task_frontmatter("blocked", runat="hcfg:1", managerat="wl:16", blocked_on="future human/helper audit direction"), encoding="utf-8")
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("error", ["traceback"])), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "wl:16"]))
+            self.assertIn("error: task=helper_audit_agent_9580.md", out.getvalue())
+
+    def test_problems_only_reports_stuck_input_for_human_helper_direction_wait(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nhelper_audit_agent_9580.md hcfg 1\n", encoding="utf-8")
+            _ = (root / "helper_audit_agent_9580.md").write_text(task_frontmatter("blocked", runat="hcfg:1", managerat="wl:16", blocked_on="future human/helper audit direction"), encoding="utf-8")
+            out = StringIO()
+            report = Report("stuck_input", ["› Continue"], "Continue", True)
+            def fake_inspect(args: object, **_: object) -> Report:
+                return Report("running", ["working"]) if getattr(args, "target") == "wl:16" else report
+
+            with patch("omo_manager.omo_agent_status.inspect", side_effect=fake_inspect), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present", return_value="sent_enter") as unstick, redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "wl:16"]))
+            text = out.getvalue()
+            self.assertIn("stuck_input: task=helper_audit_agent_9580.md", text)
+            self.assertIn("unstick=disabled:blocked_idle_blocked", text)
+            unstick.assert_not_called()
+
+    def test_problems_only_reports_non_audit_human_helper_direction_wait(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nworker.md cfg 1\n", encoding="utf-8")
+            _ = (root / "worker.md").write_text(task_frontmatter("blocked", runat="cfg:1", managerat="wl:16", blocked_on="human/helper deployment direction"), encoding="utf-8")
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "wl:16"]))
+            text = out.getvalue()
+            self.assertIn("blocked_idle: task=worker.md", text)
+            self.assertIn("reason=human/helper deployment direction", text)
+
     def test_problems_only_reports_ambiguous_human_object_wait(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1153,6 +1210,20 @@ class AgentStatusTests(unittest.TestCase):
             text = out.getvalue()
             self.assertIn("blocked_idle: task=worker.md", text)
             self.assertIn("reason=waiting on human API key", text)
+
+    def test_problems_only_reports_ambiguous_human_object_direction_wait(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nworker.md cfg 1\n", encoding="utf-8")
+            _ = (root / "worker.md").write_text(task_frontmatter("blocked", runat="cfg:1", managerat="wl:16", blocked_on="waiting on human API key direction"), encoding="utf-8")
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "wl:17"]))
+            text = out.getvalue()
+            self.assertIn("blocked_idle: task=worker.md", text)
+            self.assertIn("reason=waiting on human API key direction", text)
 
     def test_problems_only_skips_non_hvl_not_codex_human_wait(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
