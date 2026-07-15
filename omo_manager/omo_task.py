@@ -514,8 +514,8 @@ def managerat_for_task(args: Args, runat: str) -> str:
         raise ValueError("--manager-target or OMO_AGENT_TMUX_TARGET is required to write task frontmatter.")
     if TMUX_TARGET_RE.fullmatch(managerat) is None:
         raise ValueError("task frontmatter `managerat` must be a tmux target.")
-    if managerat in target_aliases(runat) and not args.is_manager:
-        raise ValueError("task frontmatter `managerat` must be different from `runat` unless `--is-manager` is set.")
+    if managerat in target_aliases(runat):
+        raise ValueError("task frontmatter `managerat` must be different from `runat`.")
     return managerat
 
 

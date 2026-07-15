@@ -53,14 +53,12 @@ class AgentStatusTests(unittest.TestCase):
             self.assertEqual({"active.md"}, done)
             self.assertEqual(set(), human_pending)
 
-    def test_manager_frontmatter_allows_self_routing(self) -> None:
-        metadata = parse_task_metadata(task_frontmatter("running", runat="wl:16", managerat="wl:16.0", is_manager=True))
-
-        self.assertTrue(metadata.is_manager)
-        self.assertEqual("wl:16.0", metadata.managerat)
+    def test_manager_frontmatter_rejects_self_routing(self) -> None:
+        with self.assertRaisesRegex(TaskFrontmatterError, "must be different"):
+            parse_task_metadata(task_frontmatter("running", runat="wl:16", managerat="wl:16.0", is_manager=True))
 
     def test_worker_frontmatter_rejects_self_routing(self) -> None:
-        with self.assertRaisesRegex(TaskFrontmatterError, "unless `is_manager` is true"):
+        with self.assertRaisesRegex(TaskFrontmatterError, "must be different"):
             parse_task_metadata(task_frontmatter("running", runat="wl:16", managerat="wl:16.0"))
 
     def test_legacy_task_file_without_frontmatter_is_not_status_source(self) -> None:
@@ -1595,7 +1593,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nmanager_ops_submanager_8653.md wl 16\n", encoding="utf-8")
-            _ = (root / "manager_ops_submanager_8653.md").write_text(task_frontmatter("blocked", runat="wl:16", managerat="wl:16", is_manager=True, blocked_on="waiting for future human or watcher manager-ops request"), encoding="utf-8")
+            _ = (root / "manager_ops_submanager_8653.md").write_text(task_frontmatter("blocked", runat="wl:16", managerat="wl:1", is_manager=True, blocked_on="waiting for future human or watcher manager-ops request"), encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(out):
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
@@ -1607,7 +1605,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nmanager_ops_submanager_8653.md wl 16\n", encoding="utf-8")
-            _ = (root / "manager_ops_submanager_8653.md").write_text(task_frontmatter("blocked", runat="wl:16", managerat="wl:16", is_manager=True, blocked_on="waiting for future human or watcher manager-ops request"), encoding="utf-8")
+            _ = (root / "manager_ops_submanager_8653.md").write_text(task_frontmatter("blocked", runat="wl:16", managerat="wl:1", is_manager=True, blocked_on="waiting for future human or watcher manager-ops request"), encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("error", ["traceback"])), redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
@@ -1619,7 +1617,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nmanager_ops_submanager_8653.md wl 16\n", encoding="utf-8")
-            _ = (root / "manager_ops_submanager_8653.md").write_text(task_frontmatter("blocked", runat="wl:16", managerat="wl:16", is_manager=True, blocked_on="waiting for future human or watcher manager-ops request"), encoding="utf-8")
+            _ = (root / "manager_ops_submanager_8653.md").write_text(task_frontmatter("blocked", runat="wl:16", managerat="wl:1", is_manager=True, blocked_on="waiting for future human or watcher manager-ops request"), encoding="utf-8")
             out = StringIO()
             report = Report("stuck_input", ["› Continue"], "Continue", True)
             with patch("omo_manager.omo_agent_status.inspect", return_value=report), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present", return_value="sent_enter") as unstick, redirect_stdout(out):
@@ -1635,7 +1633,7 @@ class AgentStatusTests(unittest.TestCase):
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nmanager_ops_submanager_8653.md wl 16\n", encoding="utf-8")
-            _ = (root / "manager_ops_submanager_8653.md").write_text(task_frontmatter("blocked", runat="wl:16", managerat="wl:16", is_manager=True, blocked_on="waiting for future human or watcher manager-ops config"), encoding="utf-8")
+            _ = (root / "manager_ops_submanager_8653.md").write_text(task_frontmatter("blocked", runat="wl:16", managerat="wl:1", is_manager=True, blocked_on="waiting for future human or watcher manager-ops config"), encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
@@ -2442,14 +2440,14 @@ class AgentStatusTests(unittest.TestCase):
             self.assertIn("owner_target=vl:15", text)
             self.assertNotIn("h:2", text)
 
-    def test_manager_view_skips_valid_self_routed_submanager_tmux_pane(self) -> None:
+    def test_manager_view_skips_valid_upper_routed_submanager_tmux_pane(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nmanager_ops.md wl:16\nperipheral_projects.md wl:18\n", encoding="utf-8")
-            _ = (root / "manager_ops.md").write_text(task_frontmatter("running", runat="wl:16", managerat="wl:16", is_manager=True), encoding="utf-8")
-            _ = (root / "peripheral_projects.md").write_text(task_frontmatter("blocked", runat="wl:18", managerat="wl:18", is_manager=True, blocked_on="waiting on human"), encoding="utf-8")
+            _ = (root / "manager_ops.md").write_text(task_frontmatter("running", runat="wl:16", managerat="wl:1", is_manager=True), encoding="utf-8")
+            _ = (root / "peripheral_projects.md").write_text(task_frontmatter("blocked", runat="wl:18", managerat="wl:1", is_manager=True, blocked_on="waiting on human"), encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_agent_status.tmux_list_panes", return_value=["wl:16", "wl:18", "wl:22"]), patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "wl:16"]))

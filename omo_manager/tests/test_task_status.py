@@ -17,7 +17,14 @@ from omo_manager.omo_task_status import update_frontmatter_status
 from omo_manager.omo_task_status import Args as StatusArgs
 
 
-def task_frontmatter(*, status: str = "running", blocked_on: str = "", pending_items: tuple[str, ...] = ()) -> str:
+def task_frontmatter(
+    *,
+    status: str = "running",
+    blocked_on: str = "",
+    pending_items: tuple[str, ...] = (),
+    managerat: str = "wl:1",
+    is_manager: bool = False,
+) -> str:
     lines = [
         "---",
         "version: v1.0.0",
@@ -29,8 +36,8 @@ def task_frontmatter(*, status: str = "running", blocked_on: str = "", pending_i
         [
             "runat: wl:2",
             "tool: codex",
-            "managerat: wl:1",
-            "is_manager: false",
+            f"managerat: {managerat}",
+            f"is_manager: {str(is_manager).lower()}",
         ]
     )
     if pending_items:
@@ -139,6 +146,114 @@ class TaskStatusTests(unittest.TestCase):
             self.assertEqual("session-1", close_calls[0][1])
             self.assertIn("Closed wl:2; session_id: session-1.", stdout.getvalue())
             self.assertIn(DONE_REMINDER, stdout.getvalue())
+
+    def test_cli_done_rejects_manager_with_active_child_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = root / "manager.md"
+            child = root / "child.md"
+            original = task_frontmatter(managerat="wl:1", is_manager=True) + "body\n"
+            manager.write_text(original, encoding="utf-8")
+            child.write_text(
+                "\n".join(
+                    [
+                        "---",
+                        "version: v1.0.0",
+                        "status: running",
+                        "runat: wl:3",
+                        "tool: codex",
+                        "managerat: wl:2.0",
+                        "is_manager: false",
+                        "pending_task_items: []",
+                        "---",
+                        "body",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            stderr = io.StringIO()
+
+            with patch("omo_manager.omo_task_status.stop_done_agent", side_effect=AssertionError("must not close manager with children")) as stop_agent, redirect_stderr(stderr):
+                exit_code = run(StatusArgs(root, Path("manager.md"), "done", ""))
+
+            self.assertEqual(2, exit_code)
+            self.assertEqual(original, manager.read_text(encoding="utf-8"))
+            self.assertIn("--migrate-manager-owner --old-manager-target wl:2 --new-manager-target wl:1", stderr.getvalue())
+            stop_agent.assert_not_called()
+            self.assertIn("manager task still owns active child task(s): child.md", stderr.getvalue())
+
+    def test_cli_done_allows_manager_with_done_child_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = root / "manager.md"
+            child = root / "child.md"
+            notes = root / "notes.md"
+            manager.write_text(task_frontmatter(managerat="wl:1", is_manager=True) + "body\n", encoding="utf-8")
+            child.write_text(
+                "\n".join(
+                    [
+                        "---",
+                        "version: v1.0.0",
+                        "status: done",
+                        "runat: wl:3",
+                        "tool: codex",
+                        "managerat: wl:2.0",
+                        "is_manager: false",
+                        "pending_task_items: []",
+                        "---",
+                        "body",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            notes.write_text("---\nversion: article\nstatus: draft\n---\nnotes\n", encoding="utf-8")
+            stdout = io.StringIO()
+
+            with patch("omo_manager.omo_task_status.stop_done_agent", return_value=(StopArgs("wl:2", 10.0, 2000, False, False, root, "manager.md", True, 0.0), "session-1")), patch(
+                "omo_manager.omo_task_status.record_close"
+            ), redirect_stdout(stdout):
+                exit_code = run(StatusArgs(root, Path("manager.md"), "done", ""))
+
+            self.assertEqual(0, exit_code)
+            self.assertIn("Closed wl:2; session_id: session-1.", stdout.getvalue())
+
+    def test_cli_done_rejects_manager_when_child_ownership_cannot_be_verified(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = root / "manager.md"
+            child = root / "child.md"
+            original = task_frontmatter(managerat="wl:1", is_manager=True) + "body\n"
+            manager.write_text(original, encoding="utf-8")
+            child.write_text(
+                "\n".join(
+                    [
+                        "---",
+                        "version: v1.0.0",
+                        "status: running",
+                        "runat: wl:3",
+                        "tool: codex",
+                        "managerat: wl:9",
+                        "managerat: wl:2",
+                        "is_manager: false",
+                        "unexpected: bad",
+                        "pending_task_items: []",
+                        "---",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            stderr = io.StringIO()
+
+            with patch("omo_manager.omo_task_status.stop_done_agent", side_effect=AssertionError("must not close manager when ownership is uncertain")) as stop_agent, redirect_stderr(stderr):
+                exit_code = run(StatusArgs(root, Path("manager.md"), "done", ""))
+
+            self.assertEqual(2, exit_code)
+            self.assertEqual(original, manager.read_text(encoding="utf-8"))
+            stop_agent.assert_not_called()
+            self.assertIn("cannot verify manager child ownership because `child.md` has invalid task frontmatter", stderr.getvalue())
 
     def test_cli_done_failure_marks_blocked_when_close_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

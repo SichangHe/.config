@@ -583,8 +583,8 @@ def parse_task_metadata(text: str) -> TaskMetadata | None:
         raise TaskFrontmatterError("`managerat` must be a tmux target.")
     tool = values["tool"]
     is_manager = values["is_manager"]
-    if same_tmux_target(runat, managerat) and is_manager is not True:
-        raise TaskFrontmatterError("`managerat` must be different from `runat` unless `is_manager` is true.")
+    if same_tmux_target(runat, managerat):
+        raise TaskFrontmatterError("`managerat` must be different from `runat`.")
     pending_items = values["pending_task_items"]
     blocked_on = values.get("blocked_on", "")
     if not isinstance(tool, str) or not tool:

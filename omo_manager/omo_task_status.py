@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shlex
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -13,8 +14,10 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from omo_manager.omo_agent_status import TASK_FRONTMATTER_STATUSES
+from omo_manager.omo_agent_status import TaskMetadata
 from omo_manager.omo_agent_status import TaskFrontmatterError
 from omo_manager.omo_agent_status import DEFAULT_ROOT
+from omo_manager.omo_agent_status import same_tmux_target
 from omo_manager.omo_codex_stop import Args as StopArgs
 from omo_manager.omo_codex_stop import has_close_note
 from omo_manager.omo_codex_stop import record_close
@@ -76,6 +79,81 @@ def task_path(root: Path, task_file: Path) -> Path:
     if path != root and root not in path.parents:
         raise TaskFrontmatterError("task file escapes root.")
     return path
+
+
+def relative_task_ref(root: Path, path: Path) -> str:
+    try:
+        return path.relative_to(root).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def frontmatter_managerat_aliases(text: str, manager_target: str) -> bool:
+    parts = frontmatter_parts(text)
+    if parts is None:
+        return False
+    frontmatter, _body = parts
+    for line in frontmatter:
+        key, sep, value = line.partition(":")
+        if sep and key.strip() == "managerat" and same_tmux_target(value.strip(), manager_target):
+            return True
+    return False
+
+
+def active_child_task_refs(root: Path, manager_path: Path, manager_target: str) -> tuple[str, ...]:
+    """Return active task files whose `managerat` still points at the closing manager."""
+    refs: list[str] = []
+    for candidate in sorted(root.rglob("*.md")):
+        if candidate == manager_path:
+            continue
+        task_ref = relative_task_ref(root, candidate)
+        try:
+            text = candidate.read_text(encoding="utf-8")
+            metadata = parse_task_metadata(text)
+        except OSError as exc:
+            raise TaskFrontmatterError(f"cannot verify manager child ownership because `{task_ref}` could not be read: {exc}") from exc
+        except TaskFrontmatterError as exc:
+            if frontmatter_managerat_aliases(text, manager_target):
+                raise TaskFrontmatterError(f"cannot verify manager child ownership because `{task_ref}` has invalid task frontmatter: {exc}") from exc
+            continue
+        if metadata is None or metadata.status == "done":
+            continue
+        if same_tmux_target(metadata.managerat, manager_target):
+            refs.append(task_ref)
+    return tuple(refs)
+
+
+def manager_owner_migration_command(root: Path, child_ref: str, old_manager: str, new_manager: str) -> str:
+    return " ".join(
+        (
+            "omo_task.py",
+            "--root",
+            shlex.quote(root.as_posix()),
+            "--task-file",
+            shlex.quote(child_ref),
+            "--migrate-manager-owner",
+            "--old-manager-target",
+            shlex.quote(old_manager),
+            "--new-manager-target",
+            shlex.quote(new_manager),
+        )
+    )
+
+
+def ensure_manager_has_no_active_children(root: Path, manager_path: Path, metadata: TaskMetadata) -> None:
+    if not metadata.is_manager:
+        return
+    child_refs = active_child_task_refs(root, manager_path, metadata.runat)
+    if not child_refs:
+        return
+    shown = ", ".join(child_refs[:5])
+    if len(child_refs) > 5:
+        shown = f"{shown}, and {len(child_refs) - 5} more"
+    command = manager_owner_migration_command(root, child_refs[0], metadata.runat, metadata.managerat)
+    raise TaskFrontmatterError(
+        f"manager task still owns active child task(s): {shown}. "
+        f"Before marking this manager done, reassign each child from managerat {metadata.runat} to {metadata.managerat}; for example: `{command}`."
+    )
 
 
 def has_pending_marker(text: str) -> bool:
@@ -199,6 +277,7 @@ def finish_closed_done(args: Args, path: Path, text: str, before: os.stat_result
     metadata = parse_task_metadata(text)
     if metadata is None:
         raise TaskFrontmatterError("task file has no frontmatter.")
+    ensure_manager_has_no_active_children(args.root, path, metadata)
     retryable_blocker = is_bookkeeping_failed_reason(metadata.blocked_on) or (
         metadata.blocked_on == DONE_CLOSE_IN_PROGRESS and has_close_note(text, metadata.runat, args.session_id)
     )
@@ -228,6 +307,8 @@ def run(args: Args) -> int:
             target, session_id = finish_closed_done(args, path, text, before)
         else:
             metadata = parse_task_metadata(text)
+            if metadata is not None and args.status == "done":
+                ensure_manager_has_no_active_children(args.root, path, metadata)
             target = metadata.runat if metadata is not None and args.status == "done" else ""
             updated = update_frontmatter_status(text, args.status, args.blocked_on)
             close_args: StopArgs | None = None
