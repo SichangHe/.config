@@ -20,6 +20,7 @@ import tempfile
 import time
 import traceback
 import unicodedata
+from collections import Counter
 from concurrent.futures import Future
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import wait as wait_futures
@@ -34,6 +35,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from omo_manager.omo_agent_status import TaskLine
+from omo_manager.omo_agent_status import blocked_dependency_snapshot
 from omo_manager.omo_agent_status import effective_owner_target
 from omo_manager.omo_agent_status import is_main_manager_task_file
 from omo_manager.omo_agent_status import parse_task_lines
@@ -261,6 +263,7 @@ class AgentProblemDispatch:
     text: str
     digest_text: str
     blocked_idle_lines: tuple[tuple[str, str], ...] = ()
+    problem_lines: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -287,10 +290,26 @@ class PendingGuard:
 
 
 @dataclass(frozen=True)
+class AgentProblemGuard:
+    command: tuple[str, ...]
+    problem_lines: tuple[str, ...]
+    root: Path | None = None
+    dependency_task_file: str = ""
+    dependency_snapshot: str = ""
+
+
+@dataclass(frozen=True)
 class DeliverySuccessEvent:
     seen_keys: tuple[str, ...] = ()
     seen_after_clear_keys: tuple[str, ...] = ()
     blocked_idle_lines: tuple[tuple[str, str], ...] = ()
+    dependency_replacements: tuple[tuple[str, str], ...] = ()
+    dependency_removals: tuple[str, ...] = ()
+    dependency_guarded_replacements: tuple[tuple[str, str, str], ...] = ()
+    dependency_guarded_removals: tuple[tuple[str, str], ...] = ()
+    failure_dependency_replacements: tuple[tuple[str, str, str], ...] = ()
+    failure_dependency_removals: tuple[tuple[str, str], ...] = ()
+    dependency_state: dict[str, str] | None = None
     seen_at_s: float = 0.0
     clear_root: Path | None = None
     clear_marker: Marker | None = None
@@ -304,6 +323,7 @@ class DeliveryFailureFallback:
     options: CodexSendOptions
     success_event: DeliverySuccessEvent | None = None
     pending_guard: PendingGuard | None = None
+    problem_guard: AgentProblemGuard | None = None
 
 
 DELIVERY_SUCCESS_EVENTS: SimpleQueue[DeliverySuccessEvent] = SimpleQueue()
@@ -315,19 +335,42 @@ def delivery_accepted(status: int) -> bool:
     return status in {0, 2, ASYNC_DELIVERY_STARTED}
 
 
-SEND_EXECUTOR: ThreadPoolExecutor | None = None
+_send_executor: ThreadPoolExecutor | None = None
 
 
 def send_executor() -> ThreadPoolExecutor:
     """Return the process-local sender pool used by watcher deliveries."""
 
-    global SEND_EXECUTOR
-    if SEND_EXECUTOR is None:
-        SEND_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="omo-pending-send")
-    return SEND_EXECUTOR
+    global _send_executor
+    if _send_executor is None:
+        _send_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="omo-pending-send")
+    return _send_executor
 
 
-def run_verified_send(target: str, message: str, options: CodexSendOptions, pending_guard: PendingGuard | None = None) -> None:
+def agent_problem_guard_current(guard: AgentProblemGuard) -> bool:
+    if guard.root is not None and guard.dependency_task_file:
+        task = TaskLine(guard.dependency_task_file, "dependency-guard", "", "", None)
+        task_path = resolve_task_path(guard.root, guard.dependency_task_file)
+        state = scan_task_state(task_path) if task_path is not None else None
+        return state is not None and blocked_dependency_snapshot(guard.root, task, state) == guard.dependency_snapshot
+    try:
+        result = subprocess.run(guard.command, capture_output=True, text=True, timeout=DEFAULT_AGENT_PROBLEM_TIMEOUT_S, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if result.returncode != 3:
+        return False
+    expected = Counter(guard.problem_lines)
+    current = Counter(result.stdout.splitlines())
+    return bool(expected) and not expected - current
+
+
+def run_verified_send(
+    target: str,
+    message: str,
+    options: CodexSendOptions,
+    pending_guard: PendingGuard | None = None,
+    problem_guard: AgentProblemGuard | None = None,
+) -> None:
     """Verify the pending marker immediately before the tmux paste."""
 
     def before_paste() -> None:
@@ -338,8 +381,10 @@ def run_verified_send(target: str, message: str, options: CodexSendOptions, pend
             pending_guard.pending_digest,
         ):
             raise RuntimeError("pending marker cleared before tmux paste")
+        if problem_guard is not None and not agent_problem_guard_current(problem_guard):
+            raise RuntimeError("agent problem resolved or changed before tmux paste")
 
-    verified_send_to_codex(target, message, options, before_paste=before_paste if pending_guard is not None else None)
+    verified_send_to_codex(target, message, options, before_paste=before_paste if pending_guard is not None or problem_guard is not None else None)
 
 
 def log_send_result(future: Future[None], success_event: DeliverySuccessEvent | None = None, failure_fallback: DeliveryFailureFallback | None = None) -> None:
@@ -358,15 +403,52 @@ def log_send_result(future: Future[None], success_event: DeliverySuccessEvent | 
                 failure_fallback.pending_guard.pending_digest,
             ):
                 print("omo_pending_watch: async fallback skipped; pending marker cleared before fallback paste", file=sys.stderr)
+                queue_delivery_failure_event(success_event)
                 return
             text = with_failed_target_escalation(failure_fallback.text, failure_fallback.failed_target, result)
             try:
-                _ = submit_send(failure_fallback.target, text, failure_fallback.options, pending_guard=failure_fallback.pending_guard, success_event=failure_fallback.success_event)
+                if failure_fallback.problem_guard is None:
+                    _ = submit_send(
+                        failure_fallback.target,
+                        text,
+                        failure_fallback.options,
+                        pending_guard=failure_fallback.pending_guard,
+                        success_event=failure_fallback.success_event,
+                    )
+                else:
+                    _ = submit_send(
+                        failure_fallback.target,
+                        text,
+                        failure_fallback.options,
+                        pending_guard=failure_fallback.pending_guard,
+                        problem_guard=failure_fallback.problem_guard,
+                        success_event=failure_fallback.success_event,
+                    )
             except Exception as fallback_exc:
                 print(f"omo_pending_watch: async fallback delivery failed: {fallback_exc}", file=sys.stderr)
+                queue_delivery_failure_event(success_event)
+            return
+        queue_delivery_failure_event(success_event)
         return
     if success_event is not None:
         DELIVERY_SUCCESS_EVENTS.put(success_event)
+
+
+def queue_delivery_failure_event(success_event: DeliverySuccessEvent | None) -> None:
+    """Queue guarded rollback for state reserved before async delivery."""
+
+    if success_event is None or success_event.dependency_state is None:
+        return
+    if not success_event.failure_dependency_replacements and not success_event.failure_dependency_removals:
+        return
+    DELIVERY_SUCCESS_EVENTS.put(
+        DeliverySuccessEvent(
+            dependency_state=success_event.dependency_state,
+            dependency_guarded_replacements=success_event.failure_dependency_replacements,
+            dependency_guarded_removals=success_event.failure_dependency_removals,
+            seen_at_s=success_event.seen_at_s,
+        )
+    )
 
 
 def forget_send(future: Future[None]) -> None:
@@ -379,12 +461,13 @@ def submit_send(
     message: str,
     options: CodexSendOptions,
     pending_guard: PendingGuard | None = None,
+    problem_guard: AgentProblemGuard | None = None,
     success_event: DeliverySuccessEvent | None = None,
     failure_fallback: DeliveryFailureFallback | None = None,
 ) -> Future[None]:
     """Submit verified tmux delivery without forking a helper process."""
 
-    future = send_executor().submit(run_verified_send, target, message, options, pending_guard)
+    future = send_executor().submit(run_verified_send, target, message, options, pending_guard, problem_guard)
     with PENDING_SENDS_LOCK:
         PENDING_SENDS.add(future)
     future.add_done_callback(lambda completed: (log_send_result(completed, success_event, failure_fallback), forget_send(completed)))
@@ -397,6 +480,7 @@ def send_to_codex(
     options: CodexSendOptions | None = None,
     *,
     pending_guard: PendingGuard | None = None,
+    problem_guard: AgentProblemGuard | None = None,
     success_event: DeliverySuccessEvent | None = None,
     failure_fallback: DeliveryFailureFallback | None = None,
 ) -> Future[None] | None:
@@ -407,7 +491,7 @@ def send_to_codex(
         print(message)
         return None
     require_sendable_codex_target(target, inspect_lines_for_message(message))
-    return submit_send(target, message, selected, pending_guard, success_event, failure_fallback)
+    return submit_send(target, message, selected, pending_guard, problem_guard, success_event, failure_fallback)
 
 
 def drain_delivery_successes(args: Args, seen: dict[str, float], now_wall_s: float) -> bool:
@@ -433,6 +517,21 @@ def drain_delivery_successes(args: Args, seen: dict[str, float], now_wall_s: flo
         for owner_target, line in event.blocked_idle_lines:
             remember_blocked_idle_report(args, seen, owner_target, line, seen_at_s)
             changed = True
+        if event.dependency_state is not None:
+            for task_file in event.dependency_removals:
+                event.dependency_state.pop(task_file, None)
+                changed = True
+            for task_file, snapshot in event.dependency_replacements:
+                event.dependency_state[task_file] = snapshot
+                changed = True
+            for task_file, expected_snapshot, snapshot in event.dependency_guarded_replacements:
+                if event.dependency_state.get(task_file) == expected_snapshot:
+                    event.dependency_state[task_file] = snapshot
+                    changed = True
+            for task_file, expected_snapshot in event.dependency_guarded_removals:
+                if event.dependency_state.get(task_file) == expected_snapshot:
+                    event.dependency_state.pop(task_file, None)
+                    changed = True
 
 
 def pending_send_snapshot() -> tuple[Future[None], ...]:
@@ -1607,7 +1706,15 @@ def push_manager_text(args: Args, text: str, success_event: DeliverySuccessEvent
     return try_send_delivery_text("manager delivery", text, args.manager_target, success_event=success_event).status
 
 
-def push_manager_text_to_target(args: Args, text: str, manager_target: str, success_event: DeliverySuccessEvent | None = None, *, marker: Marker | None = None) -> int:
+def push_manager_text_to_target(
+    args: Args,
+    text: str,
+    manager_target: str,
+    success_event: DeliverySuccessEvent | None = None,
+    *,
+    marker: Marker | None = None,
+    problem_guard: AgentProblemGuard | None = None,
+) -> int:
     scoped_args = replace(args, manager_target=manager_target)
     if scoped_args.dry_run:
         print(text)
@@ -1623,6 +1730,8 @@ def push_manager_text_to_target(args: Args, text: str, manager_target: str, succ
         success_event=success_event,
         failure_fallback_target=fallback_target,
         failure_pending_guard=PendingGuard(args.root, marker.file, marker.line, marker.digest) if marker is not None else None,
+        problem_guard=problem_guard,
+        failure_problem_guard=problem_guard,
     )
     if result.status in {0, ASYNC_DELIVERY_STARTED} or not target_unavailable(result):
         return result.status
@@ -1639,6 +1748,7 @@ def push_manager_text_to_target(args: Args, text: str, manager_target: str, succ
         pending_line=marker.line if marker is not None else 0,
         pending_digest=marker.digest if marker is not None else "",
         success_event=success_event,
+        problem_guard=problem_guard,
     ).status
 
 
@@ -1671,6 +1781,8 @@ def try_send_delivery_text(
     failure_fallback_text: str | None = None,
     failure_success_event: DeliverySuccessEvent | None = None,
     failure_pending_guard: PendingGuard | None = None,
+    problem_guard: AgentProblemGuard | None = None,
+    failure_problem_guard: AgentProblemGuard | None = None,
 ) -> DeliveryResult:
     if root is not None and pending_file is not None and not pending_marker_present(root, pending_file, pending_line, pending_digest):
         print(f"omo_pending_watch: {name} skipped; pending marker cleared before tmux paste", file=sys.stderr)
@@ -1684,19 +1796,38 @@ def try_send_delivery_text(
         True,
     )
     failure_fallback = (
-        DeliveryFailureFallback(target, failure_fallback_target, failure_fallback_text or text, options, failure_success_event or success_event, failure_pending_guard or pending_guard)
+        DeliveryFailureFallback(
+            target,
+            failure_fallback_target,
+            failure_fallback_text or text,
+            options,
+            failure_success_event or success_event,
+            failure_pending_guard or pending_guard,
+            failure_problem_guard or problem_guard,
+        )
         if failure_fallback_target and not same_tmux_target(target, failure_fallback_target)
         else None
     )
     try:
-        async_job = send_to_codex(
-            target,
-            text,
-            options,
-            pending_guard=pending_guard,
-            success_event=success_event,
-            failure_fallback=failure_fallback,
-        )
+        if problem_guard is None:
+            async_job = send_to_codex(
+                target,
+                text,
+                options,
+                pending_guard=pending_guard,
+                success_event=success_event,
+                failure_fallback=failure_fallback,
+            )
+        else:
+            async_job = send_to_codex(
+                target,
+                text,
+                options,
+                pending_guard=pending_guard,
+                problem_guard=problem_guard,
+                success_event=success_event,
+                failure_fallback=failure_fallback,
+            )
     except subprocess.CalledProcessError as exc:
         print(f"omo_pending_watch: {name} failed: {exc}", file=sys.stderr)
         return DeliveryResult(exc.returncode or 1, str(exc))
@@ -2200,7 +2331,12 @@ def agent_problem_output_by_owner(args: Args, seen: dict[str, float], output: st
         text = format_agent_problem_report(body_lines)
         digest_text = format_agent_problem_report(digest_groups.get(owner, body_lines))
         if text:
-            outputs[owner] = AgentProblemDispatch(text, digest_text or text, tuple(blocked_idle_lines.get(owner, ())))
+            outputs[owner] = AgentProblemDispatch(
+                text,
+                digest_text or text,
+                tuple(blocked_idle_lines.get(owner, ())),
+                tuple(body_lines),
+            )
     return outputs
 
 
@@ -2473,33 +2609,110 @@ def maybe_push_agent_problems(args: Args, seen: dict[str, float], now_wall_s: fl
     return handle_agent_problem_result(args, seen, CommandOutput("agent-problems", result.returncode, result.stdout, result.stderr), now_wall_s)
 
 
-def handle_agent_problem_result(args: Args, seen: dict[str, float], result: CommandOutput, now_wall_s: float) -> bool:
+def dependency_snapshot_state(root: Path) -> dict[str, tuple[TaskLine, str, str]]:
+    """Return valid blocked-manager graph snapshots and their owner targets."""
+
+    snapshots: dict[str, tuple[TaskLine, str, str]] = {}
+    seen_files: set[str] = set()
+    for task in parse_task_lines(root / "TODO.md"):
+        if task.task_file == "TODO.md" or task.task_file in seen_files or task.section not in MANAGER_TASK_STATE_LIVE_SECTIONS:
+            continue
+        seen_files.add(task.task_file)
+        task_path = resolve_task_path(root, task.task_file)
+        state = scan_task_state(task_path) if task_path is not None else None
+        if state is None:
+            continue
+        snapshot = blocked_dependency_snapshot(root, task, state)
+        if not snapshot:
+            continue
+        snapshots[task.task_file] = (task, snapshot, effective_owner_target(root, task, task_path))
+    return snapshots
+
+
+def maybe_push_dependency_transitions(args: Args, snapshots: dict[str, str], now_wall_s: float) -> bool:
+    """Alert once when an otherwise-valid blocked-manager graph changes."""
+
+    changed = False
+    current = dependency_snapshot_state(args.root)
+    for task_file in tuple(snapshots):
+        if task_file not in current:
+            snapshots.pop(task_file, None)
+    for task_file, (_task, snapshot, owner_target) in current.items():
+        previous = snapshots.get(task_file)
+        if previous is None:
+            snapshots[task_file] = snapshot
+            continue
+        if previous == snapshot:
+            continue
+        target = owner_target or args.manager_target
+        if not target:
+            continue
+        task_path = resolve_task_path(args.root, task_file)
+        state = scan_task_state(task_path) if task_path is not None else None
+        if state is None:
+            continue
+        text = "\n".join(
+            [
+                AGENT_PROBLEM_HEADER,
+                "",
+                "1 blocked manager dependency graph changed; inspect the current blocker list and leaf states:",
+                f"{task_file} {state.target} <blocked_on>{html.escape(state.reason)}</blocked_on>",
+            ]
+        )
+        event = DeliverySuccessEvent(
+            failure_dependency_replacements=((task_file, snapshot, previous),),
+            dependency_state=snapshots,
+            seen_at_s=now_wall_s,
+        )
+        guard = AgentProblemGuard(
+            (),
+            (),
+            root=args.root,
+            dependency_task_file=task_file,
+            dependency_snapshot=snapshot,
+        )
+        status = push_manager_text_to_target(args, text, target, event, problem_guard=guard)
+        if not delivery_accepted(status):
+            continue
+        snapshots[task_file] = snapshot
+        changed = True
+    return changed
+
+
+def handle_agent_problem_result(
+    args: Args,
+    seen: dict[str, float],
+    result: CommandOutput,
+    now_wall_s: float,
+    dependency_snapshots: dict[str, str] | None = None,
+) -> bool:
     """Filter, throttle, and route status-problem output."""
 
     if result.timed_out:
         print("omo_pending_watch: agent problem check timed out", file=sys.stderr)
         return False
+    dependency_changed = maybe_push_dependency_transitions(args, dependency_snapshots if dependency_snapshots is not None else {}, now_wall_s)
     if result.returncode == 0:
         enter_changed = clear_all_enter_attempts(args, seen)
-        return clear_manager_compaction_active(args, seen) or enter_changed
+        return clear_manager_compaction_active(args, seen) or enter_changed or dependency_changed
     if result.returncode != 3:
         print(f"omo_pending_watch: agent problem check exited status={result.returncode}: {result.stderr.strip()}", file=sys.stderr)
-        return False
+        return dependency_changed
     output = result.stdout.strip()
     if not output:
-        return False
+        return dependency_changed
     if result.stderr.strip():
         output = f"{output}\nstderr:\n{result.stderr.strip()}".strip()
     compaction_changed = maybe_push_manager_compaction_reminder(args, seen, output, now_wall_s)
     output = filter_manager_compaction_output(output, args.manager_target) or ""
     if not output:
-        return compaction_changed
+        return compaction_changed or dependency_changed
     manager_problem_output = manager_human_email_problem_output(output, args.manager_target)
     manager_problem_sent = route_or_email_manager_problem(args, manager_problem_output)
     output = filter_manager_self_problem_output(output, args.manager_target) or ""
     if not output:
-        return manager_problem_sent or compaction_changed
-    changed = manager_problem_sent or compaction_changed
+        return manager_problem_sent or compaction_changed or dependency_changed
+    changed = manager_problem_sent or compaction_changed or dependency_changed
     for owner_target, dispatch in agent_problem_output_by_owner(args, seen, output, now_wall_s).items():
         digest = hashlib.sha256(f"{owner_target}\n{dispatch.digest_text}".encode("utf-8")).hexdigest()[:16]
         key = f"agent-problem:{digest}"
@@ -2512,7 +2725,11 @@ def handle_agent_problem_result(args: Args, seen: dict[str, float], result: Comm
             blocked_idle_lines=dispatch.blocked_idle_lines,
             seen_at_s=now_wall_s,
         )
-        status = push_manager_text_to_target(args, text, target, event)
+        guard = AgentProblemGuard(
+            tuple([*status_command(args, True), "--no-auto-unstick"]),
+            dispatch.problem_lines,
+        )
+        status = push_manager_text_to_target(args, text, target, event, problem_guard=guard)
         if not delivery_accepted(status):
             continue
         if status == 0:
@@ -2644,6 +2861,7 @@ def markdown_line_count(path: Path) -> int:
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
     seen = new_seen_cache()
+    dependency_snapshots: dict[str, str] = {}
     if args.once:
         _ = scan_once(args, seen, markdown_files(args.root))
         _ = wait_for_delivery_successes(args, seen, max(10.0, DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S + 5.0))
@@ -2685,7 +2903,7 @@ def main(argv: list[str]) -> int:
         if agent_problem_run is not None:
             result = poll_command(agent_problem_run, now_wall_s)
             if result is not None:
-                _ = handle_agent_problem_result(args, seen, result, now_wall_s)
+                _ = handle_agent_problem_result(args, seen, result, now_wall_s, dependency_snapshots)
                 agent_problem_run = None
         last_idle_status_check_s, idle_status_run = update_idle_status_check(args, last_idle_status_check_s, now_s, idle_status_run)
         if idle_status_run is not None:

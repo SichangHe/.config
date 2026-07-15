@@ -4723,6 +4723,7 @@ class PendingMarkerTests(unittest.TestCase):
             msg.write_text("same body\n", encoding="utf-8")
             old_hash = hashlib.sha256(b"same body\n").hexdigest()
             write_report_worker_task(root, runat="cfg:7")
+            write_report_worker_task(root, "task-pane1.md", runat="cfg:7.1")
             manager_log = dated_manager_file(root)
             manager_log.write_text(
                 "\n".join(
@@ -4923,6 +4924,7 @@ class PendingMarkerTests(unittest.TestCase):
             msg = Path(tmp) / "msg.md"
             msg.write_text("same body\n", encoding="utf-8")
             write_report_worker_task(root, runat="cfg:7")
+            write_report_worker_task(root, "task-pane1.md", runat="cfg:7.1")
             for pane in ("%1701", "%1702"):
                 result = subprocess.run(
                     omo_report_command(agent="agent-tmux", message_file=msg),
@@ -7669,6 +7671,240 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertIn("vl_owned.md vl:2 <output>owned</output>", pushed_text)
             self.assertNotIn("vl_done.md", pushed_text)
 
+    def test_agent_problem_delivery_rechecks_resumed_blocked_manager_before_paste(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        stale_line = (
+            "not_codex: task=vl_ab_prep_mgr_11375.md evidence=target=vl:3 role=blocked_idle_vl "
+            "task_status=blocked output=&lt;pending-marker-clear completed&gt; owner_target=vl:3"
+        )
+        args = Args(
+            Path("/tmp"),
+            "",
+            Path("/tmp/seen.tsv"),
+            1.0,
+            1.0,
+            30.0,
+            Path("/status.py"),
+            False,
+            False,
+            manager_target="wl:1.0",
+            agent_problem_repeat_s=300.0,
+        )
+        result = watcher.CommandOutput(
+            "agent-problems",
+            3,
+            f"agent-problems: not_codex=1\n{stale_line}\n",
+            "",
+        )
+
+        with patch.object(watcher, "push_manager_text_to_target", return_value=watcher.ASYNC_DELIVERY_STARTED) as push:
+            self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
+
+        guard = push.call_args.kwargs["problem_guard"]
+        self.assertIsInstance(guard, watcher.AgentProblemGuard)
+        assert isinstance(guard, watcher.AgentProblemGuard)
+        self.assertEqual((stale_line,), guard.problem_lines)
+        self.assertIn("--no-auto-unstick", guard.command)
+
+        resumed = subprocess.CompletedProcess(
+            guard.command,
+            0,
+            "agent-status: running=1\nrunning: task=vl_ab_prep_mgr_11375.md target=vl:3 output=processing runtime-evaluator handoff\n",
+            "",
+        )
+
+        def inspect_before_paste(_target: str, _message: str, _options: object, *, before_paste: object = None) -> None:
+            self.assertIsNotNone(before_paste)
+            assert callable(before_paste)
+            before_paste()
+
+        with patch("omo_manager.omo_pending_watch.subprocess.run", return_value=resumed), patch(
+            "omo_manager.omo_pending_watch.verified_send_to_codex",
+            side_effect=inspect_before_paste,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "agent problem resolved or changed before tmux paste"):
+                watcher.run_verified_send("vl:3", "stale alert", watcher.CodexSendOptions(2, 0.15, False), problem_guard=guard)
+
+        still_failed = subprocess.CompletedProcess(
+            guard.command,
+            3,
+            f"agent-problems: not_codex=1\n{stale_line}\n",
+            "",
+        )
+        with patch("omo_manager.omo_pending_watch.subprocess.run", return_value=still_failed):
+            self.assertTrue(watcher.agent_problem_guard_current(guard))
+
+    def test_blocked_manager_dependency_snapshot_alerts_on_valid_to_valid_changes(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "TODO.md").write_text("current:\nprep.md cfg:1\npacket.md cfg:2\nleaf-a.md cfg:3\nleaf-b.md cfg:4\nleaf-c.md cfg:5\n", encoding="utf-8")
+            _ = (root / "prep.md").write_text(
+                task_frontmatter("blocked", runat="cfg:1", managerat="main:0", is_manager=True, blocked_on="packet.md"),
+                encoding="utf-8",
+            )
+            _ = (root / "packet.md").write_text(
+                task_frontmatter("blocked", runat="cfg:2", managerat="cfg:1", is_manager=True, blocked_on="leaf-a.md, leaf-b.md"),
+                encoding="utf-8",
+            )
+            _ = (root / "leaf-a.md").write_text(task_frontmatter("running", runat="cfg:3", managerat="cfg:2"), encoding="utf-8")
+            _ = (root / "leaf-b.md").write_text(task_frontmatter("running", runat="cfg:4", managerat="cfg:2"), encoding="utf-8")
+            _ = (root / "leaf-c.md").write_text(task_frontmatter("running", runat="cfg:5", managerat="cfg:2"), encoding="utf-8")
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, True, manager_target="main:0")
+            snapshots: dict[str, str] = {}
+
+            self.assertFalse(watcher.maybe_push_dependency_transitions(args, snapshots, 1000.0))
+            self.assertFalse(
+                watcher.maybe_push_dependency_transitions(
+                    args,
+                    snapshots,
+                    1000.0 + watcher.DEFAULT_SEEN_TTL_S + 1.0,
+                )
+            )
+
+            _ = (root / "packet.md").write_text(
+                task_frontmatter("blocked", runat="cfg:2", managerat="cfg:1", is_manager=True, blocked_on="leaf-a.md, leaf-c.md"),
+                encoding="utf-8",
+            )
+            out = StringIO()
+            with redirect_stdout(out):
+                self.assertTrue(watcher.maybe_push_dependency_transitions(args, snapshots, 1000.0 + watcher.DEFAULT_SEEN_TTL_S + 2.0))
+            text = out.getvalue()
+            self.assertIn("prep.md cfg:1 <blocked_on>packet.md</blocked_on>", text)
+            self.assertIn("packet.md cfg:2 <blocked_on>leaf-a.md, leaf-c.md</blocked_on>", text)
+
+            with redirect_stdout(StringIO()):
+                self.assertFalse(watcher.maybe_push_dependency_transitions(args, snapshots, 1000.0 + watcher.DEFAULT_SEEN_TTL_S + 3.0))
+
+            packet_snapshot = watcher.dependency_snapshot_state(root)["packet.md"][1]
+            guard = watcher.AgentProblemGuard(
+                (),
+                (),
+                root=root,
+                dependency_task_file="packet.md",
+                dependency_snapshot=packet_snapshot,
+            )
+            self.assertTrue(watcher.agent_problem_guard_current(guard))
+
+            _ = (root / "leaf-c.md").write_text(task_frontmatter("running", runat="cfg:6", managerat="cfg:2"), encoding="utf-8")
+            self.assertFalse(watcher.agent_problem_guard_current(guard))
+            out = StringIO()
+            with redirect_stdout(out):
+                self.assertTrue(watcher.maybe_push_dependency_transitions(args, snapshots, 1000.0 + watcher.DEFAULT_SEEN_TTL_S + 4.0))
+            self.assertIn("prep.md cfg:1", out.getvalue())
+            self.assertIn("packet.md cfg:2", out.getvalue())
+
+            _ = (root / "leaf-c.md").write_text(task_frontmatter("done", runat="cfg:6", managerat="cfg:2"), encoding="utf-8")
+            with redirect_stdout(StringIO()):
+                self.assertFalse(watcher.maybe_push_dependency_transitions(args, snapshots, 1000.0 + watcher.DEFAULT_SEEN_TTL_S + 5.0))
+            self.assertNotIn("prep.md", snapshots)
+            self.assertNotIn("packet.md", snapshots)
+
+            _ = (root / "leaf-c.md").write_text(task_frontmatter("running", runat="cfg:6", managerat="cfg:2"), encoding="utf-8")
+            with redirect_stdout(StringIO()):
+                self.assertFalse(watcher.maybe_push_dependency_transitions(args, snapshots, 1000.0 + watcher.DEFAULT_SEEN_TTL_S + 6.0))
+            _ = (root / "leaf-c.md").write_text(task_frontmatter("running", runat="cfg:7", managerat="cfg:2"), encoding="utf-8")
+            out = StringIO()
+            with redirect_stdout(out):
+                self.assertTrue(watcher.maybe_push_dependency_transitions(args, snapshots, 1000.0 + watcher.DEFAULT_SEEN_TTL_S + 7.0))
+            self.assertIn("prep.md cfg:1", out.getvalue())
+            self.assertIn("packet.md cfg:2", out.getvalue())
+
+    def test_blocked_manager_dependency_snapshot_reserves_async_change(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "TODO.md").write_text("current:\nmanager.md cfg:1\nleaf-a.md cfg:2\nleaf-b.md cfg:3\n", encoding="utf-8")
+            _ = (root / "manager.md").write_text(
+                task_frontmatter("blocked", runat="cfg:1", managerat="main:0", is_manager=True, blocked_on="leaf-a.md"),
+                encoding="utf-8",
+            )
+            _ = (root / "leaf-a.md").write_text(task_frontmatter("running", runat="cfg:2", managerat="cfg:1"), encoding="utf-8")
+            _ = (root / "leaf-b.md").write_text(task_frontmatter("running", runat="cfg:3", managerat="cfg:1"), encoding="utf-8")
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="main:0")
+            snapshots: dict[str, str] = {}
+            self.assertFalse(watcher.maybe_push_dependency_transitions(args, snapshots, 1000.0))
+
+            _ = (root / "manager.md").write_text(
+                task_frontmatter("blocked", runat="cfg:1", managerat="main:0", is_manager=True, blocked_on="leaf-b.md"),
+                encoding="utf-8",
+            )
+            with patch.object(watcher, "push_manager_text_to_target", return_value=watcher.ASYNC_DELIVERY_STARTED) as push:
+                self.assertTrue(watcher.maybe_push_dependency_transitions(args, snapshots, 1001.0))
+                self.assertFalse(watcher.maybe_push_dependency_transitions(args, snapshots, 1002.0))
+                self.assertEqual(1, push.call_count)
+
+    def test_dependency_snapshot_success_does_not_overwrite_newer_reservation(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "TODO.md").write_text("current:\nmanager.md cfg:1\nleaf-a.md cfg:2\nleaf-b.md cfg:3\nleaf-c.md cfg:4\n", encoding="utf-8")
+            _ = (root / "manager.md").write_text(
+                task_frontmatter("blocked", runat="cfg:1", managerat="main:0", is_manager=True, blocked_on="leaf-a.md"),
+                encoding="utf-8",
+            )
+            _ = (root / "leaf-a.md").write_text(task_frontmatter("running", runat="cfg:2", managerat="cfg:1"), encoding="utf-8")
+            _ = (root / "leaf-b.md").write_text(task_frontmatter("running", runat="cfg:3", managerat="cfg:1"), encoding="utf-8")
+            _ = (root / "leaf-c.md").write_text(task_frontmatter("running", runat="cfg:4", managerat="cfg:1"), encoding="utf-8")
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="main:0")
+            snapshots: dict[str, str] = {}
+            self.assertFalse(watcher.maybe_push_dependency_transitions(args, snapshots, 1000.0))
+            events: list[watcher.DeliverySuccessEvent | None] = []
+
+            def fake_push(
+                _args: watcher.Args,
+                _text: str,
+                _manager_target: str,
+                success_event: watcher.DeliverySuccessEvent | None = None,
+                *,
+                marker: watcher.Marker | None = None,
+                problem_guard: watcher.AgentProblemGuard | None = None,
+            ) -> int:
+                self.assertIsNone(marker)
+                self.assertIsNotNone(problem_guard)
+                events.append(success_event)
+                return watcher.ASYNC_DELIVERY_STARTED
+
+            with patch.object(watcher, "push_manager_text_to_target", side_effect=fake_push) as push:
+                _ = (root / "manager.md").write_text(
+                    task_frontmatter("blocked", runat="cfg:1", managerat="main:0", is_manager=True, blocked_on="leaf-b.md"),
+                    encoding="utf-8",
+                )
+                self.assertTrue(watcher.maybe_push_dependency_transitions(args, snapshots, 1001.0))
+                _ = (root / "manager.md").write_text(
+                    task_frontmatter("blocked", runat="cfg:1", managerat="main:0", is_manager=True, blocked_on="leaf-c.md"),
+                    encoding="utf-8",
+                )
+                self.assertTrue(watcher.maybe_push_dependency_transitions(args, snapshots, 1002.0))
+                current_snapshot = snapshots["manager.md"]
+                self.assertEqual(2, push.call_count)
+                self.assertIsNotNone(events[0])
+                assert events[0] is not None
+                watcher.DELIVERY_SUCCESS_EVENTS.put(events[0])
+                self.assertFalse(watcher.drain_delivery_successes(args, {}, 1003.0))
+                self.assertEqual(current_snapshot, snapshots["manager.md"])
+                self.assertFalse(watcher.maybe_push_dependency_transitions(args, snapshots, 1004.0))
+                self.assertEqual(2, push.call_count)
+
+    def test_dependency_snapshot_reservation_rolls_back_after_async_failure(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/missing-status.py"), False, True)
+        snapshots = {"manager.md": "new"}
+        future: Future[None] = Future()
+        future.set_exception(RuntimeError("paste failed"))
+        event = watcher.DeliverySuccessEvent(
+            dependency_state=snapshots,
+            failure_dependency_replacements=(("manager.md", "new", "old"),),
+        )
+        watcher.log_send_result(future, event)
+        self.assertTrue(watcher.drain_delivery_successes(args, {}, 1000.0))
+        self.assertEqual("old", snapshots["manager.md"])
+
     def test_agent_problem_check_routes_rows_to_owner_despite_manager_target(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
@@ -8360,10 +8596,12 @@ class PendingMarkerTests(unittest.TestCase):
             _options: watcher.CodexSendOptions,
             *,
             pending_guard: watcher.PendingGuard | None = None,
+            problem_guard: watcher.AgentProblemGuard | None = None,
             success_event: watcher.DeliverySuccessEvent | None = None,
             failure_fallback: watcher.DeliveryFailureFallback | None = None,
         ) -> Future[None]:
             self.assertIsNone(pending_guard)
+            self.assertIsNotNone(problem_guard)
             submitted.append((target, message, success_event, failure_fallback))
             self.assertEqual("vl:64", target)
             return owner_future
@@ -8373,10 +8611,12 @@ class PendingMarkerTests(unittest.TestCase):
             message: str,
             _options: watcher.CodexSendOptions,
             pending_guard: watcher.PendingGuard | None = None,
+            problem_guard: watcher.AgentProblemGuard | None = None,
             success_event: watcher.DeliverySuccessEvent | None = None,
             failure_fallback: watcher.DeliveryFailureFallback | None = None,
         ) -> Future[None]:
             self.assertIsNone(pending_guard)
+            self.assertIsNotNone(problem_guard)
             self.assertIsNone(failure_fallback)
             submitted.append((target, message, success_event, failure_fallback))
             self.assertEqual("wl:1", target)

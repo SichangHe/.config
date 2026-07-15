@@ -77,6 +77,7 @@ TASK_FRONTMATTER_ALLOWED_FIELDS = TASK_FRONTMATTER_REQUIRED_FIELDS | {"blocked_o
 TASK_FRONTMATTER_STATUSES = {"running", "blocked", "done"}
 RETIRED_RUNAT = "retired"
 TASK_RE = re.compile(r"`?([A-Za-z0-9_./-]+\.md)`?")
+BLOCKED_DEPENDENCY_LIST_RE = re.compile(r"`?[A-Za-z0-9_./-]+\.md`?(?:\s*,\s*`?[A-Za-z0-9_./-]+\.md`?)*")
 TARGET_RE = re.compile(r"\b([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\b")
 TARGET_SESSION_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*):")
 LOOSE_TARGET_RE = re.compile(r"\b([a-z][A-Za-z0-9_-]*)\s+(\d+)\b")
@@ -263,9 +264,73 @@ def is_current_vl_supervisor(task_file: str) -> bool:
     return name.startswith("vl_supervisor_current_") or name.startswith("vl_submanager_current_")
 
 
-def is_recorded_persistent_manager_wait(task: TaskLine, state: TaskState) -> bool:
-    reason = state.reason.lower()
-    return state.is_manager and bool(state.reason) and (is_current_vl_supervisor(task.task_file) or ("persistent" in reason and ("manager" in reason or "submanager" in reason or "role" in reason)))
+def blocked_dependency_snapshot(root: Path, task: TaskLine, state: TaskState) -> str:
+    """Describe an accepted owned dependency tree, or return an empty string."""
+    if state.status != "blocked" or not state.is_manager:
+        return ""
+    task_path = resolve_task_path(root, task.task_file)
+    if task_path is None or task_has_pending_marker(task_path):
+        return ""
+    current_task_paths = {
+        path
+        for current_task in parse_task_lines(root / "TODO.md")
+        if current_task.section == "todo:current" and (path := resolve_task_path(root, current_task.task_file)) is not None
+    }
+    if task_path not in current_task_paths:
+        return ""
+    seen_paths = {task_path}
+    seen_targets: set[str] = set()
+    if state.target:
+        seen_targets.add(canonical_target(state.target))
+    nodes: list[tuple[str, str, str, str, bool, str]] = []
+
+    def add_node(path: Path, node: TaskState) -> None:
+        nodes.append(
+            (
+                str(path.relative_to(root)),
+                node.status,
+                canonical_target(node.target),
+                canonical_target(node.manager_target),
+                node.is_manager,
+                node.reason,
+            )
+        )
+
+    def dependencies_are_active(parent_path: Path, parent: TaskState) -> bool:
+        add_node(parent_path, parent)
+        if BLOCKED_DEPENDENCY_LIST_RE.fullmatch(parent.reason) is None:
+            return False
+        found = False
+        for match in TASK_RE.finditer(parent.reason):
+            found = True
+            dependency_path = resolve_task_path(root, match.group(1))
+            if dependency_path is None or dependency_path in seen_paths:
+                return False
+            if dependency_path not in current_task_paths:
+                return False
+            dependency = scan_task_state(dependency_path)
+            if dependency is None or task_has_pending_marker(dependency_path):
+                return False
+            if not parent.target or not dependency.manager_target or not same_tmux_target(dependency.manager_target, parent.target):
+                return False
+            dependency_target = canonical_target(dependency.target)
+            if not dependency_target or dependency_target in seen_targets:
+                return False
+            seen_paths.add(dependency_path)
+            seen_targets.add(dependency_target)
+            if dependency.status == "running":
+                add_node(dependency_path, dependency)
+                continue
+            if dependency.status != "blocked" or not dependency.is_manager or not dependencies_are_active(dependency_path, dependency):
+                return False
+        return found
+
+    return json.dumps(nodes, separators=(",", ":")) if dependencies_are_active(task_path, state) else ""
+
+
+def blocked_dependencies_are_active(root: Path, task: TaskLine, state: TaskState) -> bool:
+    """Accept an owned acyclic dependency tree with running report-free leaves."""
+    return bool(blocked_dependency_snapshot(root, task, state))
 
 
 def is_recorded_human_wait(state: TaskState) -> bool:
@@ -328,7 +393,7 @@ def semicolon_task_prefix_is_empty(separator: str) -> bool:
 
 def is_artifact_task_ref(task_file: str) -> bool:
     path = Path(task_file)
-    return path.name in ARTIFACT_TASK_NAMES or (path.parts and path.parts[0] in ARTIFACT_TASK_DIRS)
+    return path.name in ARTIFACT_TASK_NAMES or (bool(path.parts) and path.parts[0] in ARTIFACT_TASK_DIRS)
 
 
 def is_main_manager_task_file(path: Path) -> bool:
@@ -828,19 +893,19 @@ def add_blocked_idle_vl_row(root: Path, task: TaskLine, role: str, rows: list[St
         return
     classified: StatusRow | None = None
     idle_status = "blocked_idle"
+    quiet_dependency = False
     if target:
         classified = classify_target(task.task_file, target, state.persistent_role, state.status, auto_unstick, role, unstick_by_target, auto_unstick_disabled_reason)
         idle_status = classified.status
         if idle_status == "running":
             return
-        if is_recorded_human_wait(state) and idle_status not in {"error", "stuck_input"}:
+        if is_recorded_human_wait(state) and idle_status == "ready":
             return
-        if is_recorded_persistent_manager_wait(task, state) and idle_status not in {"error", "not_codex", "stuck_input"}:
-            return
+        quiet_dependency = blocked_dependencies_are_active(root, task, state) and idle_status == "ready"
     reason = state.reason or "blocked with no reason in latest status line"
     evidence = classified.evidence if classified is not None else f"target={target} role={role} task_status=blocked"
     evidence += f" idle_status={idle_status} reason={reason}"
-    status = idle_status if idle_status in {"error", "not_codex", "stuck_input"} else "blocked_idle"
+    status = "ready" if quiet_dependency else idle_status if idle_status in {"error", "not_codex", "stuck_input"} else "blocked_idle"
     rows.append(StatusRow(task.task_file, status, evidence, state.persistent_role, state.status, target, classified.unstick if classified is not None else ""))
     seen.add(seen_key)
 

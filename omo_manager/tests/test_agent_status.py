@@ -910,6 +910,19 @@ class AgentStatusTests(unittest.TestCase):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             self.assertIn("ready: task=active.md", out.getvalue())
 
+    def test_problems_only_reports_missing_exact_main_manager_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\n", encoding="utf-8")
+            out = StringIO()
+
+            with patch("omo_manager.omo_codex_status.exact_pane_id", return_value=""), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "wl:1.0"]))
+
+            self.assertIn("not_codex: task=manager evidence=target=wl:1.0 role=manager", out.getvalue())
+
     def test_problems_only_reports_ready_running_persistent_role_marker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -934,7 +947,7 @@ class AgentStatusTests(unittest.TestCase):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             self.assertIn("blocked_idle: task=role.md", out.getvalue())
 
-    def test_problems_only_ignores_ready_blocked_manager_with_recorded_blocker(self) -> None:
+    def test_problems_only_reports_ready_blocked_manager_without_concrete_blocker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             registry = root / "sessions.json"
@@ -943,8 +956,8 @@ class AgentStatusTests(unittest.TestCase):
             _ = (root / "manager.md").write_text(task_frontmatter("blocked", runat="cfg:1", is_manager=True, blocked_on="persistent submanager waiting on lower manager and human follow-up"), encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["› Use /skills to list available skills"])), redirect_stdout(out):
-                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
-            self.assertEqual("", out.getvalue())
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertIn("blocked_idle: task=manager.md", out.getvalue())
 
     def test_problems_only_reports_ready_blocked_nonpersistent_manager(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -981,6 +994,301 @@ class AgentStatusTests(unittest.TestCase):
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("not_codex", [])), redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             self.assertIn("not_codex: task=manager.md", out.getvalue())
+
+    def test_problems_only_reports_not_codex_for_blocked_manager_with_concrete_dependency(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nvl_ab_prep_mgr_11375.md vl:3\n", encoding="utf-8")
+            _ = (root / "vl_ab_prep_mgr_11375.md").write_text(
+                task_frontmatter("blocked", runat="vl:3", managerat="vl:2", is_manager=True, blocked_on="vl_closefix_11375.md"),
+                encoding="utf-8",
+            )
+            _ = (root / "vl_closefix_11375.md").write_text(task_frontmatter("running", runat="vl:12", managerat="vl:3"), encoding="utf-8")
+            out = StringIO()
+
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("not_codex", ["intentional shell"])), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]), out.getvalue())
+
+            self.assertIn("not_codex: task=vl_ab_prep_mgr_11375.md", out.getvalue())
+
+    def test_packet_manager_stays_quiet_until_one_of_four_running_dependencies_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            dependencies = (
+                ("vlp_ironkv_11375.md", "vl:5"),
+                ("vlp_authrepair_11375.md", "vl:12"),
+                ("vlp_evalctr_11375.md", "vl:14"),
+                ("vlp_review3_11375.md", "vl:16"),
+            )
+            todo = ["current:", "vl_pkt_mgr_11375.md vl:10", *(f"{name} {target}" for name, target in dependencies)]
+            _ = (root / "TODO.md").write_text("\n".join(todo) + "\n", encoding="utf-8")
+            _ = (root / "vl_pkt_mgr_11375.md").write_text(
+                task_frontmatter(
+                    "blocked",
+                    runat="vl:10",
+                    managerat="vl:3",
+                    is_manager=True,
+                    blocked_on=", ".join(name for name, _target in dependencies),
+                ),
+                encoding="utf-8",
+            )
+            for name, target in dependencies:
+                _ = (root / name).write_text(task_frontmatter("running", runat=target, managerat="vl:10"), encoding="utf-8")
+
+            def inspect_target(args: CodexStatusArgs, **_kwargs: object) -> Report:
+                return Report("ready", ["parked manager"]) if args.target == "vl:10" else Report("running", ["Working"])
+
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", side_effect=inspect_target), patch("omo_manager.omo_agent_status.tmux_list_panes", return_value=[]), redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertEqual("", out.getvalue())
+
+            changed = root / dependencies[0][0]
+            _ = changed.write_text(task_frontmatter("done", runat=dependencies[0][1], managerat="vl:10"), encoding="utf-8")
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", side_effect=inspect_target), patch("omo_manager.omo_agent_status.tmux_list_panes", return_value=[]), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertIn("blocked_idle: task=vl_pkt_mgr_11375.md", out.getvalue())
+
+            _ = changed.write_text(
+                f"{task_frontmatter('running', runat=dependencies[0][1], managerat='vl:10')}(pending)\nchild report\n",
+                encoding="utf-8",
+            )
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", side_effect=inspect_target), patch("omo_manager.omo_agent_status.tmux_list_panes", return_value=[]), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertIn("blocked_idle: task=vl_pkt_mgr_11375.md", out.getvalue())
+
+    def test_problems_only_reports_ready_blocked_manager_with_stale_dependency(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nmanager.md cfg:1\n\nprevious:\ndependency.md cfg:2\n", encoding="utf-8")
+            _ = (root / "manager.md").write_text(task_frontmatter("blocked", runat="cfg:1", managerat="cfg:9", is_manager=True, blocked_on="dependency.md"), encoding="utf-8")
+            _ = (root / "dependency.md").write_text(task_frontmatter("running", runat="cfg:2", managerat="cfg:1"), encoding="utf-8")
+
+            def inspect_target(args: CodexStatusArgs, **_kwargs: object) -> Report:
+                return Report("ready", ["parked manager"]) if args.target == "cfg:1" else Report("running", ["Working"])
+
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", side_effect=inspect_target), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+
+            self.assertIn("blocked_idle: task=manager.md", out.getvalue())
+
+    def test_prep_manager_accepts_blocked_packet_manager_with_four_running_leaves(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            packet_dependencies = (
+                ("vlp_ironkv_11375.md", "vl:5"),
+                ("vlp_authrepair_11375.md", "vl:12"),
+                ("vlp_evalctr_11375.md", "vl:14"),
+                ("vlp_review3_11375.md", "vl:16"),
+            )
+            prep_running_dependencies = (
+                ("vlprep_runtime_11375.md", "vl:7"),
+                ("vlprep_mlexeval_11375.md", "vl:8"),
+                ("vlprep_admit_11375.md", "vl:18"),
+            )
+            todo = [
+                "current:",
+                "vl_ab_prep_mgr_11375.md vl:3",
+                "vl_pkt_mgr_11375.md vl:10",
+                *(f"{name} {target}" for name, target in prep_running_dependencies),
+                *(f"{name} {target}" for name, target in packet_dependencies),
+            ]
+            _ = (root / "TODO.md").write_text("\n".join(todo) + "\n", encoding="utf-8")
+            prep_blockers = (*prep_running_dependencies[:2], ("vl_pkt_mgr_11375.md", "vl:10"), prep_running_dependencies[2])
+            _ = (root / "vl_ab_prep_mgr_11375.md").write_text(
+                task_frontmatter(
+                    "blocked",
+                    runat="vl:3",
+                    managerat="vl:2",
+                    is_manager=True,
+                    blocked_on=", ".join(name for name, _target in prep_blockers),
+                ),
+                encoding="utf-8",
+            )
+            packet_path = root / "vl_pkt_mgr_11375.md"
+            packet_blockers = ", ".join(name for name, _target in packet_dependencies)
+            _ = packet_path.write_text(
+                task_frontmatter("blocked", runat="vl:10", managerat="vl:3", is_manager=True, blocked_on=packet_blockers),
+                encoding="utf-8",
+            )
+            for name, target in prep_running_dependencies:
+                _ = (root / name).write_text(task_frontmatter("running", runat=target, managerat="vl:3"), encoding="utf-8")
+            for name, target in packet_dependencies:
+                _ = (root / name).write_text(task_frontmatter("running", runat=target, managerat="vl:10"), encoding="utf-8")
+
+            def inspect_target(args: CodexStatusArgs, **_kwargs: object) -> Report:
+                return Report("ready", ["parked manager"]) if args.target in {"vl:3", "vl:10"} else Report("running", ["Working"])
+
+            def problems() -> tuple[int, str]:
+                out = StringIO()
+                with patch("omo_manager.omo_agent_status.inspect", side_effect=inspect_target), redirect_stdout(out):
+                    status = main(["--root", str(root), "--registry", str(registry), "--problems-only"])
+                return status, out.getvalue()
+
+            self.assertEqual((0, ""), problems())
+
+            def problems_with_missing_target(missing_target: str) -> tuple[int, str]:
+                out = StringIO()
+
+                def inspect_with_missing(args: CodexStatusArgs, **_kwargs: object) -> Report:
+                    return Report("not_codex", []) if args.target == missing_target else inspect_target(args)
+
+                with patch("omo_manager.omo_agent_status.inspect", side_effect=inspect_with_missing), redirect_stdout(out):
+                    status = main(["--root", str(root), "--registry", str(registry), "--problems-only"])
+                return status, out.getvalue()
+
+            status, text = problems_with_missing_target("vl:3")
+            self.assertEqual(3, status)
+            self.assertIn("not_codex: task=vl_ab_prep_mgr_11375.md", text)
+
+            status, text = problems_with_missing_target("vl:10")
+            self.assertEqual(3, status)
+            self.assertIn("not_codex: task=vl_pkt_mgr_11375.md", text)
+
+            leaf_path = root / packet_dependencies[0][0]
+            _ = leaf_path.write_text(task_frontmatter("done", runat=packet_dependencies[0][1], managerat="vl:10"), encoding="utf-8")
+            status, text = problems()
+            self.assertEqual(3, status)
+            self.assertIn("blocked_idle: task=vl_pkt_mgr_11375.md", text)
+            self.assertIn("blocked_idle: task=vl_ab_prep_mgr_11375.md", text)
+
+            _ = leaf_path.write_text(task_frontmatter("running", runat=packet_dependencies[0][1], managerat="vl:10"), encoding="utf-8")
+            _ = packet_path.write_text(
+                f"{task_frontmatter('blocked', runat='vl:10', managerat='vl:3', is_manager=True, blocked_on=packet_blockers)}(pending)\nchild report\n",
+                encoding="utf-8",
+            )
+            status, text = problems()
+            self.assertEqual(3, status)
+            self.assertIn("blocked_idle: task=vl_ab_prep_mgr_11375.md", text)
+
+            _ = packet_path.write_text(
+                task_frontmatter(
+                    "blocked",
+                    runat="vl:10",
+                    managerat="vl:3",
+                    is_manager=True,
+                    blocked_on=f"{packet_dependencies[0][0]}, {packet_dependencies[0][0]}",
+                ),
+                encoding="utf-8",
+            )
+            status, text = problems()
+            self.assertEqual(3, status)
+            self.assertIn("blocked_idle: task=vl_ab_prep_mgr_11375.md", text)
+
+            _ = packet_path.write_text(
+                task_frontmatter("blocked", runat="vl:10", managerat="vl:3", is_manager=True, blocked_on=packet_blockers),
+                encoding="utf-8",
+            )
+            _ = leaf_path.write_text(task_frontmatter("running", runat=packet_dependencies[0][1], managerat="vl:99"), encoding="utf-8")
+            status, text = problems()
+            self.assertEqual(3, status)
+            self.assertIn("blocked_idle: task=vl_ab_prep_mgr_11375.md", text)
+
+    def test_problems_only_reports_not_codex_for_dependency_mixed_with_prose(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nvl_manager.md vl:3\n", encoding="utf-8")
+            _ = (root / "vl_manager.md").write_text(
+                task_frontmatter("blocked", runat="vl:3", managerat="vl:2", is_manager=True, blocked_on="persistent VL manager role waiting on vl_closefix.md"),
+                encoding="utf-8",
+            )
+            _ = (root / "vl_closefix.md").write_text(task_frontmatter("running", runat="vl:12"), encoding="utf-8")
+            out = StringIO()
+
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("not_codex", [])), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+
+            self.assertIn("not_codex: task=vl_manager.md", out.getvalue())
+
+    def test_problems_only_still_reports_not_codex_for_running_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nworker.md cfg:1\n", encoding="utf-8")
+            _ = (root / "worker.md").write_text(task_frontmatter("running", runat="cfg:1"), encoding="utf-8")
+            out = StringIO()
+
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("not_codex", [])), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+
+            self.assertIn("not_codex: task=worker.md", out.getvalue())
+
+    def test_problems_only_reports_not_codex_for_nonactionable_blocker(self) -> None:
+        for name, blocker in (("arbitrary", "waiting"), ("missing", "missing.md"), ("self", "worker.md")):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                registry = root / "sessions.json"
+                _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+                _ = (root / "TODO.md").write_text("current:\nworker.md cfg:1\n", encoding="utf-8")
+                _ = (root / "worker.md").write_text(task_frontmatter("blocked", runat="cfg:1", blocked_on=blocker), encoding="utf-8")
+                out = StringIO()
+
+                with patch("omo_manager.omo_agent_status.inspect", return_value=Report("not_codex", [])), redirect_stdout(out):
+                    self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+
+                self.assertIn("not_codex: task=worker.md", out.getvalue())
+
+    def test_problems_only_reports_blocked_worker_even_with_running_dependency(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nworker.md cfg:1\n", encoding="utf-8")
+            _ = (root / "worker.md").write_text(task_frontmatter("blocked", runat="cfg:1", blocked_on="dependency.md"), encoding="utf-8")
+            _ = (root / "dependency.md").write_text(task_frontmatter("running", runat="cfg:2", managerat="cfg:1"), encoding="utf-8")
+            out = StringIO()
+
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("not_codex", [])), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+
+            self.assertIn("not_codex: task=worker.md", out.getvalue())
+
+    def test_problems_only_reports_not_codex_for_completed_or_circular_dependency(self) -> None:
+        for name, dependency_status, dependency_blocker in (("completed", "done", ""), ("circular", "blocked", "worker.md")):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                registry = root / "sessions.json"
+                _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+                _ = (root / "TODO.md").write_text("current:\nworker.md cfg:1\n", encoding="utf-8")
+                _ = (root / "worker.md").write_text(task_frontmatter("blocked", runat="cfg:1", blocked_on="dependency.md"), encoding="utf-8")
+                _ = (root / "dependency.md").write_text(
+                    task_frontmatter(dependency_status, runat="cfg:2", managerat="cfg:1", is_manager=name == "circular", blocked_on=dependency_blocker),
+                    encoding="utf-8",
+                )
+                out = StringIO()
+
+                with patch("omo_manager.omo_agent_status.inspect", return_value=Report("not_codex", [])), redirect_stdout(out):
+                    self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+
+                self.assertIn("not_codex: task=worker.md", out.getvalue())
+
+    def test_problems_only_still_reports_not_codex_for_malformed_blocked_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nworker.md cfg:1\n", encoding="utf-8")
+            _ = (root / "worker.md").write_text(task_frontmatter("blocked", runat="cfg:1"), encoding="utf-8")
+            out = StringIO()
+
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("not_codex", [])), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+
+            self.assertIn("not_codex: task=worker.md", out.getvalue())
 
     def test_problems_only_reports_stuck_input_for_blocked_manager_with_recorded_blocker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1060,7 +1368,7 @@ class AgentStatusTests(unittest.TestCase):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             self.assertIn("error: task=role.md", out.getvalue())
 
-    def test_problems_only_reports_not_codex_blocked_persistent_role(self) -> None:
+    def test_problems_only_reports_not_codex_for_persistent_role_without_concrete_blocker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             registry = root / "sessions.json"
@@ -1099,16 +1407,16 @@ class AgentStatusTests(unittest.TestCase):
                 encoding="utf-8",
             )
             _ = (root / "vl_worker.md").write_text(task_frontmatter("blocked", runat="vl:9", managerat="vl:15", blocked_on="Docker image lacks codex; no worker output was produced"), encoding="utf-8")
-            def fake_inspect(args: object) -> Report:
-                return Report("running", ["working"]) if getattr(args, "target") == "wl:5" else Report("ready", ["idle"])
+            def fake_inspect(args: CodexStatusArgs) -> Report:
+                return Report("running", ["working"]) if args.target == "wl:5" else Report("ready", ["idle"])
 
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", side_effect=fake_inspect), redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             text = out.getvalue()
-            self.assertIn("agent-problems: blocked_idle=1", text)
+            self.assertIn("agent-problems: blocked_idle=2", text)
             self.assertIn("manager-action: blocked_idle>0 inspect blocked agents", text)
-            self.assertNotIn("blocked_idle: task=vl_supervisor_current_7404.md", text)
+            self.assertIn("blocked_idle: task=vl_supervisor_current_7404.md", text)
             self.assertIn("owner_target=vl:15", text)
             self.assertIn("blocked_idle: task=vl_worker.md evidence=target=vl:9 role=blocked_idle_vl_dependency", text)
             self.assertIn("image lacks codex", text)
@@ -1279,7 +1587,7 @@ class AgentStatusTests(unittest.TestCase):
             self.assertIn("blocked_idle: task=worker.md", text)
             self.assertIn("reason=waiting on human API key direction", text)
 
-    def test_problems_only_skips_non_hvl_not_codex_human_wait(self) -> None:
+    def test_problems_only_reports_non_hvl_not_codex_human_wait(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             registry = root / "sessions.json"
@@ -1291,8 +1599,8 @@ class AgentStatusTests(unittest.TestCase):
                 return Report("running", ["working"]) if getattr(args, "target") == "wl:17" else Report("not_codex", [])
 
             with patch("omo_manager.omo_agent_status.inspect", side_effect=fake_inspect), redirect_stdout(out):
-                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "wl:17"]))
-            self.assertEqual("", out.getvalue())
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "wl:17"]))
+            self.assertIn("not_codex: task=worker.md", out.getvalue())
 
     def test_problems_only_skips_ready_hvl_concrete_human_review_wait(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1578,16 +1886,16 @@ class AgentStatusTests(unittest.TestCase):
             _ = (root / "TODO.md").write_text("current:\nvl_untracked.md vl 8\n\nprevious:\nvl_supervisor_current_7404.md vl 7\n", encoding="utf-8")
             _ = (root / "vl_untracked.md").write_text(task_frontmatter("running", runat="vl:8"), encoding="utf-8")
             _ = (root / "vl_supervisor_current_7404.md").write_text(task_frontmatter("blocked", runat="vl:7", managerat="vl:15", is_manager=True, blocked_on="image lacks codex"), encoding="utf-8")
-            def fake_inspect(args: object) -> Report:
-                return Report("running", ["working"]) if getattr(args, "target") == "vl:8" else Report("ready", ["idle"])
+            def fake_inspect(args: CodexStatusArgs) -> Report:
+                return Report("running", ["working"]) if args.target == "vl:8" else Report("ready", ["idle"])
 
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", side_effect=fake_inspect), redirect_stdout(out):
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry)]))
             text = out.getvalue()
-            self.assertIn("agent-status: not_codex=0 running=1 blocked_idle=0", text)
+            self.assertIn("agent-status: not_codex=0 running=1 blocked_idle=1", text)
             self.assertIn("running: task=vl_untracked.md", text)
-            self.assertNotIn("blocked_idle: task=vl_supervisor_current_7404.md", text)
+            self.assertIn("blocked_idle: task=vl_supervisor_current_7404.md", text)
 
     def test_problems_only_does_not_duplicate_blocked_idle_target_as_unmanaged_problem(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
