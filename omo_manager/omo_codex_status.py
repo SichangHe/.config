@@ -43,6 +43,7 @@ CODEX_RUNNING_EMPTY_INPUT_TEXTS = {
     "Explain this codebase",
     "Implement {feature}",
 }
+TMUX_TARGET_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*):(\d+)(?:\.(\d+))?$")
 
 
 @dataclass(frozen=True)
@@ -79,6 +80,26 @@ def parse_args(argv: list[str]) -> Args:
     if parsed.n_lines <= 0:
         parser.error("--lines must be positive.")
     return Args(parsed.target, parsed.n_lines)
+
+
+def exact_pane_id(target: str) -> str:
+    """Return the pane id only when tmux resolves the exact numeric target."""
+    match = TMUX_TARGET_RE.fullmatch(target)
+    if match is None:
+        return ""
+    session, window, pane = match.group(1), match.group(2), match.group(3) or "0"
+    canonical = f"{session}:{int(window)}.{int(pane)}"
+    out = subprocess.run(
+        ["tmux", "display-message", "-p", "-t", canonical, "#{session_name}:#{window_index}.#{pane_index}\t#{pane_id}"],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    if out.returncode != 0:
+        return ""
+    resolved, separator, pane_id = out.stdout.strip().partition("\t")
+    return pane_id if separator and resolved == canonical and pane_id.startswith("%") else ""
 
 
 def tail(target: str, n_lines: int) -> list[str]:

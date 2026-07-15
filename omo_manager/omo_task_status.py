@@ -18,12 +18,15 @@ from omo_manager.omo_agent_status import TaskMetadata
 from omo_manager.omo_agent_status import TaskFrontmatterError
 from omo_manager.omo_agent_status import DEFAULT_ROOT
 from omo_manager.omo_agent_status import same_tmux_target
+from omo_manager.omo_codex_status import exact_pane_id
 from omo_manager.omo_codex_stop import Args as StopArgs
 from omo_manager.omo_codex_stop import has_close_note
 from omo_manager.omo_codex_stop import record_close
 from omo_manager.omo_codex_stop import stop
 from omo_manager.omo_agent_status import frontmatter_parts
 from omo_manager.omo_agent_status import parse_task_metadata
+from omo_manager.omo_agent_status import parse_task_lines
+from omo_manager.omo_task_lock import task_target_lock
 
 PENDING_MARKER = "(pending)"
 DONE_REMINDER = "Status set to done. Remember to email the human."
@@ -237,13 +240,60 @@ def replace_if_unchanged(path: Path, text: str, before: os.stat_result) -> None:
             tmp_path.unlink(missing_ok=True)
 
 
-def stop_done_agent(root: Path, path: Path, target: str) -> tuple[StopArgs, str]:
+def current_target_task_paths(root: Path, target: str) -> tuple[Path, ...]:
+    """Return TODO `current` task paths that claim `target` in metadata or TODO text."""
+
+    matches: set[Path] = set()
+    for task in parse_task_lines(root / "TODO.md"):
+        if task.section != "todo:current":
+            continue
+        candidate = (root / task.task_file).resolve(strict=False)
+        if candidate != root and root not in candidate.parents:
+            continue
+        try:
+            text = candidate.read_text(encoding="utf-8")
+        except OSError:
+            if task.target and same_tmux_target(task.target, target):
+                matches.add(candidate)
+            continue
+        try:
+            metadata = parse_task_metadata(text)
+        except TaskFrontmatterError:
+            metadata = None
+        raw_runat_claim = any(key.strip() == "runat" and sep and same_tmux_target(value.strip(), target) for key, sep, value in (line.partition(":") for line in text.splitlines()))
+        if metadata is None:
+            if (task.target and same_tmux_target(task.target, target)) or raw_runat_claim:
+                matches.add(candidate)
+        elif metadata.status != "done" and same_tmux_target(metadata.runat, target):
+            matches.add(candidate)
+    return tuple(sorted(matches))
+
+
+def worker_self_close_allowed(root: Path, path: Path, metadata: TaskMetadata) -> bool:
+    """Allow self-close only for the sole current non-manager owner of its pane."""
+
+    if metadata.is_manager:
+        return False
+    manager_target = os.environ.get("OMO_MANAGER_TMUX_TARGET", "").strip()
+    if manager_target and same_tmux_target(metadata.runat, manager_target):
+        return False
+    return current_target_task_paths(root, metadata.runat) == (path,)
+
+
+def stop_done_agent(root: Path, path: Path, metadata: TaskMetadata) -> tuple[StopArgs, str]:
     """Close the task's Codex pane and return the captured session id."""
 
     task_file = path.relative_to(root).as_posix()
-    stop_args = StopArgs(target, 10.0, 2000, False, False, root, task_file, True, 0.0)
-    session_id = stop(stop_args)
-    return stop_args, session_id
+    with task_target_lock(root, metadata.runat):
+        stable_pane_id = exact_pane_id(metadata.runat)
+        allow_self = bool(stable_pane_id and worker_self_close_allowed(root, path, metadata))
+        if allow_self:
+            allow_self = worker_self_close_allowed(root, path, metadata) and exact_pane_id(metadata.runat) == stable_pane_id
+        stop_target = stable_pane_id if allow_self else metadata.runat
+        stop_args = StopArgs(stop_target, 10.0, 2000, False, allow_self, root, task_file, True, 0.0)
+        session_id = stop(stop_args)
+    record_args = StopArgs(metadata.runat, 10.0, 2000, False, allow_self, root, task_file, True, 0.0)
+    return record_args, session_id
 
 
 def done_close_message(target: str, session_id: str) -> str:
@@ -316,7 +366,8 @@ def run(args: Args) -> int:
                 in_progress = update_frontmatter_status(text, "blocked", DONE_CLOSE_IN_PROGRESS)
                 replace_if_unchanged(path, in_progress, before)
                 try:
-                    close_args, session_id = stop_done_agent(args.root, path, target)
+                    assert metadata is not None
+                    close_args, session_id = stop_done_agent(args.root, path, metadata)
                 except Exception as exc:
                     rollback_before = path.stat()
                     rollback_text = path.read_text(encoding="utf-8")

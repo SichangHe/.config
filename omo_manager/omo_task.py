@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fcntl
 import os
 import re
@@ -18,9 +19,11 @@ from pathlib import Path
 try:
     from omo_manager.omo_codex_status import current_block, status, tail
     from omo_manager.omo_agent_status import TaskFrontmatterError, parse_task_metadata
+    from omo_manager.omo_task_lock import task_target_lock
 except ModuleNotFoundError:
     from omo_codex_status import current_block, status, tail
     from omo_agent_status import TaskFrontmatterError, parse_task_metadata
+    from omo_task_lock import task_target_lock
 
 DEFAULT_ROOT = Path(os.environ.get("OMO_WORK_LOGS_ROOT", Path.home() / "work_logs"))
 HELPER_DIR = Path(__file__).resolve().parent
@@ -897,17 +900,20 @@ def main(argv: list[str]) -> int:
         if args.migrate_manager_owner:
             migrate_manager_owner(task_path(args.root, args.task_file), args.old_manager_target, args.new_manager_target, args.dry_run)
             return 0
-        validate_inputs(args)
-        if args.dry_run:
-            dry_run(args)
-            return 0
-        existed = task_path(args.root, args.task_file).exists()
-        tmux_target = new_window(args)
-        path = ensure_task_file(args, tmux_target)
-        if not args.no_link:
-            link_todo(args, tmux_target)
-        if args.workdir is not None:
-            start_codex(tmux_target, args)
+        existing_target = target(args) if args.workdir is None else ""
+        ownership_lock = task_target_lock(args.root, existing_target) if existing_target else contextlib.nullcontext()
+        with ownership_lock:
+            validate_inputs(args)
+            if args.dry_run:
+                dry_run(args)
+                return 0
+            existed = task_path(args.root, args.task_file).exists()
+            tmux_target = new_window(args)
+            path = ensure_task_file(args, tmux_target)
+            if not args.no_link:
+                link_todo(args, tmux_target)
+            if args.workdir is not None:
+                start_codex(tmux_target, args)
         print(path)
         if tmux_target:
             print(tmux_target)

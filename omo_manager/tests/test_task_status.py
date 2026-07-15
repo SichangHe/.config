@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import os
 import tempfile
 import unittest
 from contextlib import redirect_stderr
@@ -8,11 +9,12 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from omo_manager.omo_agent_status import TaskFrontmatterError
+from omo_manager.omo_agent_status import TaskFrontmatterError, parse_task_metadata
 from omo_manager.omo_task_status import DONE_REMINDER
 from omo_manager.omo_task_status import StopArgs
 from omo_manager.omo_task_status import parse_args
 from omo_manager.omo_task_status import run
+from omo_manager.omo_task_status import stop_done_agent
 from omo_manager.omo_task_status import update_frontmatter_status
 from omo_manager.omo_task_status import Args as StatusArgs
 
@@ -50,6 +52,139 @@ def task_frontmatter(
 
 
 class TaskStatusTests(unittest.TestCase):
+    def worker_text(self, target: str = "wl:3", *, status: str = "running", blocked_on: str = "", is_manager: bool = False, managerat: str = "wl:1") -> str:
+        return task_frontmatter(status=status, blocked_on=blocked_on, managerat=managerat, is_manager=is_manager).replace("runat: wl:2", f"runat: {target}")
+
+    def test_stop_done_agent_allows_unique_current_worker_to_close_own_pane(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "worker.md"
+            path.write_text(self.worker_text() + "body\n", encoding="utf-8")
+            (root / "stale_done.md").write_text(self.worker_text(status="done") + "body\n", encoding="utf-8")
+            (root / "TODO.md").write_text("current:\nworker.md wl:3\nstale_done.md wl:3\n\nhuman pending:\nstale.md\n", encoding="utf-8")
+            metadata = parse_task_metadata(path.read_text(encoding="utf-8"))
+            assert metadata is not None
+
+            with patch("omo_manager.omo_task_status.exact_pane_id", return_value="%3"), patch("omo_manager.omo_task_status.stop", return_value="session-1") as stop_call:
+                stop_args, _session_id = stop_done_agent(root, path, metadata)
+
+            self.assertTrue(stop_args.allow_self)
+            self.assertEqual("wl:3", stop_args.target)
+            self.assertEqual("%3", stop_call.call_args.args[0].target)
+            self.assertTrue(stop_call.call_args.args[0].allow_self)
+
+    def test_stop_done_agent_ignores_valid_noncurrent_target_reuse(self) -> None:
+        for section in ("Previous", "Human Pending"):
+            with self.subTest(section=section), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                path = root / "worker.md"
+                path.write_text(self.worker_text() + "body\n", encoding="utf-8")
+                (root / "stale.md").write_text(self.worker_text(status="blocked", blocked_on="waiting for human") + "body\n", encoding="utf-8")
+                (root / "TODO.md").write_text(f"Current\nworker.md wl 3\n\n{section}:\nstale.md wl:3\n", encoding="utf-8")
+                metadata = parse_task_metadata(path.read_text(encoding="utf-8"))
+                assert metadata is not None
+
+                with patch("omo_manager.omo_task_status.exact_pane_id", return_value="%3"), patch("omo_manager.omo_task_status.stop", return_value="session-1"):
+                    stop_args, _session_id = stop_done_agent(root, path, metadata)
+
+                self.assertTrue(stop_args.allow_self)
+
+    def test_stop_done_agent_refuses_malformed_current_record(self) -> None:
+        for todo_line in ("broken.md wl:3", "broken.md wl 3"):
+            with self.subTest(todo_line=todo_line), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                path = root / "worker.md"
+                path.write_text(self.worker_text() + "body\n", encoding="utf-8")
+                (root / "broken.md").write_text("no frontmatter\n", encoding="utf-8")
+                (root / "TODO.md").write_text(f"current:\nworker.md wl:3\n{todo_line}\n", encoding="utf-8")
+                metadata = parse_task_metadata(path.read_text(encoding="utf-8"))
+                assert metadata is not None
+
+                with patch("omo_manager.omo_task_status.exact_pane_id", return_value="%3"), patch("omo_manager.omo_task_status.stop", return_value="session-1"):
+                    stop_args, _session_id = stop_done_agent(root, path, metadata)
+
+                self.assertFalse(stop_args.allow_self)
+
+    def test_stop_done_agent_rechecks_current_ownership_before_stop(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "worker.md"
+            other = root / "other.md"
+            path.write_text(self.worker_text() + "body\n", encoding="utf-8")
+            metadata = parse_task_metadata(path.read_text(encoding="utf-8"))
+            assert metadata is not None
+
+            with patch("omo_manager.omo_task_status.exact_pane_id", return_value="%3"), patch(
+                "omo_manager.omo_task_status.current_target_task_paths", side_effect=((path,), (other, path))
+            ), patch("omo_manager.omo_task_status.stop", return_value="session-1"):
+                stop_args, _session_id = stop_done_agent(root, path, metadata)
+
+            self.assertFalse(stop_args.allow_self)
+
+    def test_stop_done_agent_refuses_self_close_after_pane_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "worker.md"
+            path.write_text(self.worker_text() + "body\n", encoding="utf-8")
+            (root / "TODO.md").write_text("current:\nworker.md wl:3\n", encoding="utf-8")
+            metadata = parse_task_metadata(path.read_text(encoding="utf-8"))
+            assert metadata is not None
+
+            with patch("omo_manager.omo_task_status.exact_pane_id", side_effect=("%3", "%4")), patch("omo_manager.omo_task_status.stop", return_value="session-1") as stop_call:
+                stop_args, _session_id = stop_done_agent(root, path, metadata)
+
+            self.assertFalse(stop_args.allow_self)
+            self.assertEqual("wl:3", stop_call.call_args.args[0].target)
+
+    def test_stop_done_agent_refuses_prefix_resolved_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "worker.md"
+            path.write_text(self.worker_text("wl:1", managerat="main:0") + "body\n", encoding="utf-8")
+            (root / "TODO.md").write_text("current:\nworker.md wl:1\n", encoding="utf-8")
+            metadata = parse_task_metadata(path.read_text(encoding="utf-8"))
+            assert metadata is not None
+
+            with patch("omo_manager.omo_task_status.exact_pane_id", return_value=""), patch("omo_manager.omo_task_status.stop", return_value="session-1") as stop_call:
+                stop_args, _session_id = stop_done_agent(root, path, metadata)
+
+            self.assertFalse(stop_args.allow_self)
+            self.assertEqual("wl:1", stop_call.call_args.args[0].target)
+
+    def test_stop_done_agent_refuses_self_close_for_manager_or_current_collision(self) -> None:
+        cases = {
+            "manager task": (True, "current:\nworker.md wl:3\n"),
+            "current collision": (False, "current:\nworker.md wl:3\nmanager.md wl:3\n"),
+        }
+        for name, (is_manager, todo_text) in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                path = root / "worker.md"
+                path.write_text(self.worker_text(is_manager=is_manager) + "body\n", encoding="utf-8")
+                (root / "manager.md").write_text(self.worker_text(is_manager=True) + "body\n", encoding="utf-8")
+                (root / "TODO.md").write_text(todo_text, encoding="utf-8")
+                metadata = parse_task_metadata(path.read_text(encoding="utf-8"))
+                assert metadata is not None
+
+                with patch("omo_manager.omo_task_status.stop", return_value="session-1"):
+                    stop_args, _session_id = stop_done_agent(root, path, metadata)
+
+                self.assertFalse(stop_args.allow_self)
+
+    def test_stop_done_agent_refuses_configured_main_manager_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "worker.md"
+            path.write_text(self.worker_text() + "body\n", encoding="utf-8")
+            (root / "TODO.md").write_text("current:\nworker.md wl:3\n", encoding="utf-8")
+            metadata = parse_task_metadata(path.read_text(encoding="utf-8"))
+            assert metadata is not None
+
+            with patch.dict(os.environ, {"OMO_MANAGER_TMUX_TARGET": "wl:3"}), patch("omo_manager.omo_task_status.stop", return_value="session-1"):
+                stop_args, _session_id = stop_done_agent(root, path, metadata)
+
+            self.assertFalse(stop_args.allow_self)
+
     def test_sets_blocked_status_and_blocked_on(self) -> None:
         text = task_frontmatter() + "body\n"
 

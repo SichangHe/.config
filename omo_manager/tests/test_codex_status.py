@@ -2,10 +2,27 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from omo_manager.omo_codex_status import Args, Report, can_submit_stuck_input, current_block, current_input_text, final_assistant_output, has_compacting_indicator, has_terminal_enter_prompt_after_codex_footer, has_waiting_subagent_prompt, inspect, interrupt_waiting_subagent_if_present, last_output, report_from_lines, status, submit_stuck_input_if_present, visible_error_lines
+from omo_manager.omo_codex_status import Args, Report, can_submit_stuck_input, current_block, current_input_text, exact_pane_id, final_assistant_output, has_compacting_indicator, has_terminal_enter_prompt_after_codex_footer, has_waiting_subagent_prompt, inspect, interrupt_waiting_subagent_if_present, last_output, report_from_lines, status, submit_stuck_input_if_present, visible_error_lines
 
 
 class CodexStatusTests(unittest.TestCase):
+    def test_exact_pane_id_normalizes_omitted_pane_to_zero(self) -> None:
+        result = subprocess.CompletedProcess(["tmux"], 0, "vl:20.0\t%33515\n", "")
+        with patch("omo_manager.omo_codex_status.subprocess.run", return_value=result) as run:
+            self.assertEqual("%33515", exact_pane_id("vl:20"))
+        run.assert_called_once_with(
+            ["tmux", "display-message", "-p", "-t", "vl:20.0", "#{session_name}:#{window_index}.#{pane_index}\t#{pane_id}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+
+    def test_exact_pane_id_rejects_tmux_prefix_resolution(self) -> None:
+        result = subprocess.CompletedProcess(["tmux"], 0, "wl:18.0\t%11117\n", "")
+        with patch("omo_manager.omo_codex_status.subprocess.run", return_value=result):
+            self.assertEqual("", exact_pane_id("wl:1.0"))
+
     def test_extracts_last_output_from_current_block(self) -> None:
         lines = ['old', '────', ' kept  ', '', '─ Worked for 1m 2s ─', '  gpt-5.5']
         self.assertEqual([' kept'], last_output(lines))
