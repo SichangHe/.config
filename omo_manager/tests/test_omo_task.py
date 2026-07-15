@@ -128,6 +128,36 @@ class OmoTaskTests(unittest.TestCase):
         self.assertIn("concrete bullet subgoal", runat_goal_tree_error("runat: cfg:2 pcodx\nimplement manager check\n"))
         self.assertIn("concrete bullet subgoal", runat_goal_tree_error("runat:\tcfg:2 pcodx\nimplement manager check\n"))
 
+    def test_new_frontmatter_task_accepts_blank_before_bullet_subgoals(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.md"
+            prompt.write_text(
+                "implement manager check\n\n- reproduce the failure\n- repair validation\n- verify dispatch\n",
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                result = main(
+                    [
+                        "--root",
+                        str(root),
+                        "--task-file",
+                        "x.md",
+                        "--tmux-session",
+                        "cfg",
+                        "--tmux-window",
+                        "2",
+                        "--prompt-file",
+                        str(prompt),
+                        "--manager-target",
+                        "mgr:1",
+                        "--no-link",
+                        "--dry-run",
+                    ]
+                )
+            self.assertEqual(0, result, stdout.getvalue())
+
     def test_rejects_collapsed_runat_header(self) -> None:
         text = (
             "runat: vl:13 codex managerat: vl:15 Guide the human step by step through\n"

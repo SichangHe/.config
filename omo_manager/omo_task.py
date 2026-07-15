@@ -465,7 +465,10 @@ def runat_goal_tree_error(text: str) -> str:
         return "task files starting with `runat:` must put a high-level goal directly after the `runat:` line."
     if is_bullet(lines[goal_idx]):
         return "task files starting with `runat:` must use a plain high-level goal line before bullet subgoals."
-    if len(lines) <= goal_idx + 1 or not is_bullet(lines[goal_idx + 1]):
+    subgoal_idx = goal_idx + 1
+    while subgoal_idx < len(lines) and not lines[subgoal_idx].strip():
+        subgoal_idx += 1
+    if len(lines) <= subgoal_idx or not is_bullet(lines[subgoal_idx]):
         return "task files starting with `runat:` must put at least one concrete bullet subgoal directly under the high-level goal."
     return ""
 
