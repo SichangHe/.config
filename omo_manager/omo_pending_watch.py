@@ -2787,7 +2787,20 @@ def email_human_watcher_crash(argv: list[str], exc: BaseException) -> None:
 
 def cli(argv: list[str]) -> int:
     try:
-        return main(argv)
+        status = main(argv)
+        _ = sys.stdout.flush()
+        return status
+    except BrokenPipeError:
+        try:
+            stdout_fd = sys.stdout.fileno()
+        except (AttributeError, OSError):
+            return 0
+        devnull_fd = os.open(os.devnull, os.O_WRONLY)
+        try:
+            _ = os.dup2(devnull_fd, stdout_fd)
+        finally:
+            os.close(devnull_fd)
+        return 0
     except Exception as exc:
         email_human_watcher_crash(argv, exc)
         raise

@@ -8438,6 +8438,33 @@ class PendingMarkerTests(unittest.TestCase):
         self.assertIn("The pending watcher crashed unexpectedly.", sent["body"])
         self.assertIn("RuntimeError: boom", sent["body"])
 
+    def test_once_dry_run_treats_closed_stdout_pipe_as_clean_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "task.md").write_text("(pending)\nroute this message\n", encoding="utf-8")
+            child_code = """
+import sys
+from omo_manager import omo_pending_watch as watcher
+
+watcher.email_human_watcher_crash = lambda *_: None
+raise SystemExit(watcher.cli(sys.argv[1:]))
+"""
+            read_fd, write_fd = os.pipe()
+            os.close(read_fd)
+            try:
+                result = subprocess.run(
+                    [sys.executable, "-c", child_code, "--root", str(root), "--once", "--dry-run"],
+                    stdout=write_fd,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=10,
+                    check=False,
+                )
+            finally:
+                os.close(write_fd)
+            self.assertEqual("", result.stderr)
+            self.assertEqual(0, result.returncode)
+
     def test_background_agent_problem_check_does_not_block_pending_scan(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
