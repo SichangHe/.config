@@ -2386,6 +2386,31 @@ def evidence_target(line: str) -> str:
     return match.group(1) if match is not None else ""
 
 
+MANAGER_SELF_PROBLEM_STATUSES = {"blocked_idle", "error", "manager_compaction", "manager_waiting_subagent", "not_codex", "ready", "stuck_input"}
+MANAGER_HUMAN_EMAIL_PROBLEM_STATUSES = {"error", "manager_waiting_subagent", "not_codex", "stuck_input"}
+
+
+def problem_line_matches_manager_target(line: str, manager_target: str = "") -> bool:
+    target = evidence_target(line)
+    return bool(target and same_tmux_target(target, manager_target))
+
+
+def manager_role_problem_line(line: str, statuses: set[str]) -> bool:
+    return problem_line_status(line) in statuses and problem_line_task(line) == "manager" and re.search(r"\brole=manager\b", line) is not None
+
+
+def manager_role_problem_line_for_target(line: str, statuses: set[str], manager_target: str = "") -> bool:
+    if not manager_role_problem_line(line, statuses):
+        return False
+    if not manager_target:
+        return True
+    return problem_line_matches_manager_target(line, manager_target)
+
+
+def any_manager_self_problem_line(line: str) -> bool:
+    return manager_role_problem_line(line, MANAGER_SELF_PROBLEM_STATUSES)
+
+
 def manager_self_status_line(line: str, manager_target: str = "") -> bool:
     if re.match(r"^(?:not_codex|running|blocked_idle|error|ready|stuck_input|human_request): task=\S+ evidence=target=", line) is None:
         return False
@@ -2407,21 +2432,15 @@ def filter_manager_self_status_output(output: str, manager_target: str = "") -> 
 
 
 def manager_self_problem_line(line: str, manager_target: str = "") -> bool:
-    del manager_target
-    if re.match(r"^(?:blocked_idle|error|manager_waiting_subagent|not_codex|ready|stuck_input): task=manager evidence=.*\brole=manager\b", line):
-        return True
-    return False
+    return manager_role_problem_line_for_target(line, MANAGER_SELF_PROBLEM_STATUSES, manager_target)
 
 
 def manager_human_email_problem_line(line: str, manager_target: str = "") -> bool:
-    del manager_target
     if line.startswith("stuck_input: "):
         unstick_match = re.search(r"\bunstick=(\S+)$", line)
         if unstick_match is not None and not unstick_match.group(1).startswith("not_safe:"):
             return False
-    if re.match(r"^(?:error|manager_waiting_subagent|not_codex|stuck_input): task=manager evidence=.*\brole=manager\b", line):
-        return True
-    return False
+    return manager_role_problem_line_for_target(line, MANAGER_HUMAN_EMAIL_PROBLEM_STATUSES, manager_target)
 
 
 def manager_self_unstuck_line(line: str, manager_target: str = "") -> bool:
@@ -2432,8 +2451,8 @@ def manager_self_unstuck_line(line: str, manager_target: str = "") -> bool:
 
 
 def manager_compaction_line(line: str, manager_target: str = "") -> bool:
-    if re.match(r"^manager_compaction: task=manager evidence=.*\brole=manager\b", line):
-        return True
+    if manager_role_problem_line(line, {"manager_compaction"}):
+        return manager_role_problem_line_for_target(line, {"manager_compaction"}, manager_target)
     match = re.match(r"^manager_compaction: task=\S+ evidence=target=(\S+)", line)
     return bool(match is not None and same_tmux_target(match.group(1), manager_target))
 
@@ -2467,7 +2486,7 @@ def filter_manager_compaction_output(output: str, manager_target: str = "") -> s
     lines = output.splitlines()
     if not lines or not lines[0].startswith("agent-problems:"):
         return output
-    kept = [line for line in lines[1:] if problem_line_status(line) != "human_request" and not manager_compaction_line(line, manager_target) and not line.startswith("manager-action: ")]
+    kept = [line for line in lines[1:] if problem_line_status(line) != "human_request" and not manager_role_problem_line(line, {"manager_compaction"}) and not manager_compaction_line(line, manager_target) and not line.startswith("manager-action: ")]
     if len(kept) == len(lines) - 1:
         return output
     return filtered_problem_output(kept)
@@ -2477,10 +2496,68 @@ def filter_manager_self_problem_output(output: str, manager_target: str = "") ->
     lines = output.splitlines()
     if not lines or not lines[0].startswith("agent-problems:"):
         return output
-    kept = [line for line in lines[1:] if problem_line_status(line) != "human_request" and not manager_self_problem_line(line, manager_target) and not manager_self_unstuck_line(line, manager_target) and not line.startswith("manager-action: ")]
+    kept = [line for line in lines[1:] if problem_line_status(line) != "human_request" and not any_manager_self_problem_line(line) and not manager_self_unstuck_line(line, manager_target) and not line.startswith("manager-action: ")]
     if len(kept) == len(lines) - 1:
         return output
     return filtered_problem_output(kept, suppress_message="omo_pending_watch: suppressed manager self-problem report")
+
+
+def unchanged_dependency_blocked_idle_line(line: str, current: dict[str, tuple[TaskLine, str, str]], snapshots: dict[str, str]) -> bool:
+    """Return true only for a repeated, valid blocked-manager dependency row."""
+
+    if problem_line_status(line) != "blocked_idle" or problem_line_value(line, "task_status") != "blocked":
+        return False
+    task_file = problem_line_task(line)
+    if not task_file:
+        return False
+    current_snapshot = current.get(task_file)
+    return current_snapshot is not None and snapshots.get(task_file) == current_snapshot[1]
+
+
+def filter_unchanged_dependency_blocked_idle_output(args: Args, output: str, snapshots: dict[str, str]) -> str | None:
+    lines = output.splitlines()
+    if not lines or not lines[0].startswith("agent-problems:"):
+        return output
+    current = dependency_snapshot_state(args.root)
+    if not current:
+        return output
+    kept: list[str] = []
+    suppressed = False
+    for line in lines[1:]:
+        if unchanged_dependency_blocked_idle_line(line, current, snapshots):
+            suppressed = True
+            continue
+        if not line.startswith("manager-action: "):
+            kept.append(line)
+    if not suppressed:
+        return output
+    return filtered_problem_output(kept, suppress_message="omo_pending_watch: suppressed unchanged blocked dependency report")
+
+
+def prune_dependency_reported_snapshots(root: Path, snapshots: dict[str, str]) -> None:
+    current = dependency_snapshot_state(root)
+    for task_file in tuple(snapshots):
+        current_snapshot = current.get(task_file)
+        if current_snapshot is None or current_snapshot[1] != snapshots[task_file]:
+            snapshots.pop(task_file, None)
+
+
+def dependency_snapshot_replacements_for_problem_lines(root: Path, lines: tuple[str, ...]) -> tuple[tuple[str, str], ...]:
+    current = dependency_snapshot_state(root)
+    replacements: list[tuple[str, str]] = []
+    seen_tasks: set[str] = set()
+    for line in lines:
+        if problem_line_status(line) != "blocked_idle" or problem_line_value(line, "task_status") != "blocked":
+            continue
+        task_file = problem_line_task(line)
+        if not task_file or task_file in seen_tasks:
+            continue
+        current_snapshot = current.get(task_file)
+        if current_snapshot is None:
+            continue
+        seen_tasks.add(task_file)
+        replacements.append((task_file, current_snapshot[1]))
+    return tuple(replacements)
 
 
 def manager_human_email_problem_output(output: str, manager_target: str = "") -> str:
@@ -2685,13 +2762,18 @@ def handle_agent_problem_result(
     result: CommandOutput,
     now_wall_s: float,
     dependency_snapshots: dict[str, str] | None = None,
+    dependency_reported_snapshots: dict[str, str] | None = None,
 ) -> bool:
     """Filter, throttle, and route status-problem output."""
 
     if result.timed_out:
         print("omo_pending_watch: agent problem check timed out", file=sys.stderr)
         return False
-    dependency_changed = maybe_push_dependency_transitions(args, dependency_snapshots if dependency_snapshots is not None else {}, now_wall_s)
+    dependency_state = dependency_snapshots if dependency_snapshots is not None else {}
+    dependency_reported_state = dependency_reported_snapshots if dependency_reported_snapshots is not None else {}
+    prune_dependency_reported_snapshots(args.root, dependency_reported_state)
+    previous_dependency_reported_state = dict(dependency_reported_state)
+    dependency_changed = maybe_push_dependency_transitions(args, dependency_state, now_wall_s)
     if result.returncode == 0:
         enter_changed = clear_all_enter_attempts(args, seen)
         return clear_manager_compaction_active(args, seen) or enter_changed or dependency_changed
@@ -2712,6 +2794,9 @@ def handle_agent_problem_result(
     output = filter_manager_self_problem_output(output, args.manager_target) or ""
     if not output:
         return manager_problem_sent or compaction_changed or dependency_changed
+    output = filter_unchanged_dependency_blocked_idle_output(args, output, previous_dependency_reported_state) or ""
+    if not output:
+        return manager_problem_sent or compaction_changed or dependency_changed
     changed = manager_problem_sent or compaction_changed or dependency_changed
     for owner_target, dispatch in agent_problem_output_by_owner(args, seen, output, now_wall_s).items():
         digest = hashlib.sha256(f"{owner_target}\n{dispatch.digest_text}".encode("utf-8")).hexdigest()[:16]
@@ -2720,9 +2805,12 @@ def handle_agent_problem_result(
             continue
         text = with_manager_policy_reminder(args, dispatch.text)
         target = owner_target or args.manager_target
+        dependency_reported_replacements = dependency_snapshot_replacements_for_problem_lines(args.root, dispatch.problem_lines)
         event = DeliverySuccessEvent(
             seen_keys=(key,),
             blocked_idle_lines=dispatch.blocked_idle_lines,
+            dependency_replacements=dependency_reported_replacements,
+            dependency_state=dependency_reported_state if dependency_reported_replacements else None,
             seen_at_s=now_wall_s,
         )
         guard = AgentProblemGuard(
@@ -2735,6 +2823,8 @@ def handle_agent_problem_result(
         if status == 0:
             for backoff_owner, line in dispatch.blocked_idle_lines:
                 remember_blocked_idle_report(args, seen, backoff_owner, line, now_wall_s)
+            for task_file, snapshot in dependency_reported_replacements:
+                dependency_reported_state[task_file] = snapshot
             remember_seen(seen, key, now_wall_s)
         changed = True
     return changed
@@ -2862,6 +2952,7 @@ def main(argv: list[str]) -> int:
     args = parse_args(argv)
     seen = new_seen_cache()
     dependency_snapshots: dict[str, str] = {}
+    dependency_reported_snapshots: dict[str, str] = {}
     if args.once:
         _ = scan_once(args, seen, markdown_files(args.root))
         _ = wait_for_delivery_successes(args, seen, max(10.0, DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S + 5.0))
@@ -2903,7 +2994,7 @@ def main(argv: list[str]) -> int:
         if agent_problem_run is not None:
             result = poll_command(agent_problem_run, now_wall_s)
             if result is not None:
-                _ = handle_agent_problem_result(args, seen, result, now_wall_s, dependency_snapshots)
+                _ = handle_agent_problem_result(args, seen, result, now_wall_s, dependency_snapshots, dependency_reported_snapshots)
                 agent_problem_run = None
         last_idle_status_check_s, idle_status_run = update_idle_status_check(args, last_idle_status_check_s, now_s, idle_status_run)
         if idle_status_run is not None:

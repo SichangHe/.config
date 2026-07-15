@@ -7812,6 +7812,160 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertIn("prep.md cfg:1", out.getvalue())
             self.assertIn("packet.md cfg:2", out.getvalue())
 
+    def test_agent_problem_check_suppresses_unchanged_dependency_blocked_idle(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "TODO.md").write_text("current:\nmanager.md cfg:1\nleaf.md cfg:2\n", encoding="utf-8")
+            _ = (root / "manager.md").write_text(
+                task_frontmatter("blocked", runat="cfg:1", managerat="main:0", is_manager=True, blocked_on="leaf.md"),
+                encoding="utf-8",
+            )
+            _ = (root / "leaf.md").write_text(task_frontmatter("running", runat="cfg:2", managerat="cfg:1"), encoding="utf-8")
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, True, manager_target="main:0")
+            result = watcher.CommandOutput(
+                "agent-problems",
+                3,
+                "agent-problems: blocked_idle=1\n"
+                "manager-action: blocked_idle>0 inspect blocked agents, unblock if possible, or route the exact blocker\n"
+                "blocked_idle: task=manager.md evidence=target=cfg:1 task_status=blocked idle_status=ready reason=leaf.md owner_target=main:0\n",
+                "",
+            )
+            snapshots: dict[str, str] = {}
+            reported_snapshots: dict[str, str] = {}
+            out = StringIO()
+            with redirect_stdout(out):
+                self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0, snapshots, reported_snapshots))
+            text = out.getvalue()
+            self.assertIn("blocked agents are ready", text)
+            self.assertNotIn("suppressed unchanged blocked dependency report", text)
+            self.assertIn("manager.md", snapshots)
+            self.assertIn("manager.md", reported_snapshots)
+
+            out = StringIO()
+            with redirect_stdout(out):
+                self.assertFalse(watcher.handle_agent_problem_result(args, {}, result, 1001.0, snapshots, reported_snapshots))
+            text = out.getvalue()
+            self.assertIn("suppressed unchanged blocked dependency report", text)
+            self.assertNotIn("blocked agents are ready", text)
+            self.assertIn("manager.md", snapshots)
+
+    def test_agent_problem_check_does_not_suppress_after_failed_dependency_report(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "TODO.md").write_text("current:\nmanager.md cfg:1\nleaf.md cfg:2\n", encoding="utf-8")
+            _ = (root / "manager.md").write_text(
+                task_frontmatter("blocked", runat="cfg:1", managerat="main:0", is_manager=True, blocked_on="leaf.md"),
+                encoding="utf-8",
+            )
+            _ = (root / "leaf.md").write_text(task_frontmatter("running", runat="cfg:2", managerat="cfg:1"), encoding="utf-8")
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="main:0")
+            result = watcher.CommandOutput(
+                "agent-problems",
+                3,
+                "agent-problems: blocked_idle=1\n"
+                "manager-action: blocked_idle>0 inspect blocked agents, unblock if possible, or route the exact blocker\n"
+                "blocked_idle: task=manager.md evidence=target=cfg:1 task_status=blocked idle_status=ready reason=leaf.md owner_target=main:0\n",
+                "",
+            )
+            snapshots: dict[str, str] = {}
+            reported_snapshots: dict[str, str] = {}
+            with patch.object(watcher, "push_manager_text_to_target", return_value=1):
+                self.assertFalse(watcher.handle_agent_problem_result(args, {}, result, 1000.0, snapshots, reported_snapshots))
+            self.assertIn("manager.md", snapshots)
+            self.assertNotIn("manager.md", reported_snapshots)
+
+            with patch.object(watcher, "push_manager_text_to_target", return_value=0) as push:
+                self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1001.0, snapshots, reported_snapshots))
+            self.assertEqual(1, push.call_count)
+            self.assertIn("manager.md", reported_snapshots)
+
+    def test_agent_problem_check_reports_dependency_change_then_suppresses_repeat(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "TODO.md").write_text("current:\nmanager.md cfg:1\nleaf-a.md cfg:2\nleaf-b.md cfg:3\n", encoding="utf-8")
+            _ = (root / "manager.md").write_text(
+                task_frontmatter("blocked", runat="cfg:1", managerat="main:0", is_manager=True, blocked_on="leaf-a.md"),
+                encoding="utf-8",
+            )
+            _ = (root / "leaf-a.md").write_text(task_frontmatter("running", runat="cfg:2", managerat="cfg:1"), encoding="utf-8")
+            _ = (root / "leaf-b.md").write_text(task_frontmatter("running", runat="cfg:3", managerat="cfg:1"), encoding="utf-8")
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, True, manager_target="main:0")
+            snapshots: dict[str, str] = {}
+            reported_snapshots: dict[str, str] = {}
+            self.assertFalse(watcher.maybe_push_dependency_transitions(args, snapshots, 1000.0))
+            reported_snapshots.update(snapshots)
+
+            _ = (root / "manager.md").write_text(
+                task_frontmatter("blocked", runat="cfg:1", managerat="main:0", is_manager=True, blocked_on="leaf-b.md"),
+                encoding="utf-8",
+            )
+            result = watcher.CommandOutput(
+                "agent-problems",
+                3,
+                "agent-problems: blocked_idle=1\n"
+                "manager-action: blocked_idle>0 inspect blocked agents, unblock if possible, or route the exact blocker\n"
+                "blocked_idle: task=manager.md evidence=target=cfg:1 task_status=blocked idle_status=ready reason=leaf-b.md owner_target=main:0\n",
+                "",
+            )
+            out = StringIO()
+            with redirect_stdout(out):
+                self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1001.0, snapshots, reported_snapshots))
+            text = out.getvalue()
+            self.assertIn("blocked manager dependency graph changed", text)
+            self.assertIn("manager.md cfg:1 <blocked_on>leaf-b.md</blocked_on>", text)
+            self.assertIn("blocked agents are ready", text)
+            self.assertEqual(snapshots["manager.md"], reported_snapshots["manager.md"])
+
+            out = StringIO()
+            with redirect_stdout(out):
+                self.assertFalse(watcher.handle_agent_problem_result(args, {}, result, 1002.0, snapshots, reported_snapshots))
+            text = out.getvalue()
+            self.assertIn("suppressed unchanged blocked dependency report", text)
+            self.assertNotIn("blocked agents are ready", text)
+
+    def test_agent_problem_check_keeps_blocked_idle_for_invalid_dependency_state(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        cases = (
+            ("missing dependency", "missing.md", "", ()),
+            ("pending marker", "leaf.md", "(pending)\n", (("leaf.md", "running"),)),
+            ("non-live dependency", "leaf.md", "", (("leaf.md", "done"),)),
+            ("malformed blocker", "waiting on leaf.md", "", (("leaf.md", "running"),)),
+        )
+        for name, blocked_on, manager_suffix, leaf_states in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                todo_lines = ["current:", "manager.md cfg:1", *(f"{task} cfg:{index + 2}" for index, (task, _status) in enumerate(leaf_states))]
+                _ = (root / "TODO.md").write_text("\n".join(todo_lines) + "\n", encoding="utf-8")
+                _ = (root / "manager.md").write_text(
+                    task_frontmatter("blocked", runat="cfg:1", managerat="main:0", is_manager=True, blocked_on=blocked_on) + manager_suffix,
+                    encoding="utf-8",
+                )
+                for index, (task, status) in enumerate(leaf_states):
+                    _ = (root / task).write_text(task_frontmatter(status, runat=f"cfg:{index + 2}", managerat="cfg:1"), encoding="utf-8")
+                args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, True, manager_target="main:0")
+                result = watcher.CommandOutput(
+                    "agent-problems",
+                    3,
+                    "agent-problems: blocked_idle=1\n"
+                    "manager-action: blocked_idle>0 inspect blocked agents, unblock if possible, or route the exact blocker\n"
+                    f"blocked_idle: task=manager.md evidence=target=cfg:1 task_status=blocked idle_status=ready reason={blocked_on} owner_target=main:0\n",
+                    "",
+                )
+                out = StringIO()
+                with redirect_stdout(out):
+                    self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0, {}))
+                text = out.getvalue()
+                self.assertIn("blocked agents are ready", text)
+                self.assertIn("manager.md cfg:1", text)
+                self.assertNotIn("suppressed unchanged blocked dependency report", text)
+
     def test_blocked_manager_dependency_snapshot_reserves_async_change(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
@@ -8157,6 +8311,23 @@ class PendingMarkerTests(unittest.TestCase):
         self.assertEqual(1, text.count("Unless you know the exact content of MANAGER.md, read it. Normally, don't ack human"))
         self.assertNotIn("manager agent problem: running task marker needs attention.", text)
 
+    def test_agent_problem_check_ignores_stale_manager_compaction_target(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, True, manager_target="vl:1", agent_problem_repeat_s=300.0)
+        result = watcher.CommandOutput(
+            "agent-problems",
+            3,
+            "agent-problems: manager_compaction=1\nmanager-action: manager_compaction>0 reread MANAGER.md after compaction unless the compaction summary already included it\nmanager_compaction: task=manager evidence=target=wl:1.0 role=manager output=• Compacting conversation / › Continue managing\n",
+            "",
+        )
+        out = StringIO()
+        with redirect_stdout(out):
+            self.assertFalse(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
+        text = out.getvalue()
+        self.assertNotIn("Unless you know the exact content of MANAGER.md", text)
+        self.assertNotIn("manager (this is the main manager) wl:1.0", text)
+
     def test_agent_problem_check_clears_manager_compaction_active_when_gone(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
@@ -8202,6 +8373,40 @@ class PendingMarkerTests(unittest.TestCase):
         self.assertIn("error: task=manager evidence=target=wl:1.0 role=manager", text)
         self.assertIn("suppressed manager self-problem report", text)
         self.assertNotIn("manager agent problem: running task marker needs attention.", text)
+
+    def test_agent_problem_check_ignores_stale_manager_self_target(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, True, manager_target="vl:1", agent_problem_repeat_s=300.0)
+        result = watcher.CommandOutput(
+            "agent-problems",
+            3,
+            "agent-problems: not_codex=1\nnot_codex: task=manager evidence=target=wl:1.0 role=manager\n",
+            "",
+        )
+        out = StringIO()
+        with redirect_stdout(out), patch.object(watcher, "email_human_manager_problem", side_effect=AssertionError("unexpected human email")), patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=AssertionError("unexpected manager send")):
+            self.assertFalse(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
+        text = out.getvalue()
+        self.assertIn("suppressed manager self-problem report", text)
+        self.assertNotIn("manager (this is the main manager) wl:1.0", text)
+
+    def test_agent_problem_check_preserves_configured_missing_manager_target(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, True, manager_target="wl:1.0", agent_problem_repeat_s=300.0)
+        result = watcher.CommandOutput(
+            "agent-problems",
+            3,
+            "agent-problems: not_codex=1\nnot_codex: task=manager evidence=target=wl:1.0 role=manager\n",
+            "",
+        )
+        out = StringIO()
+        with redirect_stdout(out):
+            self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
+        text = out.getvalue()
+        self.assertIn("manager human email due: manager watcher detected manager error", text)
+        self.assertIn("not_codex: task=manager evidence=target=wl:1.0 role=manager", text)
 
     def test_agent_problem_check_invokes_human_email_helper_for_manager_error(self) -> None:
         from omo_manager import omo_pending_watch as watcher
