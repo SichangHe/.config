@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import os
 import re
 import shlex
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from dataclasses import dataclass
@@ -63,6 +65,9 @@ class Args:
     manager_target: str = ""
     prelaunch_source: Path | None = None
     is_manager: bool = False
+    migrate_manager_owner: bool = False
+    old_manager_target: str = ""
+    new_manager_target: str = ""
 
 
 class ParsedArgs(argparse.Namespace):
@@ -82,10 +87,18 @@ class ParsedArgs(argparse.Namespace):
     manager_target: str = ""
     prelaunch_source: Path | None = None
     is_manager: bool = False
+    migrate_manager_owner: bool = False
+    old_manager_target: str = ""
+    new_manager_target: str = ""
 
 
 def parse_args(argv: list[str]) -> Args:
-    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        allow_abbrev=False,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=("Ownership migration: omo_task.py --root ROOT --task-file TASK.md --migrate-manager-owner --old-manager-target OLD --new-manager-target NEW [--dry-run]"),
+    )
     _ = parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     _ = parser.add_argument("--task-file", required=True)
     _ = parser.add_argument("--tmux-session", default="")
@@ -96,25 +109,74 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--window-name", default="")
     _ = parser.add_argument("--prompt-file", type=Path)
     _ = parser.add_argument("--no-link", action="store_true")
-    _ = parser.add_argument("--dry-run", action="store_true")
+    _ = parser.add_argument("--dry-run", action="store_true", help="Print the planned launch or ownership migration without changing files or tmux.")
     _ = parser.add_argument("--session-id", default="", help="Codex session id to resume in a new worker window.")
     _ = parser.add_argument("--reasoning-effort", choices=("low", "medium", "high", "xhigh", "max", "ultra"), default="", help="Start Codex with `model_reasoning_effort` for this worker.")
     _ = parser.add_argument("--codex-flag", action="append", help="Extra raw Codex argv token. Repeat for flags and values; use `--codex-flag=--flag` when the token starts with `--`.")
     _ = parser.add_argument("--manager-target", default="", help="Optional manager owner target to write as `managerat:` task metadata.")
     _ = parser.add_argument("--prelaunch-source", type=Path, help="Readable shell script to source before launching the worker command.")
     _ = parser.add_argument("--is-manager", action="store_true", help="Mark the task as a manager task in frontmatter.")
+    _ = parser.add_argument(
+        "--migrate-manager-owner", action="store_true", help="Atomically migrate only `managerat` on one existing task; requires explicit old and new targets and performs no launch or TODO action."
+    )
+    _ = parser.add_argument("--old-manager-target", default="", help="Existing `managerat` value required by --migrate-manager-owner.")
+    _ = parser.add_argument("--new-manager-target", default="", help="Replacement `managerat` value required by --migrate-manager-owner.")
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     if not parsed.task_file.endswith(".md"):
         parser.error("--task-file must end with `.md`.")
     if parsed.pane:
         parser.error("pane selection is no longer supported; pane 0 is implied.")
-    if parsed.workdir is not None and not parsed.tmux_session:
-        parser.error("--workdir requires --tmux-session.")
     if parsed.tool not in COMMAND_BY_TOOL:
         parser.error("only --tool codex or --tool pcodx is supported.")
     tool_explicit = any(arg == "--tool" or arg.startswith("--tool=") for arg in argv)
+    if not parsed.migrate_manager_owner and (parsed.old_manager_target or parsed.new_manager_target):
+        parser.error("--old-manager-target and --new-manager-target require --migrate-manager-owner.")
+    if parsed.migrate_manager_owner:
+        if not parsed.old_manager_target or not parsed.new_manager_target:
+            parser.error("--migrate-manager-owner requires --old-manager-target OLD and --new-manager-target NEW.")
+        if any(
+            (
+                parsed.tmux_session,
+                parsed.tmux_window,
+                parsed.workdir,
+                parsed.window_name,
+                parsed.prompt_file,
+                parsed.no_link,
+                parsed.session_id,
+                parsed.reasoning_effort,
+                parsed.codex_flag,
+                tool_explicit,
+                parsed.manager_target,
+                parsed.prelaunch_source,
+                parsed.is_manager,
+            )
+        ):
+            parser.error("--migrate-manager-owner only accepts --root, --task-file, explicit old/new manager targets, and optional --dry-run.")
+    if parsed.workdir is not None and not parsed.tmux_session:
+        parser.error("--workdir requires --tmux-session.")
     prelaunch_source = parsed.prelaunch_source.resolve() if parsed.prelaunch_source is not None else None
-    return Args(parsed.root.resolve(), parsed.task_file, parsed.tmux_session, parsed.tmux_window, parsed.tool, parsed.workdir, parsed.window_name, parsed.prompt_file, parsed.no_link, parsed.dry_run, parsed.session_id, parsed.reasoning_effort, tuple(parsed.codex_flag or ()), tool_explicit, parsed.manager_target, prelaunch_source, parsed.is_manager)
+    return Args(
+        parsed.root.resolve(),
+        parsed.task_file,
+        parsed.tmux_session,
+        parsed.tmux_window,
+        parsed.tool,
+        parsed.workdir,
+        parsed.window_name,
+        parsed.prompt_file,
+        parsed.no_link,
+        parsed.dry_run,
+        parsed.session_id,
+        parsed.reasoning_effort,
+        tuple(parsed.codex_flag or ()),
+        tool_explicit,
+        parsed.manager_target,
+        prelaunch_source,
+        parsed.is_manager,
+        parsed.migrate_manager_owner,
+        parsed.old_manager_target,
+        parsed.new_manager_target,
+    )
 
 
 def task_path(root: Path, task_file: str) -> Path:
@@ -126,6 +188,93 @@ def task_path(root: Path, task_file: str) -> Path:
 
 def task_ref(root: Path, task_file: str) -> str:
     return task_path(root, task_file).relative_to(root.resolve()).as_posix()
+
+
+def canonical_tmux_pane(tmux_target: str) -> tuple[str, int, int]:
+    session, window_and_pane = tmux_target.split(":", 1)
+    window, dot, pane = window_and_pane.partition(".")
+    return session, int(window), int(pane) if dot else 0
+
+
+def manager_owner_migration_text(text: str, old_owner: str, new_owner: str) -> str:
+    """Return valid task text with only the exact frontmatter owner value changed."""
+    for label, owner in (("old", old_owner), ("new", new_owner)):
+        if TMUX_TARGET_RE.fullmatch(owner) is None:
+            raise ValueError(f"{label} manager target must be a full tmux target like `SESSION:WINDOW`.")
+    if canonical_tmux_pane(old_owner) == canonical_tmux_pane(new_owner):
+        raise ValueError("old and new manager targets must identify different tmux panes.")
+    metadata = parse_task_metadata(text)
+    if metadata is None:
+        raise ValueError("ownership migration requires an existing task with valid frontmatter.")
+    if metadata.managerat != old_owner:
+        raise ValueError(f"existing managerat {metadata.managerat} does not equal --old-manager-target {old_owner}.")
+    if metadata.runat != "retired" and canonical_tmux_pane(new_owner) == canonical_tmux_pane(metadata.runat):
+        raise ValueError("new manager target must be different from task `runat`.")
+
+    lines = text.splitlines(keepends=True)
+    closing_idx = next(idx for idx, line in enumerate(lines[1:], start=1) if line.strip() == "---")
+    owner_indexes = [idx for idx, line in enumerate(lines[1:closing_idx], start=1) if line.rstrip("\r\n").partition(":")[0] == "managerat"]
+    if len(owner_indexes) != 1:
+        raise ValueError("ownership migration requires exactly one frontmatter `managerat` field.")
+    owner_idx = owner_indexes[0]
+    line = lines[owner_idx]
+    content = line.rstrip("\r\n")
+    line_ending = line[len(content) :]
+    key, separator, value = content.partition(":")
+    value_start = len(value) - len(value.lstrip())
+    value_end = len(value.rstrip())
+    lines[owner_idx] = f"{key}{separator}{value[:value_start]}{new_owner}{value[value_end:]}{line_ending}"
+    updated = "".join(lines)
+    updated_metadata = parse_task_metadata(updated)
+    if updated_metadata is None or updated_metadata.managerat != new_owner:
+        raise RuntimeError("updated task frontmatter did not retain the requested manager owner.")
+    return updated
+
+
+def same_file_state(left: os.stat_result, right: os.stat_result) -> bool:
+    return left.st_dev == right.st_dev and left.st_ino == right.st_ino and left.st_mtime_ns == right.st_mtime_ns and left.st_size == right.st_size
+
+
+def same_file_identity(left: os.stat_result, right: os.stat_result) -> bool:
+    return left.st_dev == right.st_dev and left.st_ino == right.st_ino
+
+
+def atomic_replace_if_unchanged(path: Path, text: str, before: os.stat_result) -> None:
+    """Atomically replace `path` only if it still matches the state that was read."""
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", dir=path.parent, prefix=f".{path.name}.", delete=False) as handle:
+            tmp_path = Path(handle.name)
+            _ = handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        tmp_path.chmod(before.st_mode & 0o7777)
+        if not same_file_state(before, path.stat()):
+            raise ValueError("task file changed while ownership migration was being prepared; retry after rereading it.")
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
+
+
+def migrate_manager_owner(path: Path, old_owner: str, new_owner: str, dry_run_only: bool = False) -> None:
+    """Validate and migrate one existing task owner without touching other state."""
+    if not path.is_file():
+        raise ValueError(f"ownership migration requires an existing task file: {path}")
+    while True:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            before = os.fstat(handle.fileno())
+            if not same_file_identity(before, path.stat()):
+                continue
+            existing = handle.read()
+            updated = manager_owner_migration_text(existing, old_owner, new_owner)
+            if dry_run_only:
+                print(f"dry-run: would change only managerat from {old_owner} to {new_owner} in {path}; no files or tmux panes changed.")
+                return
+            atomic_replace_if_unchanged(path, updated, before)
+            print(f"migrated only managerat from {old_owner} to {new_owner} in {path}")
+            return
 
 
 def target(args: Args) -> str:
@@ -734,6 +883,9 @@ def validate_inputs(args: Args) -> None:
 def main(argv: list[str]) -> int:
     try:
         args = parse_args(argv)
+        if args.migrate_manager_owner:
+            migrate_manager_owner(task_path(args.root, args.task_file), args.old_manager_target, args.new_manager_target, args.dry_run)
+            return 0
         validate_inputs(args)
         if args.dry_run:
             dry_run(args)
