@@ -97,6 +97,84 @@ class ReportHelperTests(unittest.TestCase):
             self.assertIn("task-file=task.md", durable_text)
             self.assertIn("default report\n", durable_text)
 
+    def test_omo_report_prefers_single_current_task_over_stale_human_pending_collision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "logs"
+            root.mkdir()
+            bin_dir = tmp_path / "bin"
+            bin_dir.mkdir()
+            write_fake_tmux(bin_dir)
+            local_env = tmp_path / "local.env"
+            local_env.write_text(f"OMO_WORK_LOGS_ROOT={root}\n", encoding="utf-8")
+            (root / "TODO.md").write_text(
+                "current:\ncurrent.md cfg:7\n\nhuman pending:\nstale.md\n",
+                encoding="utf-8",
+            )
+            _ = (root / "current.md").write_text(task_frontmatter(), encoding="utf-8")
+            _ = (root / "stale.md").write_text(
+                task_frontmatter().replace("status: running", "status: blocked\nblocked_on: waiting for human review"),
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [str(OMO_DIR / "omo_report.sh"), "--alloc-message-file"],
+                cwd=tmp,
+                env={
+                    **os.environ,
+                    "OMO_MANAGER_LOCAL_ENV": str(local_env),
+                    "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                    "TMUX_PANE": "%1701",
+                },
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            report_file = Path(result.stdout.strip())
+            self.assertTrue(report_file.name.startswith("current."))
+            report_file.unlink()
+
+    def test_omo_report_keeps_pane_collisions_ambiguous_without_one_current_match(self) -> None:
+        todo_cases = {
+            "no current match": "current:\nother.md other:1\n\nhuman pending:\nfirst.md\nsecond.md\n",
+            "multiple current matches": "current:\nfirst.md cfg:7\nsecond.md cfg:7\n",
+        }
+        for name, todo_text in todo_cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp)
+                root = tmp_path / "logs"
+                root.mkdir()
+                bin_dir = tmp_path / "bin"
+                bin_dir.mkdir()
+                write_fake_tmux(bin_dir)
+                local_env = tmp_path / "local.env"
+                local_env.write_text(f"OMO_WORK_LOGS_ROOT={root}\n", encoding="utf-8")
+                (root / "TODO.md").write_text(todo_text, encoding="utf-8")
+                _ = (root / "first.md").write_text(task_frontmatter(), encoding="utf-8")
+                _ = (root / "second.md").write_text(task_frontmatter(), encoding="utf-8")
+                _ = (root / "other.md").write_text(task_frontmatter(runat="other:1"), encoding="utf-8")
+
+                result = subprocess.run(
+                    [str(OMO_DIR / "omo_report.sh"), "--alloc-message-file"],
+                    cwd=tmp,
+                    env={
+                        **os.environ,
+                        "OMO_MANAGER_LOCAL_ENV": str(local_env),
+                        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                        "TMUX_PANE": "%1701",
+                    },
+                    text=True,
+                    capture_output=True,
+                    timeout=10,
+                    check=False,
+                )
+
+                self.assertEqual(2, result.returncode)
+                self.assertIn("multiple active task files match tmux target cfg:7", result.stderr)
+
     def test_omo_report_inference_failure_does_not_offer_explicit_task_file_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

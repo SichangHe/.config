@@ -108,6 +108,23 @@ class ManagerOwnerMigrationTests(unittest.TestCase):
             start_codex.assert_not_called()
             tmux.assert_not_called()
 
+    def test_migration_repairs_legacy_manager_self_ownership(self) -> None:
+        legacy = TASK_TEXT.replace("runat: worker:7.0", "runat: old:1").replace("is_manager: false", "is_manager: true")
+        updated = manager_owner_migration_text(legacy, "old:1", "new:2.3")
+
+        metadata = parse_task_metadata(updated)
+        self.assertIsNotNone(metadata)
+        assert metadata is not None
+        self.assertEqual("old:1", metadata.runat)
+        self.assertEqual("new:2.3", metadata.managerat)
+        self.assertTrue(metadata.is_manager)
+
+    def test_legacy_self_owner_repair_still_rejects_other_invalid_metadata(self) -> None:
+        legacy = TASK_TEXT.replace("runat: worker:7.0", "runat: old:1").replace("status: blocked", "status: waiting")
+
+        with self.assertRaisesRegex(ValueError, "status"):
+            _ = manager_owner_migration_text(legacy, "old:1", "new:2.3")
+
     def test_dry_run_validates_but_mutates_nothing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

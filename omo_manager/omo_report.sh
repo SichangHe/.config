@@ -102,7 +102,7 @@ def parse_frontmatter(path: Path) -> dict[str, str] | None:
             values[key.strip()] = value.strip()
     return values
 
-def active_task_refs() -> list[Path]:
+def task_refs(sections: set[str]) -> list[Path]:
     todo = root / "TODO.md"
     try:
         lines = todo.read_text(encoding="utf-8").splitlines()
@@ -116,7 +116,7 @@ def active_task_refs() -> list[Path]:
         if stripped.endswith(":") and stripped[:-1] in ACTIVE_SECTIONS | {"previous"}:
             section = stripped[:-1]
             continue
-        if section not in ACTIVE_SECTIONS:
+        if section not in sections:
             continue
         for match in re.findall(r"`?([A-Za-z0-9_./-]+\.md)`?", line):
             path = (root / match).resolve(strict=False)
@@ -129,6 +129,9 @@ def active_task_refs() -> list[Path]:
             seen.add(path)
             refs.append(path)
     return refs
+
+def active_task_refs() -> list[Path]:
+    return task_refs(ACTIVE_SECTIONS)
 
 current = current_tmux_target()
 if not current:
@@ -145,6 +148,12 @@ for candidate in active_task_refs():
 if len(matches) == 1:
     print(matches[0].relative_to(root))
     raise SystemExit(0)
+if len(matches) > 1:
+    current_refs = set(task_refs({"current"}))
+    current_matches = [candidate for candidate in matches if candidate in current_refs]
+    if len(current_matches) == 1:
+        print(current_matches[0].relative_to(root))
+        raise SystemExit(0)
 if not matches:
     print(f"could not infer task file for tmux target {current}", file=sys.stderr)
 else:

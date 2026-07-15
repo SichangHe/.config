@@ -17,10 +17,10 @@ from pathlib import Path
 
 try:
     from omo_manager.omo_codex_status import current_block, status, tail
-    from omo_manager.omo_agent_status import parse_task_metadata
+    from omo_manager.omo_agent_status import TaskFrontmatterError, parse_task_metadata
 except ModuleNotFoundError:
     from omo_codex_status import current_block, status, tail
-    from omo_agent_status import parse_task_metadata
+    from omo_agent_status import TaskFrontmatterError, parse_task_metadata
 
 DEFAULT_ROOT = Path(os.environ.get("OMO_WORK_LOGS_ROOT", Path.home() / "work_logs"))
 HELPER_DIR = Path(__file__).resolve().parent
@@ -203,29 +203,37 @@ def manager_owner_migration_text(text: str, old_owner: str, new_owner: str) -> s
             raise ValueError(f"{label} manager target must be a full tmux target like `SESSION:WINDOW`.")
     if canonical_tmux_pane(old_owner) == canonical_tmux_pane(new_owner):
         raise ValueError("old and new manager targets must identify different tmux panes.")
-    metadata = parse_task_metadata(text)
-    if metadata is None:
-        raise ValueError("ownership migration requires an existing task with valid frontmatter.")
-    if metadata.managerat != old_owner:
-        raise ValueError(f"existing managerat {metadata.managerat} does not equal --old-manager-target {old_owner}.")
-    if metadata.runat != "retired" and canonical_tmux_pane(new_owner) == canonical_tmux_pane(metadata.runat):
-        raise ValueError("new manager target must be different from task `runat`.")
-
     lines = text.splitlines(keepends=True)
-    closing_idx = next(idx for idx, line in enumerate(lines[1:], start=1) if line.strip() == "---")
+    if not lines or lines[0].strip() != "---":
+        raise ValueError("ownership migration requires an existing task with valid frontmatter.")
+    try:
+        closing_idx = next(idx for idx, line in enumerate(lines[1:], start=1) if line.strip() == "---")
+    except StopIteration as exc:
+        raise ValueError("ownership migration requires an existing task with valid frontmatter.") from exc
     owner_indexes = [idx for idx, line in enumerate(lines[1:closing_idx], start=1) if line.rstrip("\r\n").partition(":")[0] == "managerat"]
     if len(owner_indexes) != 1:
         raise ValueError("ownership migration requires exactly one frontmatter `managerat` field.")
+    runat_values = [line.rstrip("\r\n").partition(":")[2].strip() for line in lines[1:closing_idx] if line.rstrip("\r\n").partition(":")[0] == "runat"]
+    if any(TMUX_TARGET_RE.fullmatch(runat) is not None and canonical_tmux_pane(new_owner) == canonical_tmux_pane(runat) for runat in runat_values):
+        raise ValueError("new manager target must be different from task `runat`.")
     owner_idx = owner_indexes[0]
     line = lines[owner_idx]
     content = line.rstrip("\r\n")
     line_ending = line[len(content) :]
     key, separator, value = content.partition(":")
+    existing_owner = value.strip()
+    if existing_owner != old_owner:
+        raise ValueError(f"existing managerat {existing_owner} does not equal --old-manager-target {old_owner}.")
     value_start = len(value) - len(value.lstrip())
     value_end = len(value.rstrip())
     lines[owner_idx] = f"{key}{separator}{value[:value_start]}{new_owner}{value[value_end:]}{line_ending}"
     updated = "".join(lines)
-    updated_metadata = parse_task_metadata(updated)
+    try:
+        updated_metadata = parse_task_metadata(updated)
+    except TaskFrontmatterError as exc:
+        if str(exc) == "`managerat` must be different from `runat`.":
+            raise ValueError("new manager target must be different from task `runat`.") from exc
+        raise
     if updated_metadata is None or updated_metadata.managerat != new_owner:
         raise RuntimeError("updated task frontmatter did not retain the requested manager owner.")
     return updated
