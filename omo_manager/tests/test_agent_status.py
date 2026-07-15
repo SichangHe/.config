@@ -1257,6 +1257,147 @@ class AgentStatusTests(unittest.TestCase):
 
             self.assertIn("not_codex: task=worker.md", out.getvalue())
 
+    def test_problems_only_suppresses_resumable_stopped_worker_with_running_dependency(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nworker.md cfg:99\ndependency.md cfg:2\n", encoding="utf-8")
+            _ = (root / "worker.md").write_text(
+                task_frontmatter(
+                    "blocked",
+                    runat="cfg:99",
+                    managerat="mgr:1",
+                    pending_items=("finish preserved work",),
+                    blocked_on="dependency.md",
+                )
+                + "This stopped record-only role has preserved Codex session 019f64f1-a087-7e32-baba-e4bc07455f86.\n"
+                + "On authorized resume, use that exact session.\n",
+                encoding="utf-8",
+            )
+            _ = (root / "dependency.md").write_text(task_frontmatter("running", runat="cfg:2", managerat="mgr:1"), encoding="utf-8")
+
+            def fake_inspect(args: object, **_: object) -> Report:
+                return Report("running", ["working"]) if getattr(args, "target") == "cfg:2" else Report("not_codex", [])
+
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", side_effect=fake_inspect), patch("omo_manager.omo_agent_status.target_resolves_exactly", return_value=False), redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertEqual("", out.getvalue())
+
+    def test_problems_only_reports_resumable_stopped_worker_when_target_still_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nworker.md cfg:99\ndependency.md cfg:2\n", encoding="utf-8")
+            _ = (root / "worker.md").write_text(
+                task_frontmatter(
+                    "blocked",
+                    runat="cfg:99",
+                    managerat="mgr:1",
+                    pending_items=("finish preserved work",),
+                    blocked_on="dependency.md",
+                )
+                + "This stopped record-only role has preserved Codex session 019f64f1-a087-7e32-baba-e4bc07455f86.\n"
+                + "On authorized resume, use that exact session.\n",
+                encoding="utf-8",
+            )
+            _ = (root / "dependency.md").write_text(task_frontmatter("running", runat="cfg:2", managerat="mgr:1"), encoding="utf-8")
+
+            def fake_inspect(args: object, **_: object) -> Report:
+                return Report("running", ["working"]) if getattr(args, "target") == "cfg:2" else Report("not_codex", [])
+
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", side_effect=fake_inspect), patch("omo_manager.omo_agent_status.target_resolves_exactly", return_value=True), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertIn("not_codex: task=worker.md", out.getvalue())
+
+    def test_problems_only_reports_resumable_stopped_worker_with_visible_not_codex_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nworker.md cfg:99\ndependency.md cfg:2\n", encoding="utf-8")
+            _ = (root / "worker.md").write_text(
+                task_frontmatter(
+                    "blocked",
+                    runat="cfg:99",
+                    managerat="mgr:1",
+                    pending_items=("finish preserved work",),
+                    blocked_on="dependency.md",
+                )
+                + "This stopped record-only role has preserved Codex session 019f64f1-a087-7e32-baba-e4bc07455f86.\n"
+                + "On authorized resume, use that exact session.\n",
+                encoding="utf-8",
+            )
+            _ = (root / "dependency.md").write_text(task_frontmatter("running", runat="cfg:2", managerat="mgr:1"), encoding="utf-8")
+
+            def fake_inspect(args: object, **_: object) -> Report:
+                return Report("running", ["working"]) if getattr(args, "target") == "cfg:2" else Report("not_codex", ["fish prompt"])
+
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", side_effect=fake_inspect), patch("omo_manager.omo_agent_status.target_resolves_exactly", return_value=False), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            text = out.getvalue()
+            self.assertIn("not_codex: task=worker.md", text)
+            self.assertIn("output=fish prompt", text)
+
+    def test_problems_only_reports_invalid_resumable_stopped_worker_records(self) -> None:
+        cases = (
+            ("missing dependency", "missing.md", (("dependency.md", "running", "cfg:2", "mgr:1", ""),), True, ("finish preserved work",), "current"),
+            ("malformed blocker", "waiting on dependency.md", (("dependency.md", "running", "cfg:2", "mgr:1", ""),), True, ("finish preserved work",), "current"),
+            ("stale dependency", "dependency.md", (("dependency.md", "running", "cfg:2", "mgr:1", ""),), True, ("finish preserved work",), "previous"),
+            ("inactive dependency", "dependency.md", (("dependency.md", "done", "cfg:2", "mgr:1", ""),), True, ("finish preserved work",), "current"),
+            ("cyclic dependency", "dependency.md", (("dependency.md", "blocked", "cfg:2", "mgr:1", "worker.md"),), True, ("finish preserved work",), "current"),
+            ("absent pending item", "dependency.md", (("dependency.md", "running", "cfg:2", "mgr:1", ""),), True, (), "current"),
+            ("absent resume evidence", "dependency.md", (("dependency.md", "running", "cfg:2", "mgr:1", ""),), False, ("finish preserved work",), "current"),
+            ("frontmatter-only resume evidence", "dependency.md", (("dependency.md", "running", "cfg:2", "mgr:1", ""),), False, ("preserved Codex session 019f64f1-a087-7e32-baba-e4bc07455f86; resume later",), "current"),
+            ("unrelated uuid evidence", "dependency.md", (("dependency.md", "running", "cfg:2", "mgr:1", ""),), "uuid", ("finish preserved work",), "current"),
+        )
+        resume_text = (
+            "This stopped record-only role has preserved Codex session 019f64f1-a087-7e32-baba-e4bc07455f86.\n"
+            "On authorized resume, use that exact session.\n"
+        )
+        for name, blocker, dependencies, include_resume, pending_items, dependency_section in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                registry = root / "sessions.json"
+                _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+                current_lines = ["current:", "worker.md cfg:99"]
+                previous_lines = ["previous:"]
+                for task_file, _status, target, _managerat, _blocked_on in dependencies:
+                    entry = f"{task_file} {target}"
+                    if dependency_section == "current":
+                        current_lines.append(entry)
+                    else:
+                        previous_lines.append(entry)
+                _ = (root / "TODO.md").write_text("\n".join([*current_lines, "", *previous_lines]) + "\n", encoding="utf-8")
+                _ = (root / "worker.md").write_text(
+                    task_frontmatter(
+                        "blocked",
+                        runat="cfg:99",
+                        managerat="mgr:1",
+                        pending_items=pending_items,
+                        blocked_on=blocker,
+                    )
+                    + (resume_text if include_resume is True else "This stopped record-only role preserves external id 019f64f1-a087-7e32-baba-e4bc07455f86 and says resume later.\n" if include_resume == "uuid" else "This worker is blocked on dependency repair.\n"),
+                    encoding="utf-8",
+                )
+                for task_file, status, target, managerat, blocked_on in dependencies:
+                    _ = (root / task_file).write_text(
+                        task_frontmatter(status, runat=target, managerat=managerat, is_manager=status == "blocked", blocked_on=blocked_on),
+                        encoding="utf-8",
+                    )
+
+                def fake_inspect(args: object, **_: object) -> Report:
+                    return Report("running", ["working"]) if getattr(args, "target") == "cfg:2" else Report("not_codex", [])
+
+                out = StringIO()
+                with patch("omo_manager.omo_agent_status.inspect", side_effect=fake_inspect), patch("omo_manager.omo_agent_status.target_resolves_exactly", return_value=False), redirect_stdout(out):
+                    self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+                self.assertIn("not_codex: task=worker.md", out.getvalue())
+
     def test_problems_only_reports_not_codex_for_completed_or_circular_dependency(self) -> None:
         for name, dependency_status, dependency_blocker in (("completed", "done", ""), ("circular", "blocked", "worker.md")):
             with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:

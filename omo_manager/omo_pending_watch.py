@@ -35,7 +35,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from omo_manager.omo_agent_status import TaskLine
-from omo_manager.omo_agent_status import blocked_dependency_snapshot
+from omo_manager.omo_agent_status import blocked_status_dependency_snapshot
 from omo_manager.omo_agent_status import effective_owner_target
 from omo_manager.omo_agent_status import is_main_manager_task_file
 from omo_manager.omo_agent_status import parse_task_lines
@@ -352,7 +352,7 @@ def agent_problem_guard_current(guard: AgentProblemGuard) -> bool:
         task = TaskLine(guard.dependency_task_file, "dependency-guard", "", "", None)
         task_path = resolve_task_path(guard.root, guard.dependency_task_file)
         state = scan_task_state(task_path) if task_path is not None else None
-        return state is not None and blocked_dependency_snapshot(guard.root, task, state) == guard.dependency_snapshot
+        return state is not None and blocked_status_dependency_snapshot(guard.root, task, state) == guard.dependency_snapshot
     try:
         result = subprocess.run(guard.command, capture_output=True, text=True, timeout=DEFAULT_AGENT_PROBLEM_TIMEOUT_S, check=False)
     except (OSError, subprocess.SubprocessError):
@@ -2699,7 +2699,7 @@ def dependency_snapshot_state(root: Path) -> dict[str, tuple[TaskLine, str, str]
         state = scan_task_state(task_path) if task_path is not None else None
         if state is None:
             continue
-        snapshot = blocked_dependency_snapshot(root, task, state)
+        snapshot = blocked_status_dependency_snapshot(root, task, state)
         if not snapshot:
             continue
         snapshots[task.task_file] = (task, snapshot, effective_owner_target(root, task, task_path))
@@ -2732,7 +2732,7 @@ def maybe_push_dependency_transitions(args: Args, snapshots: dict[str, str], now
             [
                 AGENT_PROBLEM_HEADER,
                 "",
-                "1 blocked manager dependency graph changed; inspect the current blocker list and leaf states:",
+                "1 blocked dependency graph changed; inspect the current blocker list and leaf states:",
                 f"{task_file} {state.target} <blocked_on>{html.escape(state.reason)}</blocked_on>",
             ]
         )

@@ -19,6 +19,7 @@ if __package__ in {None, ""}:
 from omo_manager.omo_codex_status import Args as StatusArgs
 from omo_manager.omo_codex_status import COMPACTING_RE
 from omo_manager.omo_codex_status import Report
+from omo_manager.omo_codex_status import exact_pane_id
 from omo_manager.omo_codex_status import inspect
 from omo_manager.omo_codex_status import interrupt_waiting_subagent_if_present
 from omo_manager.omo_codex_status import is_stock_placeholder_input_text
@@ -78,6 +79,9 @@ TASK_FRONTMATTER_STATUSES = {"running", "blocked", "done"}
 RETIRED_RUNAT = "retired"
 TASK_RE = re.compile(r"`?([A-Za-z0-9_./-]+\.md)`?")
 BLOCKED_DEPENDENCY_LIST_RE = re.compile(r"`?[A-Za-z0-9_./-]+\.md`?(?:\s*,\s*`?[A-Za-z0-9_./-]+\.md`?)*")
+CODEX_SESSION_ID_RE = re.compile(r"\b(?:codex\s+session|session_id)\b[^.\n]{0,120}\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.IGNORECASE)
+STOPPED_RECORD_RE = re.compile(r"\b(?:preserved|record-only|stopped)\b", re.IGNORECASE)
+RESUME_RE = re.compile(r"\bresum(?:e|able|ed|ing)\b", re.IGNORECASE)
 TARGET_RE = re.compile(r"\b([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\b")
 TARGET_SESSION_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*):")
 LOOSE_TARGET_RE = re.compile(r"\b([a-z][A-Za-z0-9_-]*)\s+(\d+)\b")
@@ -259,6 +263,14 @@ def task_line_is_vl(task: TaskLine) -> bool:
     return is_vl_task_file(task.task_file) or target_session(task.target) == "vl"
 
 
+def current_task_paths(root: Path) -> set[Path]:
+    return {
+        path
+        for current_task in parse_task_lines(root / "TODO.md")
+        if current_task.section == "todo:current" and (path := resolve_task_path(root, current_task.task_file)) is not None
+    }
+
+
 def is_current_vl_supervisor(task_file: str) -> bool:
     name = Path(task_file).name
     return name.startswith("vl_supervisor_current_") or name.startswith("vl_submanager_current_")
@@ -271,12 +283,8 @@ def blocked_dependency_snapshot(root: Path, task: TaskLine, state: TaskState) ->
     task_path = resolve_task_path(root, task.task_file)
     if task_path is None or task_has_pending_marker(task_path):
         return ""
-    current_task_paths = {
-        path
-        for current_task in parse_task_lines(root / "TODO.md")
-        if current_task.section == "todo:current" and (path := resolve_task_path(root, current_task.task_file)) is not None
-    }
-    if task_path not in current_task_paths:
+    current_paths = current_task_paths(root)
+    if task_path not in current_paths:
         return ""
     seen_paths = {task_path}
     seen_targets: set[str] = set()
@@ -306,7 +314,7 @@ def blocked_dependency_snapshot(root: Path, task: TaskLine, state: TaskState) ->
             dependency_path = resolve_task_path(root, match.group(1))
             if dependency_path is None or dependency_path in seen_paths:
                 return False
-            if dependency_path not in current_task_paths:
+            if dependency_path not in current_paths:
                 return False
             dependency = scan_task_state(dependency_path)
             if dependency is None or task_has_pending_marker(dependency_path):
@@ -328,9 +336,93 @@ def blocked_dependency_snapshot(root: Path, task: TaskLine, state: TaskState) ->
     return json.dumps(nodes, separators=(",", ":")) if dependencies_are_active(task_path, state) else ""
 
 
+def task_body_text(path: Path) -> str:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    try:
+        parts = frontmatter_parts(text)
+    except TaskFrontmatterError:
+        return ""
+    if parts is None:
+        return text
+    _frontmatter, body = parts
+    return "\n".join(body)
+
+
+def has_stopped_resume_evidence(path: Path) -> bool:
+    text = task_body_text(path)
+    if not text:
+        return False
+    return CODEX_SESSION_ID_RE.search(text) is not None and STOPPED_RECORD_RE.search(text) is not None and RESUME_RE.search(text) is not None
+
+
+def blocked_resumable_dependency_snapshot(root: Path, task: TaskLine, state: TaskState) -> str:
+    """Describe an intentionally stopped worker with active blocker records."""
+
+    if state.status != "blocked" or state.is_manager:
+        return ""
+    task_path = resolve_task_path(root, task.task_file)
+    if task_path is None or task_has_pending_marker(task_path):
+        return ""
+    metadata = read_task_metadata(task_path)
+    if metadata is None or not metadata.pending_task_items or not has_stopped_resume_evidence(task_path):
+        return ""
+    current_paths = current_task_paths(root)
+    if task_path not in current_paths or BLOCKED_DEPENDENCY_LIST_RE.fullmatch(state.reason) is None:
+        return ""
+    seen_paths = {task_path}
+    seen_targets: set[str] = {canonical_target(state.target)} if state.target else set()
+    nodes: list[tuple[str, str, str, str, bool, str]] = [
+        (
+            str(task_path.relative_to(root)),
+            state.status,
+            canonical_target(state.target),
+            canonical_target(state.manager_target),
+            state.is_manager,
+            state.reason,
+        )
+    ]
+    found = False
+    for match in TASK_RE.finditer(state.reason):
+        found = True
+        dependency_path = resolve_task_path(root, match.group(1))
+        if dependency_path is None or dependency_path in seen_paths or dependency_path not in current_paths:
+            return ""
+        dependency = scan_task_state(dependency_path)
+        if dependency is None or dependency.status != "running" or task_has_pending_marker(dependency_path):
+            return ""
+        dependency_target = canonical_target(dependency.target)
+        if not dependency_target or dependency_target in seen_targets:
+            return ""
+        seen_paths.add(dependency_path)
+        seen_targets.add(dependency_target)
+        nodes.append(
+            (
+                str(dependency_path.relative_to(root)),
+                dependency.status,
+                dependency_target,
+                canonical_target(dependency.manager_target),
+                dependency.is_manager,
+                dependency.reason,
+            )
+        )
+    return json.dumps(nodes, separators=(",", ":")) if found else ""
+
+
+def blocked_status_dependency_snapshot(root: Path, task: TaskLine, state: TaskState) -> str:
+    return blocked_dependency_snapshot(root, task, state) or blocked_resumable_dependency_snapshot(root, task, state)
+
+
 def blocked_dependencies_are_active(root: Path, task: TaskLine, state: TaskState) -> bool:
     """Accept an owned acyclic dependency tree with running report-free leaves."""
     return bool(blocked_dependency_snapshot(root, task, state))
+
+
+def blocked_resumable_dependencies_are_active(root: Path, task: TaskLine, state: TaskState) -> bool:
+    """Accept a stopped worker only when its resume and blocker records are live."""
+    return bool(blocked_resumable_dependency_snapshot(root, task, state))
 
 
 def is_recorded_human_wait(state: TaskState) -> bool:
@@ -346,6 +438,10 @@ def canonical_target(target: str) -> str:
 def target_session(target: str) -> str:
     match = TARGET_SESSION_RE.match(target)
     return match.group(1) if match is not None else ""
+
+
+def target_resolves_exactly(target: str) -> bool:
+    return bool(exact_pane_id(target))
 
 
 def section_name(line: str, current: str) -> str:
@@ -894,6 +990,7 @@ def add_blocked_idle_vl_row(root: Path, task: TaskLine, role: str, rows: list[St
     classified: StatusRow | None = None
     idle_status = "blocked_idle"
     quiet_dependency = False
+    quiet_resumable = False
     if target:
         classified = classify_target(task.task_file, target, state.persistent_role, state.status, auto_unstick, role, unstick_by_target, auto_unstick_disabled_reason)
         idle_status = classified.status
@@ -902,10 +999,11 @@ def add_blocked_idle_vl_row(root: Path, task: TaskLine, role: str, rows: list[St
         if is_recorded_human_wait(state) and idle_status == "ready":
             return
         quiet_dependency = blocked_dependencies_are_active(root, task, state) and idle_status == "ready"
+        quiet_resumable = blocked_resumable_dependencies_are_active(root, task, state) and idle_status == "not_codex" and " output=" not in classified.evidence and not target_resolves_exactly(target)
     reason = state.reason or "blocked with no reason in latest status line"
     evidence = classified.evidence if classified is not None else f"target={target} role={role} task_status=blocked"
     evidence += f" idle_status={idle_status} reason={reason}"
-    status = "ready" if quiet_dependency else idle_status if idle_status in {"error", "not_codex", "stuck_input"} else "blocked_idle"
+    status = "ready" if quiet_dependency or quiet_resumable else idle_status if idle_status in {"error", "not_codex", "stuck_input"} else "blocked_idle"
     rows.append(StatusRow(task.task_file, status, evidence, state.persistent_role, state.status, target, classified.unstick if classified is not None else ""))
     seen.add(seen_key)
 

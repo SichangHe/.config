@@ -7917,7 +7917,7 @@ class PendingMarkerTests(unittest.TestCase):
             with redirect_stdout(out):
                 self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1001.0, snapshots, reported_snapshots))
             text = out.getvalue()
-            self.assertIn("blocked manager dependency graph changed", text)
+            self.assertIn("blocked dependency graph changed", text)
             self.assertIn("manager.md cfg:1 <blocked_on>leaf-b.md</blocked_on>", text)
             self.assertIn("blocked agents are ready", text)
             self.assertEqual(snapshots["manager.md"], reported_snapshots["manager.md"])
@@ -7990,6 +7990,53 @@ class PendingMarkerTests(unittest.TestCase):
                 self.assertTrue(watcher.maybe_push_dependency_transitions(args, snapshots, 1001.0))
                 self.assertFalse(watcher.maybe_push_dependency_transitions(args, snapshots, 1002.0))
                 self.assertEqual(1, push.call_count)
+
+    def test_resumable_worker_dependency_snapshot_alerts_on_valid_change(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "TODO.md").write_text("current:\nworker.md cfg:99\nleaf-a.md cfg:2\nleaf-b.md cfg:3\n", encoding="utf-8")
+            resume_text = (
+                "This stopped record-only role has preserved Codex session 019f64f1-a087-7e32-baba-e4bc07455f86.\n"
+                "On authorized resume, use that exact session.\n"
+            )
+            _ = (root / "worker.md").write_text(
+                task_frontmatter(
+                    "blocked",
+                    runat="cfg:99",
+                    managerat="main:0",
+                    pending_items=("finish preserved work",),
+                    blocked_on="leaf-a.md",
+                )
+                + resume_text,
+                encoding="utf-8",
+            )
+            _ = (root / "leaf-a.md").write_text(task_frontmatter("running", runat="cfg:2", managerat="main:0"), encoding="utf-8")
+            _ = (root / "leaf-b.md").write_text(task_frontmatter("running", runat="cfg:3", managerat="main:0"), encoding="utf-8")
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, True, manager_target="main:0")
+            snapshots: dict[str, str] = {}
+
+            self.assertFalse(watcher.maybe_push_dependency_transitions(args, snapshots, 1000.0))
+            self.assertIn("worker.md", snapshots)
+
+            _ = (root / "worker.md").write_text(
+                task_frontmatter(
+                    "blocked",
+                    runat="cfg:99",
+                    managerat="main:0",
+                    pending_items=("finish preserved work",),
+                    blocked_on="leaf-b.md",
+                )
+                + resume_text,
+                encoding="utf-8",
+            )
+            out = StringIO()
+            with redirect_stdout(out):
+                self.assertTrue(watcher.maybe_push_dependency_transitions(args, snapshots, 1001.0))
+            text = out.getvalue()
+            self.assertIn("blocked dependency graph changed", text)
+            self.assertIn("worker.md cfg:99 <blocked_on>leaf-b.md</blocked_on>", text)
 
     def test_dependency_snapshot_success_does_not_overwrite_newer_reservation(self) -> None:
         from omo_manager import omo_pending_watch as watcher
