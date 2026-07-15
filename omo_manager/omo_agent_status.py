@@ -93,6 +93,8 @@ HUMAN_WAIT_RE = re.compile(
     r"""
     \bwaiting\s+for\s+next\s+human(?!-readable)\b[\w\s`'":;,.()/.-]{0,120}\b(?:review|input|discussion|approval)\b
     |
+    \bwaiting\s+(?:on|for)\s+(?:(?:a|the)\s+)?(?:human(?!-readable)|person)(?:'s)?\b(?:\s+(?:action|answers?|approval|authorization|choice|confirmation|decision|discussion|feedback|follow-?up|guidance|input|repl(?:y|ies)|responses?|reviews?)\b|\s+to\b|(?=\s*(?:$|[.;,)])))
+    |
     \bhuman[- ]pending\b
     |
     \bdirect\s+human\s+discussion\b
@@ -262,11 +264,9 @@ def is_recorded_persistent_manager_wait(task: TaskLine, state: TaskState) -> boo
     return state.is_manager and bool(state.reason) and (is_current_vl_supervisor(task.task_file) or ("persistent" in reason and ("manager" in reason or "submanager" in reason or "role" in reason)))
 
 
-def is_hvl_human_wait(task: TaskLine, state: TaskState, target: str) -> bool:
-    """Return whether an hVL/VL blocked task is expected to wait for the human."""
+def is_recorded_human_wait(state: TaskState) -> bool:
+    """Return whether a blocked task already records that it is waiting on the human."""
 
-    if not task_line_is_vl(task) and target_session(target) != "hvl":
-        return False
     return HUMAN_WAIT_RE.search(state.reason) is not None
 
 
@@ -829,7 +829,7 @@ def add_blocked_idle_vl_row(root: Path, task: TaskLine, role: str, rows: list[St
         idle_status = classified.status
         if idle_status == "running":
             return
-        if idle_status == "ready" and is_hvl_human_wait(task, state, target):
+        if is_recorded_human_wait(state) and idle_status not in {"error", "stuck_input"}:
             return
         if is_recorded_persistent_manager_wait(task, state) and idle_status not in {"error", "not_codex", "stuck_input"}:
             return
