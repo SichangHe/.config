@@ -14,12 +14,13 @@ from omo_manager.omo_codex_status import Report
 from omo_manager.omo_tmux_send import Args
 from omo_manager.omo_tmux_send import CodexSendOptions
 from omo_manager.omo_tmux_send import async_job_from_query
-from omo_manager.omo_tmux_send import clear_stuck_input_before_send
+from omo_manager.omo_tmux_send import clear_existing_input_before_send
 from omo_manager.omo_tmux_send import launch_async
 from omo_manager.omo_tmux_send import main
 from omo_manager.omo_tmux_send import parse_args
 from omo_manager.omo_tmux_send import query_async_result
 from omo_manager.omo_tmux_send import read_message
+from omo_manager.omo_tmux_send import require_no_existing_input
 from omo_manager.omo_tmux_send import require_sendable_codex_target
 from omo_manager.omo_tmux_send import run_async_worker
 from omo_manager.omo_tmux_send import run_tmux
@@ -131,14 +132,14 @@ class TmuxSendTests(unittest.TestCase):
             calls.append(command)
             return subprocess.CompletedProcess(command, 0)
 
-        with patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.require_sendable_codex_target"), patch("omo_manager.omo_tmux_send.verify_placeholder_paste", return_value=False), patch("omo_manager.omo_tmux_send.wait_paste_visible"), patch("omo_manager.omo_tmux_send.verify_submit"), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
+        with patch("omo_manager.omo_tmux_send.clear_existing_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.require_sendable_codex_target"), patch("omo_manager.omo_tmux_send.verify_placeholder_paste", return_value=False), patch("omo_manager.omo_tmux_send.wait_paste_visible"), patch("omo_manager.omo_tmux_send.verify_submit"), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
             run_tmux("cfg:1.0", "literal C-c $(bad)\n", options())
 
         self.assertIn(["tmux", "load-buffer", "-b", calls[0][3], calls[0][4]], calls)
         self.assertIn(["tmux", "paste-buffer", "-b", calls[0][3], "-t", "cfg:1.0"], calls)
         self.assertIn(["tmux", "send-keys", "-t", "cfg:1.0", "Enter"], calls)
 
-    def test_run_tmux_calls_before_paste_immediately_before_buffer_load(self) -> None:
+    def test_run_tmux_rechecks_input_immediately_before_paste(self) -> None:
         events: list[str] = []
 
         def before_paste() -> None:
@@ -148,14 +149,14 @@ class TmuxSendTests(unittest.TestCase):
             events.append(command[1])
             return subprocess.CompletedProcess(command, 0)
 
-        with patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.require_sendable_codex_target"), patch("omo_manager.omo_tmux_send.verify_placeholder_paste", return_value=True), patch("omo_manager.omo_tmux_send.verify_submit"), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
+        with patch("omo_manager.omo_tmux_send.clear_existing_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.require_sendable_codex_target"), patch("omo_manager.omo_tmux_send.verify_placeholder_paste", return_value=True), patch("omo_manager.omo_tmux_send.verify_submit"), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
             run_tmux("cfg:1.0", "prompt\n", options(), before_paste=before_paste)
 
-        self.assertEqual(["load-buffer", "before_paste", "paste-buffer"], events[:3])
+        self.assertEqual(["load-buffer", "before_paste", "capture-pane", "paste-buffer"], events[:4])
         self.assertIn("send-keys", events)
 
     def test_run_tmux_does_not_wait_for_compaction(self) -> None:
-        with patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.require_sendable_codex_target"), patch("omo_manager.omo_tmux_send.verify_placeholder_paste", return_value=True), patch("omo_manager.omo_tmux_send.verify_submit"), patch("omo_manager.omo_tmux_send.subprocess.run", return_value=subprocess.CompletedProcess(["tmux"], 0)):
+        with patch("omo_manager.omo_tmux_send.clear_existing_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.require_sendable_codex_target"), patch("omo_manager.omo_tmux_send.verify_placeholder_paste", return_value=True), patch("omo_manager.omo_tmux_send.verify_submit"), patch("omo_manager.omo_tmux_send.subprocess.run", return_value=subprocess.CompletedProcess(["tmux"], 0)):
             run_tmux("cfg:1.0", "prompt\n", options())
 
     def test_wait_paste_visible_rejects_partial_probe_match(self) -> None:
@@ -173,25 +174,42 @@ class TmuxSendTests(unittest.TestCase):
         with patch("omo_manager.omo_tmux_send.tail", return_value=lines):
             wait_paste_visible("cfg:1.0", "line one\nline two\n", options())
 
-    def test_clear_stuck_input_before_send_submits_existing_real_input(self) -> None:
+    def test_clear_existing_input_before_send_submits_existing_real_input(self) -> None:
         before = Report("stuck_input", ["› Draft the manager reply"], "Draft the manager reply", True)
         after = Report("running", ["• Working"], "", False)
         with patch("omo_manager.omo_tmux_send.inspect", side_effect=[before, after]), patch("omo_manager.omo_tmux_send.subprocess.run", return_value=subprocess.CompletedProcess(["tmux"], 0)) as run, patch("omo_manager.omo_tmux_send.time.sleep") as sleep:
-            self.assertEqual("sent_enter", clear_stuck_input_before_send("cfg:1.0", options()))
+            self.assertEqual("sent_enter", clear_existing_input_before_send("cfg:1.0", options()))
         run.assert_called_once()
         sleep.assert_called_once()
 
-    def test_clear_stuck_input_before_send_submits_even_when_report_says_unsafe(self) -> None:
+    def test_clear_existing_input_before_send_submits_even_when_report_says_unsafe(self) -> None:
         before = Report("stuck_input", ["› Continue task"], "Continue task", False, "compacting")
         after = Report("running", ["• Working"], "", False)
         with patch("omo_manager.omo_tmux_send.inspect", side_effect=[before, after]), patch("omo_manager.omo_tmux_send.subprocess.run", return_value=subprocess.CompletedProcess(["tmux"], 0)) as run:
-            self.assertEqual("sent_enter", clear_stuck_input_before_send("cfg:1.0", options()))
+            self.assertEqual("sent_enter", clear_existing_input_before_send("cfg:1.0", options()))
         run.assert_called_once()
 
-    def test_clear_stuck_input_before_send_refuses_to_paste_if_still_stuck(self) -> None:
+    def test_clear_existing_input_before_send_submits_running_queued_input(self) -> None:
+        before = Report("running", ["• Working"], "queued worker message", False, "queued_running_input")
+        after = Report("running", ["• Working"], "", False)
+        with patch("omo_manager.omo_tmux_send.inspect", side_effect=[before, after]), patch("omo_manager.omo_tmux_send.subprocess.run", return_value=subprocess.CompletedProcess(["tmux"], 0)) as run:
+            self.assertEqual("sent_enter", clear_existing_input_before_send("cfg:1.0", options()))
+        run.assert_called_once()
+
+    def test_clear_existing_input_before_send_refuses_to_paste_if_input_remains(self) -> None:
         report = Report("stuck_input", ["› Continue task"], "Continue task", False, "compacting")
         with patch("omo_manager.omo_tmux_send.inspect", side_effect=[report, report]), patch("omo_manager.omo_tmux_send.subprocess.run", return_value=subprocess.CompletedProcess(["tmux"], 0)):
-            self.assertEqual("still_stuck", clear_stuck_input_before_send("cfg:1.0", options()))
+            self.assertEqual("still_input", clear_existing_input_before_send("cfg:1.0", options()))
+
+    def test_clear_existing_input_before_send_fails_closed_when_inspect_fails(self) -> None:
+        with patch("omo_manager.omo_tmux_send.inspect", side_effect=RuntimeError("tmux unavailable")):
+            self.assertEqual("inspect_failed", clear_existing_input_before_send("cfg:1.0", options()))
+
+    def test_require_no_existing_input_rejects_real_input_before_paste(self) -> None:
+        report = Report("running", ["• Working"], "queued worker message", False)
+        with patch("omo_manager.omo_tmux_send.inspect", return_value=report):
+            with self.assertRaisesRegex(RuntimeError, "existing input appeared"):
+                require_no_existing_input("cfg:1.0")
 
     def test_run_tmux_stops_before_paste_when_stuck_input_remains(self) -> None:
         calls: list[list[str]] = []
@@ -200,9 +218,31 @@ class TmuxSendTests(unittest.TestCase):
             calls.append(command)
             return subprocess.CompletedProcess(command, 0)
 
-        with patch("omo_manager.omo_tmux_send.clear_stuck_input_before_send", return_value="still_stuck"), patch("omo_manager.omo_tmux_send.require_sendable_codex_target"), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
-            with self.assertRaisesRegex(RuntimeError, "target stuck input not cleared"):
+        with patch("omo_manager.omo_tmux_send.clear_existing_input_before_send", return_value="still_input"), patch("omo_manager.omo_tmux_send.require_sendable_codex_target"), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
+            with self.assertRaisesRegex(RuntimeError, "target existing input not cleared"):
                 run_tmux("cfg:1.0", "prompt\n", options())
+
+        self.assertFalse(any(command[:2] == ["tmux", "paste-buffer"] for command in calls))
+
+    def test_run_tmux_stops_before_paste_when_callback_introduces_input(self) -> None:
+        calls: list[list[str]] = []
+        state = {"callback_ran": False}
+
+        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        def before_paste() -> None:
+            state["callback_ran"] = True
+
+        def fake_inspect(_args: object) -> Report:
+            if state["callback_ran"]:
+                return Report("running", ["• Working"], "late queued input", False)
+            return Report("running", ["• Working"], "", False)
+
+        with patch("omo_manager.omo_tmux_send.clear_existing_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.require_sendable_codex_target"), patch("omo_manager.omo_tmux_send.verify_placeholder_paste", return_value=True), patch("omo_manager.omo_tmux_send.verify_submit"), patch("omo_manager.omo_tmux_send.inspect", side_effect=fake_inspect), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
+            with self.assertRaisesRegex(RuntimeError, "existing input appeared"):
+                run_tmux("cfg:1.0", "prompt\n", options(), before_paste=before_paste)
 
         self.assertFalse(any(command[:2] == ["tmux", "paste-buffer"] for command in calls))
 

@@ -436,12 +436,12 @@ def verify_submit(target: str, message: str, options: CodexSendOptions) -> None:
         time.sleep(min(0.25, max(0.05, min(deadline_s, next_enter_s) - now_s)))
 
 
-def clear_stuck_input_before_send(target: str, options: CodexSendOptions) -> str:
+def clear_existing_input_before_send(target: str, options: CodexSendOptions) -> str:
     try:
         report = inspect(StatusArgs(target, 80))
     except Exception:
-        return ""
-    if report.status != "stuck_input":
+        return "inspect_failed"
+    if not is_real_input_text(report.input_text):
         return ""
     try:
         result = subprocess.run(["tmux", "send-keys", "-t", target, "Enter"], capture_output=True, text=True, timeout=5, check=False)
@@ -455,9 +455,18 @@ def clear_stuck_input_before_send(target: str, options: CodexSendOptions) -> str
         after = inspect(StatusArgs(target, 80))
     except Exception:
         return "inspect_failed"
-    if after.status == "stuck_input":
-        return "still_stuck"
+    if is_real_input_text(after.input_text):
+        return "still_input"
     return "sent_enter"
+
+
+def require_no_existing_input(target: str) -> None:
+    try:
+        report = inspect(StatusArgs(target, 80))
+    except Exception as exc:
+        raise RuntimeError(f"target input not inspected before tmux paste: {exc}") from exc
+    if is_real_input_text(report.input_text):
+        raise RuntimeError("target existing input appeared before tmux paste")
 
 
 def run_tmux(target: str, message: str, options: CodexSendOptions, *, before_paste: Callable[[], None] | None = None) -> None:
@@ -471,13 +480,14 @@ def run_tmux(target: str, message: str, options: CodexSendOptions, *, before_pas
                 _ = print(f"would send Enter to {target}")
             return
         require_sendable_codex_target(target, inspect_lines_for_message(message))
-        clear_result = clear_stuck_input_before_send(target, options)
+        clear_result = clear_existing_input_before_send(target, options)
         if clear_result not in {"", "sent_enter"}:
-            raise RuntimeError(f"target stuck input not cleared before tmux paste: {clear_result}")
+            raise RuntimeError(f"target existing input not cleared before tmux paste: {clear_result}")
         require_sendable_codex_target(target, inspect_lines_for_message(message))
         _ = subprocess.run(["tmux", "load-buffer", "-b", buffer_name, str(temp_path)], timeout=5, check=True)
         if before_paste is not None:
             before_paste()
+        require_no_existing_input(target)
         _ = subprocess.run(["tmux", "paste-buffer", "-b", buffer_name, "-t", target], timeout=5, check=True)
         if not verify_placeholder_paste(target, message, options):
             wait_paste_visible(target, message, options)

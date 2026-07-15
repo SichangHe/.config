@@ -19,7 +19,7 @@ class DirectTmuxDeliveryCallerTests(unittest.TestCase):
             captured["validated_target"] = target
             captured["validated_lines"] = n_lines
 
-        def fake_submit(target: str, message: str, options: object, _pending_guard: object = None, _success_event: object = None) -> Future[None]:
+        def fake_submit(target: str, message: str, options: object, _pending_guard: object = None, _success_event: object = None, _failure_fallback: object = None) -> Future[None]:
             captured["target"] = target
             captured["message"] = message
             captured["options"] = options
