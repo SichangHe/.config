@@ -1140,6 +1140,60 @@ class AgentStatusTests(unittest.TestCase):
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "wl:17"]))
             self.assertEqual("", out.getvalue())
 
+    def test_problems_only_skips_manager_ops_future_request_wait(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nmanager_ops_submanager_8653.md wl 16\n", encoding="utf-8")
+            _ = (root / "manager_ops_submanager_8653.md").write_text(task_frontmatter("blocked", runat="wl:16", managerat="wl:16", is_manager=True, blocked_on="waiting for future human or watcher manager-ops request"), encoding="utf-8")
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertEqual("", out.getvalue())
+
+    def test_problems_only_reports_error_for_manager_ops_future_request_wait(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nmanager_ops_submanager_8653.md wl 16\n", encoding="utf-8")
+            _ = (root / "manager_ops_submanager_8653.md").write_text(task_frontmatter("blocked", runat="wl:16", managerat="wl:16", is_manager=True, blocked_on="waiting for future human or watcher manager-ops request"), encoding="utf-8")
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("error", ["traceback"])), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertIn("error: task=manager_ops_submanager_8653.md", out.getvalue())
+
+    def test_problems_only_reports_stuck_input_for_manager_ops_future_request_wait(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nmanager_ops_submanager_8653.md wl 16\n", encoding="utf-8")
+            _ = (root / "manager_ops_submanager_8653.md").write_text(task_frontmatter("blocked", runat="wl:16", managerat="wl:16", is_manager=True, blocked_on="waiting for future human or watcher manager-ops request"), encoding="utf-8")
+            out = StringIO()
+            report = Report("stuck_input", ["› Continue"], "Continue", True)
+            with patch("omo_manager.omo_agent_status.inspect", return_value=report), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present", return_value="sent_enter") as unstick, redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            text = out.getvalue()
+            self.assertIn("stuck_input: task=manager_ops_submanager_8653.md", text)
+            self.assertIn("unstick=disabled:blocked_idle_blocked", text)
+            unstick.assert_not_called()
+
+    def test_problems_only_reports_non_request_manager_ops_future_wait(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nmanager_ops_submanager_8653.md wl 16\n", encoding="utf-8")
+            _ = (root / "manager_ops_submanager_8653.md").write_text(task_frontmatter("blocked", runat="wl:16", managerat="wl:16", is_manager=True, blocked_on="waiting for future human or watcher manager-ops config"), encoding="utf-8")
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            text = out.getvalue()
+            self.assertIn("blocked_idle: task=manager_ops_submanager_8653.md", text)
+            self.assertIn("reason=waiting for future human or watcher manager-ops config", text)
+
     def test_problems_only_skips_human_helper_direction_wait(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

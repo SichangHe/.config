@@ -95,6 +95,8 @@ HUMAN_WAIT_RE = re.compile(
     |
     \bwaiting\s+(?:on|for)\s+(?:(?:a|the)\s+)?(?:human(?!-readable)|person)(?:'s)?\b(?:\s+(?:action|answers?|approval|authorization|choice|confirmation|decision|discussion|feedback|follow-?up|guidance|input|repl(?:y|ies)|responses?|reviews?)\b|\s+to\b|(?=\s*(?:$|[.;,)])))
     |
+    \bwaiting\s+for\s+future\s+human\s+or\s+watcher\s+manager-ops\s+request\b
+    |
     \bhuman/helper\b[\w\s`'":;,.()/.-]{0,80}\baudit\b[\w\s`'":;,.()/.-]{0,80}\bdirection\b
     |
     \bhuman[- ]pending\b
