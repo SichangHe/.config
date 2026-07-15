@@ -126,6 +126,8 @@ MANAGER_EMAIL_POLICY_REMINDERS = (
     *MANAGER_POLICY_REMINDERS,
     "Reminder: acknowledge human email first, then delegate.",
 )
+IGNORED_PENDING_NOTE_PREFIXES = ("(email_idle_watcher manager-mail-threshold-push-failed ",)
+IGNORED_PENDING_NOTE_DETAIL_PREFIXES = ("manager mail threshold tmux poke failed:",)
 IGNORE_PARTS = {".git", ".venv", "__pycache__"}
 FENCE_PREFIXES = ("```", "~~~")
 INOTIFY_EVENT = struct.Struct("iIII")
@@ -707,6 +709,22 @@ def marker_origin_source(block_lines: list[str]) -> tuple[str, str]:
     return "human", "manual"
 
 
+def remove_ignored_pending_notes(lines: list[str]) -> list[str]:
+    output: list[str] = []
+    skip_detail = False
+    for line in lines:
+        stripped = line.strip()
+        if any(stripped.startswith(prefix) for prefix in IGNORED_PENDING_NOTE_PREFIXES):
+            skip_detail = True
+            continue
+        if skip_detail and any(stripped.startswith(prefix) for prefix in IGNORED_PENDING_NOTE_DETAIL_PREFIXES):
+            skip_detail = False
+            continue
+        skip_detail = False
+        output.append(line)
+    return output
+
+
 def delegate_source(block_lines: list[str]) -> str:
     """Return the stored email source path when a pending block came from email."""
 
@@ -1282,8 +1300,8 @@ def find_markers(root: Path, files: list[Path]) -> list[Marker]:
                 if block_idx != idx - 1 and lines[block_idx].strip() in PENDING_MARKERS:
                     end_idx = block_idx
                     break
-            block_lines = lines[idx - 1 : end_idx]
-            pending_tail = "\n".join(lines[idx - 1 :])
+            block_lines = remove_ignored_pending_notes(lines[idx - 1 : end_idx])
+            pending_tail = "\n".join(remove_ignored_pending_notes(lines[idx - 1 :]))
             origin, source = marker_origin_source(block_lines)
             digest = pending_tail_digest(rel, idx, pending_tail)
             markers.append(
@@ -1320,7 +1338,7 @@ def pending_marker_present(root: Path, pending_file: Path, pending_line: int, pe
         return False
     if not pending_digest:
         return True
-    pending_tail = "\n".join(lines[idx:])
+    pending_tail = "\n".join(remove_ignored_pending_notes(lines[idx:]))
     return pending_tail_digest(pending_file, pending_line, pending_tail) == pending_digest
 
 
@@ -1363,7 +1381,7 @@ def clear_pending_marker_if_current(root: Path, marker: Marker) -> bool:
         idx = marker.line - 1
         if idx < 0 or idx >= len(lines) or lines[idx].strip() != "(pending)":
             return False
-        pending_tail = "\n".join(lines[idx:])
+        pending_tail = "\n".join(remove_ignored_pending_notes(lines[idx:]))
         if pending_tail_digest(marker.file, marker.line, pending_tail) != marker.digest:
             return False
         del lines[idx]

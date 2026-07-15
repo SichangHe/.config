@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import argparse
-import os
 import fcntl
+import hashlib
 import imaplib
 import logging
+import os
 import queue
 import re
 import select
@@ -108,6 +109,8 @@ class EmailPush:
     text: str
     root: Path
     pending_file: Path
+    threshold_kind: str = ""
+    state_dir: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -988,6 +991,65 @@ def pending_marker_present(root: Path, pending_file: Path, pending_line: int) ->
     return 0 <= idx < len(lines) and lines[idx].strip() == "(pending)"
 
 
+def threshold_push_failure_marker(kind: str) -> str:
+    return f"(email_idle_watcher manager-mail-threshold-push-failed {kind})"
+
+
+def sanitized_one_line(text: str, limit: int = 300) -> str:
+    return " ".join(text.split())[:limit]
+
+
+def claim_threshold_push_failure(state_dir: Path | None, root: Path, pending_file: Path, pending_line: int, kind: str) -> Path | None:
+    if state_dir is None:
+        return None
+    digest = hashlib.sha256(f"{root.resolve(strict=False)}\n{pending_file}\n{pending_line}\n{kind}".encode("utf-8")).hexdigest()
+    claim_dir = state_dir / "email-threshold-push-failures"
+    try:
+        claim_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = os.open(claim_dir / f"{digest}.seen", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return None
+    except OSError:
+        return None
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(f"{pending_file}\t{pending_line}\t{kind}\n")
+    return claim_dir / f"{digest}.seen"
+
+
+def record_threshold_push_failure(root: Path, pending_file: Path, pending_line: int, kind: str, target: str, error: str, state_dir: Path | None = None) -> bool:
+    path = root / pending_file
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    lines = text.splitlines()
+    idx = pending_line - 1
+    if idx < 0 or idx >= len(lines) or lines[idx].strip() != "(pending)":
+        return False
+    marker = threshold_push_failure_marker(kind)
+    if any(line.strip() == marker for line in lines):
+        return False
+    claim_path = claim_threshold_push_failure(state_dir, root, pending_file, pending_line, kind)
+    if state_dir is not None and claim_path is None:
+        return False
+    failure_text = "\n".join(
+        [
+            "",
+            marker,
+            f"manager mail threshold tmux poke failed: target={sanitized_one_line(target)} error={sanitized_one_line(error)}; durable pending marker remains for pending watcher dispatch",
+        ]
+    )
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(f"{failure_text}\n")
+    except OSError:
+        if claim_path is not None:
+            claim_path.unlink(missing_ok=True)
+        return False
+    return True
+
+
 def run_email_push(push: EmailPush) -> bool:
     if not pending_marker_present(push.root, push.pending_file, push.line_no):
         logging.error("email pending async push skipped: line=%s marker cleared", push.line_no)
@@ -1006,6 +1068,8 @@ def run_email_push(push: EmailPush) -> bool:
         )
     except Exception as exc:
         logging.error("email pending async push failed: line=%s error=%s", push.line_no, exc)
+        if push.threshold_kind:
+            record_threshold_push_failure(push.root, push.pending_file, push.line_no, push.threshold_kind, push.target, str(exc), push.state_dir)
         return False
     return True
 
@@ -1034,8 +1098,8 @@ def wait_email_pushes() -> None:
     _email_push_queue.join()
 
 
-def email_tmux_push(args: Args, text: str, ref: Path, line_no: int) -> EmailPush:
-    return EmailPush(line_no, args.manager_target, text, args.root, ref)
+def email_tmux_push(args: Args, text: str, ref: Path, line_no: int, threshold_kind: str = "") -> EmailPush:
+    return EmailPush(line_no, args.manager_target, text, args.root, ref, threshold_kind, args.state_dir)
 
 
 def push_email_ref(args: Args, line_no: int) -> bool:
@@ -1058,32 +1122,40 @@ def push_manager_mail_threshold_ref(args: Args, line_no: int, kind: str) -> bool
         start_email_push_worker()
     except RuntimeError as exc:
         logging.error("manager mail threshold async push worker start failed: kind=%s line=%s error=%s", kind, line_no, exc)
+        record_threshold_push_failure(args.root, Path(ref), line_no, kind, args.manager_target, str(exc), args.state_dir)
         return False
-    _email_push_queue.put(email_tmux_push(args, text, Path(ref), line_no))
+    _email_push_queue.put(email_tmux_push(args, text, Path(ref), line_no, kind))
     logging.info("manager mail threshold async push queued: kind=%s line=%s", kind, line_no)
     return True
 
 
 def threshold_marker(kind: str) -> str:
+    return f"(from agent email_idle_watcher manager-mail-threshold {kind})"
+
+
+def legacy_threshold_marker(kind: str) -> str:
     return f"(from manager-email-threshold {kind})"
+
+
+def threshold_markers(kind: str) -> set[str]:
+    return {threshold_marker(kind), legacy_threshold_marker(kind)}
 
 
 def existing_current_threshold_pending_line(manager_file: Path, kind: str) -> int | None:
     if not manager_file.exists():
         return None
     lines = manager_file.read_text(encoding="utf-8").splitlines()
-    marker = threshold_marker(kind)
+    markers = threshold_markers(kind)
     for idx, line in enumerate(lines):
-        if line.strip() != marker:
+        if line.strip() not in markers:
             continue
         for pending_idx in range(max(0, idx - 6), idx):
             if lines[pending_idx].strip() == "(pending)":
                 return pending_idx + 1
-        return idx + 1
     return None
 
 
-def append_manager_mail_threshold_pending(args: Args, kind: str, counts: ManagerMailCounts, dedupe_current: bool = False) -> int:
+def append_manager_mail_threshold_pending(args: Args, kind: str, counts: ManagerMailCounts, dedupe_current: bool = True) -> int:
     manager_file = current_manager_file(args)
     if dedupe_current:
         existing_line = existing_current_threshold_pending_line(manager_file, kind)
@@ -1105,7 +1177,6 @@ def append_manager_mail_threshold_pending(args: Args, kind: str, counts: Manager
     block = [
         "",
         "(pending)",
-        f"[omo-message-source: origin=agent agent=email_idle_watcher via=manager-mail-threshold status=trigger kind={kind}]",
         threshold_marker(kind),
         summary,
         f"- counts: manager_total={counts.total} manager_unread={counts.unread} manager_human_recent={counts.recent_total} recent_window_s={int(counts.recent_window_s)}",
@@ -1114,6 +1185,14 @@ def append_manager_mail_threshold_pending(args: Args, kind: str, counts: Manager
     ]
     manager_file.write_text("\n".join(lines + block) + "\n", encoding="utf-8")
     return line_no + 1
+
+
+def ensure_manager_mail_threshold_pending(args: Args, kind: str, counts: ManagerMailCounts) -> tuple[int, bool]:
+    manager_file = current_manager_file(args)
+    existing_line = existing_current_threshold_pending_line(manager_file, kind)
+    if existing_line is not None:
+        return existing_line, False
+    return append_manager_mail_threshold_pending(args, kind, counts, dedupe_current=False), True
 
 
 def append_recovery_record(root: Path, txt_path: Path, summary: str, manager_file: Path | None = None) -> int:
@@ -1358,7 +1437,6 @@ def handle_manager_mail_thresholds(client: imaplib.IMAP4_SSL, args: Args) -> boo
     save_manager_mail_counts(manager_mail_counts_path(args), counts)
     logging.info("manager mail counts: total=%s unread=%s recent_window_s=%s recent_total=%s recent_exact=%s", counts.total, counts.unread, int(counts.recent_window_s), counts.recent_total, counts.recent_exact)
     threshold_state_path = manager_mail_threshold_state_path(args)
-    state_missing = not threshold_state_path.exists()
     active = load_active_manager_mail_thresholds(threshold_state_path)
     next_active = set(active)
     triggered = False
@@ -1370,13 +1448,13 @@ def handle_manager_mail_thresholds(client: imaplib.IMAP4_SSL, args: Args) -> boo
     for kind, threshold, count in checks:
         exceeded = threshold > 0 and count > threshold
         if exceeded and kind not in active:
-            line_no = append_manager_mail_threshold_pending(args, kind, counts, dedupe_current=state_missing)
+            line_no, created = ensure_manager_mail_threshold_pending(args, kind, counts)
             next_active.add(kind)
             save_active_manager_mail_thresholds(threshold_state_path, next_active)
-            state_missing = False
             active = set(next_active)
-            push_manager_mail_threshold_ref(args, line_no, kind)
-            triggered = True
+            if created:
+                push_manager_mail_threshold_ref(args, line_no, kind)
+                triggered = True
         elif not exceeded and kind in next_active:
             next_active.remove(kind)
             state_changed = True
