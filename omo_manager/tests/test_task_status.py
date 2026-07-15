@@ -560,6 +560,41 @@ class TaskStatusTests(unittest.TestCase):
             self.assertEqual(original, path.read_text(encoding="utf-8"))
             self.assertIn("requires a task blocked by failed done close", stderr.getvalue())
 
+    def test_cli_finish_closed_done_accepts_missing_worker_already_in_previous(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            path.write_text(
+                task_frontmatter(status="blocked", blocked_on="done_close_failed: target disappeared during status query") + "body\n",
+                encoding="utf-8",
+            )
+            (root / "TODO.md").write_text("current:\n\nprevious:\ntask.md wl:2\n", encoding="utf-8")
+
+            with patch("omo_manager.omo_task_status.exact_pane_id", return_value=""), patch(
+                "omo_manager.omo_task_status.stop_done_agent", side_effect=AssertionError("already closed")
+            ), redirect_stdout(io.StringIO()):
+                exit_code = run(StatusArgs(root, Path("task.md"), "done", "", True, "unverified-session"))
+
+            self.assertEqual(0, exit_code)
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("status: done\nrunat:", text)
+            self.assertIn("Codex session id not found in captured tmux output", text)
+            self.assertNotIn("unverified-session", text)
+
+    def test_cli_finish_closed_done_does_not_trust_missing_manager_pane(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            original = task_frontmatter(status="blocked", blocked_on="done_close_failed: target disappeared", is_manager=True) + "body\n"
+            path.write_text(original, encoding="utf-8")
+            (root / "TODO.md").write_text("previous:\ntask.md wl:2\n", encoding="utf-8")
+
+            with patch("omo_manager.omo_task_status.exact_pane_id", return_value=""), redirect_stderr(io.StringIO()):
+                exit_code = run(StatusArgs(root, Path("task.md"), "done", "", True, ""))
+
+            self.assertEqual(2, exit_code)
+            self.assertEqual(original, path.read_text(encoding="utf-8"))
+
     def test_parse_finish_closed_done_without_status(self) -> None:
         args = parse_args(["--root", "/tmp/work", "--finish-closed-done", "--session-id", "session-1", "task.md"])
 

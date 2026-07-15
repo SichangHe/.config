@@ -311,6 +311,22 @@ def is_bookkeeping_failed_reason(blocked_on: str) -> bool:
     return blocked_on == BOOKKEEPING_FAILED_PREFIX or blocked_on.startswith(f"{BOOKKEEPING_FAILED_PREFIX}: ")
 
 
+def is_close_failed_reason(blocked_on: str) -> bool:
+    return blocked_on == CLOSE_FAILED_PREFIX or blocked_on.startswith(f"{CLOSE_FAILED_PREFIX}: ")
+
+
+def task_is_in_todo_section(root: Path, path: Path, section: str) -> bool:
+    """Return whether TODO places the exact task in `section`."""
+
+    for task in parse_task_lines(root / "TODO.md"):
+        if task.section != f"todo:{section}":
+            continue
+        candidate = (root / task.task_file).resolve(strict=False)
+        if candidate == path:
+            return True
+    return False
+
+
 def done_close_failed_reason(exc: Exception) -> str:
     reason = " ".join(str(exc).split())
     return f"{CLOSE_FAILED_PREFIX}: {reason or exc.__class__.__name__}"
@@ -328,22 +344,29 @@ def finish_closed_done(args: Args, path: Path, text: str, before: os.stat_result
     if metadata is None:
         raise TaskFrontmatterError("task file has no frontmatter.")
     ensure_manager_has_no_active_children(args.root, path, metadata)
-    retryable_blocker = is_bookkeeping_failed_reason(metadata.blocked_on) or (
+    verified_already_closed = (
+        not metadata.is_manager
+        and is_close_failed_reason(metadata.blocked_on)
+        and not exact_pane_id(metadata.runat)
+        and task_is_in_todo_section(args.root, path, "previous")
+    )
+    retryable_blocker = is_bookkeeping_failed_reason(metadata.blocked_on) or verified_already_closed or (
         metadata.blocked_on == DONE_CLOSE_IN_PROGRESS and has_close_note(text, metadata.runat, args.session_id)
     )
     if metadata.status != "blocked" or not retryable_blocker:
         raise TaskFrontmatterError("--finish-closed-done requires a task blocked by failed done close or close bookkeeping.")
     _ = update_frontmatter_status(text, "done", "")
+    close_session_id = "" if verified_already_closed else args.session_id
     close_args = StopArgs(metadata.runat, 10.0, 2000, False, False, args.root, path.relative_to(args.root).as_posix(), True, 0.0)
     try:
-        record_close(close_args, args.session_id)
+        record_close(close_args, close_session_id)
     except Exception as exc:
         mark_done_bookkeeping_failed(path, exc)
         raise TaskFrontmatterError(f"done close bookkeeping retry failed; task marked blocked for retry: {exc}") from exc
     after = path.stat()
     updated = update_frontmatter_status(path.read_text(encoding="utf-8"), "done", "")
     replace_if_unchanged(path, updated, after)
-    return metadata.runat, args.session_id
+    return metadata.runat, close_session_id
 
 
 def run(args: Args) -> int:
