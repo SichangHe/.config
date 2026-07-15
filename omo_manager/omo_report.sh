@@ -210,6 +210,7 @@ task_path = Path(sys.argv[2])
 main_target = sys.argv[3].strip()
 TARGET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?$")
 ACTIVE_SECTIONS = {"current", "human pending", "low priority"}
+ACTIVE_MANAGER_STATUSES = {"running", "blocked"}
 
 def target_parts(target: str) -> tuple[str, str, str]:
     session, sep, rest = target.partition(":")
@@ -310,7 +311,11 @@ if is_named_main_manager_target(managerat):
     raise SystemExit(0)
 for candidate in active_task_refs():
     candidate_metadata = parse_frontmatter(candidate)
-    if candidate_metadata is None or candidate_metadata.get("is_manager") != "true":
+    if (
+        candidate_metadata is None
+        or candidate_metadata.get("is_manager") != "true"
+        or candidate_metadata.get("status") not in ACTIVE_MANAGER_STATUSES
+    ):
         continue
     runat = candidate_metadata.get("runat", "")
     if same_tmux_target(runat, managerat):

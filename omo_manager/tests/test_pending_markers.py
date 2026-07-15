@@ -4388,6 +4388,66 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertTrue(str(agent_pointer_paths(manager_text)[0]).endswith(f"worker-agent_done_{expected_key}.md"))
             assert_concise_agent_report(self, report_text, agent="worker-agent", tmux="vl:2", task_file="worker.md", message=b"worker done\n")
 
+    def test_omo_report_appends_worker_report_to_blocked_manager_task_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            root.mkdir()
+            msg = Path(tmp) / "msg.md"
+            msg.write_text("worker done\n", encoding="utf-8")
+            manager_task = root / "manager.md"
+            manager_task.write_text(task_frontmatter(status="blocked", blocked_on="waiting on review", runat="vl:15", managerat="main:0.0", is_manager=True), encoding="utf-8")
+            worker_task = write_report_worker_task(root, "worker.md", runat="vl:2", managerat="vl:15")
+            (root / "TODO.md").write_text("current:\nmanager.md vl:15\nworker.md vl:2\n", encoding="utf-8")
+
+            result = subprocess.run(
+                omo_report_command(agent="worker-agent", message_file=msg),
+                cwd=tmp,
+                env=report_test_env(tmp, OMO_FAKE_TMUX_INFO="vl\t2\t0\t%report\tworker\n"),
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+
+            self.assertEqual("", result.stderr)
+            self.assertEqual(0, result.returncode)
+            manager_text = manager_task.read_text(encoding="utf-8")
+            self.assertIn("(pending)", manager_text)
+            self.assertNotIn("(pending)", worker_task.read_text(encoding="utf-8"))
+            self.assertFalse(dated_manager_file(root).exists())
+            report_text = agent_pointer_paths(manager_text)[0].read_text(encoding="utf-8")
+            assert_concise_agent_report(self, report_text, agent="worker-agent", tmux="vl:2", task_file="worker.md", message=b"worker done\n")
+
+    def test_omo_report_ignores_done_manager_task_when_routing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            root.mkdir()
+            msg = Path(tmp) / "msg.md"
+            msg.write_text("worker done\n", encoding="utf-8")
+            manager_task = root / "manager.md"
+            manager_task.write_text(task_frontmatter(status="done", runat="vl:15", managerat="main:0.0", is_manager=True), encoding="utf-8")
+            worker_task = write_report_worker_task(root, "worker.md", runat="vl:2", managerat="vl:15")
+            (root / "TODO.md").write_text("current:\nmanager.md vl:15\nworker.md vl:2\n", encoding="utf-8")
+
+            result = subprocess.run(
+                omo_report_command(agent="worker-agent", message_file=msg),
+                cwd=tmp,
+                env=report_test_env(tmp, OMO_FAKE_TMUX_INFO="vl\t2\t0\t%report\tworker\n"),
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+
+            self.assertEqual("", result.stderr)
+            self.assertEqual(0, result.returncode)
+            self.assertNotIn("(pending)", manager_task.read_text(encoding="utf-8"))
+            self.assertNotIn("(pending)", worker_task.read_text(encoding="utf-8"))
+            manager_text = dated_manager_file(root).read_text(encoding="utf-8")
+            self.assertIn("(pending)", manager_text)
+            report_text = agent_pointer_paths(manager_text)[0].read_text(encoding="utf-8")
+            self.assertIn("route-warning:\nTarget manager `vl:15` has no active manager task file. Main manager: find where that manager moved or reassign this report.\nmessage:\nworker done\n", report_text)
+
     def test_omo_report_escalates_missing_manager_task_to_main_manager(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "logs"
