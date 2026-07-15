@@ -585,7 +585,6 @@ def new_window(args: Args) -> str:
     out = tmux(new_window_command(args), check=True)
     tmux_target = out.stdout.strip()
     wait_shell(tmux_target)
-    start_codex(tmux_target, args)
     return tmux_target
 
 
@@ -626,6 +625,24 @@ def todo_line(args: Args, tmux_target: str) -> str:
     return " ".join(parts)
 
 
+def refreshed_todo_entry(existing: str, ref: str, tmux_target: str) -> str:
+    leading = existing[: len(existing) - len(existing.lstrip())]
+    stripped = existing.strip()
+    token, _sep, rest = stripped.partition(" ")
+    rest = rest.lstrip()
+    if not tmux_target:
+        return f"{leading}{ref}" if not rest else f"{leading}{ref} {rest}"
+    if not rest:
+        return f"{leading}{ref} {tmux_target}"
+    target_match = re.match(r"(?P<target>[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)(?P<tail>.*)$", rest)
+    if target_match is not None:
+        return f"{leading}{ref} {tmux_target}{target_match.group('tail')}"
+    loose_target_match = re.match(r"(?P<session>[A-Za-z][A-Za-z0-9_-]*)\s+(?P<window>\d+)(?P<tail>.*)$", rest)
+    if loose_target_match is not None:
+        return f"{leading}{ref} {tmux_target}{loose_target_match.group('tail')}"
+    return f"{leading}{ref} {tmux_target} {rest}"
+
+
 def link_todo(args: Args, tmux_target: str) -> None:
     todo = args.root / "TODO.md"
     line = todo_line(args, tmux_target)
@@ -639,8 +656,9 @@ def link_todo(args: Args, tmux_target: str) -> None:
         token = stripped.split(maxsplit=1)[0]
         if token not in aliases:
             continue
-        if token != ref:
-            lines[idx] = existing.replace(token, ref, 1)
+        updated = refreshed_todo_entry(existing, ref, tmux_target)
+        if existing != updated:
+            lines[idx] = updated
             _ = todo.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return
     try:
@@ -725,6 +743,8 @@ def main(argv: list[str]) -> int:
         path = ensure_task_file(args, tmux_target)
         if not args.no_link:
             link_todo(args, tmux_target)
+        if args.workdir is not None:
+            start_codex(tmux_target, args)
         print(path)
         if tmux_target:
             print(tmux_target)

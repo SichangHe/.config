@@ -20,6 +20,7 @@ from omo_manager.omo_task import (
     codex_cmd,
     effective_tool,
     ensure_task_file,
+    refreshed_todo_entry,
     is_vl_agent,
     link_todo,
     main,
@@ -93,6 +94,19 @@ class OmoTaskTests(unittest.TestCase):
             args = Args(root, "x.md", "cfg", "1", "codex", None, "", prompt, False, False, "", "", ())
             link_todo(args, "cfg:1")
             self.assertEqual("current:\nx.md cfg:1\n", (root / "TODO.md").read_text(encoding="utf-8"))
+
+    def test_link_todo_updates_existing_task_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "TODO.md").write_text("current:\nx.md cfg:1\n", encoding="utf-8")
+            args = Args(root, "x.md", "cfg", "2", "codex", None, "", None, False, False, "", "", ())
+            link_todo(args, "cfg:2")
+            self.assertEqual("current:\nx.md cfg:2\n", (root / "TODO.md").read_text(encoding="utf-8"))
+
+    def test_refreshed_todo_entry_preserves_annotations(self) -> None:
+        self.assertEqual("  x.md cfg:2 (blocked: old note)", refreshed_todo_entry("  /tmp/root/x.md cfg:1 (blocked: old note)", "x.md", "cfg:2"))
+        self.assertEqual("x.md cfg:2; followup.md", refreshed_todo_entry("x.md cfg:1; followup.md", "x.md", "cfg:2"))
+        self.assertEqual("x.md cfg:2 (running)", refreshed_todo_entry("x.md cfg 1 (running)", "x.md", "cfg:2"))
 
     def test_creates_pcodx_task_header(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -447,7 +461,7 @@ class OmoTaskTests(unittest.TestCase):
             self.assertEqual(path, ensure_task_file(args, "cfg:2"))
             self.assertEqual("runat: cfg:2 codex\n\nold body\n", path.read_text(encoding="utf-8"))
 
-    def test_new_window_uses_tmux_new_window_shape(self) -> None:
+    def test_new_window_uses_tmux_new_window_shape_without_starting_codex(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             args = Args(Path(tmp), 'x.md', 'cfg', '', 'codex', Path(tmp), 'x', None, False, False, '', '', ())
             with patch('omo_manager.omo_task.tmux') as tmux, patch('omo_manager.omo_task.wait_shell') as wait_shell, patch('omo_manager.omo_task.start_codex') as start_codex_mock:
@@ -457,7 +471,7 @@ class OmoTaskTests(unittest.TestCase):
             self.assertEqual(['new-window', '-P'], command[:2])
             self.assertNotIn('bunx @openai/codex --dangerously-bypass-approvals-and-sandbox', command)
             wait_shell.assert_called_once_with('cfg:7')
-            start_codex_mock.assert_called_once_with('cfg:7', args)
+            start_codex_mock.assert_not_called()
 
     def test_codex_cmd_resumes_quoted_session(self) -> None:
         self.assertEqual("bunx @openai/codex --dangerously-bypass-approvals-and-sandbox resume abc", codex_cmd("abc"))
@@ -656,6 +670,139 @@ class OmoTaskTests(unittest.TestCase):
                 )
             self.assertIn("reminder: fill pending_task_items in task frontmatter.", out.getvalue())
 
+    def test_main_records_task_before_starting_codex(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.md"
+            prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
+            events: list[str] = []
+
+            def fake_ensure(_args: Args, _target: str) -> Path:
+                events.append("ensure_task_file")
+                return root / "x.md"
+
+            def fake_link(_args: Args, _target: str) -> None:
+                events.append("link_todo")
+
+            def fake_start(_target: str, _args: Args) -> None:
+                events.append("start_codex")
+
+            with (
+                patch("omo_manager.omo_task.new_window", return_value="cfg:7") as new_window_mock,
+                patch("omo_manager.omo_task.ensure_task_file", side_effect=fake_ensure),
+                patch("omo_manager.omo_task.link_todo", side_effect=fake_link),
+                patch("omo_manager.omo_task.start_codex", side_effect=fake_start),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(
+                    0,
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "--task-file",
+                            "x.md",
+                            "--tmux-session",
+                            "cfg",
+                            "--workdir",
+                            str(root),
+                            "--prompt-file",
+                            str(prompt),
+                            "--manager-target",
+                            "mgr:1",
+                        ]
+                    ),
+                )
+            new_window_mock.assert_called_once()
+            self.assertEqual(["ensure_task_file", "link_todo", "start_codex"], events)
+
+    def test_main_does_not_start_codex_when_task_link_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.md"
+            prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
+            with (
+                patch("omo_manager.omo_task.new_window", return_value="cfg:7"),
+                patch("omo_manager.omo_task.ensure_task_file", return_value=root / "x.md"),
+                patch("omo_manager.omo_task.link_todo", side_effect=RuntimeError("todo write failed")),
+                patch("omo_manager.omo_task.start_codex") as start_codex_mock,
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                self.assertEqual(
+                    1,
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "--task-file",
+                            "x.md",
+                            "--tmux-session",
+                            "cfg",
+                            "--workdir",
+                            str(root),
+                            "--prompt-file",
+                            str(prompt),
+                            "--manager-target",
+                            "mgr:1",
+                        ]
+                    ),
+                )
+            start_codex_mock.assert_not_called()
+
+    def test_main_relaunch_updates_todo_before_starting_codex(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "x.md"
+            task.write_text(
+                "---\n"
+                "version: v1.0.0\n"
+                "status: blocked\n"
+                "blocked_on: old blocker\n"
+                "runat: cfg:1\n"
+                "tool: codex\n"
+                "managerat: mgr:1\n"
+                "is_manager: false\n"
+                "pending_task_items: []\n"
+                "---\n"
+                "old body\n",
+                encoding="utf-8",
+            )
+            (root / "TODO.md").write_text("current:\nx.md cfg:1\n", encoding="utf-8")
+            events: list[str] = []
+
+            def fake_start(_target: str, _args: Args) -> None:
+                metadata = parse_task_metadata(task.read_text(encoding="utf-8"))
+                self.assertIsNotNone(metadata)
+                assert metadata is not None
+                events.append(f"{metadata.status} {metadata.runat} | {(root / 'TODO.md').read_text(encoding='utf-8').strip()}")
+
+            with (
+                patch("omo_manager.omo_task.new_window", return_value="cfg:7"),
+                patch("omo_manager.omo_task.start_codex", side_effect=fake_start),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(
+                    0,
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "--task-file",
+                            "x.md",
+                            "--tmux-session",
+                            "cfg",
+                            "--workdir",
+                            str(root),
+                        ]
+                    ),
+                )
+            metadata = parse_task_metadata(task.read_text(encoding="utf-8"))
+            self.assertIsNotNone(metadata)
+            assert metadata is not None
+            self.assertEqual("running", metadata.status)
+            self.assertEqual("cfg:7", metadata.runat)
+            self.assertEqual("running cfg:7 | current:\nx.md cfg:7", events[0])
+
     def test_dry_run_prints_prelaunch_source_before_worker_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -736,7 +883,7 @@ class OmoTaskTests(unittest.TestCase):
             with patch('omo_manager.omo_task.tmux') as tmux, patch('omo_manager.omo_task.wait_shell'), patch('omo_manager.omo_task.start_codex') as start_codex_mock:
                 tmux.return_value.stdout = 'cfg:7\n'
                 self.assertEqual('cfg:7', new_window(args))
-            start_codex_mock.assert_called_once_with('cfg:7', args)
+            start_codex_mock.assert_not_called()
 
     def test_start_codex_sends_command_inside_existing_window(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
