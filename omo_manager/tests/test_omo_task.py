@@ -642,6 +642,29 @@ class OmoTaskTests(unittest.TestCase):
             assert metadata is not None
             self.assertTrue(metadata.is_manager)
 
+    def test_new_manager_task_can_self_route(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.md"
+            prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
+            args = Args(root, "x.md", "cfg", "2", "codex", None, "", prompt, False, False, "", "", (), False, "cfg:2", None, True)
+            path = ensure_task_file(args, "cfg:2")
+            metadata = parse_task_metadata(path.read_text(encoding="utf-8"))
+            self.assertIsNotNone(metadata)
+            assert metadata is not None
+            self.assertEqual("cfg:2", metadata.runat)
+            self.assertEqual("cfg:2", metadata.managerat)
+            self.assertTrue(metadata.is_manager)
+
+    def test_new_worker_task_still_rejects_self_route(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.md"
+            prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
+            args = Args(root, "x.md", "cfg", "2", "codex", None, "", prompt, False, False, "", "", (), False, "cfg:2")
+            with self.assertRaisesRegex(ValueError, "unless `--is-manager`"):
+                ensure_task_file(args, "cfg:2")
+
     def test_main_success_reminds_to_fill_pending_task_items(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
