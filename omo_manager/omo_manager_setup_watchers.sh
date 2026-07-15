@@ -316,7 +316,7 @@ stop_pidfile_supervisor() {
 }
 
 legacy_supervisor_process() {
-  local pid="$1" name="$2" script_path="$3" root_arg="$4" state_arg="${5:-}" exe session_id script_index
+  local pid="$1" name="$2" script_path="$3" root_arg="$4" state_arg="${5:-}" exe session_id script_index launch_pid_file
   local -a argv=()
   [ -r "/proc/$pid/cmdline" ] || return 1
   mapfile -d '' -t argv <"/proc/$pid/cmdline" || return 1
@@ -326,7 +326,20 @@ legacy_supervisor_process() {
   [ "${exe##*/}" = bash ] || return 1
   [ "${argv[1]:-}" = -c ] || return 1
   [ "${argv[3]:-}" = "$name-watch-supervisor" ] || return 1
-  if [ "${argv[4]:-}" = "$script_path" ]; then
+  launch_pid_file="${argv[4]:-}"
+  if [ -n "${argv[5]:-}" ] && [ "$launch_pid_file" = "$state_dir/.$name-supervisor.${argv[5]}.pid" ]; then
+    if [ "${argv[6]:-}" = "$script_path" ]; then
+      script_index=6
+    elif [ "${argv[6]:-}" = uv ] \
+      && [ "${argv[7]:-}" = run ] \
+      && [ "${argv[8]:-}" = --project ] \
+      && [ "${argv[9]:-}" = "$helper_dir" ] \
+      && [ "${argv[10]:-}" = "$script_path" ]; then
+      script_index=10
+    else
+      return 1
+    fi
+  elif [ "${argv[4]:-}" = "$script_path" ]; then
     script_index=4
   elif [ "${argv[4]:-}" = uv ] \
     && [ "${argv[5]:-}" = run ] \

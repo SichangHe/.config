@@ -445,6 +445,85 @@ while :; do sleep 30; done
                 current.wait(timeout=2)
                 self.stop_supervisors(tmp / "state")
 
+    def test_setup_replaces_stale_current_format_pending_supervisor(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root = tmp / "work_logs"
+            state = tmp / "state"
+            root.mkdir()
+            state.mkdir()
+            old_launch_pid_file = state / ".pending-supervisor.oldtoken.pid"
+            current = subprocess.Popen(
+                [
+                    "bash",
+                    "-c",
+                    "while :; do sleep 30; done # pending watcher exited status",
+                    "pending-watch-supervisor",
+                    str(old_launch_pid_file),
+                    "oldtoken",
+                    "uv",
+                    "run",
+                    "--project",
+                    str(ROOT / "omo_manager"),
+                    str(ROOT / "omo_manager" / "omo_pending_watch.py"),
+                    "--root",
+                    str(root),
+                ],
+                start_new_session=True,
+            )
+            try:
+                result = self.run_setup(tmp)
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertIn(f"stopping legacy pending watcher supervisor pid={current.pid}", result.stdout)
+                current.wait(timeout=2)
+                self.assertIsNotNone(current.returncode)
+            finally:
+                if current.poll() is None:
+                    try:
+                        os.killpg(current.pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+                    current.wait(timeout=2)
+                self.stop_supervisors(state)
+
+    def test_setup_does_not_kill_current_format_supervisor_with_mismatched_token(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root = tmp / "work_logs"
+            state = tmp / "state"
+            root.mkdir()
+            state.mkdir()
+            launch_pid_file = state / ".pending-supervisor.real-token.pid"
+            current = subprocess.Popen(
+                [
+                    "bash",
+                    "-c",
+                    "while :; do sleep 30; done # pending watcher exited status",
+                    "pending-watch-supervisor",
+                    str(launch_pid_file),
+                    "other-token",
+                    "uv",
+                    "run",
+                    "--project",
+                    str(ROOT / "omo_manager"),
+                    str(ROOT / "omo_manager" / "omo_pending_watch.py"),
+                    "--root",
+                    str(root),
+                ],
+                start_new_session=True,
+            )
+            try:
+                result = self.run_setup(tmp)
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertIsNone(current.poll())
+            finally:
+                try:
+                    os.killpg(current.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                current.wait(timeout=2)
+                self.stop_supervisors(state)
+
     def test_setup_replaces_legacy_email_supervisor_for_exact_state(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
@@ -481,6 +560,51 @@ while :; do sleep 30; done
                     except ProcessLookupError:
                         pass
                     legacy.wait(timeout=2)
+                self.stop_supervisors(state)
+
+    def test_setup_replaces_stale_current_format_email_supervisor(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root = tmp / "work_logs"
+            state = tmp / "state"
+            root.mkdir()
+            state.mkdir()
+            old_launch_pid_file = state / ".email-supervisor.oldtoken.pid"
+            current = subprocess.Popen(
+                [
+                    "bash",
+                    "-c",
+                    "while :; do sleep 30; done # email watcher exited status",
+                    "email-watch-supervisor",
+                    str(old_launch_pid_file),
+                    "oldtoken",
+                    "uv",
+                    "run",
+                    "--project",
+                    str(ROOT / "omo_manager"),
+                    str(ROOT / "omo_manager" / "email_idle_watcher.py"),
+                    "--root",
+                    str(root),
+                    "--mail-dir",
+                    str(root / "manager_mail"),
+                    "--state-dir",
+                    str(state),
+                ],
+                start_new_session=True,
+            )
+            try:
+                result = self.run_setup(tmp)
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertIn(f"stopping legacy email watcher supervisor pid={current.pid}", result.stdout)
+                current.wait(timeout=2)
+                self.assertIsNotNone(current.returncode)
+            finally:
+                if current.poll() is None:
+                    try:
+                        os.killpg(current.pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+                    current.wait(timeout=2)
                 self.stop_supervisors(state)
 
     def test_setup_ignores_stale_pidfile_for_lookalike_supervisor(self) -> None:
