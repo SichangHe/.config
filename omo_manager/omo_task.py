@@ -17,11 +17,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 try:
-    from omo_manager.omo_codex_status import current_block, status, tail
+    from omo_manager.omo_codex_status import current_block, exact_pane_id, status, tail
     from omo_manager.omo_agent_status import TaskFrontmatterError, parse_task_metadata
     from omo_manager.omo_task_lock import task_target_lock
 except ModuleNotFoundError:
-    from omo_codex_status import current_block, status, tail
+    from omo_codex_status import current_block, exact_pane_id, status, tail
     from omo_agent_status import TaskFrontmatterError, parse_task_metadata
     from omo_task_lock import task_target_lock
 
@@ -852,6 +852,46 @@ def dry_run(args: Args) -> None:
         print("tmux: " + " ".join(shlex.quote(part) for part in launch))
 
 
+def capture_pane(pane_id: str, n_lines: int = 80) -> list[str]:
+    """Capture one already-resolved pane without resolving its target again."""
+
+    out = subprocess.run(
+        ["tmux", "capture-pane", "-p", "-t", pane_id, "-S", f"-{n_lines}"],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    if out.returncode != 0:
+        return []
+    lines = [line.rstrip() for line in (out.stdout or "").splitlines()]
+    while lines and not lines[-1]:
+        lines.pop()
+    return lines
+
+
+def validate_existing_target_runtime(args: Args) -> str:
+    """Require registration-only mode to name an exact live Codex pane."""
+
+    if args.workdir is not None:
+        return ""
+    tmux_target = target(args)
+    if TMUX_TARGET_RE.fullmatch(tmux_target) is None:
+        raise ValueError("runat tmux target must be a full tmux target like `SESSION:WINDOW`.")
+    if args.dry_run:
+        return ""
+    pane_id = exact_pane_id(tmux_target)
+    if not pane_id:
+        raise ValueError(f"existing-target mode does not create or launch `{tmux_target}`; use --workdir to launch a new worker.")
+    lines = capture_pane(pane_id)
+    if exact_pane_id(tmux_target) != pane_id:
+        raise ValueError(f"existing target `{tmux_target}` changed while it was being inspected; retry or use --workdir to launch a new worker.")
+    target_status = status(lines, current_block(lines))
+    if target_status not in {"ready", "running"}:
+        raise ValueError(f"existing-target mode requires a ready or running Codex pane at `{tmux_target}`, got {target_status}; use --workdir to launch a new worker.")
+    return pane_id
+
+
 def validate_inputs(args: Args) -> None:
     if args.prompt_file is not None and not args.prompt_file.is_file():
         raise ValueError(f"prompt file not found: {args.prompt_file}")
@@ -888,8 +928,6 @@ def validate_inputs(args: Args) -> None:
     if path.exists():
         return
     tmux_target = "target" if args.workdir is not None else target(args)
-    if args.workdir is None and TMUX_TARGET_RE.fullmatch(tmux_target) is None:
-        raise ValueError("runat tmux target must be a full tmux target like `SESSION:WINDOW`.")
     text = new_task_text(args, tmux_target, validate_target=args.workdir is None)
     validate_runat_goal_tree(text)
 
@@ -904,11 +942,14 @@ def main(argv: list[str]) -> int:
         ownership_lock = task_target_lock(args.root, existing_target) if existing_target else contextlib.nullcontext()
         with ownership_lock:
             validate_inputs(args)
+            existing_pane_id = validate_existing_target_runtime(args)
             if args.dry_run:
                 dry_run(args)
                 return 0
             existed = task_path(args.root, args.task_file).exists()
             tmux_target = new_window(args)
+            if existing_pane_id and exact_pane_id(tmux_target) != existing_pane_id:
+                raise ValueError(f"existing target `{tmux_target}` changed before task registration; retry or use --workdir to launch a new worker.")
             path = ensure_task_file(args, tmux_target)
             if not args.no_link:
                 link_todo(args, tmux_target)

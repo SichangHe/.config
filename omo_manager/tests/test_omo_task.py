@@ -30,6 +30,7 @@ from omo_manager.omo_task import (
     runat_header_error,
     start_codex,
     validate_inputs,
+    validate_existing_target_runtime,
     validate_runat_goal_tree,
     wait_command_started,
     wait_shell,
@@ -696,7 +697,9 @@ class OmoTaskTests(unittest.TestCase):
             prompt = root / "prompt.md"
             prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
             out = io.StringIO()
-            with contextlib.redirect_stdout(out):
+            with contextlib.redirect_stdout(out), patch("omo_manager.omo_task.exact_pane_id", return_value="%2"), patch(
+                "omo_manager.omo_task.capture_pane", return_value=["ready"]
+            ), patch("omo_manager.omo_task.status", return_value="ready"):
                 self.assertEqual(
                     0,
                     main(
@@ -1173,6 +1176,172 @@ class OmoTaskTests(unittest.TestCase):
             args = Args(root, "x.md", "cfg", "", "codex", None, "", prompt, False, False, "", "", (), False, "mgr:1")
             with self.assertRaisesRegex(ValueError, "full tmux target"):
                 validate_inputs(args)
+
+    def test_existing_target_mode_rejects_missing_pane_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.md"
+            prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
+            stderr = io.StringIO()
+
+            with patch("omo_manager.omo_task.exact_pane_id", return_value=""), contextlib.redirect_stderr(stderr):
+                result = main(
+                    [
+                        "--root",
+                        str(root),
+                        "--task-file",
+                        "x.md",
+                        "--tmux-session",
+                        "wl",
+                        "--tmux-window",
+                        "2",
+                        "--prompt-file",
+                        str(prompt),
+                        "--manager-target",
+                        "wl:1",
+                    ]
+                )
+
+            self.assertEqual(1, result)
+            self.assertIn("does not create or launch `wl:2`", stderr.getvalue())
+            self.assertFalse((root / "x.md").exists())
+            self.assertFalse((root / "TODO.md").exists())
+
+    def test_existing_target_mode_rejects_invalid_states_without_mutation(self) -> None:
+        for target_status in ("not_codex", "error", "stuck_input"):
+            with self.subTest(target_status=target_status), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                prompt = root / "prompt.md"
+                prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
+                stderr = io.StringIO()
+
+                with patch("omo_manager.omo_task.exact_pane_id", return_value="%2"), patch(
+                    "omo_manager.omo_task.capture_pane", return_value=["pane output"]
+                ), patch("omo_manager.omo_task.status", return_value=target_status), contextlib.redirect_stderr(stderr):
+                    result = main(
+                        [
+                            "--root",
+                            str(root),
+                            "--task-file",
+                            "x.md",
+                            "--tmux-session",
+                            "wl",
+                            "--tmux-window",
+                            "2",
+                            "--prompt-file",
+                            str(prompt),
+                            "--manager-target",
+                            "wl:1",
+                        ]
+                    )
+
+                self.assertEqual(1, result)
+                self.assertIn(f"got {target_status}", stderr.getvalue())
+                self.assertFalse((root / "x.md").exists())
+                self.assertFalse((root / "TODO.md").exists())
+
+    def test_existing_target_mode_accepts_ready_codex_pane(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.md"
+            prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
+            args = Args(root, "x.md", "wl", "2", "codex", None, "", prompt, False, False, "", "", (), False, "wl:1")
+
+            with patch("omo_manager.omo_task.exact_pane_id", return_value="%2"), patch("omo_manager.omo_task.capture_pane", return_value=["ready"]), patch(
+                "omo_manager.omo_task.status", return_value="ready"
+            ):
+                self.assertEqual("%2", validate_existing_target_runtime(args))
+
+    def test_existing_target_mode_accepts_running_codex_pane_and_registers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.md"
+            prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
+
+            with patch("omo_manager.omo_task.exact_pane_id", return_value="%2"), patch(
+                "omo_manager.omo_task.capture_pane", return_value=["running"]
+            ), patch("omo_manager.omo_task.status", return_value="running"), contextlib.redirect_stdout(io.StringIO()):
+                result = main(
+                    [
+                        "--root",
+                        str(root),
+                        "--task-file",
+                        "x.md",
+                        "--tmux-session",
+                        "wl",
+                        "--tmux-window",
+                        "2",
+                        "--prompt-file",
+                        str(prompt),
+                        "--manager-target",
+                        "wl:1",
+                    ]
+                )
+
+            self.assertEqual(0, result)
+            self.assertTrue((root / "x.md").is_file())
+            self.assertTrue((root / "TODO.md").is_file())
+
+    def test_existing_target_dry_run_does_not_require_live_pane(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.md"
+            prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
+
+            with patch("omo_manager.omo_task.exact_pane_id") as pane_lookup, contextlib.redirect_stdout(io.StringIO()):
+                result = main(
+                    [
+                        "--root",
+                        str(root),
+                        "--task-file",
+                        "x.md",
+                        "--tmux-session",
+                        "wl",
+                        "--tmux-window",
+                        "2",
+                        "--prompt-file",
+                        str(prompt),
+                        "--manager-target",
+                        "wl:1",
+                        "--dry-run",
+                    ]
+                )
+
+            self.assertEqual(0, result)
+            pane_lookup.assert_not_called()
+            self.assertFalse((root / "x.md").exists())
+
+    def test_existing_target_mode_rejects_replaced_pane_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.md"
+            prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
+            stderr = io.StringIO()
+
+            with patch("omo_manager.omo_task.exact_pane_id", side_effect=["%2", "%3"]), patch(
+                "omo_manager.omo_task.capture_pane", return_value=["ready"]
+            ), contextlib.redirect_stderr(stderr):
+                result = main(
+                    [
+                        "--root",
+                        str(root),
+                        "--task-file",
+                        "x.md",
+                        "--tmux-session",
+                        "wl",
+                        "--tmux-window",
+                        "2",
+                        "--prompt-file",
+                        str(prompt),
+                        "--manager-target",
+                        "wl:1",
+                    ]
+                )
+
+            self.assertEqual(1, result)
+            self.assertIn("changed while it was being inspected", stderr.getvalue())
+            self.assertFalse((root / "x.md").exists())
+            self.assertFalse((root / "TODO.md").exists())
 
     def test_main_dry_run_body_runat_does_not_supply_frontmatter_runat(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

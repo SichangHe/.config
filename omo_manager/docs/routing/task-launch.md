@@ -2,6 +2,8 @@
 
 `omo_task.py --task-file TASK.md --tmux-session SESSION --workdir DIR --prompt-file PROMPT` creates and links task files, opens a new tmux window with its normal shell, then starts plain Codex by default through `bunx @openai/codex --dangerously-bypass-approvals-and-sandbox`.
 
+`--workdir` is mandatory when launching a new worker. Without it, `omo_task.py` only registers the task against an exact existing ready or running Codex pane named by `--tmux-session` and `--tmux-window`; it does not create a window or start Codex. Missing, shell-only, exited, and error panes are rejected with instructions to use `--workdir`.
+
 `--task-file` is manager-side bookkeeping for `omo_task.py`; keep that path out of worker prompts. Workers report from their own tmux pane with `omo_report.sh --alloc-message-file` and `omo_report.sh --status STATUS --message-file FILE`, without `--task-file`, `--root`, `--manager-target`, or other manual route flags.
 
 Use `--tool pcodx` only for a worker that intentionally needs the PCODX CLI wrapper, its scoped `pcodx_partial_compact` MCP tools, and sidecar ledger artifacts under `/tmp/pcodx-runs`; that path records `tool: pcodx` in task frontmatter.
