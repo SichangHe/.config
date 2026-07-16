@@ -248,7 +248,10 @@ def footer_tmux_target(explicit_tmux_target: str | None = None, manager_human: b
             raise ValueError("tmux target must have shape session:window or session:window.pane.")
         return canonical_email_tmux_target(explicit_tmux_target)
     if manager_human:
-        return env_manager_tmux_target() or env_tmux_target() or current_tmux_window()
+        # A worker can inherit its manager's target while it still has an
+        # authoritative agent target.  Attribute direct worker mail to that
+        # worker, not to the manager that launched it.
+        return env_tmux_target() or env_manager_tmux_target() or current_tmux_window()
     return env_tmux_target() or current_tmux_window()
 
 
@@ -592,7 +595,16 @@ def main(argv: list[str]) -> int:
         else:
             subject, reply_headers = normalize_subject(args.title, subject_tmux_target or ""), {}
         if args.manager_human:
-            validate_manager_human_subject(subject)
+            try:
+                validate_manager_human_subject(subject)
+            except ValueError:
+                if BRACKETED_TMUX_TAG_RE.findall(subject):
+                    raise
+                # Some inbound human subjects are untagged.  Reply safely by
+                # rebuilding the prepared subject with the known sender
+                # target, rather than rejecting a valid acknowledgement.
+                subject = normalize_subject(subject, subject_tmux_target or "")
+                validate_manager_human_subject(subject)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
