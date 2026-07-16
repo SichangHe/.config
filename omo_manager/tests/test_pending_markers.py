@@ -5339,7 +5339,7 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual(2, len(calls))
             self.assertEqual("wl:2", calls[0][calls[0].index("--manager-target") + 1])
             self.assertEqual("wl:1", calls[1][calls[1].index("--manager-target") + 1])
-            self.assertEqual("Subject: worker note\n\nPlease inspect this directly.", calls[0][1])
+            self.assertEqual("Subject: worker note\n\nPlease inspect this directly.\n\n(record and delegate manager_mail/4002.txt)", calls[0][1])
             self.assertNotIn("Immediately record", calls[0][1])
             self.assertIn("Normally record pending items and remove the consumed `(pending)` marker by running:", calls[1][1])
             self.assertIn("this message is already dispatched to the agent, this is FYI", calls[1][1])
@@ -5628,7 +5628,7 @@ class PendingMarkerTests(unittest.TestCase):
             with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
                 self.assertTrue(watcher.scan_once(args, {}, [path]))
             self.assertEqual(["wl:2", "wl:1"], [call[call.index("--manager-target") + 1] for call in calls])
-            self.assertEqual("Subject: worker note\n\nPlease inspect this directly.", calls[0][1])
+            self.assertEqual("Subject: worker note\n\nPlease inspect this directly.\n\n(record and delegate manager_mail/4002.txt)", calls[0][1])
             self.assertNotIn("\n(pending)\n", calls[0][1])
             self.assertNotIn('<snippet file="worker.md:', calls[0][1])
             self.assertIn('<snippet file="worker.md:', calls[1][1])
@@ -5655,7 +5655,10 @@ class PendingMarkerTests(unittest.TestCase):
             with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
                 self.assertTrue(watcher.scan_once(args, {}, [path]))
             self.assertEqual(["wl:2", "wl:1"], [call[call.index("--manager-target") + 1] for call in calls])
-            self.assertEqual("please inspect directly\n\nSubject: worker note\n\nPlease inspect this directly.", calls[0][1])
+            self.assertEqual(
+                "please inspect directly\n\nSubject: worker note\n\nPlease inspect this directly.\n\n(record and delegate manager_mail/4002.txt)",
+                calls[0][1],
+            )
             self.assertNotIn("DM: please inspect directly", calls[0][1])
             self.assertNotIn('<snippet file="worker.md:', calls[0][1])
             self.assertIn('<snippet file="worker.md:', calls[1][1])
@@ -5682,7 +5685,10 @@ class PendingMarkerTests(unittest.TestCase):
             with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
                 self.assertTrue(watcher.scan_once(args, {}, [path]))
             self.assertEqual(["wl:2"], [call[call.index("--manager-target") + 1] for call in calls])
-            self.assertEqual("please inspect directly\n\nSubject: worker note\n\nPlease inspect this directly.", calls[0][1])
+            self.assertEqual(
+                "please inspect directly\n\nSubject: worker note\n\nPlease inspect this directly.\n\n(record and delegate manager_mail/4002.txt)",
+                calls[0][1],
+            )
             self.assertNotIn("DM only: please inspect directly", calls[0][1])
             self.assertNotIn("this message is already dispatched to the agent, this is FYI", calls[0][1])
             text = path.read_text(encoding="utf-8")
@@ -5690,7 +5696,7 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertNotIn("DM only", text)
             self.assertIn("please inspect directly", text)
 
-    def test_email_dm_only_delivers_complete_realistic_message_from_inline_routing(self) -> None:
+    def test_email_dm_only_truncates_realistic_message_but_retains_source_pointer(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -5737,13 +5743,105 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual(["vl:2"], [delivery_target(call) for call in calls])
             delivered = calls[0][1]
             self.assertIn("START", delivered)
-            self.assertIn("MIDDLE-SENTINEL", delivered)
             self.assertIn("END", delivered)
-            self.assertNotIn("chars", delivered)
+            self.assertNotIn("MIDDLE-SENTINEL", delivered)
+            self.assertRegex(delivered, r"…\d+chars…")
+            self.assertTrue(delivered.endswith("\n\n(record and delegate manager_mail/11734.txt)"))
             self.assertNotIn("manager bookkeeping", delivered)
-            self.assertGreater(len(delivered), 10_000)
-            self.assertEqual(watcher.clean_direct_message_lines(mail_text), delivered)
+            excerpt, pointer = delivered.rsplit("\n\n", 1)
+            self.assertLessEqual(len(excerpt), watcher.PENDING_CONTENT_CHAR_LIMIT)
+            self.assertEqual("(record and delegate manager_mail/11734.txt)", pointer)
             self.assertNotIn("(pending)", path.read_text(encoding="utf-8"))
+
+    def test_direct_dm_retains_distinct_colliding_source_pointers(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "docs").mkdir()
+            (root / "request.md").write_text("email request\n", encoding="utf-8")
+            (root / "docs" / "request.md").write_text("manager request\n", encoding="utf-8")
+            path = root / "worker.md"
+            path.write_text(
+                f"{task_frontmatter(runat='wl:2', managerat='wl:1')}\n"
+                "(pending)\n"
+                "DM only\n"
+                "(from manager docs/request.md)\n"
+                "(record and delegate request.md)\n",
+                encoding="utf-8",
+            )
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(capture_delivery_call(command))
+                return subprocess.CompletedProcess(command, 0)
+
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/missing-status.py"), True, False, manager_target="wl:1")
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+                self.assertTrue(watcher.scan_once(args, {}, [path]))
+            self.assertEqual(1, len(calls))
+            delivered = calls[0][1]
+            self.assertIn("email request", delivered)
+            self.assertIn("manager request", delivered)
+            self.assertIn("(record and delegate request.md)", delivered)
+            self.assertIn("(from manager docs/request.md)", delivered)
+
+    def test_direct_dm_rejected_source_is_reported_only_to_manager(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = base / "root"
+            root.mkdir()
+            (base / "secret.txt").write_text("PRIVATE-OUTSIDE-CONTENT\n", encoding="utf-8")
+            path = root / "worker.md"
+            path.write_text(
+                f"{task_frontmatter(runat='wl:2', managerat='wl:1')}\n"
+                "(pending)\n"
+                "DM only\n"
+                "(record and delegate ../secret.txt)\n"
+                "PRIVATE-INLINE-CONTENT\n",
+                encoding="utf-8",
+            )
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(capture_delivery_call(command))
+                return subprocess.CompletedProcess(command, 0)
+
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/missing-status.py"), True, False, manager_target="wl:1")
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+                self.assertFalse(watcher.scan_once(args, {}, [path]))
+            self.assertEqual(["wl:1"], [delivery_target(call) for call in calls])
+            self.assertIn("linked source was rejected by the path policy", calls[0][1])
+            self.assertNotIn("PRIVATE-OUTSIDE-CONTENT", calls[0][1])
+            self.assertNotIn("PRIVATE-INLINE-CONTENT", calls[0][1])
+            self.assertIn("(pending)", path.read_text(encoding="utf-8"))
+
+    def test_direct_dm_authorized_missing_source_sends_pointer_only_to_worker(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "worker.md"
+            path.write_text(
+                f"{task_frontmatter(runat='wl:2', managerat='wl:1')}\n"
+                "(pending)\n"
+                "DM only\n"
+                "(record and delegate missing.md)\n",
+                encoding="utf-8",
+            )
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(capture_delivery_call(command))
+                return subprocess.CompletedProcess(command, 0)
+
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/missing-status.py"), True, False, manager_target="wl:1")
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+                self.assertTrue(watcher.scan_once(args, {}, [path]))
+            self.assertEqual(["wl:2"], [delivery_target(call) for call in calls])
+            self.assertEqual("(record and delegate missing.md)", calls[0][1])
 
     def test_pending_block_dm_only_strips_case_and_punctuation_for_worker(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -5767,7 +5865,10 @@ class PendingMarkerTests(unittest.TestCase):
             with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
                 self.assertTrue(watcher.scan_once(args, {}, [path]))
             self.assertEqual(["wl:2"], [call[call.index("--manager-target") + 1] for call in calls])
-            self.assertEqual("Please inspect directly.\n\nSubject: worker note\n\nPlease inspect this directly.", calls[0][1])
+            self.assertEqual(
+                "Please inspect directly.\n\nSubject: worker note\n\nPlease inspect this directly.\n\n(record and delegate manager_mail/4002.txt)",
+                calls[0][1],
+            )
             self.assertNotIn("(pending)", calls[0][1])
             self.assertNotIn("DM Only", calls[0][1])
             self.assertNotIn("(pending)", path.read_text(encoding="utf-8"))
@@ -5871,7 +5972,7 @@ class PendingMarkerTests(unittest.TestCase):
             with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
                 self.assertTrue(watcher.scan_once(args, {}, [path]))
             self.assertEqual(["wl:2"], [call[call.index("--manager-target") + 1] for call in calls])
-            self.assertEqual("Follow this linked request.", calls[0][1])
+            self.assertEqual("Follow this linked request.\n\ndocs/request.md", calls[0][1])
             self.assertNotIn('<snippet file="docs/request.md:1-1">', calls[0][1])
             self.assertNotIn("Follow this linked request. DM only", calls[0][1])
             self.assertNotIn('<snippet file="worker.md:', calls[0][1])
@@ -5902,7 +6003,7 @@ class PendingMarkerTests(unittest.TestCase):
             )
             with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
                 self.assertTrue(watcher.scan_once(args, {}, [path]))
-            self.assertEqual("> quoted file excerpt\nFollow this linked request.", calls[0][1])
+            self.assertEqual("> quoted file excerpt\nFollow this linked request.\n\ndocs/request.md", calls[0][1])
             self.assertNotIn("\nDM only\n", calls[0][1])
 
     def test_dm_only_clears_one_pending_marker_per_delivery(self) -> None:
@@ -6088,7 +6189,7 @@ class PendingMarkerTests(unittest.TestCase):
             with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
                 self.assertTrue(watcher.scan_once(args, {}, [path]))
             self.assertEqual(["wl:2", "wl:1"], [call[call.index("--manager-target") + 1] for call in calls])
-            self.assertEqual("Please inspect this directly.", calls[0][1])
+            self.assertEqual(f"Please inspect this directly.\n\n(from agent {report})", calls[0][1])
             self.assertNotIn("message-sha256", calls[0][1])
             self.assertNotIn("sent from agent", calls[0][1])
 
@@ -6124,7 +6225,7 @@ class PendingMarkerTests(unittest.TestCase):
             with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
                 self.assertTrue(watcher.scan_once(args, {}, [path]))
             self.assertEqual(["wl:2", "wl:1"], [call[call.index("--manager-target") + 1] for call in calls])
-            self.assertEqual("Please inspect this directly.", calls[0][1])
+            self.assertEqual("Please inspect this directly.\n\ndocs/request.txt", calls[0][1])
             self.assertNotIn("manager_mail/1.txt", calls[0][1])
             self.assertNotIn("from agent", calls[0][1])
 
@@ -6178,7 +6279,11 @@ class PendingMarkerTests(unittest.TestCase):
             with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
                 self.assertTrue(watcher.scan_once(args, {}, [path]))
             self.assertEqual(["wl:2", "wl:1"], [call[call.index("--manager-target") + 1] for call in calls])
-            self.assertEqual("Subject: worker note\n\nPlease inspect this directly.\n\nFollow this linked request.", calls[0][1])
+            self.assertEqual(
+                "Subject: worker note\n\nPlease inspect this directly.\n\nFollow this linked request."
+                "\n\n(record and delegate manager_mail/4002.txt)\ndocs/request.md",
+                calls[0][1],
+            )
             self.assertNotIn('<snippet file="docs/request.md:1-1">', calls[0][1])
             self.assertNotIn('<snippet file="worker.md:', calls[0][1])
             self.assertIn('<snippet file="worker.md:', calls[1][1])
@@ -6206,7 +6311,7 @@ class PendingMarkerTests(unittest.TestCase):
             with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
                 self.assertTrue(watcher.scan_once(args, {}, [path]))
             self.assertEqual(["wl:2", "wl:1"], [call[call.index("--manager-target") + 1] for call in calls])
-            self.assertEqual("follow this linked request.", calls[0][1])
+            self.assertEqual("follow this linked request.\n\ndocs/request.md", calls[0][1])
             self.assertNotIn('<snippet file="docs/request.md:1-1">', calls[0][1])
             self.assertNotIn('<snippet file="worker.md:', calls[0][1])
             self.assertIn('<snippet file="worker.md:', calls[1][1])
@@ -6234,8 +6339,7 @@ class PendingMarkerTests(unittest.TestCase):
             with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
                 self.assertTrue(watcher.scan_once(args, {}, [path]))
             self.assertEqual(["wl:2", "wl:1"], [call[call.index("--manager-target") + 1] for call in calls])
-            self.assertEqual("Follow this linked request.", calls[0][1])
-            self.assertNotIn("docs/request.md", calls[0][1])
+            self.assertEqual("Follow this linked request.\n\n- docs/request.md", calls[0][1])
 
     def test_linked_file_dm_markdown_link_pointer_sends_only_file_content_to_worker(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -6260,8 +6364,7 @@ class PendingMarkerTests(unittest.TestCase):
             with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
                 self.assertTrue(watcher.scan_once(args, {}, [path]))
             self.assertEqual(["wl:2", "wl:1"], [call[call.index("--manager-target") + 1] for call in calls])
-            self.assertEqual("Follow this linked request.", calls[0][1])
-            self.assertNotIn("[request]", calls[0][1])
+            self.assertEqual("Follow this linked request.\n\n[request](docs/request.md)", calls[0][1])
 
     def test_linked_file_dm_markdown_link_pointer_ignores_title_and_wrapper(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -6294,9 +6397,10 @@ class PendingMarkerTests(unittest.TestCase):
             with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
                 self.assertTrue(watcher.scan_once(args, {}, [path]))
             self.assertEqual(["wl:2", "wl:1"], [call[call.index("--manager-target") + 1] for call in calls])
-            self.assertEqual("Follow the first linked request.\n\nFollow the second linked request.", calls[0][1])
-            self.assertNotIn("[first]", calls[0][1])
-            self.assertNotIn("[second]", calls[0][1])
+            self.assertEqual(
+                'Follow the first linked request.\n\nFollow the second linked request.\n\n[first](docs/first.md "title")\n([second](docs/second.md))',
+                calls[0][1],
+            )
 
     def test_quoted_dm_in_linked_file_does_not_trigger_dm(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -6384,7 +6488,7 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual(["wl:1", "wl:2", "wl:1"], [call[call.index("--manager-target") + 1] for call in calls])
             self.assertIn('<snippet file="docs/first.md:1-1">', calls[0][1])
             self.assertIn('<snippet file="worker.md:', calls[0][1])
-            self.assertEqual("Direct worker request.", calls[1][1])
+            self.assertEqual("Direct worker request.\n\ndocs/second.md", calls[1][1])
             self.assertNotIn('<snippet file="docs/second.md:1-1">', calls[1][1])
             self.assertNotIn('<snippet file="worker.md:', calls[1][1])
 
@@ -6592,7 +6696,10 @@ class PendingMarkerTests(unittest.TestCase):
             with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
                 self.assertTrue(watcher.scan_once(args, {}, [path]))
             self.assertEqual(["wl:2", "wl:1"], [call[call.index("--manager-target") + 1] for call in calls])
-            self.assertEqual("see missing.md\n\nPlease inspect this directly.", calls[0][1])
+            self.assertEqual(
+                "see missing.md\n\nPlease inspect this directly.\n\n(record and delegate manager_mail/4002.txt)\nmissing.md",
+                calls[0][1],
+            )
             self.assertNotIn("<source-error", calls[0][1])
 
     def test_email_dm_worker_launch_failure_sends_manager_action_fallback(self) -> None:
@@ -6741,7 +6848,7 @@ class PendingMarkerTests(unittest.TestCase):
                 self.assertTrue(watcher.scan_once(args, seen, [path]))
             targets = [call[call.index("--manager-target") + 1] for call in calls]
             self.assertEqual(["wl:1", "wl:2", "wl:1"], targets)
-            self.assertEqual(visible, calls[1][1])
+            self.assertEqual(f"{visible}\n\n(record and delegate manager_mail/4002.txt)", calls[1][1])
 
     def test_email_dm_manager_fyi_skips_policy_reminder(self) -> None:
         from omo_manager import omo_pending_watch as watcher

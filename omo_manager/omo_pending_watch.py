@@ -42,7 +42,6 @@ from omo_manager.omo_agent_status import parse_task_lines
 from omo_manager.omo_agent_status import read_task_metadata
 from omo_manager.omo_agent_status import resolve_task_path
 from omo_manager.omo_agent_status import scan_task_state
-from omo_manager.omo_pending_digest import DIRECT_MESSAGE_CONTENT_CHAR_LIMIT
 from omo_manager.omo_pending_digest import PENDING_CONTENT_CHAR_LIMIT
 from omo_manager.omo_pending_digest import pending_tail_digest
 from omo_manager.omo_pending_digest import truncate_content
@@ -87,6 +86,7 @@ ROUTED_PREFIXES = ("(manager handled:", "(manager routed:")
 EMAIL_SOURCE_PREFIXES = ("(record and delegate ", "(from email ", "[source: email ")
 AGENT_SOURCE_PREFIXES = ("[omo-message-source: origin=agent ", "(from agent ")
 MANAGER_SOURCE_PREFIXES = ("(from manager ",)
+REJECTED_SOURCE_ERRORS = {"relative source escapes root", "absolute source is not an agent message file"}
 FILE_REF_RE = re.compile(r"(?<![\w@.-])((?:/)?(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+\.[A-Za-z0-9_.-]+|[A-Za-z0-9_.-]+\.(?:md|txt|json|yaml|yml|toml|py|sh))(?![\w/.-])")
 LIST_POINTER_PREFIX_RE = re.compile(r"^(?:[-*+]|\d+[.)])\s+")
 CHECKBOX_POINTER_PREFIX_RE = re.compile(r"^\[[ xX]\]\s+")
@@ -909,6 +909,8 @@ def marker_is_dm(marker: Marker, attachments: Sequence[SourceAttachment]) -> boo
 
 
 def marker_is_dm_only(marker: Marker, attachments: Sequence[SourceAttachment]) -> bool:
+    if inline_dm_only_email_header(marker.block_text.splitlines()) is not None:
+        return True
     if text_marks_dm_only(marker.block_text):
         return True
     return any(not attachment.error and text_marks_dm_only(attachment.text) for attachment in attachments)
@@ -1318,6 +1320,17 @@ def is_standalone_source_pointer(line: str, sources: set[str]) -> bool:
     return bare_source_pointer_text(line) in sources
 
 
+def line_points_to_source(line: str, source: str) -> bool:
+    """Match one standalone or routing-metadata pointer by parsed path."""
+
+    stripped = line.strip()
+    if bare_source_pointer_text(stripped) == source:
+        return True
+    if not stripped.startswith(EMAIL_SOURCE_PREFIXES + AGENT_SOURCE_PREFIXES + MANAGER_SOURCE_PREFIXES):
+        return False
+    return any(match.group(1) == source for match in FILE_REF_RE.finditer(stripped))
+
+
 def clean_direct_message_lines(text: str) -> str:
     """Remove routing source metadata from direct worker text."""
 
@@ -1375,7 +1388,22 @@ def direct_message_text(marker: Marker, attachments: Sequence[SourceAttachment])
         attachment_text = direct_attachment_text(attachment)
         if attachment_text:
             parts.append(attachment_text)
-    return truncate_content("\n\n".join(parts), DIRECT_MESSAGE_CONTENT_CHAR_LIMIT)
+    excerpt = truncate_content("\n\n".join(parts), PENDING_CONTENT_CHAR_LIMIT)
+    pointer_lines: list[str] = []
+    for attachment in attachments:
+        if attachment.error in REJECTED_SOURCE_ERRORS:
+            continue
+        pointer = next(
+            (
+                display_pending_tail(line.strip())
+                for line in marker.block_text.splitlines()
+                if line_points_to_source(line, attachment.source)
+            ),
+            attachment.source,
+        )
+        if pointer not in pointer_lines:
+            pointer_lines.append(pointer)
+    return "\n\n".join(part for part in (excerpt, "\n".join(pointer_lines)) if part)
 
 
 def marker_delivery_text(marker: Marker, attachments: Sequence[SourceAttachment] = (), prefix: str = "") -> str:
@@ -1744,11 +1772,28 @@ def push_ref(args: Args, seen: dict[str, float], now_s: float, marker: Marker, a
     if not args.dry_run and not manager_target:
         print("omo_pending_watch: a frontmatter `managerat` or OMO_MANAGER_TMUX_TARGET is required outside --dry-run", file=sys.stderr)
         return 1
-    if not for_manager and marker_is_dm_only(marker, attachments):
+    attachment_errors = any(attachment.error for attachment in attachments)
+    rejected_source = any(attachment.error in REJECTED_SOURCE_ERRORS for attachment in attachments)
+    dm_only = not for_manager and marker_is_dm_only(marker, attachments)
+    if dm_only and not rejected_source:
         return push_dm_ref(args, seen, now_s, marker, attachments, manager_target, copy_manager=False)
-    if not for_manager and marker_is_dm(marker, attachments):
+    if dm_only and rejected_source:
+        error_key = attachment_error_seen_key(args, marker, attachments)
+        if seen_contains(seen, error_key, now_s):
+            return 1
+        status = push_marker_text_or_escalate(
+            args,
+            marker,
+            dm_only_delivery_failure_text(marker, "a linked source was rejected by the path policy"),
+            manager_target,
+            DeliverySuccessEvent(seen_keys=(error_key,), seen_at_s=now_s),
+        )
+        if status == 0:
+            remember_seen(seen, error_key, now_s)
+        return status if status not in {0, 2} else 1
+    if not for_manager and marker_is_dm(marker, attachments) and not dm_only:
         return push_dm_ref(args, seen, now_s, marker, attachments, manager_target)
-    if any(attachment.error for attachment in attachments):
+    if attachment_errors:
         error_key = attachment_error_seen_key(args, marker, attachments)
         if seen_contains(seen, error_key, now_s):
             return 1
