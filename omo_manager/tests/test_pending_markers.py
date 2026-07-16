@@ -1474,10 +1474,30 @@ class PendingMarkerTests(unittest.TestCase):
             finally:
                 watcher.push_email_ref = old_push
             self.assertEqual([], pushes)
-            self.assertIn("(pending)\n(record and delegate manager_mail/22.txt)\n", worker.read_text(encoding="utf-8"))
+            self.assertIn("(pending)\nDM only\n(record and delegate manager_mail/22.txt)\n", worker.read_text(encoding="utf-8"))
             self.assertNotIn("manager_mail/22.txt", submanager.read_text(encoding="utf-8"))
             self.assertEqual([("22", "+FLAGS", r"(\Seen)")], client.stores)
             self.assertFalse((root / "work_manager_today.md").exists())
+            (state / "email-processed-uids.tsv").unlink()
+
+            class IntakeRestartClient:
+                stores: list[tuple[object, ...]] = []
+
+                def uid(self, command: str, *args: object) -> tuple[str, list[object]]:
+                    if command == "search":
+                        if "SINCE" in args:
+                            return "OK", [b""]
+                        return "OK", [b"22"]
+                    if command == "fetch":
+                        raise AssertionError("durable DM-only marker should avoid refetch")
+                    if command == "store":
+                        self.stores.append(args)
+                        return "OK", [b""]
+                    raise AssertionError(command)
+
+            with patch("omo_manager.email_idle_watcher.push_email_ref", side_effect=AssertionError("no manager push")):
+                watcher.handle_unseen(IntakeRestartClient(), args)
+            self.assertIn("(pending)\nDM only\n", worker.read_text(encoding="utf-8"))
             calls: list[list[str]] = []
 
             def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
@@ -1573,7 +1593,7 @@ class PendingMarkerTests(unittest.TestCase):
             finally:
                 watcher.push_email_ref = old_push
             self.assertEqual([], pushes)
-            self.assertIn("(pending)\n(record and delegate manager_mail/11329.txt)\n", worker.read_text(encoding="utf-8"))
+            self.assertIn("(pending)\nDM only\n(record and delegate manager_mail/11329.txt)\n", worker.read_text(encoding="utf-8"))
             self.assertNotIn("manager_mail/11329.txt", manager.read_text(encoding="utf-8"))
             self.assertEqual([("11329", "+FLAGS", r"(\Seen)")], client.stores)
 
@@ -5363,7 +5383,13 @@ class PendingMarkerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             path = root / "worker.md"
-            path.write_text(f"{task_frontmatter(runat='wl:2', managerat='wl:1')}\n(pending)\nDM only\nPlease inspect this directly.\n", encoding="utf-8")
+            path.write_text(
+                f"{task_frontmatter(runat='wl:2', managerat='wl:1')}\n"
+                "(pending)\n"
+                "DM only\n"
+                "Please inspect this directly.\n",
+                encoding="utf-8",
+            )
             worker_future: Future[None] = Future()
             fallback_future: Future[None] = Future()
             submitted: list[tuple[str, str, watcher.DeliverySuccessEvent | None, watcher.DeliveryFailureFallback | None]] = []
@@ -5400,16 +5426,20 @@ class PendingMarkerTests(unittest.TestCase):
             seen: dict[str, float] = {}
             with patch("omo_manager.omo_pending_watch.send_to_codex", side_effect=fake_send_to_codex), patch("omo_manager.omo_pending_watch.submit_send", side_effect=fake_submit):
                 self.assertTrue(watcher.scan_once(args, seen, [path]))
-                self.assertEqual({}, seen)
+                self.assertEqual(1, len(seen))
+                self.assertFalse(watcher.scan_once(args, seen, [path]))
+                self.assertEqual(1, len(submitted))
                 worker_future.set_exception(RuntimeError("Codex paste not verified after 5s"))
                 watcher.log_send_result(worker_future, submitted[0][2], submitted[0][3])
                 self.assertEqual(2, len(submitted))
                 self.assertIn("Delivery to resolved target `wl:2` failed: Codex paste not verified after 5s.", submitted[1][1])
-                self.assertIn("direct-message delivery failed: worker target `wl:2` did not receive this message", submitted[1][1])
+                self.assertIn("DM-only delivery failed for `worker.md:11`", submitted[1][1])
+                self.assertIn("do not copy its message", submitted[1][1])
+                self.assertNotIn("Please inspect this directly", submitted[1][1])
                 fallback_future.set_result(None)
                 watcher.log_send_result(fallback_future, submitted[1][2])
                 self.assertTrue(watcher.drain_delivery_successes(args, seen, 1001.0))
-            self.assertIn("(pending)", path.read_text(encoding="utf-8"))
+            self.assertIn("(pending)\nDM only\n", path.read_text(encoding="utf-8"))
             self.assertTrue(any(key.endswith(":delivery-failure") for key in seen))
             self.assertFalse(any(":dm-worker:" in key and not key.endswith(":delivery-failure") for key in seen))
             submitted.clear()
@@ -5418,7 +5448,56 @@ class PendingMarkerTests(unittest.TestCase):
                 side_effect=AssertionError("unexpected fallback"),
             ):
                 self.assertFalse(watcher.scan_once(args, seen, [path]))
-            self.assertIn("(pending)", path.read_text(encoding="utf-8"))
+            self.assertIn("(pending)\nDM only\n", path.read_text(encoding="utf-8"))
+
+    def test_dm_only_async_success_clears_after_unrelated_append_without_duplicate(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "worker.md"
+            path.write_text(
+                f"{task_frontmatter(runat='wl:2', managerat='wl:1')}\n"
+                "(pending)\n"
+                "DM only\n"
+                "(record and delegate manager_mail/4002.txt)\n",
+                encoding="utf-8",
+            )
+            mail = root / "manager_mail" / "4002.txt"
+            mail.parent.mkdir()
+            mail.write_text("Please inspect directly.\nDM only\n", encoding="utf-8")
+            (root / "TODO.md").write_text("PRIVATE-MANAGER-BOOKKEEPING\n", encoding="utf-8")
+            worker_future: Future[None] = Future()
+            success_events: list[watcher.DeliverySuccessEvent | None] = []
+
+            def fake_send_to_codex(
+                _target: str,
+                _message: str,
+                _options: watcher.CodexSendOptions,
+                **kwargs: object,
+            ) -> Future[None]:
+                success_events.append(kwargs.get("success_event"))
+                return worker_future
+
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/missing-status.py"), False, False, manager_target="wl:1")
+            seen: dict[str, float] = {}
+            with patch("omo_manager.omo_pending_watch.send_to_codex", side_effect=fake_send_to_codex):
+                self.assertTrue(watcher.scan_once(args, seen, [path]))
+                self.assertFalse(watcher.scan_once(args, seen, [path]))
+            with path.open("a", encoding="utf-8") as handle:
+                _ = handle.write("(comment: updated TODO.md manager bookkeeping)\n")
+            worker_future.set_result(None)
+            watcher.log_send_result(worker_future, success_events[0])
+            with patch("omo_manager.omo_pending_watch.clear_pending_marker_if_current", return_value=False):
+                self.assertTrue(watcher.drain_delivery_successes(args, seen, 1001.0))
+            self.assertIn("(pending)\nDM only\n", path.read_text(encoding="utf-8"))
+            with patch("omo_manager.omo_pending_watch.send_to_codex", side_effect=AssertionError("delivered worker message must not resend")):
+                self.assertTrue(watcher.scan_once(args, seen, [path]))
+            text = path.read_text(encoding="utf-8")
+            self.assertNotIn("(pending)", text)
+            self.assertNotIn("DM only", text)
+            self.assertIn("(record and delegate manager_mail/4002.txt)", text)
+            self.assertIn("(comment: updated TODO.md manager bookkeeping)", text)
 
     def test_normal_dm_async_worker_failure_notifies_manager_without_worker_success(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -5610,6 +5689,61 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertNotIn("(pending)", text)
             self.assertNotIn("DM only", text)
             self.assertIn("please inspect directly", text)
+
+    def test_email_dm_only_delivers_complete_realistic_message_from_inline_routing(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mail = root / "manager_mail" / "11734.txt"
+            mail.parent.mkdir()
+            prefix = "Subject: focused helper repair\n\nSTART\n"
+            middle = "\nMIDDLE-SENTINEL\n"
+            suffix = "\nEND\nDM only\n"
+            fill_size = 10_119 - len(prefix) - len(middle) - len(suffix)
+            mail_text = f"{prefix}{'a' * (fill_size // 2)}{middle}{'b' * (fill_size - fill_size // 2)}{suffix}"
+            self.assertEqual(10_119, len(mail_text))
+            mail.write_text(mail_text, encoding="utf-8")
+            path = root / "worker.md"
+            path.write_text(
+                f"{task_frontmatter(runat='vl:2', managerat='vl:1')}\n"
+                "(pending)\n"
+                "DM only\n"
+                "(record and delegate manager_mail/11734.txt)\n"
+                "(comment: manager bookkeeping is not DM content)\n",
+                encoding="utf-8",
+            )
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(capture_delivery_call(command))
+                return subprocess.CompletedProcess(command, 0)
+
+            args = Args(
+                root=root,
+                manager_url="",
+                state=root / "seen.tsv",
+                interval_s=1.0,
+                full_scan_interval_s=1.0,
+                idle_status_interval_s=1800.0,
+                status_script=Path("/bin/false"),
+                once=True,
+                dry_run=False,
+                manager_target="vl:1",
+            )
+            self.assertIn("(pending)\nDM only\n", path.read_text(encoding="utf-8"))
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+                self.assertTrue(watcher.scan_once(args, {}, [path]))
+            self.assertEqual(["vl:2"], [delivery_target(call) for call in calls])
+            delivered = calls[0][1]
+            self.assertIn("START", delivered)
+            self.assertIn("MIDDLE-SENTINEL", delivered)
+            self.assertIn("END", delivered)
+            self.assertNotIn("chars", delivered)
+            self.assertNotIn("manager bookkeeping", delivered)
+            self.assertGreater(len(delivered), 10_000)
+            self.assertEqual(watcher.clean_direct_message_lines(mail_text), delivered)
+            self.assertNotIn("(pending)", path.read_text(encoding="utf-8"))
 
     def test_pending_block_dm_only_strips_case_and_punctuation_for_worker(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -6702,13 +6836,13 @@ class PendingMarkerTests(unittest.TestCase):
                 self.assertTrue(watcher.scan_once(args, {}, [path]))
             self.assertEqual(1, len(calls))
             self.assertEqual("main:0.0", calls[0][calls[0].index("--manager-target") + 1])
-            self.assertIn("Direct-message routing failed: pending block or linked file starts or ends with `DM only`, but no safe worker `runat:` target was found.", calls[0][1])
-            self.assertIn("Do not record this routing marker as a pending_task_item.", calls[0][1])
-            self.assertIn("reinstating the worker agent or correcting the routing", calls[0][1])
-            self.assertIn("report this routing error to the human", calls[0][1])
-            self.assertIn('<snippet file="work_manager_today.md:1-2">', calls[0][1])
-            self.assertIn('<snippet file="manager_mail/4002.txt:1-1">', calls[0][1])
-            self.assertIn("Please route this. DM only.", calls[0][1])
+            self.assertIn("DM-only delivery failed for `work_manager_today.md:1`", calls[0][1])
+            self.assertIn("Do not record the routing marker as a pending item", calls[0][1])
+            self.assertIn("Restore or correct the worker target", calls[0][1])
+            self.assertIn("report the routing error to the human", calls[0][1])
+            self.assertNotIn('<snippet file="work_manager_today.md:1-2">', calls[0][1])
+            self.assertNotIn('<snippet file="manager_mail/4002.txt:1-1">', calls[0][1])
+            self.assertNotIn("Please route this. DM only.", calls[0][1])
             self.assertNotIn("omo_record_pending.py", calls[0][1])
 
     def test_email_attachment_error_does_not_mark_marker_seen(self) -> None:

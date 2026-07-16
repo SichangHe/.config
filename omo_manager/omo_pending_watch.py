@@ -42,6 +42,7 @@ from omo_manager.omo_agent_status import parse_task_lines
 from omo_manager.omo_agent_status import read_task_metadata
 from omo_manager.omo_agent_status import resolve_task_path
 from omo_manager.omo_agent_status import scan_task_state
+from omo_manager.omo_pending_digest import DIRECT_MESSAGE_CONTENT_CHAR_LIMIT
 from omo_manager.omo_pending_digest import PENDING_CONTENT_CHAR_LIMIT
 from omo_manager.omo_pending_digest import pending_tail_digest
 from omo_manager.omo_pending_digest import truncate_content
@@ -302,6 +303,8 @@ class AgentProblemGuard:
 class DeliverySuccessEvent:
     seen_keys: tuple[str, ...] = ()
     seen_after_clear_keys: tuple[str, ...] = ()
+    seen_removals: tuple[str, ...] = ()
+    failure_seen_removals: tuple[str, ...] = ()
     blocked_idle_lines: tuple[tuple[str, str], ...] = ()
     dependency_replacements: tuple[tuple[str, str], ...] = ()
     dependency_removals: tuple[str, ...] = ()
@@ -437,12 +440,17 @@ def log_send_result(future: Future[None], success_event: DeliverySuccessEvent | 
 def queue_delivery_failure_event(success_event: DeliverySuccessEvent | None) -> None:
     """Queue guarded rollback for state reserved before async delivery."""
 
-    if success_event is None or success_event.dependency_state is None:
+    if success_event is None:
         return
-    if not success_event.failure_dependency_replacements and not success_event.failure_dependency_removals:
+    if (
+        not success_event.failure_seen_removals
+        and not success_event.failure_dependency_replacements
+        and not success_event.failure_dependency_removals
+    ):
         return
     DELIVERY_SUCCESS_EVENTS.put(
         DeliverySuccessEvent(
+            seen_removals=success_event.failure_seen_removals,
             dependency_state=success_event.dependency_state,
             dependency_guarded_replacements=success_event.failure_dependency_replacements,
             dependency_guarded_removals=success_event.failure_dependency_removals,
@@ -510,10 +518,19 @@ def drain_delivery_successes(args: Args, seen: dict[str, float], now_wall_s: flo
         for key in event.seen_keys:
             remember_seen(seen, key, seen_at_s)
             changed = True
+        for key in event.seen_removals:
+            if key in seen:
+                del seen[key]
+                changed = True
         if clear_ok:
             for key in event.seen_after_clear_keys:
                 remember_seen(seen, key, seen_at_s)
                 changed = True
+        else:
+            for key in event.seen_after_clear_keys:
+                if key in seen:
+                    del seen[key]
+                    changed = True
         for owner_target, line in event.blocked_idle_lines:
             remember_blocked_idle_report(args, seen, owner_target, line, seen_at_s)
             changed = True
@@ -846,7 +863,23 @@ def marker_worker_target(args: Args, marker: Marker, manager_target: str) -> str
     return target
 
 
+def inline_dm_only_email_header(lines: Sequence[str], idx: int = 0) -> tuple[str, str, str] | None:
+    """Return the watcher-emitted DM-only email header, which has no inline payload."""
+
+    tail = remove_ignored_pending_notes(list(lines[idx:]))
+    if (
+        len(tail) >= 3
+        and tail[0].strip() == "(pending)"
+        and tail[1].strip().casefold() == "dm only"
+        and tail[2].strip().startswith(EMAIL_SOURCE_PREFIXES)
+    ):
+        return tail[0], tail[1], tail[2]
+    return None
+
+
 def pending_source_paths(marker: Marker) -> list[str]:
+    if inline_dm_only_email_header(marker.block_text.splitlines()) is not None:
+        return [marker.delegate_source] if marker.delegate_source else []
     sources: list[str] = []
     if marker.delegate_source:
         sources.append(marker.delegate_source)
@@ -888,7 +921,9 @@ def marker_is_for_manager(marker: Marker, attachments: Sequence[SourceAttachment
 
 
 def dm_worker_seen_key(args: Args, marker: Marker, worker_target: str, attachments: Sequence[SourceAttachment]) -> str:
-    payload = f"{marker.block_text}\n{readable_attachment_payload(attachments)}"
+    header = inline_dm_only_email_header(marker.block_text.splitlines())
+    block_payload = "\n".join(header) if header is not None else marker.block_text
+    payload = f"{block_payload}\n{readable_attachment_payload(attachments)}"
     dm = int(marker_is_dm(marker, attachments))
     dm_only = int(marker_is_dm_only(marker, attachments))
     return f"{args.root}:{marker.file}:{marker.line}:{marker.digest}:dm-worker:{canonical_target(worker_target)}:{attachment_payload_digest(payload)}:dm:{dm}:dm-only:{dm_only}"
@@ -1298,6 +1333,8 @@ def clean_direct_message_lines(text: str) -> str:
 def direct_message_block_text(marker: Marker, attachments: Sequence[SourceAttachment]) -> str:
     """Return only human request text from the pending block."""
 
+    if attachments and inline_dm_only_email_header(marker.block_text.splitlines()) is not None:
+        return ""
     attachment_sources = {attachment.source for attachment in attachments if not attachment.error}
     lines = []
     for line in clean_direct_message_lines(marker.block_text).splitlines():
@@ -1338,7 +1375,7 @@ def direct_message_text(marker: Marker, attachments: Sequence[SourceAttachment])
         attachment_text = direct_attachment_text(attachment)
         if attachment_text:
             parts.append(attachment_text)
-    return truncate_content("\n\n".join(parts), PENDING_CONTENT_CHAR_LIMIT)
+    return truncate_content("\n\n".join(parts), DIRECT_MESSAGE_CONTENT_CHAR_LIMIT)
 
 
 def marker_delivery_text(marker: Marker, attachments: Sequence[SourceAttachment] = (), prefix: str = "") -> str:
@@ -1367,6 +1404,16 @@ def direct_message_fallback_text(marker: Marker, attachments: Sequence[SourceAtt
     ]
     parts.extend(marker_snippet_parts(marker, attachments))
     return "\n".join(parts)
+
+
+def dm_only_delivery_failure_text(marker: Marker, reason: str) -> str:
+    """Report a DM-only routing failure without copying the private message."""
+
+    return (
+        f"DM-only delivery failed for `{marker.file}:{marker.line}`: {reason}. "
+        "Do not record the routing marker as a pending item and do not copy its message. "
+        "Restore or correct the worker target so the watcher can retry; report the routing error to the human if it cannot be resolved."
+    )
 
 
 def find_markers(root: Path, files: list[Path]) -> list[Marker]:
@@ -1402,7 +1449,7 @@ def find_markers(root: Path, files: list[Path]) -> list[Marker]:
             block_lines = remove_ignored_pending_notes(lines[idx - 1 : end_idx])
             pending_tail = "\n".join(remove_ignored_pending_notes(lines[idx - 1 :]))
             origin, source = marker_origin_source(block_lines)
-            digest = pending_tail_digest(rel, idx, pending_tail)
+            digest = pending_tail_digest(rel, idx, pending_guard_text(lines, idx - 1))
             markers.append(
                 Marker(
                     file=rel,
@@ -1426,6 +1473,15 @@ def with_manager_policy_reminder(args: Args, text: str, reminders: Sequence[str]
     return f"{text}\n{args.reminder_choice(reminders)}"
 
 
+def pending_guard_text(lines: Sequence[str], idx: int) -> str:
+    """Keep new inline DM-only email guards stable across unrelated appends."""
+
+    header = inline_dm_only_email_header(lines, idx)
+    if header is not None:
+        return "\n".join(header)
+    return "\n".join(remove_ignored_pending_notes(list(lines[idx:])))
+
+
 def pending_marker_present(root: Path, pending_file: Path, pending_line: int, pending_digest: str = "") -> bool:
     path = root / pending_file
     try:
@@ -1437,8 +1493,7 @@ def pending_marker_present(root: Path, pending_file: Path, pending_line: int, pe
         return False
     if not pending_digest:
         return True
-    pending_tail = "\n".join(remove_ignored_pending_notes(lines[idx:]))
-    return pending_tail_digest(pending_file, pending_line, pending_tail) == pending_digest
+    return pending_tail_digest(pending_file, pending_line, pending_guard_text(lines, idx)) == pending_digest
 
 
 def remove_direct_routing_header(lines: list[str], idx: int) -> None:
@@ -1480,8 +1535,7 @@ def clear_pending_marker_if_current(root: Path, marker: Marker) -> bool:
         idx = marker.line - 1
         if idx < 0 or idx >= len(lines) or lines[idx].strip() != "(pending)":
             return False
-        pending_tail = "\n".join(remove_ignored_pending_notes(lines[idx:]))
-        if pending_tail_digest(marker.file, marker.line, pending_tail) != marker.digest:
+        if pending_tail_digest(marker.file, marker.line, pending_guard_text(lines, idx)) != marker.digest:
             return False
         del lines[idx]
         remove_direct_routing_header(lines, idx)
@@ -1577,19 +1631,25 @@ def push_dm_ref(args: Args, seen: dict[str, float], now_s: float, marker: Marker
     marker_name = "DM" if copy_manager else "DM only"
     marker_key = marker_seen_key(args, marker, attachments)
     if not worker_target:
-        text = direct_message_fallback_text(
-            marker,
-            attachments,
-            marker_name,
-            "no safe worker `runat:` target was found",
+        text = (
+            direct_message_fallback_text(marker, attachments, marker_name, "no safe worker `runat:` target was found")
+            if copy_manager
+            else dm_only_delivery_failure_text(marker, "no safe worker `runat:` target was found")
         )
-        return push_marker_text_or_escalate(
+        fallback_status = push_marker_text_or_escalate(
             args,
             marker,
             with_manager_policy_reminder(args, text, reminders),
             manager_target,
-            DeliverySuccessEvent(seen_keys=(marker_key,), seen_at_s=now_s),
+            DeliverySuccessEvent(
+                seen_keys=(marker_key,),
+                failure_seen_removals=(marker_key,) if not copy_manager else (),
+                seen_at_s=now_s,
+            ),
         )
+        if not copy_manager and fallback_status == ASYNC_DELIVERY_STARTED:
+            remember_seen(seen, marker_key, now_s)
+        return fallback_status
     worker_text = marker_worker_dm_text(marker, attachments)
     worker_key = dm_worker_seen_key(args, marker, worker_target, attachments)
     worker_failure_key = dm_worker_failure_seen_key(args, marker, worker_target, attachments)
@@ -1599,10 +1659,14 @@ def push_dm_ref(args: Args, seen: dict[str, float], now_s: float, marker: Marker
     if not worker_seen and worker_failure_seen:
         return 1
     if not worker_seen and not worker_failure_seen:
-        failure_text = marker_delivery_text(
-            marker,
-            attachments,
-            f"direct-message delivery failed: worker target `{worker_target}` did not receive this message; manager action required to inspect or restart the target, then handle the human request.",
+        failure_text = (
+            marker_delivery_text(
+                marker,
+                attachments,
+                f"direct-message delivery failed: worker target `{worker_target}` did not receive this message; manager action required to inspect or restart the target, then handle the human request.",
+            )
+            if copy_manager
+            else dm_only_delivery_failure_text(marker, f"worker target `{worker_target}` did not accept the message")
         )
         result = push_marker_delivery(
             args,
@@ -1615,27 +1679,40 @@ def push_dm_ref(args: Args, seen: dict[str, float], now_s: float, marker: Marker
                 seen_at_s=now_s,
                 clear_root=args.root if not copy_manager else None,
                 clear_marker=marker if not copy_manager else None,
+                failure_seen_removals=(marker_key,),
             ),
             failure_fallback_target=manager_target,
             failure_fallback_text=with_manager_policy_reminder(args, failure_text, reminders),
-            failure_success_event=DeliverySuccessEvent(seen_keys=(worker_failure_key,), seen_at_s=now_s),
+            failure_success_event=DeliverySuccessEvent(
+                seen_keys=(worker_failure_key,),
+                failure_seen_removals=(marker_key,),
+                seen_at_s=now_s,
+            ),
         )
         worker_status = result.status
         if worker_status not in {0, ASYNC_DELIVERY_STARTED}:
-            text = marker_delivery_text(
-                marker,
-                attachments,
-                f"direct-message fallback: direct worker delivery to {worker_target} failed with status {worker_status}; manager action required to route or help with the human request.",
+            text = (
+                marker_delivery_text(
+                    marker,
+                    attachments,
+                    f"direct-message fallback: direct worker delivery to {worker_target} failed with status {worker_status}; manager action required to route or help with the human request.",
+                )
+                if copy_manager
+                else dm_only_delivery_failure_text(marker, f"worker target `{worker_target}` failed with status {worker_status}")
             )
-            return push_marker_text_or_escalate(
+            fallback_status = push_marker_text_or_escalate(
                 args,
                 marker,
                 with_manager_policy_reminder(args, text, reminders),
                 manager_target,
-                DeliverySuccessEvent(seen_keys=(marker_key,), seen_at_s=now_s),
+                DeliverySuccessEvent(seen_keys=(marker_key,), failure_seen_removals=(marker_key,), seen_at_s=now_s),
             )
+            if not copy_manager and fallback_status == ASYNC_DELIVERY_STARTED:
+                remember_seen(seen, marker_key, now_s)
+            return fallback_status
     if not copy_manager:
         if worker_status == ASYNC_DELIVERY_STARTED:
+            remember_seen(seen, marker_key, now_s)
             return ASYNC_DELIVERY_STARTED
         if worker_status == 0:
             remember_seen(seen, worker_key, now_s)

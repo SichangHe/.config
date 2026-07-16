@@ -6,6 +6,7 @@ from pathlib import Path
 
 
 PENDING_CONTENT_CHAR_LIMIT = 2000
+DIRECT_MESSAGE_CONTENT_CHAR_LIMIT = 12000
 
 
 def truncate_content(text: str, limit: int) -> str:

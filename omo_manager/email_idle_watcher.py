@@ -964,7 +964,14 @@ def existing_source_pending_path_line_in_root(root: Path, txt_path: Path, manage
     return None
 
 
-def append_pending(root: Path, txt_path: Path, manager_file: Path | None = None, routed_target: str = "") -> int:
+def append_pending(
+    root: Path,
+    txt_path: Path,
+    manager_file: Path | None = None,
+    routed_target: str = "",
+    *,
+    dm_only: bool = False,
+) -> int:
     manager_file = manager_file or dated_manager_file(root)
     existing_line = existing_source_pending_line(root, txt_path, manager_file)
     if existing_line is not None:
@@ -975,9 +982,12 @@ def append_pending(root: Path, txt_path: Path, manager_file: Path | None = None,
     lines = manager_file.read_text(encoding="utf-8").splitlines() if manager_file.exists() else []
     line_no = len(lines) + 1
     from_line = email_source_lines(root, txt_path)[0]
-    block = ["", "(pending)", from_line]
+    block = ["", "(pending)"]
+    if dm_only:
+        block.append("DM only")
     if routed_target:
-        block.insert(2, f"(manager routed: {routed_target})")
+        block.append(f"(manager routed: {routed_target})")
+    block.append(from_line)
     manager_file.write_text("\n".join(lines + block) + "\n", encoding="utf-8")
     return line_no + 1
 
@@ -989,6 +999,19 @@ def pending_marker_present(root: Path, pending_file: Path, pending_line: int) ->
         return False
     idx = pending_line - 1
     return 0 <= idx < len(lines) and lines[idx].strip() == "(pending)"
+
+
+def dm_only_pending_routing_present(root: Path, pending_file: Path, pending_line: int) -> bool:
+    try:
+        lines = (root / pending_file).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    idx = pending_line - 1
+    return (
+        0 <= idx < len(lines) - 1
+        and lines[idx].strip() == "(pending)"
+        and lines[idx + 1].strip() == "DM only"
+    )
 
 
 def threshold_push_failure_marker(kind: str) -> str:
@@ -1552,7 +1575,6 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
     unaccepted_changed = False
     handled = False
     manager_file = current_manager_file(args)
-    push_args = args_for_manager_file(args, manager_file)
     candidate_uids: set[bytes] = set()
     for subject_prefix in NORMAL_REPLY_SEARCH_PREFIXES:
         candidate_uids.update(search_uids(client, subject_prefix, args.self_email, processed_uids))
@@ -1578,7 +1600,9 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
         pending_ref = existing_source_pending_path_line_in_root(args.root, expected_txt_path, manager_file) if uid in unaccepted_pending_uids else None
         if pending_ref is not None:
             pending_file, pending_line = pending_ref
-            if push_email_ref(args_for_manager_file(args, pending_file, pending_line), pending_line):
+            if dm_only_pending_routing_present(args.root, pending_file, pending_line) or push_email_ref(
+                args_for_manager_file(args, pending_file, pending_line), pending_line
+            ):
                 unaccepted_pending_uids.discard(uid)
                 unaccepted_changed = True
                 processed_uids.add(uid)
@@ -1616,9 +1640,12 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
                 continue
             else:
                 logging.warning("email processed uid lacks source in current root; reprocessing: uid=%s root=%s", uid, args.root)
-        existing_pending_line = existing_source_pending_line(args.root, expected_txt_path, manager_file)
-        if existing_pending_line is not None:
-            if push_email_ref(push_args, existing_pending_line):
+        existing_pending = existing_source_pending_path_line_in_root(args.root, expected_txt_path, manager_file)
+        if existing_pending is not None:
+            pending_file, existing_pending_line = existing_pending
+            if dm_only_pending_routing_present(args.root, pending_file, existing_pending_line) or push_email_ref(
+                args_for_manager_file(args, pending_file, existing_pending_line), existing_pending_line
+            ):
                 unaccepted_pending_uids.discard(uid)
                 unaccepted_changed = True
                 processed_uids.add(uid)
@@ -1668,7 +1695,13 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
         else:
             route = email_route(args, subject, body_text)
             route_args = replace(args, manager_file=route.manager_file, manager_target=route.manager_target)
-            pending_line = append_pending(args.root, txt_path, route.manager_file, route.routed_target)
+            pending_line = append_pending(
+                args.root,
+                txt_path,
+                route.manager_file,
+                route.routed_target,
+                dm_only=route.direct_delivery and text_marks_dm_only(body_text),
+            )
             if route.direct_delivery or push_email_ref(route_args, pending_line):
                 unaccepted_pending_uids.discard(uid)
                 unaccepted_changed = True
