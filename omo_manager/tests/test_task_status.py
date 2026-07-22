@@ -331,7 +331,7 @@ class TaskStatusTests(unittest.TestCase):
                         "---",
                         "version: v1.0.0",
                         "status: done",
-                        "runat: wl:3",
+                        "runat: retired",
                         "tool: codex",
                         "managerat: wl:2.0",
                         "is_manager: false",
@@ -343,6 +343,7 @@ class TaskStatusTests(unittest.TestCase):
                 + "\n",
                 encoding="utf-8",
             )
+            child_before = child.read_bytes()
             notes.write_text("---\nversion: article\nstatus: draft\n---\nnotes\n", encoding="utf-8")
             stdout = io.StringIO()
 
@@ -352,7 +353,44 @@ class TaskStatusTests(unittest.TestCase):
                 exit_code = run(StatusArgs(root, Path("manager.md"), "done", ""))
 
             self.assertEqual(0, exit_code)
+            self.assertEqual(child_before, child.read_bytes())
             self.assertIn("Closed wl:2; session_id: session-1.", stdout.getvalue())
+
+    def test_cli_done_rejects_manager_with_active_retired_child_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = root / "manager.md"
+            child = root / "child.md"
+            original = task_frontmatter(managerat="wl:1", is_manager=True) + "body\n"
+            manager.write_text(original, encoding="utf-8")
+            child.write_text(
+                "\n".join(
+                    [
+                        "---",
+                        "version: v1.0.0",
+                        "status: running",
+                        "runat: retired",
+                        "tool: codex",
+                        "managerat: wl:2.0",
+                        "is_manager: false",
+                        "pending_task_items: []",
+                        "---",
+                        "body",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch(
+                "omo_manager.omo_task_status.stop_done_agent",
+                side_effect=AssertionError("must not close manager with invalid child"),
+            ) as stop_agent, redirect_stderr(io.StringIO()):
+                exit_code = run(StatusArgs(root, Path("manager.md"), "done", ""))
+
+            self.assertEqual(2, exit_code)
+            self.assertEqual(original, manager.read_text(encoding="utf-8"))
+            stop_agent.assert_not_called()
 
     def test_cli_done_rejects_manager_when_child_ownership_cannot_be_verified(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

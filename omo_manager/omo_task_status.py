@@ -8,6 +8,7 @@ import shlex
 import sys
 import tempfile
 from dataclasses import dataclass
+from dataclasses import replace
 from pathlib import Path
 
 if __package__ in {None, ""}:
@@ -103,6 +104,28 @@ def frontmatter_managerat_aliases(text: str, manager_target: str) -> bool:
     return False
 
 
+def parse_manager_child_metadata(text: str) -> TaskMetadata | None:
+    """Validate historical `done` plus `retired` children without changing active-task rules."""
+    parts = frontmatter_parts(text)
+    if parts is None:
+        return None
+    frontmatter, body = parts
+    fields = {key: value.strip() for line in frontmatter for key, sep, value in (line.partition(":"),) if sep}
+    if fields.get("status") != "done" or fields.get("runat") != "retired":
+        return parse_task_metadata(text)
+    compatible: list[str] = []
+    for line in frontmatter:
+        key, sep, _value = line.partition(":")
+        compatible.append("status: blocked" if sep and key == "status" else line)
+        if sep and key == "status":
+            compatible.append("blocked_on: archived completed task")
+    trailing_newline = "\n" if text.endswith("\n") else ""
+    validated = parse_task_metadata("\n".join(["---", *compatible, "---", *body]) + trailing_newline)
+    if validated is None:
+        raise TaskFrontmatterError("task file has no frontmatter.")
+    return replace(validated, status="done", blocked_on="")
+
+
 def active_child_task_refs(root: Path, manager_path: Path, manager_target: str) -> tuple[str, ...]:
     """Return active task files whose `managerat` still points at the closing manager."""
     refs: list[str] = []
@@ -112,7 +135,7 @@ def active_child_task_refs(root: Path, manager_path: Path, manager_target: str) 
         task_ref = relative_task_ref(root, candidate)
         try:
             text = candidate.read_text(encoding="utf-8")
-            metadata = parse_task_metadata(text)
+            metadata = parse_manager_child_metadata(text)
         except OSError as exc:
             raise TaskFrontmatterError(f"cannot verify manager child ownership because `{task_ref}` could not be read: {exc}") from exc
         except TaskFrontmatterError as exc:
