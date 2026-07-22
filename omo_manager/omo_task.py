@@ -47,6 +47,7 @@ CODEX_LAUNCH_MARKER_PREFIX = "[omo:"
 CODEX_LAUNCH_MARKER_DRY_RUN = f"{CODEX_LAUNCH_MARKER_PREFIX}DRY]"
 CODEX_UPDATE_PROMPT_MARKERS = ("update available!", "update now", "press enter to continue")
 CODEX_UPDATE_SUCCESS_MARKERS = ("update ran successfully", "please restart codex")
+MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$")
 
 
 @dataclass(frozen=True)
@@ -71,6 +72,7 @@ class Args:
     migrate_manager_owner: bool = False
     old_manager_target: str = ""
     new_manager_target: str = ""
+    model: str = ""
 
 
 class ParsedArgs(argparse.Namespace):
@@ -85,6 +87,7 @@ class ParsedArgs(argparse.Namespace):
     no_link: bool = False
     dry_run: bool = False
     session_id: str = ""
+    model: str = ""
     reasoning_effort: str = ""
     codex_flag: list[str] | None = None
     manager_target: str = ""
@@ -93,6 +96,18 @@ class ParsedArgs(argparse.Namespace):
     migrate_manager_owner: bool = False
     old_manager_target: str = ""
     new_manager_target: str = ""
+
+
+def codex_flags_model_error(codex_flags: tuple[str, ...]) -> str:
+    if any(flag == "--model" or flag.startswith("--model=") or flag.startswith("-m") for flag in codex_flags):
+        return "raw model selection in --codex-flag is not supported; use --model MODEL."
+    return ""
+
+
+def model_error(model: str) -> str:
+    if model and MODEL_RE.fullmatch(model) is None:
+        return "--model must be a nonempty model identifier containing only letters, numbers, `.`, `_`, `:`, `/`, or `-`."
+    return ""
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -114,6 +129,7 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--no-link", action="store_true")
     _ = parser.add_argument("--dry-run", action="store_true", help="Print the planned launch or ownership migration without changing files or tmux.")
     _ = parser.add_argument("--session-id", default="", help="Codex session id to resume in a new worker window.")
+    _ = parser.add_argument("--model", default="", help="Model to use for a new worker launch.")
     _ = parser.add_argument("--reasoning-effort", choices=("low", "medium", "high", "xhigh", "max", "ultra"), default="", help="Start Codex with `model_reasoning_effort` for this worker.")
     _ = parser.add_argument("--codex-flag", action="append", help="Extra raw Codex argv token. Repeat for flags and values; use `--codex-flag=--flag` when the token starts with `--`.")
     _ = parser.add_argument("--manager-target", default="", help="Optional manager owner target to write as `managerat:` task metadata.")
@@ -146,6 +162,7 @@ def parse_args(argv: list[str]) -> Args:
                 parsed.prompt_file,
                 parsed.no_link,
                 parsed.session_id,
+                parsed.model,
                 parsed.reasoning_effort,
                 parsed.codex_flag,
                 tool_explicit,
@@ -157,6 +174,13 @@ def parse_args(argv: list[str]) -> Args:
             parser.error("--migrate-manager-owner only accepts --root, --task-file, explicit old/new manager targets, and optional --dry-run.")
     if parsed.workdir is not None and not parsed.tmux_session:
         parser.error("--workdir requires --tmux-session.")
+    if parsed.workdir is not None and (not parsed.model.strip() or not parsed.reasoning_effort.strip()):
+        parser.error("--workdir requires nonempty --model MODEL and --reasoning-effort EFFORT.")
+    if invalid_model := model_error(parsed.model):
+        parser.error(invalid_model)
+    raw_model_flag_error = codex_flags_model_error(tuple(parsed.codex_flag or ()))
+    if raw_model_flag_error:
+        parser.error(raw_model_flag_error)
     prelaunch_source = parsed.prelaunch_source.resolve() if parsed.prelaunch_source is not None else None
     return Args(
         parsed.root.resolve(),
@@ -179,6 +203,7 @@ def parse_args(argv: list[str]) -> Args:
         parsed.migrate_manager_owner,
         parsed.old_manager_target,
         parsed.new_manager_target,
+        model=parsed.model,
     )
 
 
@@ -615,11 +640,21 @@ def prompt_input(prompt_file: Path | None, vl_agent: bool = False) -> str:
     return f"\"$(cat -- {quoted_paths})\""
 
 
-def codex_cmd(session_id: str = "", reasoning_effort: str = "", codex_flags: tuple[str, ...] = (), prompt_file: Path | None = None, tool: str = DEFAULT_TOOL, vl_agent: bool = False) -> str:
+def codex_cmd(
+    session_id: str = "",
+    reasoning_effort: str = "",
+    codex_flags: tuple[str, ...] = (),
+    prompt_file: Path | None = None,
+    tool: str = DEFAULT_TOOL,
+    vl_agent: bool = False,
+    model: str = "",
+) -> str:
     try:
         args = list(COMMAND_BY_TOOL[tool])
     except KeyError as exc:
         raise ValueError(f"unsupported tool: {tool}") from exc
+    if model:
+        args.extend(("--model", model))
     if reasoning_effort:
         args.extend(("--config", f'model_reasoning_effort="{reasoning_effort}"'))
     args.extend(codex_flags)
@@ -731,7 +766,7 @@ def start_codex(target: str, args: Args) -> None:
     vl_agent = is_vl_agent(args.task_file, target)
     if vl_agent and args.prompt_file is None:
         raise ValueError("VL launches require --prompt-file so the end-goal and reviewer guidance has task-local context.")
-    command = codex_cmd(args.session_id, args.reasoning_effort, args.codex_flags, args.prompt_file, effective_tool(args), vl_agent)
+    command = codex_cmd(args.session_id, args.reasoning_effort, args.codex_flags, args.prompt_file, effective_tool(args), vl_agent, args.model)
     for attempt in range(2):
         launch_marker = new_launch_marker()
         shell_launch = shell_cmd(worker_command(command, target, args.prelaunch_source, launch_marker))
@@ -848,7 +883,7 @@ def dry_run(args: Args) -> None:
         command = ["tmux", *new_window_command(args)]
         print("tmux: " + " ".join(shlex.quote(part) for part in command))
         launch_target = f"{args.tmux_session}:DRYRUN"
-        launch = ["tmux", "send-keys", "-t", launch_target, shell_cmd(worker_command(codex_cmd(args.session_id, args.reasoning_effort, args.codex_flags, args.prompt_file, effective_tool(args), is_vl_agent(args.task_file, launch_target)), launch_target, args.prelaunch_source, CODEX_LAUNCH_MARKER_DRY_RUN)), "Enter"]
+        launch = ["tmux", "send-keys", "-t", launch_target, shell_cmd(worker_command(codex_cmd(args.session_id, args.reasoning_effort, args.codex_flags, args.prompt_file, effective_tool(args), is_vl_agent(args.task_file, launch_target), args.model), launch_target, args.prelaunch_source, CODEX_LAUNCH_MARKER_DRY_RUN)), "Enter"]
         print("tmux: " + " ".join(shlex.quote(part) for part in launch))
 
 
@@ -893,6 +928,10 @@ def validate_existing_target_runtime(args: Args) -> str:
 
 
 def validate_inputs(args: Args) -> None:
+    if args.workdir is not None and (not args.model.strip() or not args.reasoning_effort.strip()):
+        raise ValueError("--workdir requires nonempty --model MODEL and --reasoning-effort EFFORT.")
+    if invalid_model := model_error(args.model):
+        raise ValueError(invalid_model)
     if args.prompt_file is not None and not args.prompt_file.is_file():
         raise ValueError(f"prompt file not found: {args.prompt_file}")
     if args.prelaunch_source is not None:
@@ -902,6 +941,9 @@ def validate_inputs(args: Args) -> None:
             raise ValueError(f"prelaunch source file is not readable: {args.prelaunch_source}")
     if any(not flag or "\0" in flag or "\n" in flag for flag in args.codex_flags):
         raise ValueError("codex flags must be non-empty single-line argv tokens.")
+    raw_model_flag_error = codex_flags_model_error(args.codex_flags)
+    if raw_model_flag_error:
+        raise ValueError(raw_model_flag_error)
     if args.tool != "pcodx" and any("mcp_servers." in flag for flag in args.codex_flags):
         raise ValueError("MCP server config requires --tool pcodx.")
     if args.workdir is not None and args.prompt_file is None and is_vl_agent(args.task_file, target(args)):

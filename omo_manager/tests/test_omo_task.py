@@ -179,7 +179,7 @@ class OmoTaskTests(unittest.TestCase):
                 "(above are pending task items)\n"
             )
             path.write_text(original, encoding="utf-8")
-            args = Args(root, "vl_worker.md", "vl", "1", "codex", root, "", prompt, False, False, "", "", (), False, "vl:15")
+            args = Args(root, "vl_worker.md", "vl", "1", "codex", root, "", prompt, False, False, "", "medium", (), False, "vl:15", model="gpt-5.6-terra")
             with self.assertRaisesRegex(ValueError, "exactly `runat: TARGET TOOL`"):
                 validate_inputs(args)
             self.assertEqual(original, path.read_text(encoding="utf-8"))
@@ -275,7 +275,7 @@ class OmoTaskTests(unittest.TestCase):
             root = Path(tmp)
             path = root / "x.md"
             path.write_text("runat:\tcfg:2 codex\nold goal\n- item\n", encoding="utf-8")
-            args = Args(root, "x.md", "cfg", "2", "pcodx", root, "", None, False, False, "", "", ())
+            args = Args(root, "x.md", "cfg", "2", "pcodx", root, "", None, False, False, "", "medium", (), model="gpt-5.6-terra")
             validate_inputs(args)
             ensure_task_file(args, "cfg:2")
             self.assertEqual("runat: cfg:2 pcodx\nold goal\n- item\n", path.read_text(encoding="utf-8"))
@@ -307,7 +307,7 @@ class OmoTaskTests(unittest.TestCase):
             root = Path(tmp)
             prompt = root / "prompt.md"
             prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
-            args = Args(root, "vl_worker.md", "vl", "1", "codex", root, "", prompt, False, False, "", "", ())
+            args = Args(root, "vl_worker.md", "vl", "1", "codex", root, "", prompt, False, False, "", "medium", (), model="gpt-5.6-terra")
             with self.assertRaisesRegex(ValueError, "require --manager-target"):
                 validate_inputs(args)
 
@@ -316,7 +316,7 @@ class OmoTaskTests(unittest.TestCase):
             root = Path(tmp)
             prompt = root / "prompt.md"
             prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
-            args = Args(root, "vl_submanager_current_8653.md", "vl", "15", "codex", root, "", prompt, False, False, "", "", ())
+            args = Args(root, "vl_submanager_current_8653.md", "vl", "15", "codex", root, "", prompt, False, False, "", "medium", (), model="gpt-5.6-terra")
             with patch.dict("os.environ", {"OMO_AGENT_TMUX_TARGET": "main:1"}):
                 validate_inputs(args)
 
@@ -327,7 +327,7 @@ class OmoTaskTests(unittest.TestCase):
             prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
             path = root / "vl_worker.md"
             path.write_text("runat: vl:1 codex\nwork\n- route\n(above are pending task items)\n", encoding="utf-8")
-            args = Args(root, "vl_worker.md", "vl", "1", "codex", root, "", prompt, False, False, "", "", (), False, "vl:15")
+            args = Args(root, "vl_worker.md", "vl", "1", "codex", root, "", prompt, False, False, "", "medium", (), False, "vl:15", model="gpt-5.6-terra")
             validate_inputs(args)
             ensure_task_file(args, "vl:1")
             self.assertIn("managerat: vl:15\n", path.read_text(encoding="utf-8"))
@@ -339,7 +339,7 @@ class OmoTaskTests(unittest.TestCase):
             prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
             path = root / "vl_worker.md"
             path.write_text("runat: vl:1 codex\nmanagerat: vl:14\nwork\n- route\n(above are pending task items)\n", encoding="utf-8")
-            args = Args(root, "vl_worker.md", "vl", "1", "codex", root, "", prompt, False, False, "", "", (), False, "vl:15")
+            args = Args(root, "vl_worker.md", "vl", "1", "codex", root, "", prompt, False, False, "", "medium", (), False, "vl:15", model="gpt-5.6-terra")
             with self.assertRaisesRegex(ValueError, "does not match --manager-target"):
                 validate_inputs(args)
 
@@ -453,7 +453,7 @@ class OmoTaskTests(unittest.TestCase):
                 "- old item\n",
                 encoding="utf-8",
             )
-            args = Args(root, "x.md", "cfg", "7", "pcodx", root, "", None, False, False, "", "", (), True, "mgr:1")
+            args = Args(root, "x.md", "cfg", "7", "pcodx", root, "", None, False, False, "", "medium", (), True, "mgr:1", model="gpt-5.6-terra")
             validate_inputs(args)
             ensure_task_file(args, "cfg:7")
             text = path.read_text(encoding="utf-8")
@@ -547,6 +547,26 @@ class OmoTaskTests(unittest.TestCase):
             codex_cmd(reasoning_effort="xhigh", codex_flags=("--profile", "deep-review"), tool="codex"),
         )
 
+    def test_codex_cmd_orders_and_quotes_explicit_model_and_effort(self) -> None:
+        self.assertEqual(
+            "bunx @openai/codex --dangerously-bypass-approvals-and-sandbox --model 'model name' --config 'model_reasoning_effort=\"xhigh\"' --profile deep-review",
+            codex_cmd(model="model name", reasoning_effort="xhigh", codex_flags=("--profile", "deep-review")),
+        )
+        self.assertEqual(
+            f"{PCODX_WRAPPER} --model 'model name' --config 'model_reasoning_effort=\"xhigh\"' --profile deep-review",
+            codex_cmd(model="model name", reasoning_effort="xhigh", codex_flags=("--profile", "deep-review"), tool="pcodx"),
+        )
+
+    def test_codex_cmd_resume_carries_explicit_model_and_effort(self) -> None:
+        self.assertEqual(
+            "bunx @openai/codex --dangerously-bypass-approvals-and-sandbox --model gpt-5.6-terra --config 'model_reasoning_effort=\"max\"' resume 'abc def'",
+            codex_cmd("abc def", reasoning_effort="max", model="gpt-5.6-terra"),
+        )
+        self.assertEqual(
+            f"{PCODX_WRAPPER} --model gpt-5.6-terra --config 'model_reasoning_effort=\"max\"' resume 'abc def'",
+            codex_cmd("abc def", reasoning_effort="max", model="gpt-5.6-terra", tool="pcodx"),
+        )
+
     def test_pcodx_tool_uses_wrapper_command(self) -> None:
         self.assertTrue(PCODX_WRAPPER.is_absolute())
         self.assertEqual(Path(__file__).resolve().parents[1] / "pcodx", PCODX_WRAPPER)
@@ -596,6 +616,111 @@ class OmoTaskTests(unittest.TestCase):
         self.assertEqual(("--profile", "deep-review"), args.codex_flags)
         self.assertEqual(DEFAULT_TOOL, args.tool)
 
+    def test_parse_args_requires_model_and_reasoning_for_launch(self) -> None:
+        base = ["--task-file", "x.md", "--tmux-session", "cfg", "--workdir", "/tmp"]
+        for supplied in ((), ("--model", "gpt-5.6-terra"), ("--reasoning-effort", "max")):
+            with self.subTest(supplied=supplied), contextlib.redirect_stderr(io.StringIO()) as stderr, self.assertRaises(SystemExit):
+                parse_args([*base, *supplied])
+            self.assertIn("requires nonempty --model MODEL and --reasoning-effort EFFORT", stderr.getvalue())
+        args = parse_args([*base, "--model", "gpt-5.6-terra", "--reasoning-effort", "max"])
+        self.assertEqual("gpt-5.6-terra", args.model)
+        self.assertEqual("max", args.reasoning_effort)
+
+    def test_validate_inputs_requires_model_and_reasoning_for_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for model, effort in (("", ""), ("gpt-5.6-terra", ""), ("", "max"), (" ", "max")):
+                args = Args(root, "x.md", "cfg", "", "codex", root, "", None, False, False, "", effort, (), model=model)
+                with self.subTest(model=model, effort=effort), self.assertRaisesRegex(ValueError, "requires nonempty --model MODEL and --reasoning-effort EFFORT"):
+                    validate_inputs(args)
+
+    def test_model_must_be_a_safe_identifier(self) -> None:
+        for model in (" ", "gpt-5.6-terra\n--profile", "gpt-5.6-terra\r--profile", "gpt-5.6-terra\u2028--profile"):
+            with self.subTest(model=model), contextlib.redirect_stderr(io.StringIO()) as stderr, self.assertRaises(SystemExit):
+                parse_args(["--task-file", "x.md", "--model", model])
+            self.assertIn("nonempty model identifier", stderr.getvalue())
+        args = Args(Path("/tmp"), "x.md", "cfg", "2", "codex", None, "", None, False, False, "", "", (), model="bad\nmodel")
+        with self.assertRaisesRegex(ValueError, "nonempty model identifier"):
+            validate_inputs(args)
+
+    def test_raw_model_flags_are_rejected(self) -> None:
+        raw_argvs = (
+            ("--codex-flag=--model", "--codex-flag", "gpt-5.6-terra"),
+            ("--codex-flag=--model=gpt-5.6-terra",),
+            ("--codex-flag=-m", "--codex-flag", "gpt-5.6-terra"),
+            ("--codex-flag=-mgpt-5.6-terra",),
+            ("--codex-flag=-m=gpt-5.6-terra",),
+        )
+        for raw_argv in raw_argvs:
+            with self.subTest(raw_argv=raw_argv), contextlib.redirect_stderr(io.StringIO()) as stderr, self.assertRaises(SystemExit):
+                parse_args(["--task-file", "x.md", *raw_argv])
+            self.assertIn("use --model MODEL", stderr.getvalue())
+
+    def test_programmatic_raw_model_flags_are_rejected(self) -> None:
+        args = Args(Path("/tmp"), "x.md", "cfg", "2", "codex", None, "", None, False, False, "", "", ("--model", "gpt-5.6-terra"))
+        with self.assertRaisesRegex(ValueError, "use --model MODEL"):
+            validate_inputs(args)
+
+    def test_registration_and_migration_do_not_require_launch_selection(self) -> None:
+        registration = parse_args(["--task-file", "x.md", "--tmux-session", "cfg", "--tmux-window", "2"])
+        self.assertEqual("", registration.model)
+        self.assertEqual("", registration.reasoning_effort)
+        migration = parse_args(
+            ["--task-file", "x.md", "--migrate-manager-owner", "--old-manager-target", "cfg:1", "--new-manager-target", "cfg:2"]
+        )
+        self.assertTrue(migration.migrate_manager_owner)
+
+    def test_migration_runs_without_launch_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "x.md"
+            original = (
+                "---\n"
+                "version: v1.0.0\n"
+                "status: running\n"
+                "runat: cfg:3\n"
+                "tool: codex\n"
+                "managerat: cfg:1\n"
+                "is_manager: false\n"
+                "pending_task_items: []\n"
+                "---\n"
+                "work\n"
+            )
+            task.write_text(original, encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()):
+                result = main(
+                    [
+                        "--root",
+                        str(root),
+                        "--task-file",
+                        "x.md",
+                        "--migrate-manager-owner",
+                        "--old-manager-target",
+                        "cfg:1",
+                        "--new-manager-target",
+                        "cfg:2",
+                    ]
+                )
+            self.assertEqual(0, result)
+            self.assertEqual(original.replace("managerat: cfg:1", "managerat: cfg:2"), task.read_text(encoding="utf-8"))
+
+    def test_migration_rejects_model(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()) as stderr, self.assertRaises(SystemExit):
+            parse_args(
+                [
+                    "--task-file",
+                    "x.md",
+                    "--migrate-manager-owner",
+                    "--old-manager-target",
+                    "cfg:1",
+                    "--new-manager-target",
+                    "cfg:2",
+                    "--model",
+                    "gpt-5.6-terra",
+                ]
+            )
+        self.assertIn("only accepts", stderr.getvalue())
+
     def test_parse_args_accepts_new_reasoning_efforts(self) -> None:
         for effort in ("max", "ultra"):
             with self.subTest(effort=effort):
@@ -642,6 +767,10 @@ class OmoTaskTests(unittest.TestCase):
                             "cfg",
                             "--workdir",
                             str(root),
+                            "--model",
+                            "gpt-5.6-terra",
+                            "--reasoning-effort",
+                            "medium",
                             "--prompt-file",
                             str(prompt),
                             "--prelaunch-source",
@@ -757,6 +886,10 @@ class OmoTaskTests(unittest.TestCase):
                             "cfg",
                             "--workdir",
                             str(root),
+                            "--model",
+                            "gpt-5.6-terra",
+                            "--reasoning-effort",
+                            "medium",
                             "--prompt-file",
                             str(prompt),
                             "--manager-target",
@@ -791,6 +924,10 @@ class OmoTaskTests(unittest.TestCase):
                             "cfg",
                             "--workdir",
                             str(root),
+                            "--model",
+                            "gpt-5.6-terra",
+                            "--reasoning-effort",
+                            "medium",
                             "--prompt-file",
                             str(prompt),
                             "--manager-target",
@@ -844,6 +981,10 @@ class OmoTaskTests(unittest.TestCase):
                             "cfg",
                             "--workdir",
                             str(root),
+                            "--model",
+                            "gpt-5.6-terra",
+                            "--reasoning-effort",
+                            "medium",
                         ]
                     ),
                 )
@@ -875,6 +1016,10 @@ class OmoTaskTests(unittest.TestCase):
                 "mgr:1",
                 "--workdir",
                 str(root),
+                "--model",
+                "gpt-5.6-terra",
+                "--reasoning-effort",
+                "medium",
                 "--prompt-file",
                 str(prompt),
                 "--prelaunch-source",
@@ -1143,7 +1288,30 @@ class OmoTaskTests(unittest.TestCase):
             prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
-                self.assertEqual(0, main(["--root", str(root), "--task-file", "x.md", "--tmux-session", "cfg", "--manager-target", "mgr:1", "--workdir", str(root), "--prompt-file", str(prompt), "--dry-run"]))
+                self.assertEqual(
+                    0,
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "--task-file",
+                            "x.md",
+                            "--tmux-session",
+                            "cfg",
+                            "--manager-target",
+                            "mgr:1",
+                            "--workdir",
+                            str(root),
+                            "--model",
+                            "gpt-5.6-terra",
+                            "--reasoning-effort",
+                            "medium",
+                            "--prompt-file",
+                            str(prompt),
+                            "--dry-run",
+                        ]
+                    ),
+                )
             self.assertIn("tmux new-window", out.getvalue())
             self.assertIn("tmux send-keys", out.getvalue())
             self.assertIn("export OMO_AGENT_TMUX_TARGET=cfg:DRYRUN", out.getvalue())
@@ -1156,7 +1324,30 @@ class OmoTaskTests(unittest.TestCase):
             prompt = root / "prompt.md"
             prompt.write_text("implement manager check\n", encoding="utf-8")
             with contextlib.redirect_stderr(io.StringIO()):
-                self.assertEqual(1, main(["--root", str(root), "--task-file", "x.md", "--tmux-session", "cfg", "--manager-target", "mgr:1", "--workdir", str(root), "--prompt-file", str(prompt), "--dry-run"]))
+                self.assertEqual(
+                    1,
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "--task-file",
+                            "x.md",
+                            "--tmux-session",
+                            "cfg",
+                            "--manager-target",
+                            "mgr:1",
+                            "--workdir",
+                            str(root),
+                            "--model",
+                            "gpt-5.6-terra",
+                            "--reasoning-effort",
+                            "medium",
+                            "--prompt-file",
+                            str(prompt),
+                            "--dry-run",
+                        ]
+                    ),
+                )
             self.assertFalse((root / "x.md").exists())
             self.assertFalse((root / "TODO.md").exists())
 
@@ -1357,7 +1548,26 @@ class OmoTaskTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             with contextlib.redirect_stderr(io.StringIO()):
-                self.assertEqual(1, main(["--root", str(root), "--task-file", "vl_worker.md", "--tmux-session", "vl", "--workdir", str(root), "--dry-run"]))
+                self.assertEqual(
+                    1,
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "--task-file",
+                            "vl_worker.md",
+                            "--tmux-session",
+                            "vl",
+                            "--workdir",
+                            str(root),
+                            "--model",
+                            "gpt-5.6-terra",
+                            "--reasoning-effort",
+                            "medium",
+                            "--dry-run",
+                        ]
+                    ),
+                )
             self.assertFalse((root / "vl_worker.md").exists())
             self.assertFalse((root / "TODO.md").exists())
 
@@ -1365,7 +1575,28 @@ class OmoTaskTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             with contextlib.redirect_stderr(io.StringIO()):
-                self.assertEqual(1, main(["--root", str(root), "--task-file", "x.md", "--tmux-session", "cfg", "--workdir", str(root), "--prompt-file", str(root / "missing.md"), "--dry-run"]))
+                self.assertEqual(
+                    1,
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "--task-file",
+                            "x.md",
+                            "--tmux-session",
+                            "cfg",
+                            "--workdir",
+                            str(root),
+                            "--model",
+                            "gpt-5.6-terra",
+                            "--reasoning-effort",
+                            "medium",
+                            "--prompt-file",
+                            str(root / "missing.md"),
+                            "--dry-run",
+                        ]
+                    ),
+                )
             self.assertFalse((root / "x.md").exists())
             self.assertFalse((root / "TODO.md").exists())
 
@@ -1373,7 +1604,28 @@ class OmoTaskTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             with contextlib.redirect_stderr(io.StringIO()):
-                self.assertEqual(1, main(["--root", str(root), "--task-file", "x.md", "--tmux-session", "cfg", "--workdir", str(root), "--codex-flag", "bad\nflag", "--dry-run"]))
+                self.assertEqual(
+                    1,
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "--task-file",
+                            "x.md",
+                            "--tmux-session",
+                            "cfg",
+                            "--workdir",
+                            str(root),
+                            "--model",
+                            "gpt-5.6-terra",
+                            "--reasoning-effort",
+                            "medium",
+                            "--codex-flag",
+                            "bad\nflag",
+                            "--dry-run",
+                        ]
+                    ),
+                )
             self.assertFalse((root / "x.md").exists())
             self.assertFalse((root / "TODO.md").exists())
 
