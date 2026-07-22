@@ -1,4 +1,6 @@
 import json
+import os
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -7,17 +9,29 @@ from unittest.mock import patch
 
 from omo_manager.omo_manager_rotate import (
     Args,
+    Coordinator,
     LaunchMetadata,
     PaneIdentity,
     Preflight,
     ProcessInfo,
     RotationError,
+    acquire_lock,
+    begin_coordinator_handoff,
+    cleanup_pre_go_handoff,
+    coordinator_rotation,
+    create_reservation,
     execute_rotation,
     fresh_command,
+    invocation_is_target,
     option_values,
     preflight,
+    read_reservation,
+    reject_or_clear_stale_reservation,
     resolve_exact_pane,
+    rotate,
     select_launch_metadata,
+    spawn_coordinator,
+    update_reservation,
     wait_for_startup,
 )
 
@@ -31,8 +45,16 @@ def process(pid: int, ppid: int, *argv: str, state: str = "S") -> ProcessInfo:
 
 
 class ManagerRotateTests(unittest.TestCase):
-    def args(self, root: Path, state_dir: Path, *, model: str | None = None, effort: str | None = None) -> Args:
-        return Args("manager:2.0", root, state_dir, model, effort, 2.0, 0.01)
+    def args(
+        self,
+        root: Path,
+        state_dir: Path,
+        *,
+        model: str | None = None,
+        effort: str | None = None,
+        coordinator_token: str | None = None,
+    ) -> Args:
+        return Args("manager:2.0", root, state_dir, model, effort, 2.0, 0.01, coordinator_token)
 
     def pane(self, cwd: Path) -> PaneIdentity:
         return PaneIdentity("manager:2.0", "%42", "@9", 100, cwd)
@@ -82,19 +104,34 @@ class ManagerRotateTests(unittest.TestCase):
                 with self.assertRaisesRegex(RotationError, "ambiguous or non-exact"):
                     resolve_exact_pane("wl:1")
 
-    def test_preflight_refuses_invocation_from_target_pane_by_process_tree(self) -> None:
+    def test_detects_target_invocation_by_pane_or_process_tree(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             pane = self.pane(root)
             processes = {100: process(100, 1, "zsh"), 200: process(200, 100, "python", "omo_manager_rotate.py")}
             with (
-                patch("omo_manager.omo_manager_rotate.resolve_exact_pane", return_value=pane),
-                patch("omo_manager.omo_manager_rotate.read_processes", return_value=processes),
                 patch("omo_manager.omo_manager_rotate.os.getpid", return_value=200),
                 patch.dict("omo_manager.omo_manager_rotate.os.environ", {"TMUX_PANE": "%different"}),
             ):
-                with self.assertRaisesRegex(RotationError, "target pane"):
-                    preflight(self.args(root, root / "state", model="gpt-5.6-terra", effort="xhigh"))
+                self.assertTrue(invocation_is_target(pane, processes))
+            with (
+                patch("omo_manager.omo_manager_rotate.os.getpid", return_value=300),
+                patch.dict("omo_manager.omo_manager_rotate.os.environ", {"TMUX_PANE": "%42"}),
+            ):
+                self.assertTrue(invocation_is_target(pane, processes))
+
+    def test_internal_coordinator_refuses_target_pane_to_prevent_recursion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pane = self.pane(root)
+            args = self.args(root, root / "state", model="gpt-5.6-terra", effort="xhigh", coordinator_token="a" * 32)
+            with (
+                patch("omo_manager.omo_manager_rotate.resolve_exact_pane", return_value=pane),
+                patch("omo_manager.omo_manager_rotate.read_processes", return_value={100: process(100, 1, "zsh")}),
+                patch.dict("omo_manager.omo_manager_rotate.os.environ", {"TMUX_PANE": "%42"}),
+            ):
+                with self.assertRaisesRegex(RotationError, "coordinator pane must differ"):
+                    preflight(args)
 
     def test_argv_parsing_supports_long_short_and_equals_forms(self) -> None:
         models, efforts = option_values(
@@ -171,6 +208,204 @@ class ManagerRotateTests(unittest.TestCase):
         self.assertIn("OMO_WORK_LOGS_ROOT=/home/sichangheagent/work_logs", command)
         self.assertNotIn("resume", command.casefold())
         self.assertNotRegex(command, r"[0-9a-f]{8}-[0-9a-f-]{27,}")
+
+    def test_self_path_starts_detached_coordinator_with_explicit_args_and_private_log(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "root with spaces; literal"
+            root.mkdir()
+            state_dir = Path(tmp) / "private state"
+            prepared = self.prepared(root, state_dir)
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], *, timeout: float = 10, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+                calls.append(command)
+                return completed(command, stdout="%77\n")
+
+            token = "a" * 32
+            with patch("omo_manager.omo_manager_rotate.run", side_effect=fake_run):
+                coordinator = spawn_coordinator(prepared, token)
+
+            self.assertEqual("%77", coordinator.pane_id)
+            self.assertEqual(["tmux", "new-window", "-d", "-P", "-F", "#{pane_id}", "-t", "manager:", "-n", "manager-rotate-coordinator"], calls[0][:-1])
+            shell_command = calls[0][-1]
+            self.assertIn(f"--_coordinator-token {token}", shell_command)
+            self.assertIn("--target manager:2.0", shell_command)
+            self.assertIn("--model gpt-5.6-terra", shell_command)
+            self.assertIn("--reasoning-effort xhigh", shell_command)
+            self.assertIn(shlex.quote(str(root)), shell_command)
+            self.assertIn(shlex.quote(str(state_dir)), shell_command)
+            self.assertIn(shlex.quote(str(coordinator.log_path)), shell_command)
+            self.assertIn('tmux set-option -p -t "$TMUX_PANE" remain-on-exit off', shell_command)
+            self.assertEqual(0o600, os.stat(coordinator.log_path).st_mode & 0o777)
+
+    def test_external_path_stays_direct(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            external = self.prepared(root, root / "state")
+            audit_path = root / "audit.json"
+            with (
+                patch("omo_manager.omo_manager_rotate.acquire_lock", return_value=10),
+                patch("omo_manager.omo_manager_rotate.os.close"),
+                patch("omo_manager.omo_manager_rotate.preflight", return_value=external),
+                patch("omo_manager.omo_manager_rotate.execute_rotation", return_value=audit_path) as execute,
+                patch("omo_manager.omo_manager_rotate.spawn_coordinator") as spawn,
+            ):
+                result = rotate(external.args)
+            self.assertEqual(audit_path, result.path)
+            self.assertFalse(result.coordinated)
+            execute.assert_called_once_with(external)
+            spawn.assert_not_called()
+
+    def test_coordinator_failure_to_start_is_reported_without_live_rotation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prepared = self.prepared(root, root / "state")
+            failed = completed([], returncode=1, stderr="can't create window")
+            with patch("omo_manager.omo_manager_rotate.run", return_value=failed):
+                with self.assertRaisesRegex(RotationError, "failed to start detached rotation coordinator"):
+                    spawn_coordinator(prepared, "a" * 32)
+
+    def test_parent_requires_ready_before_go_and_cleans_pre_go_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prepared = self.prepared(root, root / "state")
+            coordinator = Coordinator("%77", "a" * 32, root / "coordinator.log")
+            calls = 0
+
+            def handoff(_command: list[str], *, timeout: float = 10.0) -> None:
+                nonlocal calls
+                calls += 1
+                if calls == 3:
+                    raise RotationError("timed out waiting for READY")
+
+            with (
+                patch("omo_manager.omo_manager_rotate.secrets.token_hex", return_value="a" * 32),
+                patch("omo_manager.omo_manager_rotate.spawn_coordinator", return_value=coordinator),
+                patch("omo_manager.omo_manager_rotate.tmux_handoff", side_effect=handoff),
+                patch("omo_manager.omo_manager_rotate.run", return_value=completed([])) as run,
+            ):
+                with self.assertRaisesRegex(RotationError, "READY"):
+                    begin_coordinator_handoff(prepared)
+            self.assertIsNone(read_reservation(prepared.args.state_dir))
+            self.assertIn(["tmux", "kill-pane", "-t", "%77"], [call.args[0] for call in run.call_args_list])
+
+    def test_pre_go_cleanup_clears_reservation_when_kill_pane_times_out(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp)
+            token = "a" * 32
+            coordinator = Coordinator("%77", token, state_dir / "coordinator.log")
+            create_reservation(state_dir, token)
+            update_reservation(state_dir, token, coordinator.pane_id, "started")
+
+            def timed_out(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+                if "kill-pane" in command:
+                    raise subprocess.TimeoutExpired(command, 5)
+                return completed(command)
+
+            with patch("omo_manager.omo_manager_rotate.run", side_effect=timed_out):
+                cleanup_pre_go_handoff(state_dir, coordinator, token)
+            self.assertIsNone(read_reservation(state_dir))
+
+    def test_parent_reserves_channels_before_spawn_and_sends_go_after_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prepared = self.prepared(root, root / "state")
+            token = "a" * 32
+            coordinator = Coordinator("%77", token, root / "coordinator.log")
+            commands: list[list[str]] = []
+
+            def handoff(command: list[str], *, timeout: float = 10.0) -> None:
+                commands.append(command)
+                if len(commands) == 3:
+                    update_reservation(prepared.args.state_dir, token, "%77", "ready")
+
+            with (
+                patch("omo_manager.omo_manager_rotate.secrets.token_hex", return_value=token),
+                patch("omo_manager.omo_manager_rotate.spawn_coordinator", return_value=coordinator) as spawn,
+                patch("omo_manager.omo_manager_rotate.tmux_handoff", side_effect=handoff),
+            ):
+                self.assertEqual(coordinator, begin_coordinator_handoff(prepared))
+            spawn.assert_called_once_with(prepared, token)
+            self.assertEqual("-L", commands[0][2])
+            self.assertEqual("-L", commands[1][2])
+            self.assertIn("ready", commands[2][-1])
+            self.assertEqual("-U", commands[-1][2])
+            self.assertIn("go", commands[-1][-1])
+
+    def test_active_reservation_rejected_and_stale_missing_pane_is_cleared(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp)
+            create_reservation(state_dir, "a" * 32)
+            update_reservation(state_dir, "a" * 32, "%77", "ready")
+            with patch("omo_manager.omo_manager_rotate.pane_exists", return_value=True):
+                with self.assertRaisesRegex(RotationError, "active manager rotation handoff"):
+                    acquire_lock(state_dir)
+            with patch("omo_manager.omo_manager_rotate.pane_exists", return_value=False):
+                reject_or_clear_stale_reservation(state_dir)
+            self.assertIsNone(read_reservation(state_dir))
+
+    def test_stale_pre_pane_reservation_clears_only_when_main_lock_is_free(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state_dir = Path(tmp)
+            create_reservation(state_dir, "a" * 32)
+            with patch("omo_manager.omo_manager_rotate.rotation_lock_is_free", return_value=False):
+                with self.assertRaisesRegex(RotationError, "active manager rotation handoff"):
+                    reject_or_clear_stale_reservation(state_dir)
+            with patch("omo_manager.omo_manager_rotate.rotation_lock_is_free", return_value=True):
+                reject_or_clear_stale_reservation(state_dir)
+            self.assertIsNone(read_reservation(state_dir))
+
+    def test_matching_coordinator_clears_reservation_only_after_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_dir = root / "state"
+            token = "a" * 32
+            args = self.args(root, state_dir, model="gpt-5.6-terra", effort="xhigh", coordinator_token=token)
+            create_reservation(state_dir, token)
+            update_reservation(state_dir, token, "%77", "started")
+            pane = self.pane(root)
+            prepared = self.prepared(root, state_dir)
+            events: list[str] = []
+
+            def locked(*_args: object, **_kwargs: object) -> int:
+                events.append("lock")
+                return 12
+
+            def execute(_prepared: Preflight) -> Path:
+                self.assertIsNone(read_reservation(state_dir))
+                events.append("execute")
+                return root / "audit.json"
+
+            with (
+                patch.dict("omo_manager.omo_manager_rotate.os.environ", {"TMUX_PANE": "%77"}),
+                patch("omo_manager.omo_manager_rotate.resolve_exact_pane", return_value=pane),
+                patch("omo_manager.omo_manager_rotate.tmux_handoff"),
+                patch("omo_manager.omo_manager_rotate.acquire_lock", side_effect=locked),
+                patch("omo_manager.omo_manager_rotate.preflight", return_value=prepared),
+                patch("omo_manager.omo_manager_rotate.execute_rotation", side_effect=execute),
+                patch("omo_manager.omo_manager_rotate.os.close"),
+            ):
+                coordinator_rotation(args)
+            self.assertEqual(["lock", "execute"], events)
+
+    def test_coordinator_go_timeout_leaves_reservation_for_stale_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state_dir = root / "state"
+            token = "a" * 32
+            args = self.args(root, state_dir, model="gpt-5.6-terra", effort="xhigh", coordinator_token=token)
+            create_reservation(state_dir, token)
+            update_reservation(state_dir, token, "%77", "started")
+            with (
+                patch.dict("omo_manager.omo_manager_rotate.os.environ", {"TMUX_PANE": "%77"}),
+                patch("omo_manager.omo_manager_rotate.resolve_exact_pane", return_value=self.pane(root)),
+                patch("omo_manager.omo_manager_rotate.tmux_handoff", side_effect=[None, RotationError("GO timeout")]),
+                patch("omo_manager.omo_manager_rotate.execute_rotation") as execute,
+            ):
+                with self.assertRaisesRegex(RotationError, "GO timeout"):
+                    coordinator_rotation(args)
+            self.assertEqual("ready", read_reservation(state_dir).phase)  # type: ignore[union-attr]
+            execute.assert_not_called()
 
     def test_execute_respawns_same_pane_then_starts_watchers_with_explicit_env(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

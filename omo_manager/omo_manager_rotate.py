@@ -11,6 +11,7 @@ import fcntl
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
 import subprocess
@@ -31,6 +32,10 @@ EFFORT_RE = re.compile(r"^model_reasoning_effort\s*=\s*(['\"]?)([A-Za-z0-9_-]+)\
 EFFORTS = {"low", "medium", "high", "xhigh", "max", "ultra"}
 SUCCESS_STATUSES = {"ready", "running"}
 TERMINAL_FAILURE_STATUSES = {"error"}
+HANDOFF_TIMEOUT_S = 10.0
+HANDOFF_LOCK_TIMEOUT_S = 10.0
+RESERVATION_NAME = "manager-rotation.handoff.json"
+TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
 
 
 class RotationError(RuntimeError):
@@ -46,6 +51,7 @@ class Args:
     reasoning_effort: str | None
     startup_timeout_s: float
     poll_interval_s: float
+    coordinator_token: str | None = None
 
 
 @dataclass(frozen=True)
@@ -81,6 +87,27 @@ class Preflight:
     metadata: LaunchMetadata
     pane_output: str
     prompt: str
+    invoked_from_target: bool = False
+
+
+@dataclass(frozen=True)
+class Coordinator:
+    pane_id: str
+    token: str
+    log_path: Path
+
+
+@dataclass(frozen=True)
+class RotationResult:
+    path: Path
+    coordinated: bool
+
+
+@dataclass(frozen=True)
+class HandoffReservation:
+    token: str
+    pane_id: str
+    phase: str
 
 
 class ParsedArgs(argparse.Namespace):
@@ -91,6 +118,7 @@ class ParsedArgs(argparse.Namespace):
     reasoning_effort: str | None = None
     startup_timeout_s: float = 45.0
     poll_interval_s: float = 0.5
+    coordinator_token: str | None = None
 
 
 def default_state_dir() -> Path:
@@ -106,6 +134,7 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--reasoning-effort", choices=sorted(EFFORTS), help="Required with --model only when live metadata is unavailable.")
     _ = parser.add_argument("--startup-timeout-s", type=float, default=45.0)
     _ = parser.add_argument("--poll-interval-s", type=float, default=0.5)
+    _ = parser.add_argument("--_coordinator-token", dest="coordinator_token", help=argparse.SUPPRESS)
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     if not parsed.target:
         parser.error("--target is required when OMO_MANAGER_TMUX_TARGET is unset.")
@@ -117,6 +146,10 @@ def parse_args(argv: list[str]) -> Args:
         parser.error("--startup-timeout-s must be positive.")
     if parsed.poll_interval_s <= 0:
         parser.error("--poll-interval-s must be positive.")
+    if parsed.coordinator_token is not None and TOKEN_RE.fullmatch(parsed.coordinator_token) is None:
+        parser.error("internal coordinator token is invalid.")
+    if parsed.coordinator_token is not None and (parsed.model is None or parsed.reasoning_effort is None):
+        parser.error("internal coordinator requires explicit --model and --reasoning-effort.")
     assert parsed.root is not None and parsed.state_dir is not None
     return Args(
         parsed.target,
@@ -126,6 +159,7 @@ def parse_args(argv: list[str]) -> Args:
         parsed.reasoning_effort,
         parsed.startup_timeout_s,
         parsed.poll_interval_s,
+        parsed.coordinator_token,
     )
 
 
@@ -261,7 +295,14 @@ def unique_metadata_value(values: list[str], label: str) -> str | None:
     return value
 
 
-def select_launch_metadata(processes: dict[int, ProcessInfo], pane_pid: int, model_override: str | None, effort_override: str | None) -> LaunchMetadata:
+def select_launch_metadata(
+    processes: dict[int, ProcessInfo],
+    pane_pid: int,
+    model_override: str | None,
+    effort_override: str | None,
+    *,
+    validated_override: bool = False,
+) -> LaunchMetadata:
     launches = [process for process in processes.values() if process.state != "Z" and process_is_under(process.pid, pane_pid, processes) and is_codex_launch_argv(process.argv)]
     if len(launches) > 1:
         raise RotationError(f"found multiple live Codex launch argv descendants under pane PID {pane_pid}: {[process.pid for process in launches]}")
@@ -280,6 +321,15 @@ def select_launch_metadata(processes: dict[int, ProcessInfo], pane_pid: int, mod
 
     inference_complete = inferred_model is not None and inferred_effort is not None
     overrides_supplied = model_override is not None and effort_override is not None
+    if validated_override:
+        if not overrides_supplied:
+            raise RotationError("internal coordinator requires explicit validated model and reasoning effort")
+        assert model_override is not None and effort_override is not None
+        if inferred_model is not None and inferred_model != model_override:
+            raise RotationError(f"coordinator model {model_override!r} conflicts with inferred model {inferred_model!r}")
+        if inferred_effort is not None and inferred_effort != effort_override:
+            raise RotationError(f"coordinator reasoning effort {effort_override!r} conflicts with inferred effort {inferred_effort!r}")
+        return LaunchMetadata(model_override, effort_override, "coordinator", launch.pid if launch else None, launch.argv if launch else ())
     if inference_complete and overrides_supplied:
         raise RotationError("--model and --reasoning-effort are allowed only when live launch metadata cannot be inferred")
     if inference_complete:
@@ -312,13 +362,23 @@ def capture_pane(pane_id: str) -> str:
     return result.stdout
 
 
+def invocation_is_target(pane: PaneIdentity, processes: dict[int, ProcessInfo]) -> bool:
+    return os.environ.get("TMUX_PANE", "") == pane.pane_id or process_is_under(os.getpid(), pane.pane_pid, processes)
+
+
 def preflight(args: Args) -> Preflight:
     pane = resolve_exact_pane(args.target)
     processes = read_processes()
-    current_pane_id = os.environ.get("TMUX_PANE", "")
-    if current_pane_id == pane.pane_id or process_is_under(os.getpid(), pane.pane_pid, processes):
-        raise RotationError(f"refusing invocation from target pane {pane.canonical_target}")
-    metadata = select_launch_metadata(processes, pane.pane_pid, args.model, args.reasoning_effort)
+    invoked_from_target = invocation_is_target(pane, processes)
+    if args.coordinator_token is not None and invoked_from_target:
+        raise RotationError(f"internal coordinator pane must differ from target pane {pane.canonical_target}")
+    metadata = select_launch_metadata(
+        processes,
+        pane.pane_pid,
+        args.model,
+        args.reasoning_effort,
+        validated_override=args.coordinator_token is not None,
+    )
     if shutil.which("bunx") is None:
         raise RotationError("bunx is not available on PATH")
     if not STATUS_HELPER.is_file() or not WATCHER_HELPER.is_file():
@@ -329,7 +389,7 @@ def preflight(args: Args) -> Preflight:
     pane_output = capture_pane(pane.pane_id)
     if resolve_exact_pane(args.target) != pane:
         raise RotationError("target pane identity or launch context changed during preflight")
-    return Preflight(args, pane, metadata, pane_output, prompt)
+    return Preflight(args, pane, metadata, pane_output, prompt, invoked_from_target)
 
 
 def ensure_private_directory(path: Path) -> None:
@@ -339,15 +399,87 @@ def ensure_private_directory(path: Path) -> None:
     path.chmod(0o700)
 
 
-def acquire_lock(state_dir: Path) -> int:
+def reservation_path(state_dir: Path) -> Path:
+    return state_dir / RESERVATION_NAME
+
+
+def read_reservation(state_dir: Path) -> HandoffReservation | None:
+    path = reservation_path(state_dir)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RotationError(f"cannot read handoff reservation {path}: {exc}") from exc
+    if not isinstance(payload, dict) or set(payload) != {"token", "pane_id", "phase"}:
+        raise RotationError(f"invalid handoff reservation: {path}")
+    token, pane_id, phase = payload["token"], payload["pane_id"], payload["phase"]
+    if not isinstance(token, str) or TOKEN_RE.fullmatch(token) is None or not isinstance(pane_id, str) or not isinstance(phase, str):
+        raise RotationError(f"invalid handoff reservation: {path}")
+    return HandoffReservation(token, pane_id, phase)
+
+
+def pane_exists(pane_id: str) -> bool:
+    if not pane_id.startswith("%"):
+        return False
+    result = run(["tmux", "display-message", "-p", "-t", pane_id, "#{pane_id}"], timeout=5)
+    return result.returncode == 0 and result.stdout.strip() == pane_id
+
+
+def rotation_lock_is_free(state_dir: Path) -> bool:
+    flags = os.O_CREAT | os.O_RDWR | os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(state_dir / "manager-rotation.lock", flags, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return True
+    finally:
+        os.close(fd)
+
+
+def reject_or_clear_stale_reservation(state_dir: Path, matching_token: str | None = None) -> None:
+    reservation = read_reservation(state_dir)
+    if reservation is None:
+        if matching_token is not None:
+            raise RotationError("matching manager rotation handoff reservation is missing")
+        return
+    if reservation.token == matching_token:
+        return
+    if not reservation.pane_id and rotation_lock_is_free(state_dir):
+        reservation_path(state_dir).unlink(missing_ok=True)
+        return
+    if reservation.pane_id and not pane_exists(reservation.pane_id):
+        try:
+            reservation_path(state_dir).unlink()
+        except FileNotFoundError:
+            pass
+        return
+    raise RotationError(f"active manager rotation handoff is reserved for coordinator pane {reservation.pane_id or '<starting>'}")
+
+
+def acquire_lock(state_dir: Path, *, matching_token: str | None = None, timeout_s: float = 0.0) -> int:
     ensure_private_directory(state_dir)
+    reject_or_clear_stale_reservation(state_dir, matching_token)
     flags = os.O_CREAT | os.O_RDWR | os.O_CLOEXEC
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     try:
         fd = os.open(state_dir / "manager-rotation.lock", flags, 0o600)
         os.fchmod(fd, 0o600)
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        deadline = time.monotonic() + timeout_s
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(min(0.05, max(0.01, deadline - time.monotonic())))
     except (BlockingIOError, OSError) as exc:
         try:
             os.close(fd)
@@ -372,6 +504,39 @@ def write_private(path: Path, content: str, *, replace: bool = False) -> None:
     finally:
         if fd >= 0:
             os.close(fd)
+
+
+def reservation_content(reservation: HandoffReservation) -> str:
+    return json.dumps(asdict(reservation), ensure_ascii=True, sort_keys=True) + "\n"
+
+
+def create_reservation(state_dir: Path, token: str) -> None:
+    ensure_private_directory(state_dir)
+    write_private(reservation_path(state_dir), reservation_content(HandoffReservation(token, "", "reserved")))
+
+
+def update_reservation(state_dir: Path, token: str, pane_id: str, phase: str) -> None:
+    current = read_reservation(state_dir)
+    if current is None or current.token != token:
+        raise RotationError("manager rotation handoff reservation changed unexpectedly")
+    temporary = state_dir / f".{RESERVATION_NAME}.{token}.tmp"
+    try:
+        write_private(temporary, reservation_content(HandoffReservation(token, pane_id, phase)))
+        os.replace(temporary, reservation_path(state_dir))
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def clear_reservation(state_dir: Path, token: str) -> None:
+    current = read_reservation(state_dir)
+    if current is None:
+        return
+    if current.token != token:
+        raise RotationError("refusing to clear a different manager rotation handoff reservation")
+    reservation_path(state_dir).unlink()
 
 
 def fresh_command(metadata: LaunchMetadata, prompt_path: Path, target: str, root: Path, state_dir: Path) -> str:
@@ -447,6 +612,134 @@ def write_audit(path: Path, payload: dict[str, object], *, replace: bool = False
     write_private(path, json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True) + "\n", replace=replace)
 
 
+def handoff_channel(token: str, phase: str) -> str:
+    return f"omo-manager-rotate-{token}-{phase}"
+
+
+def coordinator_command(prepared: Preflight, token: str, log_path: Path) -> str:
+    command = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--target",
+        prepared.pane.canonical_target,
+        "--root",
+        str(prepared.args.root),
+        "--state-dir",
+        str(prepared.args.state_dir),
+        "--model",
+        prepared.metadata.model,
+        "--reasoning-effort",
+        prepared.metadata.reasoning_effort,
+        "--startup-timeout-s",
+        str(prepared.args.startup_timeout_s),
+        "--poll-interval-s",
+        str(prepared.args.poll_interval_s),
+        "--_coordinator-token",
+        token,
+    ]
+    helper_command = shlex.join(command)
+    return f'{{ tmux set-option -p -t "$TMUX_PANE" remain-on-exit off && {helper_command}; }} >> {shlex.quote(str(log_path))} 2>&1'
+
+
+def spawn_coordinator(prepared: Preflight, token: str) -> Coordinator:
+    coordinators_dir = prepared.args.state_dir / "coordinators"
+    ensure_private_directory(coordinators_dir)
+    record_id = f"{datetime.now(timezone.utc):%Y%m%dT%H%M%S}.{time.time_ns()}-{os.getpid()}"
+    log_path = coordinators_dir / f"manager-rotation-coordinator-{record_id}.log"
+    write_private(log_path, "")
+    session = prepared.pane.canonical_target.partition(":")[0]
+    result = run(
+        [
+            "tmux",
+            "new-window",
+            "-d",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "-t",
+            f"{session}:",
+            "-n",
+            "manager-rotate-coordinator",
+            coordinator_command(prepared, token, log_path),
+        ],
+        timeout=10,
+    )
+    if result.returncode != 0:
+        raise RotationError(f"failed to start detached rotation coordinator: {result.stderr.strip()}; log: {log_path}")
+    coordinator_pane = result.stdout.strip()
+    if not coordinator_pane.startswith("%") or coordinator_pane == prepared.pane.pane_id:
+        if coordinator_pane.startswith("%"):
+            _ = run(["tmux", "kill-pane", "-t", coordinator_pane], timeout=5)
+        raise RotationError(f"tmux returned invalid coordinator pane {coordinator_pane!r}; target pane is {prepared.pane.pane_id}")
+    return Coordinator(coordinator_pane, token, log_path)
+
+
+def tmux_handoff(command: list[str], *, timeout: float = HANDOFF_TIMEOUT_S) -> None:
+    try:
+        result = run(command, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise RotationError(f"timed out waiting for coordinator handoff: {shlex.join(command)}") from exc
+    if result.returncode != 0:
+        raise RotationError(f"tmux coordinator handoff failed: {result.stderr.strip()}")
+
+
+def cleanup_pre_go_handoff(state_dir: Path, coordinator: Coordinator | None, token: str) -> None:
+    try:
+        if coordinator is not None:
+            try:
+                _ = run(["tmux", "kill-pane", "-t", coordinator.pane_id], timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+    finally:
+        clear_reservation(state_dir, token)
+        for phase in ("ready", "go"):
+            try:
+                _ = run(["tmux", "wait-for", "-U", handoff_channel(token, phase)], timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+
+
+def begin_coordinator_handoff(prepared: Preflight) -> Coordinator:
+    token = secrets.token_hex(16)
+    coordinator: Coordinator | None = None
+    create_reservation(prepared.args.state_dir, token)
+    try:
+        for phase in ("ready", "go"):
+            tmux_handoff(["tmux", "wait-for", "-L", handoff_channel(token, phase)])
+        coordinator = spawn_coordinator(prepared, token)
+        update_reservation(prepared.args.state_dir, token, coordinator.pane_id, "started")
+        tmux_handoff(["tmux", "wait-for", "-L", handoff_channel(token, "ready")])
+        reservation = read_reservation(prepared.args.state_dir)
+        if reservation != HandoffReservation(token, coordinator.pane_id, "ready"):
+            raise RotationError("coordinator READY acknowledgement did not match its reservation")
+        tmux_handoff(["tmux", "wait-for", "-U", handoff_channel(token, "ready")])
+        tmux_handoff(["tmux", "wait-for", "-U", handoff_channel(token, "go")])
+    except Exception:
+        cleanup_pre_go_handoff(prepared.args.state_dir, coordinator, token)
+        raise
+    return coordinator
+
+
+def coordinator_rotation(args: Args) -> Path:
+    token = args.coordinator_token
+    assert token is not None
+    pane = resolve_exact_pane(args.target)
+    coordinator_pane = os.environ.get("TMUX_PANE", "")
+    reservation = read_reservation(args.state_dir)
+    if coordinator_pane == pane.pane_id or reservation != HandoffReservation(token, coordinator_pane, "started"):
+        raise RotationError("coordinator pane/token does not match the active handoff reservation")
+    update_reservation(args.state_dir, token, coordinator_pane, "ready")
+    tmux_handoff(["tmux", "wait-for", "-U", handoff_channel(token, "ready")])
+    tmux_handoff(["tmux", "wait-for", "-L", handoff_channel(token, "go")])
+    tmux_handoff(["tmux", "wait-for", "-U", handoff_channel(token, "go")])
+    lock_fd = acquire_lock(args.state_dir, matching_token=token, timeout_s=HANDOFF_LOCK_TIMEOUT_S)
+    try:
+        clear_reservation(args.state_dir, token)
+        return execute_rotation(preflight(args))
+    finally:
+        os.close(lock_fd)
+
+
 def execute_rotation(prepared: Preflight) -> Path:
     rotations_dir = prepared.args.state_dir / "rotations"
     ensure_private_directory(rotations_dir)
@@ -481,21 +774,32 @@ def execute_rotation(prepared: Preflight) -> Path:
     return audit_path
 
 
-def rotate(args: Args) -> Path:
+def rotate(args: Args) -> RotationResult:
     lock_fd = acquire_lock(args.state_dir)
     try:
-        return execute_rotation(preflight(args))
+        prepared = preflight(args)
+        if prepared.invoked_from_target:
+            coordinator = begin_coordinator_handoff(prepared)
+            result = RotationResult(coordinator.log_path, coordinated=True)
+        else:
+            result = RotationResult(execute_rotation(prepared), coordinated=False)
     finally:
         os.close(lock_fd)
+    return result
 
 
 def main(argv: list[str]) -> int:
     try:
-        audit_path = rotate(parse_args(argv))
+        args = parse_args(argv)
+        if args.coordinator_token is not None:
+            result = RotationResult(coordinator_rotation(args), coordinated=False)
+        else:
+            result = rotate(args)
     except RotationError as exc:
         print(f"omo_manager_rotate: {exc}", file=sys.stderr)
         return 1
-    print(f"audit_record: {audit_path}")
+    label = "coordinator_log" if result.coordinated else "audit_record"
+    print(f"{label}: {result.path}")
     return 0
 
 
