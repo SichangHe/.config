@@ -42,6 +42,7 @@ from omo_manager.omo_agent_status import parse_task_lines
 from omo_manager.omo_agent_status import read_task_metadata
 from omo_manager.omo_agent_status import resolve_task_path
 from omo_manager.omo_agent_status import scan_task_state
+from omo_manager.omo_codex_status import tail as codex_tail
 from omo_manager.omo_pending_digest import PENDING_CONTENT_CHAR_LIMIT
 from omo_manager.omo_pending_digest import pending_tail_digest
 from omo_manager.omo_pending_digest import truncate_content
@@ -50,6 +51,7 @@ from omo_manager.omo_tmux_send import DEFAULT_TMUX_ENTER_COUNT
 from omo_manager.omo_tmux_send import DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S
 from omo_manager.omo_tmux_send import inspect_lines_for_message
 from omo_manager.omo_tmux_send import require_sendable_codex_target
+from omo_manager.omo_tmux_send import send_capacity_resume as verified_send_capacity_resume
 from omo_manager.omo_tmux_send import send_to_codex as verified_send_to_codex
 
 
@@ -63,6 +65,8 @@ DEFAULT_DIGEST_IDLE_AFTER_S = float(os.environ.get("OMO_MANAGER_DIGEST_IDLE_AFTE
 DEFAULT_AGENT_PROBLEM_INTERVAL_S = float(os.environ.get("OMO_MANAGER_AGENT_PROBLEM_INTERVAL_S", "300"))
 DEFAULT_AGENT_PROBLEM_REPEAT_S = float(os.environ.get("OMO_MANAGER_AGENT_PROBLEM_REPEAT_S", "1800"))
 ASYNC_DELIVERY_STARTED = 202
+CAPACITY_ERROR_TEXT = "Selected model is at capacity. Please try a different model."
+CAPACITY_RESUME_MAX_ATTEMPTS = 3
 BLOCKED_IDLE_BACKOFF_INITIAL_S = 600.0
 BLOCKED_IDLE_BACKOFF_MULTIPLIER = 1.5
 BLOCKED_IDLE_BACKOFF_STATE_TTL_S = 30 * 24 * 60 * 60.0
@@ -304,7 +308,10 @@ class DeliverySuccessEvent:
     seen_keys: tuple[str, ...] = ()
     seen_after_clear_keys: tuple[str, ...] = ()
     seen_removals: tuple[str, ...] = ()
+    seen_values: tuple[tuple[str, float], ...] = ()
     failure_seen_removals: tuple[str, ...] = ()
+    failure_seen_values: tuple[tuple[str, float], ...] = ()
+    capacity_advisory_removals: tuple[tuple[str, str], ...] = ()
     blocked_idle_lines: tuple[tuple[str, str], ...] = ()
     dependency_replacements: tuple[tuple[str, str], ...] = ()
     dependency_removals: tuple[str, ...] = ()
@@ -330,6 +337,8 @@ class DeliveryFailureFallback:
 
 
 DELIVERY_SUCCESS_EVENTS: SimpleQueue[DeliverySuccessEvent] = SimpleQueue()
+CAPACITY_ADVISORY_DISCOVERIES: SimpleQueue[tuple[str, str]] = SimpleQueue()
+CAPACITY_ADVISORY_PENDING: set[tuple[str, str]] = set()
 PENDING_SENDS: set[Future[None]] = set()
 PENDING_SENDS_LOCK = Lock()
 
@@ -444,6 +453,7 @@ def queue_delivery_failure_event(success_event: DeliverySuccessEvent | None) -> 
         return
     if (
         not success_event.failure_seen_removals
+        and not success_event.failure_seen_values
         and not success_event.failure_dependency_replacements
         and not success_event.failure_dependency_removals
     ):
@@ -451,6 +461,7 @@ def queue_delivery_failure_event(success_event: DeliverySuccessEvent | None) -> 
     DELIVERY_SUCCESS_EVENTS.put(
         DeliverySuccessEvent(
             seen_removals=success_event.failure_seen_removals,
+            seen_values=success_event.failure_seen_values,
             dependency_state=success_event.dependency_state,
             dependency_guarded_replacements=success_event.failure_dependency_replacements,
             dependency_guarded_removals=success_event.failure_dependency_removals,
@@ -510,7 +521,7 @@ def drain_delivery_successes(args: Args, seen: dict[str, float], now_wall_s: flo
         try:
             event = DELIVERY_SUCCESS_EVENTS.get_nowait()
         except Empty:
-            return changed
+            return retry_capacity_advisory(args, seen, now_wall_s) or changed
         seen_at_s = event.seen_at_s or now_wall_s
         clear_ok = True
         if event.clear_root is not None and event.clear_marker is not None:
@@ -522,6 +533,12 @@ def drain_delivery_successes(args: Args, seen: dict[str, float], now_wall_s: flo
             if key in seen:
                 del seen[key]
                 changed = True
+        for key, value in event.seen_values:
+            remember_seen(seen, key, value)
+            changed = True
+        for key in event.capacity_advisory_removals:
+            CAPACITY_ADVISORY_PENDING.discard(key)
+            changed = True
         if clear_ok:
             for key in event.seen_after_clear_keys:
                 remember_seen(seen, key, seen_at_s)
@@ -2258,6 +2275,264 @@ def parse_problem_row(line: str) -> ProblemRow | None:
     )
 
 
+def capacity_problem_row(line: str) -> ProblemRow | None:
+    row = parse_problem_row(line)
+    if row is None:
+        return None
+    output = re.sub(r"^⚠\ufe0f?\s*", "", row.output)
+    return replace(row, output=output) if row.status == "error" and output == CAPACITY_ERROR_TEXT and row.target else None
+
+
+def capacity_state_prefix(args: Args, target: str) -> str:
+    return f"capacity-retry:{args.root}:{canonical_target(target)}:"
+
+
+def capacity_attempt_count(args: Args, seen: dict[str, float], target: str, now_wall_s: float) -> int:
+    prune_seen(seen, now_wall_s)
+    prefix = capacity_state_prefix(args, target)
+    return sum(key.startswith(f"{prefix}attempt:") for key in seen)
+
+
+def clear_resolved_capacity_state(args: Args, seen: dict[str, float], active_targets: set[str]) -> bool:
+    root_prefix = f"capacity-retry:{args.root}:"
+    active_prefixes = tuple(capacity_state_prefix(args, target) for target in active_targets)
+    changed = False
+    for key in tuple(seen):
+        if not key.startswith(root_prefix):
+            continue
+        if key.startswith(active_prefixes):
+            continue
+        del seen[key]
+        changed = True
+    return changed
+
+
+def capacity_model_for_target(target: str) -> str:
+    for line in reversed(codex_tail(target, 80)):
+        match = re.match(r"^\s+(gpt-[^\s·]+)", line)
+        if match is not None:
+            return match.group(1)
+    return "unknown"
+
+
+def capacity_models(targets: Sequence[str]) -> tuple[str, ...]:
+    return tuple(sorted({capacity_model_for_target(target) for target in targets}))
+
+
+def capacity_advisory_text(targets: Sequence[str]) -> str:
+    return capacity_advisory_text_for_models(capacity_models(targets))
+
+
+def capacity_advisory_text_for_models(models: Sequence[str]) -> str:
+    return (
+        f"Capacity advisory: models currently capacity-limited: {', '.join(models)}. "
+        "Prioritize work using other models for now."
+    )
+
+
+def capacity_advisory_seen_key(args: Args, models: Sequence[str]) -> str:
+    digest = hashlib.sha256("\n".join(models).encode()).hexdigest()[:16]
+    return f"capacity-advisory-models:{args.root}:{digest}"
+
+
+def retry_capacity_advisory(args: Args, seen: dict[str, float], now_wall_s: float) -> bool:
+    while True:
+        try:
+            CAPACITY_ADVISORY_PENDING.add(CAPACITY_ADVISORY_DISCOVERIES.get_nowait())
+        except Empty:
+            break
+    models = tuple(sorted(model for root, model in CAPACITY_ADVISORY_PENDING if root == str(args.root)))
+    if not models or not args.manager_target:
+        return False
+    key = capacity_advisory_seen_key(args, models)
+    pending = tuple((str(args.root), model) for model in models)
+    if key in seen and now_wall_s - seen_get(seen, key, now_s=now_wall_s) < args.agent_problem_repeat_s:
+        CAPACITY_ADVISORY_PENDING.difference_update(pending)
+        return False
+    inflight_key = f"{key}:inflight"
+    next_key = f"{key}:next"
+    if inflight_key in seen or now_wall_s < seen.get(next_key, 0.0):
+        return False
+    event = DeliverySuccessEvent(
+        seen_keys=(key,),
+        seen_removals=(inflight_key, next_key),
+        failure_seen_removals=(inflight_key,),
+        failure_seen_values=((next_key, now_wall_s + args.agent_problem_interval_s),),
+        capacity_advisory_removals=pending,
+        seen_at_s=now_wall_s,
+    )
+    seen[inflight_key] = now_wall_s
+    status = push_manager_text(args, capacity_advisory_text_for_models(models), event)
+    if not delivery_accepted(status):
+        seen.pop(inflight_key, None)
+        seen[next_key] = now_wall_s + args.agent_problem_interval_s
+        return False
+    if status == 0:
+        remember_seen(seen, key, now_wall_s)
+        seen.pop(inflight_key, None)
+        CAPACITY_ADVISORY_PENDING.difference_update(pending)
+    return True
+
+
+def run_capacity_resume(target: str, options: CodexSendOptions, guard: AgentProblemGuard) -> None:
+    def before_paste() -> None:
+        if not agent_problem_guard_current(guard):
+            raise RuntimeError("selected-model-capacity problem resolved or changed before tmux paste")
+
+    model = capacity_model_for_target(target)
+    CAPACITY_ADVISORY_DISCOVERIES.put((str(guard.root or ""), model))
+    _ = verified_send_capacity_resume(target, options, before_paste=before_paste)
+
+
+def capacity_alert_text(row: ProblemRow, attempts: int, detail: str) -> str:
+    return (
+        f"Capacity recovery failed for `{row.task or row.target}` at `{row.target}` after {attempts} resume attempt(s). "
+        f"{detail} Inspect the pane and move the work to another model."
+    )
+
+
+def route_capacity_main_manager_alert(args: Args, row: ProblemRow, text: str) -> bool:
+    problem_output = f"agent-problems: error=1\nerror: task=manager evidence=target={row.target} role=manager output={CAPACITY_ERROR_TEXT}"
+    targets = active_manager_problem_targets(args.root, problem_output, args.manager_target)
+    if targets:
+        route_target = args.reminder_choice(targets)
+        if args.dry_run:
+            print(f"manager problem route due: target={route_target}\n{text}", flush=True)
+            return True
+        if delivery_accepted(try_send_delivery_text("capacity manager recovery alert", text, route_target).status):
+            return True
+    return email_human_manager_problem(args, text)
+
+
+def push_capacity_owner_alert(args: Args, seen: dict[str, float], row: ProblemRow, attempts: int, detail: str, now_wall_s: float) -> bool:
+    target = row.owner_target or args.manager_target
+    if not target:
+        return False
+    text = capacity_alert_text(row, attempts, detail)
+    digest = hashlib.sha256(f"{target}\n{text}".encode()).hexdigest()[:16]
+    key = f"capacity-alert:{digest}"
+    if key in seen and now_wall_s - seen_get(seen, key, now_s=now_wall_s) < args.agent_problem_repeat_s:
+        return False
+    if row.main_manager and same_tmux_target(row.target, target):
+        sent = route_capacity_main_manager_alert(args, row, text)
+        if sent:
+            remember_seen(seen, key, now_wall_s)
+        return sent
+    event = DeliverySuccessEvent(seen_keys=(key,), seen_at_s=now_wall_s)
+    status = push_manager_text_to_target(args, text, target, event)
+    if not delivery_accepted(status):
+        return False
+    if status == 0:
+        remember_seen(seen, key, now_wall_s)
+    return True
+
+
+def log_capacity_resume_result(
+    future: Future[None],
+    success_event: DeliverySuccessEvent,
+    fallback: DeliveryFailureFallback | None,
+    args: Args,
+    row: ProblemRow,
+    attempt: int,
+) -> None:
+    try:
+        _ = future.result()
+    except Exception as exc:
+        if fallback is not None:
+            log_send_result(future, success_event, fallback)
+            return
+        queue_delivery_failure_event(success_event)
+        text = capacity_alert_text(row, attempt, f"The resume submission failed: {exc}.")
+        _ = route_capacity_main_manager_alert(args, row, text)
+        return
+    DELIVERY_SUCCESS_EVENTS.put(success_event)
+
+
+def submit_capacity_resume(
+    args: Args,
+    row: ProblemRow,
+    line: str,
+    attempt: int,
+    seen: dict[str, float],
+    now_wall_s: float,
+) -> bool:
+    prefix = capacity_state_prefix(args, row.target)
+    inflight_key = f"{prefix}inflight"
+    attempt_key = f"{prefix}attempt:{attempt}"
+    next_key = f"{prefix}next"
+    seen[inflight_key] = now_wall_s
+    delay_s = args.agent_problem_interval_s * attempt
+    success_event = DeliverySuccessEvent(
+        seen_removals=(inflight_key,),
+        seen_values=((attempt_key, now_wall_s), (next_key, now_wall_s + delay_s)),
+        failure_seen_removals=(inflight_key,),
+        failure_seen_values=((attempt_key, now_wall_s), (next_key, now_wall_s + delay_s)),
+    )
+    failure_event = DeliverySuccessEvent(
+        seen_removals=(inflight_key,),
+        seen_values=((attempt_key, now_wall_s), (next_key, now_wall_s + delay_s)),
+    )
+    alert = capacity_alert_text(row, attempt, "The latest resume submission was not accepted.")
+    owner_target = row.owner_target or args.manager_target
+    options = CodexSendOptions(1, 0.15, False, DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S, False)
+    guard = AgentProblemGuard(tuple([*status_command(args, True), "--no-auto-unstick"]), (line,), root=args.root)
+    fallback = (
+        DeliveryFailureFallback(row.target, owner_target, alert, options, failure_event, problem_guard=guard)
+        if owner_target and not same_tmux_target(row.target, owner_target)
+        else None
+    )
+    if args.dry_run:
+        print(f"capacity resume due: target={row.target} attempt={attempt} message=resume")
+        del seen[inflight_key]
+        remember_seen(seen, attempt_key, now_wall_s)
+        seen[next_key] = now_wall_s + delay_s
+        return True
+    try:
+        future = send_executor().submit(run_capacity_resume, row.target, options, guard)
+    except Exception as exc:
+        del seen[inflight_key]
+        remember_seen(seen, attempt_key, now_wall_s)
+        seen[next_key] = now_wall_s + delay_s
+        return push_capacity_owner_alert(args, seen, row, attempt, f"Resume submission failed immediately: {exc}.", now_wall_s)
+    with PENDING_SENDS_LOCK:
+        PENDING_SENDS.add(future)
+    future.add_done_callback(lambda completed: (log_capacity_resume_result(completed, success_event, fallback, args, row, attempt), forget_send(completed)))
+    return True
+
+
+def handle_capacity_problems(args: Args, seen: dict[str, float], output: str, now_wall_s: float) -> tuple[str, bool]:
+    lines = output.splitlines()
+    if not lines or not lines[0].startswith("agent-problems:"):
+        return output, False
+    capacity_lines = [(line, row) for line in lines[1:] if (row := capacity_problem_row(line)) is not None]
+    active_targets = {canonical_target(row.target) for _line, row in capacity_lines}
+    changed = clear_resolved_capacity_state(args, seen, active_targets)
+    if args.dry_run and capacity_lines:
+        CAPACITY_ADVISORY_PENDING.update((str(args.root), model) for model in capacity_models([row.target for _line, row in capacity_lines]))
+        changed = retry_capacity_advisory(args, seen, now_wall_s) or changed
+    for line, row in capacity_lines:
+        prefix = capacity_state_prefix(args, row.target)
+        attempts = capacity_attempt_count(args, seen, row.target, now_wall_s)
+        if f"{prefix}inflight" in seen:
+            continue
+        if attempts >= CAPACITY_RESUME_MAX_ATTEMPTS:
+            changed = push_capacity_owner_alert(
+                args,
+                seen,
+                row,
+                attempts,
+                "The exact capacity warning persists after the retry budget was exhausted.",
+                now_wall_s,
+            ) or changed
+            continue
+        if now_wall_s < seen.get(f"{prefix}next", 0.0):
+            continue
+        changed = submit_capacity_resume(args, row, line, attempts + 1, seen, now_wall_s) or changed
+    capacity_line_set = {line for line, _row in capacity_lines}
+    kept = [line for line in lines[1:] if line not in capacity_line_set and not line.startswith("manager-action: ")]
+    return filtered_problem_output(kept) or "", changed
+
+
 def enter_attempt_prefix(args: Args, target: str) -> str:
     return f"agent-problem-enter-attempt:{args.root}:{canonical_target(target)}:"
 
@@ -2898,7 +3173,8 @@ def handle_agent_problem_result(
     dependency_changed = maybe_push_dependency_transitions(args, dependency_state, now_wall_s)
     if result.returncode == 0:
         enter_changed = clear_all_enter_attempts(args, seen)
-        return clear_manager_compaction_active(args, seen) or enter_changed or dependency_changed
+        capacity_changed = clear_resolved_capacity_state(args, seen, set())
+        return clear_manager_compaction_active(args, seen) or enter_changed or capacity_changed or dependency_changed
     if result.returncode != 3:
         print(f"omo_pending_watch: agent problem check exited status={result.returncode}: {result.stderr.strip()}", file=sys.stderr)
         return dependency_changed
@@ -2907,19 +3183,22 @@ def handle_agent_problem_result(
         return dependency_changed
     if result.stderr.strip():
         output = f"{output}\nstderr:\n{result.stderr.strip()}".strip()
+    output, capacity_changed = handle_capacity_problems(args, seen, output, now_wall_s)
+    if not output:
+        return capacity_changed or dependency_changed
     compaction_changed = maybe_push_manager_compaction_reminder(args, seen, output, now_wall_s)
     output = filter_manager_compaction_output(output, args.manager_target) or ""
     if not output:
-        return compaction_changed or dependency_changed
+        return capacity_changed or compaction_changed or dependency_changed
     manager_problem_output = manager_human_email_problem_output(output, args.manager_target)
     manager_problem_sent = route_or_email_manager_problem(args, manager_problem_output)
     output = filter_manager_self_problem_output(output, args.manager_target) or ""
     if not output:
-        return manager_problem_sent or compaction_changed or dependency_changed
+        return capacity_changed or manager_problem_sent or compaction_changed or dependency_changed
     output = filter_unchanged_dependency_blocked_idle_output(args, output, previous_dependency_reported_state) or ""
     if not output:
-        return manager_problem_sent or compaction_changed or dependency_changed
-    changed = manager_problem_sent or compaction_changed or dependency_changed
+        return capacity_changed or manager_problem_sent or compaction_changed or dependency_changed
+    changed = capacity_changed or manager_problem_sent or compaction_changed or dependency_changed
     for owner_target, dispatch in agent_problem_output_by_owner(args, seen, output, now_wall_s).items():
         digest = hashlib.sha256(f"{owner_target}\n{dispatch.digest_text}".encode("utf-8")).hexdigest()[:16]
         key = f"agent-problem:{digest}"

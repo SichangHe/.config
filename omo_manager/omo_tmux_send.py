@@ -26,8 +26,10 @@ try:
         current_input_text,
         has_plan_prompt,
         inspect,
+        SELECTED_MODEL_CAPACITY_RE,
         status,
         tail,
+        visible_error_lines,
     )
 except ModuleNotFoundError:
     from omo_codex_status import (
@@ -38,8 +40,10 @@ except ModuleNotFoundError:
         current_input_text,
         has_plan_prompt,
         inspect,
+        SELECTED_MODEL_CAPACITY_RE,
         status,
         tail,
+        visible_error_lines,
     )
 
 
@@ -176,6 +180,18 @@ def send_to_codex(target: str, message: str, options: CodexSendOptions | None = 
     selected = options or CodexSendOptions(1, 0.15, False)
     validate_options(selected)
     run_tmux(target, message, selected, before_paste=before_paste)
+
+
+def send_capacity_resume(target: str, options: CodexSendOptions | None = None, *, before_paste: Callable[[], None] | None = None) -> bool:
+    """Submit file-backed `resume` only from the selected-model-capacity error.
+
+    Return true when Codex advances to running and false when the exact capacity
+    warning remains through the verification timeout.
+    """
+
+    selected = options or CodexSendOptions(1, 0.15, False)
+    validate_options(selected)
+    return run_capacity_resume(target, selected, before_paste=before_paste)
 
 
 def send_message_file_to_codex(target: str, message_file: Path, options: CodexSendOptions | None = None) -> None:
@@ -326,6 +342,15 @@ def require_sendable_codex_target(target: str, n_lines: int = 80) -> None:
     current_status = require_codex_target(target, n_lines)
     if current_status not in {"ready", "running", "stuck_input", "waiting_subagent"}:
         raise RuntimeError(f"target is not a supported Codex send state before paste: {target} status={current_status}")
+
+
+def exact_capacity_error(lines: list[str]) -> bool:
+    return status(lines, current_block(lines)) == "error" and only_exact_capacity_warning(lines)
+
+
+def only_exact_capacity_warning(lines: list[str]) -> bool:
+    errors = visible_error_lines(current_block(lines).lines)
+    return bool(errors) and all(SELECTED_MODEL_CAPACITY_RE.fullmatch(line) is not None for line in errors)
 
 
 def send_literal(target: str, text: str) -> None:
@@ -503,6 +528,71 @@ def run_tmux(target: str, message: str, options: CodexSendOptions, *, before_pas
         temp_path.unlink(missing_ok=True)
         if not options.dry_run:
             _ = subprocess.run(["tmux", "delete-buffer", "-b", buffer_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=False)
+
+
+def run_capacity_resume(target: str, options: CodexSendOptions, *, before_paste: Callable[[], None] | None = None) -> bool:
+    message = "resume"
+    temp_path = write_private_temp(message)
+    buffer_name = f"omo-tmux-send-{os.getpid()}-{uuid.uuid4().hex}"
+    n_lines = inspect_lines_for_message(message)
+    try:
+        if options.dry_run:
+            print(f"would send capacity resume to {target} from {temp_path}")
+            return True
+        if not exact_capacity_error(tail(target, n_lines)):
+            raise RuntimeError(f"target does not have only the selected-model-capacity error: {target}")
+        _ = subprocess.run(["tmux", "load-buffer", "-b", buffer_name, str(temp_path)], timeout=5, check=True)
+        if before_paste is not None:
+            before_paste()
+        if not exact_capacity_error(tail(target, n_lines)):
+            raise RuntimeError(f"selected-model-capacity error changed before paste: {target}")
+        require_no_existing_input(target)
+        _ = subprocess.run(["tmux", "paste-buffer", "-b", buffer_name, "-t", target], timeout=5, check=True)
+        wait_capacity_resume_paste(target, options)
+        for idx in range(options.enter_count):
+            if idx:
+                time.sleep(options.enter_delay_s)
+            send_enter(target)
+        return verify_capacity_resume(target, options)
+    finally:
+        temp_path.unlink(missing_ok=True)
+        if not options.dry_run:
+            _ = subprocess.run(["tmux", "delete-buffer", "-b", buffer_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=False)
+
+
+def wait_capacity_resume_paste(target: str, options: CodexSendOptions) -> None:
+    deadline_s = time.monotonic() + options.submit_verify_timeout_s
+    while True:
+        lines = tail(target, 80)
+        if has_plan_prompt(lines):
+            raise RuntimeError(f"plan prompt appeared before capacity resume submit: {target}")
+        if not only_exact_capacity_warning(lines):
+            raise RuntimeError(f"selected-model-capacity error changed before submit: {target}")
+        if current_input_text(lines).strip() == "resume":
+            return
+        now_s = time.monotonic()
+        if now_s >= deadline_s:
+            raise RuntimeError(f"capacity resume paste not verified after {options.submit_verify_timeout_s:g}s")
+        time.sleep(min(0.25, max(0.05, deadline_s - now_s)))
+
+
+def verify_capacity_resume(target: str, options: CodexSendOptions) -> bool:
+    deadline_s = time.monotonic() + options.submit_verify_timeout_s
+    while True:
+        lines = tail(target, 80)
+        current_status = status(lines, current_block(lines))
+        if current_status in {"running", "waiting_subagent"} and not is_real_input_text(current_input_text(lines)):
+            return True
+        if current_status == "not_codex":
+            raise RuntimeError(f"target is not a Codex pane after capacity resume: {target}")
+        if current_status == "error" and not exact_capacity_error(lines):
+            raise RuntimeError(f"target has a different Codex error after capacity resume: {target}")
+        now_s = time.monotonic()
+        if now_s >= deadline_s:
+            if exact_capacity_error(lines):
+                return False
+            raise RuntimeError(f"capacity resume not verified after {options.submit_verify_timeout_s:g}s: status={current_status}")
+        time.sleep(min(0.25, max(0.05, deadline_s - now_s)))
 
 
 def worker_argv(args: Args, job: AsyncJob) -> list[str]:

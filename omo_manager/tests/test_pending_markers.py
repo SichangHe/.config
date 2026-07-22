@@ -16,7 +16,7 @@ from email.message import EmailMessage
 from email.utils import format_datetime
 from io import StringIO
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -200,6 +200,9 @@ def write_report_worker_task(root: Path, name: str = "task.md", *, runat: str = 
 
 class PendingMarkerTests(unittest.TestCase):
     def setUp(self) -> None:
+        pending_watcher.CAPACITY_ADVISORY_PENDING.clear()
+        while not pending_watcher.CAPACITY_ADVISORY_DISCOVERIES.empty():
+            _ = pending_watcher.CAPACITY_ADVISORY_DISCOVERIES.get_nowait()
         self._send_patch = patch("omo_manager.omo_pending_watch.send_to_codex", side_effect=self._fake_send_to_codex)
         self._send_patch.start()
         self.addCleanup(self._send_patch.stop)
@@ -9677,6 +9680,219 @@ printf 'header\\n(pending)\\nchanged\\n' > {task}
             self.assertEqual(1, result.returncode)
             self.assertIn("dispatch cleanup skipped: file changed during send", result.stderr)
             self.assertEqual("header\n(pending)\nchanged\n", task.read_text(encoding="utf-8"))
+
+
+    def test_capacity_worker_resume_targets_worker_and_suppresses_owner_problem(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, True, manager_target="wl:1", agent_problem_interval_s=10.0, agent_problem_repeat_s=300.0)
+        row = "error: task=worker.md evidence=target=vl:2 output=Selected model is at capacity. Please try a different model. owner_target=vl:64"
+        result = watcher.CommandOutput("agent-problems", 3, f"agent-problems: error=1\n{row}\n", "")
+        out = StringIO()
+        with redirect_stdout(out), patch.object(watcher, "capacity_model_for_target", return_value="gpt-5.5"):
+            self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
+
+        self.assertIn("capacity resume due: target=vl:2 attempt=1 message=resume", out.getvalue())
+        self.assertNotIn(watcher.AGENT_PROBLEM_HEADER, out.getvalue())
+
+    def test_capacity_problem_row_accepts_supported_warning_prefixes(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        for warning in ("⚠ ", "⚠️ "):
+            line = f"error: task=worker.md evidence=target=vl:2 output={warning}{watcher.CAPACITY_ERROR_TEXT} owner_target=wl:1"
+            with self.subTest(warning=warning):
+                row = watcher.capacity_problem_row(line)
+                self.assertIsNotNone(row)
+                assert row is not None
+                self.assertEqual(watcher.CAPACITY_ERROR_TEXT, row.output)
+
+    def test_capacity_manager_resume_targets_exact_manager(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, True, manager_target="wl:1", agent_problem_interval_s=10.0)
+        row = "error: task=manager evidence=target=wl:2.1 role=manager output=Selected model is at capacity. Please try a different model. owner_target=wl:1"
+        result = watcher.CommandOutput("agent-problems", 3, f"agent-problems: error=1\n{row}\n", "")
+        out = StringIO()
+        with redirect_stdout(out), patch.object(watcher, "capacity_model_for_target", return_value="gpt-5.5"):
+            self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
+
+        self.assertIn("capacity resume due: target=wl:2.1 attempt=1 message=resume", out.getvalue())
+
+    def test_capacity_resume_uses_linear_retry_timing_and_exhausts_to_owner(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, True, manager_target="wl:1", agent_problem_interval_s=10.0)
+        row = "error: task=worker.md evidence=target=vl:2 output=Selected model is at capacity. Please try a different model. owner_target=vl:64"
+        result = watcher.CommandOutput("agent-problems", 3, f"agent-problems: error=1\n{row}\n", "")
+        seen: dict[str, float] = {}
+        out = StringIO()
+        alerts: list[tuple[str, str]] = []
+
+        def fake_push(_args: Args, text: str, target: str, *_pos: object, **_kwargs: object) -> int:
+            alerts.append((target, text))
+            return 0
+
+        with redirect_stdout(out), patch.object(watcher, "capacity_model_for_target", return_value="gpt-5.5"), patch.object(
+            watcher, "push_manager_text_to_target", side_effect=fake_push
+        ):
+            self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 1000.0))
+            self.assertFalse(watcher.handle_agent_problem_result(args, seen, result, 1009.0))
+            self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 1010.0))
+            self.assertFalse(watcher.handle_agent_problem_result(args, seen, result, 1029.0))
+            self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 1030.0))
+            self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 1031.0))
+
+        self.assertEqual(1, out.getvalue().count("attempt=1"))
+        self.assertEqual(1, out.getvalue().count("attempt=2"))
+        self.assertEqual(1, out.getvalue().count("attempt=3"))
+        self.assertEqual("vl:64", alerts[0][0])
+        self.assertIn("after 3 resume attempt(s)", alerts[0][1])
+
+    def test_capacity_immediate_submit_failure_escalates_attempt_count(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1", agent_problem_interval_s=10.0)
+        line = "error: task=worker.md evidence=target=vl:2 output=Selected model is at capacity. Please try a different model. owner_target=vl:64"
+        row = watcher.capacity_problem_row(line)
+        assert row is not None
+        executor = MagicMock()
+        executor.submit.side_effect = RuntimeError("executor closed")
+        seen: dict[str, float] = {}
+        with patch.object(watcher, "send_executor", return_value=executor), patch.object(watcher, "push_capacity_owner_alert", return_value=True) as alert:
+            self.assertTrue(watcher.submit_capacity_resume(args, row, line, 1, seen, 1000.0))
+
+        self.assertEqual(1, alert.call_args.args[3])
+        self.assertIn("failed immediately", alert.call_args.args[4])
+        self.assertEqual(1, watcher.capacity_attempt_count(args, seen, row.target, 1001.0))
+        self.assertEqual(1010.0, seen[f"{watcher.capacity_state_prefix(args, row.target)}next"])
+
+    def test_capacity_retry_state_clears_when_target_recovers(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, True, manager_target="wl:1", agent_problem_interval_s=10.0)
+        prefix = watcher.capacity_state_prefix(args, "vl:2")
+        seen = {f"{prefix}attempt:1": 1000.0, f"{prefix}next": 1010.0}
+        healthy = watcher.CommandOutput("agent-problems", 0, "", "")
+
+        self.assertTrue(watcher.handle_agent_problem_result(args, seen, healthy, 1001.0))
+        self.assertFalse(any(key.startswith(prefix) for key in seen))
+
+    def test_capacity_model_advisory_aggregates_and_dedupes_models(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with patch.object(watcher, "capacity_model_for_target", side_effect={"vl:2": "gpt-5.5", "wl:3": "gpt-5.5", "cfg:4": "gpt-5.4"}.get):
+            text = watcher.capacity_advisory_text(("vl:2", "wl:3", "cfg:4"))
+
+        self.assertIn("gpt-5.4, gpt-5.5", text)
+        self.assertEqual(1, text.count("gpt-5.5"))
+        self.assertIn("Prioritize work using other models", text)
+
+    def test_capacity_model_advisory_dedupes_equivalent_target_sets(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, True, manager_target="wl:1", agent_problem_repeat_s=300.0)
+        seen: dict[str, float] = {}
+        watcher.CAPACITY_ADVISORY_PENDING.add((str(args.root), "gpt-5.5"))
+        out = StringIO()
+
+        with redirect_stdout(out):
+            self.assertTrue(watcher.retry_capacity_advisory(args, seen, 1000.0))
+            self.assertFalse(watcher.retry_capacity_advisory(args, seen, 1001.0))
+
+        self.assertEqual(1, out.getvalue().count("Capacity advisory:"))
+
+    def test_capacity_model_advisory_remains_pending_after_target_recovers(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1")
+        pending = (str(args.root), "gpt-5.5")
+        watcher.CAPACITY_ADVISORY_PENDING.add(pending)
+        with patch.object(watcher, "push_manager_text", return_value=1):
+            self.assertFalse(watcher.retry_capacity_advisory(args, {}, 1000.0))
+        self.assertIn(pending, watcher.CAPACITY_ADVISORY_PENDING)
+
+    def test_capacity_model_advisory_async_failure_remains_pending(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1", agent_problem_interval_s=10.0)
+        key = watcher.capacity_advisory_seen_key(args, ("gpt-5.5",))
+        watcher.CAPACITY_ADVISORY_PENDING.add((str(args.root), "gpt-5.5"))
+        seen: dict[str, float] = {}
+        events: list[watcher.DeliverySuccessEvent] = []
+
+        def fake_push(_args: Args, _text: str, event: watcher.DeliverySuccessEvent) -> int:
+            events.append(event)
+            return watcher.ASYNC_DELIVERY_STARTED
+
+        with patch.object(watcher, "push_manager_text", side_effect=fake_push):
+            self.assertTrue(watcher.retry_capacity_advisory(args, seen, 1000.0))
+        watcher.queue_delivery_failure_event(events[0])
+        self.assertTrue(watcher.drain_delivery_successes(args, seen, 1001.0))
+
+        self.assertIn((str(args.root), "gpt-5.5"), watcher.CAPACITY_ADVISORY_PENDING)
+        self.assertEqual(1010.0, seen[f"{key}:next"])
+
+    def test_capacity_model_discovery_is_applied_on_watcher_thread(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1")
+        pending = (str(args.root), "gpt-actor")
+        watcher.CAPACITY_ADVISORY_PENDING.discard(pending)
+        guard = watcher.AgentProblemGuard((), (), root=args.root)
+        selected: list[watcher.CodexSendOptions] = []
+
+        def failed_send(_target: str, options: watcher.CodexSendOptions, **_kwargs: object) -> bool:
+            selected.append(options)
+            raise RuntimeError("send failed")
+
+        with patch.object(watcher, "capacity_model_for_target", return_value="gpt-actor"), patch.object(
+            watcher, "verified_send_capacity_resume", side_effect=failed_send
+        ), self.assertRaisesRegex(RuntimeError, "send failed"):
+            watcher.run_capacity_resume("vl:2", watcher.CodexSendOptions(1, 0.15, False), guard)
+
+        self.assertNotIn(pending, watcher.CAPACITY_ADVISORY_PENDING)
+        with patch.object(watcher, "push_manager_text", return_value=1):
+            _ = watcher.drain_delivery_successes(args, {}, 1000.0)
+        self.assertIn(pending, watcher.CAPACITY_ADVISORY_PENDING)
+        self.assertEqual(1, selected[0].enter_count)
+        self.assertFalse(selected[0].allow_plan_prompt_enter)
+
+    def test_capacity_main_manager_failure_routes_to_peer(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1")
+        row = watcher.ProblemRow("error", "manager", "wl:1", watcher.CAPACITY_ERROR_TEXT, owner_target="wl:1", main_manager=True)
+        with patch.object(watcher, "active_manager_problem_targets", return_value=["wl:2"]), patch.object(
+            watcher, "try_send_delivery_text", return_value=watcher.DeliveryResult(watcher.ASYNC_DELIVERY_STARTED)
+        ) as push, patch.object(watcher, "email_human_manager_problem", side_effect=AssertionError("unexpected email")):
+            self.assertTrue(watcher.push_capacity_owner_alert(args, {}, row, 3, "persistent.", 1000.0))
+
+        self.assertEqual("wl:2", push.call_args.args[2])
+
+    def test_capacity_main_manager_failure_emails_without_peer(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1")
+        row = watcher.ProblemRow("error", "manager", "wl:1", watcher.CAPACITY_ERROR_TEXT, owner_target="wl:1", main_manager=True)
+        with patch.object(watcher, "active_manager_problem_targets", return_value=[]), patch.object(
+            watcher, "email_human_manager_problem", return_value=True
+        ) as email:
+            self.assertTrue(watcher.push_capacity_owner_alert(args, {}, row, 1, "send failed.", 1000.0))
+
+        self.assertIn("after 1 resume attempt(s)", email.call_args.args[1])
+
+    def test_nonexact_capacity_error_keeps_normal_owner_routing(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, True, manager_target="wl:1", agent_problem_interval_s=10.0, agent_problem_repeat_s=300.0)
+        row = "error: task=worker.md evidence=target=vl:2 output=Selected model is at capacity owner_target=vl:64"
+        result = watcher.CommandOutput("agent-problems", 3, f"agent-problems: error=1\n{row}\n", "")
+        out = StringIO()
+        with redirect_stdout(out):
+            self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
+
+        self.assertIn(watcher.AGENT_PROBLEM_HEADER, out.getvalue())
+        self.assertNotIn("capacity resume due", out.getvalue())
 
 
 if __name__ == "__main__":

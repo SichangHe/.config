@@ -15,6 +15,7 @@ from omo_manager.omo_tmux_send import Args
 from omo_manager.omo_tmux_send import CodexSendOptions
 from omo_manager.omo_tmux_send import async_job_from_query
 from omo_manager.omo_tmux_send import clear_existing_input_before_send
+from omo_manager.omo_tmux_send import exact_capacity_error
 from omo_manager.omo_tmux_send import launch_async
 from omo_manager.omo_tmux_send import main
 from omo_manager.omo_tmux_send import parse_args
@@ -23,10 +24,14 @@ from omo_manager.omo_tmux_send import read_message
 from omo_manager.omo_tmux_send import require_no_existing_input
 from omo_manager.omo_tmux_send import require_sendable_codex_target
 from omo_manager.omo_tmux_send import run_async_worker
+from omo_manager.omo_tmux_send import run_capacity_resume
 from omo_manager.omo_tmux_send import run_tmux
 from omo_manager.omo_tmux_send import send_message_file_to_codex
+from omo_manager.omo_tmux_send import send_capacity_resume
 from omo_manager.omo_tmux_send import send_to_codex
 from omo_manager.omo_tmux_send import verify_submit
+from omo_manager.omo_tmux_send import verify_capacity_resume
+from omo_manager.omo_tmux_send import wait_capacity_resume_paste
 from omo_manager.omo_tmux_send import wait_paste_visible
 from omo_manager.omo_tmux_send import worker_argv
 from omo_manager.omo_tmux_send import write_private_temp
@@ -45,6 +50,66 @@ def options(**kwargs: object) -> CodexSendOptions:
 
 
 class TmuxSendTests(unittest.TestCase):
+    def test_exact_capacity_error_rejects_other_errors(self) -> None:
+        capacity = ["Selected model is at capacity. Please try a different model.", "› Use /skills to list available skills", "  gpt-5.5"]
+        mixed = ["Selected model is at capacity. Please try a different model.", "■ Error: network failed", "› Use /skills to list available skills", "  gpt-5.5"]
+        historical = ["Selected model is at capacity. Please try a different model.", "────", "■ Error: network failed", "› Use /skills to list available skills", "  gpt-5.5"]
+
+        self.assertTrue(exact_capacity_error(capacity))
+        self.assertFalse(exact_capacity_error(mixed))
+        self.assertFalse(exact_capacity_error(historical))
+
+    def test_send_capacity_resume_uses_narrow_library_boundary(self) -> None:
+        with patch("omo_manager.omo_tmux_send.run_capacity_resume", return_value=False) as run:
+            self.assertFalse(send_capacity_resume("cfg:1.0", options()))
+
+        run.assert_called_once()
+        self.assertEqual("cfg:1.0", run.call_args.args[0])
+
+    def test_run_capacity_resume_loads_file_backed_resume(self) -> None:
+        calls: list[list[str]] = []
+        loaded_text = ""
+        capacity = ["Selected model is at capacity. Please try a different model.", "› Use /skills to list available skills", "  gpt-5.5"]
+        pasted = ["Selected model is at capacity. Please try a different model.", "› resume", "  gpt-5.5"]
+        running = ["• Working", "  gpt-5.5"]
+        tails = iter((capacity, capacity, pasted, running))
+
+        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            nonlocal loaded_text
+            calls.append(command)
+            if command[1] == "load-buffer":
+                loaded_text = Path(command[-1]).read_text(encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch("omo_manager.omo_tmux_send.tail", side_effect=lambda *_: next(tails)), patch("omo_manager.omo_tmux_send.require_no_existing_input"), patch(
+            "omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run
+        ):
+            self.assertTrue(run_capacity_resume("cfg:1.0", options()))
+
+        self.assertEqual("resume", loaded_text)
+        self.assertTrue(any(command[:2] == ["tmux", "paste-buffer"] for command in calls))
+
+    def test_verify_capacity_resume_accepts_running_and_reports_persistent_capacity(self) -> None:
+        running = ["• Working", "  gpt-5.5"]
+        capacity = ["Selected model is at capacity. Please try a different model.", "› Use /skills to list available skills", "  gpt-5.5"]
+        with patch("omo_manager.omo_tmux_send.tail", return_value=running):
+            self.assertTrue(verify_capacity_resume("cfg:1.0", options()))
+        with patch("omo_manager.omo_tmux_send.tail", return_value=capacity), patch(
+            "omo_manager.omo_tmux_send.time.monotonic", side_effect=[0.0, 2.0]
+        ):
+            self.assertFalse(verify_capacity_resume("cfg:1.0", options()))
+
+    def test_capacity_resume_refuses_plan_prompt_before_enter(self) -> None:
+        capacity_plan = [
+            "Selected model is at capacity. Please try a different model.",
+            "Create a plan? shift + tab use Plan mode esc dismiss",
+            "› resume",
+            "  gpt-5.5",
+        ]
+        with patch("omo_manager.omo_tmux_send.tail", return_value=capacity_plan):
+            with self.assertRaisesRegex(RuntimeError, "plan prompt appeared"):
+                wait_capacity_resume_paste("cfg:1.0", options())
+
     def test_read_message_file_preserves_special_text(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "message.txt"
