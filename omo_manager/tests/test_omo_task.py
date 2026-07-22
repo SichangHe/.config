@@ -4,6 +4,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -26,6 +27,7 @@ from omo_manager.omo_task import (
     main,
     new_window,
     parse_args,
+    prompt_input,
     runat_goal_tree_error,
     runat_header_error,
     start_codex,
@@ -34,6 +36,7 @@ from omo_manager.omo_task import (
     validate_runat_goal_tree,
     wait_command_started,
     wait_shell,
+    write_human_instruction_file,
 )
 
 
@@ -41,6 +44,14 @@ VALID_GOAL_TREE = "implement manager check\n- reject missing task goal tree\n"
 
 
 class OmoTaskTests(unittest.TestCase):
+    def render_prompt(self, expression: str) -> bytes:
+        result = subprocess.run(
+            ["bash", "-c", f'set -- {expression}; printf %s "$1"'],
+            capture_output=True,
+            check=True,
+        )
+        return result.stdout
+
     def test_creates_task_file_with_runat_header_and_todo_link(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -505,9 +516,10 @@ class OmoTaskTests(unittest.TestCase):
             start_codex_mock.assert_not_called()
 
     def test_codex_cmd_resumes_quoted_session(self) -> None:
-        self.assertEqual("bunx @openai/codex --dangerously-bypass-approvals-and-sandbox resume abc", codex_cmd("abc"))
-        self.assertEqual("bunx @openai/codex --dangerously-bypass-approvals-and-sandbox resume 'abc def'", codex_cmd("abc def"))
-        self.assertEqual(f"{PCODX_WRAPPER} resume abc", codex_cmd("abc", tool="pcodx"))
+        self.assertTrue(codex_cmd("abc").startswith("bunx @openai/codex --dangerously-bypass-approvals-and-sandbox resume abc "))
+        self.assertTrue(codex_cmd("abc def").startswith("bunx @openai/codex --dangerously-bypass-approvals-and-sandbox resume 'abc def' "))
+        self.assertTrue(codex_cmd("abc", tool="pcodx").startswith(f"{PCODX_WRAPPER} resume abc "))
+        self.assertIn(str(DEFAULT_WORKER_INSTRUCTIONS), codex_cmd("abc", tool="pcodx"))
 
     def test_codex_cmd_uses_prompt_argument_from_file(self) -> None:
         expected_paths = f"{DEFAULT_WORKER_INSTRUCTIONS} /tmp/prompt.md"
@@ -526,8 +538,10 @@ class OmoTaskTests(unittest.TestCase):
             codex_cmd(prompt_file=Path("/tmp/prompt.md"), vl_agent=True),
         )
 
-    def test_codex_cmd_does_not_add_context_free_vl_guidance(self) -> None:
-        self.assertEqual("bunx @openai/codex --dangerously-bypass-approvals-and-sandbox", codex_cmd(vl_agent=True))
+    def test_codex_cmd_adds_defaults_without_custom_prompt(self) -> None:
+        command = codex_cmd(vl_agent=True)
+        self.assertIn(str(DEFAULT_WORKER_INSTRUCTIONS), command)
+        self.assertIn(str(VL_WORKER_INSTRUCTIONS), command)
 
     def test_vl_agent_scope_uses_task_file_or_tmux_session(self) -> None:
         self.assertTrue(is_vl_agent("vl_worker.md", "cfg:2"))
@@ -538,42 +552,35 @@ class OmoTaskTests(unittest.TestCase):
         self.assertFalse(is_vl_agent("worker.md", "cfg:2"))
 
     def test_codex_cmd_adds_reasoning_effort_and_extra_flags(self) -> None:
-        self.assertEqual(
+        self.assertTrue(codex_cmd(reasoning_effort="xhigh", codex_flags=("--profile", "deep-review")).startswith(
             "bunx @openai/codex --dangerously-bypass-approvals-and-sandbox --config 'model_reasoning_effort=\"xhigh\"' --profile deep-review",
-            codex_cmd(reasoning_effort="xhigh", codex_flags=("--profile", "deep-review")),
-        )
-        self.assertEqual(
+        ))
+        self.assertTrue(codex_cmd(reasoning_effort="xhigh", codex_flags=("--profile", "deep-review"), tool="codex").startswith(
             "bunx @openai/codex --dangerously-bypass-approvals-and-sandbox --config 'model_reasoning_effort=\"xhigh\"' --profile deep-review",
-            codex_cmd(reasoning_effort="xhigh", codex_flags=("--profile", "deep-review"), tool="codex"),
-        )
+        ))
 
     def test_codex_cmd_orders_and_quotes_explicit_model_and_effort(self) -> None:
-        self.assertEqual(
+        self.assertTrue(codex_cmd(model="model name", reasoning_effort="xhigh", codex_flags=("--profile", "deep-review")).startswith(
             "bunx @openai/codex --dangerously-bypass-approvals-and-sandbox --model 'model name' --config 'model_reasoning_effort=\"xhigh\"' --profile deep-review",
-            codex_cmd(model="model name", reasoning_effort="xhigh", codex_flags=("--profile", "deep-review")),
-        )
-        self.assertEqual(
+        ))
+        self.assertTrue(codex_cmd(model="model name", reasoning_effort="xhigh", codex_flags=("--profile", "deep-review"), tool="pcodx").startswith(
             f"{PCODX_WRAPPER} --model 'model name' --config 'model_reasoning_effort=\"xhigh\"' --profile deep-review",
-            codex_cmd(model="model name", reasoning_effort="xhigh", codex_flags=("--profile", "deep-review"), tool="pcodx"),
-        )
+        ))
 
     def test_codex_cmd_resume_carries_explicit_model_and_effort(self) -> None:
-        self.assertEqual(
+        self.assertTrue(codex_cmd("abc def", reasoning_effort="max", model="gpt-5.6-terra").startswith(
             "bunx @openai/codex --dangerously-bypass-approvals-and-sandbox --model gpt-5.6-terra --config 'model_reasoning_effort=\"max\"' resume 'abc def'",
-            codex_cmd("abc def", reasoning_effort="max", model="gpt-5.6-terra"),
-        )
-        self.assertEqual(
+        ))
+        self.assertTrue(codex_cmd("abc def", reasoning_effort="max", model="gpt-5.6-terra", tool="pcodx").startswith(
             f"{PCODX_WRAPPER} --model gpt-5.6-terra --config 'model_reasoning_effort=\"max\"' resume 'abc def'",
-            codex_cmd("abc def", reasoning_effort="max", model="gpt-5.6-terra", tool="pcodx"),
-        )
+        ))
 
     def test_pcodx_tool_uses_wrapper_command(self) -> None:
         self.assertTrue(PCODX_WRAPPER.is_absolute())
         self.assertEqual(Path(__file__).resolve().parents[1] / "pcodx", PCODX_WRAPPER)
-        self.assertEqual(
+        self.assertTrue(codex_cmd(reasoning_effort="xhigh", codex_flags=("--profile", "deep-review"), tool="pcodx").startswith(
             f"{PCODX_WRAPPER} --config 'model_reasoning_effort=\"xhigh\"' --profile deep-review",
-            codex_cmd(reasoning_effort="xhigh", codex_flags=("--profile", "deep-review"), tool="pcodx"),
-        )
+        ))
 
     def test_pcodx_wrapper_allows_new_reasoning_efforts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -731,6 +738,290 @@ class OmoTaskTests(unittest.TestCase):
     def test_parse_args_accepts_prelaunch_source(self) -> None:
         args = parse_args(["--task-file", "x.md", "--prelaunch-source", "/tmp/pre launch.sh"])
         self.assertEqual(Path("/tmp/pre launch.sh"), args.prelaunch_source)
+
+    def test_parse_args_accepts_paired_human_email_options(self) -> None:
+        args = parse_args(
+            [
+                "--root",
+                "/tmp/root",
+                "--task-file",
+                "x.md",
+                "--tmux-session",
+                "cfg",
+                "--workdir",
+                "/tmp",
+                "--model",
+                "gpt-5.6-terra",
+                "--reasoning-effort",
+                "medium",
+                "--human-email-file",
+                "manager_mail/request.md",
+                "--human-email-lines",
+                "2-4",
+            ]
+        )
+        self.assertEqual(Path("manager_mail/request.md"), args.human_email_file)
+        self.assertEqual((2, 4), args.human_email_lines)
+
+    def test_parse_args_requires_paired_human_email_options_and_valid_range(self) -> None:
+        invalid_options = (
+            ("--human-email-file", "request.md"),
+            ("--human-email-lines", "2-4"),
+            ("--human-email-file", "request.md", "--human-email-lines", "0-2"),
+            ("--human-email-file", "request.md", "--human-email-lines", "3-2"),
+            ("--human-email-file", "request.md", "--human-email-lines", "1:2"),
+        )
+        for options in invalid_options:
+            with self.subTest(options=options), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                parse_args(["--task-file", "x.md", *options])
+
+    def test_migration_rejects_human_email_options(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()) as stderr, self.assertRaises(SystemExit):
+            parse_args(
+                [
+                    "--task-file",
+                    "x.md",
+                    "--migrate-manager-owner",
+                    "--old-manager-target",
+                    "cfg:1",
+                    "--new-manager-target",
+                    "cfg:2",
+                    "--human-email-file",
+                    "request.md",
+                    "--human-email-lines",
+                    "1-1",
+                ]
+            )
+        self.assertIn("only accepts", stderr.getvalue())
+
+    def test_human_email_validation_requires_contained_readable_existing_range(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mail = root / "manager_mail"
+            mail.mkdir()
+            email = mail / "request.md"
+            email.write_text("one\ntwo\n", encoding="utf-8")
+            base = Args(root, "x.md", "cfg", "2", "codex", root, "", None, False, False, "", "medium", (), model="gpt-5.6-terra")
+            cases = (
+                (replace(base, human_email_file=Path("../request.md"), human_email_lines=(1, 1)), "inside ROOT/manager_mail"),
+                (replace(base, human_email_file=Path("manager_mail/missing.md"), human_email_lines=(1, 1)), "not found"),
+                (replace(base, human_email_file=Path("manager_mail/request.md"), human_email_lines=(1, 3)), "only 2 lines"),
+            )
+            for args, message in cases:
+                with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                    validate_inputs(args)
+            with patch("omo_manager.omo_task.os.access", return_value=False), self.assertRaisesRegex(ValueError, "not readable"):
+                validate_inputs(replace(base, human_email_file=Path("manager_mail/request.md"), human_email_lines=(1, 1)))
+
+    def test_human_email_options_require_actual_launch(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()) as stderr, self.assertRaises(SystemExit):
+            parse_args(
+                [
+                    "--task-file",
+                    "x.md",
+                    "--human-email-file",
+                    "manager_mail/request.md",
+                    "--human-email-lines",
+                    "1-1",
+                ]
+            )
+        self.assertIn("require --workdir", stderr.getvalue())
+
+    def test_invalid_human_email_is_rejected_before_task_todo_or_tmux_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "manager_mail").mkdir()
+            (root / "manager_mail" / "request.md").write_text("one\n", encoding="utf-8")
+            prompt = root / "prompt.md"
+            prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
+            with contextlib.redirect_stderr(io.StringIO()), patch("omo_manager.omo_task.tmux") as tmux_mock:
+                result = main(
+                    [
+                        "--root",
+                        str(root),
+                        "--task-file",
+                        "x.md",
+                        "--tmux-session",
+                        "cfg",
+                        "--workdir",
+                        str(root),
+                        "--model",
+                        "gpt-5.6-terra",
+                        "--reasoning-effort",
+                        "medium",
+                        "--prompt-file",
+                        str(prompt),
+                        "--human-email-file",
+                        "manager_mail/request.md",
+                        "--human-email-lines",
+                        "1-2",
+                    ]
+                )
+            self.assertEqual(1, result)
+            self.assertFalse((root / "x.md").exists())
+            self.assertFalse((root / "TODO.md").exists())
+            tmux_mock.assert_not_called()
+
+    def test_prompt_orders_defaults_manager_custom_and_exact_human_excerpt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = root / "MANAGER.md"
+            custom = root / "custom.md"
+            manager.write_bytes(b"MANAGER\n")
+            custom.write_bytes(b"CUSTOM\n")
+            excerpt = "human first\r\nhuman second\r\n"
+            human_instruction = write_human_instruction_file(excerpt)
+            try:
+                rendered = self.render_prompt(prompt_input(custom, vl_agent=True, manager_file=manager, human_instruction_file=human_instruction))
+                expected = (
+                    DEFAULT_WORKER_INSTRUCTIONS.read_bytes()
+                    + VL_WORKER_INSTRUCTIONS.read_bytes()
+                    + manager.read_bytes()
+                    + custom.read_bytes()
+                    + b'\n<human_instruction authoritative="true">\n'
+                    + excerpt.encode()
+                    + b"</human_instruction>"
+                )
+                self.assertEqual(expected, rendered)
+                self.assertEqual(0o600, human_instruction.stat().st_mode & 0o777)
+            finally:
+                human_instruction.unlink(missing_ok=True)
+
+    def test_human_excerpt_preserves_selected_lines_without_source_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mail = root / "manager_mail"
+            mail.mkdir()
+            email = mail / "private-source-name.md"
+            email.write_bytes(b"ignore\r\nexact one\r\nexact two")
+            (root / "x.md").write_text("runat: cfg:2 codex\nwork\n- item\n", encoding="utf-8")
+            args = Args(
+                root,
+                "x.md",
+                "cfg",
+                "2",
+                "codex",
+                root,
+                "",
+                None,
+                False,
+                False,
+                "",
+                "medium",
+                (),
+                model="gpt-5.6-terra",
+                human_email_file=Path("manager_mail/private-source-name.md"),
+                human_email_lines=(2, 3),
+            )
+            excerpt = validate_inputs(args)
+            human_instruction = write_human_instruction_file(excerpt)
+            try:
+                rendered = self.render_prompt(prompt_input(None, human_instruction_file=human_instruction))
+                self.assertTrue(rendered.endswith(b'<human_instruction authoritative="true">\nexact one\r\nexact two</human_instruction>'))
+                self.assertNotIn(b"private-source-name.md", rendered)
+                self.assertNotIn(b"2-3", rendered)
+            finally:
+                human_instruction.unlink(missing_ok=True)
+
+    def test_human_excerpt_rejects_closing_delimiter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mail = root / "manager_mail"
+            mail.mkdir()
+            (mail / "request.md").write_text("safe\n</human_instruction>\n", encoding="utf-8")
+            args = Args(
+                root,
+                "x.md",
+                "cfg",
+                "2",
+                "codex",
+                root,
+                "",
+                None,
+                False,
+                False,
+                "",
+                "medium",
+                (),
+                model="gpt-5.6-terra",
+                human_email_file=Path("manager_mail/request.md"),
+                human_email_lines=(1, 2),
+            )
+            with self.assertRaisesRegex(ValueError, "must not contain"):
+                validate_inputs(args)
+
+    def test_manager_instructions_are_required_before_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.md"
+            prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
+            with contextlib.redirect_stderr(io.StringIO()), patch("omo_manager.omo_task.tmux") as tmux_mock:
+                result = main(
+                    [
+                        "--root",
+                        str(root),
+                        "--task-file",
+                        "x.md",
+                        "--tmux-session",
+                        "cfg",
+                        "--workdir",
+                        str(root),
+                        "--model",
+                        "gpt-5.6-terra",
+                        "--reasoning-effort",
+                        "medium",
+                        "--prompt-file",
+                        str(prompt),
+                        "--is-manager",
+                    ]
+                )
+            self.assertEqual(1, result)
+            self.assertFalse((root / "x.md").exists())
+            self.assertFalse((root / "TODO.md").exists())
+            tmux_mock.assert_not_called()
+
+    def test_registration_only_manager_does_not_require_manager_instructions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "x.md").write_text("runat: cfg:2 codex\nwork\n- item\n", encoding="utf-8")
+            args = Args(root, "x.md", "cfg", "2", "codex", None, "", None, False, False, "", "", (), is_manager=True)
+            self.assertEqual("", validate_inputs(args))
+
+    def test_task_file_bookkeeping_stores_only_custom_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "MANAGER.md").write_text("manager-only-secret\n", encoding="utf-8")
+            mail = root / "manager_mail"
+            mail.mkdir()
+            (mail / "request.md").write_text("email-only-secret\n", encoding="utf-8")
+            prompt = root / "prompt.md"
+            prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
+            args = Args(
+                root,
+                "x.md",
+                "cfg",
+                "2",
+                "codex",
+                None,
+                "",
+                prompt,
+                False,
+                False,
+                "",
+                "",
+                (),
+                False,
+                "mgr:1",
+                None,
+                True,
+                human_email_file=Path("request.md"),
+                human_email_lines=(1, 1),
+            )
+            text = ensure_task_file(args, "cfg:2").read_text(encoding="utf-8")
+            self.assertIn(VALID_GOAL_TREE, text)
+            self.assertNotIn("manager-only-secret", text)
+            self.assertNotIn("email-only-secret", text)
+            self.assertNotIn(DEFAULT_WORKER_INSTRUCTIONS.read_text(encoding="utf-8"), text)
 
     def test_parse_args_resolves_relative_prelaunch_source(self) -> None:
         args = parse_args(["--task-file", "x.md", "--prelaunch-source", "omo_manager/WORKER_DEFAULTS.md"])
@@ -1117,6 +1408,44 @@ class OmoTaskTests(unittest.TestCase):
         self.assertIn("bunx @openai/codex", sent[1][3])
         wait_shell.assert_called_once_with("cfg:7", timeout_s=15.0)
 
+    def test_start_codex_uses_private_human_file_across_retry_then_removes_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            excerpt = "human text " * 10_000
+            args = Args(root, "x.md", "cfg", "", "codex", root, "x", None, False, False, "", "", (), human_email_text=excerpt)
+            created: list[Path] = []
+            modes: list[int] = []
+            present_during_send: list[bool] = []
+            commands: list[str] = []
+
+            def record_instruction_file(text: str) -> Path:
+                path = write_human_instruction_file(text)
+                created.append(path)
+                modes.append(path.stat().st_mode & 0o777)
+                return path
+
+            def record_tmux(command: list[str], check: bool = False) -> subprocess.CompletedProcess[str]:
+                _ = check
+                if command[0] == "send-keys":
+                    present_during_send.append(created[0].exists())
+                    commands.append(command[3])
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with (
+                patch("omo_manager.omo_task.write_human_instruction_file", side_effect=record_instruction_file),
+                patch("omo_manager.omo_task.tmux", side_effect=record_tmux),
+                patch("omo_manager.omo_task.wait_command_started", side_effect=[CODEX_LAUNCH_UPDATED, CODEX_LAUNCH_STARTED]),
+                patch("omo_manager.omo_task.wait_shell"),
+            ):
+                start_codex("cfg:7", args)
+
+            self.assertEqual([0o600], modes)
+            self.assertEqual([True, True], present_during_send)
+            self.assertEqual(2, len(commands))
+            self.assertTrue(all(str(created[0]) in command for command in commands))
+            self.assertTrue(all(excerpt not in command for command in commands))
+            self.assertFalse(created[0].exists())
+
     def test_start_codex_stops_when_update_does_not_return_to_shell(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             prompt = Path(tmp) / "prompt.md"
@@ -1158,6 +1487,17 @@ class OmoTaskTests(unittest.TestCase):
                 start_codex("vl:7", args)
             command = tmux.call_args_list[0].args[0]
             self.assertIn(str(VL_WORKER_INSTRUCTIONS), command[3])
+
+    def test_start_codex_automatically_adds_root_manager_instructions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = root / "MANAGER.md"
+            manager.write_text("manager instructions\n", encoding="utf-8")
+            args = Args(root, "x.md", "cfg", "", "codex", root, "x", None, False, False, "", "", (), is_manager=True)
+            with patch("omo_manager.omo_task.tmux") as tmux, patch("omo_manager.omo_task.wait_command_started"):
+                start_codex("cfg:7", args)
+            command = tmux.call_args_list[0].args[0][3]
+            self.assertLess(command.index(str(DEFAULT_WORKER_INSTRUCTIONS)), command.index(str(manager)))
 
     def test_start_codex_rejects_context_free_vl_launch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

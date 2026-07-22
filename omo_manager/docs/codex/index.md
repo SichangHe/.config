@@ -2,6 +2,8 @@
 
 - `live-model-switch.md`
   - manual live-session model switching reference
+- `manager-rotation.md`
+  - fresh main-manager session in the same tmux pane
 - `raw-turn-cost.md`
   - raw Codex session token and cost aggregation reference
 - `compact-when-idle.md`

@@ -13,7 +13,7 @@ import sys
 import tempfile
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 try:
@@ -48,6 +48,8 @@ CODEX_LAUNCH_MARKER_DRY_RUN = f"{CODEX_LAUNCH_MARKER_PREFIX}DRY]"
 CODEX_UPDATE_PROMPT_MARKERS = ("update available!", "update now", "press enter to continue")
 CODEX_UPDATE_SUCCESS_MARKERS = ("update ran successfully", "please restart codex")
 MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$")
+LINE_RANGE_RE = re.compile(r"^([1-9]\d*)-([1-9]\d*)$")
+HUMAN_INSTRUCTION_CLOSE = "</human_instruction>"
 
 
 @dataclass(frozen=True)
@@ -73,6 +75,9 @@ class Args:
     old_manager_target: str = ""
     new_manager_target: str = ""
     model: str = ""
+    human_email_file: Path | None = None
+    human_email_lines: tuple[int, int] | None = None
+    human_email_text: str | None = None
 
 
 class ParsedArgs(argparse.Namespace):
@@ -96,6 +101,8 @@ class ParsedArgs(argparse.Namespace):
     migrate_manager_owner: bool = False
     old_manager_target: str = ""
     new_manager_target: str = ""
+    human_email_file: Path | None = None
+    human_email_lines: tuple[int, int] | None = None
 
 
 def codex_flags_model_error(codex_flags: tuple[str, ...]) -> str:
@@ -108,6 +115,16 @@ def model_error(model: str) -> str:
     if model and MODEL_RE.fullmatch(model) is None:
         return "--model must be a nonempty model identifier containing only letters, numbers, `.`, `_`, `:`, `/`, or `-`."
     return ""
+
+
+def line_range(value: str) -> tuple[int, int]:
+    match = LINE_RANGE_RE.fullmatch(value)
+    if match is None:
+        raise argparse.ArgumentTypeError("must be START-END with positive, inclusive line numbers")
+    start, end = (int(part) for part in match.groups())
+    if start > end:
+        raise argparse.ArgumentTypeError("START must be less than or equal to END")
+    return start, end
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -135,6 +152,8 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--manager-target", default="", help="Optional manager owner target to write as `managerat:` task metadata.")
     _ = parser.add_argument("--prelaunch-source", type=Path, help="Readable shell script to source before launching the worker command.")
     _ = parser.add_argument("--is-manager", action="store_true", help="Mark the task as a manager task in frontmatter.")
+    _ = parser.add_argument("--human-email-file", type=Path, help="Email source file under ROOT/manager_mail; requires --human-email-lines.")
+    _ = parser.add_argument("--human-email-lines", type=line_range, metavar="START-END", help="Inclusive email line range; requires --human-email-file.")
     _ = parser.add_argument(
         "--migrate-manager-owner", action="store_true", help="Atomically migrate only `managerat` on one existing task; requires explicit old and new targets and performs no launch or TODO action."
     )
@@ -148,6 +167,8 @@ def parse_args(argv: list[str]) -> Args:
     if parsed.tool not in COMMAND_BY_TOOL:
         parser.error("only --tool codex or --tool pcodx is supported.")
     tool_explicit = any(arg == "--tool" or arg.startswith("--tool=") for arg in argv)
+    if (parsed.human_email_file is None) != (parsed.human_email_lines is None):
+        parser.error("--human-email-file and --human-email-lines must be supplied together.")
     if not parsed.migrate_manager_owner and (parsed.old_manager_target or parsed.new_manager_target):
         parser.error("--old-manager-target and --new-manager-target require --migrate-manager-owner.")
     if parsed.migrate_manager_owner:
@@ -169,11 +190,15 @@ def parse_args(argv: list[str]) -> Args:
                 parsed.manager_target,
                 parsed.prelaunch_source,
                 parsed.is_manager,
+                parsed.human_email_file,
+                parsed.human_email_lines,
             )
         ):
             parser.error("--migrate-manager-owner only accepts --root, --task-file, explicit old/new manager targets, and optional --dry-run.")
     if parsed.workdir is not None and not parsed.tmux_session:
         parser.error("--workdir requires --tmux-session.")
+    if parsed.human_email_file is not None and parsed.workdir is None:
+        parser.error("--human-email-file and --human-email-lines require --workdir.")
     if parsed.workdir is not None and (not parsed.model.strip() or not parsed.reasoning_effort.strip()):
         parser.error("--workdir requires nonempty --model MODEL and --reasoning-effort EFFORT.")
     if invalid_model := model_error(parsed.model):
@@ -204,6 +229,8 @@ def parse_args(argv: list[str]) -> Args:
         parsed.old_manager_target,
         parsed.new_manager_target,
         model=parsed.model,
+        human_email_file=parsed.human_email_file,
+        human_email_lines=parsed.human_email_lines,
     )
 
 
@@ -624,20 +651,70 @@ def new_task_text(args: Args, tmux_target: str, validate_target: bool = True) ->
     return f"{task_frontmatter(args, tmux_target, managerat)}\n{prompt}\n"
 
 
-def prompt_input(prompt_file: Path | None, vl_agent: bool = False) -> str:
-    if prompt_file is None:
+def readable_file(path: Path, label: str) -> None:
+    if not path.is_file():
+        raise ValueError(f"{label} file not found: {path}")
+    if not os.access(path, os.R_OK):
+        raise ValueError(f"{label} file is not readable: {path}")
+
+
+def human_email_path(args: Args) -> Path | None:
+    if args.human_email_file is None:
+        return None
+    mail_root = (args.root / "manager_mail").resolve()
+    candidate = args.human_email_file
+    path = (candidate if candidate.is_absolute() else args.root / candidate).resolve()
+    if path == mail_root or mail_root not in path.parents:
+        raise ValueError("human email file must resolve inside ROOT/manager_mail.")
+    return path
+
+
+def human_email_excerpt(args: Args) -> str:
+    if args.human_email_text is not None:
+        return args.human_email_text
+    path = human_email_path(args)
+    if path is None or args.human_email_lines is None:
         return ""
-    if not DEFAULT_WORKER_INSTRUCTIONS.is_file():
-        raise FileNotFoundError(f"worker defaults file not found: {DEFAULT_WORKER_INSTRUCTIONS}")
+    readable_file(path, "human email")
+    with path.open("r", encoding="utf-8", newline="") as source:
+        lines = source.read().splitlines(keepends=True)
+    start, end = args.human_email_lines
+    if end > len(lines):
+        raise ValueError(f"human email line range ends at {end}, but the file has only {len(lines)} lines.")
+    excerpt = "".join(lines[start - 1 : end])
+    if HUMAN_INSTRUCTION_CLOSE in excerpt:
+        raise ValueError(f"human email excerpt must not contain {HUMAN_INSTRUCTION_CLOSE}.")
+    return excerpt
+
+
+def authoritative_human_instruction(excerpt: str) -> str:
+    return f'<human_instruction authoritative="true">\n{excerpt}{HUMAN_INSTRUCTION_CLOSE}'
+
+
+def write_human_instruction_file(excerpt: str) -> Path:
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", prefix="omo-human-instruction.", delete=False) as handle:
+        os.fchmod(handle.fileno(), 0o600)
+        _ = handle.write(f"\n{authoritative_human_instruction(excerpt)}")
+        return Path(handle.name)
+
+
+def prompt_input(
+    prompt_file: Path | None,
+    vl_agent: bool = False,
+    manager_file: Path | None = None,
+    human_instruction_file: Path | None = None,
+) -> str:
     paths = [DEFAULT_WORKER_INSTRUCTIONS]
     if vl_agent:
-        if not VL_WORKER_INSTRUCTIONS.is_file():
-            raise FileNotFoundError(f"VL worker defaults file not found: {VL_WORKER_INSTRUCTIONS}")
         paths.append(VL_WORKER_INSTRUCTIONS)
+    if manager_file is not None:
+        paths.append(manager_file)
     if prompt_file is not None:
         paths.append(prompt_file)
+    if human_instruction_file is not None:
+        paths.append(human_instruction_file)
     quoted_paths = " ".join(shlex.quote(str(path)) for path in paths)
-    return f"\"$(cat -- {quoted_paths})\""
+    return f'"$(cat -- {quoted_paths})"'
 
 
 def codex_cmd(
@@ -648,6 +725,8 @@ def codex_cmd(
     tool: str = DEFAULT_TOOL,
     vl_agent: bool = False,
     model: str = "",
+    manager_file: Path | None = None,
+    human_instruction_file: Path | None = None,
 ) -> str:
     try:
         args = list(COMMAND_BY_TOOL[tool])
@@ -661,9 +740,7 @@ def codex_cmd(
     if session_id:
         args.extend(("resume", session_id))
     parts = [shlex.quote(arg) for arg in args]
-    prompt = prompt_input(prompt_file, vl_agent)
-    if prompt:
-        parts.append(prompt)
+    parts.append(prompt_input(prompt_file, vl_agent, manager_file, human_instruction_file))
     return " ".join(parts)
 
 
@@ -766,15 +843,32 @@ def start_codex(target: str, args: Args) -> None:
     vl_agent = is_vl_agent(args.task_file, target)
     if vl_agent and args.prompt_file is None:
         raise ValueError("VL launches require --prompt-file so the end-goal and reviewer guidance has task-local context.")
-    command = codex_cmd(args.session_id, args.reasoning_effort, args.codex_flags, args.prompt_file, effective_tool(args), vl_agent, args.model)
-    for attempt in range(2):
-        launch_marker = new_launch_marker()
-        shell_launch = shell_cmd(worker_command(command, target, args.prelaunch_source, launch_marker))
-        _ = tmux(["send-keys", "-t", target, shell_launch, "Enter"], check=True)
-        if wait_command_started(target, launch_marker=launch_marker) != CODEX_LAUNCH_UPDATED:
-            return
-        wait_shell(target, timeout_s=15.0)
-    raise RuntimeError("Codex update completed but relaunch showed the update prompt again.")
+    manager_file = args.root / "MANAGER.md" if args.is_manager else None
+    excerpt = human_email_excerpt(args)
+    human_instruction_file = write_human_instruction_file(excerpt) if excerpt else None
+    try:
+        command = codex_cmd(
+            args.session_id,
+            args.reasoning_effort,
+            args.codex_flags,
+            args.prompt_file,
+            effective_tool(args),
+            vl_agent,
+            args.model,
+            manager_file,
+            human_instruction_file,
+        )
+        for attempt in range(2):
+            launch_marker = new_launch_marker()
+            shell_launch = shell_cmd(worker_command(command, target, args.prelaunch_source, launch_marker))
+            _ = tmux(["send-keys", "-t", target, shell_launch, "Enter"], check=True)
+            if wait_command_started(target, launch_marker=launch_marker) != CODEX_LAUNCH_UPDATED:
+                return
+            wait_shell(target, timeout_s=15.0)
+        raise RuntimeError("Codex update completed but relaunch showed the update prompt again.")
+    finally:
+        if human_instruction_file is not None:
+            human_instruction_file.unlink(missing_ok=True)
 
 
 def new_window(args: Args) -> str:
@@ -883,7 +977,20 @@ def dry_run(args: Args) -> None:
         command = ["tmux", *new_window_command(args)]
         print("tmux: " + " ".join(shlex.quote(part) for part in command))
         launch_target = f"{args.tmux_session}:DRYRUN"
-        launch = ["tmux", "send-keys", "-t", launch_target, shell_cmd(worker_command(codex_cmd(args.session_id, args.reasoning_effort, args.codex_flags, args.prompt_file, effective_tool(args), is_vl_agent(args.task_file, launch_target), args.model), launch_target, args.prelaunch_source, CODEX_LAUNCH_MARKER_DRY_RUN)), "Enter"]
+        manager_file = args.root / "MANAGER.md" if args.is_manager else None
+        human_instruction_file = Path(tempfile.gettempdir()) / "omo-human-instruction.DRYRUN" if args.human_email_file is not None else None
+        launch_command = codex_cmd(
+            args.session_id,
+            args.reasoning_effort,
+            args.codex_flags,
+            args.prompt_file,
+            effective_tool(args),
+            is_vl_agent(args.task_file, launch_target),
+            args.model,
+            manager_file,
+            human_instruction_file,
+        )
+        launch = ["tmux", "send-keys", "-t", launch_target, shell_cmd(worker_command(launch_command, launch_target, args.prelaunch_source, CODEX_LAUNCH_MARKER_DRY_RUN)), "Enter"]
         print("tmux: " + " ".join(shlex.quote(part) for part in launch))
 
 
@@ -927,11 +1034,23 @@ def validate_existing_target_runtime(args: Args) -> str:
     return pane_id
 
 
-def validate_inputs(args: Args) -> None:
+def validate_inputs(args: Args) -> str:
     if args.workdir is not None and (not args.model.strip() or not args.reasoning_effort.strip()):
         raise ValueError("--workdir requires nonempty --model MODEL and --reasoning-effort EFFORT.")
     if invalid_model := model_error(args.model):
         raise ValueError(invalid_model)
+    if (args.human_email_file is None) != (args.human_email_lines is None):
+        raise ValueError("--human-email-file and --human-email-lines must be supplied together.")
+    if args.human_email_file is not None and args.workdir is None:
+        raise ValueError("--human-email-file and --human-email-lines require --workdir.")
+    if args.human_email_file is not None:
+        _ = human_email_excerpt(args)
+    if args.workdir is not None:
+        readable_file(DEFAULT_WORKER_INSTRUCTIONS, "worker defaults")
+        if is_vl_agent(args.task_file, target(args)):
+            readable_file(VL_WORKER_INSTRUCTIONS, "VL worker defaults")
+    if args.workdir is not None and args.is_manager:
+        readable_file(args.root / "MANAGER.md", "manager instructions")
     if args.prompt_file is not None and not args.prompt_file.is_file():
         raise ValueError(f"prompt file not found: {args.prompt_file}")
     if args.prelaunch_source is not None:
@@ -968,10 +1087,11 @@ def validate_inputs(args: Args) -> None:
             validate_runat_header(existing_text)
             validate_managerat_metadata(existing_text)
     if path.exists():
-        return
+        return human_email_excerpt(args)
     tmux_target = "target" if args.workdir is not None else target(args)
     text = new_task_text(args, tmux_target, validate_target=args.workdir is None)
     validate_runat_goal_tree(text)
+    return human_email_excerpt(args)
 
 
 def main(argv: list[str]) -> int:
@@ -983,7 +1103,7 @@ def main(argv: list[str]) -> int:
         existing_target = target(args) if args.workdir is None else ""
         ownership_lock = task_target_lock(args.root, existing_target) if existing_target else contextlib.nullcontext()
         with ownership_lock:
-            validate_inputs(args)
+            args = replace(args, human_email_text=validate_inputs(args))
             existing_pane_id = validate_existing_target_runtime(args)
             if args.dry_run:
                 dry_run(args)
