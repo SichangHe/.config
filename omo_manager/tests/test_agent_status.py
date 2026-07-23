@@ -398,6 +398,27 @@ class AgentStatusTests(unittest.TestCase):
         self.assertEqual("ready", row.status)
         self.assertIn("done", row.evidence)
 
+    def test_running_evidence_uses_output_before_stock_input_placeholder(self) -> None:
+        task = TaskLine("task.md", "todo:current", "task.md wl 6", "wl:6", None)
+        record = SessionRecord("task.md", "wl:6", 18947, 1.0)
+        report = Report(
+            "running",
+            [
+                "• Ran git status --short",
+                "  └ M omo_manager/omo_agent_status.py",
+                "",
+                "› Find and fix a bug in @filename",
+            ],
+            "Find and fix a bug in @filename",
+        )
+
+        with patch("omo_manager.omo_agent_status.inspect", return_value=report):
+            row = classify_task(task, record)
+
+        self.assertEqual("running", row.status)
+        self.assertIn("output=• Ran git status --short /   └ M omo_manager/omo_agent_status.py", row.evidence)
+        self.assertNotIn("@filename", row.evidence)
+
     def test_problem_summary_includes_only_problem_rows(self) -> None:
         rows = [
             StatusRow("ok.md", "running", "target=cfg:1"),

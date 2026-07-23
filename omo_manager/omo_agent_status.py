@@ -133,7 +133,16 @@ MANAGER_MD_REREAD_NEGATIVE_RE = re.compile(
 def report_output_evidence(report: Report) -> str:
     if not report.lines:
         return ""
-    tail = report.lines[-3:]
+    evidence_lines = report.lines
+    if report.status == "running" and is_stock_placeholder_input_text(report.input_text):
+        for idx in range(len(report.lines) - 1, -1, -1):
+            line = report.lines[idx].lstrip()
+            if line.startswith("›") and is_stock_placeholder_input_text(line[1:].strip()):
+                evidence_lines = [candidate for candidate in report.lines[:idx] if candidate.strip()]
+                break
+    tail = evidence_lines[-3:]
+    if not tail:
+        return ""
     if report.status != "error":
         return " output=" + " / ".join(tail)
     errors = visible_error_lines(report.lines, include_unmarked=False) or visible_error_lines(report.lines)

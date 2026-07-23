@@ -224,16 +224,6 @@ def file_search_overlay_input_text(lines: list[str]) -> str:
             break
     if prompt_idx < 0:
         return ""
-    recent_pre_overlay = lines[max(0, prompt_idx - 20) : prompt_idx]
-    if not any(
-        CODEX_FOOTER_RE.match(line) is not None
-        or QUEUE_MESSAGE_FOOTER_RE.search(line) is not None
-        or BUSY_RE.search(line) is not None
-        or BACKGROUND_RUNNING_RE.search(line) is not None
-        or COMPACTING_RE.search(line) is not None
-        for line in recent_pre_overlay
-    ):
-        return ""
     prompt_lines = lines[prompt_idx : no_matches[0]]
     text = "\n".join([prompt_lines[0].lstrip()[1:].strip(), *(line.rstrip() for line in prompt_lines[1:])]).strip()
     return text if "@filename" in text else ""
@@ -241,10 +231,6 @@ def file_search_overlay_input_text(lines: list[str]) -> str:
 
 def has_file_search_overlay(lines: list[str]) -> bool:
     return bool(file_search_overlay_input_text(lines))
-
-
-def normalize_prompt_text(text: str) -> str:
-    return " ".join(text.split())
 
 
 def has_running_indicator(lines: list[str]) -> bool:
@@ -408,8 +394,6 @@ def submit_stuck_input_if_present(target: str, report: Report, n_lines: int = CO
     if not pane_id:
         return "failed"
     if has_file_search_overlay(latest.lines):
-        if latest.input_text != report.input_text:
-            return "not_safe:file_search_overlay_changed"
         try:
             recovered = subprocess.run(["tmux", "send-keys", "-t", pane_id, "Enter"], capture_output=True, text=True, timeout=5, check=False)
         except (OSError, subprocess.SubprocessError):
@@ -420,14 +404,12 @@ def submit_stuck_input_if_present(target: str, report: Report, n_lines: int = CO
             after = wait_for_file_search_overlay_transition(target, n_lines, compaction_wait_timeout_s)
         except TimeoutError:
             return "not_safe:file_search_overlay"
-        if after.status in {"running", "waiting_subagent"} and (not after.input_text or is_stock_placeholder_input_text(after.input_text)):
+        if after.status in {"running", "waiting_subagent", "ready"}:
             return "sent_enter"
         if has_plan_prompt(after.lines):
             return "not_safe:plan_prompt"
         if after.status != "stuck_input" or not after.can_submit_input:
             return f"not_safe:{after.input_blocker or 'underlying_prompt_not_visible'}"
-        if after.input_text != report.input_text:
-            return "not_safe:underlying_prompt_changed"
     try:
         result = subprocess.run(["tmux", "send-keys", "-t", pane_id, "Enter"], capture_output=True, text=True, timeout=5, check=False)
     except (OSError, subprocess.SubprocessError):

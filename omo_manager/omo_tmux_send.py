@@ -401,13 +401,6 @@ def send_enter(target: str) -> None:
     _ = subprocess.run(["tmux", "send-keys", "-t", target, "Enter"], timeout=5, check=True)
 
 
-def matching_file_search_overlay(lines: list[str], message: str) -> str:
-    overlay_input = file_search_overlay_input_text(lines)
-    if not overlay_input:
-        return ""
-    return overlay_input if overlay_input == message.strip() else ""
-
-
 def wait_paste_visible(
     target: str,
     message: str,
@@ -423,17 +416,14 @@ def wait_paste_visible(
     deadline_s = time.monotonic() + options.submit_verify_timeout_s
     last_status = "unknown"
     last_input = ""
-    recovered_overlay = ""
-    saw_file_search_overlay = False
+    recovered_overlay = False
     while True:
         lines = tail(target, n_lines)
         visible_overlay = file_search_overlay_input_text(lines)
-        matching_overlay = matching_file_search_overlay(lines, message)
         if visible_overlay:
-            saw_file_search_overlay = True
-            if matching_overlay and not recovered_overlay:
+            if not recovered_overlay:
                 send_enter(target)
-                recovered_overlay = matching_overlay
+                recovered_overlay = True
             now_s = time.monotonic()
             if now_s >= deadline_s:
                 raise RuntimeError(f"Codex paste not verified after {options.submit_verify_timeout_s:g}s: file search overlay did not transition")
@@ -442,8 +432,6 @@ def wait_paste_visible(
         last_status = status(lines, current_block(lines))
         validate_error_transition(lines, preexisting_error, target, "before submit")
         input_text = current_input_text(lines)
-        if saw_file_search_overlay and input_text != message.strip():
-            raise RuntimeError("Codex paste not verified: input changed after file search overlay")
         if is_real_input_text(input_text) and (all(probe in input_text for probe in probes) or has_collapsed_paste_text(input_text)):
             return
         last_input = "" if input_text in CODEX_EMPTY_INPUT_TEXTS else input_text
@@ -461,15 +449,14 @@ def verify_placeholder_paste(target: str, message: str, options: CodexSendOption
     sentinel = f"__omo_paste_probe_{uuid.uuid4().hex[:8]}__"
     n_lines = inspect_lines_for_message(f"{message}\n{sentinel}")
     deadline_s = time.monotonic() + options.submit_verify_timeout_s
-    recovered_overlay = ""
+    recovered_overlay = False
     while True:
         lines = tail(target, n_lines)
         visible_overlay = file_search_overlay_input_text(lines)
-        matching_overlay = matching_file_search_overlay(lines, message)
         if visible_overlay:
-            if matching_overlay and not recovered_overlay:
+            if not recovered_overlay:
                 send_enter(target)
-                recovered_overlay = matching_overlay
+                recovered_overlay = True
             now_s = time.monotonic()
             if now_s >= deadline_s:
                 raise RuntimeError(f"Codex paste not verified after {options.submit_verify_timeout_s:g}s: file search overlay did not transition")
