@@ -103,7 +103,10 @@ def exact_pane_id(target: str) -> str:
 
 
 def tail(target: str, n_lines: int) -> list[str]:
-    out = subprocess.run(["tmux", "capture-pane", "-p", "-t", target, "-S", f"-{n_lines}"], capture_output=True, text=True, timeout=5, check=False)
+    pane_id = exact_pane_id(target)
+    if not pane_id:
+        return []
+    out = subprocess.run(["tmux", "capture-pane", "-p", "-t", pane_id, "-S", f"-{n_lines}"], capture_output=True, text=True, timeout=5, check=False)
     if out.returncode != 0:
         return []
     lines = [line.rstrip() for line in (out.stdout or "").splitlines()]
@@ -252,20 +255,27 @@ def has_idle_queued_input(lines: list[str], input_text: str) -> bool:
     return has_queued_message_footer(lines) and bool(input_text) and not has_visible_running_indicator(lines)
 
 
+def latest_output_before_input(lines: list[str]) -> list[str]:
+    input_indices = [idx for idx, line in enumerate(lines) if line.lstrip().startswith("›")]
+    if input_indices:
+        latest_input_idx = input_indices[-1]
+        previous_input_idx = input_indices[-2] if len(input_indices) > 1 else -1
+        output_start_idx = previous_input_idx + 1
+        for idx in range(latest_input_idx - 1, output_start_idx - 1, -1):
+            if WORKED_RE.match(lines[idx]):
+                output_start_idx = idx + 1
+                break
+        return lines[output_start_idx:latest_input_idx]
+    return lines
+
+
 def has_selected_model_capacity_warning(lines: list[str]) -> bool:
-    output_lines: list[str] = []
-    for line in lines:
-        if line.lstrip().startswith("›"):
-            break
-        output_lines.append(line)
-    return any(SELECTED_MODEL_CAPACITY_RE.search(line) is not None for line in output_lines)
+    return any(SELECTED_MODEL_CAPACITY_RE.search(line) is not None for line in latest_output_before_input(lines))
 
 
 def visible_error_lines(lines: list[str], include_unmarked: bool = True) -> list[str]:
     found: list[str] = []
-    for line in lines:
-        if line.lstrip().startswith("›"):
-            break
+    for line in latest_output_before_input(lines):
         marked = VISIBLE_ERROR_MARKER_RE.search(line) is not None
         if SELECTED_MODEL_CAPACITY_RE.search(line) is not None or (ERROR_RE.search(line) is not None and (include_unmarked or marked)):
             found.append(line.strip())
@@ -344,8 +354,11 @@ def submit_stuck_input_if_present(target: str, report: Report, n_lines: int = CO
         return "not_stuck"
     if not latest.can_submit_input:
         return f"not_safe:{latest.input_blocker or 'unknown'}"
+    pane_id = exact_pane_id(target)
+    if not pane_id:
+        return "failed"
     try:
-        result = subprocess.run(["tmux", "send-keys", "-t", target, "Enter"], capture_output=True, text=True, timeout=5, check=False)
+        result = subprocess.run(["tmux", "send-keys", "-t", pane_id, "Enter"], capture_output=True, text=True, timeout=5, check=False)
     except (OSError, subprocess.SubprocessError):
         return "failed"
     return "sent_enter" if result.returncode == 0 else "failed"
@@ -357,8 +370,11 @@ def interrupt_waiting_subagent_if_present(target: str, report: Report, n_lines: 
     latest = report_from_lines(tail(target, n_lines), detect_waiting_subagent=True)
     if latest.status != "waiting_subagent":
         return "not_waiting_subagent"
+    pane_id = exact_pane_id(target)
+    if not pane_id:
+        return "failed"
     try:
-        result = subprocess.run(["tmux", "send-keys", "-t", target, "Escape"], capture_output=True, text=True, timeout=5, check=False)
+        result = subprocess.run(["tmux", "send-keys", "-t", pane_id, "Escape"], capture_output=True, text=True, timeout=5, check=False)
     except (OSError, subprocess.SubprocessError):
         return "failed"
     return "sent_escape" if result.returncode == 0 else "failed"

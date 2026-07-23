@@ -37,6 +37,14 @@ from omo_manager.omo_tmux_send import worker_argv
 from omo_manager.omo_tmux_send import write_private_temp
 
 
+SELECTED_MODEL_CAPACITY_SCREEN = [
+    "⚠ Selected model is at capacity. Please try a different model.",
+    "",
+    "› Use /skills to list available skills",
+    "  gpt-5.5 high · 100% left",
+]
+
+
 def options(**kwargs: object) -> CodexSendOptions:
     values = {
         "enter_count": 1,
@@ -181,14 +189,121 @@ class TmuxSendTests(unittest.TestCase):
             with self.subTest(lines=lines), patch("omo_manager.omo_tmux_send.tail", return_value=lines):
                 require_sendable_codex_target("cfg:1.0")
 
-    def test_require_sendable_codex_target_rejects_not_codex_and_error(self) -> None:
+    def test_require_sendable_codex_target_rejects_not_codex_and_allows_error(self) -> None:
         with patch("omo_manager.omo_tmux_send.tail", return_value=["fish prompt"]):
             with self.assertRaisesRegex(RuntimeError, "not a Codex pane"):
                 require_sendable_codex_target("vl:20.0")
         lines = ["────", "■ Error: 429 Too Many Requests", "› Use /skills", "  gpt-5.5"]
         with patch("omo_manager.omo_tmux_send.tail", return_value=lines):
-            with self.assertRaisesRegex(RuntimeError, "Codex error state"):
-                require_sendable_codex_target("cfg:1.0")
+            self.assertEqual(("■ Error: 429 Too Many Requests",), require_sendable_codex_target("cfg:1.0"))
+
+    def test_run_tmux_recovers_from_selected_model_capacity_error(self) -> None:
+        pasted = [
+            *SELECTED_MODEL_CAPACITY_SCREEN[:-2],
+            "› resume",
+            SELECTED_MODEL_CAPACITY_SCREEN[-1],
+        ]
+        tails = iter(
+            (
+                SELECTED_MODEL_CAPACITY_SCREEN,
+                SELECTED_MODEL_CAPACITY_SCREEN,
+                SELECTED_MODEL_CAPACITY_SCREEN,
+                pasted,
+                pasted,
+                SELECTED_MODEL_CAPACITY_SCREEN,
+                ["• Working", "", "› Explain this codebase", SELECTED_MODEL_CAPACITY_SCREEN[-1]],
+            )
+        )
+
+        with patch("omo_manager.omo_tmux_send.tail", side_effect=lambda *_: next(tails)), patch(
+            "omo_manager.omo_tmux_send.clear_existing_input_before_send", return_value=""
+        ), patch("omo_manager.omo_tmux_send.require_no_existing_input"), patch(
+            "omo_manager.omo_tmux_send.subprocess.run", return_value=subprocess.CompletedProcess(["tmux"], 0)
+        ), patch("omo_manager.omo_tmux_send.time.sleep"):
+            run_tmux("vl:2", "resume", options())
+
+    def test_run_tmux_rejects_error_change_after_before_paste(self) -> None:
+        old_error = ("■ Error: network request failed",)
+        new_error = ["────", "■ Error: authentication failed", "› Use /skills to list available skills", "  gpt-5.5"]
+        calls: list[list[str]] = []
+
+        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch("omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=old_error), patch(
+            "omo_manager.omo_tmux_send.clear_existing_input_before_send", return_value=""
+        ), patch("omo_manager.omo_tmux_send.tail", return_value=new_error), patch(
+            "omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run
+        ):
+            with self.assertRaisesRegex(RuntimeError, "different Codex error before paste"):
+                run_tmux("vl:2", "recover now", options(), before_paste=lambda: None)
+
+        self.assertFalse(any(command[:2] == ["tmux", "paste-buffer"] for command in calls))
+
+    def test_run_tmux_placeholder_path_rechecks_error_before_enter(self) -> None:
+        old_error = ("■ Error: network request failed",)
+        old_screen = ["────", *old_error, "› Summarize recent commits", "  gpt-5.5"]
+        new_screen = ["────", "■ Error: authentication failed", "› Summarize recent commits", "  gpt-5.5"]
+        screens = iter((old_screen, new_screen))
+        calls: list[list[str]] = []
+
+        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch("omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=old_error), patch(
+            "omo_manager.omo_tmux_send.clear_existing_input_before_send", return_value=""
+        ), patch("omo_manager.omo_tmux_send.require_no_existing_input"), patch(
+            "omo_manager.omo_tmux_send.verify_placeholder_paste", return_value=True
+        ), patch("omo_manager.omo_tmux_send.tail", side_effect=lambda *_: next(screens)), patch(
+            "omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run
+        ):
+            with self.assertRaisesRegex(RuntimeError, "different Codex error before submit"):
+                run_tmux("vl:2", "Summarize recent commits", options())
+
+        self.assertTrue(any(command[:2] == ["tmux", "paste-buffer"] for command in calls))
+        self.assertFalse(any(command[-1:] == ["Enter"] for command in calls))
+
+    def test_wait_paste_visible_allows_matching_preexisting_generic_error(self) -> None:
+        error = ("■ Error: 429 Too Many Requests",)
+        lines = ["────", *error, "› recover now", "  gpt-5.5"]
+
+        with patch("omo_manager.omo_tmux_send.tail", return_value=lines):
+            wait_paste_visible("vl:2", "recover now", options(), error)
+
+    def test_verify_submit_tolerates_old_error_until_ready(self) -> None:
+        error = ("■ Error: network request failed",)
+        tails = iter(
+            (
+                ["────", *error, "› recover now", "  gpt-5.5"],
+                ["────", *error, "› Use /skills to list available skills", "  gpt-5.5"],
+                ["────", "Recovery accepted", "─ Worked for 1s ─", "› Use /skills to list available skills", "  gpt-5.5"],
+            )
+        )
+
+        with patch("omo_manager.omo_tmux_send.tail", side_effect=lambda *_: next(tails)), patch(
+            "omo_manager.omo_tmux_send.subprocess.run", return_value=subprocess.CompletedProcess(["tmux"], 0)
+        ), patch("omo_manager.omo_tmux_send.time.sleep"):
+            verify_submit("vl:2", "recover now", options(), error)
+
+    def test_verify_submit_rejects_new_error_after_recovery_submit(self) -> None:
+        old_error = ("■ Error: network request failed",)
+        new_error = ["────", "■ Error: authentication failed", "› Use /skills to list available skills", "  gpt-5.5"]
+
+        with patch("omo_manager.omo_tmux_send.tail", return_value=new_error):
+            with self.assertRaisesRegex(RuntimeError, "different Codex error after submit"):
+                verify_submit("vl:2", "recover now", options(), old_error)
+
+    def test_verify_submit_rejects_recovery_prompt_stuck_in_error_input(self) -> None:
+        error = ("■ Error: network request failed",)
+        lines = ["────", *error, "› recover now", "  gpt-5.5"]
+
+        with patch("omo_manager.omo_tmux_send.tail", return_value=lines), patch(
+            "omo_manager.omo_tmux_send.time.monotonic", side_effect=[0.0, 0.0, 2.0]
+        ), patch("omo_manager.omo_tmux_send.time.sleep"), patch("omo_manager.omo_tmux_send.send_enter"):
+            with self.assertRaisesRegex(RuntimeError, "prompt still in input"):
+                verify_submit("vl:2", "recover now", options(), error)
 
     def test_run_tmux_uses_buffer_and_mandatory_enter(self) -> None:
         calls: list[list[str]] = []
@@ -197,7 +312,7 @@ class TmuxSendTests(unittest.TestCase):
             calls.append(command)
             return subprocess.CompletedProcess(command, 0)
 
-        with patch("omo_manager.omo_tmux_send.clear_existing_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.require_sendable_codex_target"), patch("omo_manager.omo_tmux_send.verify_placeholder_paste", return_value=False), patch("omo_manager.omo_tmux_send.wait_paste_visible"), patch("omo_manager.omo_tmux_send.verify_submit"), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
+        with patch("omo_manager.omo_tmux_send.clear_existing_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.require_sendable_codex_target"), patch("omo_manager.omo_tmux_send.require_no_existing_input"), patch("omo_manager.omo_tmux_send.verify_placeholder_paste", return_value=False), patch("omo_manager.omo_tmux_send.wait_paste_visible"), patch("omo_manager.omo_tmux_send.verify_submit"), patch("omo_manager.omo_tmux_send.tail", return_value=["› Use /skills to list available skills", "  gpt-5.5"]), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
             run_tmux("cfg:1.0", "literal C-c $(bad)\n", options())
 
         self.assertIn(["tmux", "load-buffer", "-b", calls[0][3], calls[0][4]], calls)
@@ -214,14 +329,18 @@ class TmuxSendTests(unittest.TestCase):
             events.append(command[1])
             return subprocess.CompletedProcess(command, 0)
 
-        with patch("omo_manager.omo_tmux_send.clear_existing_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.require_sendable_codex_target"), patch("omo_manager.omo_tmux_send.verify_placeholder_paste", return_value=True), patch("omo_manager.omo_tmux_send.verify_submit"), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
+        def fake_inspect(_args: object) -> Report:
+            events.append("capture-pane")
+            return Report("ready", [], "", False)
+
+        with patch("omo_manager.omo_tmux_send.clear_existing_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.require_sendable_codex_target"), patch("omo_manager.omo_tmux_send.inspect", side_effect=fake_inspect), patch("omo_manager.omo_tmux_send.verify_placeholder_paste", return_value=True), patch("omo_manager.omo_tmux_send.verify_submit"), patch("omo_manager.omo_tmux_send.tail", return_value=["› Use /skills to list available skills", "  gpt-5.5"]), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
             run_tmux("cfg:1.0", "prompt\n", options(), before_paste=before_paste)
 
         self.assertEqual(["load-buffer", "before_paste", "capture-pane", "paste-buffer"], events[:4])
         self.assertIn("send-keys", events)
 
     def test_run_tmux_does_not_wait_for_compaction(self) -> None:
-        with patch("omo_manager.omo_tmux_send.clear_existing_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.require_sendable_codex_target"), patch("omo_manager.omo_tmux_send.verify_placeholder_paste", return_value=True), patch("omo_manager.omo_tmux_send.verify_submit"), patch("omo_manager.omo_tmux_send.subprocess.run", return_value=subprocess.CompletedProcess(["tmux"], 0)):
+        with patch("omo_manager.omo_tmux_send.clear_existing_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.require_sendable_codex_target"), patch("omo_manager.omo_tmux_send.require_no_existing_input"), patch("omo_manager.omo_tmux_send.verify_placeholder_paste", return_value=True), patch("omo_manager.omo_tmux_send.verify_submit"), patch("omo_manager.omo_tmux_send.tail", return_value=["› Use /skills to list available skills", "  gpt-5.5"]), patch("omo_manager.omo_tmux_send.subprocess.run", return_value=subprocess.CompletedProcess(["tmux"], 0)):
             run_tmux("cfg:1.0", "prompt\n", options())
 
     def test_wait_paste_visible_rejects_partial_probe_match(self) -> None:
@@ -305,7 +424,7 @@ class TmuxSendTests(unittest.TestCase):
                 return Report("running", ["• Working"], "late queued input", False)
             return Report("running", ["• Working"], "", False)
 
-        with patch("omo_manager.omo_tmux_send.clear_existing_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.require_sendable_codex_target"), patch("omo_manager.omo_tmux_send.verify_placeholder_paste", return_value=True), patch("omo_manager.omo_tmux_send.verify_submit"), patch("omo_manager.omo_tmux_send.inspect", side_effect=fake_inspect), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
+        with patch("omo_manager.omo_tmux_send.clear_existing_input_before_send", return_value=""), patch("omo_manager.omo_tmux_send.require_sendable_codex_target"), patch("omo_manager.omo_tmux_send.verify_placeholder_paste", return_value=True), patch("omo_manager.omo_tmux_send.verify_submit"), patch("omo_manager.omo_tmux_send.inspect", side_effect=fake_inspect), patch("omo_manager.omo_tmux_send.tail", return_value=["› Use /skills to list available skills", "  gpt-5.5"]), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
             with self.assertRaisesRegex(RuntimeError, "existing input appeared"):
                 run_tmux("cfg:1.0", "prompt\n", options(), before_paste=before_paste)
 
@@ -375,10 +494,9 @@ class TmuxSendTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "different input remains visible"):
                 verify_submit("cfg:1.0", "Read the dispatch prompt from /tmp/x and follow it exactly.\n", options())
 
-    def test_verify_submit_fails_when_prompt_gone_but_not_running(self) -> None:
-        with patch("omo_manager.omo_tmux_send.tail", return_value=["› Use /skills to list available skills", "  gpt-5.5"]), patch("omo_manager.omo_tmux_send.time.monotonic", side_effect=[0, 2]):
-            with self.assertRaisesRegex(RuntimeError, "target did not become running"):
-                verify_submit("cfg:1.0", "Read the dispatch prompt from /tmp/x and follow it exactly.\n", options())
+    def test_verify_submit_accepts_ready_when_prompt_is_gone(self) -> None:
+        with patch("omo_manager.omo_tmux_send.tail", return_value=["› Use /skills to list available skills", "  gpt-5.5"]):
+            verify_submit("cfg:1.0", "Read the dispatch prompt from /tmp/x and follow it exactly.\n", options())
 
     def test_launch_async_copies_payload_starts_worker_and_prints_result_dir(self) -> None:
         started: list[list[str]] = []

@@ -2,27 +2,11 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from omo_manager.omo_codex_status import Args, Report, can_submit_stuck_input, current_block, current_input_text, exact_pane_id, final_assistant_output, has_compacting_indicator, has_terminal_enter_prompt_after_codex_footer, has_waiting_subagent_prompt, inspect, interrupt_waiting_subagent_if_present, last_output, report_from_lines, status, submit_stuck_input_if_present, visible_error_lines
+from omo_manager.omo_codex_status import Args, Report, can_submit_stuck_input, current_block, current_input_text, exact_pane_id, final_assistant_output, has_compacting_indicator, has_terminal_enter_prompt_after_codex_footer, has_waiting_subagent_prompt, inspect, interrupt_waiting_subagent_if_present, last_output, report_from_lines, status, submit_stuck_input_if_present, tail, visible_error_lines
+from omo_manager.omo_tmux_send import error_signature, exact_capacity_error
 
 
 class CodexStatusTests(unittest.TestCase):
-    def test_exact_pane_id_normalizes_omitted_pane_to_zero(self) -> None:
-        result = subprocess.CompletedProcess(["tmux"], 0, "vl:20.0\t%33515\n", "")
-        with patch("omo_manager.omo_codex_status.subprocess.run", return_value=result) as run:
-            self.assertEqual("%33515", exact_pane_id("vl:20"))
-        run.assert_called_once_with(
-            ["tmux", "display-message", "-p", "-t", "vl:20.0", "#{session_name}:#{window_index}.#{pane_index}\t#{pane_id}"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-
-    def test_exact_pane_id_rejects_tmux_prefix_resolution(self) -> None:
-        result = subprocess.CompletedProcess(["tmux"], 0, "wl:18.0\t%11117\n", "")
-        with patch("omo_manager.omo_codex_status.subprocess.run", return_value=result):
-            self.assertEqual("", exact_pane_id("wl:1.0"))
-
     def test_extracts_last_output_from_current_block(self) -> None:
         lines = ['old', '────', ' kept  ', '', '─ Worked for 1m 2s ─', '  gpt-5.5']
         self.assertEqual([' kept'], last_output(lines))
@@ -159,9 +143,9 @@ class CodexStatusTests(unittest.TestCase):
             '  gpt-5.5 xhigh · ~/.config · 71.7M used',
         ]
         report = report_from_lines(lines, detect_waiting_subagent=True)
-        with patch('omo_manager.omo_codex_status.tail', return_value=lines), patch('omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)) as run:
+        with patch('omo_manager.omo_codex_status.tail', return_value=lines), patch('omo_manager.omo_codex_status.exact_pane_id', return_value='%7'), patch('omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)) as run:
             self.assertEqual('sent_escape', interrupt_waiting_subagent_if_present('cfg:1.0', report))
-        run.assert_called_once_with(['tmux', 'send-keys', '-t', 'cfg:1.0', 'Escape'], capture_output=True, text=True, timeout=5, check=False)
+        run.assert_called_once_with(['tmux', 'send-keys', '-t', '%7', 'Escape'], capture_output=True, text=True, timeout=5, check=False)
 
     def test_status_running_while_waiting_for_background_terminal_with_review_placeholder(self) -> None:
         lines = ['• Waiting for background terminal · 1 background terminal running · /ps to view · /stop to close', '', '› Run /review on my current changes', '  gpt-5.5']
@@ -423,6 +407,100 @@ class CodexStatusTests(unittest.TestCase):
                 lines = ['────', warning, '› Use /skills to list available skills', '  gpt-5.5']
                 self.assertEqual('error', report_from_lines(lines).status)
 
+    def test_status_error_from_capacity_warning_after_older_manager_history(self) -> None:
+        lines = [
+            '› Handle ALL omo_pending_watch agent problems below; only email human if you cannot handle them:',
+            '',
+            '  1 blocked agents are ready; if they are not actually blocked, correct their status, otherwise make sure whatever is blocking them is being resolved:',
+            '  hvl_cli_push_11754.md hvl:9 <blocked_on>waiting for separate explicit human authorization of preserved-thread segment 9 before any continuation</blocked_on>',
+            '',
+            '• hvl:9 remains correctly blocked solely on explicit segment 9 authorization. No new authorization exists, so no state change or duplicate email was needed.',
+            '',
+            '› Handle ALL omo_pending_watch agent problems below; only email human if you cannot handle them:',
+            '',
+            '  1 blocked agents are ready; if they are not actually blocked, correct their status, otherwise make sure whatever is blocking them is being resolved:',
+            '  hvl_cli_push_11754.md hvl:9 <blocked_on>waiting for separate explicit human authorization of preserved-thread segment 9 before any continuation</blocked_on>',
+            '',
+            '• Verified unchanged: hvl:9 is genuinely blocked on explicit segment 9 authorization. No duplicate email or state change was needed.',
+            '',
+            '› Normally record pending items and remove the consumed `(pending)` marker by running:',
+            '  `omo_record_pending.py --pending-file hvl_product_pitch_12489.md --line 223 --item PENDING_ITEM_TEXT [--item ...] [--task-file TARGET_TASK.md] --ack-human`',
+            '  Choose `--item` values by quoting the human\'s words as much as possible. Use `--ack-human` so the script emails the human after recording. If no new pending task item should be added, use',
+            '',
+            '• I’m reopening the completed pitch manager in the human-facing hvl session, recording the listenable overview and four-example portfolio as new owner items, and preserving example discovery as',
+            '  delegated worker work.',
+            '',
+            "• Ran tmux list-windows -t hvl -F '#{window_index} #{window_name} active=#{window_active}' | sort -n | tail -n 30",
+            "  │ sed -n '1,12p' hvl_product_pitch_12489.md",
+            '  └ 0 nvim active=1',
+            '    1 vl_doc_review_9758 active=0',
+            '    … +19 lines (ctrl + t to view transcript)',
+            '    Run `~/.config/getagentsmd` first and follow `MANAGER.md` plus repository-local instructions. Stay at manager level: delegate asset inventory, investor narrative/visual design, technical Q&A, and',
+            '    adversarial claim review. Preserve experiment evidence and unrelated work.',
+            '',
+            '• Added /tmp/hvl_product_pitch_resume_12489.prompt.md (+7 -0)',
+            '    1 +Resume the completed pitch-manager context for the human\'s new follow-up.',
+            '    2 +',
+            '    3 +Start by emailing the human a listenable overview of how the pitch works and which primary example was selected, including what it demonstrates and why it was chosen. Write for listening, not sca',
+            '       nning; explain the story and evidence boundaries in plain language.',
+            '    4 +',
+            '    5 +Then manage a four-example portfolio with varied complexity. Preserve the reviewed Byteorder primary and TOML backup unless fresh evidence warrants a clearly reviewed change. Delegate independent',
+            '        workers to identify at least two additional evidence-backed examples at different complexity levels. Prepare the primary example deeply; prepare lighter but usable backup packets for the other e',
+            '       xamples. Require exact evidence, claim boundaries, visual potential, audience fit, and honest limitations. Do not launch new experiments without separate authorization; first use existing reviewe',
+            '       d evidence.',
+            '    6 +',
+            '    7 +Stay at manager level, delegate example discovery, and report milestones privately. External presentation, distribution, outreach, transcript/TOML display, and experiment gates remain open.',
+            '',
+            '⚠ Selected model is at capacity. Please try a different model.',
+            '',
+            '› Explain this codebase',
+            '',
+            '  gpt-5.6-sol medium · /ssd1/sichangheagent/work_logs · 37.1M used · Context 86% used · Main [default]',
+        ]
+        self.assertEqual('error', report_from_lines(lines).status)
+        warning = '⚠ Selected model is at capacity. Please try a different model.'
+        self.assertEqual([warning], visible_error_lines(current_block(lines).lines))
+        self.assertEqual((warning,), error_signature(lines))
+        self.assertTrue(exact_capacity_error(lines))
+
+    def test_status_ready_when_capacity_warning_is_from_older_completed_turn(self) -> None:
+        lines = [
+            '────',
+            '› Retry the manager task',
+            '⚠ Selected model is at capacity. Please try a different model.',
+            '› Continue with the fallback model',
+            '• Completed the manager task.',
+            '─ Worked for 12s ─────────────────',
+            '› Explain this codebase',
+            '  gpt-5.5',
+        ]
+        self.assertEqual('ready', report_from_lines(lines).status)
+        self.assertEqual([], visible_error_lines(current_block(lines).lines))
+        self.assertFalse(exact_capacity_error(lines))
+
+    def test_status_ready_when_truncated_tail_has_capacity_warning_before_worked_boundary(self) -> None:
+        lines = [
+            '⚠ Selected model is at capacity. Please try a different model.',
+            '─ Worked for 12s ─────────────────',
+            '› Explain this codebase',
+            '  gpt-5.5',
+        ]
+        self.assertEqual('ready', report_from_lines(lines).status)
+        self.assertEqual([], visible_error_lines(current_block(lines).lines))
+        self.assertFalse(exact_capacity_error(lines))
+
+    def test_status_error_when_capacity_warning_follows_worked_boundary(self) -> None:
+        lines = [
+            '─ Worked for 12s ─────────────────',
+            '⚠ Selected model is at capacity. Please try a different model.',
+            '› Explain this codebase',
+            '  gpt-5.5',
+        ]
+        warning = '⚠ Selected model is at capacity. Please try a different model.'
+        self.assertEqual('error', report_from_lines(lines).status)
+        self.assertEqual([warning], visible_error_lines(current_block(lines).lines))
+        self.assertTrue(exact_capacity_error(lines))
+
     def test_visible_error_lines_include_warning_and_square_marker_above_input(self) -> None:
         lines = ['────', '■ Error: 429 Too Many Requests', 'detail', '› Explain this codebase', '  gpt-5.5']
         self.assertEqual(['■ Error: 429 Too Many Requests'], visible_error_lines(current_block(lines).lines))
@@ -496,10 +574,14 @@ class CodexStatusTests(unittest.TestCase):
     def test_status_stuck_input_when_capacity_warning_text_is_typed(self) -> None:
         lines = ['────', 'done', '› Selected model is at capacity. Please try a different model.', '  gpt-5.5']
         self.assertEqual('stuck_input', report_from_lines(lines).status)
+        self.assertEqual([], visible_error_lines(current_block(lines).lines))
+        self.assertFalse(exact_capacity_error(lines))
 
     def test_status_stuck_input_when_capacity_warning_text_is_multiline_input(self) -> None:
         lines = ['────', 'done', '› Note this exact text:', '  Selected model is at capacity. Please try a different model.', '  gpt-5.5']
         self.assertEqual('stuck_input', report_from_lines(lines).status)
+        self.assertEqual([], visible_error_lines(current_block(lines).lines))
+        self.assertFalse(exact_capacity_error(lines))
 
     def test_status_not_codex_for_capacity_warning_without_codex_footer(self) -> None:
         lines = ['Selected model is at capacity. Please try a different model.']
@@ -515,17 +597,39 @@ class CodexStatusTests(unittest.TestCase):
         self.assertEqual('ready', report.status)
         self.assertEqual(['done'], report.lines)
 
+    def test_exact_pane_id_normalizes_omitted_pane_to_zero(self) -> None:
+        result = subprocess.CompletedProcess(['tmux'], 0, 'vl:20.0\t%33515\n', '')
+        with patch('omo_manager.omo_codex_status.subprocess.run', return_value=result) as run:
+            self.assertEqual('%33515', exact_pane_id('vl:20'))
+        run.assert_called_once_with(
+            ['tmux', 'display-message', '-p', '-t', 'vl:20.0', '#{session_name}:#{window_index}.#{pane_index}\t#{pane_id}'],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+
+    def test_exact_pane_id_rejects_tmux_prefix_resolution(self) -> None:
+        result = subprocess.CompletedProcess(['tmux'], 0, 'wl:18.0\t%11117\n', '')
+        with patch('omo_manager.omo_codex_status.subprocess.run', return_value=result):
+            self.assertEqual('', exact_pane_id('wl:1.0'))
+
+    def test_tail_does_not_capture_prefix_resolved_pane(self) -> None:
+        with patch('omo_manager.omo_codex_status.exact_pane_id', return_value=''), patch('omo_manager.omo_codex_status.subprocess.run') as run:
+            self.assertEqual([], tail('wl:1.0', 20))
+        run.assert_not_called()
+
     def test_submit_stuck_input_if_present_sends_enter_for_stuck_input(self) -> None:
         report = Report('stuck_input', ['› Continue task'], 'Continue task', True)
-        with patch('omo_manager.omo_codex_status.tail', return_value=['› Continue task', '  gpt-5.5']), patch('omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)) as run:
+        with patch('omo_manager.omo_codex_status.tail', return_value=['› Continue task', '  gpt-5.5']), patch('omo_manager.omo_codex_status.exact_pane_id', return_value='%7'), patch('omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)) as run:
             self.assertEqual('sent_enter', submit_stuck_input_if_present('cfg:1.0', report))
-        run.assert_called_once_with(['tmux', 'send-keys', '-t', 'cfg:1.0', 'Enter'], capture_output=True, text=True, timeout=5, check=False)
+        run.assert_called_once_with(['tmux', 'send-keys', '-t', '%7', 'Enter'], capture_output=True, text=True, timeout=5, check=False)
 
     def test_submit_stuck_input_if_present_sends_enter_for_terminal_enter_prompt(self) -> None:
         report = Report('stuck_input', ['Press Enter to continue...'], '', True)
-        with patch('omo_manager.omo_codex_status.tail', return_value=['────', 'done', '─ Worked for 1s ─', '  gpt-5.5', 'Press Enter to continue...']), patch('omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)) as run:
+        with patch('omo_manager.omo_codex_status.tail', return_value=['────', 'done', '─ Worked for 1s ─', '  gpt-5.5', 'Press Enter to continue...']), patch('omo_manager.omo_codex_status.exact_pane_id', return_value='%7'), patch('omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)) as run:
             self.assertEqual('sent_enter', submit_stuck_input_if_present('cfg:1.0', report))
-        run.assert_called_once_with(['tmux', 'send-keys', '-t', 'cfg:1.0', 'Enter'], capture_output=True, text=True, timeout=5, check=False)
+        run.assert_called_once_with(['tmux', 'send-keys', '-t', '%7', 'Enter'], capture_output=True, text=True, timeout=5, check=False)
 
     def test_submit_stuck_input_if_present_ignores_latest_placeholder(self) -> None:
         report = Report('stuck_input', ['› Continue task'], 'Continue task', True)
@@ -553,9 +657,9 @@ class CodexStatusTests(unittest.TestCase):
             '',
             '  Create a plan?  shift + tab use Plan mode   esc dismiss',
         ]
-        with patch('omo_manager.omo_codex_status.tail', return_value=lines), patch('omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)) as run:
+        with patch('omo_manager.omo_codex_status.tail', return_value=lines), patch('omo_manager.omo_codex_status.exact_pane_id', return_value='%7'), patch('omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)) as run:
             self.assertEqual('sent_enter', submit_stuck_input_if_present('cfg:1.0', report))
-        run.assert_called_once_with(['tmux', 'send-keys', '-t', 'cfg:1.0', 'Enter'], capture_output=True, text=True, timeout=5, check=False)
+        run.assert_called_once_with(['tmux', 'send-keys', '-t', '%7', 'Enter'], capture_output=True, text=True, timeout=5, check=False)
 
     def test_submit_stuck_input_if_present_reports_compaction_timeout_as_unsafe(self) -> None:
         report = Report('stuck_input', ['› Continue task'], 'Continue task', True)
@@ -565,9 +669,9 @@ class CodexStatusTests(unittest.TestCase):
 
     def test_submit_stuck_input_if_present_sends_enter_while_latest_screen_is_busy(self) -> None:
         report = Report('stuck_input', ['› Continue task'], 'Continue task', True)
-        with patch('omo_manager.omo_codex_status.tail', return_value=['• Working', '', '› Continue task', '  gpt-5.5']), patch('omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)) as run:
+        with patch('omo_manager.omo_codex_status.tail', return_value=['• Working', '', '› Continue task', '  gpt-5.5']), patch('omo_manager.omo_codex_status.exact_pane_id', return_value='%7'), patch('omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)) as run:
             self.assertEqual('sent_enter', submit_stuck_input_if_present('cfg:1.0', report))
-        run.assert_called_once_with(['tmux', 'send-keys', '-t', 'cfg:1.0', 'Enter'], capture_output=True, text=True, timeout=5, check=False)
+        run.assert_called_once_with(['tmux', 'send-keys', '-t', '%7', 'Enter'], capture_output=True, text=True, timeout=5, check=False)
 
     def test_submit_stuck_input_if_present_waits_for_compaction_then_sends_enter(self) -> None:
         report = Report('stuck_input', ['› Continue task'], 'Continue task', True)
@@ -584,12 +688,12 @@ class CodexStatusTests(unittest.TestCase):
             line_counts.append(n_lines)
             return next(tails)
 
-        with patch('omo_manager.omo_codex_status.tail', side_effect=fake_tail), patch('omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)) as run, patch('omo_manager.omo_codex_status.time.sleep') as sleep:
+        with patch('omo_manager.omo_codex_status.tail', side_effect=fake_tail), patch('omo_manager.omo_codex_status.exact_pane_id', return_value='%7'), patch('omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)) as run, patch('omo_manager.omo_codex_status.time.sleep') as sleep:
             self.assertEqual('sent_enter', submit_stuck_input_if_present('cfg:1.0', report, compaction_wait_timeout_s=10))
         self.assertEqual(2, captures)
         self.assertEqual([2000, 2000], line_counts)
         sleep.assert_called_once()
-        run.assert_called_once_with(['tmux', 'send-keys', '-t', 'cfg:1.0', 'Enter'], capture_output=True, text=True, timeout=5, check=False)
+        run.assert_called_once_with(['tmux', 'send-keys', '-t', '%7', 'Enter'], capture_output=True, text=True, timeout=5, check=False)
 
     def test_submit_stuck_input_if_present_ignores_non_stuck_report(self) -> None:
         report = Report('ready', ['› Use /skills to list available skills'], 'Use /skills to list available skills', False)

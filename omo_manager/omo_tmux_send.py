@@ -328,20 +328,53 @@ def inspect_lines_for_message(message: str) -> int:
     return min(2000, max(80, len(message.splitlines()) + 20))
 
 
+def error_signature(lines: list[str]) -> tuple[str, ...]:
+    return tuple(visible_error_lines(current_block(lines).lines))
+
+
+def validate_error_transition(
+    lines: list[str],
+    preexisting_error: tuple[str, ...] | None,
+    target: str,
+    phase: str,
+) -> None:
+    current_status = status(lines, current_block(lines))
+    if current_status == "not_codex":
+        raise RuntimeError(f"target is not a Codex pane {phase}: {target}")
+    current_error = error_signature(lines)
+    if current_error and current_error != preexisting_error:
+        raise RuntimeError(f"target has a different Codex error {phase}: {target}")
+    if current_status == "error" and current_error != preexisting_error:
+        raise RuntimeError(f"target has a different Codex error {phase}: {target}")
+
+
+def revalidate_error_transition(
+    target: str,
+    n_lines: int,
+    preexisting_error: tuple[str, ...] | None,
+    phase: str,
+) -> list[str]:
+    lines = tail(target, n_lines)
+    validate_error_transition(lines, preexisting_error, target, phase)
+    return lines
+
+
 def require_codex_target(target: str, n_lines: int = 80) -> str:
     lines = tail(target, n_lines)
     current_status = status(lines, current_block(lines))
     if current_status == "not_codex":
         raise RuntimeError(f"target is not a Codex pane: {target}")
-    if current_status == "error":
-        raise RuntimeError(f"target is in Codex error state: {target}")
     return current_status
 
 
-def require_sendable_codex_target(target: str, n_lines: int = 80) -> None:
-    current_status = require_codex_target(target, n_lines)
-    if current_status not in {"ready", "running", "stuck_input", "waiting_subagent"}:
+def require_sendable_codex_target(target: str, n_lines: int = 80) -> tuple[str, ...] | None:
+    lines = tail(target, n_lines)
+    current_status = status(lines, current_block(lines))
+    if current_status == "not_codex":
+        raise RuntimeError(f"target is not a Codex pane: {target}")
+    if current_status not in {"ready", "running", "stuck_input", "waiting_subagent", "error"}:
         raise RuntimeError(f"target is not a supported Codex send state before paste: {target} status={current_status}")
+    return error_signature(lines) or None
 
 
 def exact_capacity_error(lines: list[str]) -> bool:
@@ -366,7 +399,12 @@ def send_enter(target: str) -> None:
     _ = subprocess.run(["tmux", "send-keys", "-t", target, "Enter"], timeout=5, check=True)
 
 
-def wait_paste_visible(target: str, message: str, options: CodexSendOptions) -> None:
+def wait_paste_visible(
+    target: str,
+    message: str,
+    options: CodexSendOptions,
+    preexisting_error: tuple[str, ...] | None = None,
+) -> None:
     if options.submit_verify_timeout_s <= 0:
         return
     probes = message_probes(message)
@@ -379,8 +417,7 @@ def wait_paste_visible(target: str, message: str, options: CodexSendOptions) -> 
     while True:
         lines = tail(target, n_lines)
         last_status = status(lines, current_block(lines))
-        if last_status in {"not_codex", "error"}:
-            raise RuntimeError(f"target left supported Codex state before submit: {target} status={last_status}")
+        validate_error_transition(lines, preexisting_error, target, "before submit")
         input_text = current_input_text(lines)
         if is_real_input_text(input_text) and (all(probe in input_text for probe in probes) or has_collapsed_paste_text(input_text)):
             return
@@ -425,7 +462,12 @@ def wait_probe_removed(target: str, options: CodexSendOptions, probe: str, n_lin
         time.sleep(min(0.25, max(0.05, deadline_s - now_s)))
 
 
-def verify_submit(target: str, message: str, options: CodexSendOptions) -> None:
+def verify_submit(
+    target: str,
+    message: str,
+    options: CodexSendOptions,
+    preexisting_error: tuple[str, ...] | None = None,
+) -> None:
     if options.submit_verify_timeout_s <= 0:
         return
     probes = message_probes(message)
@@ -438,14 +480,11 @@ def verify_submit(target: str, message: str, options: CodexSendOptions) -> None:
     while True:
         lines = tail(target, n_lines)
         last_status = status(lines, current_block(lines))
-        if last_status == "not_codex":
-            raise RuntimeError(f"target is not a Codex pane after submit: {target}")
-        if last_status == "error":
-            raise RuntimeError(f"target is in Codex error state after submit: {target}")
+        validate_error_transition(lines, preexisting_error, target, "after submit")
         input_text = current_input_text(lines)
         real_input_visible = is_real_input_text(input_text)
         prompt_still_present = real_input_visible and (any(probe in input_text for probe in probes) or has_collapsed_paste_text(input_text))
-        if last_status in {"running", "waiting_subagent"} and not real_input_visible:
+        if last_status in {"ready", "running", "waiting_subagent"} and not real_input_visible:
             return
         if real_input_visible and not prompt_still_present:
             raise RuntimeError(f"Codex submit not verified: different input remains visible, status={last_status}")
@@ -504,26 +543,28 @@ def run_tmux(target: str, message: str, options: CodexSendOptions, *, before_pas
             for _ in range(options.enter_count):
                 _ = print(f"would send Enter to {target}")
             return
-        require_sendable_codex_target(target, inspect_lines_for_message(message))
+        preexisting_error = require_sendable_codex_target(target, inspect_lines_for_message(message))
         clear_result = clear_existing_input_before_send(target, options)
         if clear_result not in {"", "sent_enter"}:
             raise RuntimeError(f"target existing input not cleared before tmux paste: {clear_result}")
-        require_sendable_codex_target(target, inspect_lines_for_message(message))
+        preexisting_error = require_sendable_codex_target(target, inspect_lines_for_message(message))
         _ = subprocess.run(["tmux", "load-buffer", "-b", buffer_name, str(temp_path)], timeout=5, check=True)
         if before_paste is not None:
             before_paste()
+        revalidate_error_transition(target, inspect_lines_for_message(message), preexisting_error, "before paste")
         require_no_existing_input(target)
         _ = subprocess.run(["tmux", "paste-buffer", "-b", buffer_name, "-t", target], timeout=5, check=True)
         if not verify_placeholder_paste(target, message, options):
-            wait_paste_visible(target, message, options)
+            wait_paste_visible(target, message, options, preexisting_error)
         enter_n_lines = inspect_lines_for_message(message)
         for idx in range(options.enter_count):
             if idx:
                 time.sleep(options.enter_delay_s)
-            if has_plan_prompt(tail(target, enter_n_lines)) and not options.allow_plan_prompt_enter:
+            lines = revalidate_error_transition(target, enter_n_lines, preexisting_error, "before submit")
+            if has_plan_prompt(lines) and not options.allow_plan_prompt_enter:
                 raise RuntimeError("Codex submit blocked by unsafe Plan prompt")
             send_enter(target)
-        verify_submit(target, message, options)
+        verify_submit(target, message, options, preexisting_error)
     finally:
         temp_path.unlink(missing_ok=True)
         if not options.dry_run:
