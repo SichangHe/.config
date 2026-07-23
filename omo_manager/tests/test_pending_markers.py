@@ -9706,6 +9706,43 @@ printf 'header\\n(pending)\\nchanged\\n' > {task}
                 assert row is not None
                 self.assertEqual(watcher.CAPACITY_ERROR_TEXT, row.output)
 
+    def test_capacity_untracked_agent_resumes_and_remains_reported(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(
+            Path("/tmp"),
+            "",
+            Path("/tmp/seen.tsv"),
+            1.0,
+            1.0,
+            30.0,
+            Path("/status.py"),
+            False,
+            True,
+            manager_target="wl:1",
+            agent_problem_interval_s=10.0,
+            agent_problem_repeat_s=300.0,
+        )
+        capacity_line = (
+            "untracked_agent: task=tmux:wl:6 evidence=target=wl:6 role=tmux_unmanaged "
+            f"output={watcher.CAPACITY_ERROR_TEXT} owner_target=wl:1"
+        )
+        result = watcher.CommandOutput("agent-problems", 3, f"agent-problems: untracked_agent=1\n{capacity_line}\n", "")
+        out = StringIO()
+        with redirect_stdout(out), patch.object(watcher, "capacity_model_for_target", return_value="gpt-5.5"):
+            self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
+
+        self.assertIn("capacity resume due: target=wl:6 attempt=1 message=resume", out.getvalue())
+        self.assertIn(watcher.AGENT_PROBLEM_HEADER, out.getvalue())
+        self.assertIn("1 not tracked in any task file", out.getvalue())
+        self.assertIn(f"wl:6 <output>{watcher.CAPACITY_ERROR_TEXT}</output>", out.getvalue())
+        self.assertIsNone(
+            watcher.capacity_problem_row(
+                "untracked_agent: task=tmux:wl:6 evidence=target=wl:6 role=tmux_unmanaged "
+                "output=working owner_target=wl:1"
+            )
+        )
+
     def test_capacity_manager_resume_targets_exact_manager(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 

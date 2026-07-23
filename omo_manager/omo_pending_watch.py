@@ -2280,7 +2280,7 @@ def capacity_problem_row(line: str) -> ProblemRow | None:
     if row is None:
         return None
     output = re.sub(r"^⚠\ufe0f?\s*", "", row.output)
-    return replace(row, output=output) if row.status == "error" and output == CAPACITY_ERROR_TEXT and row.target else None
+    return replace(row, output=output) if row.status in {"error", "untracked_agent"} and output == CAPACITY_ERROR_TEXT and row.target else None
 
 
 def capacity_state_prefix(args: Args, target: str) -> str:
@@ -2528,8 +2528,8 @@ def handle_capacity_problems(args: Args, seen: dict[str, float], output: str, no
         if now_wall_s < seen.get(f"{prefix}next", 0.0):
             continue
         changed = submit_capacity_resume(args, row, line, attempts + 1, seen, now_wall_s) or changed
-    capacity_line_set = {line for line, _row in capacity_lines}
-    kept = [line for line in lines[1:] if line not in capacity_line_set and not line.startswith("manager-action: ")]
+    suppressed_capacity_lines = {line for line, row in capacity_lines if row.status == "error"}
+    kept = [line for line in lines[1:] if line not in suppressed_capacity_lines and not line.startswith("manager-action: ")]
     return filtered_problem_output(kept) or "", changed
 
 

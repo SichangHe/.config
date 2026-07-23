@@ -67,6 +67,65 @@ class CodexStatusTests(unittest.TestCase):
     def test_status_requires_codex_marker_in_last_line(self) -> None:
         self.assertEqual('not_codex', status(['shell'], current_block(['shell'])))
 
+    def test_exact_file_search_overlay_is_recoverable_stuck_input(self) -> None:
+        lines = [
+            '• Working (8s • esc to interrupt)',
+            '› Previous worker is running; output=› Find and fix a bug in @filename',
+            '',
+            '  no matches',
+            '  enter insert · esc close · ←/→ switch search modes                 [All Results] Filesystem Only Plugins',
+        ]
+
+        report = report_from_lines(lines)
+
+        self.assertEqual('stuck_input', report.status)
+        self.assertTrue(report.can_submit_input)
+        self.assertEqual('Previous worker is running; output=› Find and fix a bug in @filename', report.input_text)
+
+    def test_wrapped_file_search_overlay_is_also_recoverable(self) -> None:
+        lines = [
+            '  gpt-5.5 medium · /home/sichangheagent/.config',
+            '› Manager notice includes @filename',
+            'no matches',
+            'enter insert · esc close · ←/→ switch search modes',
+            '[All Results] Filesystem Only Plugins',
+        ]
+
+        self.assertEqual('stuck_input', report_from_lines(lines).status)
+
+    def test_file_search_overlay_near_misses_remain_not_codex(self) -> None:
+        cases = (
+            [
+                '• Working (8s • esc to interrupt)',
+                '› ordinary terminal text without a file token',
+                'no matches',
+                'enter insert · esc close · ←/→ switch search modes',
+                '[All Results] Filesystem Only Plugins',
+            ],
+            [
+                'shell printed @filename',
+                'no matches',
+                'enter insert · esc close · ←/→ switch search modes',
+                '[All Results] Filesystem Only Plugins',
+            ],
+            [
+                '› terminal merely printed @filename',
+                'no matches',
+                'enter insert · esc close · ←/→ switch search modes',
+                '[All Results] Filesystem Only Plugins',
+            ],
+            [
+                '• Working (8s • esc to interrupt)',
+                '› terminal mentioned @filename',
+                'no matches',
+                'enter insert · esc close',
+                '[All Results] Filesystem Only Plugins',
+            ],
+        )
+        for lines in cases:
+            with self.subTest(lines=lines):
+                self.assertEqual('not_codex', report_from_lines(lines).status)
+
     def test_status_ready_from_current_worked_footer(self) -> None:
         lines = ['────', 'done', '─ Worked for 1s ─', '  gpt-5.5']
         self.assertEqual('ready', status(lines, current_block(lines)))
@@ -623,6 +682,89 @@ class CodexStatusTests(unittest.TestCase):
         report = Report('stuck_input', ['› Continue task'], 'Continue task', True)
         with patch('omo_manager.omo_codex_status.tail', return_value=['› Continue task', '  gpt-5.5']), patch('omo_manager.omo_codex_status.exact_pane_id', return_value='%7'), patch('omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)) as run:
             self.assertEqual('sent_enter', submit_stuck_input_if_present('cfg:1.0', report))
+        run.assert_called_once_with(['tmux', 'send-keys', '-t', '%7', 'Enter'], capture_output=True, text=True, timeout=5, check=False)
+
+    def test_submit_stuck_input_recovers_exact_search_overlay_then_submits_prompt(self) -> None:
+        overlay = [
+            '• Working (8s • esc to interrupt)',
+            '› Previous worker is running; output=› Find and fix a bug in @filename',
+            '  no matches',
+            '  enter insert · esc close · ←/→ switch search modes       [All Results] Filesystem Only Plugins',
+        ]
+        underlying = [
+            '› Previous worker is running; output=› Find and fix a bug in @filename',
+            '  gpt-5.5',
+        ]
+        report = report_from_lines(overlay)
+
+        with patch('omo_manager.omo_codex_status.tail', side_effect=[overlay, overlay, underlying]), patch('omo_manager.omo_codex_status.exact_pane_id', return_value='%7'), patch('omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)) as run, patch('omo_manager.omo_codex_status.time.sleep'):
+            self.assertEqual('sent_enter', submit_stuck_input_if_present('cfg:1.0', report))
+
+        expected = ['tmux', 'send-keys', '-t', '%7', 'Enter']
+        self.assertEqual([expected, expected], [call.args[0] for call in run.call_args_list])
+
+    def test_submit_stuck_input_refuses_changed_search_overlay(self) -> None:
+        expected_overlay = [
+            '• Working (8s • esc to interrupt)',
+            '› Expected prompt @filename',
+            '  no matches',
+            '  enter insert · esc close · ←/→ switch search modes       [All Results] Filesystem Only Plugins',
+        ]
+        changed_overlay = [
+            '• Working (8s • esc to interrupt)',
+            '› Different prompt @filename',
+            '  no matches',
+            '  enter insert · esc close · ←/→ switch search modes       [All Results] Filesystem Only Plugins',
+        ]
+        report = report_from_lines(expected_overlay)
+
+        with patch('omo_manager.omo_codex_status.tail', return_value=changed_overlay), patch('omo_manager.omo_codex_status.exact_pane_id', return_value='%7'), patch('omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)) as run:
+            self.assertEqual('not_safe:file_search_overlay_changed', submit_stuck_input_if_present('cfg:1.0', report))
+
+        run.assert_not_called()
+
+    def test_submit_stuck_input_refuses_changed_prompt_after_search_overlay(self) -> None:
+        overlay = [
+            '• Working (8s • esc to interrupt)',
+            '› Expected prompt @filename',
+            '  no matches',
+            '  enter insert · esc close · ←/→ switch search modes       [All Results] Filesystem Only Plugins',
+        ]
+        changed_prompt = ['› Different prompt @filename', '  gpt-5.5']
+        report = report_from_lines(overlay)
+
+        with patch('omo_manager.omo_codex_status.tail', side_effect=[overlay, changed_prompt]), patch('omo_manager.omo_codex_status.exact_pane_id', return_value='%7'), patch('omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)) as run, patch('omo_manager.omo_codex_status.time.sleep'):
+            self.assertEqual('not_safe:underlying_prompt_changed', submit_stuck_input_if_present('cfg:1.0', report))
+
+        run.assert_called_once_with(['tmux', 'send-keys', '-t', '%7', 'Enter'], capture_output=True, text=True, timeout=5, check=False)
+
+    def test_submit_search_overlay_accepts_running_stock_placeholder_after_recovery(self) -> None:
+        overlay = [
+            '• Working (8s • esc to interrupt)',
+            '› Manager notice includes @filename',
+            'no matches',
+            'enter insert · esc close · ←/→ switch search modes  [All Results] Filesystem Only Plugins',
+        ]
+        running = ['• Working', '› Find and fix a bug in @filename', '  gpt-5.5']
+        report = report_from_lines(overlay)
+
+        with patch('omo_manager.omo_codex_status.tail', side_effect=[overlay, overlay, running]), patch('omo_manager.omo_codex_status.exact_pane_id', return_value='%7'), patch('omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)) as run, patch('omo_manager.omo_codex_status.time.sleep'):
+            self.assertEqual('sent_enter', submit_stuck_input_if_present('cfg:1.0', report))
+
+        run.assert_called_once_with(['tmux', 'send-keys', '-t', '%7', 'Enter'], capture_output=True, text=True, timeout=5, check=False)
+
+    def test_submit_search_overlay_sends_one_recovery_enter_while_frames_stay_stale(self) -> None:
+        overlay = [
+            '• Working (8s • esc to interrupt)',
+            '› Manager notice includes @filename',
+            'no matches',
+            'enter insert · esc close · ←/→ switch search modes  [All Results] Filesystem Only Plugins',
+        ]
+        report = report_from_lines(overlay)
+
+        with patch('omo_manager.omo_codex_status.tail', side_effect=[overlay, overlay]), patch('omo_manager.omo_codex_status.exact_pane_id', return_value='%7'), patch('omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)) as run, patch('omo_manager.omo_codex_status.time.monotonic', side_effect=[0.0, 0.0, 2.0]):
+            self.assertEqual('not_safe:file_search_overlay', submit_stuck_input_if_present('cfg:1.0', report, compaction_wait_timeout_s=1.0))
+
         run.assert_called_once_with(['tmux', 'send-keys', '-t', '%7', 'Enter'], capture_output=True, text=True, timeout=5, check=False)
 
     def test_submit_stuck_input_if_present_sends_enter_for_terminal_enter_prompt(self) -> None:

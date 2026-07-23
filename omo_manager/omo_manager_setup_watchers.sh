@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 PATH="$HOME/.config/bin:$PATH"
-helper_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+helper_path="$(readlink -f -- "${BASH_SOURCE[0]}")"
+helper_dir="$(cd "$(dirname "$helper_path")" && pwd)"
 uv_run=()
 if command -v uv >/dev/null 2>&1; then
   uv_run=(uv run --project "$helper_dir")
@@ -111,6 +112,22 @@ cmdline_has_arg() {
   [ -r "/proc/$pid/cmdline" ] || return 1
   while IFS= read -r -d '' arg; do
     [ "$arg" = "$value" ] && return 0
+  done <"/proc/$pid/cmdline"
+  return 1
+}
+
+same_resolved_path() {
+  local left="$1" right="$2" resolved_left resolved_right
+  resolved_left="$(readlink -f -- "$left" 2>/dev/null || true)"
+  resolved_right="$(readlink -f -- "$right" 2>/dev/null || true)"
+  [ -n "$resolved_left" ] && [ "$resolved_left" = "$resolved_right" ]
+}
+
+cmdline_has_resolved_path_arg() {
+  local pid="$1" value="$2" arg
+  [ -r "/proc/$pid/cmdline" ] || return 1
+  while IFS= read -r -d '' arg; do
+    same_resolved_path "$arg" "$value" && return 0
   done <"/proc/$pid/cmdline"
   return 1
 }
@@ -286,7 +303,7 @@ owned_supervisor_process() {
   cmdline_has_fragment "$pid" "$loop_marker" || return 1
   cmdline_has_arg "$pid" "$name-watch-supervisor" || return 1
   cmdline_has_arg "$pid" "$token" || return 1
-  cmdline_has_arg "$pid" "$script_path" || return 1
+  cmdline_has_resolved_path_arg "$pid" "$script_path" || return 1
   cmdline_has_arg_pair "$pid" --root "$root_arg" || return 1
   [ -z "$state_arg" ] || cmdline_has_arg_pair "$pid" --state-dir "$state_arg"
 }

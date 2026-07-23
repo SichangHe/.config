@@ -358,6 +358,81 @@ class TmuxSendTests(unittest.TestCase):
         with patch("omo_manager.omo_tmux_send.tail", return_value=lines):
             wait_paste_visible("cfg:1.0", "line one\nline two\n", options())
 
+    def test_wait_paste_visible_recovers_matching_file_search_overlay_with_enter(self) -> None:
+        message = "Manager notice includes Find and fix a bug in @filename"
+        overlay = [
+            "• Working (8s • esc to interrupt)",
+            f"› {message}",
+            "no matches",
+            "enter insert · esc close · ←/→ switch search modes        [All Results] Filesystem Only Plugins",
+        ]
+        underlying = [f"› {message}", "  gpt-5.5"]
+
+        with patch("omo_manager.omo_tmux_send.tail", side_effect=[overlay, overlay, underlying]), patch("omo_manager.omo_tmux_send.send_enter") as enter, patch("omo_manager.omo_tmux_send.time.sleep"):
+            wait_paste_visible("cfg:1.0", message, options())
+
+        enter.assert_called_once_with("cfg:1.0")
+
+    def test_wait_paste_visible_does_not_recover_another_search_overlay(self) -> None:
+        overlay = [
+            "• Working (8s • esc to interrupt)",
+            "› unrelated prompt containing @filename",
+            "no matches",
+            "enter insert · esc close · ←/→ switch search modes",
+            "[All Results] Filesystem Only Plugins",
+        ]
+
+        with patch("omo_manager.omo_tmux_send.tail", return_value=overlay), patch("omo_manager.omo_tmux_send.send_enter") as enter, patch("omo_manager.omo_tmux_send.time.monotonic", side_effect=[0.0, 2.0]):
+            with self.assertRaisesRegex(RuntimeError, "Codex paste not verified"):
+                wait_paste_visible("cfg:1.0", "my own prompt with @filename", options())
+
+        enter.assert_not_called()
+
+    def test_wait_paste_visible_does_not_recover_same_prefix_different_prompt(self) -> None:
+        shared_prefix = "x" * 100
+        overlay = [
+            "• Working (8s • esc to interrupt)",
+            f"› {shared_prefix} overlay prompt @filename",
+            "no matches",
+            "enter insert · esc close · ←/→ switch search modes        [All Results] Filesystem Only Plugins",
+        ]
+
+        with patch("omo_manager.omo_tmux_send.tail", return_value=overlay), patch("omo_manager.omo_tmux_send.send_enter") as enter, patch("omo_manager.omo_tmux_send.time.monotonic", side_effect=[0.0, 2.0]):
+            with self.assertRaisesRegex(RuntimeError, "Codex paste not verified"):
+                wait_paste_visible("cfg:1.0", f"{shared_prefix} different prompt @filename", options())
+
+        enter.assert_not_called()
+
+    def test_wait_paste_visible_rejects_different_input_after_file_search_overlay(self) -> None:
+        shared_prefix = "x" * 100
+        overlay = [
+            "• Working (8s • esc to interrupt)",
+            f"› {shared_prefix} another prompt @filename",
+            "no matches",
+            "enter insert · esc close · ←/→ switch search modes        [All Results] Filesystem Only Plugins",
+        ]
+        different_input = [f"› {shared_prefix} different prompt @filename", "  gpt-5.5"]
+
+        with patch("omo_manager.omo_tmux_send.tail", side_effect=[overlay, different_input]), patch("omo_manager.omo_tmux_send.send_enter") as enter:
+            with self.assertRaisesRegex(RuntimeError, "input changed after file search overlay"):
+                wait_paste_visible("cfg:1.0", f"{shared_prefix} expected prompt @filename", options())
+
+        enter.assert_not_called()
+
+    def test_wait_paste_visible_does_not_normalize_search_overlay_whitespace(self) -> None:
+        overlay = [
+            "• Working (8s • esc to interrupt)",
+            "› expected  prompt @filename",
+            "no matches",
+            "enter insert · esc close · ←/→ switch search modes        [All Results] Filesystem Only Plugins",
+        ]
+
+        with patch("omo_manager.omo_tmux_send.tail", return_value=overlay), patch("omo_manager.omo_tmux_send.send_enter") as enter, patch("omo_manager.omo_tmux_send.time.monotonic", side_effect=[0.0, 2.0]):
+            with self.assertRaisesRegex(RuntimeError, "Codex paste not verified"):
+                wait_paste_visible("cfg:1.0", "expected prompt @filename", options())
+
+        enter.assert_not_called()
+
     def test_clear_existing_input_before_send_submits_existing_real_input(self) -> None:
         before = Report("stuck_input", ["› Draft the manager reply"], "Draft the manager reply", True)
         after = Report("running", ["• Working"], "", False)

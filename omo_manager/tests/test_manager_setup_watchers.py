@@ -18,6 +18,7 @@ class WatcherSetupTests(unittest.TestCase):
         self,
         tmp: Path,
         *,
+        setup: Path = SETUP,
         fake_uv_mode: str = "real",
         email: str = "false",
         health_timeout_s: str = "1",
@@ -27,7 +28,7 @@ class WatcherSetupTests(unittest.TestCase):
         root = tmp / "work_logs"
         state = tmp / "state"
         bin_dir = home / ".config" / "bin"
-        bin_dir.mkdir(parents=True)
+        bin_dir.mkdir(parents=True, exist_ok=True)
         root.mkdir(exist_ok=True)
         state.mkdir(exist_ok=True)
         fake_uv_log = tmp / "fake-uv.log"
@@ -79,7 +80,7 @@ esac
             "FAKE_UV_MODE": fake_uv_mode,
             "FAKE_UV_SLEEP": "5",
         }
-        return subprocess.run([str(SETUP)], env=env, text=True, capture_output=True, timeout=8, check=False)
+        return subprocess.run([str(setup)], env=env, text=True, capture_output=True, timeout=8, check=False)
 
     def pid_from_file(self, pid_file: Path) -> int | None:
         try:
@@ -485,6 +486,111 @@ while :; do sleep 30; done
                         pass
                     current.wait(timeout=2)
                 self.stop_supervisors(state)
+
+    def test_setup_replaces_pidfile_supervisor_started_through_symlink_path(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root = tmp / "work_logs"
+            state = tmp / "state"
+            alias = tmp / "helper-alias"
+            root.mkdir()
+            state.mkdir()
+            alias.mkdir()
+            (alias / "omo_pending_watch.py").symlink_to(ROOT / "omo_manager" / "omo_pending_watch.py")
+            token = "alias-token"
+            launch_pid_file = state / f".pending-supervisor.{token}.pid"
+            current = subprocess.Popen(
+                [
+                    "bash",
+                    "-c",
+                    "while :; do sleep 30; done # pending watcher exited status",
+                    "pending-watch-supervisor",
+                    str(launch_pid_file),
+                    token,
+                    "uv",
+                    "run",
+                    "--project",
+                    str(alias),
+                    str(alias / "omo_pending_watch.py"),
+                    "--root",
+                    str(root),
+                ],
+                start_new_session=True,
+            )
+            (state / "pending-supervisor.pid").write_text(
+                f"pid={current.pid}\nstart={self.process_start_ticks(current.pid)}\ntoken={token}\n",
+                encoding="utf-8",
+            )
+            try:
+                result = self.run_setup(tmp)
+                self.assertEqual(0, result.returncode, result.stderr)
+                current.wait(timeout=2)
+                self.assertIsNotNone(current.returncode)
+                self.assertNotIn("stale pending watcher pidfile points at unowned", result.stderr)
+            finally:
+                if current.poll() is None:
+                    self.terminate_tree(current.pid)
+                    current.wait(timeout=2)
+                self.stop_supervisors(state)
+
+    def test_setup_does_not_kill_legacy_supervisor_started_through_symlink_path(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root = tmp / "work_logs"
+            state = tmp / "state"
+            alias = tmp / "helper-alias"
+            root.mkdir()
+            state.mkdir()
+            alias.mkdir()
+            (alias / "omo_pending_watch.py").symlink_to(ROOT / "omo_manager" / "omo_pending_watch.py")
+            legacy = subprocess.Popen(
+                [
+                    "bash",
+                    "-c",
+                    "while :; do sleep 30; done # pending watcher exited status",
+                    "pending-watch-supervisor",
+                    "uv",
+                    "run",
+                    "--project",
+                    str(alias),
+                    str(alias / "omo_pending_watch.py"),
+                    "--root",
+                    str(root),
+                ],
+                start_new_session=True,
+            )
+            try:
+                result = self.run_setup(tmp)
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertIsNone(legacy.poll())
+            finally:
+                if legacy.poll() is None:
+                    self.terminate_tree(legacy.pid)
+                    legacy.wait(timeout=2)
+                self.stop_supervisors(state)
+
+    def test_setup_symlink_entrypoint_refreshes_one_canonical_supervisor(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            alias = tmp / "helper-alias"
+            alias.mkdir()
+            alias_setup = alias / "omo_manager_setup_watchers.sh"
+            alias_setup.symlink_to(SETUP)
+            try:
+                first = self.run_setup(tmp, setup=alias_setup)
+                self.assertEqual(0, first.returncode, first.stderr)
+                first_pid = self.pid_from_file(tmp / "state" / "pending-supervisor.pid")
+                self.assertIsNotNone(first_pid)
+
+                second = self.run_setup(tmp)
+                self.assertEqual(0, second.returncode, second.stderr)
+                second_pid = self.pid_from_file(tmp / "state" / "pending-supervisor.pid")
+                self.assertIsNotNone(second_pid)
+                self.assertNotEqual(first_pid, second_pid)
+                assert first_pid is not None
+                self.assertFalse(self.process_active(first_pid))
+            finally:
+                self.stop_supervisors(tmp / "state")
 
     def test_setup_does_not_kill_current_format_supervisor_with_mismatched_token(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:

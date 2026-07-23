@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 DEFAULT_COMPACTION_WAIT_TIMEOUT_S = float(os.environ.get("OMO_CODEX_COMPACTION_WAIT_TIMEOUT_S", "300"))
 COMPACTION_WAIT_INTERVAL_S = 0.5
+FILE_SEARCH_RECOVERY_INTERVAL_S = 0.05
 COMPACTION_WAIT_LINES = 2000
 CODEX_RE = re.compile(r"  gpt-")
 CODEX_FOOTER_RE = re.compile(r"^  gpt-")
@@ -28,6 +29,9 @@ BACKGROUND_RUNNING_RE = re.compile(r"^• .*?\b(?:Waiting for background termina
 QUEUE_MESSAGE_FOOTER_RE = re.compile(r"\btab to queue message\b")
 TERMINAL_ENTER_PROMPT_RE = re.compile(r"^\s*\[?press enter(?:/return)?(?: to continue)?(?:\.\.\.)?\]?\s*$", re.IGNORECASE)
 PLAN_PROMPT_RE = re.compile(r"\bCreate a plan\?\s+shift\s+\+\s+tab\s+use Plan mode\s+esc dismiss\s*$")
+FILE_SEARCH_NO_MATCHES_RE = re.compile(r"^\s*no matches\s*$", re.IGNORECASE)
+FILE_SEARCH_HELP_RE = re.compile(r"\benter insert\s*·\s*esc close\s*·\s*←/→ switch search modes\b")
+FILE_SEARCH_MODES_RE = re.compile(r"\[All Results\]\s+Filesystem Only\s+Plugins\s*$")
 WAITING_FOR_SUBAGENT_RE = re.compile(r"^• Waiting for [0-9a-fA-F][0-9a-fA-F-]{15,}$")
 WORKING_INTERRUPT_RE = re.compile(r"^• Working \([^)]* • esc to interrupt\)$")
 QUEUED_AFTER_TOOL_CALL_RE = re.compile(r"^• Messages to be submitted after next tool call \(press esc to interrupt and send immediately\)$")
@@ -201,6 +205,48 @@ def current_input_text(lines: list[str]) -> str:
     return ""
 
 
+def file_search_overlay_input_text(lines: list[str]) -> str:
+    visible = [(idx, line.rstrip()) for idx, line in enumerate(lines) if line.strip()]
+    if len(visible) < 3:
+        return ""
+    if FILE_SEARCH_HELP_RE.search(visible[-1][1]) is not None and FILE_SEARCH_MODES_RE.search(visible[-1][1]) is not None:
+        no_matches = visible[-2]
+    elif len(visible) >= 4 and FILE_SEARCH_HELP_RE.search(visible[-2][1]) is not None and FILE_SEARCH_MODES_RE.fullmatch(visible[-1][1]) is not None:
+        no_matches = visible[-3]
+    else:
+        return ""
+    if FILE_SEARCH_NO_MATCHES_RE.fullmatch(no_matches[1]) is None:
+        return ""
+    prompt_idx = -1
+    for idx in range(no_matches[0] - 1, -1, -1):
+        if lines[idx].lstrip().startswith("›"):
+            prompt_idx = idx
+            break
+    if prompt_idx < 0:
+        return ""
+    recent_pre_overlay = lines[max(0, prompt_idx - 20) : prompt_idx]
+    if not any(
+        CODEX_FOOTER_RE.match(line) is not None
+        or QUEUE_MESSAGE_FOOTER_RE.search(line) is not None
+        or BUSY_RE.search(line) is not None
+        or BACKGROUND_RUNNING_RE.search(line) is not None
+        or COMPACTING_RE.search(line) is not None
+        for line in recent_pre_overlay
+    ):
+        return ""
+    prompt_lines = lines[prompt_idx : no_matches[0]]
+    text = "\n".join([prompt_lines[0].lstrip()[1:].strip(), *(line.rstrip() for line in prompt_lines[1:])]).strip()
+    return text if "@filename" in text else ""
+
+
+def has_file_search_overlay(lines: list[str]) -> bool:
+    return bool(file_search_overlay_input_text(lines))
+
+
+def normalize_prompt_text(text: str) -> str:
+    return " ".join(text.split())
+
+
 def has_running_indicator(lines: list[str]) -> bool:
     return has_compacting_indicator(lines) or any(BUSY_RE.search(line) is not None or BACKGROUND_RUNNING_RE.search(line) is not None for line in lines[-20:])
 
@@ -310,6 +356,8 @@ def is_stock_placeholder_input_text(input_text: str) -> bool:
 
 
 def can_submit_stuck_input(lines: list[str]) -> bool:
+    if has_file_search_overlay(lines):
+        return True
     if has_terminal_enter_prompt_after_codex_footer(lines):
         return True
     if has_plan_prompt(lines):
@@ -322,6 +370,8 @@ def can_submit_stuck_input(lines: list[str]) -> bool:
 
 
 def stuck_input_blocker(lines: list[str], input_text: str) -> str:
+    if has_file_search_overlay(lines):
+        return ""
     if has_terminal_enter_prompt_after_codex_footer(lines):
         return ""
     if has_plan_prompt(lines):
@@ -357,6 +407,27 @@ def submit_stuck_input_if_present(target: str, report: Report, n_lines: int = CO
     pane_id = exact_pane_id(target)
     if not pane_id:
         return "failed"
+    if has_file_search_overlay(latest.lines):
+        if latest.input_text != report.input_text:
+            return "not_safe:file_search_overlay_changed"
+        try:
+            recovered = subprocess.run(["tmux", "send-keys", "-t", pane_id, "Enter"], capture_output=True, text=True, timeout=5, check=False)
+        except (OSError, subprocess.SubprocessError):
+            return "failed"
+        if recovered.returncode != 0:
+            return "failed"
+        try:
+            after = wait_for_file_search_overlay_transition(target, n_lines, compaction_wait_timeout_s)
+        except TimeoutError:
+            return "not_safe:file_search_overlay"
+        if after.status in {"running", "waiting_subagent"} and (not after.input_text or is_stock_placeholder_input_text(after.input_text)):
+            return "sent_enter"
+        if has_plan_prompt(after.lines):
+            return "not_safe:plan_prompt"
+        if after.status != "stuck_input" or not after.can_submit_input:
+            return f"not_safe:{after.input_blocker or 'underlying_prompt_not_visible'}"
+        if after.input_text != report.input_text:
+            return "not_safe:underlying_prompt_changed"
     try:
         result = subprocess.run(["tmux", "send-keys", "-t", pane_id, "Enter"], capture_output=True, text=True, timeout=5, check=False)
     except (OSError, subprocess.SubprocessError):
@@ -383,6 +454,8 @@ def interrupt_waiting_subagent_if_present(target: str, report: Report, n_lines: 
 def status(lines: list[str], block: Block, *, detect_waiting_subagent: bool = False) -> str:
     if not lines:
         return "not_codex"
+    if has_file_search_overlay(lines):
+        return "stuck_input"
     if detect_waiting_subagent and has_waiting_subagent_prompt(lines):
         return "waiting_subagent"
     if not has_codex_model_footer(lines):
@@ -425,7 +498,7 @@ def status(lines: list[str], block: Block, *, detect_waiting_subagent: bool = Fa
 
 def report_from_lines(lines: list[str], *, detect_waiting_subagent: bool = False) -> Report:
     block = current_block(lines)
-    input_text = current_input_text(lines)
+    input_text = file_search_overlay_input_text(lines) or current_input_text(lines)
     can_submit_input = can_submit_stuck_input(lines)
     report_status = status(lines, block, detect_waiting_subagent=detect_waiting_subagent)
     input_blocker = stuck_input_blocker(lines, input_text) if report_status == "stuck_input" and not can_submit_input else ""
@@ -446,6 +519,22 @@ def wait_while_compacting(target: str, n_lines: int = COMPACTION_WAIT_LINES, tim
             return latest
         if time.monotonic() >= deadline_s:
             raise TimeoutError(f"target still compacting after {timeout_s:g}s")
+        time.sleep(min(interval_s, max(0.05, deadline_s - time.monotonic())))
+
+
+def wait_for_file_search_overlay_transition(
+    target: str,
+    n_lines: int = COMPACTION_WAIT_LINES,
+    timeout_s: float = DEFAULT_COMPACTION_WAIT_TIMEOUT_S,
+    interval_s: float = FILE_SEARCH_RECOVERY_INTERVAL_S,
+) -> Report:
+    deadline_s = time.monotonic() + timeout_s
+    while True:
+        lines = tail(target, n_lines)
+        if not file_search_overlay_input_text(lines):
+            return report_from_lines(lines)
+        if time.monotonic() >= deadline_s:
+            raise TimeoutError(f"file search overlay did not transition after {timeout_s:g}s")
         time.sleep(min(interval_s, max(0.05, deadline_s - time.monotonic())))
 
 
