@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import os
 import re
 import shlex
@@ -13,6 +14,7 @@ from concurrent.futures import Future
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime
 from email.message import EmailMessage
+from email.parser import BytesParser
 from email.utils import format_datetime
 from io import StringIO
 from pathlib import Path
@@ -24,6 +26,16 @@ from omo_manager import omo_pending_watch as pending_watcher
 from omo_manager.email_idle_watcher import append_pending, current_manager_file, dated_manager_file, existing_consumed_source_line, existing_source_pending_line, normalize_human_subject
 from omo_manager.omo_email_subject import RecentHeader, fetch_recent_header, manager_subject_w_target, normalized_subject_key, prepare_subject, prepare_subject_and_headers, reply_headers_for_subject, strip_leading_tmux_tags
 from omo_manager.omo_pending_watch import Args, find_markers
+
+
+def email_me_module() -> object:
+    spec = importlib.util.spec_from_file_location("email_me", Path(__file__).resolve().parents[2] / "bin" / "email_me.py")
+    if spec is None or spec.loader is None:
+        raise RuntimeError("cannot load email_me.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 ORIGINAL_PENDING_WATCH_RUN = pending_watcher.subprocess.run
 
@@ -3099,6 +3111,41 @@ class PendingMarkerTests(unittest.TestCase):
                     self.assertFalse((state / "email-processed-uids.tsv").exists())
                     self.assertIn(f"{uid}\t", (state / "email-ignored-uids.tsv").read_text(encoding="utf-8"))
 
+    def test_email_watcher_ignores_manager_header_without_footer(self) -> None:
+        from omo_manager import email_idle_watcher as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            root.mkdir()
+            state = Path(tmp) / "state"
+            msg = EmailMessage()
+            msg["From"] = "me@example.com"
+            msg["Subject"] = "Re: [a] manager status"
+            msg[watcher.MANAGER_EMAIL_HEADER] = "1"
+            msg.set_content("Status without a footer.")
+
+            class Client:
+                stores: list[tuple[object, ...]] = []
+
+                def uid(self, command: str, *args: object) -> tuple[str, list[object]]:
+                    if command == "search":
+                        if "SINCE" in args:
+                            return "OK", [b""]
+                        return "OK", [b"54"]
+                    if command == "fetch":
+                        return "OK", [(b"RFC822", msg.as_bytes())]
+                    if command == "store":
+                        self.stores.append(args)
+                        return "OK", [b""]
+                    raise AssertionError(command)
+
+            client = Client()
+            args = watcher.Args(root, "", root / "manager_mail", state, root / "work_manager_today.md", True, "me@example.com", 0, Path("/bin/false"), manager_target="wl:1.0")
+            watcher.handle_unseen(client, args)
+            self.assertFalse((root / "work_manager_today.md").exists())
+            self.assertFalse((root / "manager_mail" / "54.txt").exists())
+            self.assertIn("54\t", (state / "email-ignored-uids.tsv").read_text(encoding="utf-8"))
+
     def test_email_watcher_classifies_plain_manager_subject_with_footer(self) -> None:
         from email.message import EmailMessage
         from omo_manager import email_idle_watcher as watcher
@@ -3109,6 +3156,105 @@ class PendingMarkerTests(unittest.TestCase):
         msg.set_content("Status.\n\ntmux: wl:16\n")
 
         self.assertTrue(watcher.manager_authored_message(msg, "me@example.com"))
+
+    def test_email_me_manager_human_echo_is_ignored_without_mail_or_pending(self) -> None:
+        from omo_manager import email_idle_watcher as watcher
+
+        email_me = email_me_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            root.mkdir()
+            state = Path(tmp) / "state"
+            env_file = Path(tmp) / "email.env"
+            message_file = Path(tmp) / "message.md"
+            env_file.write_text("EMAIL_ME_GMAIL_ADDRESS=me@example.com\nEMAIL_ME_GMAIL_APP_PASSWORD=password\n", encoding="utf-8")
+            message_file.write_text("Manager acknowledgement.", encoding="utf-8")
+
+            class Smtp:
+                message: EmailMessage | None = None
+
+                def __enter__(self) -> Smtp:
+                    return self
+
+                def __exit__(self, *_args: object) -> None:
+                    return None
+
+                def login(self, _email: str, _password: str) -> None:
+                    return None
+
+                def send_message(self, msg: EmailMessage) -> None:
+                    self.message = msg
+
+            smtp = Smtp()
+            email_me.ENV_FILE_PATH = env_file
+            with (
+                patch.dict(email_me.os.environ, {"EMAIL_ME_FAKE_SEND_LOG": ""}),
+                patch.object(email_me, "prepare_subject_and_headers", return_value=("Re: [a] [wl:1] duplicate-mail prevention", {})),
+                patch.object(email_me, "should_send_manager_email_key", return_value=True),
+                patch.object(email_me, "log_manager_email"),
+                patch.object(email_me.smtplib, "SMTP_SSL", return_value=smtp),
+                redirect_stdout(StringIO()),
+            ):
+                self.assertEqual(
+                    0,
+                    email_me.main(
+                        [
+                            "--manager-human",
+                            "--no-pwd-footer",
+                            "--tmux-target",
+                            "wl:1",
+                            "--subject",
+                            "Re: duplicate-mail prevention",
+                            "--message-file",
+                            str(message_file),
+                        ]
+                    ),
+                )
+            self.assertIsNotNone(smtp.message)
+            message_bytes = smtp.message.as_bytes()
+            captured_message = BytesParser().parsebytes(message_bytes)
+            self.assertEqual("1", captured_message[email_me.MANAGER_EMAIL_HEADER])
+            self.assertFalse(watcher.has_agent_footer(watcher.message_text(captured_message)))
+
+            class Client:
+                def uid(self, command: str, *args: object) -> tuple[str, list[object]]:
+                    if command == "search":
+                        if "SINCE" in args:
+                            return "OK", [b""]
+                        return "OK", [b"57"]
+                    if command == "fetch":
+                        return "OK", [(b"RFC822", message_bytes)]
+                    raise AssertionError(command)
+
+            manager_file = root / "work_manager_today.md"
+            args = watcher.Args(
+                root,
+                "",
+                root / "manager_mail",
+                state,
+                manager_file,
+                True,
+                "me@example.com",
+                0,
+                Path("/bin/false"),
+                manager_target="wl:1.0",
+                recent_cleanup_threshold=999,
+            )
+            watcher.handle_unseen(Client(), args)
+            self.assertFalse((root / "manager_mail" / "57.txt").exists())
+            self.assertFalse(manager_file.exists())
+            self.assertIn("57\t", (state / "email-ignored-uids.tsv").read_text(encoding="utf-8"))
+
+    def test_email_watcher_keeps_human_reply_without_footer(self) -> None:
+        from omo_manager import email_idle_watcher as watcher
+
+        msg = EmailMessage()
+        msg["From"] = "Human <me@example.com>"
+        msg["Subject"] = "Re: [a] manager status"
+        msg[watcher.MANAGER_EMAIL_HEADER] = "1"
+        msg.set_content("Please continue.")
+
+        self.assertFalse(watcher.manager_authored_message(msg, "me@example.com"))
 
     def test_email_watcher_does_not_mark_manager_authored_existing_source_read(self) -> None:
         from email.message import EmailMessage

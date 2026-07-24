@@ -67,6 +67,7 @@ CONFIG_PATH = Path(os.environ.get("OMO_EMAIL_CONFIG_PATH", Path.home() / ".confi
 MANAGER_REPLY_PREFIX = "Re: [a]"
 MANAGER_SUBJECT_TOKEN = "[a]"
 MANAGER_SUBJECT_TOKENS = (MANAGER_SUBJECT_TOKEN, "[omo_manager]")
+MANAGER_EMAIL_HEADER = "X-OMO-Manager-Email"
 MANAGER_REPLY_SEARCH_PREFIXES = (MANAGER_REPLY_PREFIX, "Re:[a]", "Re: [omo_manager]", "Re:[omo_manager]")
 NORMAL_REPLY_SEARCH_PREFIXES = MANAGER_REPLY_SEARCH_PREFIXES
 MANAGER_REPLY_SUBJECT_RE = re.compile(r"^re:\s*(?:\[a\]|\[omo_manager\])\s*", re.IGNORECASE)
@@ -1541,7 +1542,13 @@ def sender_display_name(sender: str) -> str:
 def manager_authored_message(msg: Message, self_email: str) -> bool:
     sender = str(msg.get("From", ""))
     subject = str(msg.get("Subject", ""))
-    return has_manager_subject_token(subject) and from_self(sender, self_email) and sender_display_name(sender) != "human" and has_agent_footer(message_text(msg))
+    if not has_manager_subject_token(subject) or not from_self(sender, self_email):
+        return False
+    if sender_display_name(sender) == "human":
+        return False
+    if str(msg.get(MANAGER_EMAIL_HEADER, "")).strip() == "1":
+        return True
+    return has_agent_footer(message_text(msg))
 
 
 def stored_mail_has_agent_footer(path: Path) -> bool:

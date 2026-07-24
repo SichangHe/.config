@@ -42,6 +42,7 @@ except ImportError:
     strip_leading_tmux_tags = None
 
 MANAGER_PREFIX = "[a]"
+MANAGER_EMAIL_HEADER = "X-OMO-Manager-Email"
 PWD_FOOTER_RE = re.compile(r"(?:^|\n)(?:>\s*)?PWD: [^\n]+\n?\Z")
 TMUX_WINDOW_RE = re.compile(r"[^:\n]+:\d+(?:\.\d+)?\Z")
 TMUX_SUBJECT_TAG_RE = re.compile(r"^\s*(?:\[[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?\]|[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)(?:\s+|$)")
@@ -450,12 +451,14 @@ def markdown_to_html(text: str) -> str:
     return f'<!doctype html><html><body style="font-family: -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif; line-height: 1.45;">{body}</body></html>\n'
 
 
-def build_message(sender_email: str, title: str, content: str, add_pwd_footer: bool = True, prepared_subject: str | None = None, reply_headers: dict[str, str] | None = None, tmux_target: str | None = None) -> EmailMessage:
+def build_message(sender_email: str, title: str, content: str, add_pwd_footer: bool = True, prepared_subject: str | None = None, reply_headers: dict[str, str] | None = None, tmux_target: str | None = None, manager_human: bool = False) -> EmailMessage:
     source_target = footer_tmux_target(tmux_target)
     msg = EmailMessage()
     msg.add_header("Subject", prepared_subject or normalize_subject(title, source_target or ""))
     msg.add_header("From", sender_email)
     msg.add_header("To", sender_email)
+    if manager_human:
+        msg.add_header(MANAGER_EMAIL_HEADER, "1")
     if reply_headers is not None:
         for name, value in reply_headers.items():
             msg.add_header(name, value)
@@ -649,6 +652,7 @@ def main(argv: list[str]) -> int:
             prepared_subject=subject,
             reply_headers=reply_headers,
             tmux_target=subject_tmux_target,
+            manager_human=args.manager_human,
         )
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
