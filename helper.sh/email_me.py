@@ -42,8 +42,8 @@ except ImportError:
     strip_leading_tmux_tags = None
 
 MANAGER_PREFIX = "[a]"
-MANAGER_EMAIL_HEADER = "X-OMO-Manager-Email"
 PWD_FOOTER_RE = re.compile(r"(?:^|\n)(?:>\s*)?PWD: [^\n]+\n?\Z")
+UNQUOTED_PWD_FOOTER_RE = re.compile(r"(?:^|\n)PWD: [^\n]+\n?\Z")
 TMUX_WINDOW_RE = re.compile(r"[^:\n]+:\d+(?:\.\d+)?\Z")
 TMUX_SUBJECT_TAG_RE = re.compile(r"^\s*(?:\[[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?\]|[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)(?:\s+|$)")
 BRACKETED_TMUX_TAG_RE = re.compile(r"\[[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?\]")
@@ -273,8 +273,9 @@ def validate_manager_human_subject(subject: str) -> None:
         raise ValueError("manager-human subject must contain exactly one bracketed tmux tag.")
 
 
-def append_pwd_footer(content: str, cwd: str | Path | None = None, tmux_target: str | None = None) -> str:
-    if PWD_FOOTER_RE.search(content) or TMUX_FOOTER_RE.search(content):
+def append_pwd_footer(content: str, cwd: str | Path | None = None, tmux_target: str | None = None, require_unquoted_footer: bool = False) -> str:
+    pwd_footer = UNQUOTED_PWD_FOOTER_RE if require_unquoted_footer else PWD_FOOTER_RE
+    if pwd_footer.search(content) or TMUX_FOOTER_RE.search(content):
         return content
     tmux_window = footer_tmux_target(tmux_target)
     if tmux_window is not None:
@@ -452,20 +453,18 @@ def markdown_to_html(text: str) -> str:
 
 
 def build_message(sender_email: str, title: str, content: str, add_pwd_footer: bool = True, prepared_subject: str | None = None, reply_headers: dict[str, str] | None = None, tmux_target: str | None = None, manager_human: bool = False) -> EmailMessage:
-    source_target = footer_tmux_target(tmux_target)
+    source_target = footer_tmux_target(tmux_target, manager_human)
     msg = EmailMessage()
     msg.add_header("Subject", prepared_subject or normalize_subject(title, source_target or ""))
     msg.add_header("From", sender_email)
     msg.add_header("To", sender_email)
-    if manager_human:
-        msg.add_header(MANAGER_EMAIL_HEADER, "1")
     if reply_headers is not None:
         for name, value in reply_headers.items():
             msg.add_header(name, value)
     elif reply_headers_for_subject is not None:
         for name, value in reply_headers_for_subject(title).items():
             msg.add_header(name, value)
-    body = append_pwd_footer(content, tmux_target=source_target) if add_pwd_footer else content
+    body = append_pwd_footer(content, tmux_target=source_target, require_unquoted_footer=manager_human) if add_pwd_footer or manager_human else content
     msg.set_content(markdown_links_to_plain(body))
     msg.add_alternative(markdown_to_html(body), subtype="html")
     return msg

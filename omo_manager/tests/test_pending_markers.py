@@ -3111,41 +3111,6 @@ class PendingMarkerTests(unittest.TestCase):
                     self.assertFalse((state / "email-processed-uids.tsv").exists())
                     self.assertIn(f"{uid}\t", (state / "email-ignored-uids.tsv").read_text(encoding="utf-8"))
 
-    def test_email_watcher_ignores_manager_header_without_footer(self) -> None:
-        from omo_manager import email_idle_watcher as watcher
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "logs"
-            root.mkdir()
-            state = Path(tmp) / "state"
-            msg = EmailMessage()
-            msg["From"] = "me@example.com"
-            msg["Subject"] = "Re: [a] manager status"
-            msg[watcher.MANAGER_EMAIL_HEADER] = "1"
-            msg.set_content("Status without a footer.")
-
-            class Client:
-                stores: list[tuple[object, ...]] = []
-
-                def uid(self, command: str, *args: object) -> tuple[str, list[object]]:
-                    if command == "search":
-                        if "SINCE" in args:
-                            return "OK", [b""]
-                        return "OK", [b"54"]
-                    if command == "fetch":
-                        return "OK", [(b"RFC822", msg.as_bytes())]
-                    if command == "store":
-                        self.stores.append(args)
-                        return "OK", [b""]
-                    raise AssertionError(command)
-
-            client = Client()
-            args = watcher.Args(root, "", root / "manager_mail", state, root / "work_manager_today.md", True, "me@example.com", 0, Path("/bin/false"), manager_target="wl:1.0")
-            watcher.handle_unseen(client, args)
-            self.assertFalse((root / "work_manager_today.md").exists())
-            self.assertFalse((root / "manager_mail" / "54.txt").exists())
-            self.assertIn("54\t", (state / "email-ignored-uids.tsv").read_text(encoding="utf-8"))
-
     def test_email_watcher_classifies_plain_manager_subject_with_footer(self) -> None:
         from email.message import EmailMessage
         from omo_manager import email_idle_watcher as watcher
@@ -3168,7 +3133,7 @@ class PendingMarkerTests(unittest.TestCase):
             env_file = Path(tmp) / "email.env"
             message_file = Path(tmp) / "message.md"
             env_file.write_text("EMAIL_ME_GMAIL_ADDRESS=me@example.com\nEMAIL_ME_GMAIL_APP_PASSWORD=password\n", encoding="utf-8")
-            message_file.write_text("Manager acknowledgement.", encoding="utf-8")
+            message_file.write_text("Manager acknowledgement.\n\n> PWD: quoted", encoding="utf-8")
 
             class Smtp:
                 message: EmailMessage | None = None
@@ -3213,17 +3178,28 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertIsNotNone(smtp.message)
             message_bytes = smtp.message.as_bytes()
             captured_message = BytesParser().parsebytes(message_bytes)
-            self.assertEqual("1", captured_message[email_me.MANAGER_EMAIL_HEADER])
-            self.assertFalse(watcher.has_agent_footer(watcher.message_text(captured_message)))
+            self.assertNotIn("X-OMO-Manager-Email", captured_message)
+            self.assertTrue(watcher.has_agent_footer(watcher.message_text(captured_message)))
+            self.assertTrue(watcher.message_text(captured_message).endswith("tmux: wl:1\n"))
+            human_message = EmailMessage()
+            human_message["From"] = "Human <me@example.com>"
+            human_message["Subject"] = "Re: [a] [wl:1] duplicate-mail prevention"
+            human_message.set_content("Please continue.")
 
             class Client:
+                stores: list[tuple[object, ...]] = []
+
                 def uid(self, command: str, *args: object) -> tuple[str, list[object]]:
                     if command == "search":
                         if "SINCE" in args:
                             return "OK", [b""]
-                        return "OK", [b"57"]
+                        return "OK", [b"57 58"]
                     if command == "fetch":
-                        return "OK", [(b"RFC822", message_bytes)]
+                        message = message_bytes if args[0] == "57" else human_message.as_bytes()
+                        return "OK", [(b"RFC822", message)]
+                    if command == "store":
+                        self.stores.append(args)
+                        return "OK", [b""]
                     raise AssertionError(command)
 
             manager_file = root / "work_manager_today.md"
@@ -3242,7 +3218,8 @@ class PendingMarkerTests(unittest.TestCase):
             )
             watcher.handle_unseen(Client(), args)
             self.assertFalse((root / "manager_mail" / "57.txt").exists())
-            self.assertFalse(manager_file.exists())
+            self.assertTrue((root / "manager_mail" / "58.txt").exists())
+            self.assertIn("(pending)", manager_file.read_text(encoding="utf-8"))
             self.assertIn("57\t", (state / "email-ignored-uids.tsv").read_text(encoding="utf-8"))
 
     def test_email_watcher_keeps_human_reply_without_footer(self) -> None:
@@ -3251,7 +3228,6 @@ class PendingMarkerTests(unittest.TestCase):
         msg = EmailMessage()
         msg["From"] = "Human <me@example.com>"
         msg["Subject"] = "Re: [a] manager status"
-        msg[watcher.MANAGER_EMAIL_HEADER] = "1"
         msg.set_content("Please continue.")
 
         self.assertFalse(watcher.manager_authored_message(msg, "me@example.com"))
