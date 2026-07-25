@@ -89,6 +89,30 @@ class AgentStatusTests(unittest.TestCase):
             self.assertIn("agent-problems: human_request=1", text)
             self.assertIn("human_request: task=done.md evidence=pending_item=preserve human request", text)
 
+    def test_frontmatter_accepts_long_running_without_blocked_on(self) -> None:
+        metadata = parse_task_metadata(task_frontmatter("long_running"))
+
+        self.assertIsNotNone(metadata)
+        assert metadata is not None
+        self.assertEqual("long_running", metadata.status)
+        self.assertEqual("", metadata.blocked_on)
+
+    def test_long_running_ready_is_quiet_but_error_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            registry.write_text('{"sessions":[]}', encoding="utf-8")
+            (root / "TODO.md").write_text("current:\ncontact.md cfg:5\n", encoding="utf-8")
+            (root / "contact.md").write_text(task_frontmatter("long_running", runat="cfg:5"), encoding="utf-8")
+            ready = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(ready):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertEqual("", ready.getvalue())
+            failed = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("error", ["failed"])), redirect_stdout(failed):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertIn("error: task=contact.md", failed.getvalue())
+
     def test_load_task_state_prefers_reopened_active_over_stale_done(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -133,7 +133,7 @@ def add_pending_items(text: str, items: tuple[str, ...]) -> str:
     if metadata is None:
         raise TaskFrontmatterError("target task file has no frontmatter.")
     if metadata.status == "done":
-        raise TaskFrontmatterError("target task file is already done; record pending items on a running or blocked task.")
+        raise TaskFrontmatterError("target task file is already done; record pending items on an active task.")
     lines = text.splitlines()
     if not lines or lines[0].strip() != "---":
         raise TaskFrontmatterError("target task file has no frontmatter.")

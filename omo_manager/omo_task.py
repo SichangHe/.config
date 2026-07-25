@@ -587,11 +587,12 @@ def managerat_for_task(args: Args, runat: str) -> str:
 
 def task_frontmatter(args: Args, runat: str, managerat: str) -> str:
     is_manager = "true" if args.is_manager else "false"
+    status = "long_running" if args.is_manager else "running"
     return "\n".join(
         [
             "---",
             f"version: {TASK_FRONTMATTER_VERSION}",
-            "status: running",
+            f"status: {status}",
             f"runat: {runat}",
             f"tool: {effective_tool(args)}",
             f"managerat: {managerat}",
@@ -629,8 +630,10 @@ def replace_frontmatter_fields(text: str, updates: dict[str, str], remove: set[s
 
 
 def launched_frontmatter_text(existing: str, args: Args, tmux_target: str) -> str:
+    metadata = parse_task_metadata(existing)
+    is_manager = args.is_manager or (metadata is not None and metadata.is_manager)
     updates = {
-        "status": "running",
+        "status": "long_running" if is_manager else "running",
         "runat": tmux_target,
         "tool": effective_tool(args),
     }
@@ -1121,7 +1124,7 @@ def main(argv: list[str]) -> int:
         if tmux_target:
             print(tmux_target)
         if not existed:
-            print("reminder: fill pending_task_items in task frontmatter. Use omo_task_edit.py pending-add or omo_record_pending.py --task-file; do not hand-edit.")
+            print("reminder: the launched agent owns its open-work queue through omo_pending.py; do not pass task paths to it.")
     except Exception as exc:
         print(f"omo_task: {exc}", file=sys.stderr)
         return 1

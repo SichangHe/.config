@@ -1,10 +1,18 @@
 # task file edit helpers
 
-Goal: managers use helpers for routine task-file state changes instead of
-manually editing task files or telling workers about task files.
+Goal: managers own task lifecycle and cross-task bookkeeping, while every agent
+maintains its own pending queue through a path-opaque helper.
 
-Non-goal: workers do not use these helpers. Workers report with `omo_report.sh`
-from their tmux pane.
+Workers use only `omo_pending.py list|add|replace|remove`; they never receive a
+task path or backing-file details. Workers report with `omo_report.sh`.
+
+## agent pending queue
+
+`omo_pending.py` infers the exact current tmux pane, resolves one active queue,
+locks its target, rechecks ownership, and fails closed on missing or ambiguous
+ownership. `list` prints item text. `add` and `replace` keep work open. `remove`
+requires one-line completion or cancellation evidence. Output never includes a
+task filename, `runat`, or `managerat`.
 
 ## command shape
 

@@ -23,6 +23,14 @@
 
 ## active state
 
+- current migration: add `long_running` as a first-class active status for managers and human-facing interactive agents
+- `long_running` status behavior: no idle/ready close reminder; preserve error, stuck-input, malformed-state, launch-failure, task-state, and pending-item handling
+- superseded temporary rule: do not key reminder suppression from `blocked_on: long-running`; migrate that intent to `status: long_running`
+- blocked policy decision: do not change mail routing until the human defines the normal recipient/copy behavior, exact marker match boundary, and whether linked-file markers count
+- current pending ownership: workers and managers manage their own `pending_task_items` through task-file-opaque helper commands that infer the current task from tmux
+- current pending reminders: deliver each idle agent's pending-item reminder to that agent, not its manager; `long_running` agents still receive pending-item reminders
+- current instructions: update manager/worker/helper docs after behavior is stable, then obtain human review, commit, restart relevant watchers, and broadcast manager reread
+
 - communication: keep chat terse; email important human-visible conclusions
 - current incident: agents sent manager reports to themselves
 - current human directive: `omo_report.sh` must route reports by reading the reporting task file's `managerat`, not by appending to the reporting task file
@@ -43,6 +51,14 @@
 - completed: watcher setup restarted pending, stuck, and email watchers after the helper changes
 
 ## plan
+
+- specify `long_running` schema, transition, TODO, report-routing, status-scan, and reminder semantics before editing shared parsers
+- migrate normal email routing to direct delivery and delete DM-marker branches, while retaining exact manager-override and explicit routing-failure escalation
+- expose current-agent pending-item list/add/replace/remove operations without task-file arguments or task-file output; keep evidence checks for removal
+- route idle pending-item reminders to each agent's `runat`, including `long_running`, and remove manager-owned worker-list reminders
+- update launcher-injected worker instructions and manager instructions so agents use the opaque pending helper and managers no longer edit worker pending queues
+- add realistic schema, mail, pending API, reminder, and watcher regressions; run focused suites, static checks, and reviewer loops
+- preserve unrelated dirty hunks, commit owner-safe changes atomically, restart watchers through supported setup helpers, notify managers to reread, and email the human
 
 - inventory helper entry points from PATH, `.config/bin`, `.config/helper.sh`, `.config/omo_manager`, helper-owned docs, and helper-owned test suites
 - map each helper to its caller, output contract, state files, and failure behavior
@@ -91,6 +107,15 @@
 - move to the next helper only after the human agrees or no open reliability question remains
 
 ## checklist
+
+- [x] `long_running` schema and lifecycle
+- [ ] direct-by-default mail routing and exact manager markers
+- [x] task-file-opaque agent pending-item commands
+- [x] agent-targeted idle pending-item reminders
+- [x] manager and worker instruction migration
+- [ ] focused integration tests and reviewer loops
+- [ ] owner-safe commits and watcher restart
+- [ ] manager broadcast and human email
 
 - [ ] helper inventory
 - [ ] PATH and wrapper entry points

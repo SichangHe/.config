@@ -313,6 +313,20 @@ class OmoTaskTests(unittest.TestCase):
                 path.read_text(encoding="utf-8"),
             )
 
+    def test_new_manager_task_starts_long_running(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.md"
+            prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
+            args = Args(root, "manager.md", "cfg", "2", "codex", None, "", prompt, False, False, "", "", (), manager_target="wl:1", is_manager=True)
+
+            metadata = parse_task_metadata(ensure_task_file(args, "cfg:2").read_text(encoding="utf-8"))
+
+            self.assertIsNotNone(metadata)
+            assert metadata is not None
+            self.assertEqual("long_running", metadata.status)
+            self.assertTrue(metadata.is_manager)
+
     def test_vl_worker_launch_requires_manager_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1111,7 +1125,7 @@ class OmoTaskTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "must be different"):
                 ensure_task_file(args, "cfg:2")
 
-    def test_main_success_reminds_to_fill_pending_task_items(self) -> None:
+    def test_main_success_assigns_pending_queue_to_agent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             prompt = root / "prompt.md"
@@ -1139,7 +1153,7 @@ class OmoTaskTests(unittest.TestCase):
                         ]
                     ),
                 )
-            self.assertIn("reminder: fill pending_task_items in task frontmatter.", out.getvalue())
+            self.assertIn("launched agent owns its open-work queue through omo_pending.py", out.getvalue())
 
     def test_main_records_task_before_starting_codex(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

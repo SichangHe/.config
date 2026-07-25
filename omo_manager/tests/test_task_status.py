@@ -201,6 +201,14 @@ class TaskStatusTests(unittest.TestCase):
         self.assertIn("status: running\nrunat:", updated)
         self.assertNotIn("blocked_on:", updated)
 
+    def test_long_running_is_a_normal_status_transition(self) -> None:
+        text = task_frontmatter() + "body\n"
+
+        updated = update_frontmatter_status(text, "long_running", "")
+
+        self.assertIn("status: long_running\nrunat:", updated)
+        self.assertIn("body\n", updated)
+
     def test_pending_marker_blocks_status_change(self) -> None:
         text = task_frontmatter() + "(pending)\nplease route\n"
 

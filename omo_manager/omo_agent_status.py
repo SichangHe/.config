@@ -75,7 +75,7 @@ PENDING_TASK_ITEMS_MARKER = "(above are pending task items)"
 TASK_FRONTMATTER_VERSION = "v1.0.0"
 TASK_FRONTMATTER_REQUIRED_FIELDS = {"version", "status", "runat", "tool", "managerat", "is_manager", "pending_task_items"}
 TASK_FRONTMATTER_ALLOWED_FIELDS = TASK_FRONTMATTER_REQUIRED_FIELDS | {"blocked_on"}
-TASK_FRONTMATTER_STATUSES = {"running", "blocked", "done"}
+TASK_FRONTMATTER_STATUSES = {"running", "long_running", "blocked", "done"}
 RETIRED_RUNAT = "retired"
 TASK_RE = re.compile(r"`?([A-Za-z0-9_./-]+\.md)`?")
 BLOCKED_DEPENDENCY_LIST_RE = re.compile(r"`?[A-Za-z0-9_./-]+\.md`?(?:\s*,\s*`?[A-Za-z0-9_./-]+\.md`?)*")
@@ -90,7 +90,7 @@ TASK_BATCH_PREFIX_RE = re.compile(r"^(?:active\s+batch|batch|tasks?)\s*:$", re.I
 TASK_CONNECTOR_RE = re.compile(r"^\s*(?:[,/&+]|\band\b|\bor\b)*\s*$")
 ARTIFACT_TASK_NAMES = {"ANSWER.md", "PROCESS.md", "TELEMETRY.md"}
 ARTIFACT_TASK_DIRS = {"docs", "manager_mail"}
-STATUS_DETAIL_RE = re.compile(r"^\((pending|running|done|blocked)(?::\s*([^)]*))?\)(?:\s+\(([^)]*)\))?$")
+STATUS_DETAIL_RE = re.compile(r"^\((pending|running|long_running|done|blocked)(?::\s*([^)]*))?\)(?:\s+\(([^)]*)\))?$")
 RUNAT_RE = re.compile(r"^runat:\s+([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\b")
 CLOSE_TARGET_RE = re.compile(r"\btmux target [`']?([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)[`']?")
 PERSISTENT_ROLE_RE = re.compile(r"\bpersistent\b.*\brole\b")
@@ -335,7 +335,7 @@ def blocked_dependency_snapshot(root: Path, task: TaskLine, state: TaskState) ->
                 return False
             seen_paths.add(dependency_path)
             seen_targets.add(dependency_target)
-            if dependency.status == "running":
+            if dependency.status in {"running", "long_running"}:
                 add_node(dependency_path, dependency)
                 continue
             if dependency.status != "blocked" or not dependency.is_manager or not dependencies_are_active(dependency_path, dependency):
@@ -400,7 +400,7 @@ def blocked_resumable_dependency_snapshot(root: Path, task: TaskLine, state: Tas
         if dependency_path is None or dependency_path in seen_paths or dependency_path not in current_paths:
             return ""
         dependency = scan_task_state(dependency_path)
-        if dependency is None or dependency.status != "running" or task_has_pending_marker(dependency_path):
+        if dependency is None or dependency.status not in {"running", "long_running"} or task_has_pending_marker(dependency_path):
             return ""
         dependency_target = canonical_target(dependency.target)
         if not dependency_target or dependency_target in seen_targets:
@@ -575,7 +575,7 @@ def parse_task_metadata(text: str) -> TaskMetadata | None:
     extra_blocked_on = "blocked_on" in values
     status = values["status"]
     if not isinstance(status, str) or status not in TASK_FRONTMATTER_STATUSES:
-        raise TaskFrontmatterError("`status` must be `running`, `blocked`, or `done`.")
+        raise TaskFrontmatterError("`status` must be `running`, `long_running`, `blocked`, or `done`.")
     if status == "blocked" and not extra_blocked_on:
         raise TaskFrontmatterError("`blocked_on` is required when `status` is `blocked`.")
     if status != "blocked" and extra_blocked_on:
@@ -857,7 +857,7 @@ def pending_task_item_rows(root: Path, manager_target: str = "") -> list[StatusR
         if not task_owned_by_manager(root, task, manager_target, state_path):
             continue
         state = scan_task_state(state_path)
-        if state is None or state.status in {"running", "pending", "blocked"}:
+        if state is None or state.status in {"running", "long_running", "pending", "blocked"}:
             continue
         for item in pending_task_items(state_path):
             rows.append(StatusRow(task.task_file, "human_request", f"pending_item={item}", task_status=state.status if state is not None else "missing"))
@@ -1327,6 +1327,10 @@ def is_quiet_blocked_active_row(row: StatusRow) -> bool:
     return row.task_status == "blocked" and row.status in {"ready", "running"}
 
 
+def is_quiet_long_running_ready_row(row: StatusRow) -> bool:
+    return row.task_status == "long_running" and row.status == "ready"
+
+
 def completed_stale_evidence(root: Path, completed_stale: set[str]) -> dict[str, str]:
     evidence: dict[str, str] = {}
     for task_file in completed_stale:
@@ -1376,7 +1380,7 @@ def main(argv: list[str]) -> int:
         records = session_records(args.registry)
         tasks = list(current.values())
         if args.problems_only:
-            tasks = [task for task in tasks if task.status == "running"]
+            tasks = [task for task in tasks if task.status in {"running", "long_running"}]
         auto_unstick = args.problems_only and args.auto_unstick
         auto_unstick_disabled_reason = "no_auto_unstick" if args.problems_only and not args.auto_unstick else "not_problems_only"
         unstick_by_target: dict[str, str] = {}
@@ -1415,7 +1419,7 @@ def main(argv: list[str]) -> int:
             tmux_rows = tmux_unmanaged_problem_rows(task_args, inspected_targets, auto_unstick, unstick_by_target, auto_unstick_disabled_reason)
             rows.extend(tmux_rows)
             inspected_targets.update(row.target for row in tmux_rows if row.target)
-            rows = add_owner_to_status_rows(args.root, rows)
+            rows = add_owner_to_status_rows(args.root, [row for row in rows if not is_quiet_long_running_ready_row(row)])
         else:
             untracked_rows = current_untracked_task_rows(task_args, inspected_targets, auto_unstick, unstick_by_target, auto_unstick_disabled_reason)
             rows.extend(untracked_rows)

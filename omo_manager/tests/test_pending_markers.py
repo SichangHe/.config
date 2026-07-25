@@ -7410,13 +7410,13 @@ class PendingMarkerTests(unittest.TestCase):
 
             self.assertIsNotNone(text)
             assert text is not None
-            self.assertIn("manager task-state reminder: MANAGER.md requires each manager-owned task to have frontmatter", text)
+            self.assertIn("manager task-state reminder: each manager-owned task must have a valid frontmatter status", text)
             self.assertIn("task-state: task=pending_task.md status=pending", text)
             self.assertNotIn("blocked_task.md", text)
             self.assertNotIn("done_task.md", text)
             self.assertIn("Single-tag enforcement is intentionally not checked.", text)
 
-    def test_manager_pending_item_reminders_route_to_manager_runat(self) -> None:
+    def test_pending_item_reminders_route_each_queue_to_its_agent(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -7436,15 +7436,15 @@ class PendingMarkerTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            reminders = watcher.manager_pending_item_reminder_texts(root)
+            reminders = watcher.agent_pending_item_reminder_texts(root)
 
-            self.assertEqual(["wl:2"], sorted(reminders))
-            text = reminders["wl:2"]
-            self.assertIn("manager pending-item reminder: manager task files should not keep `pending_task_items`.", text)
-            self.assertIn("manager-pending-item: task=manager_task.md item=delegate audit work", text)
-            self.assertNotIn("worker-owned item", text)
+            self.assertEqual(["wl:2", "wl:3"], sorted(reminders))
+            self.assertIn("You have 1 open pending item(s).", reminders["wl:2"])
+            self.assertIn("`omo_pending.py list`", reminders["wl:3"])
+            self.assertNotIn("manager_task.md", "\n".join(reminders.values()))
+            self.assertNotIn("worker-owned item", "\n".join(reminders.values()))
 
-    def test_worker_pending_item_reminders_route_large_lists_to_owner_manager(self) -> None:
+    def test_pending_item_reminders_have_no_size_threshold(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -7464,15 +7464,65 @@ class PendingMarkerTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            reminders = watcher.worker_pending_item_reminder_texts(root)
+            reminders = watcher.agent_pending_item_reminder_texts(root)
 
-            self.assertEqual(["wl:1"], sorted(reminders))
-            text = reminders["wl:1"]
-            self.assertIn("worker pending-item reminder: these task files have large `pending_task_items` lists.", text)
-            self.assertIn("worker-pending-items: task=large_worker.md status=running count=11", text)
-            self.assertIn("worker-pending-item: task=large_worker.md item=large 0", text)
-            self.assertIn("worker-pending-item: task=large_worker.md omitted=8", text)
-            self.assertNotIn("small_worker.md", text)
+            self.assertEqual(["wl:3", "wl:4"], sorted(reminders))
+            self.assertIn("3 open pending item(s)", reminders["wl:3"])
+            self.assertIn("11 open pending item(s)", reminders["wl:4"])
+            self.assertNotIn("large 0", reminders["wl:4"])
+
+    def test_long_running_agent_keeps_pending_item_reminders(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "TODO.md").write_text("current:\ncontact.md wl:4\n", encoding="utf-8")
+            (root / "contact.md").write_text(
+                task_frontmatter(status="long_running", runat="wl:4", managerat="wl:1", pending_items=("wait for next review",)),
+                encoding="utf-8",
+            )
+
+            self.assertIn("1 open pending item(s)", watcher.agent_pending_item_reminder_texts(root)["wl:4"])
+
+    def test_pending_item_reminders_reject_tmux_alias_collision(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "TODO.md").write_text("current:\na.md wl:4\n\nprevious:\nb.md wl:4.0\n", encoding="utf-8")
+            (root / "a.md").write_text(
+                task_frontmatter(runat="wl:4", managerat="wl:1", pending_items=("first",)),
+                encoding="utf-8",
+            )
+            (root / "b.md").write_text(
+                task_frontmatter(runat="wl:4.0", managerat="wl:1"),
+                encoding="utf-8",
+            )
+
+            self.assertEqual({}, watcher.agent_pending_item_reminder_texts(root))
+
+    def test_pending_item_reminder_only_wakes_ready_agent(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "TODO.md").write_text("current:\ncontact.md wl:4\n", encoding="utf-8")
+            (root / "contact.md").write_text(
+                task_frontmatter(status="long_running", runat="wl:4", managerat="wl:1", pending_items=("continue review",)),
+                encoding="utf-8",
+            )
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1")
+            with patch.object(watcher, "inspect_codex", return_value=MagicMock(status="running")), patch.object(
+                watcher, "try_send_delivery_text", return_value=watcher.DeliveryResult(0)
+            ) as push:
+                self.assertFalse(watcher.push_agent_pending_item_reminders(args))
+                push.assert_not_called()
+            with patch.object(watcher, "inspect_codex", return_value=MagicMock(status="ready")), patch.object(
+                watcher, "try_send_delivery_text", return_value=watcher.DeliveryResult(watcher.ASYNC_DELIVERY_STARTED)
+            ) as push:
+                self.assertTrue(watcher.push_agent_pending_item_reminders(args))
+                self.assertEqual("wl:4", push.call_args.args[2])
+                self.assertNotIn("failure_fallback_target", push.call_args.kwargs)
 
     def test_maybe_push_idle_status_sends_manager_pending_items_to_runat(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -7491,10 +7541,11 @@ class PendingMarkerTests(unittest.TestCase):
                 self.assertTrue(watcher.maybe_push_idle_status(args, 100.0, 131.0))
 
             text = out.getvalue()
-            self.assertIn("manager-pending-item: task=manager_task.md item=delegate audit work", text)
+            self.assertIn("You have 1 open pending item(s).", text)
+            self.assertIn("omo_pending.py", text)
             self.assertNotIn("manager task-state reminder", text)
 
-    def test_maybe_push_idle_status_sends_worker_pending_item_size_reminders(self) -> None:
+    def test_maybe_push_idle_status_sends_pending_reminder_to_agent(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -7511,10 +7562,11 @@ class PendingMarkerTests(unittest.TestCase):
                 self.assertTrue(watcher.maybe_push_idle_status(args, 100.0, 131.0))
 
             text = out.getvalue()
-            self.assertIn("worker pending-item reminder: these task files have large `pending_task_items` lists.", text)
-            self.assertIn("worker-pending-items: task=large_worker.md status=running count=10", text)
+            self.assertIn("You have 10 open pending item(s).", text)
+            self.assertIn("omo_pending.py", text)
+            self.assertNotIn("large_worker.md", text)
 
-    def test_push_manager_pending_item_reminders_keeps_manager_and_worker_reminders(self) -> None:
+    def test_push_pending_item_reminders_keeps_manager_and_worker_self_reminders(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -7532,13 +7584,13 @@ class PendingMarkerTests(unittest.TestCase):
             args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, True, manager_target="wl:1")
 
             with redirect_stdout(out):
-                self.assertTrue(watcher.push_manager_pending_item_reminders(args))
+                self.assertTrue(watcher.push_agent_pending_item_reminders(args))
 
             text = out.getvalue()
-            self.assertIn("manager pending-item reminder: manager task files should not keep `pending_task_items`.", text)
-            self.assertIn("manager-pending-item: task=manager_task.md item=delegate audit work", text)
-            self.assertIn("worker pending-item reminder: these task files have large `pending_task_items` lists.", text)
-            self.assertIn("worker-pending-items: task=large_worker.md status=running count=10", text)
+            self.assertEqual(2, text.count("You have"))
+            self.assertIn("You have 1 open pending item(s).", text)
+            self.assertIn("You have 10 open pending item(s).", text)
+            self.assertNotIn("manager_task.md", text)
 
     def test_periodic_status_text_ignores_artifact_paths_in_todo_notes(self) -> None:
         from omo_manager import omo_pending_watch as watcher

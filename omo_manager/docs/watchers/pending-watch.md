@@ -110,7 +110,7 @@
   - detects `untracked_agent` panes when a non-`h*` tmux session contains a running, ready, errored, or stuck Codex pane that no task file owns
   - agent-problem prompts start with a direct helper instruction and do not need human acknowledgement
   - email pending refs remain `origin=human source=email action=ack-human`
-  - idle manager checks directly remind each manager task file's `runat` pane when that manager file still has `pending_task_items`, because managers should move those items into worker task files through `omo_task_edit.py pending-move`
+  - idle checks remind each ready active agent at its own `runat` when its pending queue is nonempty
 
 - agent-problem prompt format
   - starts with ``Handle ALL omo_pending_watch agent problems below; only email human if you cannot handle them:``
@@ -140,8 +140,8 @@
   - manager self-problem rows and matching `unstuck:` rows are logged and filtered by the watcher so they are not pasted back into the manager prompt
   - `human_request` status rows are filtered from agent-problem prompts because live `(pending)` blocks are dispatched through the pending-marker path
   - manager compaction reminders say ``Unless you know the exact content of MANAGER.md, read it. Normally, don't ack human``
-  - manager pending-item reminders say manager task files should not keep `pending_task_items`; they are sent to that manager task file's `runat` pane
-  - worker pending-item size reminders are sent to `managerat` when a live worker task file has 10 or more `pending_task_items`; the manager should verify completed or cancelled items and remove them with `omo_task_edit.py pending-remove --evidence TEXT`
+  - any ready active agent with pending items receives a path-opaque reminder at its own `runat`; this includes `long_running`, managers, and queues below the former size threshold
+  - reminders tell the agent to use `omo_pending.py`; they do not expose task filenames, item text, `managerat`, or backing storage
   - `TODO.md` length reminders tell managers to keep only the newest 20 `previous` tasks in `TODO.md` and move older `previous` tasks to `YYYYMM/old_todos.md`
   - dirty worktree reminders name the dirty repo path, omit raw status/category fields, tell managers to let workers commit their own changes, and tell managers to commit task files themselves without routing task-file cleanup to workers
   - identical problem output is keyed by SHA-256 in process-local time-bounded delivery memory and is repeated at most once per `--agent-problem-repeat-s` seconds, default `1800`

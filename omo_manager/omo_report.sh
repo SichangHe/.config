@@ -219,7 +219,7 @@ task_path = Path(sys.argv[2])
 main_target = sys.argv[3].strip()
 TARGET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?$")
 ACTIVE_SECTIONS = {"current", "human pending", "low priority"}
-ACTIVE_MANAGER_STATUSES = {"running", "blocked"}
+ACTIVE_MANAGER_STATUSES = {"running", "long_running", "blocked"}
 
 def target_parts(target: str) -> tuple[str, str, str]:
     session, sep, rest = target.partition(":")

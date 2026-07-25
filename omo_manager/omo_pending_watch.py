@@ -42,6 +42,8 @@ from omo_manager.omo_agent_status import parse_task_lines
 from omo_manager.omo_agent_status import read_task_metadata
 from omo_manager.omo_agent_status import resolve_task_path
 from omo_manager.omo_agent_status import scan_task_state
+from omo_manager.omo_codex_status import Args as CodexStatusArgs
+from omo_manager.omo_codex_status import inspect as inspect_codex
 from omo_manager.omo_codex_status import tail as codex_tail
 from omo_manager.omo_pending_digest import PENDING_CONTENT_CHAR_LIMIT
 from omo_manager.omo_pending_digest import pending_tail_digest
@@ -95,7 +97,7 @@ FILE_REF_RE = re.compile(r"(?<![\w@.-])((?:/)?(?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-
 LIST_POINTER_PREFIX_RE = re.compile(r"^(?:[-*+]|\d+[.)])\s+")
 CHECKBOX_POINTER_PREFIX_RE = re.compile(r"^\[[ xX]\]\s+")
 MARKDOWN_POINTER_LINK_RE = re.compile(r"^\[[^\]]*\]\(\s*<?([^)\s>]+)>?(?:\s+(?:\"[^\"]*\"|'[^']*'|\([^)]*\)))?\s*\)$")
-STATUS_DETAIL_RE = re.compile(r"^\((pending|running|done|blocked)(?::\s*([^)]*))?\)(?:\s+\(([^)]*)\))?$")
+STATUS_DETAIL_RE = re.compile(r"^\((pending|running|long_running|done|blocked)(?::\s*([^)]*))?\)(?:\s+\(([^)]*)\))?$")
 TMUX_TARGET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?$")
 AGENT_POINTER_WITH_TARGET_RE = re.compile(r"^\(from agent ([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?) (/tmp/omo-agent-messages-[^)]*)\)$")
 AGENT_MESSAGE_DIR_RE = re.compile(r"^/tmp/omo-agent-messages-[^/]+/")
@@ -106,22 +108,17 @@ TODO_LENGTH_REMINDER = (
     "Archive old completed tasks per docs/monthly-archive.md; keep only the newest 20 `previous` tasks in TODO.md and move older `previous` tasks to YYYYMM/old_todos.md."
 )
 MANAGER_TASK_STATE_REMINDER_HEADER = (
-    "manager task-state reminder: MANAGER.md requires each manager-owned task to have frontmatter `status: running`, `status: done`, or `status: blocked` while the manager is idle. "
+    "manager task-state reminder: each manager-owned task must have a valid frontmatter status while the manager is idle. "
     "Start/resume the task, mark it done, or block it with a reason. Single-tag enforcement is intentionally not checked."
 )
-MANAGER_PENDING_ITEMS_REMINDER_HEADER = (
-    "manager pending-item reminder: manager task files should not keep `pending_task_items`. "
-    "Move each item into worker task files, then clear the manager list."
+AGENT_PENDING_ITEMS_REMINDER = (
+    "You have {count} open pending item(s). Run `omo_pending.py list`, continue the work, use `omo_pending.py add|replace` to keep the queue accurate, "
+    "and run `omo_pending.py remove --item TEXT --evidence TEXT` only after verifying an item is complete or cancelled."
 )
-WORKER_PENDING_ITEMS_REMINDER_HEADER = (
-    "worker pending-item reminder: these task files have large `pending_task_items` lists. "
-    "Review each list, verify completed or cancelled items, remove them with `omo_task_edit.py pending-remove --evidence TEXT`, and split still-open work into worker tasks if needed."
-)
-MANAGER_TASK_STATE_OK = {"running", "done", "blocked"}
+MANAGER_TASK_STATE_OK = {"running", "long_running", "done", "blocked"}
 MANAGER_TASK_STATE_REMINDER_LIMIT = 20
 MANAGER_TASK_STATE_LIVE_SECTIONS = {"todo:current", "todo:human pending", "todo:low priority"}
-WORKER_PENDING_ITEMS_WARNING_THRESHOLD = 10
-WORKER_PENDING_ITEMS_SAMPLE_LIMIT = 3
+AGENT_PENDING_ITEM_SECTIONS = MANAGER_TASK_STATE_LIVE_SECTIONS | {"todo:previous"}
 MANAGER_WORKTREE_REMINDER_LIMIT = 20
 MANAGER_WORKTREE_CHECK_TIMEOUT_S = 10
 MANAGER_POLICY_REMINDER_RATE = 0.125
@@ -1987,15 +1984,20 @@ def push_idle_reminders(args: Args) -> bool:
     text = manager_task_state_reminder_text(args.root, args.manager_target)
     if text:
         changed = delivery_accepted(push_manager_text(args, text))
-    return push_manager_pending_item_reminders(args) or changed
+    return push_agent_pending_item_reminders(args) or changed
 
 
-def push_manager_pending_item_reminders(args: Args) -> bool:
+def push_agent_pending_item_reminders(args: Args) -> bool:
     changed = False
-    for target, reminder_text in manager_pending_item_reminder_texts(args.root).items():
-        changed = delivery_accepted(push_manager_text_to_target(args, reminder_text, target)) or changed
-    for target, reminder_text in worker_pending_item_reminder_texts(args.root).items():
-        changed = delivery_accepted(push_manager_text_to_target(args, reminder_text, target)) or changed
+    for target, reminder_text in agent_pending_item_reminder_texts(args.root).items():
+        if not args.dry_run and inspect_codex(CodexStatusArgs(target, 80)).status != "ready":
+            continue
+        if args.dry_run:
+            print(reminder_text)
+            status = 0
+        else:
+            status = try_send_delivery_text("agent pending-item reminder", reminder_text, target).status
+        changed = delivery_accepted(status) or changed
     return changed
 
 
@@ -2029,61 +2031,26 @@ def manager_task_state_reminder_text(root: Path, manager_target: str = "") -> st
     return "\n".join([MANAGER_TASK_STATE_REMINDER_HEADER, *visible_rows])
 
 
-def manager_pending_item_reminder_texts(root: Path) -> dict[str, str]:
+def agent_pending_item_reminder_texts(root: Path) -> dict[str, str]:
+    """Build path-opaque self-reminders for active agents with open work."""
+
     todo = root / "TODO.md"
-    rows_by_target: dict[str, list[str]] = {}
+    queues: list[tuple[str, int]] = []
     seen: set[str] = set()
     for task in parse_task_lines(todo):
-        if task.task_file == "TODO.md" or task.task_file in seen or task.section not in MANAGER_TASK_STATE_LIVE_SECTIONS:
+        if task.task_file == "TODO.md" or task.task_file in seen or task.section not in AGENT_PENDING_ITEM_SECTIONS:
             continue
         seen.add(task.task_file)
         state_path = resolve_task_path(root, task.task_file)
         metadata = read_task_metadata(state_path)
-        if metadata is None or not metadata.is_manager or not metadata.pending_task_items or metadata.runat == "retired":
+        if metadata is None or metadata.status not in {"running", "long_running", "blocked"} or metadata.runat == "retired":
             continue
-        rows = rows_by_target.setdefault(metadata.runat, [])
-        for item in metadata.pending_task_items:
-            rows.append(f"manager-pending-item: task={task.task_file} item={truncate_content(item, PENDING_CONTENT_CHAR_LIMIT)}")
+        queues.append((metadata.runat, len(metadata.pending_task_items)))
     reminders: dict[str, str] = {}
-    for target, rows in rows_by_target.items():
-        visible_rows = rows[:MANAGER_TASK_STATE_REMINDER_LIMIT]
-        if len(rows) > MANAGER_TASK_STATE_REMINDER_LIMIT:
-            visible_rows.append(f"manager-pending-item: omitted={len(rows) - MANAGER_TASK_STATE_REMINDER_LIMIT}")
-        reminders[target] = "\n".join([MANAGER_PENDING_ITEMS_REMINDER_HEADER, *visible_rows])
-    return reminders
-
-
-def worker_pending_item_reminder_texts(root: Path) -> dict[str, str]:
-    todo = root / "TODO.md"
-    rows_by_target: dict[str, list[list[str]]] = {}
-    seen: set[str] = set()
-    for task in parse_task_lines(todo):
-        if task.task_file == "TODO.md" or task.task_file in seen or task.section not in MANAGER_TASK_STATE_LIVE_SECTIONS:
-            continue
-        seen.add(task.task_file)
-        state_path = resolve_task_path(root, task.task_file)
-        metadata = read_task_metadata(state_path)
-        if metadata is None or metadata.is_manager or metadata.runat == "retired":
-            continue
-        n_items = len(metadata.pending_task_items)
-        if n_items < WORKER_PENDING_ITEMS_WARNING_THRESHOLD:
-            continue
-        owner = effective_owner_target(root, task, state_path)
-        if not owner:
-            continue
-        rows = [f"worker-pending-items: task={task.task_file} status={metadata.status} count={n_items}"]
-        for item in metadata.pending_task_items[:WORKER_PENDING_ITEMS_SAMPLE_LIMIT]:
-            rows.append(f"worker-pending-item: task={task.task_file} item={truncate_content(item, PENDING_CONTENT_CHAR_LIMIT)}")
-        n_omitted = n_items - WORKER_PENDING_ITEMS_SAMPLE_LIMIT
-        if n_omitted > 0:
-            rows.append(f"worker-pending-item: task={task.task_file} omitted={n_omitted}")
-        rows_by_target.setdefault(owner, []).append(rows)
-    reminders: dict[str, str] = {}
-    for target, task_rows in rows_by_target.items():
-        visible_rows = [line for rows in task_rows[:MANAGER_TASK_STATE_REMINDER_LIMIT] for line in rows]
-        if len(task_rows) > MANAGER_TASK_STATE_REMINDER_LIMIT:
-            visible_rows.append(f"worker-pending-tasks: omitted={len(task_rows) - MANAGER_TASK_STATE_REMINDER_LIMIT}")
-        reminders[target] = "\n".join([WORKER_PENDING_ITEMS_REMINDER_HEADER, *visible_rows])
+    for index, (target, count) in enumerate(queues):
+        collision = any(other != index and same_tmux_target(target, other_target) for other, (other_target, _) in enumerate(queues))
+        if count and not collision:
+            reminders[target] = AGENT_PENDING_ITEMS_REMINDER.format(count=count)
     return reminders
 
 
@@ -2987,7 +2954,7 @@ def active_manager_problem_targets(root: Path, output: str, manager_target: str 
         seen_files.add(task.task_file)
         state_path = resolve_task_path(root, task.task_file)
         state = scan_task_state(state_path) if state_path is not None else None
-        if state is None or state.status != "running" or not state.is_manager or not state.target:
+        if state is None or state.status not in {"running", "long_running"} or not state.is_manager or not state.target:
             continue
         if any(same_tmux_target(state.target, problem_target) for problem_target in problem_targets):
             continue
@@ -3404,7 +3371,7 @@ def main(argv: list[str]) -> int:
                 text = periodic_status_text(args, result)
                 if text is not None and args.manager_target:
                     _ = send_delivery_text("idle status delivery", text, args.manager_target)
-                _ = push_manager_pending_item_reminders(args)
+                _ = push_agent_pending_item_reminders(args)
                 if worktree_run is None and (worktree_command := worktree_check_command(args.root)) is not None:
                     worktree_run = start_command("worktree check", worktree_command, MANAGER_WORKTREE_CHECK_TIMEOUT_S)
                 idle_status_run = None
