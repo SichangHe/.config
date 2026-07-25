@@ -30,13 +30,11 @@ from urllib.parse import urlparse
 try:
     from .omo_email_subject import subject_base
     from .omo_agent_status import TaskFrontmatterError, parse_task_metadata
-    from .omo_pending_watch import text_marks_dm, text_marks_dm_only
     from .omo_tmux_send import CodexSendOptions, DEFAULT_TMUX_ENTER_COUNT, require_sendable_codex_target, send_to_codex
 except ImportError:
     try:
         from omo_email_subject import subject_base
         from omo_agent_status import TaskFrontmatterError, parse_task_metadata
-        from omo_pending_watch import text_marks_dm, text_marks_dm_only
         from omo_tmux_send import CodexSendOptions, DEFAULT_TMUX_ENTER_COUNT, require_sendable_codex_target, send_to_codex
     except ImportError:
         subject_base = None
@@ -44,13 +42,6 @@ except ImportError:
 
         def parse_task_metadata(_text: str) -> object:
             return None
-
-        def text_marks_dm(_text: str) -> bool:
-            return False
-
-        def text_marks_dm_only(_text: str) -> bool:
-            return False
-
 
 def default_state_dir() -> Path:
     return Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "omo-manager"
@@ -75,7 +66,7 @@ TMUX_TARGET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?$")
 PWD_FOOTER_RE = re.compile(r"(?:^|\n)PWD: [^\n]+\n?\Z")
 TMUX_FOOTER_RE = re.compile(r"(?:^|\n)tmux: [^\r\n]+\r?\n?\Z", re.IGNORECASE)
 RECOVERY_SUBJECTS = {"[omo_manager_recover]", "Re: [omo_manager_recover]"}
-ROUTED_PREFIXES = ("(manager handled:", "(manager routed:")
+ROUTED_PREFIXES = ("(manager handled:",)
 IGNORE_PARTS = {".git", ".venv", "__pycache__", "manager_mail"}
 # Fail closed by default: raw email can contain sender-injected Authentication-Results.
 # This opt-in is an operator/admin-trusted escape hatch for mailbox/provider setups
@@ -126,8 +117,7 @@ class ManagerMailCounts:
 class EmailRoute:
     manager_file: Path
     manager_target: str
-    routed_target: str = ""
-    direct_delivery: bool = False
+    pending_watcher_delivery: bool = False
 
 
 _email_push_queue: queue.Queue[EmailPush] = queue.Queue()
@@ -430,11 +420,11 @@ def current_route_for_owner(args: Args, owner_target: str) -> EmailRoute | None:
     if owner_target in target_aliases(args.manager_target):
         if current_task_file_for_target(args.root, owner_target) is None and ":" in owner_target:
             return None
-        return EmailRoute(current_manager_file(args), args.manager_target, args.manager_target)
+        return EmailRoute(current_manager_file(args), args.manager_target)
     owner_file = current_task_file_for_target(args.root, owner_target)
     if owner_file is None:
         return None
-    return EmailRoute(owner_file, owner_target, owner_target)
+    return EmailRoute(owner_file, owner_target, pending_watcher_delivery=True)
 
 
 def sendable_codex_target(target: str) -> bool:
@@ -502,7 +492,7 @@ def inactive_task_files_for_target(root: Path, tmux_target: str) -> list[Path]:
 
 
 def email_route(args: Args, subject: str, body: str = "") -> EmailRoute:
-    direct_worker_reply = text_marks_dm(body) or text_marks_dm_only(body)
+    del body
     tmux_target = subject_manager_target(subject)
     if not tmux_target:
         return EmailRoute(current_manager_file(args), args.manager_target)
@@ -526,18 +516,9 @@ def email_route(args: Args, subject: str, body: str = "") -> EmailRoute:
         metadata = parse_task_metadata(manager_text) if manager_text else None
     except TaskFrontmatterError:
         metadata = None
-    if metadata is not None and metadata.is_manager:
-        return EmailRoute(manager_file, fallback_manager_target_for_file(args, manager_file, tmux_target), tmux_target)
-    if metadata is not None and direct_worker_reply:
-        return EmailRoute(manager_file, metadata.runat, direct_delivery=True)
-    owner_target = metadata.managerat if metadata is not None else ""
-    if owner_target and owner_target not in target_aliases(tmux_target):
-        owner_route = current_route_for_owner(args, owner_target)
-        if owner_route is None:
-            logging.warning("managerat target did not map to a task file; using default manager: task=%s managerat=%s", manager_file, owner_target)
-            return EmailRoute(current_manager_file(args), args.manager_target)
-        return owner_route
-    return EmailRoute(manager_file, fallback_manager_target_for_file(args, manager_file, tmux_target), tmux_target)
+    if metadata is not None:
+        return EmailRoute(manager_file, metadata.runat, pending_watcher_delivery=True)
+    return EmailRoute(manager_file, fallback_manager_target_for_file(args, manager_file, tmux_target))
 
 
 def manager_target_for_file(args: Args, manager_file: Path) -> str:
@@ -557,24 +538,9 @@ def manager_target_for_file(args: Args, manager_file: Path) -> str:
     return args.manager_target
 
 
-def routed_target_for_pending_line(path: Path, line_no: int) -> str:
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return ""
-    for line in lines[line_no:]:
-        stripped = line.strip()
-        if stripped == "(pending)":
-            return ""
-        if stripped.startswith("(manager routed: ") and stripped.endswith(")"):
-            target = stripped[len("(manager routed: ") : -1].strip()
-            return target if TMUX_TARGET_RE.fullmatch(target) else ""
-    return ""
-
-
 def args_for_manager_file(args: Args, manager_file: Path, pending_line: int = 0) -> Args:
-    routed_target = routed_target_for_pending_line(manager_file, pending_line) if pending_line > 0 else ""
-    manager_target = fallback_manager_target_for_file(args, manager_file, routed_target or manager_target_for_file(args, manager_file))
+    del pending_line
+    manager_target = fallback_manager_target_for_file(args, manager_file, manager_target_for_file(args, manager_file))
     return replace(args, manager_file=manager_file, manager_target=manager_target)
 
 
@@ -711,13 +677,6 @@ def existing_source_line_in_root(root: Path, txt_path: Path, manager_file: Path 
     return None
 
 
-def retryable_routed_line(stripped: str) -> bool:
-    if not stripped.startswith("(manager routed: ") or not stripped.endswith(")"):
-        return False
-    target = stripped[len("(manager routed: ") : -1].strip()
-    return bool(TMUX_TARGET_RE.fullmatch(target))
-
-
 def source_marker_consumed_by_routed_prose(lines: list[str], source_idx: int) -> bool:
     routed_prose_seen = False
     for prior_idx in range(source_idx - 1, -1, -1):
@@ -725,8 +684,6 @@ def source_marker_consumed_by_routed_prose(lines: list[str], source_idx: int) ->
         if not stripped:
             continue
         if stripped.startswith(ROUTED_PREFIXES):
-            if retryable_routed_line(stripped):
-                continue
             routed_prose_seen = True
             continue
         if stripped == "(pending)":
@@ -734,30 +691,6 @@ def source_marker_consumed_by_routed_prose(lines: list[str], source_idx: int) ->
         if stripped.startswith(("(", "#")):
             return False
     return False
-
-
-def source_marker_consumed_by_direct_dm_only(root: Path, txt_path: Path, task_path: Path, lines: list[str], source_idx: int) -> bool:
-    try:
-        text = txt_path.read_text(encoding="utf-8")
-    except OSError:
-        return False
-    if not text_marks_dm_only(text):
-        return False
-    try:
-        metadata = parse_task_metadata("\n".join(lines) + "\n") if lines else None
-    except TaskFrontmatterError:
-        return False
-    if metadata is None or metadata.is_manager:
-        return False
-    for prior_idx in range(source_idx - 1, -1, -1):
-        stripped = lines[prior_idx].strip()
-        if not stripped:
-            continue
-        if stripped == "(pending)":
-            return False
-        if stripped.startswith(("(", "#")):
-            break
-    return task_path.exists()
 
 
 def consumed_source_reference_line(stripped: str, ref: str) -> bool:
@@ -924,8 +857,6 @@ def existing_consumed_source_line(root: Path, txt_path: Path, manager_file: Path
                 return idx + 1
             if stripped in source_lines and source_marker_consumed_by_routed_prose(lines, idx):
                 return idx + 1
-            if stripped in source_lines and source_marker_consumed_by_direct_dm_only(root, txt_path, path, lines, idx):
-                return idx + 1
     return None
 
 
@@ -940,8 +871,6 @@ def existing_source_pending_line(root: Path, txt_path: Path, manager_file: Path 
         if stripped == "(pending)":
             return pending_idx + 1
         if stripped.startswith(ROUTED_PREFIXES):
-            if retryable_routed_line(stripped):
-                continue
             break
         if stripped.startswith(("(", "#")) and stripped != "(pending)":
             break
@@ -968,9 +897,6 @@ def append_pending(
     root: Path,
     txt_path: Path,
     manager_file: Path | None = None,
-    routed_target: str = "",
-    *,
-    dm_only: bool = False,
 ) -> int:
     manager_file = manager_file or dated_manager_file(root)
     existing_line = existing_source_pending_line(root, txt_path, manager_file)
@@ -983,10 +909,6 @@ def append_pending(
     line_no = len(lines) + 1
     from_line = email_source_lines(root, txt_path)[0]
     block = ["", "(pending)"]
-    if dm_only:
-        block.append("DM only")
-    if routed_target:
-        block.append(f"(manager routed: {routed_target})")
     block.append(from_line)
     manager_file.write_text("\n".join(lines + block) + "\n", encoding="utf-8")
     return line_no + 1
@@ -1001,17 +923,16 @@ def pending_marker_present(root: Path, pending_file: Path, pending_line: int) ->
     return 0 <= idx < len(lines) and lines[idx].strip() == "(pending)"
 
 
-def dm_only_pending_routing_present(root: Path, pending_file: Path, pending_line: int) -> bool:
+def pending_watcher_delivery_present(root: Path, pending_file: Path, pending_line: int) -> bool:
     try:
-        lines = (root / pending_file).read_text(encoding="utf-8").splitlines()
-    except OSError:
+        path = root / pending_file
+        text = path.read_text(encoding="utf-8")
+        lines = text.splitlines()
+        metadata = parse_task_metadata(text)
+    except (OSError, TaskFrontmatterError):
         return False
     idx = pending_line - 1
-    return (
-        0 <= idx < len(lines) - 1
-        and lines[idx].strip() == "(pending)"
-        and lines[idx + 1].strip() == "DM only"
-    )
+    return metadata is not None and 0 <= idx < len(lines) and lines[idx].strip() == "(pending)"
 
 
 def threshold_push_failure_marker(kind: str) -> str:
@@ -1604,7 +1525,7 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
         pending_ref = existing_source_pending_path_line_in_root(args.root, expected_txt_path, manager_file) if uid in unaccepted_pending_uids else None
         if pending_ref is not None:
             pending_file, pending_line = pending_ref
-            if dm_only_pending_routing_present(args.root, pending_file, pending_line) or push_email_ref(
+            if pending_watcher_delivery_present(args.root, pending_file, pending_line) or push_email_ref(
                 args_for_manager_file(args, pending_file, pending_line), pending_line
             ):
                 unaccepted_pending_uids.discard(uid)
@@ -1647,7 +1568,7 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
         existing_pending = existing_source_pending_path_line_in_root(args.root, expected_txt_path, manager_file)
         if existing_pending is not None:
             pending_file, existing_pending_line = existing_pending
-            if dm_only_pending_routing_present(args.root, pending_file, existing_pending_line) or push_email_ref(
+            if pending_watcher_delivery_present(args.root, pending_file, existing_pending_line) or push_email_ref(
                 args_for_manager_file(args, pending_file, existing_pending_line), existing_pending_line
             ):
                 unaccepted_pending_uids.discard(uid)
@@ -1703,10 +1624,8 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
                 args.root,
                 txt_path,
                 route.manager_file,
-                route.routed_target,
-                dm_only=route.direct_delivery and text_marks_dm_only(body_text),
             )
-            if route.direct_delivery or push_email_ref(route_args, pending_line):
+            if route.pending_watcher_delivery or push_email_ref(route_args, pending_line):
                 unaccepted_pending_uids.discard(uid)
                 unaccepted_changed = True
                 processed_uids.add(uid)

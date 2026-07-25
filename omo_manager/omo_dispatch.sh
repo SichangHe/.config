@@ -43,49 +43,13 @@ if [ ! -f "$path_real" ]; then echo "file not found: $file" >&2; exit 2; fi
 before_sig=$(python3 -c 'import os, sys; st = os.stat(sys.argv[1]); print(f"{st.st_dev}:{st.st_ino}:{st.st_mtime_ns}:{st.st_size}")' "$path_real")
 body=$(sed -n "${start},${end}p" "$path_real")
 if [ -z "$body" ]; then echo "empty dispatch block" >&2; exit 2; fi
-body=$(printf '%s\n' "$body" | python3 -c 'from __future__ import annotations
-import re
-import sys
+body=$(printf '%s\n' "$body" | python3 -c 'import sys
 lines = sys.stdin.read().splitlines()
 while lines and lines[0].strip() == "(pending)":
     del lines[0]
-marker_re = re.compile(r"^\s*(DM only|DM)\b\s*[:.!?;,]*\s*$", re.I)
-def active_indices() -> list[int]:
-    return [idx for idx, line in enumerate(lines) if line.strip() and not line.lstrip().startswith(">")]
-def strip_first_marker() -> bool:
-    active = active_indices()
-    if not active:
-        return False
-    idx = active[0]
-    before = lines[idx]
-    if marker_re.match(lines[idx]):
-        del lines[idx]
-        return True
-    else:
-        lines[idx] = re.sub(r"^\s*(DM only|DM)\b(?:\s*[:.!?;,]+\s*|\s+)?", "", lines[idx], count=1, flags=re.I)
-        return lines[idx] != before
-def strip_last_marker() -> bool:
-    active = active_indices()
-    if not active:
-        return False
-    idx = active[-1]
-    before = lines[idx]
-    if marker_re.match(lines[idx]):
-        del lines[idx]
-        return True
-    else:
-        lines[idx] = re.sub(r"(?:\s*[:.!?;,]+\s*|\s+)?\b(DM only|DM)\b\s*[:.!?;,]*\s*$", "", lines[idx], count=1, flags=re.I)
-        return lines[idx] != before
-while True:
-    if strip_first_marker():
-        continue
-    if strip_last_marker():
-        continue
-    break
-text = "\n".join(lines).strip()
-sys.stdout.write(text)
+sys.stdout.write("\n".join(lines).strip())
 ')
-if [ -z "$body" ]; then echo "empty dispatch block after removing pending/direct markers" >&2; exit 2; fi
+if [ -z "$body" ]; then echo "empty dispatch block after removing pending marker" >&2; exit 2; fi
 manager_line_pattern='^\s*(?:>\s*)*(?:(?:[-*+]\s+(?:\[[ xX]\]\s+)?)|(?:[0-9]+[.)]\s+))*\(for manager:'
 manager_lines=$(printf '%s\n' "$body" | python3 -c 'import re, sys; pat = re.compile(sys.argv[1], re.I); sys.stdout.write("\n".join(line for line in sys.stdin.read().splitlines() if pat.match(line)))' "$manager_line_pattern")
 prompt=$(printf '%s\n' "$body" | python3 -c 'import re, sys; pat = re.compile(sys.argv[1], re.I); sys.stdout.write("\n".join(line for line in sys.stdin.read().splitlines() if not pat.match(line)))' "$manager_line_pattern")

@@ -468,7 +468,7 @@ class TaskEditTests(unittest.TestCase):
             self.assertEqual(0, exit_code)
             self.assertEqual("header\nNo new task item here.\n(pending marker cleared line=2: report-only: informational only)\n", task.read_text(encoding="utf-8"))
 
-    def test_delegate_message_appends_worker_dm_only_pending_block(self) -> None:
+    def test_delegate_message_appends_direct_pending_block(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             task = root / "worker.md"
@@ -480,7 +480,7 @@ class TaskEditTests(unittest.TestCase):
 
             self.assertEqual(0, exit_code)
             self.assertEqual(
-                task_frontmatter() + "body\n(pending)\nDM only\n(from manager omo_task_edit delegate-message)\nPlease inspect the failing shard.\n",
+                task_frontmatter() + "body\n(pending)\n(from manager omo_task_edit delegate-message)\nPlease inspect the failing shard.\n",
                 task.read_text(encoding="utf-8"),
             )
 

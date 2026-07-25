@@ -54,23 +54,15 @@
   - new agent source blocks use compact `(from agent ...)` markers
   - verbose `[omo-message-source: ...]` markers remain recognized for old blocks
   - unmarked pending blocks are `origin=human source=manual` because prompts appended to `work_manager*.md` are human-origin unless explicitly marked otherwise
-  - human-origin refs require manager email acknowledgement
-  - worker task-file frontmatter routes normal pending blocks to `managerat`
-  - manager task-file frontmatter routes normal pending blocks to that manager's `runat`
+  - human-origin refs routed to a manager require the manager acknowledgement flow; ordinary direct delivery sends no manager acknowledgement
+  - ordinary pending blocks in frontmatter task files route directly to `runat`; successful delivery contains only clean message content, clears the consumed `(pending)` only when its original block is unchanged or bounded by a later `(pending)`, and sends no manager copy
   - if a resolved manager delivery target is unavailable and differs from `OMO_MANAGER_TMUX_TARGET`, the same manager-facing message is escalated to `OMO_MANAGER_TMUX_TARGET` with the failed target and error inline
-  - a pending block or any readable linked file starting or ending with standalone case-insensitive `for manager`, after quote lines are ignored and edge punctuation/whitespace is trimmed, routes to the task frontmatter `managerat`
-  - worker `runat` is used for DM worker delivery
+  - `for manager` or `for a manager` at the beginning or end of active unquoted content routes to `managerat`; matching ignores case, surrounding punctuation, and edge whitespace, but changed internal spacing does not match
+  - marker search includes the pending block and readable one-level attachments, including linked email content; quote lines and indented code are excluded, and links inside attachments are not followed
+  - missing, rejected, or unavailable direct destinations remain visible through manager escalation and are not recorded as work
   - legacy prose metadata remains recognized only for main manager task files and old explicit source markers
-  - a pending block or any readable linked file starting or ending with standalone `DM`, after quote lines are ignored and edge punctuation/whitespace is trimmed, is delivered to the task frontmatter `runat` worker target when that target is safely distinct from the manager target
-  - `DM only` follows the same marker rules as `DM` but does not send the manager FYI copy after successful worker delivery
-  - successful DM worker delivery also sends the manager an FYI copy that starts with the same `omo_record_pending.py` instruction and ends ``this message is already dispatched to the agent, this is FYI:``
-  - agent-origin DM manager FYI copies say to omit `--ack-human`
-  - worker DM delivery contains only the cleaned message text
-  - worker DM delivery does not include manager instructions, task-file snippets, source snippets, or XML-style wrappers
-  - worker DM delivery strips standalone file-pointer lines after including readable file content, and extracts only the `message:` body from `omo_report.sh` agent report files
-  - manager DM FYI keeps the task-file snippet inline so the manager can record and clear the pending marker
-  - failed or unroutable DM worker delivery sends the manager an action-required fallback
-  - same-process DM manager-FYI retry does not resend the worker copy after worker delivery succeeds
+  - direct delivery strips `(pending)` and source-pointer plumbing from the message body; literal `DM` and `DM only` text is ordinary message content
+  - direct linked-file delivery includes readable content, retains the source pointer after the possibly truncated content, and extracts only the `message:` body from `omo_report.sh` report files
 
 - manager delivery example
   - ``Normally record pending items and remove the consumed `(pending)` marker by running:``
@@ -90,25 +82,18 @@
   - ``<blocked_on>persistent helper-audit contact waiting for human follow-up at `wl:10.0`</blocked_on>``
   - `</status>`
 
-- dm fyi example
-  - ``Normally record pending items and remove the consumed `(pending)` marker by running:``
-  - ``omo_record_pending.py --pending-file worker.md --line 11 --item PENDING_ITEM_TEXT [--item ...] [--task-file TARGET_TASK.md] --email-file manager_mail/4002.txt --ack-human``
-  - ``Choose `--item` values by quoting the human's words as much as possible. Use `--ack-human` so the script emails the human after recording. If no new pending task item should be added, use `omo_task_edit.py pending-marker-clear` with `--comment`, `--clear-kind report-only|duplicate|cancelled|superseded`, `--ack-human`, and the same `--email-file` when shown above; if an active owner task already tracks it, use `--clear-kind existing-owner-item --owner-task-file TASK.md --owner-item ITEM`. Existing pending-item cleanup uses `omo_task_edit.py pending-replace` or `omo_task_edit.py pending-remove --evidence TEXT`. This message is already dispatched to the agent, this is FYI:``
-  - `<snippet file="worker.md:11-12">`
-  - `(pending)`
-  - `(record and delegate manager_mail/4002.txt)`
-  - `</snippet>`
-
 - agent-problem routing
   - runs `omo_agent_status.py --problems-only` every `--agent-problem-interval-s` seconds, default `300`
   - scans all task owners; `OMO_MANAGER_TMUX_TARGET` only adds the main-manager self-check
   - dispatches each problem group to the row's `owner_target`, falling back to `OMO_MANAGER_TMUX_TARGET` only when no owner is known
   - detects task files with frontmatter `status: running` whose pane is `error`, `not_codex`, `ready`, or `stuck_input`
-  - detects blocked persistent-role task files from frontmatter whose pane is `error`, `not_codex`, or `stuck_input`
+  - detects blocked task files whose pane is `error`, `not_codex`, or `stuck_input`; a `ready` blocked manager is quiet only for a human wait or an owned acyclic tree of exact comma-separated blocker lists whose distinct leaves are valid running tasks without pending reports
+  - remembers each accepted dependency tree in process-local state and alerts once if a blocker list or valid leaf target changes; it also alerts when a node becomes missing, inactive, malformed, cyclic, ambiguously owned, target-reusing, or report-bearing
   - detects manager pane problems when `OMO_MANAGER_TMUX_TARGET` is set
   - detects completed task files whose agents still appear open
   - detects `untracked_agent` panes when a non-`h*` tmux session contains a running, ready, errored, or stuck Codex pane that no task file owns
   - agent-problem prompts start with a direct helper instruction and do not need human acknowledgement
+  - immediately before an asynchronous agent-problem paste, reruns the same problem scan without auto-unsticking and skips delivery unless every routed raw problem row is still present; a resumed manager or any changed pane/dependency state therefore invalidates stale captured output
   - email pending refs remain `origin=human source=email action=ack-human`
   - idle checks remind each ready active agent at its own `runat` when its pending queue is nonempty
 

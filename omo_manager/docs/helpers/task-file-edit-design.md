@@ -82,13 +82,12 @@ unchanged since it was read.
   stays in the original email thread
 
 `delegate-message WORKER.md --message-file FILE`
-- append `(pending)`, `DM only`, and the message file content to a non-done
-  worker task
+- append `(pending)`, a manager source marker, and the message file content to
+  a non-done worker task
 - intended for managers to dispatch new worker work without hand-editing the
   worker task file
 - does not send directly to tmux; `omo_pending_watch.py` owns delivery
-- plain pending blocks in worker task files route to `managerat`, so this
-  command MUST use `DM only` to reach the worker
+- ordinary pending blocks route directly to the task's `runat`
 
 ## existing helper interaction
 
@@ -98,9 +97,10 @@ and source email subjects.
 
 Keep `omo_task_status.py` for status changes.
 
-`omo_pending_watch.py` prompts managers to normally use `omo_record_pending.py`
-when a pending block has new work items. If there is no new item, it should point
-to `omo_task_edit.py pending-marker-clear`.
+`omo_pending_watch.py` sends ordinary pending blocks directly to the task agent,
+which maintains its own queue through `omo_pending.py`. A message selected by a
+case-insensitive, whitespace- and punctuation-insensitive manager edge marker prompts the manager to use `omo_record_pending.py` when it creates work. If it creates no new item, the manager uses
+`omo_task_edit.py pending-marker-clear`.
 
 Keep existing `list`, `add`, `replace`/`update`, `remove`, and `comment` names
 as compatibility aliases if already shipped, but docs should use the canonical

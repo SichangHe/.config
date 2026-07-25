@@ -50,7 +50,7 @@ Reject fields that are not in the schema. All comments stay inside Markdown bodi
 If `status: blocked`, `blocked_on` is required; else, `blocked_on` MUST NOT exist.
 ALL other fields are required.
 
-`managerat` MUST be different from `runat`. In a worker task file, `managerat` is the manager that owns the task. In a manager task file, `runat` is the manager pane that receives pending blocks already written to that manager file. Use worker `runat` only for the worker pane and direct-message delivery.
+`managerat` MUST be different from `runat`. In a worker task file, `managerat` is the manager that owns the task. In a manager task file, `runat` is the manager pane that receives pending blocks already written to that manager file. Every task's `runat` receives ordinary pending delivery; `managerat` receives only manager-marked content, matched case-insensitively with surrounding punctuation and edge whitespace ignored.
 
 `pending_task_items` only contains items that are still open. Before removing an item, verify it is actually complete or cancelled; remove it immediately after that verification.
 
@@ -68,7 +68,7 @@ Managers change `status` with `omo_task_status.py TASK.md running|blocked|done`;
 
 `omo_agent_status.py` only reads from frontmatter.
 
-`omo_pending_watch.py` scans for `(pending)` markers and dispatches lines from there to the end of the task file. Worker task files route normal pending blocks to `managerat`; manager task files route normal pending blocks to their own `runat`. It then remembers the dispatch in process memory before possibly re-dispatching. The target manager records `pending_task_items` with `omo_record_pending.py`, which removes the consumed pending marker after validating the file and line still match. Worker `runat` is used for direct-message worker delivery only.
+`omo_pending_watch.py` scans for `(pending)` markers. Ordinary task-file messages go directly to that task's `runat`, send no manager copy, and clear the consumed marker only after verified delivery when the original block is unchanged or bounded by a later `(pending)`. `for manager` or `for a manager` at the beginning or end of active unquoted pending-block or directly linked readable content routes to `managerat`; matching ignores case, surrounding punctuation, and edge whitespace, while linked content is resolved once through the existing attachment path policy. Literal `DM` and `DM only` text has no routing meaning. The receiving agent maintains its own pending queue through `omo_pending.py`.
 
 `omo_report.sh` infers the reporting worker task file from the current tmux pane, finds its `managerat`, and appends the `(pending)` report block to that manager's task file. Workers invoke it without `--task-file`, `--root`, `--manager-target`, or other manual route flags. If `managerat` is the main manager target, the destination is the dated `work_manager_YYYY-MM-DD.md` file.
 

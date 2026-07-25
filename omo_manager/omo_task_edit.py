@@ -140,10 +140,10 @@ def parse_args(argv: list[str]) -> Args:
     _ = comment_parser.add_argument("legacy_message", nargs="?", help="Compatibility positional comment text.")
     _ = comment_parser.add_argument("--message", help="One-line comment text to append.")
 
-    delegate_parser = subparsers.add_parser("delegate-message", help="Append a DM-only pending block to a worker task file.")
+    delegate_parser = subparsers.add_parser("delegate-message", help="Append a pending message block to a worker task file.")
     delegate_parser.set_defaults(command="delegate-message")
     _ = delegate_parser.add_argument("task_file", type=Path)
-    _ = delegate_parser.add_argument("--message-file", type=Path, required=True, help="File containing the worker direct-message body.")
+    _ = delegate_parser.add_argument("--message-file", type=Path, required=True, help="File containing the worker message body.")
 
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     try:
@@ -585,7 +585,7 @@ def append_delegate_message(text: str, message: str) -> str:
     newline = preferred_newline(text)
     separator = "" if not text or text.endswith("\n") else newline
     message_text = message if message.endswith("\n") else f"{message}{newline}"
-    return f"{text}{separator}{PENDING_MARKER}{newline}DM only{newline}(from manager omo_task_edit delegate-message){newline}{message_text}"
+    return f"{text}{separator}{PENDING_MARKER}{newline}(from manager omo_task_edit delegate-message){newline}{message_text}"
 
 
 def write_if_changed(path: Path, text: str, updated: str, before: os.stat_result) -> None:
@@ -673,7 +673,7 @@ def run(args: Args) -> int:
             message = message_file_text(normalized_message_file(args.message_file))
             updated = append_delegate_message(text, message)
             write_if_changed(path, text, updated, before)
-            print(f"appended DM-only pending message to {path.name}")
+            print(f"appended pending message to {path.name}")
             return 0
         raise TaskFrontmatterError(f"unknown command: {command}")
     except (OSError, TaskFrontmatterError, subprocess.CalledProcessError, argparse.ArgumentTypeError) as exc:

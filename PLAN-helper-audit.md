@@ -26,7 +26,9 @@
 - current migration: add `long_running` as a first-class active status for managers and human-facing interactive agents
 - `long_running` status behavior: no idle/ready close reminder; preserve error, stuck-input, malformed-state, launch-failure, task-state, and pending-item handling
 - superseded temporary rule: do not key reminder suppression from `blocked_on: long-running`; migrate that intent to `status: long_running`
-- blocked policy decision: do not change mail routing until the human defines the normal recipient/copy behavior, exact marker match boundary, and whether linked-file markers count
+- authorized mail routing: ordinary addressed email goes only to the task `runat`; no manager FYI copy
+- authorized manager override: `for manager` or `for a manager` at the beginning or end of active unquoted content routes to `managerat`; matching ignores case, surrounding punctuation, and edge whitespace while preserving internal spacing
+- authorized marker scope: inspect the pending block plus one-level readable linked content, including linked email files; do not recursively crawl links inside attachments
 - current pending ownership: workers and managers manage their own `pending_task_items` through task-file-opaque helper commands that infer the current task from tmux
 - current pending reminders: deliver each idle agent's pending-item reminder to that agent, not its manager; `long_running` agents still receive pending-item reminders
 - current instructions: update manager/worker/helper docs after behavior is stable, then obtain human review, commit, restart relevant watchers, and broadcast manager reread
@@ -53,7 +55,7 @@
 ## plan
 
 - specify `long_running` schema, transition, TODO, report-routing, status-scan, and reminder semantics before editing shared parsers
-- migrate normal email routing to direct delivery and delete DM-marker branches, while retaining exact manager-override and explicit routing-failure escalation
+- migrate normal email routing to direct delivery and delete DM-marker branches, while retaining manager-edge override and explicit routing-failure escalation
 - expose current-agent pending-item list/add/replace/remove operations without task-file arguments or task-file output; keep evidence checks for removal
 - route idle pending-item reminders to each agent's `runat`, including `long_running`, and remove manager-owned worker-list reminders
 - update launcher-injected worker instructions and manager instructions so agents use the opaque pending helper and managers no longer edit worker pending queues
@@ -109,7 +111,7 @@
 ## checklist
 
 - [x] `long_running` schema and lifecycle
-- [ ] direct-by-default mail routing and exact manager markers
+- [ ] direct-by-default mail routing and manager markers
 - [x] task-file-opaque agent pending-item commands
 - [x] agent-targeted idle pending-item reminders
 - [x] manager and worker instruction migration

@@ -81,14 +81,12 @@ DEFAULT_AGENT_PROBLEM_TIMEOUT_S = float(
 DEFAULT_POLL_BACKSTOP_INTERVAL_S = float(os.environ.get("OMO_MANAGER_POLL_BACKSTOP_INTERVAL_S", "30"))
 DEFAULT_HUMAN_EMAIL_HELPER = Path(__file__).resolve().parents[1] / "helper.sh" / "email_me.py"
 PENDING_MARKERS = {"(pending)"}
-FOR_MANAGER_MARKER = "for manager"
-DIRECT_MARKER_SEPARATOR_CHARS = {":", ".", "!", "?", ";", ","}
-DIRECT_MARKER_WRAPPER_CLOSERS = {")": "(", "]": "[", "}": "{", '"': '"', "'": "'", "`": "`"}
+FOR_MANAGER_MARKERS = ("for manager", "for a manager")
 POINTER_WRAPPER_PAIRS = {"`": "`", "'": "'", '"': '"', "(": ")", "[": "]", "<": ">", "{": "}"}
 TASK_FILE_LINE_WARNING_THRESHOLD = 2000
 TODO_LINE_WARNING_THRESHOLD = 200
 EMAIL_CONTENT_CHAR_LIMIT = PENDING_CONTENT_CHAR_LIMIT
-ROUTED_PREFIXES = ("(manager handled:", "(manager routed:")
+ROUTED_PREFIXES = ("(manager handled:",)
 EMAIL_SOURCE_PREFIXES = ("(record and delegate ", "(from email ", "[source: email ")
 AGENT_SOURCE_PREFIXES = ("[omo-message-source: origin=agent ", "(from agent ")
 MANAGER_SOURCE_PREFIXES = ("(from manager ",)
@@ -289,6 +287,7 @@ class PendingGuard:
     pending_file: Path
     pending_line: int
     pending_digest: str
+    pending_text: str
 
 
 @dataclass(frozen=True)
@@ -388,6 +387,7 @@ def run_verified_send(
             pending_guard.pending_file,
             pending_guard.pending_line,
             pending_guard.pending_digest,
+            pending_guard.pending_text,
         ):
             raise RuntimeError("pending marker cleared before tmux paste")
         if problem_guard is not None and not agent_problem_guard_current(problem_guard):
@@ -410,6 +410,7 @@ def log_send_result(future: Future[None], success_event: DeliverySuccessEvent | 
                 failure_fallback.pending_guard.pending_file,
                 failure_fallback.pending_guard.pending_line,
                 failure_fallback.pending_guard.pending_digest,
+                failure_fallback.pending_guard.pending_text,
             ):
                 print("omo_pending_watch: async fallback skipped; pending marker cleared before fallback paste", file=sys.stderr)
                 queue_delivery_failure_event(success_event)
@@ -869,31 +870,12 @@ def delegate_source(block_lines: list[str]) -> str:
     return ""
 
 
-def marker_worker_target(args: Args, marker: Marker, manager_target: str) -> str:
+def marker_direct_target(args: Args, marker: Marker) -> str:
     metadata = read_task_metadata(args.root / marker.file)
-    target = metadata.runat if metadata is not None else ""
-    if not target or same_tmux_target(target, manager_target) or same_tmux_window_unless_both_panes(target, manager_target):
-        return ""
-    return target
-
-
-def inline_dm_only_email_header(lines: Sequence[str], idx: int = 0) -> tuple[str, str, str] | None:
-    """Return the watcher-emitted DM-only email header, which has no inline payload."""
-
-    tail = remove_ignored_pending_notes(list(lines[idx:]))
-    if (
-        len(tail) >= 3
-        and tail[0].strip() == "(pending)"
-        and tail[1].strip().casefold() == "dm only"
-        and tail[2].strip().startswith(EMAIL_SOURCE_PREFIXES)
-    ):
-        return tail[0], tail[1], tail[2]
-    return None
+    return metadata.runat if metadata is not None else ""
 
 
 def pending_source_paths(marker: Marker) -> list[str]:
-    if inline_dm_only_email_header(marker.block_text.splitlines()) is not None:
-        return [marker.delegate_source] if marker.delegate_source else []
     sources: list[str] = []
     if marker.delegate_source:
         sources.append(marker.delegate_source)
@@ -916,37 +898,24 @@ def readable_attachment_payload(attachments: Sequence[SourceAttachment]) -> str:
     return "\n".join(f"{attachment.source}\0{attachment.text}" for attachment in attachments if not attachment.error)
 
 
-def marker_is_dm(marker: Marker, attachments: Sequence[SourceAttachment]) -> bool:
-    if text_marks_dm(marker.block_text):
-        return True
-    return any(not attachment.error and text_marks_dm(attachment.text) for attachment in attachments)
-
-
-def marker_is_dm_only(marker: Marker, attachments: Sequence[SourceAttachment]) -> bool:
-    if inline_dm_only_email_header(marker.block_text.splitlines()) is not None:
-        return True
-    if text_marks_dm_only(marker.block_text):
-        return True
-    return any(not attachment.error and text_marks_dm_only(attachment.text) for attachment in attachments)
-
-
 def marker_is_for_manager(marker: Marker, attachments: Sequence[SourceAttachment]) -> bool:
     if text_marks_for_manager(marker.block_text):
         return True
-    return any(not attachment.error and text_marks_for_manager(attachment.text) for attachment in attachments)
+    return any(not attachment.error and text_marks_for_manager(attachment_routing_text(attachment)) for attachment in attachments)
 
 
-def dm_worker_seen_key(args: Args, marker: Marker, worker_target: str, attachments: Sequence[SourceAttachment]) -> str:
-    header = inline_dm_only_email_header(marker.block_text.splitlines())
-    block_payload = "\n".join(header) if header is not None else marker.block_text
-    payload = f"{block_payload}\n{readable_attachment_payload(attachments)}"
-    dm = int(marker_is_dm(marker, attachments))
-    dm_only = int(marker_is_dm_only(marker, attachments))
-    return f"{args.root}:{marker.file}:{marker.line}:{marker.digest}:dm-worker:{canonical_target(worker_target)}:{attachment_payload_digest(payload)}:dm:{dm}:dm-only:{dm_only}"
+def attachment_routing_text(attachment: SourceAttachment) -> str:
+    """Return active message content used for attachment route markers."""
+
+    if not attachment.source.startswith("manager_mail/"):
+        return attachment.text
+    _headers, separator, body = attachment.text.partition("\n\n")
+    return body if separator else attachment.text
 
 
-def dm_worker_failure_seen_key(args: Args, marker: Marker, worker_target: str, attachments: Sequence[SourceAttachment]) -> str:
-    return f"{dm_worker_seen_key(args, marker, worker_target, attachments)}:delivery-failure"
+def direct_delivery_seen_key(args: Args, marker: Marker, target: str, attachments: Sequence[SourceAttachment]) -> str:
+    payload = f"{marker.block_text}\n{readable_attachment_payload(attachments)}"
+    return f"{args.root}:{marker.file}:{marker.line}:{marker.digest}:direct:{canonical_target(target)}:{attachment_payload_digest(payload)}"
 
 
 def attachment_error_seen_key(args: Args, marker: Marker, attachments: Sequence[SourceAttachment]) -> str:
@@ -961,27 +930,8 @@ def marker_seen_key(args: Args, marker: Marker, attachments: Sequence[SourceAtta
     if any(attachment.error for attachment in attachments):
         return key
     payload = readable_attachment_payload(attachments)
-    dm = int(marker_is_dm(marker, attachments))
-    dm_only = int(marker_is_dm_only(marker, attachments))
     for_manager = int(marker_is_for_manager(marker, attachments))
-    return f"{key}:files:{attachment_payload_digest(payload)}:dm:{dm}:dm-only:{dm_only}:for-manager:{for_manager}"
-
-
-def is_vl_task_file(path: Path) -> bool:
-    return path.name.startswith("vl_") or "/vl_" in path.as_posix()
-
-
-def marker_manager_target(args: Args, marker: Marker) -> str:
-    """Choose the manager pane that owns this marker."""
-
-    metadata = read_task_metadata(args.root / marker.file)
-    if metadata is not None:
-        if metadata.is_manager:
-            return metadata.runat
-        return metadata.managerat or args.manager_target
-    if is_main_manager_task_file(marker.file):
-        return args.manager_target
-    return args.manager_target
+    return f"{key}:files:{attachment_payload_digest(payload)}:for-manager:{for_manager}"
 
 
 def marker_for_manager_target(args: Args, marker: Marker) -> str:
@@ -1068,9 +1018,7 @@ def unquoted_pending_content(text: str) -> str:
     """Return pending text that is active request content.
 
     Markdown/email quote lines are old context. They must not add attachments or
-    convert a manager-routed request into a direct worker message. Pending-block
-    checks ignore the marker line so `DM: ...` directly under `(pending)` counts
-    as a leading DM marker.
+    alter routing. Pending-block checks ignore the `(pending)` marker line.
     """
 
     lines = [line for line in text.splitlines() if not line.lstrip().startswith(">")]
@@ -1081,110 +1029,61 @@ def unquoted_pending_content(text: str) -> str:
     return "\n".join(lines)
 
 
-def trim_edge_marker_punctuation(text: str) -> str:
-    value = unquoted_pending_content(text).strip()
-    while value and unicodedata.category(value[0]).startswith("P"):
-        value = value[1:].lstrip()
-    while value and unicodedata.category(value[-1]).startswith("P"):
-        value = value[:-1].rstrip()
-    return value
+def marker_edge_text(value: str, *, start: bool) -> str:
+    """Remove whitespace and punctuation at one outer marker edge."""
+
+    if start:
+        index = 0
+        while index < len(value) and marker_edge_ignored(value[index]):
+            index += 1
+        return value[index:]
+    index = len(value)
+    while index > 0 and marker_edge_ignored(value[index - 1]):
+        index -= 1
+    return value[:index]
 
 
-def edge_marker_char_is_word(text: str, index: int) -> bool:
-    return text[index].isalnum() or text[index] == "_"
+def marker_edge_ignored(char: str) -> bool:
+    return char.isspace() or (char != "_" and unicodedata.category(char).startswith("P"))
 
 
-def text_has_edge_marker(text: str, marker: str, *, case_sensitive: bool = True) -> bool:
-    """Check active text for a standalone marker at either outer edge."""
-
-    value = trim_edge_marker_punctuation(text)
-    haystack = value if case_sensitive else value.casefold()
-    needle = marker if case_sensitive else marker.casefold()
-    if haystack.startswith(needle) and (len(value) == len(marker) or not edge_marker_char_is_word(value, len(marker))):
-        return True
-    if haystack.endswith(needle) and (len(value) == len(marker) or not edge_marker_char_is_word(value, -len(marker) - 1)):
-        return True
-    return False
+def marker_boundary(value: str, index: int) -> bool:
+    return index == len(value) or marker_edge_ignored(value[index])
 
 
-def active_text_has_edge_marker(text: str, marker: str, *, case_sensitive: bool = True) -> bool:
+def marker_prefix_boundary(value: str, index: int) -> bool:
+    return index == 0 or marker_edge_ignored(value[index - 1])
+
+
+def active_text_has_edge_marker(text: str, marker: str) -> bool:
+    """Match a case-insensitive marker at an active text edge, ignoring edge punctuation."""
+
     lines = unquoted_pending_content(text).splitlines()
     edge_indices = active_content_edge_indices(lines)
     if edge_indices is None:
         return False
-    return any(not line_is_markdown_indented_code(lines[idx]) and text_has_edge_marker(lines[idx], marker, case_sensitive=case_sensitive) for idx in edge_indices)
-
-
-def text_marks_dm(text: str) -> bool:
-    return active_text_has_edge_marker(text, "DM", case_sensitive=False)
-
-
-def text_marks_dm_only(text: str) -> bool:
-    return active_text_has_edge_marker(text, "DM only", case_sensitive=False)
+    first, last = edge_indices
+    if not line_is_markdown_indented_code(lines[first]):
+        value = marker_edge_text(lines[first], start=True)
+        folded = value.casefold()
+        marker_folded = marker.casefold()
+        if folded.startswith(marker_folded) and marker_boundary(value, len(marker)):
+            return True
+    if last != first and not line_is_markdown_indented_code(lines[last]):
+        value = marker_edge_text(lines[last], start=False)
+        marker_folded = marker.casefold()
+        if value.casefold().endswith(marker_folded) and marker_prefix_boundary(value, len(value) - len(marker)):
+            return True
+    elif last == first and not line_is_markdown_indented_code(lines[last]):
+        value = marker_edge_text(lines[last], start=False)
+        marker_folded = marker.casefold()
+        if value.casefold().endswith(marker_folded) and marker_prefix_boundary(value, len(value) - len(marker)):
+            return True
+    return False
 
 
 def text_marks_for_manager(text: str) -> bool:
-    return active_text_has_edge_marker(text, FOR_MANAGER_MARKER, case_sensitive=False)
-
-
-def strip_edge_marker(text: str, marker: str) -> str:
-    """Remove one routing marker from the active text edge."""
-
-    value = strip_start_edge_marker(text, marker)
-    if value != text.strip():
-        return value
-    return strip_end_edge_marker(text, marker)
-
-
-def strip_start_edge_marker(text: str, marker: str) -> str:
-    """Remove one routing marker from the start of active text."""
-
-    value = text.strip()
-    folded = value.casefold()
-    marker_folded = marker.casefold()
-    start = 0
-    while start < len(value) and (value[start].isspace() or unicodedata.category(value[start]).startswith("P")):
-        start += 1
-    after = start + len(marker)
-    if folded.startswith(marker_folded, start) and (after == len(value) or not edge_marker_char_is_word(value, after)):
-        while after < len(value):
-            if value[after].isspace() or value[after] in DIRECT_MARKER_SEPARATOR_CHARS or value[after] in DIRECT_MARKER_WRAPPER_CLOSERS:
-                after += 1
-                continue
-            break
-        return value[after:].strip()
-    return value
-
-
-def strip_end_edge_marker(text: str, marker: str) -> str:
-    """Remove one routing marker from the end of active text."""
-
-    value = text.strip()
-    folded = value.casefold()
-    marker_folded = marker.casefold()
-    end = len(value)
-    wrapper_closers: list[str] = []
-    while end > 0:
-        if value[end - 1].isspace() or value[end - 1] in DIRECT_MARKER_SEPARATOR_CHARS:
-            end -= 1
-            continue
-        if value[end - 1] in DIRECT_MARKER_WRAPPER_CLOSERS:
-            wrapper_closers.append(value[end - 1])
-            end -= 1
-            continue
-        break
-    marker_start = end - len(marker)
-    if marker_start >= 0 and folded[marker_start:end] == marker_folded and (marker_start == 0 or not edge_marker_char_is_word(value, marker_start - 1)):
-        prefix_end = marker_start
-        while prefix_end > 0 and value[prefix_end - 1] in {" ", "\t"}:
-            prefix_end -= 1
-        while prefix_end > 0 and wrapper_closers and value[prefix_end - 1] == DIRECT_MARKER_WRAPPER_CLOSERS[wrapper_closers[-1]]:
-            wrapper_closers.pop()
-            prefix_end -= 1
-            while prefix_end > 0 and value[prefix_end - 1] in {" ", "\t"}:
-                prefix_end -= 1
-        return value[:prefix_end].strip()
-    return value
+    return any(active_text_has_edge_marker(text, marker) for marker in FOR_MANAGER_MARKERS)
 
 
 def strip_pending_marker_line(text: str) -> str:
@@ -1215,44 +1114,6 @@ def join_without_outer_blank_lines(lines: Sequence[str]) -> str:
     while end > start and not lines[end - 1].strip():
         end -= 1
     return "\n".join(lines[start:end])
-
-
-def strip_active_edge_marker_once(text: str, marker: str) -> tuple[str, bool]:
-    lines = text.splitlines()
-    edge_indices = active_content_edge_indices(lines)
-    if edge_indices is None:
-        return join_without_outer_blank_lines(lines), False
-    for idx in edge_indices:
-        if line_is_markdown_indented_code(lines[idx]):
-            continue
-        if text_has_edge_marker(lines[idx], marker, case_sensitive=False):
-            before = lines[idx]
-            if edge_indices[0] == edge_indices[1]:
-                lines[idx] = strip_edge_marker(lines[idx], marker)
-            elif idx == edge_indices[0]:
-                lines[idx] = strip_start_edge_marker(lines[idx], marker)
-            else:
-                lines[idx] = strip_end_edge_marker(lines[idx], marker)
-            if lines[idx] == before:
-                continue
-            if not lines[idx]:
-                del lines[idx]
-            return join_without_outer_blank_lines(lines), True
-    return join_without_outer_blank_lines(lines), False
-
-
-def strip_direct_markers(text: str) -> str:
-    """Remove worker-routing markers from active request text."""
-
-    value = strip_pending_marker_line(text)
-    while True:
-        changed = False
-        for marker in ("DM only", "DM"):
-            value, changed = strip_active_edge_marker_once(value, marker)
-            if changed:
-                break
-        if not changed:
-            return value
 
 
 def manager_pending_instruction(marker: Marker, after_recording: str = "Then dispatch the task:") -> str:
@@ -1346,22 +1207,20 @@ def line_points_to_source(line: str, source: str) -> bool:
 
 
 def clean_direct_message_lines(text: str) -> str:
-    """Remove routing source metadata from direct worker text."""
+    """Remove queue and source metadata from direct-delivery text."""
 
     lines = []
-    for line in strip_direct_markers(text).splitlines():
+    for line in strip_pending_marker_line(text).splitlines():
         stripped = line.strip()
         if stripped.startswith(EMAIL_SOURCE_PREFIXES) or stripped.startswith(AGENT_SOURCE_PREFIXES) or stripped.startswith(MANAGER_SOURCE_PREFIXES):
             continue
         lines.append(line)
-    return strip_direct_markers("\n".join(lines))
+    return join_without_outer_blank_lines(lines)
 
 
 def direct_message_block_text(marker: Marker, attachments: Sequence[SourceAttachment]) -> str:
     """Return only human request text from the pending block."""
 
-    if attachments and inline_dm_only_email_header(marker.block_text.splitlines()) is not None:
-        return ""
     attachment_sources = {attachment.source for attachment in attachments if not attachment.error}
     lines = []
     for line in clean_direct_message_lines(marker.block_text).splitlines():
@@ -1384,15 +1243,15 @@ def agent_report_message_text(text: str) -> str:
 
 
 def direct_attachment_text(attachment: SourceAttachment) -> str:
-    """Return only readable linked-message text for worker DMs."""
+    """Return only readable linked-message text for direct delivery."""
 
     if attachment.error:
         return ""
-    return clean_direct_message_lines(agent_report_message_text(attachment.text))
+    return clean_direct_message_lines(agent_report_message_text(attachment_routing_text(attachment)))
 
 
 def direct_message_text(marker: Marker, attachments: Sequence[SourceAttachment]) -> str:
-    """Build a worker DM with no manager instructions or metadata wrappers."""
+    """Build direct-delivery content with no manager instructions or wrappers."""
 
     parts: list[str] = []
     block_text = direct_message_block_text(marker, attachments)
@@ -1403,7 +1262,7 @@ def direct_message_text(marker: Marker, attachments: Sequence[SourceAttachment])
         if attachment_text:
             parts.append(attachment_text)
     excerpt = truncate_content("\n\n".join(parts), PENDING_CONTENT_CHAR_LIMIT)
-    pointer_lines: list[str] = []
+    pointers: list[str] = []
     for attachment in attachments:
         if attachment.error in REJECTED_SOURCE_ERRORS:
             continue
@@ -1415,9 +1274,9 @@ def direct_message_text(marker: Marker, attachments: Sequence[SourceAttachment])
             ),
             attachment.source,
         )
-        if pointer not in pointer_lines:
-            pointer_lines.append(pointer)
-    return "\n\n".join(part for part in (excerpt, "\n".join(pointer_lines)) if part)
+        if pointer not in pointers:
+            pointers.append(pointer)
+    return "\n\n".join(part for part in (excerpt, "\n".join(pointers)) if part)
 
 
 def marker_delivery_text(marker: Marker, attachments: Sequence[SourceAttachment] = (), prefix: str = "") -> str:
@@ -1429,33 +1288,17 @@ def marker_delivery_text(marker: Marker, attachments: Sequence[SourceAttachment]
     return text
 
 
-def marker_worker_dm_text(marker: Marker, attachments: Sequence[SourceAttachment]) -> str:
+def marker_direct_text(marker: Marker, attachments: Sequence[SourceAttachment]) -> str:
     return direct_message_text(marker, attachments)
 
 
-def marker_fyi_text(marker: Marker, attachments: Sequence[SourceAttachment]) -> str:
-    parts = [manager_pending_instruction(marker, "this message is already dispatched to the agent, this is FYI:")]
-    parts.extend(marker_snippet_parts(marker, attachments))
-    return "\n".join(parts)
-
-
-def direct_message_fallback_text(marker: Marker, attachments: Sequence[SourceAttachment], marker_name: str, reason: str) -> str:
+def direct_delivery_fallback_text(marker: Marker, attachments: Sequence[SourceAttachment], reason: str) -> str:
     parts = [
-        f"Direct-message routing failed: pending block or linked file starts or ends with `{marker_name}`, but {reason}.",
-        "Do not record this routing marker as a pending_task_item. If you can resolve the error by reinstating the worker agent or correcting the routing, do that, deliver the message to the intended worker, then clear this pending marker with `omo_task_edit.py pending-marker-clear`. If you cannot resolve it, report this routing error to the human.",
+        f"Direct delivery failed for `{marker.file}:{marker.line}`: {reason}.",
+        "This is delivery failure visibility, not work to record as a pending item. Inspect or correct the direct target, deliver the attached request, and clear the consumed marker only after delivery succeeds. If the target cannot be restored, handle or reassign the request through the manager.",
     ]
     parts.extend(marker_snippet_parts(marker, attachments))
     return "\n".join(parts)
-
-
-def dm_only_delivery_failure_text(marker: Marker, reason: str) -> str:
-    """Report a DM-only routing failure without copying the private message."""
-
-    return (
-        f"DM-only delivery failed for `{marker.file}:{marker.line}`: {reason}. "
-        "Do not record the routing marker as a pending item and do not copy its message. "
-        "Restore or correct the worker target so the watcher can retry; report the routing error to the human if it cannot be resolved."
-    )
 
 
 def find_markers(root: Path, files: list[Path]) -> list[Marker]:
@@ -1516,15 +1359,23 @@ def with_manager_policy_reminder(args: Args, text: str, reminders: Sequence[str]
 
 
 def pending_guard_text(lines: Sequence[str], idx: int) -> str:
-    """Keep new inline DM-only email guards stable across unrelated appends."""
+    """Return one pending block, stopping before the next pending marker."""
 
-    header = inline_dm_only_email_header(lines, idx)
-    if header is not None:
-        return "\n".join(header)
-    return "\n".join(remove_ignored_pending_notes(list(lines[idx:])))
+    end = len(lines)
+    for line_idx in range(idx + 1, len(lines)):
+        if lines[line_idx].strip() in PENDING_MARKERS:
+            end = line_idx
+            break
+    return "\n".join(remove_ignored_pending_notes(list(lines[idx:end])))
 
 
-def pending_marker_present(root: Path, pending_file: Path, pending_line: int, pending_digest: str = "") -> bool:
+def pending_marker_present(
+    root: Path,
+    pending_file: Path,
+    pending_line: int,
+    pending_digest: str = "",
+    pending_text: str = "",
+) -> bool:
     path = root / pending_file
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
@@ -1533,15 +1384,19 @@ def pending_marker_present(root: Path, pending_file: Path, pending_line: int, pe
     idx = pending_line - 1
     if idx < 0 or idx >= len(lines) or lines[idx].strip() != "(pending)":
         return False
+    current_text = pending_guard_text(lines, idx)
+    if pending_text:
+        expected_lines = pending_text.splitlines()
+        current_lines = current_text.splitlines()
+        return current_lines == expected_lines
     if not pending_digest:
         return True
-    return pending_tail_digest(pending_file, pending_line, pending_guard_text(lines, idx)) == pending_digest
+    return pending_tail_digest(pending_file, pending_line, current_text) == pending_digest
 
 
-def remove_direct_routing_header(lines: list[str], idx: int) -> None:
-    """Remove `DM only` routing metadata after a delivered marker is cleared."""
+def remove_direct_source_header(lines: list[str], idx: int) -> None:
+    """Remove source plumbing adjacent to a successfully delivered marker."""
 
-    stripped_direct_marker = False
     while idx < len(lines):
         stripped = lines[idx].strip()
         if stripped in PENDING_MARKERS:
@@ -1552,21 +1407,11 @@ def remove_direct_routing_header(lines: list[str], idx: int) -> None:
         if not stripped or stripped.startswith(AGENT_SOURCE_PREFIXES) or stripped.startswith(MANAGER_SOURCE_PREFIXES):
             del lines[idx]
             continue
-        if stripped_direct_marker:
-            return
-        original = lines[idx]
-        updated = strip_direct_markers(original)
-        if updated == original:
-            return
-        stripped_direct_marker = True
-        if updated:
-            lines[idx] = updated
-            return
-        del lines[idx]
+        return
 
 
 def clear_pending_marker_if_current(root: Path, marker: Marker) -> bool:
-    """Remove one delivered `DM only` marker after verifying the pending tail."""
+    """Remove one successfully delivered marker after verifying the pending tail."""
 
     path = root / marker.file
     tmp_path: Path | None = None
@@ -1577,10 +1422,10 @@ def clear_pending_marker_if_current(root: Path, marker: Marker) -> bool:
         idx = marker.line - 1
         if idx < 0 or idx >= len(lines) or lines[idx].strip() != "(pending)":
             return False
-        if pending_tail_digest(marker.file, marker.line, pending_guard_text(lines, idx)) != marker.digest:
+        if not pending_marker_present(root, marker.file, marker.line, marker.digest, marker.block_text):
             return False
         del lines[idx]
-        remove_direct_routing_header(lines, idx)
+        remove_direct_source_header(lines, idx)
         updated = "\n".join(lines) + ("\n" if text.endswith("\n") else "")
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False) as handle:
             _ = handle.write(updated)
@@ -1595,7 +1440,7 @@ def clear_pending_marker_if_current(root: Path, marker: Marker) -> bool:
         tmp_path = None
         return True
     except OSError as exc:
-        print(f"omo_pending_watch: failed to clear delivered DM-only pending marker in {marker.file}: {exc}", file=sys.stderr)
+        print(f"omo_pending_watch: failed to clear delivered pending marker in {marker.file}: {exc}", file=sys.stderr)
         return False
     finally:
         if tmp_path is not None:
@@ -1625,6 +1470,7 @@ def push_marker_delivery(
             pending_file=marker.file,
             pending_line=marker.line,
             pending_digest=marker.digest,
+            pending_text=marker.block_text,
             success_event=success_event,
             failure_fallback_target=failure_fallback_target,
             failure_fallback_text=failure_fallback_text,
@@ -1667,146 +1513,101 @@ def push_marker_text_or_escalate(args: Args, marker: Marker, text: str, manager_
     return push_marker_delivery(args, marker, with_failed_target_escalation(text, manager_target, result), fallback_target, success_event).status
 
 
-def push_dm_ref(args: Args, seen: dict[str, float], now_s: float, marker: Marker, attachments: Sequence[SourceAttachment], manager_target: str, *, copy_manager: bool = True) -> int:
-    worker_target = marker_worker_target(args, marker, manager_target)
-    reminders = MANAGER_EMAIL_POLICY_REMINDERS if marker.source == "email" else MANAGER_POLICY_REMINDERS
-    marker_name = "DM" if copy_manager else "DM only"
+def push_direct_ref(
+    args: Args,
+    seen: dict[str, float],
+    now_s: float,
+    marker: Marker,
+    attachments: Sequence[SourceAttachment],
+) -> int:
+    """Deliver ordinary pending content directly and clear it after success."""
+
+    target = marker_direct_target(args, marker)
+    manager_target = marker_for_manager_target(args, marker)
     marker_key = marker_seen_key(args, marker, attachments)
-    if not worker_target:
-        text = (
-            direct_message_fallback_text(marker, attachments, marker_name, "no safe worker `runat:` target was found")
-            if copy_manager
-            else dm_only_delivery_failure_text(marker, "no safe worker `runat:` target was found")
-        )
-        fallback_status = push_marker_text_or_escalate(
-            args,
-            marker,
-            with_manager_policy_reminder(args, text, reminders),
-            manager_target,
-            DeliverySuccessEvent(
-                seen_keys=(marker_key,),
-                failure_seen_removals=(marker_key,) if not copy_manager else (),
-                seen_at_s=now_s,
-            ),
-        )
-        if not copy_manager and fallback_status == ASYNC_DELIVERY_STARTED:
-            remember_seen(seen, marker_key, now_s)
-        return fallback_status
-    worker_text = marker_worker_dm_text(marker, attachments)
-    worker_key = dm_worker_seen_key(args, marker, worker_target, attachments)
-    worker_failure_key = dm_worker_failure_seen_key(args, marker, worker_target, attachments)
-    worker_seen = seen_contains(seen, worker_key, now_s)
-    worker_status = 0
-    worker_failure_seen = seen_contains(seen, worker_failure_key, now_s)
-    if not worker_seen and worker_failure_seen:
-        return 1
-    if not worker_seen and not worker_failure_seen:
-        failure_text = (
-            marker_delivery_text(
-                marker,
-                attachments,
-                f"direct-message delivery failed: worker target `{worker_target}` did not receive this message; manager action required to inspect or restart the target, then handle the human request.",
-            )
-            if copy_manager
-            else dm_only_delivery_failure_text(marker, f"worker target `{worker_target}` did not accept the message")
-        )
-        result = push_marker_delivery(
-            args,
-            marker,
-            worker_text,
-            worker_target,
-            DeliverySuccessEvent(
-                seen_keys=(worker_key,),
-                seen_after_clear_keys=(marker_key,) if not copy_manager else (),
-                seen_at_s=now_s,
-                clear_root=args.root if not copy_manager else None,
-                clear_marker=marker if not copy_manager else None,
-                failure_seen_removals=(marker_key,),
-            ),
-            failure_fallback_target=manager_target,
-            failure_fallback_text=with_manager_policy_reminder(args, failure_text, reminders),
-            failure_success_event=DeliverySuccessEvent(
-                seen_keys=(worker_failure_key,),
-                failure_seen_removals=(marker_key,),
-                seen_at_s=now_s,
-            ),
-        )
-        worker_status = result.status
-        if worker_status not in {0, ASYNC_DELIVERY_STARTED}:
-            text = (
-                marker_delivery_text(
-                    marker,
-                    attachments,
-                    f"direct-message fallback: direct worker delivery to {worker_target} failed with status {worker_status}; manager action required to route or help with the human request.",
-                )
-                if copy_manager
-                else dm_only_delivery_failure_text(marker, f"worker target `{worker_target}` failed with status {worker_status}")
-            )
-            fallback_status = push_marker_text_or_escalate(
-                args,
-                marker,
-                with_manager_policy_reminder(args, text, reminders),
-                manager_target,
-                DeliverySuccessEvent(seen_keys=(marker_key,), failure_seen_removals=(marker_key,), seen_at_s=now_s),
-            )
-            if not copy_manager and fallback_status == ASYNC_DELIVERY_STARTED:
-                remember_seen(seen, marker_key, now_s)
-            return fallback_status
-    if not copy_manager:
-        if worker_status == ASYNC_DELIVERY_STARTED:
-            remember_seen(seen, marker_key, now_s)
-            return ASYNC_DELIVERY_STARTED
-        if worker_status == 0:
-            remember_seen(seen, worker_key, now_s)
-        if args.dry_run or clear_pending_marker_if_current(args.root, marker):
-            return 0
-        return 1
-    if not worker_seen and worker_status == 0:
-        remember_seen(seen, worker_key, now_s)
-    manager_text = marker_fyi_text(marker, attachments)
-    manager_status = push_manager_text_to_target(
-        args,
-        manager_text,
-        manager_target,
-        DeliverySuccessEvent(seen_keys=(marker_key,), seen_at_s=now_s),
-        marker=marker,
+    reminders = MANAGER_EMAIL_POLICY_REMINDERS if marker.source == "email" else MANAGER_POLICY_REMINDERS
+    fallback_event = DeliverySuccessEvent(
+        seen_keys=(marker_key,),
+        failure_seen_removals=(marker_key,),
+        seen_at_s=now_s,
     )
-    if manager_status == 0 and worker_status == ASYNC_DELIVERY_STARTED:
-        return ASYNC_DELIVERY_STARTED
-    return manager_status
+    if not target:
+        fallback = direct_delivery_fallback_text(marker, attachments, "no usable frontmatter `runat` target was found")
+        status = push_marker_text_or_escalate(
+            args,
+            marker,
+            with_manager_policy_reminder(args, fallback, reminders),
+            manager_target,
+            fallback_event,
+        )
+        if status == ASYNC_DELIVERY_STARTED:
+            remember_seen(seen, marker_key, now_s)
+        return status
+
+    direct_key = direct_delivery_seen_key(args, marker, target, attachments)
+    failure_text = direct_delivery_fallback_text(marker, attachments, f"target `{target}` did not accept the message")
+    result = push_marker_delivery(
+        args,
+        marker,
+        marker_direct_text(marker, attachments),
+        target,
+        DeliverySuccessEvent(
+            seen_keys=(direct_key,),
+            seen_after_clear_keys=(marker_key,),
+            seen_at_s=now_s,
+            clear_root=args.root,
+            clear_marker=marker,
+            failure_seen_removals=(marker_key,),
+        ),
+        failure_fallback_target=manager_target,
+        failure_fallback_text=with_manager_policy_reminder(args, failure_text, reminders),
+        failure_success_event=fallback_event,
+    )
+    if result.status == ASYNC_DELIVERY_STARTED:
+        remember_seen(seen, marker_key, now_s)
+        return result.status
+    if result.status != 0:
+        fallback = with_failed_target_escalation(failure_text, target, result)
+        status = push_marker_text_or_escalate(args, marker, fallback, manager_target, fallback_event)
+        if status == ASYNC_DELIVERY_STARTED:
+            remember_seen(seen, marker_key, now_s)
+        return status
+    remember_seen(seen, direct_key, now_s)
+    if args.dry_run or clear_pending_marker_if_current(args.root, marker):
+        return 0
+    return 1
 
 
 def push_ref(args: Args, seen: dict[str, float], now_s: float, marker: Marker, attachments: Sequence[SourceAttachment]) -> int:
     """Deliver one pending marker, guarded by its current file position."""
 
-    reminders = MANAGER_EMAIL_POLICY_REMINDERS if marker.source == "email" else MANAGER_POLICY_REMINDERS
     marker_key = marker_seen_key(args, marker, attachments)
     for_manager = marker_is_for_manager(marker, attachments)
-    manager_target = marker_for_manager_target(args, marker) if for_manager else marker_manager_target(args, marker)
-    if not args.dry_run and not manager_target:
-        print("omo_pending_watch: a frontmatter `managerat` or OMO_MANAGER_TMUX_TARGET is required outside --dry-run", file=sys.stderr)
-        return 1
     attachment_errors = any(attachment.error for attachment in attachments)
-    rejected_source = any(attachment.error in REJECTED_SOURCE_ERRORS for attachment in attachments)
-    dm_only = not for_manager and marker_is_dm_only(marker, attachments)
-    if dm_only and not rejected_source:
-        return push_dm_ref(args, seen, now_s, marker, attachments, manager_target, copy_manager=False)
-    if dm_only and rejected_source:
+    if not for_manager and not is_main_manager_task_file(marker.file) and attachment_errors:
+        manager_target = marker_for_manager_target(args, marker)
         error_key = attachment_error_seen_key(args, marker, attachments)
         if seen_contains(seen, error_key, now_s):
             return 1
+        text = direct_delivery_fallback_text(marker, attachments, "one or more linked sources could not be read safely")
         status = push_marker_text_or_escalate(
             args,
             marker,
-            dm_only_delivery_failure_text(marker, "a linked source was rejected by the path policy"),
+            text,
             manager_target,
             DeliverySuccessEvent(seen_keys=(error_key,), seen_at_s=now_s),
         )
         if status == 0:
             remember_seen(seen, error_key, now_s)
         return status if status not in {0, 2} else 1
-    if not for_manager and marker_is_dm(marker, attachments) and not dm_only:
-        return push_dm_ref(args, seen, now_s, marker, attachments, manager_target)
+    if not for_manager and not is_main_manager_task_file(marker.file):
+        return push_direct_ref(args, seen, now_s, marker, attachments)
+
+    reminders = MANAGER_EMAIL_POLICY_REMINDERS if marker.source == "email" else MANAGER_POLICY_REMINDERS
+    manager_target = marker_for_manager_target(args, marker) if for_manager else args.manager_target
+    if not args.dry_run and not manager_target:
+        print("omo_pending_watch: a manager delivery target is required outside --dry-run", file=sys.stderr)
+        return 1
     if attachment_errors:
         error_key = attachment_error_seen_key(args, marker, attachments)
         if seen_contains(seen, error_key, now_s):
@@ -1865,7 +1666,7 @@ def push_manager_text_to_target(
         scoped_args.manager_target,
         success_event=success_event,
         failure_fallback_target=fallback_target,
-        failure_pending_guard=PendingGuard(args.root, marker.file, marker.line, marker.digest) if marker is not None else None,
+        failure_pending_guard=PendingGuard(args.root, marker.file, marker.line, marker.digest, marker.block_text) if marker is not None else None,
         problem_guard=problem_guard,
         failure_problem_guard=problem_guard,
     )
@@ -1873,7 +1674,7 @@ def push_manager_text_to_target(
         return result.status
     if not fallback_target:
         return result.status
-    if marker is not None and not pending_marker_present(args.root, marker.file, marker.line, marker.digest):
+    if marker is not None and not pending_marker_present(args.root, marker.file, marker.line, marker.digest, marker.block_text):
         return result.status
     return try_send_delivery_text(
         "manager delivery",
@@ -1883,6 +1684,7 @@ def push_manager_text_to_target(
         pending_file=marker.file if marker is not None else None,
         pending_line=marker.line if marker is not None else 0,
         pending_digest=marker.digest if marker is not None else "",
+        pending_text=marker.block_text if marker is not None else "",
         success_event=success_event,
         problem_guard=problem_guard,
     ).status
@@ -1897,9 +1699,10 @@ def send_delivery_text(
     pending_file: Path | None = None,
     pending_line: int = 0,
     pending_digest: str = "",
+    pending_text: str = "",
     submit_verify_timeout_s: float = DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S,
 ) -> int:
-    return try_send_delivery_text(name, text, target, root=root, pending_file=pending_file, pending_line=pending_line, pending_digest=pending_digest, submit_verify_timeout_s=submit_verify_timeout_s).status
+    return try_send_delivery_text(name, text, target, root=root, pending_file=pending_file, pending_line=pending_line, pending_digest=pending_digest, pending_text=pending_text, submit_verify_timeout_s=submit_verify_timeout_s).status
 
 
 def try_send_delivery_text(
@@ -1911,6 +1714,7 @@ def try_send_delivery_text(
     pending_file: Path | None = None,
     pending_line: int = 0,
     pending_digest: str = "",
+    pending_text: str = "",
     submit_verify_timeout_s: float = DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S,
     success_event: DeliverySuccessEvent | None = None,
     failure_fallback_target: str = "",
@@ -1920,10 +1724,10 @@ def try_send_delivery_text(
     problem_guard: AgentProblemGuard | None = None,
     failure_problem_guard: AgentProblemGuard | None = None,
 ) -> DeliveryResult:
-    if root is not None and pending_file is not None and not pending_marker_present(root, pending_file, pending_line, pending_digest):
+    if root is not None and pending_file is not None and not pending_marker_present(root, pending_file, pending_line, pending_digest, pending_text):
         print(f"omo_pending_watch: {name} skipped; pending marker cleared before tmux paste", file=sys.stderr)
         return DeliveryResult(1, "pending marker cleared before tmux paste")
-    pending_guard = PendingGuard(root, pending_file, pending_line, pending_digest) if root is not None and pending_file is not None else None
+    pending_guard = PendingGuard(root, pending_file, pending_line, pending_digest, pending_text) if root is not None and pending_file is not None else None
     options = CodexSendOptions(
         DEFAULT_TMUX_ENTER_COUNT,
         0.15,
