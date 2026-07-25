@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 
+from omo_manager.omo_task_edit import add_pending_items
 from omo_manager.omo_task_metadata import PendingItemsBlocker
 from omo_manager.omo_task_metadata import TaskFrontmatterError
 from omo_manager.omo_task_metadata import parse_task_metadata
@@ -114,6 +115,10 @@ class TaskMetadataV2Tests(unittest.TestCase):
         self.assertIsInstance(blocker, PendingItemsBlocker)
         assert isinstance(blocker, PendingItemsBlocker)
         self.assertEqual((OTHER_ITEM_ID,), blocker.item_ids)
+
+    def test_v1_mutator_rejects_v2_until_enablement(self) -> None:
+        with self.assertRaisesRegex(TaskFrontmatterError, "v2 task mutation is disabled"):
+            add_pending_items(v2_task(), ("new item",))
 
 if __name__ == "__main__":
     unittest.main()

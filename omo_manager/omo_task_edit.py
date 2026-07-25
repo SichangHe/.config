@@ -19,6 +19,7 @@ from omo_manager.omo_agent_status import TaskMetadata
 from omo_manager.omo_agent_status import parse_task_metadata
 from omo_manager.omo_task_status import replace_if_unchanged
 from omo_manager.omo_task_status import task_path
+from omo_manager.omo_task_metadata import TASK_FRONTMATTER_V1
 
 PENDING_MARKER = "(pending)"
 REMOVE_REMINDER = "Verify the removed pending item was actually done or cancelled; consider evaluator agents for uncertain verification."
@@ -292,6 +293,13 @@ def require_metadata(text: str) -> TaskMetadata:
     return metadata
 
 
+def require_v1_metadata(text: str) -> TaskMetadata:
+    metadata = require_metadata(text)
+    if metadata.version != TASK_FRONTMATTER_V1:
+        raise TaskFrontmatterError("v2 task mutation is disabled until migration validation and watcher enablement are complete.")
+    return metadata
+
+
 def require_task_file(task_file: Path | None) -> Path:
     if task_file is None:
         raise TaskFrontmatterError("task file is required.")
@@ -332,6 +340,7 @@ def preferred_newline(text: str) -> str:
 
 
 def render_pending_items(text: str, items: tuple[str, ...]) -> str:
+    _ = require_v1_metadata(text)
     lines = text.splitlines(keepends=True)
     bounds = pending_list_bounds(lines)
     newline = line_newline(lines[bounds.field_idx])
@@ -347,7 +356,7 @@ def render_pending_items(text: str, items: tuple[str, ...]) -> str:
 
 def add_pending_items(text: str, items: tuple[str, ...]) -> tuple[str, int]:
     requested = normalized_items(items)
-    metadata = require_metadata(text)
+    metadata = require_v1_metadata(text)
     if metadata.status == "done":
         raise TaskFrontmatterError("task is already done; do not add pending task items to done tasks.")
     existing = list(metadata.pending_task_items)
@@ -364,7 +373,7 @@ def add_pending_items(text: str, items: tuple[str, ...]) -> tuple[str, int]:
 
 
 def replace_pending_item(text: str, old_item: str, new_item: str) -> tuple[str, bool]:
-    metadata = require_metadata(text)
+    metadata = require_v1_metadata(text)
     if metadata.status == "done":
         raise TaskFrontmatterError("task is already done; do not replace pending task items on done tasks.")
     old_value = normalized_item(old_item)
@@ -384,7 +393,7 @@ def replace_pending_item(text: str, old_item: str, new_item: str) -> tuple[str, 
 
 
 def remove_pending_items(text: str, items: tuple[str, ...]) -> tuple[str, int]:
-    metadata = require_metadata(text)
+    metadata = require_v1_metadata(text)
     requested = normalized_items(items)
     current = list(metadata.pending_task_items)
     missing = [item for item in requested if item not in current]
@@ -402,7 +411,7 @@ def pending_remove_evidence_comment(n_items: int, evidence: str) -> str:
 
 
 def append_comment(text: str, comment: str) -> str:
-    _ = require_metadata(text)
+    _ = require_v1_metadata(text)
     value = normalized_comment(comment)
     return append_comment_line(text, value)
 
@@ -577,7 +586,7 @@ def move_pending_item(source_text: str, target_text: str, item: str) -> tuple[st
 
 
 def append_delegate_message(text: str, message: str) -> str:
-    metadata = require_metadata(text)
+    metadata = require_v1_metadata(text)
     if metadata.status == "done":
         raise TaskFrontmatterError("task is already done; do not delegate new messages to done tasks.")
     if metadata.is_manager:
@@ -619,6 +628,10 @@ def run(args: Args) -> int:
         path = task_path(args.root, require_task_file(args.task_file))
         before = path.stat()
         text = path.read_text(encoding="utf-8")
+        if command not in {"summary", "pending-list"}:
+            metadata = parse_task_metadata(text)
+            if metadata is not None and metadata.version != TASK_FRONTMATTER_V1:
+                raise TaskFrontmatterError("v2 task mutation is disabled until migration validation and watcher enablement are complete.")
         if command == "summary":
             print(summary_text(text), end="")
             return 0
