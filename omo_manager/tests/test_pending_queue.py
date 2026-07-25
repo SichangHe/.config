@@ -63,7 +63,7 @@ class PendingQueueTests(unittest.TestCase):
             root = Path(tmp)
             path = root / "secret-task.md"
             (root / "TODO.md").write_text("current:\nsecret-task.md cfg:2\n", encoding="utf-8")
-            path.write_text(task_text(), encoding="utf-8")
+            path.write_text(task_text("long_running"), encoding="utf-8")
             output = StringIO()
             with patch("omo_manager.omo_pending.current_active_task", return_value=path), redirect_stdout(output):
                 self.assertEqual(0, run(Args("add", ("inspect failure",)), root))

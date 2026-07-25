@@ -208,6 +208,11 @@ class TaskStatusTests(unittest.TestCase):
 
         self.assertIn("status: long_running\nrunat:", updated)
         self.assertIn("body\n", updated)
+        self.assertNotIn("blocked_on:", updated)
+
+    def test_long_running_rejects_blocked_on(self) -> None:
+        with self.assertRaisesRegex(TaskFrontmatterError, "only valid"):
+            update_frontmatter_status(task_frontmatter() + "body\n", "long_running", "persistent role")
 
     def test_pending_marker_blocks_status_change(self) -> None:
         text = task_frontmatter() + "(pending)\nplease route\n"

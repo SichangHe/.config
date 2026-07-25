@@ -23,6 +23,7 @@ from omo_manager.omo_task import (
     ensure_task_file,
     refreshed_todo_entry,
     is_vl_agent,
+    launched_frontmatter_text,
     link_todo,
     main,
     new_window,
@@ -326,6 +327,32 @@ class OmoTaskTests(unittest.TestCase):
             assert metadata is not None
             self.assertEqual("long_running", metadata.status)
             self.assertTrue(metadata.is_manager)
+
+    def test_manager_relaunch_clears_blocker_for_long_running(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            existing = (
+                "---\\n"
+                "version: v1.0.0\\n"
+                "status: blocked\\n"
+                "blocked_on: waiting for a manager decision\\n"
+                "runat: cfg:2\\n"
+                "tool: codex\\n"
+                "managerat: wl:1\\n"
+                "is_manager: true\\n"
+                "pending_task_items: []\\n"
+                "---\\n"
+                "continue coordination\\n"
+            )
+            args = Args(root, "manager.md", "cfg", "2", "codex", root, "", None, False, False, "", "medium", (), manager_target="wl:1", is_manager=True, model="gpt-5.6-terra")
+
+            updated = launched_frontmatter_text(existing, args, "cfg:2")
+            metadata = parse_task_metadata(updated)
+
+            self.assertIsNotNone(metadata)
+            assert metadata is not None
+            self.assertEqual("long_running", metadata.status)
+            self.assertEqual("", metadata.blocked_on)
 
     def test_vl_worker_launch_requires_manager_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

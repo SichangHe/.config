@@ -76,6 +76,20 @@ class TaskEditTests(unittest.TestCase):
             self.assertEqual(0, exit_code)
             self.assertEqual(task_frontmatter(pending_items=("finish review", "email human")) + "body\n", task.read_text(encoding="utf-8"))
 
+    def test_adds_pending_items_to_long_running_task_without_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            task.write_text(task_frontmatter(status="long_running") + "body\n", encoding="utf-8")
+
+            exit_code = run(Args(root, Path("task.md"), "pending-add", items=("review queue",)))
+
+            self.assertEqual(0, exit_code)
+            self.assertEqual(
+                task_frontmatter(status="long_running", pending_items=("review queue",)) + "body\n",
+                task.read_text(encoding="utf-8"),
+            )
+
     def test_add_rejects_done_task_and_empty_item(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
