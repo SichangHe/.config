@@ -100,6 +100,10 @@ TMUX_TARGET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?$")
 AGENT_POINTER_WITH_TARGET_RE = re.compile(r"^\(from agent ([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?) (/tmp/omo-agent-messages-[^)]*)\)$")
 AGENT_MESSAGE_DIR_RE = re.compile(r"^/tmp/omo-agent-messages-[^/]+/")
 AGENT_PROBLEM_HEADER = "Handle ALL omo_pending_watch agent problems below; only email human if you cannot handle them:"
+DELIVERY_RECOVERY_POLICY = (
+    "Before a delivery-recovery stop, await every retained async sender result and refresh watcher status. "
+    "A stop requires both a terminal failed sender result and fresh `not_codex` or unchanged fatal-error evidence after non-destructive recovery; visible input alone is insufficient."
+)
 MANAGER_COMPACTION_REMINDER = "Unless you know the exact content of MANAGER.md, read it. Normally, don't ack human"
 TODO_LENGTH_REMINDER = (
     "omo_pending_watch detected TODO.md with {n_lines} lines is too long. "
@@ -336,6 +340,7 @@ DELIVERY_SUCCESS_EVENTS: SimpleQueue[DeliverySuccessEvent] = SimpleQueue()
 CAPACITY_ADVISORY_DISCOVERIES: SimpleQueue[tuple[str, str]] = SimpleQueue()
 CAPACITY_ADVISORY_PENDING: set[tuple[str, str]] = set()
 PENDING_SENDS: set[Future[None]] = set()
+PENDING_SEND_HANDLERS: dict[Future[None], Callable[[Future[None]], None]] = {}
 PENDING_SENDS_LOCK = Lock()
 
 
@@ -396,12 +401,21 @@ def run_verified_send(
     verified_send_to_codex(target, message, options, before_paste=before_paste if pending_guard is not None or problem_guard is not None else None)
 
 
-def log_send_result(future: Future[None], success_event: DeliverySuccessEvent | None = None, failure_fallback: DeliveryFailureFallback | None = None) -> None:
+def log_send_result(
+    future: Future[None],
+    success_event: DeliverySuccessEvent | None = None,
+    failure_fallback: DeliveryFailureFallback | None = None,
+    problem_guard: AgentProblemGuard | None = None,
+) -> None:
     """Log delivery failure or queue success-side effects for the main loop."""
 
     try:
         _ = future.result()
     except Exception as exc:
+        if problem_guard is not None and not agent_problem_guard_current(problem_guard):
+            print("omo_pending_watch: async delivery result is stale after watcher-state refresh", file=sys.stderr)
+            queue_delivery_failure_event(success_event)
+            return
         print(f"omo_pending_watch: async delivery failed: {exc}", file=sys.stderr)
         result = DeliveryResult(1, str(exc))
         if failure_fallback is not None:
@@ -468,9 +482,27 @@ def queue_delivery_failure_event(success_event: DeliverySuccessEvent | None) -> 
     )
 
 
-def forget_send(future: Future[None]) -> None:
+def retain_send_result(future: Future[None], handler: Callable[[Future[None]], None]) -> None:
+    """Retain an async sender and its result handler for the watcher thread."""
+
     with PENDING_SENDS_LOCK:
-        PENDING_SENDS.discard(future)
+        PENDING_SENDS.add(future)
+        PENDING_SEND_HANDLERS[future] = handler
+
+
+def drain_send_results() -> None:
+    """Consume completed sender results on the watcher thread."""
+
+    while True:
+        with PENDING_SENDS_LOCK:
+            completed = [(future, PENDING_SEND_HANDLERS[future]) for future in PENDING_SENDS if future.done()]
+            for future, _handler in completed:
+                PENDING_SENDS.remove(future)
+                del PENDING_SEND_HANDLERS[future]
+        if not completed:
+            return
+        for future, handler in completed:
+            handler(future)
 
 
 def submit_send(
@@ -485,9 +517,7 @@ def submit_send(
     """Submit verified tmux delivery without forking a helper process."""
 
     future = send_executor().submit(run_verified_send, target, message, options, pending_guard, problem_guard)
-    with PENDING_SENDS_LOCK:
-        PENDING_SENDS.add(future)
-    future.add_done_callback(lambda completed: (log_send_result(completed, success_event, failure_fallback), forget_send(completed)))
+    retain_send_result(future, lambda completed: log_send_result(completed, success_event, failure_fallback, problem_guard))
     return future
 
 
@@ -514,6 +544,7 @@ def send_to_codex(
 def drain_delivery_successes(args: Args, seen: dict[str, float], now_wall_s: float) -> bool:
     """Apply completed background-send side effects on the watcher thread."""
 
+    drain_send_results()
     changed = False
     while True:
         try:
@@ -572,15 +603,16 @@ def pending_send_snapshot() -> tuple[Future[None], ...]:
 
 
 def wait_for_delivery_successes(args: Args, seen: dict[str, float], timeout_s: float) -> bool:
-    """Wait for already-launched sends so one-shot mode can apply callbacks."""
+    """Await retained sends; report slow progress without abandoning results."""
 
     changed = False
     deadline_s = time.monotonic() + timeout_s
     while futures := pending_send_snapshot():
         remaining_s = deadline_s - time.monotonic()
         if remaining_s <= 0:
-            print(f"omo_pending_watch: timed out waiting for {len(futures)} async delivery result(s)", file=sys.stderr)
-            return drain_delivery_successes(args, seen, time.time()) or changed
+            print(f"omo_pending_watch: still waiting for {len(futures)} async delivery result(s)", file=sys.stderr)
+            deadline_s = time.monotonic() + timeout_s
+            continue
         _done, _pending = wait_futures(futures, timeout=min(remaining_s, 0.5))
         changed = drain_delivery_successes(args, seen, time.time()) or changed
     return drain_delivery_successes(args, seen, time.time()) or changed
@@ -2202,6 +2234,7 @@ def log_capacity_resume_result(
     future: Future[None],
     success_event: DeliverySuccessEvent,
     fallback: DeliveryFailureFallback | None,
+    guard: AgentProblemGuard,
     args: Args,
     row: ProblemRow,
     attempt: int,
@@ -2210,7 +2243,11 @@ def log_capacity_resume_result(
         _ = future.result()
     except Exception as exc:
         if fallback is not None:
-            log_send_result(future, success_event, fallback)
+            log_send_result(future, success_event, fallback, guard)
+            return
+        if not agent_problem_guard_current(guard):
+            print("omo_pending_watch: async capacity result is stale after watcher-state refresh", file=sys.stderr)
+            queue_delivery_failure_event(success_event)
             return
         queue_delivery_failure_event(success_event)
         text = capacity_alert_text(row, attempt, f"The resume submission failed: {exc}.")
@@ -2265,9 +2302,10 @@ def submit_capacity_resume(
         remember_seen(seen, attempt_key, now_wall_s)
         seen[next_key] = now_wall_s + delay_s
         return push_capacity_owner_alert(args, seen, row, attempt, f"Resume submission failed immediately: {exc}.", now_wall_s)
-    with PENDING_SENDS_LOCK:
-        PENDING_SENDS.add(future)
-    future.add_done_callback(lambda completed: (log_capacity_resume_result(completed, success_event, fallback, args, row, attempt), forget_send(completed)))
+    retain_send_result(
+        future,
+        lambda completed: log_capacity_resume_result(completed, success_event, fallback, guard, args, row, attempt),
+    )
     return True
 
 
@@ -2446,7 +2484,7 @@ def problem_section(status: str, rows: list[ProblemRow]) -> list[str]:
         "manager_compaction": f"{len(rows)} are compacting; reread MANAGER.md after compaction unless the summary already included it:",
         "manager_waiting_subagent": f"{len(rows)} managers are waiting on a subagent and could not be interrupted automatically; inspect or interrupt them:",
         "ready": f"{len(rows)} ready and not blocked; consider resuming or closing them:",
-        "stuck_input": f"{len(rows)} have their input being stuck; unstick or restart them:",
+        "stuck_input": f"{len(rows)} have visible input; refresh status and unstick safely; do not stop a live agent solely for this input:",
         "untracked_agent": f"{len(rows)} not tracked in any task file; ask them what their task is, or consider resuming or closing them:",
         "done-stale": f"{len(rows)} are marked `done` but remain open; either close the agents or correct the task status:",
     }
@@ -2460,7 +2498,7 @@ def format_agent_problem_report(lines: list[str]) -> str:
     if not rows:
         return ""
     order = ("not_codex", "untracked_agent", "blocked_idle", "error", "manager_compaction", "manager_waiting_subagent", "ready", "stuck_input", "done-stale")
-    parts = [AGENT_PROBLEM_HEADER]
+    parts = [AGENT_PROBLEM_HEADER, DELIVERY_RECOVERY_POLICY]
     for status in order:
         parts.extend(problem_section(status, [row for row in rows if row.status == status]))
     return "\n".join(parts).strip()

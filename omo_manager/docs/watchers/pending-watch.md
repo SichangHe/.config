@@ -22,6 +22,9 @@
 
 - subprocess isolation
   - pending dispatch calls the `omo_tmux_send.py` library sender in-process
+  - the watcher retains every asynchronous sender future until the watcher thread awaits and consumes its result
+  - one-shot mode emits periodic slow-send notices but does not exit while a retained result remains unconsumed
+  - guarded failures refresh current watcher state before failure diagnosis or fallback
   - agent-problem checks run as background child processes and are polled
   - digest delivery runs as a background child process and is polled
   - timeout handling kills overdue maintenance children and logs stderr
@@ -109,12 +112,18 @@
     - ``vl_langdoc_9160.md vl:32 <output>...</output>``
     - ``16 ready and not blocked; consider resuming or closing them:``
     - ``vl:11 <output>...</output>``
-    - ``6 have their input being stuck; unstick or restart them:``
+    - ``6 have visible input; refresh status and unstick safely; do not stop a live agent solely for this input:``
     - ``vl:37 <input>Manager correction: ignore the earlier Read first item for MANAGER.md.</input>``
     - ``1 not tracked in any task file; ask them what their task is, or consider resuming or closing them:``
     - ``vl:41 <output>Implemented and privately reported.</output>``
     - ``1 are marked `done` but remain open; either close the agents or correct the task status:``
     - ``task_name.md``
+
+- delivery recovery stop evidence
+  - await every retained asynchronous sender result before diagnosing its delivery
+  - rerun watcher status after the result; an older problem snapshot is not current evidence
+  - visible input alone never justifies stopping a live agent
+  - a recovery stop requires both a terminal failed sender result and fresh watcher `not_codex` or unchanged fatal-error evidence after non-destructive recovery
 
 - scoped maintenance
   - all manager-owned worker rows are handled by the same owner-routed problem scan

@@ -213,6 +213,9 @@ def write_report_worker_task(root: Path, name: str = "task.md", *, runat: str = 
 class PendingMarkerTests(unittest.TestCase):
     def setUp(self) -> None:
         pending_watcher.CAPACITY_ADVISORY_PENDING.clear()
+        with pending_watcher.PENDING_SENDS_LOCK:
+            pending_watcher.PENDING_SENDS.clear()
+            pending_watcher.PENDING_SEND_HANDLERS.clear()
         while not pending_watcher.CAPACITY_ADVISORY_DISCOVERIES.empty():
             _ = pending_watcher.CAPACITY_ADVISORY_DISCOVERIES.get_nowait()
         self._send_patch = patch("omo_manager.omo_pending_watch.send_to_codex", side_effect=self._fake_send_to_codex)
@@ -5513,8 +5516,80 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertFalse(watcher.handle_agent_problem_result(args, seen, result, 1000.0))
             self.assertFalse(watcher.handle_agent_problem_result(args, seen, result, 1001.0))
             self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 1002.0))
-        self.assertEqual(1, out.getvalue().count("1 have their input being stuck; unstick or restart them:"))
+        self.assertEqual(1, out.getvalue().count("1 have visible input; refresh status and unstick safely; do not stop a live agent solely for this input:"))
         self.assertNotIn("(from agent omo_pending_watch agent-problem)", out.getvalue())
+
+    def test_agent_problem_report_defines_delivery_recovery_stop_evidence(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        text = watcher.format_agent_problem_report(
+            ["stuck_input: task=task.md evidence=target=cfg:1 input=queued prompt unstick=not_safe:plan_prompt"]
+        )
+
+        self.assertIn("await every retained async sender result and refresh watcher status", text)
+        self.assertIn("terminal failed sender result and fresh `not_codex` or unchanged fatal-error evidence", text)
+        self.assertIn("visible input alone is insufficient", text)
+
+    def test_completed_sender_result_is_retained_until_watcher_drain(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/missing-status.py"), False, True)
+        future: Future[None] = Future()
+        future.set_result(None)
+        event = watcher.DeliverySuccessEvent(seen_keys=("delivery-key",), seen_at_s=1000.0)
+        watcher.retain_send_result(future, lambda completed: watcher.log_send_result(completed, event))
+
+        self.assertIn(future, watcher.pending_send_snapshot())
+        seen: dict[str, float] = {}
+        self.assertTrue(watcher.drain_delivery_successes(args, seen, 1001.0))
+        self.assertNotIn(future, watcher.pending_send_snapshot())
+        self.assertIn("delivery-key", seen)
+
+    def test_one_shot_wait_keeps_delayed_submit_result_after_notice_interval(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        class Executor:
+            def __init__(self, future: Future[None]) -> None:
+                self.future = future
+
+            def submit(self, *_args: object) -> Future[None]:
+                return self.future
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/missing-status.py"), False, True)
+        future: Future[None] = Future()
+        event = watcher.DeliverySuccessEvent(seen_keys=("delivery-key",), seen_at_s=1000.0)
+        with patch("omo_manager.omo_pending_watch.send_executor", return_value=Executor(future)):
+            submitted = watcher.submit_send("cfg:1", "message", watcher.CodexSendOptions(1, 0.0, False), success_event=event)
+
+        def finish_sender(_futures: object, **_kwargs: object) -> tuple[set[Future[None]], set[Future[None]]]:
+            future.set_result(None)
+            return {future}, set()
+
+        err = StringIO()
+        seen: dict[str, float] = {}
+        with patch("omo_manager.omo_pending_watch.time.monotonic", side_effect=(0.0, 2.0, 2.0, 2.0)), patch(
+            "omo_manager.omo_pending_watch.wait_futures", side_effect=finish_sender
+        ), redirect_stderr(err):
+            self.assertTrue(watcher.wait_for_delivery_successes(args, seen, 1.0))
+
+        self.assertIs(submitted, future)
+        self.assertIn("still waiting for 1 async delivery result", err.getvalue())
+        self.assertNotIn(future, watcher.pending_send_snapshot())
+        self.assertIn("delivery-key", seen)
+
+    def test_failed_guarded_sender_refreshes_state_before_diagnosis(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        future: Future[None] = Future()
+        future.set_exception(RuntimeError("different input remains visible"))
+        guard = watcher.AgentProblemGuard(("status",), ("stuck",))
+        err = StringIO()
+        with patch("omo_manager.omo_pending_watch.agent_problem_guard_current", return_value=False) as refresh, redirect_stderr(err):
+            watcher.log_send_result(future, problem_guard=guard)
+
+        refresh.assert_called_once_with(guard)
+        self.assertIn("stale after watcher-state refresh", err.getvalue())
+        self.assertNotIn("async delivery failed", err.getvalue())
 
     def test_agent_problem_check_pushes_blocked_idle_reports(self) -> None:
         from omo_manager import omo_pending_watch as watcher
