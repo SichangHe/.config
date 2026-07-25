@@ -4,6 +4,8 @@
   - helper contract for project registry and compact submanager summaries
 - `agent-status.md`
   - active task and pane status summaries for manager maintenance
+- `bidirectional-blocking-design.md`
+  - reviewed data model and worker acceptance criteria for item dependencies
 - `project-registry.md`
   - main-manager-owned project registry helper reference
 - `task-file-frontmatter.md`
