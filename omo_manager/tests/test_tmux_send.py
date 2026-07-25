@@ -597,8 +597,10 @@ class TmuxSendTests(unittest.TestCase):
             self.assertEqual("literal $HOME\n", payload_path.read_text(encoding="utf-8"))
             self.assertEqual("running\n", (result_dir / "status.txt").read_text(encoding="utf-8"))
             self.assertEqual(0o700, stat.S_IMODE(os.stat(result_dir).st_mode))
+            self.assertIn("queued; delivery has not yet been verified", stdout.getvalue())
             self.assertIn("async_id:", stdout.getvalue())
             self.assertIn(f"result_dir: {result_dir}", stdout.getvalue())
+            self.assertIn(f"completion: omo_tmux_send.py --async-result {result_dir.name.removeprefix('omo-tmux-send-async-')}", stdout.getvalue())
         finally:
             for path in result_dir.iterdir():
                 path.unlink(missing_ok=True)

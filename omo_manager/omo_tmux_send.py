@@ -724,8 +724,10 @@ def launch_async(args: Args, message: str) -> AsyncJob | None:
         _ = print(f"result_dir: {job.result_dir}")
         raise
     write_async_metadata(job, args, proc.pid)
+    _ = print("omo_tmux_send: queued; delivery has not yet been verified.")
     _ = print(f"async_id: {job.job_id}")
     _ = print(f"result_dir: {job.result_dir}")
+    _ = print(f"completion: omo_tmux_send.py --async-result {job.job_id}")
     _ = print(f"omo_tmux_send: async worker pid={proc.pid}")
     return job
 
