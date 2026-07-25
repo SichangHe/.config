@@ -5350,6 +5350,25 @@ class PendingMarkerTests(unittest.TestCase):
 
             self.assertIn("1 open pending items", watcher.agent_pending_item_reminder_texts(root)["wl:4"])
 
+    def test_blocked_agent_does_not_receive_pending_item_reminders(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "TODO.md").write_text("human pending:\ncontact.md wl:4\n", encoding="utf-8")
+            (root / "contact.md").write_text(
+                task_frontmatter(
+                    status="blocked",
+                    blocked_on="waiting for an authorized launch",
+                    runat="wl:4",
+                    managerat="wl:1",
+                    pending_items=("capture the next launch diagnostic",),
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual({}, watcher.agent_pending_item_reminder_texts(root))
+
     def test_pending_item_reminders_reject_tmux_alias_collision(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 

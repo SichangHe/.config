@@ -2068,7 +2068,7 @@ def agent_pending_item_reminder_counts(root: Path) -> dict[str, int]:
         seen.add(task.task_file)
         state_path = resolve_task_path(root, task.task_file)
         metadata = read_task_metadata(state_path)
-        if metadata is None or metadata.status not in {"running", "long_running", "blocked"} or metadata.runat == "retired":
+        if metadata is None or metadata.status not in {"running", "long_running"} or metadata.runat == "retired":
             continue
         queues.append((metadata.runat, len(metadata.pending_task_items)))
     counts: dict[str, int] = {}

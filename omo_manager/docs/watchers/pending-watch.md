@@ -136,7 +136,7 @@
   - manager self-problem rows and matching `unstuck:` rows are logged and filtered by the watcher so they are not pasted back into the manager prompt
   - `human_request` status rows are filtered from agent-problem prompts because live `(pending)` blocks are dispatched through the pending-marker path
   - manager compaction reminders say ``Unless you know the exact content of MANAGER.md, read it. Normally, don't ack human``
-  - any ready active agent with pending items receives a path-opaque reminder at its own `runat`; this includes `long_running`, managers, and queues below the former size threshold
+  - any ready `running` or `long_running` agent with pending items receives a path-opaque reminder at its own `runat`; blocked agents wait for their blocker instead of receiving impossible-work reminders
   - reminders say `You have N open pending items. To see them, run `omo_pending.py list`. Continue working and complete them, and run `omo_pending.py remove` only after verifying an item is complete or cancelled.`; they do not expose task filenames, item text, `managerat`, or backing storage
   - unchanged reminder counts are deduplicated and repeat only after `--agent-problem-repeat-s`; a changed count is sent on the next shared pass
   - a manager with more than five unique active direct-report targets receives the target list and an instruction to delegate some reports to submanagers; unchanged lists use the same repeat interval
