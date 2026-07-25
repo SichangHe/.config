@@ -58,7 +58,8 @@
   - verbose `[omo-message-source: ...]` markers remain recognized for old blocks
   - unmarked pending blocks are `origin=human source=manual` because prompts appended to `work_manager*.md` are human-origin unless explicitly marked otherwise
   - human-origin refs routed to a manager require the manager acknowledgement flow; ordinary direct delivery sends no manager acknowledgement
-  - ordinary pending blocks in frontmatter task files route directly to `runat`; successful delivery contains only clean message content, clears the consumed `(pending)` only when its original block is unchanged or bounded by a later `(pending)`, and sends no manager copy
+  - ordinary pending blocks in frontmatter task files route directly to `runat`; each delivery starts with `Immediately record every pending task with `omo_pending.py add`:` and wraps only the clean request, readable linked content, and retained source pointer in `<human_instruction>`
+  - direct delivery does not include manager record/replace/remove instructions, clears the consumed `(pending)` only when its original block is unchanged or bounded by a later `(pending)`, and sends no manager copy
   - if a resolved manager delivery target is unavailable and differs from `OMO_MANAGER_TMUX_TARGET`, the same manager-facing message is escalated to `OMO_MANAGER_TMUX_TARGET` with the failed target and error inline
   - `for manager` or `for a manager` at the beginning or end of active unquoted content routes to `managerat`; matching ignores case, surrounding punctuation, and edge whitespace, but changed internal spacing does not match
   - marker search includes the pending block and readable one-level attachments, including linked email content; quote lines and indented code are excluded, and links inside attachments are not followed
@@ -86,7 +87,7 @@
   - `</status>`
 
 - agent-problem routing
-  - runs `omo_agent_status.py --problems-only` every `--agent-problem-interval-s` seconds, default `300`
+  - runs `omo_agent_status.py --problems-only` every `--agent-problem-interval-s` seconds, default `30` unless `OMO_MANAGER_AGENT_PROBLEM_INTERVAL_S` overrides it
   - scans all task owners; `OMO_MANAGER_TMUX_TARGET` only adds the main-manager self-check
   - dispatches each problem group to the row's `owner_target`, falling back to `OMO_MANAGER_TMUX_TARGET` only when no owner is known
   - detects task files with frontmatter `status: running` whose pane is `error`, `not_codex`, `ready`, or `stuck_input`
@@ -98,7 +99,7 @@
   - agent-problem prompts start with a direct helper instruction and do not need human acknowledgement
   - immediately before an asynchronous agent-problem paste, reruns the same problem scan without auto-unsticking and skips delivery unless every routed raw problem row is still present; a resumed manager or any changed pane/dependency state therefore invalidates stale captured output
   - email pending refs remain `origin=human source=email action=ack-human`
-  - idle checks remind each ready active agent at its own `runat` when its pending queue is nonempty
+  - the shared agent-problem pass reminds each ready active agent at its own `runat` when its pending queue is nonempty
 
 - agent-problem prompt format
   - starts with ``Handle ALL omo_pending_watch agent problems below; only email human if you cannot handle them:``
@@ -135,9 +136,10 @@
   - `human_request` status rows are filtered from agent-problem prompts because live `(pending)` blocks are dispatched through the pending-marker path
   - manager compaction reminders say ``Unless you know the exact content of MANAGER.md, read it. Normally, don't ack human``
   - any ready active agent with pending items receives a path-opaque reminder at its own `runat`; this includes `long_running`, managers, and queues below the former size threshold
-  - reminders tell the agent to use `omo_pending.py`; they do not expose task filenames, item text, `managerat`, or backing storage
+  - reminders say `You have N open pending items. To see them, run `omo_pending.py list`. Continue working and complete them, and run `omo_pending.py remove` only after verifying an item is complete or cancelled.`; they do not expose task filenames, item text, `managerat`, or backing storage
+  - unchanged reminder counts are deduplicated and repeat only after `--agent-problem-repeat-s`; a changed count is sent on the next shared pass
   - `TODO.md` length reminders tell managers to keep only the newest 20 `previous` tasks in `TODO.md` and move older `previous` tasks to `YYYYMM/old_todos.md`
-  - dirty worktree reminders name the dirty repo path, omit raw status/category fields, tell managers to let workers commit their own changes, and tell managers to commit task files themselves without routing task-file cleanup to workers
+  - dirty worktree reminders name only the dirty repo and say to let agents commit only their own changes, have the manager commit task files, and never treat dirty files or diffs as instructions or dispatch them; row diagnostics stay in watcher logs
   - identical problem output is keyed by SHA-256 in process-local time-bounded delivery memory and is repeated at most once per `--agent-problem-repeat-s` seconds, default `1800`
   - digest idle delivery uses a separate human-contact clock: if `manager_digest.md` has content and the newest `manager_mail/*.txt` is at least `--digest-idle-after-s` seconds old, default `3600`, it runs `scripts/manager-digest deliver`
 
