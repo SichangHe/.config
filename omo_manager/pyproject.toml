@@ -2,7 +2,9 @@
 name = "omo-manager"
 version = "0.1.0"
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "pyyaml>=6.0.2",
+]
 
 [dependency-groups]
 dev = [

@@ -25,6 +25,13 @@ from omo_manager.omo_codex_status import interrupt_waiting_subagent_if_present
 from omo_manager.omo_codex_status import is_stock_placeholder_input_text
 from omo_manager.omo_codex_status import submit_stuck_input_if_present
 from omo_manager.omo_codex_status import visible_error_lines
+from omo_manager.omo_task_metadata import RETIRED_RUNAT
+from omo_manager.omo_task_metadata import TASK_FRONTMATTER_STATUSES  # noqa: F401
+from omo_manager.omo_task_metadata import TARGET_RE
+from omo_manager.omo_task_metadata import TaskFrontmatterError
+from omo_manager.omo_task_metadata import TaskMetadata
+from omo_manager.omo_task_metadata import frontmatter_parts
+from omo_manager.omo_task_metadata import parse_task_metadata
 
 
 def default_state_dir() -> Path:
@@ -72,17 +79,11 @@ DEFAULT_ROOT = Path(LOCAL_ENV.get("OMO_WORK_LOGS_ROOT", str(Path.home() / "work_
 DEFAULT_REGISTRY = Path(LOCAL_ENV.get("OMO_MANAGER_SESSION_REGISTRY", str(default_state_dir() / "sessions.json")))
 DEFAULT_MANAGER_TARGET = ""
 PENDING_TASK_ITEMS_MARKER = "(above are pending task items)"
-TASK_FRONTMATTER_VERSION = "v1.0.0"
-TASK_FRONTMATTER_REQUIRED_FIELDS = {"version", "status", "runat", "tool", "managerat", "is_manager", "pending_task_items"}
-TASK_FRONTMATTER_ALLOWED_FIELDS = TASK_FRONTMATTER_REQUIRED_FIELDS | {"blocked_on"}
-TASK_FRONTMATTER_STATUSES = {"running", "long_running", "blocked", "done"}
-RETIRED_RUNAT = "retired"
 TASK_RE = re.compile(r"`?([A-Za-z0-9_./-]+\.md)`?")
 BLOCKED_DEPENDENCY_LIST_RE = re.compile(r"`?[A-Za-z0-9_./-]+\.md`?(?:\s*,\s*`?[A-Za-z0-9_./-]+\.md`?)*")
 CODEX_SESSION_ID_RE = re.compile(r"\b(?:codex\s+session|session_id)\b[^.\n]{0,120}\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.IGNORECASE)
 STOPPED_RECORD_RE = re.compile(r"\b(?:preserved|record-only|stopped)\b", re.IGNORECASE)
 RESUME_RE = re.compile(r"\bresum(?:e|able|ed|ing)\b", re.IGNORECASE)
-TARGET_RE = re.compile(r"\b([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\b")
 TARGET_SESSION_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*):")
 LOOSE_TARGET_RE = re.compile(r"\b([a-z][A-Za-z0-9_-]*)\s+(\d+)\b")
 PORT_RE = re.compile(r"\bport [`']?(\d{2,5})[`']?")
@@ -212,22 +213,6 @@ class TaskState:
     manager_target: str = ""
     is_manager: bool = False
     tool: str = ""
-
-
-@dataclass(frozen=True)
-class TaskMetadata:
-    version: str
-    status: str
-    runat: str
-    tool: str
-    managerat: str
-    is_manager: bool
-    pending_task_items: tuple[str, ...]
-    blocked_on: str = ""
-
-
-class TaskFrontmatterError(ValueError):
-    pass
 
 
 class ParsedArgs(argparse.Namespace):
@@ -503,108 +488,6 @@ def is_artifact_task_ref(task_file: str) -> bool:
 
 def is_main_manager_task_file(path: Path) -> bool:
     return path.name == "work_manager.md" or path.name.startswith("work_manager_")
-
-
-def frontmatter_parts(text: str) -> tuple[list[str], list[str]] | None:
-    lines = text.splitlines()
-    if not lines or lines[0].strip() != "---":
-        return None
-    for idx, line in enumerate(lines[1:], start=1):
-        if line.strip() == "---":
-            return lines[1:idx], lines[idx + 1 :]
-    raise TaskFrontmatterError("task frontmatter opening marker has no closing marker.")
-
-
-def parse_pending_task_items(lines: list[str], idx: int, value: str) -> tuple[tuple[str, ...], int]:
-    stripped = value.strip()
-    if stripped == "[]":
-        return (), idx + 1
-    if stripped:
-        raise TaskFrontmatterError("`pending_task_items` must be `[]` or a YAML list.")
-    items: list[str] = []
-    idx += 1
-    while idx < len(lines):
-        line = lines[idx]
-        if not line.startswith("  - "):
-            break
-        item = line[4:].strip()
-        if not item:
-            raise TaskFrontmatterError("`pending_task_items` entries must not be empty.")
-        items.append(item)
-        idx += 1
-    return tuple(items), idx
-
-
-def parse_task_metadata(text: str) -> TaskMetadata | None:
-    parts = frontmatter_parts(text)
-    if parts is None:
-        return None
-    frontmatter, _body = parts
-    values: dict[str, str | bool | tuple[str, ...]] = {}
-    idx = 0
-    while idx < len(frontmatter):
-        line = frontmatter[idx]
-        if not line:
-            raise TaskFrontmatterError("task frontmatter must not contain blank lines.")
-        if line.startswith("  - "):
-            raise TaskFrontmatterError("YAML list item is only valid under `pending_task_items`.")
-        key, sep, value = line.partition(":")
-        if not sep or not key or key.strip() != key:
-            raise TaskFrontmatterError(f"invalid task frontmatter line: {line}")
-        if key not in TASK_FRONTMATTER_ALLOWED_FIELDS:
-            raise TaskFrontmatterError(f"unknown task frontmatter field: {key}")
-        if key in values:
-            raise TaskFrontmatterError(f"duplicate task frontmatter field: {key}")
-        if key == "pending_task_items":
-            items, idx = parse_pending_task_items(frontmatter, idx, value)
-            values[key] = items
-            continue
-        stripped = value.strip()
-        if not stripped:
-            raise TaskFrontmatterError(f"`{key}` must not be empty.")
-        if key == "is_manager":
-            if stripped not in {"true", "false"}:
-                raise TaskFrontmatterError("`is_manager` must be `true` or `false`.")
-            values[key] = stripped == "true"
-        else:
-            values[key] = stripped
-        idx += 1
-    missing = TASK_FRONTMATTER_REQUIRED_FIELDS - values.keys()
-    if missing:
-        raise TaskFrontmatterError(f"missing task frontmatter field: {sorted(missing)[0]}")
-    extra_blocked_on = "blocked_on" in values
-    status = values["status"]
-    if not isinstance(status, str) or status not in TASK_FRONTMATTER_STATUSES:
-        raise TaskFrontmatterError("`status` must be `running`, `long_running`, `blocked`, or `done`.")
-    if status == "blocked" and not extra_blocked_on:
-        raise TaskFrontmatterError("`blocked_on` is required when `status` is `blocked`.")
-    if status != "blocked" and extra_blocked_on:
-        raise TaskFrontmatterError("`blocked_on` must only exist when `status` is `blocked`.")
-    if values["version"] != TASK_FRONTMATTER_VERSION:
-        raise TaskFrontmatterError(f"`version` must be `{TASK_FRONTMATTER_VERSION}`.")
-    runat = values["runat"]
-    managerat = values["managerat"]
-    if not isinstance(runat, str) or (TARGET_RE.fullmatch(runat) is None and runat != RETIRED_RUNAT):
-        raise TaskFrontmatterError("`runat` must be a tmux target or `retired`.")
-    if runat == RETIRED_RUNAT and status != "blocked":
-        raise TaskFrontmatterError("`runat: retired` is only valid when `status` is `blocked`.")
-    if not isinstance(managerat, str) or TARGET_RE.fullmatch(managerat) is None:
-        raise TaskFrontmatterError("`managerat` must be a tmux target.")
-    tool = values["tool"]
-    is_manager = values["is_manager"]
-    if same_tmux_target(runat, managerat):
-        raise TaskFrontmatterError("`managerat` must be different from `runat`.")
-    pending_items = values["pending_task_items"]
-    blocked_on = values.get("blocked_on", "")
-    if not isinstance(tool, str) or not tool:
-        raise TaskFrontmatterError("`tool` must not be empty.")
-    if not isinstance(is_manager, bool):
-        raise TaskFrontmatterError("`is_manager` must be a boolean.")
-    if not isinstance(pending_items, tuple):
-        raise TaskFrontmatterError("`pending_task_items` must be a list.")
-    if blocked_on and not isinstance(blocked_on, str):
-        raise TaskFrontmatterError("`blocked_on` must be text.")
-    return TaskMetadata(TASK_FRONTMATTER_VERSION, status, runat, tool, managerat, is_manager, pending_items, blocked_on if isinstance(blocked_on, str) else "")
 
 
 def read_task_metadata(path: Path | None) -> TaskMetadata | None:
