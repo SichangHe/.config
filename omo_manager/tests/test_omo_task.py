@@ -529,6 +529,77 @@ class OmoTaskTests(unittest.TestCase):
             wait_shell.assert_called_once_with('cfg:7')
             start_codex_mock.assert_not_called()
 
+    def test_new_window_retains_tmux_failure_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "x.md"
+            task.write_text(VALID_GOAL_TREE, encoding="utf-8")
+            prompt = root / "prompt.md"
+            prompt.write_text("launch\n", encoding="utf-8")
+            email = root / "human-email.md"
+            email.write_text("private email source\n", encoding="utf-8")
+            args = replace(
+                Args(root, "x.md", "cfg", "", "codex", root, "worker", prompt, False, False, "", "", ()),
+                codex_flags=("mcp_servers.private=secret",),
+                human_email_file=email,
+                human_email_lines=(1, 1),
+                human_email_text="private human email text",
+            )
+            failure = subprocess.CalledProcessError(1, ["tmux", "new-window"], output="tmux-out", stderr="tmux-err")
+            state = subprocess.CompletedProcess(["tmux", "list-windows"], 0, "1:manager:bunx:/tmp:%1\n", "")
+            with patch("omo_manager.omo_task.tmux", side_effect=[failure, state]):
+                with self.assertRaisesRegex(RuntimeError, r"diagnostic: (.+)") as raised:
+                    _ = new_window(args)
+            evidence = Path(raised.exception.args[0].split("diagnostic: ", 1)[1])
+            try:
+                text = evidence.read_text(encoding="utf-8")
+            finally:
+                evidence.unlink(missing_ok=True)
+            self.assertIn("exit_status: 1", text)
+            self.assertIn("stderr: tmux-err", text)
+            self.assertIn("task: path=", text)
+            self.assertIn("prompt: path=", text)
+            self.assertIn("workdir: path=", text)
+            self.assertIn("effective_window_name: worker", text)
+            self.assertIn("session_windows_stdout: 1:manager:bunx:/tmp:%1", text)
+            self.assertNotIn("private human email text", text)
+            self.assertNotIn("mcp_servers.private=secret", text)
+            self.assertNotIn(str(email), text)
+            self.assertNotIn("private email source", text)
+
+    def test_new_window_retains_tmux_timeout_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = Args(root, "x.md", "cfg", "", "codex", root, "worker", None, False, False, "", "", ())
+            timeout = subprocess.TimeoutExpired(["tmux", "new-window"], 10, output="partial-out", stderr="partial-err")
+            state = subprocess.CompletedProcess(["tmux", "list-windows"], 1, "", "session unavailable")
+            with patch("omo_manager.omo_task.tmux", side_effect=[timeout, state]):
+                with self.assertRaisesRegex(RuntimeError, r"diagnostic: (.+)") as raised:
+                    _ = new_window(args)
+            evidence = Path(raised.exception.args[0].split("diagnostic: ", 1)[1])
+            try:
+                text = evidence.read_text(encoding="utf-8")
+            finally:
+                evidence.unlink(missing_ok=True)
+            self.assertIn("exit_status: timeout after 10s", text)
+            self.assertIn("stdout: partial-out", text)
+            self.assertIn("stderr: partial-err", text)
+
+    def test_new_window_retains_tmux_spawn_error_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = Args(root, "x.md", "cfg", "", "codex", root, "worker", None, False, False, "", "", ())
+            failure = FileNotFoundError(2, "tmux unavailable")
+            state = subprocess.CompletedProcess(["tmux", "list-windows"], 1, "", "tmux unavailable")
+            with patch("omo_manager.omo_task.tmux", side_effect=[failure, state]):
+                with self.assertRaisesRegex(RuntimeError, r"diagnostic: (.+)") as raised:
+                    _ = new_window(args)
+            evidence = Path(raised.exception.args[0].split("diagnostic: ", 1)[1])
+            try:
+                text = evidence.read_text(encoding="utf-8")
+            finally:
+                evidence.unlink(missing_ok=True)
+            self.assertIn("exit_status: FileNotFoundError: [Errno 2] tmux unavailable", text)
     def test_codex_cmd_resumes_quoted_session(self) -> None:
         self.assertTrue(codex_cmd("abc").startswith("bunx @openai/codex --dangerously-bypass-approvals-and-sandbox resume abc "))
         self.assertTrue(codex_cmd("abc def").startswith("bunx @openai/codex --dangerously-bypass-approvals-and-sandbox resume 'abc def' "))

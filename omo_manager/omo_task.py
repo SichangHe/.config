@@ -6,6 +6,7 @@ import argparse
 import contextlib
 import fcntl
 import os
+import hashlib
 import re
 import shlex
 import subprocess
@@ -840,6 +841,74 @@ def wait_command_started(target: str, timeout_s: float = 5.0, launch_marker: str
 def new_window_command(args: Args) -> list[str]:
     name = args.window_name or Path(args.task_file).stem
     return ["new-window", "-P", "-F", "#{session_name}:#{window_index}", "-t", args.tmux_session, "-n", name, "-c", str(args.workdir)]
+def launch_input_state(path: Path | None) -> str:
+    """Describe one launch input without retaining its content in the error summary."""
+    if path is None:
+        return "none"
+    try:
+        if not path.exists():
+            return f"path={path!s} exists=false"
+        stat = path.stat()
+        digest = "omitted"
+        if path.is_file() and stat.st_size <= 1_000_000:
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        return f"path={path!s} exists=true file={path.is_file()} size={stat.st_size} sha256={digest}"
+    except OSError as error:
+        return f"path={path!s} state_error={error}"
+
+
+def retain_new_window_failure(args: Args, error: subprocess.CalledProcessError | subprocess.TimeoutExpired | OSError) -> Path:
+    """Persist enough evidence to diagnose a tmux new-window failure after the caller exits."""
+    try:
+        session_state = tmux(
+            ["list-windows", "-t", args.tmux_session, "-F", "#{window_index}:#{window_name}:#{pane_current_command}:#{pane_current_path}:#{pane_id}"],
+        )
+    except (OSError, subprocess.SubprocessError) as state_error:
+        session_state = subprocess.CompletedProcess([], 1, "", str(state_error))
+    task = task_path(args.root, args.task_file)
+    command = new_window_command(args)
+    tmux_env = {key: os.environ.get(key, "") for key in ("TMUX", "TMUX_PANE", "TERM", "OMO_AGENT_TMUX_TARGET", "OMO_MANAGER_TMUX_TARGET")}
+    safe_args = replace(
+        args,
+        codex_flags=tuple("<redacted>" for _ in args.codex_flags),
+        human_email_file=None,
+        human_email_lines=None,
+        human_email_text=None,
+    )
+    if isinstance(error, subprocess.CalledProcessError):
+        exit_status = error.returncode
+    elif isinstance(error, subprocess.TimeoutExpired):
+        exit_status = f"timeout after {error.timeout}s"
+    else:
+        exit_status = f"{type(error).__name__}: {error}"
+    lines = [
+        "omo_task tmux new-window failure",
+        f"args: {safe_args!r}",
+        f"process_cwd: {Path.cwd()}",
+        f"tmux_env: {tmux_env!r}",
+        f"tmux_command: {shlex.join(['tmux', *command])}",
+        f"exit_status: {exit_status}",
+        f"stdout: {getattr(error, 'stdout', '') or ''}",
+        f"stderr: {getattr(error, 'stderr', '') or ''}",
+        f"task: {launch_input_state(task)}",
+        f"prompt: {launch_input_state(args.prompt_file)}",
+        f"human_email: {'present (redacted)' if args.human_email_file is not None else 'none'}",
+        f"prelaunch_source: {launch_input_state(args.prelaunch_source)}",
+        f"workdir: {launch_input_state(args.workdir)}",
+        f"effective_window_name: {args.window_name or Path(args.task_file).stem}",
+        f"session_windows_exit_status: {session_state.returncode}",
+        f"session_windows_stdout: {session_state.stdout}",
+        f"session_windows_stderr: {session_state.stderr}",
+    ]
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        prefix="omo-task-new-window-failure-",
+        suffix=".log",
+        delete=False,
+    ) as evidence:
+        _ = evidence.write("\n".join(lines) + "\n")
+    return Path(evidence.name)
 
 
 def start_codex(target: str, args: Args) -> None:
@@ -877,7 +946,14 @@ def start_codex(target: str, args: Args) -> None:
 def new_window(args: Args) -> str:
     if args.workdir is None:
         return target(args)
-    out = tmux(new_window_command(args), check=True)
+    try:
+        out = tmux(new_window_command(args), check=True)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as error:
+        try:
+            evidence = retain_new_window_failure(args, error)
+        except OSError as evidence_error:
+            raise RuntimeError(f"tmux new-window failed; diagnostic retention failed: {evidence_error}") from error
+        raise RuntimeError(f"tmux new-window failed; diagnostic: {evidence}") from error
     tmux_target = out.stdout.strip()
     wait_shell(tmux_target)
     return tmux_target
