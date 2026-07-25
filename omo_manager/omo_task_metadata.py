@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import TypeAlias
 from uuid import UUID
 
@@ -16,6 +17,7 @@ TASK_FRONTMATTER_STATUSES = {"running", "long_running", "blocked", "done"}
 RETIRED_RUNAT = "retired"
 TARGET_RE = re.compile(r"\b([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\b")
 ID_RE = re.compile(r"^(task|pi|wake)_([0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$")
+RFC3339_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$")
 V1_REQUIRED_FIELDS = {"version", "status", "runat", "tool", "managerat", "is_manager", "pending_task_items"}
 V1_ALLOWED_FIELDS = V1_REQUIRED_FIELDS | {"blocked_on"}
 V2_REQUIRED_FIELDS = V1_REQUIRED_FIELDS | {"task_id", "resolved_task_items"}
@@ -115,10 +117,17 @@ class UniqueKeyLoader(yaml.SafeLoader):
     pass
 
 
+UniqueKeyLoader.yaml_implicit_resolvers = {
+    key: [(tag, pattern) for tag, pattern in resolvers if tag != "tag:yaml.org,2002:timestamp"] for key, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
+}
+
+
 def construct_unique_mapping(loader: UniqueKeyLoader, node: yaml.MappingNode, deep: bool = False) -> dict[object, object]:
     mapping: dict[object, object] = {}
     for key_node, value_node in node.value:
         key = loader.construct_object(key_node, deep=deep)
+        if not isinstance(key, str):
+            raise TaskFrontmatterError("task frontmatter YAML mapping keys must be text.")
         if key in mapping:
             raise TaskFrontmatterError(f"duplicate YAML key: {key}")
         mapping[key] = loader.construct_object(value_node, deep=deep)
@@ -143,7 +152,7 @@ def frontmatter_text(text: str) -> str | None:
     return None if parts is None else "\n".join(parts[0])
 
 
-def parse_task_metadata(text: str) -> TaskMetadata | None:
+def parse_task_metadata(text: str, work_log_root: Path | None = None) -> TaskMetadata | None:
     source = frontmatter_text(text)
     if source is None:
         return None
@@ -151,7 +160,7 @@ def parse_task_metadata(text: str) -> TaskMetadata | None:
     if version == TASK_FRONTMATTER_V1:
         return parse_v1_metadata(source.splitlines())
     if version == TASK_FRONTMATTER_V2:
-        return parse_v2_metadata(source)
+        return parse_v2_metadata(source, work_log_root)
     raise TaskFrontmatterError(f"unsupported task frontmatter version: {version or '<missing>'}")
 
 
@@ -224,14 +233,14 @@ def load_v2_mapping(source: str) -> dict[str, object]:
         loaded = yaml.load(source, Loader=UniqueKeyLoader)
     except TaskFrontmatterError:
         raise
-    except yaml.YAMLError as exc:
+    except (TypeError, ValueError, yaml.YAMLError) as exc:
         raise TaskFrontmatterError(f"invalid task frontmatter YAML: {exc}") from exc
     if not isinstance(loaded, dict) or not all(isinstance(key, str) for key in loaded):
         raise TaskFrontmatterError("task frontmatter must be a mapping with text keys.")
     return loaded
 
 
-def parse_v2_metadata(source: str) -> TaskMetadata:
+def parse_v2_metadata(source: str, work_log_root: Path | None = None) -> TaskMetadata:
     values = load_v2_mapping(source)
     validate_required(values, V2_REQUIRED_FIELDS)
     common = parse_common(values, V2_ALLOWED_FIELDS)
@@ -241,7 +250,7 @@ def parse_v2_metadata(source: str) -> TaskMetadata:
     all_item_ids = [item.id for item in pending_items] + [item.id for item in resolved_items]
     if len(set(all_item_ids)) != len(all_item_ids):
         raise TaskFrontmatterError("pending and resolved item ids must be unique within a task.")
-    blockers = tuple(parse_blocker(value) for value in require_list(values.get("blocked_on", []), "blocked_on"))
+    blockers = tuple(parse_blocker(value, work_log_root) for value in require_list(values.get("blocked_on", []), "blocked_on"))
     notices = [notice for item in (*pending_items, *resolved_items) for notice in item.notices]
     if len({notice.id for notice in notices}) != len(notices):
         raise TaskFrontmatterError("notice ids must be unique within a task.")
@@ -252,7 +261,7 @@ def parse_v2_metadata(source: str) -> TaskMetadata:
     if status == "blocked":
         if resume_status not in {"running", "long_running"}:
             raise TaskFrontmatterError("`resume_status` must be `running` or `long_running` for a blocked v2 task.")
-    elif resume_status:
+    elif "resume_status" in values:
         raise TaskFrontmatterError("`resume_status` must only exist when `status` is `blocked`.")
     blocker_summary = "; ".join(blocker_text(blocker) for blocker in blockers)
     return TaskMetadata(*common, pending_items=pending_items, blocked_on=blocker_summary, task_id=task_id, resume_status=str(resume_status), blockers=blockers, resolved_task_items=resolved_items)
@@ -330,18 +339,12 @@ def require_id(value: object, prefix: str, field: str) -> str:
 
 
 def require_time(value: object, field: str) -> datetime:
-    if isinstance(value, datetime):
-        parsed = value
-    elif isinstance(value, str):
-        try:
-            parsed = datetime.fromisoformat(value)
-        except ValueError as exc:
-            raise TaskFrontmatterError(f"`{field}` must be an RFC 3339 time with an explicit offset.") from exc
-    else:
+    if not isinstance(value, str) or RFC3339_RE.fullmatch(value) is None:
         raise TaskFrontmatterError(f"`{field}` must be an RFC 3339 time with an explicit offset.")
-    if parsed.utcoffset() is None:
-        raise TaskFrontmatterError(f"`{field}` must include an explicit offset.")
-    return parsed
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise TaskFrontmatterError(f"`{field}` must be an RFC 3339 time with an explicit offset.") from exc
 
 
 def parse_dependency(value: object) -> ItemDependency:
@@ -402,7 +405,20 @@ def parse_resolved_item(value: object) -> ResolvedTaskItem:
     )
 
 
-def parse_blocker(value: object) -> TaskBlockerEntry:
+def canonical_task_reference(value: object, work_log_root: Path | None) -> str:
+    text = require_text(value, "task")
+    path = Path(text)
+    if path.is_absolute() or "\\" in text or path.as_posix() != text or path.suffix != ".md" or any(part in {"", ".", ".."} for part in path.parts):
+        raise TaskFrontmatterError("task blocker `task` must be a canonical relative Markdown path inside the work-log root.")
+    if work_log_root is not None:
+        root = work_log_root.resolve()
+        resolved = (root / path).resolve(strict=False)
+        if resolved == root or not resolved.is_relative_to(root):
+            raise TaskFrontmatterError("task blocker `task` must resolve inside the work-log root.")
+    return text
+
+
+def parse_blocker(value: object, work_log_root: Path | None = None) -> TaskBlockerEntry:
     if not isinstance(value, dict) or set(value) == set() or not isinstance(value.get("kind"), str):
         raise TaskFrontmatterError("`blocked_on` entries must be mappings with a `kind`.")
     kind = value["kind"]
@@ -417,7 +433,7 @@ def parse_blocker(value: object) -> TaskBlockerEntry:
         return HumanBlocker(kind, require_text(row["reason"], "reason"))
     if kind == "task":
         row = require_mapping(value, "blocked_on", {"kind", "task", "reason"})
-        return TaskBlocker(kind, require_text(row["task"], "task"), require_text(row["reason"], "reason"))
+        return TaskBlocker(kind, canonical_task_reference(row["task"], work_log_root), require_text(row["reason"], "reason"))
     if kind == "legacy":
         row = require_mapping(value, "blocked_on", {"kind", "text"})
         return LegacyBlocker(kind, require_text(row["text"], "text"))

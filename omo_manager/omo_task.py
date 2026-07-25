@@ -20,10 +20,12 @@ from pathlib import Path
 try:
     from omo_manager.omo_codex_status import current_block, exact_pane_id, status, tail
     from omo_manager.omo_agent_status import TaskFrontmatterError, parse_task_metadata
+    from omo_manager.omo_task_metadata import TASK_FRONTMATTER_V2
     from omo_manager.omo_task_lock import task_target_lock
 except ModuleNotFoundError:
     from omo_codex_status import current_block, exact_pane_id, status, tail
     from omo_agent_status import TaskFrontmatterError, parse_task_metadata
+    from omo_task_metadata import TASK_FRONTMATTER_V2
     from omo_task_lock import task_target_lock
 
 DEFAULT_ROOT = Path(os.environ.get("OMO_WORK_LOGS_ROOT", Path.home() / "work_logs"))
@@ -254,6 +256,9 @@ def canonical_tmux_pane(tmux_target: str) -> tuple[str, int, int]:
 
 def manager_owner_migration_text(text: str, old_owner: str, new_owner: str) -> str:
     """Return valid task text with only the exact frontmatter owner value changed."""
+    metadata = parse_task_metadata(text)
+    if metadata is not None and metadata.version == TASK_FRONTMATTER_V2:
+        raise ValueError("v2 task mutation is disabled until migration validation and watcher enablement are complete.")
     for label, owner in (("old", old_owner), ("new", new_owner)):
         if TMUX_TARGET_RE.fullmatch(owner) is None:
             raise ValueError(f"{label} manager target must be a full tmux target like `SESSION:WINDOW`.")
@@ -305,6 +310,9 @@ def same_file_identity(left: os.stat_result, right: os.stat_result) -> bool:
 
 def atomic_replace_if_unchanged(path: Path, text: str, before: os.stat_result) -> None:
     """Atomically replace `path` only if it still matches the state that was read."""
+    metadata = parse_task_metadata(text)
+    if metadata is not None and metadata.version == TASK_FRONTMATTER_V2:
+        raise ValueError("v2 task mutation is disabled until migration validation and watcher enablement are complete.")
     tmp_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", dir=path.parent, prefix=f".{path.name}.", delete=False) as handle:
@@ -632,6 +640,8 @@ def replace_frontmatter_fields(text: str, updates: dict[str, str], remove: set[s
 
 def launched_frontmatter_text(existing: str, args: Args, tmux_target: str) -> str:
     metadata = parse_task_metadata(existing)
+    if metadata is not None and metadata.version == TASK_FRONTMATTER_V2:
+        raise ValueError("v2 task mutation is disabled until migration validation and watcher enablement are complete.")
     is_manager = args.is_manager or (metadata is not None and metadata.is_manager)
     updates = {
         "status": "long_running" if is_manager else "running",
@@ -985,6 +995,9 @@ def ensure_task_file(args: Args, tmux_target: str) -> Path:
             if parse_task_metadata(text) is None:
                 validate_runat_header(text)
                 validate_managerat_metadata(text)
+        metadata = parse_task_metadata(text)
+        if metadata is not None and metadata.version == TASK_FRONTMATTER_V2:
+            raise ValueError("v2 task mutation is disabled until migration validation and watcher enablement are complete.")
         _ = path.write_text(text, encoding="utf-8")
     return path
 

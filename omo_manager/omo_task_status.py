@@ -28,6 +28,7 @@ from omo_manager.omo_agent_status import frontmatter_parts
 from omo_manager.omo_agent_status import parse_task_metadata
 from omo_manager.omo_agent_status import parse_task_lines
 from omo_manager.omo_task_lock import task_target_lock
+from omo_manager.omo_task_metadata import TASK_FRONTMATTER_V2
 
 PENDING_MARKER = "(pending)"
 DONE_REMINDER = "Status set to done. Remember to email the human."
@@ -200,6 +201,8 @@ def update_frontmatter_status(text: str, status: str, blocked_on: str) -> str:
     metadata = parse_task_metadata(text)
     if metadata is None:
         raise TaskFrontmatterError("task file has no frontmatter.")
+    if metadata.version == TASK_FRONTMATTER_V2:
+        raise TaskFrontmatterError("v2 task mutation is disabled until migration validation and watcher enablement are complete.")
     if has_pending_marker(text):
         raise TaskFrontmatterError("task file still contains `(pending)`; handle pending markers before changing status.")
     if status == "done" and metadata.pending_task_items:
@@ -246,6 +249,9 @@ def same_file_state(left: os.stat_result, right: os.stat_result) -> bool:
 
 def replace_if_unchanged(path: Path, text: str, before: os.stat_result) -> None:
     """Replace `path` atomically after checking it did not change since read."""
+    metadata = parse_task_metadata(text)
+    if metadata is not None and metadata.version == TASK_FRONTMATTER_V2:
+        raise TaskFrontmatterError("v2 task mutation is disabled until migration validation and watcher enablement are complete.")
     tmp_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False) as handle:
