@@ -5411,9 +5411,12 @@ class PendingMarkerTests(unittest.TestCase):
                 self.assertNotIn("failure_fallback_target", push.call_args.kwargs)
                 event = push.call_args.kwargs["success_event"]
                 self.assertIn(watcher.pending_item_reminder_key(args, "wl:4", 1), seen)
-                watcher.queue_delivery_failure_event(event)
+                with patch("omo_manager.omo_pending_watch.time.time", return_value=1001.0):
+                    watcher.queue_delivery_failure_event(event)
                 self.assertTrue(watcher.drain_delivery_successes(args, seen, 1001.0))
-                self.assertNotIn(watcher.pending_item_reminder_key(args, "wl:4", 1), seen)
+                self.assertFalse(watcher.push_agent_pending_item_reminders(args, seen, 1001.0 + args.agent_problem_repeat_s - 1))
+                self.assertTrue(watcher.push_agent_pending_item_reminders(args, seen, 1001.0 + args.agent_problem_repeat_s + 1))
+                self.assertEqual(2, push.call_count)
 
     def test_timed_out_problem_scan_still_sends_pending_item_reminder(self) -> None:
         from omo_manager import omo_pending_watch as watcher

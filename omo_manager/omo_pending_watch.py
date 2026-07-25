@@ -313,6 +313,7 @@ class DeliverySuccessEvent:
     seen_values: tuple[tuple[str, float], ...] = ()
     failure_seen_removals: tuple[str, ...] = ()
     failure_seen_values: tuple[tuple[str, float], ...] = ()
+    failure_seen_now_keys: tuple[str, ...] = ()
     failure_seen_delays_s: tuple[tuple[str, float], ...] = ()
     failure_seen_deadlines_s: tuple[tuple[str, float], ...] = ()
     capacity_advisory_removals: tuple[tuple[str, str], ...] = ()
@@ -475,6 +476,7 @@ def queue_delivery_failure_event(success_event: DeliverySuccessEvent | None) -> 
     if (
         not success_event.failure_seen_removals
         and not success_event.failure_seen_values
+        and not success_event.failure_seen_now_keys
         and not success_event.failure_seen_delays_s
         and not success_event.failure_seen_deadlines_s
         and not success_event.failure_dependency_replacements
@@ -482,6 +484,7 @@ def queue_delivery_failure_event(success_event: DeliverySuccessEvent | None) -> 
     ):
         return
     now_s = time.time()
+    now_values = tuple((key, now_s) for key in success_event.failure_seen_now_keys)
     delayed_values = tuple(
         (key, now_s - DEFAULT_SEEN_TTL_S + delay_s)
         for key, delay_s in success_event.failure_seen_delays_s
@@ -490,7 +493,7 @@ def queue_delivery_failure_event(success_event: DeliverySuccessEvent | None) -> 
     DELIVERY_SUCCESS_EVENTS.put(
         DeliverySuccessEvent(
             seen_removals=success_event.failure_seen_removals,
-            seen_values=(*success_event.failure_seen_values, *delayed_values, *deadline_values),
+            seen_values=(*success_event.failure_seen_values, *now_values, *delayed_values, *deadline_values),
             dependency_state=success_event.dependency_state,
             dependency_guarded_replacements=success_event.failure_dependency_replacements,
             dependency_guarded_removals=success_event.failure_dependency_removals,
@@ -1946,7 +1949,7 @@ def push_agent_pending_item_reminders(args: Args, seen: dict[str, float], now_wa
         else:
             event = DeliverySuccessEvent(
                 seen_keys=(key,),
-                failure_seen_removals=(key,),
+                failure_seen_now_keys=(key,),
                 seen_at_s=now_wall_s,
             )
             status = try_send_delivery_text(
