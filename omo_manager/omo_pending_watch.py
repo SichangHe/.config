@@ -66,6 +66,7 @@ DEFAULT_STATE = default_state_dir() / "pending-watch-unused"
 DEFAULT_DIGEST_IDLE_AFTER_S = float(os.environ.get("OMO_MANAGER_DIGEST_IDLE_AFTER_S", "3600"))
 DEFAULT_AGENT_PROBLEM_INTERVAL_S = float(os.environ.get("OMO_MANAGER_AGENT_PROBLEM_INTERVAL_S", "30"))
 DEFAULT_AGENT_PROBLEM_REPEAT_S = float(os.environ.get("OMO_MANAGER_AGENT_PROBLEM_REPEAT_S", "1800"))
+PENDING_DELIVERY_FAILURE_RETRY_S = 600.0
 ASYNC_DELIVERY_STARTED = 202
 CAPACITY_ERROR_TEXT = "Selected model is at capacity. Please try a different model."
 CAPACITY_RESUME_MAX_ATTEMPTS = 3
@@ -117,6 +118,7 @@ AGENT_PENDING_ITEMS_REMINDER = (
     "You have {count} open pending items. To see them, run `omo_pending.py list`. Continue working and complete them, "
     "and run `omo_pending.py remove` only after verifying an item is complete or cancelled."
 )
+MANAGER_DIRECT_REPORT_LIMIT = 5
 MANAGER_TASK_STATE_OK = {"running", "long_running", "done", "blocked"}
 MANAGER_TASK_STATE_REMINDER_LIMIT = 20
 MANAGER_TASK_STATE_LIVE_SECTIONS = {"todo:current", "todo:human pending", "todo:low priority"}
@@ -311,6 +313,8 @@ class DeliverySuccessEvent:
     seen_values: tuple[tuple[str, float], ...] = ()
     failure_seen_removals: tuple[str, ...] = ()
     failure_seen_values: tuple[tuple[str, float], ...] = ()
+    failure_seen_delays_s: tuple[tuple[str, float], ...] = ()
+    failure_seen_deadlines_s: tuple[tuple[str, float], ...] = ()
     capacity_advisory_removals: tuple[tuple[str, str], ...] = ()
     blocked_idle_lines: tuple[tuple[str, str], ...] = ()
     dependency_replacements: tuple[tuple[str, str], ...] = ()
@@ -334,6 +338,7 @@ class DeliveryFailureFallback:
     success_event: DeliverySuccessEvent | None = None
     pending_guard: PendingGuard | None = None
     problem_guard: AgentProblemGuard | None = None
+    defer_if_busy: bool = False
 
 
 DELIVERY_SUCCESS_EVENTS: SimpleQueue[DeliverySuccessEvent] = SimpleQueue()
@@ -429,6 +434,10 @@ def log_send_result(
                 print("omo_pending_watch: async fallback skipped; pending marker cleared before fallback paste", file=sys.stderr)
                 queue_delivery_failure_event(success_event)
                 return
+            if failure_fallback.defer_if_busy and inspect_codex(CodexStatusArgs(failure_fallback.target, 80)).status != "ready":
+                print(f"omo_pending_watch: repeated manager fallback deferred until ready: {failure_fallback.target}", file=sys.stderr)
+                queue_delivery_failure_event(failure_fallback.success_event)
+                return
             text = with_failed_target_escalation(failure_fallback.text, failure_fallback.failed_target, result)
             try:
                 if failure_fallback.problem_guard is None:
@@ -466,14 +475,22 @@ def queue_delivery_failure_event(success_event: DeliverySuccessEvent | None) -> 
     if (
         not success_event.failure_seen_removals
         and not success_event.failure_seen_values
+        and not success_event.failure_seen_delays_s
+        and not success_event.failure_seen_deadlines_s
         and not success_event.failure_dependency_replacements
         and not success_event.failure_dependency_removals
     ):
         return
+    now_s = time.time()
+    delayed_values = tuple(
+        (key, now_s - DEFAULT_SEEN_TTL_S + delay_s)
+        for key, delay_s in success_event.failure_seen_delays_s
+    )
+    deadline_values = tuple((key, now_s + delay_s) for key, delay_s in success_event.failure_seen_deadlines_s)
     DELIVERY_SUCCESS_EVENTS.put(
         DeliverySuccessEvent(
             seen_removals=success_event.failure_seen_removals,
-            seen_values=success_event.failure_seen_values,
+            seen_values=(*success_event.failure_seen_values, *delayed_values, *deadline_values),
             dependency_state=success_event.dependency_state,
             dependency_guarded_replacements=success_event.failure_dependency_replacements,
             dependency_guarded_removals=success_event.failure_dependency_removals,
@@ -964,6 +981,54 @@ def marker_seen_key(args: Args, marker: Marker, attachments: Sequence[SourceAtta
     payload = readable_attachment_payload(attachments)
     for_manager = int(marker_is_for_manager(marker, attachments))
     return f"{key}:files:{attachment_payload_digest(payload)}:for-manager:{for_manager}"
+
+
+def pending_delivery_event(key: str, now_s: float) -> DeliverySuccessEvent:
+    """Reserve one marker while sending and retry a failed send after ten minutes."""
+
+    return DeliverySuccessEvent(
+        seen_keys=(key,),
+        failure_seen_delays_s=((key, PENDING_DELIVERY_FAILURE_RETRY_S),),
+        seen_at_s=now_s,
+    )
+
+
+def manager_pending_delivery_event(key: str, now_s: float) -> DeliverySuccessEvent:
+    """Reserve a manager marker and retain its attempted-delivery identity."""
+
+    attempt_key = manager_delivery_attempt_key(key)
+    return DeliverySuccessEvent(
+        seen_keys=(key, attempt_key),
+        failure_seen_values=((attempt_key, now_s),),
+        failure_seen_delays_s=((key, PENDING_DELIVERY_FAILURE_RETRY_S),),
+        seen_at_s=now_s,
+    )
+
+
+def reserve_async_marker(seen: dict[str, float], key: str, now_s: float, status: int) -> None:
+    if status == ASYNC_DELIVERY_STARTED:
+        remember_seen(seen, key, now_s)
+
+
+def manager_delivery_attempt_key(key: str) -> str:
+    return f"manager-delivery-attempt:{key}"
+
+
+def repeated_manager_delivery_is_busy(args: Args, seen: dict[str, float], key: str, target: str, now_s: float) -> bool:
+    """Defer a repeated manager delivery until its target is ready."""
+
+    if not seen_contains(seen, manager_delivery_attempt_key(key), now_s) or args.dry_run:
+        return False
+    if inspect_codex(CodexStatusArgs(target, 80)).status == "ready":
+        return False
+    retry_seen_at_s = now_s - DEFAULT_SEEN_TTL_S + PENDING_DELIVERY_FAILURE_RETRY_S
+    remember_seen(seen, key, retry_seen_at_s)
+    return True
+
+
+def remember_manager_delivery_attempt(seen: dict[str, float], key: str, now_s: float, status: int) -> None:
+    if delivery_accepted(status):
+        remember_seen(seen, manager_delivery_attempt_key(key), now_s)
 
 
 def marker_for_manager_target(args: Args, marker: Marker) -> str:
@@ -1497,6 +1562,7 @@ def push_marker_delivery(
     failure_fallback_target: str = "",
     failure_fallback_text: str | None = None,
     failure_success_event: DeliverySuccessEvent | None = None,
+    failure_fallback_defer_if_busy: bool = False,
 ) -> DeliveryResult:
     if args.dry_run:
         print(text)
@@ -1515,6 +1581,7 @@ def push_marker_delivery(
             failure_fallback_target=failure_fallback_target,
             failure_fallback_text=failure_fallback_text,
             failure_success_event=failure_success_event,
+            failure_fallback_defer_if_busy=failure_fallback_defer_if_busy,
         )
     return DeliveryResult(1, "missing delivery target")
 
@@ -1566,12 +1633,11 @@ def push_direct_ref(
     manager_target = marker_for_manager_target(args, marker)
     marker_key = marker_seen_key(args, marker, attachments)
     reminders = MANAGER_EMAIL_POLICY_REMINDERS if marker.source == "email" else MANAGER_POLICY_REMINDERS
-    fallback_event = DeliverySuccessEvent(
-        seen_keys=(marker_key,),
-        failure_seen_removals=(marker_key,),
-        seen_at_s=now_s,
-    )
+    fallback_event = manager_pending_delivery_event(marker_key, now_s)
+    repeated_manager_fallback = seen_contains(seen, manager_delivery_attempt_key(marker_key), now_s)
     if not target:
+        if repeated_manager_delivery_is_busy(args, seen, marker_key, manager_target, now_s):
+            return 1
         fallback = direct_delivery_fallback_text(marker, attachments, "no usable frontmatter `runat` target was found")
         status = push_marker_text_or_escalate(
             args,
@@ -1582,6 +1648,7 @@ def push_direct_ref(
         )
         if status == ASYNC_DELIVERY_STARTED:
             remember_seen(seen, marker_key, now_s)
+        remember_manager_delivery_attempt(seen, marker_key, now_s, status)
         return status
 
     direct_key = direct_delivery_seen_key(args, marker, target, attachments)
@@ -1597,20 +1664,24 @@ def push_direct_ref(
             seen_at_s=now_s,
             clear_root=args.root,
             clear_marker=marker,
-            failure_seen_removals=(marker_key,),
+            failure_seen_delays_s=((marker_key, PENDING_DELIVERY_FAILURE_RETRY_S),),
         ),
         failure_fallback_target=manager_target,
         failure_fallback_text=with_manager_policy_reminder(args, failure_text, reminders),
         failure_success_event=fallback_event,
+        failure_fallback_defer_if_busy=repeated_manager_fallback,
     )
     if result.status == ASYNC_DELIVERY_STARTED:
         remember_seen(seen, marker_key, now_s)
         return result.status
     if result.status != 0:
+        if repeated_manager_delivery_is_busy(args, seen, marker_key, manager_target, now_s):
+            return 1
         fallback = with_failed_target_escalation(failure_text, target, result)
         status = push_marker_text_or_escalate(args, marker, fallback, manager_target, fallback_event)
         if status == ASYNC_DELIVERY_STARTED:
             remember_seen(seen, marker_key, now_s)
+        remember_manager_delivery_attempt(seen, marker_key, now_s, status)
         return status
     remember_seen(seen, direct_key, now_s)
     if args.dry_run or clear_pending_marker_if_current(args.root, marker):
@@ -1629,14 +1700,18 @@ def push_ref(args: Args, seen: dict[str, float], now_s: float, marker: Marker, a
         error_key = attachment_error_seen_key(args, marker, attachments)
         if seen_contains(seen, error_key, now_s):
             return 1
+        if repeated_manager_delivery_is_busy(args, seen, error_key, manager_target, now_s):
+            return 1
         text = direct_delivery_fallback_text(marker, attachments, "one or more linked sources could not be read safely")
         status = push_marker_text_or_escalate(
             args,
             marker,
             text,
             manager_target,
-            DeliverySuccessEvent(seen_keys=(error_key,), seen_at_s=now_s),
+            manager_pending_delivery_event(error_key, now_s),
         )
+        reserve_async_marker(seen, error_key, now_s, status)
+        remember_manager_delivery_attempt(seen, error_key, now_s, status)
         if status == 0:
             remember_seen(seen, error_key, now_s)
         return status if status not in {0, 2} else 1
@@ -1652,25 +1727,34 @@ def push_ref(args: Args, seen: dict[str, float], now_s: float, marker: Marker, a
         error_key = attachment_error_seen_key(args, marker, attachments)
         if seen_contains(seen, error_key, now_s):
             return 1
+        if repeated_manager_delivery_is_busy(args, seen, error_key, manager_target, now_s):
+            return 1
         text = marker_delivery_text(marker, attachments)
         status = push_marker_text_or_escalate(
             args,
             marker,
             with_manager_policy_reminder(args, text, reminders),
             manager_target,
-            DeliverySuccessEvent(seen_keys=(error_key,), seen_at_s=now_s),
+            manager_pending_delivery_event(error_key, now_s),
         )
+        reserve_async_marker(seen, error_key, now_s, status)
+        remember_manager_delivery_attempt(seen, error_key, now_s, status)
         if status == 0:
             remember_seen(seen, error_key, now_s)
         return status if status not in {0, 2} else 1
     text = marker_delivery_text(marker, attachments)
-    return push_marker_text_or_escalate(
+    if repeated_manager_delivery_is_busy(args, seen, marker_key, manager_target, now_s):
+        return 1
+    status = push_marker_text_or_escalate(
         args,
         marker,
         with_manager_policy_reminder(args, text, reminders),
         manager_target,
-        DeliverySuccessEvent(seen_keys=(marker_key,), seen_at_s=now_s),
+        manager_pending_delivery_event(marker_key, now_s),
     )
+    reserve_async_marker(seen, marker_key, now_s, status)
+    remember_manager_delivery_attempt(seen, marker_key, now_s, status)
+    return status
 
 
 def push_manager_text(args: Args, text: str, success_event: DeliverySuccessEvent | None = None) -> int:
@@ -1763,6 +1847,7 @@ def try_send_delivery_text(
     failure_pending_guard: PendingGuard | None = None,
     problem_guard: AgentProblemGuard | None = None,
     failure_problem_guard: AgentProblemGuard | None = None,
+    failure_fallback_defer_if_busy: bool = False,
 ) -> DeliveryResult:
     if root is not None and pending_file is not None and not pending_marker_present(root, pending_file, pending_line, pending_digest, pending_text):
         print(f"omo_pending_watch: {name} skipped; pending marker cleared before tmux paste", file=sys.stderr)
@@ -1784,6 +1869,7 @@ def try_send_delivery_text(
             failure_success_event or success_event,
             failure_pending_guard or pending_guard,
             failure_problem_guard or problem_guard,
+            failure_fallback_defer_if_busy,
         )
         if failure_fallback_target and not same_tmux_target(target, failure_fallback_target)
         else None
@@ -1872,6 +1958,71 @@ def push_agent_pending_item_reminders(args: Args, seen: dict[str, float], now_wa
         changed = delivery_accepted(status) or changed
         if delivery_accepted(status):
             remember_seen(seen, key, now_wall_s)
+    return changed
+
+
+def manager_direct_report_targets(root: Path) -> dict[str, tuple[str, ...]]:
+    """Return unique active agent targets grouped by their direct manager."""
+
+    reports: dict[str, dict[str, str]] = {}
+    seen_files: set[str] = set()
+    for task in parse_task_lines(root / "TODO.md"):
+        if task.task_file == "TODO.md" or task.task_file in seen_files or task.section not in AGENT_PENDING_ITEM_SECTIONS:
+            continue
+        seen_files.add(task.task_file)
+        metadata = read_task_metadata(resolve_task_path(root, task.task_file))
+        if (
+            metadata is None
+            or metadata.status not in {"running", "long_running", "blocked"}
+            or not metadata.managerat
+            or metadata.runat == "retired"
+            or same_tmux_target(metadata.managerat, metadata.runat)
+        ):
+            continue
+        reports.setdefault(canonical_target(metadata.managerat), {})[canonical_target(metadata.runat)] = metadata.runat
+    return {
+        manager: tuple(sorted(targets.values(), key=canonical_target))
+        for manager, targets in reports.items()
+        if len(targets) > MANAGER_DIRECT_REPORT_LIMIT
+    }
+
+
+def manager_direct_report_key(args: Args, manager_target: str, reports: Sequence[str]) -> str:
+    digest = hashlib.sha256("\0".join(canonical_target(target) for target in reports).encode("utf-8")).hexdigest()[:16]
+    return f"manager-direct-reports:{args.root}:{canonical_target(manager_target)}:{digest}"
+
+
+def manager_direct_report_retry_key(key: str) -> str:
+    return f"{key}:retry-after"
+
+
+def push_manager_direct_report_reminders(args: Args, seen: dict[str, float], now_wall_s: float) -> bool:
+    changed = False
+    for manager_target, reports in manager_direct_report_targets(args.root).items():
+        key = manager_direct_report_key(args, manager_target, reports)
+        retry_key = manager_direct_report_retry_key(key)
+        prefix = key.rsplit(":", 1)[0] + ":"
+        for seen_key in tuple(seen):
+            if seen_key.startswith(prefix) and seen_key not in {key, retry_key}:
+                del seen[seen_key]
+        last_sent_s = seen_get(seen, key, now_s=now_wall_s)
+        if key in seen and now_wall_s - last_sent_s < args.agent_problem_repeat_s:
+            continue
+        retry_after_s = seen_get(seen, retry_key, now_s=now_wall_s)
+        if retry_after_s > now_wall_s:
+            continue
+        seen.pop(retry_key, None)
+        text = f"You have {len(reports)} direct reports ({', '.join(reports)}), too many. Delegate some of them to submanagers."
+        event = DeliverySuccessEvent(
+            seen_keys=(key,),
+            failure_seen_removals=(key,),
+            failure_seen_deadlines_s=((retry_key, PENDING_DELIVERY_FAILURE_RETRY_S),),
+            seen_at_s=now_wall_s,
+        )
+        status = push_manager_text_to_target(args, text, manager_target, event)
+        if delivery_accepted(status):
+            remember_seen(seen, key, now_wall_s)
+            changed = True
     return changed
 
 
@@ -3027,9 +3178,11 @@ def handle_agent_problem_result(
     """Filter, throttle, and route status-problem output."""
 
     pending_reminders_changed = push_agent_pending_item_reminders(args, seen, now_wall_s)
+    direct_report_reminders_changed = push_manager_direct_report_reminders(args, seen, now_wall_s)
+    reminders_changed = pending_reminders_changed or direct_report_reminders_changed
     if result.timed_out:
         print("omo_pending_watch: agent problem check timed out", file=sys.stderr)
-        return pending_reminders_changed
+        return reminders_changed
     dependency_state = dependency_snapshots if dependency_snapshots is not None else {}
     dependency_reported_state = dependency_reported_snapshots if dependency_reported_snapshots is not None else {}
     prune_dependency_reported_snapshots(args.root, dependency_reported_state)
@@ -3038,31 +3191,31 @@ def handle_agent_problem_result(
     if result.returncode == 0:
         enter_changed = clear_all_enter_attempts(args, seen)
         capacity_changed = clear_resolved_capacity_state(args, seen, set())
-        return clear_manager_compaction_active(args, seen) or enter_changed or capacity_changed or dependency_changed or pending_reminders_changed
+        return clear_manager_compaction_active(args, seen) or enter_changed or capacity_changed or dependency_changed or reminders_changed
     if result.returncode != 3:
         print(f"omo_pending_watch: agent problem check exited status={result.returncode}: {result.stderr.strip()}", file=sys.stderr)
-        return dependency_changed or pending_reminders_changed
+        return dependency_changed or reminders_changed
     output = result.stdout.strip()
     if not output:
-        return dependency_changed or pending_reminders_changed
+        return dependency_changed or reminders_changed
     if result.stderr.strip():
         output = f"{output}\nstderr:\n{result.stderr.strip()}".strip()
     output, capacity_changed = handle_capacity_problems(args, seen, output, now_wall_s)
     if not output:
-        return capacity_changed or dependency_changed or pending_reminders_changed
+        return capacity_changed or dependency_changed or reminders_changed
     compaction_changed = maybe_push_manager_compaction_reminder(args, seen, output, now_wall_s)
     output = filter_manager_compaction_output(output, args.manager_target) or ""
     if not output:
-        return capacity_changed or compaction_changed or dependency_changed or pending_reminders_changed
+        return capacity_changed or compaction_changed or dependency_changed or reminders_changed
     manager_problem_output = manager_human_email_problem_output(output, args.manager_target)
     manager_problem_sent = route_or_email_manager_problem(args, manager_problem_output)
     output = filter_manager_self_problem_output(output, args.manager_target) or ""
     if not output:
-        return capacity_changed or manager_problem_sent or compaction_changed or dependency_changed or pending_reminders_changed
+        return capacity_changed or manager_problem_sent or compaction_changed or dependency_changed or reminders_changed
     output = filter_unchanged_dependency_blocked_idle_output(args, output, previous_dependency_reported_state) or ""
     if not output:
-        return capacity_changed or manager_problem_sent or compaction_changed or dependency_changed or pending_reminders_changed
-    changed = capacity_changed or manager_problem_sent or compaction_changed or dependency_changed or pending_reminders_changed
+        return capacity_changed or manager_problem_sent or compaction_changed or dependency_changed or reminders_changed
+    changed = capacity_changed or manager_problem_sent or compaction_changed or dependency_changed or reminders_changed
     for owner_target, dispatch in agent_problem_output_by_owner(args, seen, output, now_wall_s).items():
         digest = hashlib.sha256(f"{owner_target}\n{dispatch.digest_text}".encode("utf-8")).hexdigest()[:16]
         key = f"agent-problem:{digest}"
