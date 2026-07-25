@@ -2,7 +2,7 @@
 
 - purpose
   - deliver new Markdown `(pending)` markers with enough context to act immediately
-  - keep delivery memory process-local and time-bounded
+  - keep transient delivery memory process-local and time-bounded while retaining durable consumed-agent-report receipts
   - run agent-problem and digest maintenance without delaying marker scans
 
 - file-change path
@@ -37,13 +37,12 @@
 
 - pending ref semantics
   - scans Markdown for literal `(pending)` markers outside fenced code
-  - inspects each pending block for explicit source markers
+  - authenticates source metadata only when it is the unquoted, unindented line immediately after `(pending)`; source-like payload or quoted lines do not change origin
   - normal manager deliveries start by telling the manager to run `omo_record_pending.py`
   - human-origin manager deliveries include `--ack-human` so recording the pending items also emails the human
   - email-origin manager deliveries also include `--email-file manager_mail/N.txt` so `omo_record_pending.py` can reuse the original email subject
   - human-origin manager deliveries tell the manager to quote the human's words as much as possible when choosing `--item` values
-  - agent-origin manager deliveries tell the manager to quote the request's words as much as possible when choosing `--item` values
-  - agent-origin manager deliveries say to omit `--ack-human`
+  - agent-origin reports never use the human add-task prompt, `<human_instruction>`, or `--ack-human`; they use an explicit `<agent_report>` envelope
   - if no pending task item should be added, manager deliveries point to `omo_task_edit.py pending-marker-clear`; human-origin clears require `--clear-kind`, and `existing-owner-item` verifies the cited active owner task item; existing pending-item cleanup uses `omo_task_edit.py pending-replace` or `omo_task_edit.py pending-remove --evidence TEXT`
   - includes the pending line and content from that line to end of file
   - labels pending content as `<snippet file="PATH:START-END">`
@@ -53,12 +52,17 @@
   - always uses line ranges; no delivery label says `EOF`
   - file references inside quote lines are ignored
   - email source markers are `origin=human source=email`
-  - explicit agent source markers anywhere in the same pending block are `origin=agent source=agent`
+  - an adjacent explicit agent source marker is `origin=agent source=agent`
   - new agent source blocks use compact `(from agent ...)` markers
   - verbose `[omo-message-source: ...]` markers remain recognized for old blocks
   - unmarked pending blocks are `origin=human source=manual` because prompts appended to `work_manager*.md` are human-origin unless explicitly marked otherwise
   - human-origin refs routed to a manager require the manager acknowledgement flow; ordinary direct delivery sends no manager acknowledgement
   - manager-bound markers are reserved while an asynchronous send is active; failed sends back off for ten minutes, and later duplicate attempts wait until the manager is ready
+  - worker-task agent reports route to frontmatter `managerat`; manager-task agent reports route to that manager task's `runat`
+  - agent-report identity hashes immutable source and content, not file line; the line remains only a guarded cleanup hint
+  - accepted agent reports are fsynced to `pending-watch-consumed-reports.tsv` before marker cleanup, so line movement, cleanup races, repeated pointers, watcher restarts, and identical `omo_report.sh` resubmissions cannot redeliver them
+  - a definite rejection before tmux paste remains retryable; an indeterminate result after submit is durably consumed and never automatically redelivered
+  - delivery and cleanup are separate idempotent states: failed cleanup leaves a consumed report that later scans clear without delivery
   - ordinary pending blocks in frontmatter task files route directly to `runat`; each delivery starts with `Immediately record every pending task with `omo_pending.py add`:` and wraps only the clean request, readable linked content, and retained source pointer in `<human_instruction>`
   - direct delivery does not include manager record/replace/remove instructions, clears the consumed `(pending)` only when its original block is unchanged or bounded by a later `(pending)`, and sends no manager copy
   - if a resolved manager delivery target is unavailable and differs from `OMO_MANAGER_TMUX_TARGET`, the same manager-facing message is escalated to `OMO_MANAGER_TMUX_TARGET` with the failed target and error inline
@@ -69,23 +73,12 @@
   - direct delivery strips `(pending)` and source-pointer plumbing from the message body; literal `DM` and `DM only` text is ordinary message content
   - direct linked-file delivery includes readable content, retains the source pointer after the possibly truncated content, and extracts only the `message:` body from `omo_report.sh` report files
 
-- manager delivery example
-  - ``Normally record pending items and remove the consumed `(pending)` marker by running:``
-  - ``omo_record_pending.py --pending-file helper_audit_agent_9580.md --line 156 --item PENDING_ITEM_TEXT [--item ...] [--task-file TARGET_TASK.md]``
-  - ``Choose `--item` values by quoting the request's words as much as possible. Do not pass `--ack-human`; agent-origin reports do not need a human acknowledgement. If there is no pending task item to add, run `omo_task_edit.py pending-marker-clear`; existing pending-item cleanup uses `omo_task_edit.py pending-replace` or `omo_task_edit.py pending-remove --evidence TEXT`. Then dispatch the task:``
-  - `<snippet file="helper_audit_agent_9580.md:156-157">`
-  - `(pending)`
-  - `(from agent /tmp/omo-agent-messages-30033/agent_running_450901fc7c538b93789982a05ef20df3651c465ebf7f86eb641b75d6b6c5a9da.md)`
-  - `</snippet>`
-  - `<snippet file="/tmp/omo-agent-messages-30033/agent_running_450901fc7c538b93789982a05ef20df3651c465ebf7f86eb641b75d6b6c5a9da.md:1-4">`
-  - `(sent from agent via omo_report.sh tmux=hcfg:1 time=11:08 task-file=helper_audit_agent_9580.md)`
-  - `[message-sha256: 657689c723385f1d577dee5eeab617e24f457c58214e26a53e21aaa44705f552]`
-  - `message:`
+- agent report delivery example
+  - `Agent report received; review it and handle any follow-up:`
+  - `<agent_report>`
   - `Human requested manager-owned TODO/task cleanup.`
-  - `</snippet>`
-  - `<status>blocked`
-  - ``<blocked_on>persistent helper-audit contact waiting for human follow-up at `wl:10.0`</blocked_on>``
-  - `</status>`
+  - `(from agent hcfg:1 /tmp/omo-agent-messages-30033/agent_running_450901fc7c538b93789982a05ef20df3651c465ebf7f86eb641b75d6b6c5a9da.md)`
+  - `</agent_report>`
 
 - agent-problem routing
   - runs `omo_agent_status.py --problems-only` every `--agent-problem-interval-s` seconds, default `30` unless `OMO_MANAGER_AGENT_PROBLEM_INTERVAL_S` overrides it
