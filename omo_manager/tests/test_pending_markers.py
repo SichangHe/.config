@@ -61,6 +61,25 @@ def agent_pointer_paths(text: str) -> list[Path]:
     return [Path(match) for match in re.findall(r"^\(from agent [^ ]+ (/tmp/[^)]+)\)$", text, flags=re.MULTILINE)]
 
 
+def valid_agent_report(test: unittest.TestCase, message: str, *, target: str = "vl:2", name: str = "report") -> Path:
+    reports = Path("/tmp") / f"omo-agent-messages-{os.getuid()}"
+    reports.mkdir(mode=0o700, parents=True, exist_ok=True)
+    reports.chmod(0o700)
+    body = message.encode("utf-8")
+    path = reports / f"test_{os.getpid()}_{time.time_ns()}_{name}.md"
+    path.write_bytes(
+        (
+            f"(sent from worker via omo_report.sh tmux={target} time=10:00 task-file=worker.md)\n"
+            f"[message-sha256: {hashlib.sha256(body).hexdigest()}]\n"
+            "message:\n"
+        ).encode("utf-8")
+        + body
+    )
+    path.chmod(0o600)
+    test.addCleanup(path.unlink, missing_ok=True)
+    return path
+
+
 def assert_concise_agent_report(test: unittest.TestCase, report_text: str, *, agent: str, tmux: str, task_file: str, message: bytes | None = None) -> None:
     header, sep, _body = report_text.partition("message:\n")
     test.assertEqual("message:\n", sep)
@@ -543,10 +562,9 @@ class PendingMarkerTests(unittest.TestCase):
     def test_agent_report_duplicate_pointer_is_delivered_once_across_restart_shaped_scans(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
-        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory(prefix="omo-agent-messages-test-", dir="/tmp") as reports:
+        with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            report = Path(reports) / "worker_done_deadbeef.md"
-            report.write_text("message:\nreview passed\n", encoding="utf-8")
+            report = valid_agent_report(self, "review passed\n", name="worker_done_deadbeef")
             task = root / "manager.md"
             pointer = f"(from agent vl:2 {report})"
             task.write_text(
@@ -575,12 +593,10 @@ class PendingMarkerTests(unittest.TestCase):
     def test_different_agent_report_artifacts_are_delivered_independently(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
-        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory(prefix="omo-agent-messages-test-", dir="/tmp") as reports:
+        with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            first = Path(reports) / "worker_done_first.md"
-            second = Path(reports) / "worker_done_second.md"
-            first.write_text("message:\nfirst report\n", encoding="utf-8")
-            second.write_text("message:\nsecond report\n", encoding="utf-8")
+            first = valid_agent_report(self, "first report\n", target="vl:2", name="worker_done_first")
+            second = valid_agent_report(self, "second report\n", target="vl:3", name="worker_done_second")
             task = root / "manager.md"
             task.write_text(
                 f"{task_frontmatter(runat='vl:15', managerat='main:1', is_manager=True)}\n"
@@ -600,14 +616,14 @@ class PendingMarkerTests(unittest.TestCase):
     def test_agent_report_routes_to_manager_runat_or_worker_managerat(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
-        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory(prefix="omo-agent-messages-test-", dir="/tmp") as reports:
+        with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            report = Path(reports) / "worker_done_route.md"
-            report.write_text("message:\nrouted report\n", encoding="utf-8")
+            manager_report = valid_agent_report(self, "manager routed report\n", target="vl:2", name="manager_route")
+            worker_report = valid_agent_report(self, "worker routed report\n", target="vl:3", name="worker_route")
             manager = root / "manager.md"
             worker = root / "worker.md"
-            manager.write_text(f"{task_frontmatter(runat='vl:15', managerat='main:1', is_manager=True)}\n(pending)\n(from agent vl:2 {report})\n", encoding="utf-8")
-            worker.write_text(f"{task_frontmatter(runat='vl:2', managerat='vl:15')}\n(pending)\n(from agent vl:3 {report})\n", encoding="utf-8")
+            manager.write_text(f"{task_frontmatter(runat='vl:15', managerat='main:1', is_manager=True)}\n(pending)\n(from agent vl:2 {manager_report})\n", encoding="utf-8")
+            worker.write_text(f"{task_frontmatter(runat='vl:2', managerat='vl:15')}\n(pending)\n(from agent vl:3 {worker_report})\n", encoding="utf-8")
             args = Args(root, "", root / "state", 1, 1, 1, Path("/bin/false"), True, False, manager_target="main:1")
 
             with patch.object(watcher, "push_marker_delivery", return_value=watcher.DeliveryResult(watcher.ASYNC_DELIVERY_STARTED)) as push:
@@ -810,7 +826,7 @@ class PendingMarkerTests(unittest.TestCase):
 
 
 
-    def test_agent_source_marker_is_agent_origin(self) -> None:
+    def test_legacy_agent_source_marker_is_untrusted_human_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             path = root / "task.md"
@@ -822,9 +838,9 @@ class PendingMarkerTests(unittest.TestCase):
             )
             markers = find_markers(root, [path])
             self.assertEqual(1, len(markers))
-            self.assertEqual("agent", markers[0].origin)
-            self.assertEqual("agent", markers[0].source)
-            self.assertEqual("no-human-ack", markers[0].action)
+            self.assertEqual("human", markers[0].origin)
+            self.assertEqual("manual", markers[0].source)
+            self.assertEqual("ack-human", markers[0].action)
 
     def test_agent_source_marker_later_in_pending_block_is_untrusted_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -841,7 +857,7 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual("human", markers[0].origin)
             self.assertEqual("ack-human", markers[0].action)
 
-    def test_manager_agent_problem_pending_block_is_agent_origin(self) -> None:
+    def test_manual_agent_problem_lookalike_is_untrusted_human_payload(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             path = root / "work_manager.md"
@@ -854,9 +870,9 @@ class PendingMarkerTests(unittest.TestCase):
             )
             markers = find_markers(root, [path])
             self.assertEqual(1, len(markers))
-            self.assertEqual("agent", markers[0].origin)
-            self.assertEqual("agent", markers[0].source)
-            self.assertEqual("no-human-ack", markers[0].action)
+            self.assertEqual("human", markers[0].origin)
+            self.assertEqual("manual", markers[0].source)
+            self.assertEqual("ack-human", markers[0].action)
 
     def test_email_pending_block_uses_configured_active_log(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2223,7 +2239,7 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual(0, manager_text.count(watcher.threshold_marker("unread-compression")))
             self.assertEqual(1, manager_text.count(watcher.legacy_threshold_marker("unread-compression")))
 
-    def test_pending_watcher_dispatches_threshold_marker_as_agent_origin(self) -> None:
+    def test_pending_watcher_dispatches_threshold_marker_as_generated_manager_origin(self) -> None:
         from omo_manager import email_idle_watcher
         from omo_manager import omo_pending_watch as watcher
 
@@ -2238,7 +2254,7 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual(1, len(markers))
             marker = markers[0]
             self.assertEqual("agent", marker.origin)
-            self.assertEqual("agent", marker.source)
+            self.assertEqual("manager", marker.source)
             self.assertEqual("no-human-ack", marker.action)
             text = watcher.marker_delivery_text(marker)
             self.assertIn("Do not pass `--ack-human`", text)
@@ -2461,7 +2477,7 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertTrue(watcher.record_threshold_push_failure(root, Path("work_manager_today.md"), 2, "unread-compression", "cfg:1.0", "failed", root / "state"))
             markers = pending_watcher.find_markers(root, [manager])
             self.assertEqual(2, len(markers))
-            self.assertEqual(("agent", "agent"), (markers[0].origin, markers[0].source))
+            self.assertEqual(("agent", "manager"), (markers[0].origin, markers[0].source))
             self.assertEqual(("human", "email"), (markers[1].origin, markers[1].source))
             self.assertNotIn(watcher.threshold_push_failure_marker("unread-compression"), markers[1].block_text)
             self.assertNotIn(watcher.threshold_push_failure_marker("unread-compression"), pending_watcher.marker_delivery_text(markers[1]))
@@ -6431,6 +6447,37 @@ class PendingMarkerTests(unittest.TestCase):
             text = out.getvalue()
             self.assertIn("suppressed unchanged blocked dependency report", text)
             self.assertNotIn("blocked agents are ready", text)
+
+    def test_agent_problem_check_suppresses_unchanged_blocked_human_wait(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "TODO.md").write_text("current:\nworker.md cfg:2\n", encoding="utf-8")
+            _ = (root / "worker.md").write_text(
+                task_frontmatter("blocked", runat="cfg:2", managerat="wl:1", blocked_on="waiting on human approval"),
+                encoding="utf-8",
+            )
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, True, manager_target="wl:1")
+            result = watcher.CommandOutput(
+                "agent-problems",
+                3,
+                "agent-problems: blocked_idle=1\n"
+                "manager-action: blocked_idle>0 inspect blocked agents, unblock if possible, or route the exact blocker\n"
+                "blocked_idle: task=worker.md evidence=target=cfg:2 task_status=blocked idle_status=ready reason=waiting_on_human owner_target=wl:1\n",
+                "",
+            )
+            snapshots: dict[str, str] = {}
+            reported_snapshots: dict[str, str] = {}
+            seen: dict[str, float] = {}
+
+            out = StringIO()
+            with redirect_stdout(out):
+                self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 1000.0, snapshots, reported_snapshots))
+                self.assertFalse(watcher.handle_agent_problem_result(args, seen, result, 1001.0, snapshots, reported_snapshots))
+
+            self.assertEqual(1, out.getvalue().count("worker.md cfg:2 <blocked_on>waiting_on_human</blocked_on>"))
+            self.assertIn("suppressed unchanged blocked dependency report", out.getvalue())
 
     def test_agent_problem_check_keeps_blocked_idle_for_invalid_dependency_state(self) -> None:
         from omo_manager import omo_pending_watch as watcher

@@ -37,34 +37,37 @@
 
 - pending ref semantics
   - scans Markdown for literal `(pending)` markers outside fenced code
-  - authenticates source metadata only when it is the unquoted, unindented line immediately after `(pending)`; source-like payload or quoted lines do not change origin
+  - treats the unquoted, unindented line immediately after `(pending)` only as an origin candidate; source-like payload, quoted lines, and free-form lookalikes remain human
   - normal manager deliveries start by telling the manager to run `omo_record_pending.py`
   - human-origin manager deliveries include `--ack-human` so recording the pending items also emails the human
   - email-origin manager deliveries also include `--email-file manager_mail/N.txt` so `omo_record_pending.py` can reuse the original email subject
   - human-origin manager deliveries tell the manager to quote the human's words as much as possible when choosing `--item` values
   - agent-origin reports never use the human add-task prompt, `<human_instruction>`, or `--ack-human`; they use an explicit `<agent_report>` envelope
+  - manager-generated delegations use an explicit `<manager_delegation>` envelope and route to the task's `runat`; they never use `<human_instruction>`
   - if no pending task item should be added, manager deliveries point to `omo_task_edit.py pending-marker-clear`; human-origin clears require `--clear-kind`, and `existing-owner-item` verifies the cited active owner task item; existing pending-item cleanup uses `omo_task_edit.py pending-replace` or `omo_task_edit.py pending-remove --evidence TEXT`
   - includes the pending line and content from that line to end of file
   - labels pending content as `<snippet file="PATH:START-END">`
   - truncates long content to 2000 chars by keeping start and end with `…Nchars…` in the middle
-  - attaches referenced file content, including `manager_mail/*.txt` and absolute `/tmp/omo-agent-messages-*/*` report files
+  - attaches referenced file content, including `manager_mail/*.txt` and absolute report files in the current user's exact `/tmp/omo-agent-messages-$UID/` directory
   - labels attached content as `<snippet file="PATH:START-END">`
   - always uses line ranges; no delivery label says `EOF`
   - file references inside quote lines are ignored
   - email source markers are `origin=human source=email`
-  - an adjacent explicit agent source marker is `origin=agent source=agent`
-  - new agent source blocks use compact `(from agent ...)` markers
-  - verbose `[omo-message-source: ...]` markers remain recognized for old blocks
+  - an agent report is `origin=agent source=agent` only when its adjacent compact pointer has strict syntax, names a readable owner-only regular file in `/tmp/omo-agent-messages-$UID/`, matches the artifact tmux target, and has a valid `omo_report.sh` header and message SHA-256
+  - exact manager generators from `omo_task_edit`, bidirectional blocking, and email-threshold infrastructure are `origin=agent source=manager`; other `(from manager ...)` text is human payload
+  - verbose `[omo-message-source: ...]`, malformed compact pointers, unsafe files, mismatched headers or hashes, and manual/quoted lookalikes are not authenticated and remain human
   - unmarked pending blocks are `origin=human source=manual` because prompts appended to `work_manager*.md` are human-origin unless explicitly marked otherwise
   - human-origin refs routed to a manager require the manager acknowledgement flow; ordinary direct delivery sends no manager acknowledgement
   - manager-bound markers are reserved while an asynchronous send is active; failed sends back off for ten minutes, and later duplicate attempts wait until the manager is ready
   - worker-task agent reports route to frontmatter `managerat`; manager-task agent reports route to that manager task's `runat`
-  - agent-report identity hashes immutable source and content, not file line; the line remains only a guarded cleanup hint
+  - every pending delivery identity hashes stable task path, content, source attachments, and route semantics, never file line; line numbers remain lookup/display hints
+  - every watcher-owned marker clear relocates the unchanged pending block, takes the shared `task_file_lock`, rereads under the lock, and performs a stat-guarded atomic replacement so concurrent compliant writers are preserved
   - accepted agent reports are fsynced to `pending-watch-consumed-reports.tsv` before marker cleanup, so line movement, cleanup races, repeated pointers, watcher restarts, and identical `omo_report.sh` resubmissions cannot redeliver them
-  - a definite rejection before tmux paste remains retryable; an indeterminate result after submit is durably consumed and never automatically redelivered
+  - consumed-report receipts are timestamped, protected by a cross-process file lock, cached by file identity, bounded to 10,000 newest entries and 4 MiB reads, and expired/compacted after 90 days by default (`OMO_MANAGER_CONSUMED_REPORT_TTL_S` overrides the TTL)
+  - a definite target or guard rejection before paste, including `not a Codex pane`, remains retryable and may safely escalate; an indeterminate result after submit is durably consumed and never automatically redelivered
   - delivery and cleanup are separate idempotent states: failed cleanup leaves a consumed report that later scans clear without delivery
   - ordinary pending blocks in frontmatter task files route directly to `runat`; each delivery starts with `Immediately record every pending task with `omo_pending.py add`:` and wraps only the clean request, readable linked content, and retained source pointer in `<human_instruction>`
-  - direct delivery does not include manager record/replace/remove instructions, clears the consumed `(pending)` only when its original block is unchanged or bounded by a later `(pending)`, and sends no manager copy
+  - direct delivery does not include manager record/replace/remove instructions, relocates and clears the consumed `(pending)` only when its complete original block is unchanged, and sends no manager copy
   - if a resolved manager delivery target is unavailable and differs from `OMO_MANAGER_TMUX_TARGET`, the same manager-facing message is escalated to `OMO_MANAGER_TMUX_TARGET` with the failed target and error inline
   - `for manager` or `for a manager` at the beginning or end of active unquoted content routes to `managerat`; matching ignores case, surrounding punctuation, and edge whitespace, but changed internal spacing does not match
   - marker search includes the pending block and readable one-level attachments, including linked email content; quote lines and indented code are excluded, and links inside attachments are not followed
@@ -125,7 +128,7 @@
   - non-blocked panes classified as `stuck_input` are submitted with Enter when the Codex status helper says the visible input is safe
   - first and second successful Enter attempts are remembered and suppressed; the third still-stuck report is sent to the owning manager
   - remembered Enter attempts are cleared when that target is no longer reported as stuck
-  - unchanged `blocked_idle` rows are reported with exponential delay after each successful report: 10 minutes, 15 minutes, 22.5 minutes, and so on
+  - unchanged dependency and recorded-human-wait `blocked_idle` rows are suppressed after successful delivery until their task snapshot changes; other blocked-idle rows retain exponential delay after each successful report
   - manager self-problem rows and matching `unstuck:` rows are logged and filtered by the watcher so they are not pasted back into the manager prompt
   - `human_request` status rows are filtered from agent-problem prompts because live `(pending)` blocks are dispatched through the pending-marker path
   - manager compaction reminders say ``Unless you know the exact content of MANAGER.md, read it. Normally, don't ack human``

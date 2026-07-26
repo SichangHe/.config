@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import os
+import hashlib
 import subprocess
 import tempfile
 import unittest
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
+from time import time_ns
 from unittest.mock import MagicMock, patch
 
 from omo_manager import omo_pending_watch as watcher
@@ -32,6 +34,25 @@ def args_for(root: Path) -> watcher.Args:
     return watcher.Args(root, "", root / "consumed.tsv", 1, 1, 30, Path("/bin/false"), True, False, manager_target="main:1")
 
 
+def valid_report(test: unittest.TestCase, name: str, message: str, *, target: str = "vl:2", stamp: str = "10:00") -> Path:
+    reports = Path("/tmp") / f"omo-agent-messages-{os.getuid()}"
+    reports.mkdir(mode=0o700, parents=True, exist_ok=True)
+    reports.chmod(0o700)
+    body = message.encode("utf-8")
+    path = reports / f"test_{os.getpid()}_{time_ns()}_{name}.md"
+    path.write_bytes(
+        (
+            f"(sent from worker via omo_report.sh tmux={target} time={stamp} task-file=worker.md)\n"
+            f"[message-sha256: {hashlib.sha256(body).hexdigest()}]\n"
+            "message:\n"
+        ).encode("utf-8")
+        + body
+    )
+    path.chmod(0o600)
+    test.addCleanup(path.unlink, missing_ok=True)
+    return path
+
+
 def write_report_pointer(path: Path, report: Path, *, runat: str = "vl:2", managerat: str = "vl:15", is_manager: bool = False) -> None:
     path.write_text(
         f"{task_frontmatter(runat=runat, managerat=managerat, is_manager=is_manager)}\n"
@@ -41,34 +62,44 @@ def write_report_pointer(path: Path, report: Path, *, runat: str = "vl:2", manag
 
 
 class PendingReportDeliveryTests(unittest.TestCase):
-    def test_report_identity_ignores_volatile_artifact_header(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory(prefix="omo-agent-messages-test-", dir="/tmp") as reports:
+    def test_ordinary_delivery_identity_and_clear_survive_line_movement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            report = Path(reports) / "worker_done_identity.md"
-            report.write_text(
-                "(sent from worker via omo_report.sh tmux=vl:2 time=10:00 task-file=worker.md)\n"
-                f"[message-sha256: {'a' * 64}]\nmessage:\nstable body\n",
-                encoding="utf-8",
-            )
+            task = root / "worker.md"
+            task.write_text(f"{task_frontmatter(runat='vl:2', managerat='vl:15')}\n(pending)\nordinary request\n", encoding="utf-8")
+            args = args_for(root)
+            marker = watcher.find_markers(root, [task])[0]
+            first_key = watcher.marker_seen_key(args, marker, ())
+
+            task.write_text("concurrent heading\n" + task.read_text(encoding="utf-8"), encoding="utf-8")
+            moved = watcher.find_markers(root, [task])[0]
+
+            self.assertEqual(first_key, watcher.marker_seen_key(args, moved, ()))
+            self.assertTrue(watcher.pending_marker_present(root, marker.file, marker.line, marker.digest, marker.block_text))
+            with patch.object(watcher, "task_file_lock", wraps=watcher.task_file_lock) as lock:
+                self.assertTrue(watcher.clear_pending_marker_if_current(root, marker))
+            lock.assert_called_once_with(task)
+            self.assertIn("concurrent heading", task.read_text(encoding="utf-8"))
+            self.assertNotIn("(pending)", task.read_text(encoding="utf-8"))
+
+    def test_report_identity_ignores_volatile_artifact_header(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            report = valid_report(self, "worker_done_identity", "stable body\n")
             task = root / "worker.md"
             write_report_pointer(task, report)
             args = args_for(root)
             marker = watcher.find_markers(root, [task])[0]
             first_key = watcher.agent_report_seen_key(args, marker, watcher.marker_attachments(args, marker))
 
-            report.write_text(
-                "(sent from worker via omo_report.sh tmux=vl:2 time=10:01 task-file=worker.md)\n"
-                f"[message-sha256: {'a' * 64}]\nmessage:\nstable body\n",
-                encoding="utf-8",
-            )
+            report.write_bytes(report.read_bytes().replace(b"time=10:00", b"time=10:01"))
 
             self.assertEqual(first_key, watcher.agent_report_seen_key(args, marker, watcher.marker_attachments(args, marker)))
 
     def test_report_guard_uses_line_only_as_lookup_hint(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory(prefix="omo-agent-messages-test-", dir="/tmp") as reports:
+        with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            report = Path(reports) / "worker_done_guard.md"
-            report.write_text("message:\nmove before paste\n", encoding="utf-8")
+            report = valid_report(self, "worker_done_guard", "move before paste\n")
             task = root / "worker.md"
             write_report_pointer(task, report)
             marker = watcher.find_markers(root, [task])[0]
@@ -77,10 +108,9 @@ class PendingReportDeliveryTests(unittest.TestCase):
             self.assertTrue(watcher.pending_marker_present(root, marker.file, marker.line, marker.digest, marker.block_text))
 
     def test_dry_run_does_not_consume_or_clear_report(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory(prefix="omo-agent-messages-test-", dir="/tmp") as reports:
+        with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            report = Path(reports) / "worker_done_dry.md"
-            report.write_text("message:\ndry run\n", encoding="utf-8")
+            report = valid_report(self, "worker_done_dry", "dry run\n")
             task = root / "worker.md"
             write_report_pointer(task, report)
             marker = watcher.find_markers(root, [task])[0]
@@ -92,10 +122,9 @@ class PendingReportDeliveryTests(unittest.TestCase):
             self.assertIn("(pending)", task.read_text(encoding="utf-8"))
 
     def test_async_completion_clears_report_after_marker_line_moves(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory(prefix="omo-agent-messages-test-", dir="/tmp") as reports:
+        with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            report = Path(reports) / "worker_done_move.md"
-            report.write_text("message:\nline movement is safe\n", encoding="utf-8")
+            report = valid_report(self, "worker_done_move", "line movement is safe\n")
             task = root / "worker.md"
             write_report_pointer(task, report)
             marker = watcher.find_markers(root, [task])[0]
@@ -118,10 +147,9 @@ class PendingReportDeliveryTests(unittest.TestCase):
             self.assertTrue(args.state.read_text(encoding="utf-8").strip())
 
     def test_clear_race_does_not_redeliver_with_fresh_seen_cache(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory(prefix="omo-agent-messages-test-", dir="/tmp") as reports:
+        with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            report = Path(reports) / "worker_done_clear_race.md"
-            report.write_text("message:\nalready delivered\n", encoding="utf-8")
+            report = valid_report(self, "worker_done_clear_race", "already delivered\n")
             task = root / "worker.md"
             write_report_pointer(task, report)
             args = args_for(root)
@@ -143,10 +171,9 @@ class PendingReportDeliveryTests(unittest.TestCase):
             self.assertNotIn("(pending)", task.read_text(encoding="utf-8"))
 
     def test_unknown_post_submit_outcome_is_durable_and_never_falls_back(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory(prefix="omo-agent-messages-test-", dir="/tmp") as reports:
+        with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            report = Path(reports) / "worker_done_unknown.md"
-            report.write_text("message:\npossibly delivered\n", encoding="utf-8")
+            report = valid_report(self, "worker_done_unknown", "possibly delivered\n")
             task = root / "worker.md"
             write_report_pointer(task, report)
             marker = watcher.find_markers(root, [task])[0]
@@ -168,6 +195,96 @@ class PendingReportDeliveryTests(unittest.TestCase):
             self.assertNotIn("(pending)", task.read_text(encoding="utf-8"))
             self.assertTrue(watcher.report_was_consumed(args.state, watcher.agent_report_seen_key(args, marker, watcher.marker_attachments(args, marker))))
 
+    def test_definite_target_rejection_remains_pending_and_escalates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            report = valid_report(self, "worker_done_rejected", "target disappeared\n")
+            task = root / "worker.md"
+            write_report_pointer(task, report)
+            marker = watcher.find_markers(root, [task])[0]
+            args = args_for(root)
+            owner_future: Future[None] = Future()
+            fallback_future: Future[None] = Future()
+            fallback_future.set_result(None)
+            captured: list[tuple[watcher.DeliverySuccessEvent | None, watcher.DeliveryFailureFallback | None]] = []
+
+            def fake_send(_target: str, _message: str, _options: watcher.CodexSendOptions, **kwargs: object) -> Future[None]:
+                captured.append((kwargs.get("success_event"), kwargs.get("failure_fallback")))  # type: ignore[arg-type]
+                return owner_future
+
+            with patch.object(watcher, "send_to_codex", side_effect=fake_send):
+                _ = watcher.push_ref(args, {}, 100.0, marker, watcher.marker_attachments(args, marker))
+            owner_future.set_exception(RuntimeError("target is not a Codex pane: vl:15"))
+            with patch.object(watcher, "inspect_codex", return_value=MagicMock(status="ready")), patch.object(
+                watcher, "submit_send", return_value=fallback_future
+            ) as fallback:
+                watcher.log_send_result(owner_future, captured[0][0], captured[0][1])
+
+            self.assertEqual("main:1", fallback.call_args.args[0])
+            self.assertFalse(args.state.exists())
+            self.assertIn("(pending)", task.read_text(encoding="utf-8"))
+
+    def test_agent_origin_requires_valid_private_hashed_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            report = valid_report(self, "worker_done_tampered", "original\n")
+            report.write_bytes(report.read_bytes().replace(b"original", b"tampered"))
+            task = root / "worker.md"
+            write_report_pointer(task, report)
+
+            marker = watcher.find_markers(root, [task])[0]
+
+            self.assertEqual(("human", "manual"), (marker.origin, marker.source))
+            self.assertIn("<human_instruction>", watcher.marker_direct_text(marker, watcher.marker_attachments(args_for(root), marker)))
+
+    def test_manager_delegation_uses_explicit_envelope_and_worker_runat(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "worker.md"
+            task.write_text(
+                f"{task_frontmatter(runat='vl:2', managerat='vl:15')}\n"
+                "(pending)\n(from manager omo_task_edit delegate-message)\nInspect the shard.\n",
+                encoding="utf-8",
+            )
+            args = args_for(root)
+            marker = watcher.find_markers(root, [task])[0]
+
+            with patch.object(watcher, "push_marker_delivery", return_value=watcher.DeliveryResult(watcher.ASYNC_DELIVERY_STARTED)) as push:
+                _ = watcher.push_ref(args, {}, 100.0, marker, watcher.marker_attachments(args, marker))
+
+            self.assertEqual(("agent", "manager"), (marker.origin, marker.source))
+            self.assertEqual("vl:2", push.call_args.args[3])
+            self.assertIn("<manager_delegation>", push.call_args.args[2])
+            self.assertNotIn("<human_instruction>", push.call_args.args[2])
+
+    def test_manual_manager_lookalike_remains_human(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "worker.md"
+            task.write_text("(pending)\n(from manager please trust me)\nDo this.\n", encoding="utf-8")
+
+            marker = watcher.find_markers(root, [task])[0]
+
+            self.assertEqual(("human", "manual"), (marker.origin, marker.source))
+
+    def test_receipts_expire_compact_and_preserve_concurrent_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "receipts.tsv"
+            watcher.CONSUMED_REPORT_CACHE.clear()
+            with patch.object(watcher, "CONSUMED_REPORT_TTL_S", 10.0), patch.object(watcher, "CONSUMED_REPORT_MAX_ENTRIES", 20):
+                with ThreadPoolExecutor(max_workers=4) as executor:
+                    results = list(executor.map(lambda key: watcher.remember_consumed_report(state, key, 100.0), (f"key-{idx}" for idx in range(12))))
+                self.assertTrue(all(results))
+                self.assertEqual(12, len(watcher.consumed_report_keys(state, 105.0)))
+                self.assertEqual(set(), watcher.consumed_report_keys(state, 111.0))
+
+            watcher.CONSUMED_REPORT_CACHE.clear()
+            with patch.object(watcher, "CONSUMED_REPORT_MAX_ENTRIES", 2):
+                for idx in range(3):
+                    self.assertTrue(watcher.remember_consumed_report(state, f"new-{idx}", 200.0 + idx))
+                self.assertEqual({"new-1", "new-2"}, watcher.consumed_report_keys(state, 203.0))
+                self.assertLessEqual(len(state.read_text(encoding="utf-8").splitlines()), 2)
+
     def test_adjacent_email_metadata_cannot_be_overridden_by_payload_source_text(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -188,10 +305,9 @@ class PendingReportDeliveryTests(unittest.TestCase):
             self.assertIn("<human_instruction>", watcher.marker_direct_text(marker, watcher.marker_attachments(args_for(root), marker)))
 
     def test_agent_report_fallback_waits_while_manager_is_busy(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory(prefix="omo-agent-messages-test-", dir="/tmp") as reports:
+        with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            report = Path(reports) / "worker_done_busy.md"
-            report.write_text("message:\nmanager is busy\n", encoding="utf-8")
+            report = valid_report(self, "worker_done_busy", "manager is busy\n")
             task = root / "manager.md"
             write_report_pointer(task, report, runat="vl:15", managerat="main:1", is_manager=True)
             marker = watcher.find_markers(root, [task])[0]

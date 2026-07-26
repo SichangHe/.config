@@ -6,13 +6,15 @@ import argparse
 import ctypes
 import ctypes.util
 import errno
+import fcntl
 import html
-import os
 import hashlib
+import os
 import random
 import re
 import shlex
 import select
+import stat
 import struct
 import subprocess
 import sys
@@ -21,10 +23,11 @@ import time
 import traceback
 import unicodedata
 from collections import Counter
+from contextlib import contextmanager
 from concurrent.futures import Future
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import wait as wait_futures
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from queue import Empty
@@ -38,6 +41,7 @@ from omo_manager.omo_agent_status import TaskLine
 from omo_manager.omo_agent_status import blocked_status_dependency_snapshot
 from omo_manager.omo_agent_status import effective_owner_target
 from omo_manager.omo_agent_status import is_main_manager_task_file
+from omo_manager.omo_agent_status import is_recorded_human_wait
 from omo_manager.omo_agent_status import parse_task_lines
 from omo_manager.omo_agent_status import read_task_metadata
 from omo_manager.omo_agent_status import resolve_task_path
@@ -59,6 +63,21 @@ from omo_manager.omo_tmux_send import send_to_codex as verified_send_to_codex
 
 def default_state_dir() -> Path:
     return Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "omo-manager"
+
+
+@contextmanager
+def task_file_lock(path: Path) -> Iterator[None]:
+    """Use the repository-wide per-task lock path without another module dependency."""
+
+    key = hashlib.sha256(str(path.resolve(strict=False)).encode()).hexdigest()
+    lock_path = Path("/tmp") / f"omo-task-file-locks-{os.getuid()}" / key
+    lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with lock_path.open("a", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 DEFAULT_ROOT = Path(os.environ.get("OMO_WORK_LOGS_ROOT", Path.home() / "work_logs"))
 DEFAULT_MANAGER_TARGET = os.environ.get("OMO_MANAGER_TMUX_TARGET", "")
@@ -98,8 +117,20 @@ CHECKBOX_POINTER_PREFIX_RE = re.compile(r"^\[[ xX]\]\s+")
 MARKDOWN_POINTER_LINK_RE = re.compile(r"^\[[^\]]*\]\(\s*<?([^)\s>]+)>?(?:\s+(?:\"[^\"]*\"|'[^']*'|\([^)]*\)))?\s*\)$")
 STATUS_DETAIL_RE = re.compile(r"^\((pending|running|long_running|done|blocked)(?::\s*([^)]*))?\)(?:\s+\(([^)]*)\))?$")
 TMUX_TARGET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?$")
-AGENT_POINTER_WITH_TARGET_RE = re.compile(r"^\(from agent ([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?) (/tmp/omo-agent-messages-[^)]*)\)$")
-AGENT_MESSAGE_DIR_RE = re.compile(r"^/tmp/omo-agent-messages-[^/]+/")
+AGENT_POINTER_WITH_TARGET_RE = re.compile(
+    rf"^\(from agent ([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?) (/tmp/omo-agent-messages-{os.getuid()}/[A-Za-z0-9_.-]+\.md)\)$"
+)
+AGENT_REPORT_SENT_RE = re.compile(
+    r"^\(sent from [A-Za-z0-9_.-]+ via omo_report\.sh tmux=([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?) "
+    r"time=\S+ task-file=[A-Za-z0-9_.-]+\)$"
+)
+AGENT_REPORT_HASH_RE = re.compile(r"^\[message-sha256: ([0-9a-f]{64})\]$")
+AGENT_MESSAGE_DIR_RE = re.compile(rf"^/tmp/omo-agent-messages-{os.getuid()}/")
+MANAGER_GENERATED_SOURCE_RE = re.compile(
+    r"^(?:\(from manager (?:omo_task_edit delegate-message|bidirectional blocking (?:wake|escalation) [A-Za-z0-9_.:-]+)\)"
+    r"|\(from agent email_idle_watcher manager-mail-threshold (?:unread-compression|recent-cleanup)\)"
+    r"|\(from manager-email-threshold (?:unread-compression|recent-cleanup)\))$"
+)
 AGENT_PROBLEM_HEADER = "Handle ALL omo_pending_watch agent problems below; only email human if you cannot handle them:"
 DELIVERY_RECOVERY_POLICY = (
     "Before a delivery-recovery stop, await every retained async sender result and refresh watcher status. "
@@ -168,6 +199,8 @@ def positive_float_env(name: str, default: float) -> float:
 
 
 DEFAULT_SEEN_TTL_S = positive_float_env("OMO_MANAGER_SEEN_TTL_S", 24 * 60 * 60)
+CONSUMED_REPORT_TTL_S = positive_float_env("OMO_MANAGER_CONSUMED_REPORT_TTL_S", 90 * 24 * 60 * 60)
+CONSUMED_REPORT_MAX_ENTRIES = 10_000
 
 
 @dataclass(frozen=True)
@@ -352,6 +385,16 @@ CAPACITY_ADVISORY_PENDING: set[tuple[str, str]] = set()
 PENDING_SENDS: set[Future[None]] = set()
 PENDING_SEND_HANDLERS: dict[Future[None], Callable[[Future[None]], None]] = {}
 PENDING_SENDS_LOCK = Lock()
+CONSUMED_REPORT_CACHE_LOCK = Lock()
+
+
+@dataclass
+class ConsumedReportCache:
+    signature: tuple[int, int, int, int] | None
+    entries: dict[str, float]
+
+
+CONSUMED_REPORT_CACHE: dict[Path, ConsumedReportCache] = {}
 
 
 class PrePasteRejected(RuntimeError):
@@ -367,6 +410,12 @@ def definitely_rejected_before_paste(exc: Exception) -> bool:
     return any(
         fragment in error
         for fragment in (
+            "not a codex pane",
+            "not a supported codex send state before paste",
+            "can't find window",
+            "cannot find window",
+            "no such window",
+            "no such pane",
             "before tmux paste",
             "before paste",
             "existing input not cleared before tmux paste",
@@ -430,7 +479,12 @@ def run_verified_send(
         if problem_guard is not None and not agent_problem_guard_current(problem_guard):
             raise PrePasteRejected("agent problem resolved or changed before tmux paste")
 
-    verified_send_to_codex(target, message, options, before_paste=before_paste if pending_guard is not None or problem_guard is not None else None)
+    try:
+        verified_send_to_codex(target, message, options, before_paste=before_paste if pending_guard is not None or problem_guard is not None else None)
+    except Exception as exc:
+        if definitely_rejected_before_paste(exc) and not isinstance(exc, PrePasteRejected):
+            raise PrePasteRejected(str(exc)) from exc
+        raise
 
 
 def log_send_result(
@@ -919,7 +973,7 @@ def mtime_changed_markdown_files(root: Path, state: FileState) -> list[Path]:
 
 
 def adjacent_source_metadata(block_lines: Sequence[str]) -> str:
-    """Return only generator-owned metadata immediately after `(pending)`."""
+    """Return an unquoted metadata candidate immediately after `(pending)`."""
 
     if len(block_lines) < 2 or block_lines[0].strip() not in PENDING_MARKERS:
         return ""
@@ -929,13 +983,56 @@ def adjacent_source_metadata(block_lines: Sequence[str]) -> str:
     return line
 
 
+def valid_agent_report_artifact(source_line: str) -> bool:
+    """Authenticate one immutable `omo_report.sh` pointer and artifact."""
+
+    match = AGENT_POINTER_WITH_TARGET_RE.fullmatch(source_line)
+    if match is None:
+        return False
+    path = Path(match.group(2))
+    expected_dir = Path("/tmp") / f"omo-agent-messages-{os.getuid()}"
+    try:
+        directory_stat = expected_dir.lstat()
+        if not stat.S_ISDIR(directory_stat.st_mode) or expected_dir.resolve(strict=True) != expected_dir:
+            return False
+        if directory_stat.st_uid != os.getuid() or stat.S_IMODE(directory_stat.st_mode) & 0o077:
+            return False
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(fd, "rb") as handle:
+            path_stat = os.fstat(handle.fileno())
+            if not stat.S_ISREG(path_stat.st_mode) or path_stat.st_uid != os.getuid() or stat.S_IMODE(path_stat.st_mode) & 0o077:
+                return False
+            payload = handle.read(PENDING_CONTENT_CHAR_LIMIT * 8 + 1)
+            if len(payload) > PENDING_CONTENT_CHAR_LIMIT * 8:
+                return False
+    except OSError:
+        return False
+    header, separator, message = payload.partition(b"message:\n")
+    if not separator:
+        return False
+    try:
+        header_lines = header.decode("utf-8").splitlines()
+        _ = message.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    if len(header_lines) not in {2, 4}:
+        return False
+    sent_match = AGENT_REPORT_SENT_RE.fullmatch(header_lines[0])
+    hash_match = AGENT_REPORT_HASH_RE.fullmatch(header_lines[1])
+    if sent_match is None or sent_match.group(1) != match.group(1) or hash_match is None:
+        return False
+    if len(header_lines) == 4 and (header_lines[2] != "route-warning:" or not header_lines[3]):
+        return False
+    return hashlib.sha256(message).hexdigest() == hash_match.group(1)
+
+
 def marker_origin_source(block_lines: list[str]) -> tuple[str, str]:
     """Classify origin from authenticated, structurally adjacent metadata."""
 
     source_line = adjacent_source_metadata(block_lines)
-    if source_line.startswith(MANAGER_SOURCE_PREFIXES):
+    if MANAGER_GENERATED_SOURCE_RE.fullmatch(source_line) is not None:
         return "agent", "manager"
-    if source_line.startswith(AGENT_SOURCE_PREFIXES):
+    if valid_agent_report_artifact(source_line):
         return "agent", "agent"
     if source_line.startswith(EMAIL_SOURCE_PREFIXES):
         return "human", "email"
@@ -991,6 +1088,14 @@ def marker_attachments(args: Args, marker: Marker) -> list[SourceAttachment]:
     return [source_attachment(args.root, source) for source in pending_source_paths(marker)]
 
 
+def marker_has_authenticated_agent_report(marker: Marker, attachments: Sequence[SourceAttachment]) -> bool:
+    source_line = adjacent_source_metadata(marker.block_text.splitlines())
+    match = AGENT_POINTER_WITH_TARGET_RE.fullmatch(source_line)
+    if match is None or not valid_agent_report_artifact(source_line):
+        return False
+    return any(attachment.source == match.group(2) and not attachment.error for attachment in attachments)
+
+
 def attachment_payload_digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
@@ -1027,32 +1132,145 @@ def agent_report_seen_key(args: Args, marker: Marker, attachments: Sequence[Sour
     return f"{args.root}:agent-report:{digest}"
 
 
-def consumed_report_keys(state: Path) -> set[str]:
+def receipt_state_signature(state: Path) -> tuple[int, int, int, int] | None:
     try:
-        return {line for line in state.read_text(encoding="utf-8").splitlines() if line}
+        current = state.stat()
     except FileNotFoundError:
-        return set()
+        return None
+    except OSError as exc:
+        print(f"omo_pending_watch: failed to stat consumed-report state {state}: {exc}", file=sys.stderr)
+        return None
+    return current.st_dev, current.st_ino, current.st_mtime_ns, current.st_size
+
+
+def receipt_lock_path(state: Path) -> Path:
+    return state.with_name(f".{state.name}.lock")
+
+
+def read_bounded_receipt_text(state: Path, max_bytes: int = 4 * 1024 * 1024) -> str:
+    with state.open("rb") as handle:
+        size = os.fstat(handle.fileno()).st_size
+        start = max(0, size - max_bytes)
+        handle.seek(start)
+        payload = handle.read(max_bytes)
+    if start:
+        _, separator, payload = payload.partition(b"\n")
+        if not separator:
+            return ""
+    return payload.decode("utf-8", errors="replace")
+
+
+def parse_consumed_report_entries(state: Path, now_s: float) -> tuple[dict[str, float], bool]:
+    try:
+        state_stat = state.stat()
+        legacy_timestamp = state_stat.st_mtime
+        text = read_bounded_receipt_text(state)
+    except FileNotFoundError:
+        return {}, False
     except OSError as exc:
         print(f"omo_pending_watch: failed to read consumed-report state {state}: {exc}", file=sys.stderr)
-        return set()
+        return {}, False
+    entries: dict[str, float] = {}
+    dirty = state_stat.st_size > 4 * 1024 * 1024
+    for line in text.splitlines():
+        timestamp_text, separator, key = line.partition("\t")
+        if not separator:
+            timestamp_s, key, dirty = legacy_timestamp, line, True
+        else:
+            try:
+                timestamp_s = float(timestamp_text)
+            except ValueError:
+                dirty = True
+                continue
+        if not key or now_s - timestamp_s >= CONSUMED_REPORT_TTL_S:
+            dirty = True
+            continue
+        entries[key] = max(entries.get(key, 0.0), timestamp_s)
+    if len(entries) > CONSUMED_REPORT_MAX_ENTRIES:
+        entries = dict(sorted(entries.items(), key=lambda item: item[1])[-CONSUMED_REPORT_MAX_ENTRIES:])
+        dirty = True
+    return entries, dirty
 
 
-def report_was_consumed(state: Path, key: str) -> bool:
-    return key in consumed_report_keys(state)
-
-
-def remember_consumed_report(state: Path, key: str) -> bool:
-    """Append and fsync one idempotent consumed-report receipt."""
-
-    if report_was_consumed(state, key):
-        return True
+def write_consumed_report_entries(state: Path, entries: dict[str, float]) -> None:
+    state.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    tmp_path: Path | None = None
     try:
-        state.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        fd = os.open(state, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
-        with os.fdopen(fd, "a", encoding="utf-8") as handle:
-            _ = handle.write(f"{key}\n")
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=state.parent, prefix=f".{state.name}.", delete=False) as handle:
+            tmp_path = Path(handle.name)
+            for key, timestamp_s in sorted(entries.items(), key=lambda item: item[1]):
+                _ = handle.write(f"{timestamp_s:.6f}\t{key}\n")
             handle.flush()
             os.fsync(handle.fileno())
+        tmp_path.chmod(0o600)
+        os.replace(tmp_path, state)
+        tmp_path = None
+        directory_fd = os.open(state.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
+
+
+def locked_consumed_report_entries(state: Path, now_s: float, *, force_reload: bool = False) -> dict[str, float]:
+    state = state.resolve(strict=False)
+    state.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    lock_path = receipt_lock_path(state)
+    with CONSUMED_REPORT_CACHE_LOCK, lock_path.open("a", encoding="utf-8") as lock:
+        lock_path.chmod(0o600)
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            signature = receipt_state_signature(state)
+            cached = CONSUMED_REPORT_CACHE.get(state)
+            if force_reload or cached is None or cached.signature != signature:
+                entries, dirty = parse_consumed_report_entries(state, now_s)
+            else:
+                entries = dict(cached.entries)
+                dirty = False
+            expired = [key for key, timestamp_s in entries.items() if now_s - timestamp_s >= CONSUMED_REPORT_TTL_S]
+            for key in expired:
+                del entries[key]
+            dirty = dirty or bool(expired)
+            if dirty:
+                write_consumed_report_entries(state, entries)
+                signature = receipt_state_signature(state)
+            CONSUMED_REPORT_CACHE[state] = ConsumedReportCache(signature, dict(entries))
+            return entries
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def consumed_report_keys(state: Path, now_s: float | None = None) -> set[str]:
+    return set(locked_consumed_report_entries(state, time.time() if now_s is None else now_s))
+
+
+def report_was_consumed(state: Path, key: str, now_s: float | None = None) -> bool:
+    return key in consumed_report_keys(state, now_s)
+
+
+def remember_consumed_report(state: Path, key: str, now_s: float | None = None) -> bool:
+    """Persist one timestamped receipt under a cross-process lock."""
+
+    timestamp_s = time.time() if now_s is None else now_s
+    state = state.resolve(strict=False)
+    state.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    lock_path = receipt_lock_path(state)
+    try:
+        with CONSUMED_REPORT_CACHE_LOCK, lock_path.open("a", encoding="utf-8") as lock:
+            lock_path.chmod(0o600)
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                entries, _dirty = parse_consumed_report_entries(state, timestamp_s)
+                entries[key] = timestamp_s
+                if len(entries) > CONSUMED_REPORT_MAX_ENTRIES:
+                    entries = dict(sorted(entries.items(), key=lambda item: item[1])[-CONSUMED_REPORT_MAX_ENTRIES:])
+                write_consumed_report_entries(state, entries)
+                CONSUMED_REPORT_CACHE[state] = ConsumedReportCache(receipt_state_signature(state), dict(entries))
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
         return True
     except OSError as exc:
         print(f"omo_pending_watch: failed to persist consumed report {key}: {exc}", file=sys.stderr)
@@ -1075,26 +1293,39 @@ def attachment_routing_text(attachment: SourceAttachment) -> str:
 
 
 def direct_delivery_seen_key(args: Args, marker: Marker, target: str, attachments: Sequence[SourceAttachment]) -> str:
-    payload = f"{marker.block_text}\n{readable_attachment_payload(attachments)}"
-    return f"{args.root}:{marker.file}:{marker.line}:{marker.digest}:direct:{canonical_target(target)}:{attachment_payload_digest(payload)}"
+    marker_key = stable_marker_seen_key(args, marker, attachments)
+    return f"{marker_key}:direct:{canonical_target(target)}"
 
 
 def attachment_error_seen_key(args: Args, marker: Marker, attachments: Sequence[SourceAttachment]) -> str:
     errors = "|".join(f"{attachment.source}:{attachment.error}" for attachment in attachments if attachment.error)
-    return f"{args.root}:{marker.file}:{marker.line}:{marker.digest}:attachment-error:{attachment_payload_digest(errors)}"
+    return f"{stable_marker_seen_key(args, marker, attachments)}:attachment-error:{attachment_payload_digest(errors)}"
+
+
+def stable_marker_seen_key(args: Args, marker: Marker, attachments: Sequence[SourceAttachment]) -> str:
+    """Identify pending content and sources without using its current line."""
+
+    attachment_payload = "\n".join(
+        f"{attachment.source}\0{attachment.text if not attachment.error else f'error:{attachment.error}'}" for attachment in attachments
+    )
+    identity = "\0".join(
+        (
+            str(args.root),
+            str(marker.file),
+            marker.origin,
+            marker.source,
+            marker.block_text,
+            attachment_payload,
+            str(int(marker_is_for_manager(marker, attachments))),
+        )
+    )
+    return f"{args.root}:pending:{hashlib.sha256(identity.encode('utf-8')).hexdigest()}"
 
 
 def marker_seen_key(args: Args, marker: Marker, attachments: Sequence[SourceAttachment]) -> str:
     if marker.origin == "agent" and marker.source == "agent":
         return agent_report_seen_key(args, marker, attachments)
-    key = f"{args.root}:{marker.file}:{marker.line}:{marker.digest}"
-    if not attachments:
-        return key
-    if any(attachment.error for attachment in attachments):
-        return key
-    payload = readable_attachment_payload(attachments)
-    for_manager = int(marker_is_for_manager(marker, attachments))
-    return f"{key}:files:{attachment_payload_digest(payload)}:for-manager:{for_manager}"
+    return stable_marker_seen_key(args, marker, attachments)
 
 
 def pending_delivery_event(key: str, now_s: float) -> DeliverySuccessEvent:
@@ -1445,7 +1676,7 @@ def agent_report_message_text(text: str) -> str:
     """Extract the body from `omo_report.sh` agent report artifacts."""
 
     lines = text.splitlines()
-    if not any(line.startswith(AGENT_SOURCE_PREFIXES) or line.startswith("(sent from agent via omo_report.sh ") for line in lines[:8]):
+    if not any(line.startswith(AGENT_SOURCE_PREFIXES) or AGENT_REPORT_SENT_RE.fullmatch(line) is not None for line in lines[:8]):
         return text
     for idx, line in enumerate(lines):
         if line.strip() == "message:":
@@ -1516,6 +1747,20 @@ def marker_agent_report_text(marker: Marker, attachments: Sequence[SourceAttachm
 
     message = html.escape(direct_message_text(marker, attachments), quote=False)
     return "\n".join(("Agent report received; review it and handle any follow-up:", "<agent_report>", message, "</agent_report>"))
+
+
+def marker_manager_delegation_text(marker: Marker, attachments: Sequence[SourceAttachment]) -> str:
+    """Render generated manager work without impersonating a human request."""
+
+    message = html.escape(direct_message_text(marker, attachments), quote=False)
+    return "\n".join(
+        (
+            "Manager delegation received; carry out the delegated work and report through the normal task channel:",
+            "<manager_delegation>",
+            message,
+            "</manager_delegation>",
+        )
+    )
 
 
 def direct_delivery_fallback_text(marker: Marker, attachments: Sequence[SourceAttachment], reason: str) -> str:
@@ -1608,26 +1853,26 @@ def pending_marker_present(
     except OSError:
         return False
     idx = pending_line - 1
-    exact_line = 0 <= idx < len(lines) and lines[idx].strip() == "(pending)"
-    current_text = pending_guard_text(lines, idx) if exact_line else ""
     if pending_text:
-        expected_lines = pending_text.splitlines()
-        if current_text.splitlines() == expected_lines:
-            return True
-        report_source = adjacent_source_metadata(expected_lines)
-        if AGENT_POINTER_WITH_TARGET_RE.fullmatch(report_source) is not None:
-            return any(
-                lines[line_idx].strip() == "(pending)"
-                and line_idx + 1 < len(lines)
-                and lines[line_idx + 1] == report_source
-                for line_idx in range(len(lines))
-            )
-        return False
+        return relocated_pending_index(lines, pending_text, idx) is not None
+    exact_line = 0 <= idx < len(lines) and lines[idx].strip() == "(pending)"
     if not exact_line:
         return False
     if not pending_digest:
         return True
+    current_text = pending_guard_text(lines, idx)
     return pending_tail_digest(pending_file, pending_line, current_text) == pending_digest
+
+
+def relocated_pending_index(lines: Sequence[str], expected_text: str, hint_idx: int) -> int | None:
+    """Locate an unchanged pending block, preferring its previous line."""
+
+    candidates = [hint_idx, *(idx for idx, line in enumerate(lines) if idx != hint_idx and line.strip() in PENDING_MARKERS)]
+    expected_lines = expected_text.splitlines()
+    for idx in candidates:
+        if 0 <= idx < len(lines) and lines[idx].strip() in PENDING_MARKERS and pending_guard_text(lines, idx).splitlines() == expected_lines:
+            return idx
+    return None
 
 
 def remove_direct_source_header(lines: list[str], idx: int) -> None:
@@ -1647,34 +1892,33 @@ def remove_direct_source_header(lines: list[str], idx: int) -> None:
 
 
 def clear_pending_marker_if_current(root: Path, marker: Marker) -> bool:
-    """Remove one successfully delivered marker after verifying the pending tail."""
+    """Relocate and clear one delivered block under the shared task-file lock."""
 
     path = root / marker.file
     tmp_path: Path | None = None
     try:
-        before = path.stat()
-        text = path.read_text(encoding="utf-8")
-        lines = text.splitlines()
-        idx = marker.line - 1
-        if idx < 0 or idx >= len(lines) or lines[idx].strip() != "(pending)":
-            return False
-        if not pending_marker_present(root, marker.file, marker.line, marker.digest, marker.block_text):
-            return False
-        del lines[idx]
-        remove_direct_source_header(lines, idx)
-        updated = "\n".join(lines) + ("\n" if text.endswith("\n") else "")
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False) as handle:
-            _ = handle.write(updated)
-            handle.flush()
-            os.fsync(handle.fileno())
-            tmp_path = Path(handle.name)
-        tmp_path.chmod(before.st_mode & 0o7777)
-        after = path.stat()
-        if after.st_dev != before.st_dev or after.st_ino != before.st_ino or after.st_mtime_ns != before.st_mtime_ns or after.st_size != before.st_size:
-            return False
-        os.replace(tmp_path, path)
-        tmp_path = None
-        return True
+        with task_file_lock(path):
+            before = path.stat()
+            text = path.read_text(encoding="utf-8")
+            lines = text.splitlines()
+            idx = relocated_pending_index(lines, marker.block_text, marker.line - 1)
+            if idx is None:
+                return False
+            del lines[idx]
+            remove_direct_source_header(lines, idx)
+            updated = "\n".join(lines) + ("\n" if text.endswith("\n") else "")
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False) as handle:
+                _ = handle.write(updated)
+                handle.flush()
+                os.fsync(handle.fileno())
+                tmp_path = Path(handle.name)
+            tmp_path.chmod(before.st_mode & 0o7777)
+            after = path.stat()
+            if (after.st_dev, after.st_ino, after.st_mtime_ns, after.st_size) != (before.st_dev, before.st_ino, before.st_mtime_ns, before.st_size):
+                return False
+            os.replace(tmp_path, path)
+            tmp_path = None
+            return True
     except OSError as exc:
         print(f"omo_pending_watch: failed to clear delivered pending marker in {marker.file}: {exc}", file=sys.stderr)
         return False
@@ -1686,12 +1930,8 @@ def clear_pending_marker_if_current(root: Path, marker: Marker) -> bool:
 def clear_consumed_report_marker(args: Args, hint: Marker, report_key: str) -> bool:
     """Clear one matching report marker even if its line moved after delivery."""
 
-    path = args.root / hint.file
-    for current in find_markers(args.root, [path]):
-        attachments = marker_attachments(args, current)
-        if current.origin == "agent" and current.source == "agent" and agent_report_seen_key(args, current, attachments) == report_key:
-            return clear_pending_marker_if_current(args.root, current)
-    return False
+    _ = report_key
+    return clear_pending_marker_if_current(args.root, hint)
 
 
 def push_marker_delivery(
@@ -1798,7 +2038,7 @@ def push_direct_ref(
     result = push_marker_delivery(
         args,
         marker,
-        marker_direct_text(marker, attachments),
+        marker_manager_delegation_text(marker, attachments) if marker.source == "manager" else marker_direct_text(marker, attachments),
         target,
         DeliverySuccessEvent(
             seen_keys=(direct_key,),
@@ -1913,6 +2153,8 @@ def push_agent_report_ref(
 def push_ref(args: Args, seen: dict[str, float], now_s: float, marker: Marker, attachments: Sequence[SourceAttachment]) -> int:
     """Deliver one pending marker, guarded by its current file position."""
 
+    if marker.origin == "agent" and marker.source == "agent" and not marker_has_authenticated_agent_report(marker, attachments):
+        marker = replace(marker, origin="human", source="manual", delegate_source="")
     if marker.origin == "agent" and marker.source == "agent":
         return push_agent_report_ref(args, seen, now_s, marker, attachments)
     marker_key = marker_seen_key(args, marker, attachments)
@@ -3152,7 +3394,7 @@ def filter_unchanged_dependency_blocked_idle_output(args: Args, output: str, sna
     lines = output.splitlines()
     if not lines or not lines[0].startswith("agent-problems:"):
         return output
-    current = dependency_snapshot_state(args.root)
+    current = blocked_report_snapshot_state(args.root)
     if not current:
         return output
     kept: list[str] = []
@@ -3169,7 +3411,7 @@ def filter_unchanged_dependency_blocked_idle_output(args: Args, output: str, sna
 
 
 def prune_dependency_reported_snapshots(root: Path, snapshots: dict[str, str]) -> None:
-    current = dependency_snapshot_state(root)
+    current = blocked_report_snapshot_state(root)
     for task_file in tuple(snapshots):
         current_snapshot = current.get(task_file)
         if current_snapshot is None or current_snapshot[1] != snapshots[task_file]:
@@ -3177,7 +3419,7 @@ def prune_dependency_reported_snapshots(root: Path, snapshots: dict[str, str]) -
 
 
 def dependency_snapshot_replacements_for_problem_lines(root: Path, lines: tuple[str, ...]) -> tuple[tuple[str, str], ...]:
-    current = dependency_snapshot_state(root)
+    current = blocked_report_snapshot_state(root)
     replacements: list[tuple[str, str]] = []
     seen_tasks: set[str] = set()
     for line in lines:
@@ -3336,6 +3578,25 @@ def dependency_snapshot_state(root: Path) -> dict[str, tuple[TaskLine, str, str]
         snapshot = blocked_status_dependency_snapshot(root, task, state)
         if not snapshot:
             continue
+        snapshots[task.task_file] = (task, snapshot, effective_owner_target(root, task, task_path))
+    return snapshots
+
+
+def blocked_report_snapshot_state(root: Path) -> dict[str, tuple[TaskLine, str, str]]:
+    """Return stable snapshots for dependency and recorded-human blocked rows."""
+
+    snapshots = dependency_snapshot_state(root)
+    seen_files = set(snapshots)
+    for task in parse_task_lines(root / "TODO.md"):
+        if task.task_file == "TODO.md" or task.task_file in seen_files or task.section not in MANAGER_TASK_STATE_LIVE_SECTIONS:
+            continue
+        seen_files.add(task.task_file)
+        task_path = resolve_task_path(root, task.task_file)
+        state = scan_task_state(task_path) if task_path is not None else None
+        if state is None or state.status != "blocked" or not is_recorded_human_wait(state):
+            continue
+        identity = "\0".join((state.status, state.target, state.manager_target, state.reason))
+        snapshot = f"human:{hashlib.sha256(identity.encode('utf-8')).hexdigest()}"
         snapshots[task.task_file] = (task, snapshot, effective_owner_target(root, task, task_path))
     return snapshots
 
@@ -3570,6 +3831,8 @@ def scan_once(args: Args, seen: dict[str, float], files: list[Path]) -> bool:
                 changed = True
     for marker in find_markers(args.root, files):
         attachments = marker_attachments(args, marker)
+        if marker.origin == "agent" and marker.source == "agent" and not marker_has_authenticated_agent_report(marker, attachments):
+            marker = replace(marker, origin="human", source="manual", delegate_source="")
         key = marker_seen_key(args, marker, attachments)
         if marker.origin == "agent" and marker.source == "agent" and report_was_consumed(args.state, key):
             status = push_ref(args, seen, now_s, marker, attachments)
