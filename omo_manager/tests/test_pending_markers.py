@@ -3214,8 +3214,7 @@ class PendingMarkerTests(unittest.TestCase):
         self.assertTrue(watcher.has_agent_footer("body\n\ntmux: notes\n"))
         self.assertFalse(watcher.has_agent_footer("body\n\n> tmux: wl:2\n"))
 
-    def test_email_watcher_recovers_processed_uid_without_current_source(self) -> None:
-        from email.message import EmailMessage
+    def test_email_watcher_does_not_replay_processed_uid_without_current_source(self) -> None:
         from omo_manager import email_idle_watcher as watcher
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -3224,22 +3223,16 @@ class PendingMarkerTests(unittest.TestCase):
             state = Path(tmp) / "state"
             state.mkdir()
             (state / "email-processed-uids.tsv").write_text("41\t1\n", encoding="utf-8")
-            calls = []
-            msg = EmailMessage()
-            msg["From"] = "Human <me@example.com>"
-            msg["Subject"] = "Re: [omo_manager] stale root"
-            msg.set_content("body")
-
             class Client:
                 stores: list[tuple[object, ...]] = []
 
                 def uid(self, command: str, *args: object) -> tuple[str, list[object]]:
                     if command == "search":
-                        if args and args[0] == "UNSEEN":
-                            return "OK", [b""]
                         return "OK", [b"41"]
                     if command == "fetch":
-                        return "OK", [(b"RFC822", msg.as_bytes())]
+                        if args == ("(BODY.PEEK[])",):
+                            raise AssertionError("processed UID must not be refetched after its task is archived")
+                        return "NO", []
                     if command == "store":
                         self.stores.append(args)
                         return "OK", [b""]
@@ -3248,21 +3241,9 @@ class PendingMarkerTests(unittest.TestCase):
             client = Client()
             manager_file = root / "work_manager_today.md"
             args = watcher.Args(root, "", root / "manager_mail", state, manager_file, True, "me@example.com", 0, Path("/bin/false"), manager_target="wl:1.0")
-            old_push = watcher.push_email_ref
-
-            def push(_args: watcher.Args, line_no: int) -> bool:
-                calls.append(line_no)
-                return False
-
-            watcher.push_email_ref = push
-            try:
-                watcher.handle_unseen(client, args)
-                watcher.handle_unseen(client, args)
-            finally:
-                watcher.push_email_ref = old_push
-            self.assertIn("(pending)\n(record and delegate manager_mail/41.txt)\n", manager_file.read_text(encoding="utf-8"))
-            self.assertEqual(calls, [])
-            self.assertEqual(client.stores, [("41", "+FLAGS", r"(\Seen)"), ("41", "+FLAGS", r"(\Seen)")])
+            watcher.handle_unseen(client, args)
+            self.assertFalse(manager_file.exists())
+            self.assertEqual(client.stores, [("41", "+FLAGS", r"(\Seen)")])
             self.assertIn("41	", (state / "email-processed-uids.tsv").read_text(encoding="utf-8"))
 
     def test_email_watcher_processed_uid_with_old_root_source_can_mark_read(self) -> None:
@@ -3789,6 +3770,7 @@ class PendingMarkerTests(unittest.TestCase):
 
             class Client:
                 fetches = 0
+                stores: list[tuple[object, ...]] = []
 
                 def uid(self, command: str, *args: object) -> tuple[str, list[object]]:
                     if command == "search":
@@ -3801,6 +3783,9 @@ class PendingMarkerTests(unittest.TestCase):
                     if command == "fetch":
                         self.fetches += 1
                         raise AssertionError("old processed UID outside recovery window should not be fetched")
+                    if command == "store":
+                        self.stores.append(args)
+                        return "OK", [b""]
                     raise AssertionError(command)
 
             client = Client()
@@ -3808,6 +3793,7 @@ class PendingMarkerTests(unittest.TestCase):
             watcher.handle_unseen(client, args)
             self.assertEqual("(done)\n", manager_file.read_text(encoding="utf-8"))
             self.assertEqual(0, client.fetches)
+            self.assertEqual([("18", "+FLAGS", r"(\Seen)")], client.stores)
 
     def test_email_watcher_keeps_processed_state_when_mark_seen_returns_no(self) -> None:
         from email.message import EmailMessage

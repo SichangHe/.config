@@ -95,7 +95,6 @@ DEFAULT_IDLE_RESPONSE_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_EMAIL_IDLE_R
 DEFAULT_IMAP_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_EMAIL_IMAP_TIMEOUT_S", str(max(90.0, DEFAULT_IDLE_WAIT_S + 30.0))))
 DEFAULT_PULL_INTERVAL_S = float(os.environ.get("OMO_MANAGER_EMAIL_PULL_INTERVAL_S", "600"))
 DEFAULT_IDLE_EXIT_AFTER_S = float(os.environ.get("OMO_MANAGER_EMAIL_IDLE_EXIT_AFTER_S", "3600"))
-DEFAULT_PROCESSED_RECOVERY_UID_WINDOW = int(os.environ.get("OMO_MANAGER_EMAIL_PROCESSED_RECOVERY_UID_WINDOW", "256"))
 DEFAULT_EMAIL_PUSH_SUBMIT_VERIFY_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_EMAIL_PUSH_SUBMIT_VERIFY_TIMEOUT_S", "1"))
 DEFAULT_MANAGER_UNREAD_COMPRESSION_THRESHOLD = int(os.environ.get("OMO_MANAGER_EMAIL_UNREAD_COMPRESSION_THRESHOLD", "16"))
 DEFAULT_MANAGER_RECENT_CLEANUP_THRESHOLD = int(os.environ.get("OMO_MANAGER_EMAIL_RECENT_CLEANUP_THRESHOLD", "64"))
@@ -1431,21 +1430,6 @@ def maybe_handle_manager_mail_thresholds(client: imaplib.IMAP4_SSL, args: Args) 
         return False
 
 
-def recoverable_processed_uids(processed_uids: set[str], root: Path, mail_dir: Path, manager_file: Path, uid_window: int = DEFAULT_PROCESSED_RECOVERY_UID_WINDOW) -> list[str]:
-    numeric_uids = [int(uid) for uid in processed_uids if uid.isdigit()]
-    if uid_window <= 0 or not numeric_uids:
-        return []
-    min_uid = max(numeric_uids) - uid_window + 1
-    return [
-        uid
-        for uid in sorted(processed_uids, key=lambda value: (0, int(value)) if value.isdigit() else (1, value))
-        if uid.isdigit()
-        and int(uid) >= min_uid
-        and existing_source_line_in_root(root, mail_dir / f"{uid}.txt", manager_file) is None
-        and existing_consumed_source_line(root, mail_dir / f"{uid}.txt", manager_file) is None
-    ]
-
-
 def mark_seen(client: imaplib.IMAP4_SSL, uid: str) -> bool:
     try:
         typ, _data = client.uid("store", uid, "+FLAGS", r"(\Seen)")
@@ -1519,10 +1503,6 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
     candidate_uids: set[bytes] = set()
     for subject_prefix in NORMAL_REPLY_SEARCH_PREFIXES:
         candidate_uids.update(search_uids(client, subject_prefix, args.self_email, processed_uids))
-    processed_missing_source = set(recoverable_processed_uids(processed_uids, args.root, args.mail_dir, manager_file))
-    if processed_missing_source:
-        for subject_prefix in NORMAL_REPLY_SEARCH_PREFIXES:
-            candidate_uids.update(search_processed_uids(client, subject_prefix, args.self_email, sorted(processed_missing_source, key=lambda value: int(value))))
     if unaccepted_pending_uids:
         for subject_prefix in NORMAL_REPLY_SEARCH_PREFIXES:
             candidate_uids.update(search_processed_uids(client, subject_prefix, args.self_email, sorted(unaccepted_pending_uids, key=lambda value: int(value))))
@@ -1566,20 +1546,15 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
             handled = True
             continue
         if uid in processed_uids:
-            existing_source_line = existing_source_line_in_root(args.root, expected_txt_path, manager_file)
-            existing_consumed_line = existing_consumed_source_line(args.root, expected_txt_path, manager_file)
-            if uid not in unaccepted_pending_uids and (existing_source_line is not None or existing_consumed_line is not None):
+            if uid not in unaccepted_pending_uids:
+                logging.info("email processed uid remains authoritative without an active source marker: uid=%s root=%s", uid, args.root)
                 handled = mark_seen_after_human_intake(client, uid, args, txt_path=expected_txt_path) or handled
                 continue
+            existing_source_line = existing_source_line_in_root(args.root, expected_txt_path, manager_file)
             if uid in unaccepted_pending_uids and existing_source_line is not None:
                 logging.warning("email unaccepted processed uid has source without pending; reprocessing: uid=%s root=%s", uid, args.root)
             elif uid in unaccepted_pending_uids:
                 logging.warning("email unaccepted processed uid lacks source; reprocessing: uid=%s root=%s", uid, args.root)
-            elif uid not in processed_missing_source:
-                logging.warning("email processed uid lacks source in current root and is outside recovery window; skipping: uid=%s root=%s", uid, args.root)
-                continue
-            else:
-                logging.warning("email processed uid lacks source in current root; reprocessing: uid=%s root=%s", uid, args.root)
         existing_pending = existing_source_pending_path_line_in_root(args.root, expected_txt_path, manager_file)
         if existing_pending is not None:
             pending_file, existing_pending_line = existing_pending
