@@ -30,11 +30,13 @@ from urllib.parse import urlparse
 try:
     from .omo_email_subject import subject_base
     from .omo_agent_status import TaskFrontmatterError, parse_task_metadata
+    from .omo_task_lock import task_file_lock
     from .omo_tmux_send import CodexSendOptions, DEFAULT_TMUX_ENTER_COUNT, require_sendable_codex_target, send_to_codex
 except ImportError:
     try:
         from omo_email_subject import subject_base
         from omo_agent_status import TaskFrontmatterError, parse_task_metadata
+        from omo_task_lock import task_file_lock
         from omo_tmux_send import CodexSendOptions, DEFAULT_TMUX_ENTER_COUNT, require_sendable_codex_target, send_to_codex
     except ImportError:
         subject_base = None
@@ -49,6 +51,14 @@ def default_state_dir() -> Path:
 
 def dated_manager_file(root: Path) -> Path:
     return root / f"work_manager_{datetime.now().astimezone().strftime('%Y-%m-%d')}.md"
+
+
+def fsync_directory(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 DEFAULT_ROOT = Path(os.environ.get("OMO_WORK_LOGS_ROOT", Path.home() / "work_logs"))
 DEFAULT_MANAGER_URL = os.environ.get("OMO_MANAGER_URL", "http://127.0.0.1:18790")
@@ -420,7 +430,7 @@ def current_route_for_owner(args: Args, owner_target: str) -> EmailRoute | None:
     if owner_target in target_aliases(args.manager_target):
         if current_task_file_for_target(args.root, owner_target) is None and ":" in owner_target:
             return None
-        return EmailRoute(current_manager_file(args), args.manager_target)
+        return EmailRoute(current_manager_file(args), args.manager_target, pending_watcher_delivery=True)
     owner_file = current_task_file_for_target(args.root, owner_target)
     if owner_file is None:
         return None
@@ -495,7 +505,7 @@ def email_route(args: Args, subject: str, body: str = "") -> EmailRoute:
     del body
     tmux_target = subject_manager_target(subject)
     if not tmux_target:
-        return EmailRoute(current_manager_file(args), args.manager_target)
+        return EmailRoute(current_manager_file(args), args.manager_target, pending_watcher_delivery=True)
     manager_file = current_task_file_for_target(args.root, tmux_target)
     if manager_file is None:
         for inactive_file in inactive_task_files_for_target(args.root, tmux_target):
@@ -507,7 +517,7 @@ def email_route(args: Args, subject: str, body: str = "") -> EmailRoute:
             if owner_route is not None:
                 return owner_route
         logging.warning("sub-manager email target did not map to a task file; using default manager: target=%s", tmux_target)
-        return EmailRoute(current_manager_file(args), args.manager_target)
+        return EmailRoute(current_manager_file(args), args.manager_target, pending_watcher_delivery=True)
     try:
         manager_text = manager_file.read_text(encoding="utf-8")
     except OSError:
@@ -518,7 +528,7 @@ def email_route(args: Args, subject: str, body: str = "") -> EmailRoute:
         metadata = None
     if metadata is not None:
         return EmailRoute(manager_file, metadata.runat, pending_watcher_delivery=True)
-    return EmailRoute(manager_file, fallback_manager_target_for_file(args, manager_file, tmux_target))
+    return EmailRoute(manager_file, fallback_manager_target_for_file(args, manager_file, tmux_target), pending_watcher_delivery=True)
 
 
 def manager_target_for_file(args: Args, manager_file: Path) -> str:
@@ -899,19 +909,23 @@ def append_pending(
     manager_file: Path | None = None,
 ) -> int:
     manager_file = manager_file or dated_manager_file(root)
-    existing_line = existing_source_pending_line(root, txt_path, manager_file)
-    if existing_line is not None:
-        return existing_line
-    consumed_line = existing_consumed_source_line(root, txt_path, manager_file)
-    if consumed_line is not None:
-        return consumed_line
-    lines = manager_file.read_text(encoding="utf-8").splitlines() if manager_file.exists() else []
-    line_no = len(lines) + 1
-    from_line = email_source_lines(root, txt_path)[0]
-    block = ["", "(pending)"]
-    block.append(from_line)
-    manager_file.write_text("\n".join(lines + block) + "\n", encoding="utf-8")
-    return line_no + 1
+    with task_file_lock(manager_file):
+        existing_line = existing_source_pending_line(root, txt_path, manager_file)
+        if existing_line is not None:
+            return existing_line
+        consumed_line = existing_consumed_source_line(root, txt_path, manager_file)
+        if consumed_line is not None:
+            return consumed_line
+        text = manager_file.read_text(encoding="utf-8") if manager_file.exists() else ""
+        pending_line = len(text.splitlines()) + 2
+        from_line = email_source_lines(root, txt_path)[0]
+        separator = "\n" if not text or text.endswith("\n") else "\n\n"
+        with manager_file.open("a", encoding="utf-8") as handle:
+            _ = handle.write(f"{separator}(pending)\n{from_line}\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        fsync_directory(manager_file.parent)
+        return pending_line
 
 
 def pending_marker_present(root: Path, pending_file: Path, pending_line: int) -> bool:
@@ -924,15 +938,7 @@ def pending_marker_present(root: Path, pending_file: Path, pending_line: int) ->
 
 
 def pending_watcher_delivery_present(root: Path, pending_file: Path, pending_line: int) -> bool:
-    try:
-        path = root / pending_file
-        text = path.read_text(encoding="utf-8")
-        lines = text.splitlines()
-        metadata = parse_task_metadata(text)
-    except (OSError, TaskFrontmatterError):
-        return False
-    idx = pending_line - 1
-    return metadata is not None and 0 <= idx < len(lines) and lines[idx].strip() == "(pending)"
+    return pending_marker_present(root, pending_file, pending_line)
 
 
 def threshold_push_failure_marker(kind: str) -> str:
@@ -1151,13 +1157,23 @@ def append_recovery_record(root: Path, txt_path: Path, summary: str, manager_fil
 
 
 def write_mail(args: Args, uid: str, msg: Message, _sender: str, subject: str) -> Path:
+    missing_dirs: list[Path] = []
+    candidate = args.mail_dir
+    while not candidate.exists():
+        missing_dirs.append(candidate)
+        candidate = candidate.parent
     args.mail_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    for created_dir in reversed(missing_dirs):
+        fsync_directory(created_dir.parent)
     args.mail_dir.chmod(0o700)
     txt_path = args.mail_dir / f"{uid}.txt"
     body = f"Subject: {normalize_human_subject(subject)}\n\n{message_text(msg)}"
     fd = os.open(txt_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write(body)
+        handle.flush()
+        os.fsync(handle.fileno())
+    fsync_directory(args.mail_dir)
     return txt_path
 
 
@@ -1516,7 +1532,6 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
         logging.info("email scan complete: n=0 processed_next=%s manager_file=%s", uid_search_range(processed_uids), manager_file)
         return maybe_handle_manager_mail_thresholds(client, args)
     logging.info("email candidates found: n=%s uids=%s processed_max=%s manager_file=%s", len(candidate_uids), ",".join(uid.decode() for uid in sorted(candidate_uids, key=lambda value: int(value))), uid_search_range(processed_uids), manager_file)
-    args.mail_dir.mkdir(parents=True, exist_ok=True)
     for raw_uid in sorted(candidate_uids, key=lambda value: int(value)):
         uid = raw_uid.decode()
         if uid in ignored_uids:
