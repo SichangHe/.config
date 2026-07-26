@@ -7172,6 +7172,85 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertIn("agent-problems: error=1", body)
             self.assertIn("error: task=manager evidence=target=wl:1.0 role=manager", body)
 
+    def test_agent_problem_check_reserves_unchanged_manager_error_while_peer_send_runs(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1", agent_problem_repeat_s=300.0)
+        result = watcher.CommandOutput(
+            "agent-problems",
+            3,
+            "agent-problems: error=1\nerror: task=manager evidence=target=wl:1 role=manager output=fatal\n",
+            "",
+        )
+        seen: dict[str, float] = {}
+        delivery = watcher.DeliveryResult(watcher.ASYNC_DELIVERY_STARTED)
+        with patch.object(watcher, "active_manager_problem_targets", return_value=["vl:2"]), patch.object(
+            watcher, "try_send_delivery_text", return_value=delivery
+        ) as push:
+            self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 1000.0))
+            self.assertFalse(watcher.handle_agent_problem_result(args, seen, result, 1030.0))
+
+        self.assertEqual(1, push.call_count)
+        key = watcher.manager_problem_seen_key(args, result.stdout.strip())
+        self.assertIn(watcher.agent_problem_attempt_key(key), seen)
+        self.assertIsNotNone(push.call_args.kwargs["problem_guard"])
+
+    def test_agent_problem_check_retries_failed_manager_error_after_bounded_delay(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1", agent_problem_repeat_s=300.0)
+        result = watcher.CommandOutput(
+            "agent-problems",
+            3,
+            "agent-problems: error=1\nerror: task=manager evidence=target=wl:1 role=manager output=fatal\n",
+            "",
+        )
+        seen: dict[str, float] = {}
+        events: list[watcher.DeliverySuccessEvent] = []
+
+        def capture_send(*_args: object, **kwargs: object) -> watcher.DeliveryResult:
+            events.append(kwargs["success_event"])
+            return watcher.DeliveryResult(watcher.ASYNC_DELIVERY_STARTED)
+
+        with patch.object(watcher, "active_manager_problem_targets", return_value=["vl:2"]), patch.object(
+            watcher, "try_send_delivery_text", side_effect=capture_send
+        ) as push:
+            self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 1000.0))
+            with patch.object(watcher.time, "time", return_value=1001.0):
+                watcher.queue_delivery_failure_event(events[0])
+            self.assertTrue(watcher.drain_delivery_successes(args, seen, 1001.0))
+            self.assertFalse(watcher.handle_agent_problem_result(args, seen, result, 1599.0))
+            self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 1601.0))
+
+        self.assertEqual(2, push.call_count)
+
+    def test_agent_problem_check_throttles_from_delayed_manager_send_completion(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1", agent_problem_repeat_s=300.0)
+        result = watcher.CommandOutput(
+            "agent-problems",
+            3,
+            "agent-problems: error=1\nerror: task=manager evidence=target=wl:1 role=manager output=fatal\n",
+            "",
+        )
+        seen: dict[str, float] = {}
+        events: list[watcher.DeliverySuccessEvent] = []
+
+        def capture_send(*_args: object, **kwargs: object) -> watcher.DeliveryResult:
+            events.append(kwargs["success_event"])
+            return watcher.DeliveryResult(watcher.ASYNC_DELIVERY_STARTED)
+
+        with patch.object(watcher, "active_manager_problem_targets", return_value=["vl:2"]), patch.object(
+            watcher, "try_send_delivery_text", side_effect=capture_send
+        ) as push:
+            self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 1000.0))
+            watcher.DELIVERY_SUCCESS_EVENTS.put(events[0])
+            self.assertTrue(watcher.drain_delivery_successes(args, seen, 1400.0))
+            self.assertFalse(watcher.handle_agent_problem_result(args, seen, result, 1401.0))
+
+        self.assertEqual(1, push.call_count)
+
     def test_agent_problem_check_suppresses_worker_alias_sent_enter_until_retry_limit(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 

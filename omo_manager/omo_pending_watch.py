@@ -3507,23 +3507,53 @@ def manager_problem_route_text(args: Args, output: str) -> str:
     return format_agent_problem_report(body_lines)
 
 
-def route_or_email_manager_problem(args: Args, output: str) -> bool:
+def manager_problem_seen_key(args: Args, output: str) -> str:
+    digest = hashlib.sha256(f"{args.root}\n{output}".encode("utf-8")).hexdigest()[:16]
+    return f"manager-self-problem:{digest}"
+
+
+def route_or_email_manager_problem(args: Args, seen: dict[str, float], output: str, now_wall_s: float) -> bool:
     if not output:
+        return False
+    key = manager_problem_seen_key(args, output)
+    attempt_key = agent_problem_attempt_key(key)
+    if seen_contains(seen, attempt_key, now_wall_s):
+        return False
+    if now_wall_s - seen_get(seen, key, now_s=now_wall_s) < args.agent_problem_repeat_s:
         return False
     targets = active_manager_problem_targets(args.root, output, args.manager_target)
     if not targets:
-        return email_human_manager_problem(args, output)
+        sent = email_human_manager_problem(args, output)
+        if sent:
+            remember_seen(seen, key, now_wall_s)
+        return sent
     route_target = args.reminder_choice(targets)
     targets = [route_target, *(target for target in targets if target != route_target)]
     text = manager_problem_route_text(args, output)
+    event = DeliverySuccessEvent(
+        seen_keys=(key,),
+        seen_removals=(attempt_key,),
+        failure_seen_delays_s=((attempt_key, PENDING_DELIVERY_FAILURE_RETRY_S),),
+    )
+    guard = AgentProblemGuard(
+        tuple([*status_command(args, True), "--no-auto-unstick"]),
+        tuple(output.splitlines()[1:]),
+    )
     for target in targets:
         if args.dry_run:
             print(f"manager problem route due: target={target}\n{text}", flush=True)
+            remember_seen(seen, key, now_wall_s)
             return True
-        result = try_send_delivery_text("manager problem routing", text, target)
+        result = try_send_delivery_text("manager problem routing", text, target, success_event=event, problem_guard=guard)
         if delivery_accepted(result.status):
+            reserve_async_marker(seen, attempt_key, now_wall_s, result.status)
+            if result.status == 0:
+                remember_seen(seen, key, now_wall_s)
             return True
-    return email_human_manager_problem(args, output)
+    sent = email_human_manager_problem(args, output)
+    if sent:
+        remember_seen(seen, key, now_wall_s)
+    return sent
 
 
 def email_human_manager_problem(args: Args, output: str) -> bool:
@@ -3715,7 +3745,7 @@ def handle_agent_problem_result(
     if not output:
         return capacity_changed or compaction_changed or dependency_changed or reminders_changed
     manager_problem_output = manager_human_email_problem_output(output, args.manager_target)
-    manager_problem_sent = route_or_email_manager_problem(args, manager_problem_output)
+    manager_problem_sent = route_or_email_manager_problem(args, seen, manager_problem_output, now_wall_s)
     output = filter_manager_self_problem_output(output, args.manager_target) or ""
     if not output:
         return capacity_changed or manager_problem_sent or compaction_changed or dependency_changed or reminders_changed
