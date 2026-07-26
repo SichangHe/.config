@@ -19,6 +19,13 @@ from omo_manager.omo_agent_status import TaskMetadata
 from omo_manager.omo_agent_status import TaskFrontmatterError
 from omo_manager.omo_agent_status import DEFAULT_ROOT
 from omo_manager.omo_agent_status import same_tmux_target
+from omo_manager.omo_blocking import BlockingError
+from omo_manager.omo_blocking import load_yaml_mapping
+from omo_manager.omo_blocking import only_wake_pending_markers
+from omo_manager.omo_blocking import render_task
+from omo_manager.omo_blocking import split_task_text
+from omo_manager.omo_blocking import V2_VERSION
+from omo_manager.omo_blocking import v2_enabled
 from omo_manager.omo_codex_status import exact_pane_id
 from omo_manager.omo_codex_stop import Args as StopArgs
 from omo_manager.omo_codex_stop import has_close_note
@@ -28,7 +35,8 @@ from omo_manager.omo_agent_status import frontmatter_parts
 from omo_manager.omo_agent_status import parse_task_metadata
 from omo_manager.omo_agent_status import parse_task_lines
 from omo_manager.omo_task_lock import task_target_lock
-from omo_manager.omo_task_metadata import TASK_FRONTMATTER_V2
+from omo_manager.omo_task_lock import task_file_lock
+from omo_manager.omo_blocking_actor import request as blocking_request
 
 PENDING_MARKER = "(pending)"
 DONE_REMINDER = "Status set to done. Remember to email the human."
@@ -105,7 +113,7 @@ def frontmatter_managerat_aliases(text: str, manager_target: str) -> bool:
     return False
 
 
-def parse_manager_child_metadata(text: str) -> TaskMetadata | None:
+def parse_manager_child_metadata(text: str, work_log_root: Path | None = None) -> TaskMetadata | None:
     """Validate historical `done` plus `retired` children without changing active-task rules."""
     parts = frontmatter_parts(text)
     if parts is None:
@@ -113,7 +121,7 @@ def parse_manager_child_metadata(text: str) -> TaskMetadata | None:
     frontmatter, body = parts
     fields = {key: value.strip() for line in frontmatter for key, sep, value in (line.partition(":"),) if sep}
     if fields.get("status") != "done" or fields.get("runat") != "retired":
-        return parse_task_metadata(text)
+        return parse_task_metadata(text, work_log_root)
     compatible: list[str] = []
     for line in frontmatter:
         key, sep, _value = line.partition(":")
@@ -121,7 +129,7 @@ def parse_manager_child_metadata(text: str) -> TaskMetadata | None:
         if sep and key == "status":
             compatible.append("blocked_on: archived completed task")
     trailing_newline = "\n" if text.endswith("\n") else ""
-    validated = parse_task_metadata("\n".join(["---", *compatible, "---", *body]) + trailing_newline)
+    validated = parse_task_metadata("\n".join(["---", *compatible, "---", *body]) + trailing_newline, work_log_root)
     if validated is None:
         raise TaskFrontmatterError("task file has no frontmatter.")
     return replace(validated, status="done", blocked_on="")
@@ -136,7 +144,7 @@ def active_child_task_refs(root: Path, manager_path: Path, manager_target: str) 
         task_ref = relative_task_ref(root, candidate)
         try:
             text = candidate.read_text(encoding="utf-8")
-            metadata = parse_manager_child_metadata(text)
+            metadata = parse_manager_child_metadata(text, root)
         except OSError as exc:
             raise TaskFrontmatterError(f"cannot verify manager child ownership because `{task_ref}` could not be read: {exc}") from exc
         except TaskFrontmatterError as exc:
@@ -196,14 +204,12 @@ def has_pending_marker(text: str) -> bool:
     return False
 
 
-def update_frontmatter_status(text: str, status: str, blocked_on: str) -> str:
+def update_frontmatter_status(text: str, status: str, blocked_on: str, work_log_root: Path | None = None) -> str:
     """Return task text with validated `status` and `blocked_on` frontmatter."""
-    metadata = parse_task_metadata(text)
+    metadata = parse_task_metadata(text, work_log_root)
     if metadata is None:
         raise TaskFrontmatterError("task file has no frontmatter.")
-    if metadata.version == TASK_FRONTMATTER_V2:
-        raise TaskFrontmatterError("v2 task mutation is disabled until migration validation and watcher enablement are complete.")
-    if has_pending_marker(text):
+    if has_pending_marker(text) and not (metadata.version == V2_VERSION and only_wake_pending_markers(text)):
         raise TaskFrontmatterError("task file still contains `(pending)`; handle pending markers before changing status.")
     if status == "done" and metadata.pending_task_items:
         raise TaskFrontmatterError(
@@ -215,6 +221,28 @@ def update_frontmatter_status(text: str, status: str, blocked_on: str) -> str:
         raise TaskFrontmatterError("`--blocked-on` must be one line.")
     if status != "blocked" and blocked_on:
         raise TaskFrontmatterError("`--blocked-on` is only valid when setting status to `blocked`.")
+    if metadata.version == V2_VERSION:
+        frontmatter_text, body_text = split_task_text(text)
+        values = load_yaml_mapping(frontmatter_text)
+        generated = [blocker for blocker in values.get("blocked_on", []) if blocker.get("kind") == "pending_items"]
+        external = [blocker for blocker in values.get("blocked_on", []) if blocker.get("kind") != "pending_items"]
+        if status == "blocked":
+            if values["status"] != "blocked":
+                values["resume_status"] = values["status"]
+            values["status"] = "blocked"
+            added = {"kind": "human", "reason": blocked_on}
+            values["blocked_on"] = [*generated, *external, *([] if added in external else [added])]
+        elif generated:
+            if status == "done":
+                raise TaskFrontmatterError("dependency-blocked task cannot be marked done")
+            values["status"] = "blocked"
+            values["resume_status"] = status
+            values["blocked_on"] = generated
+        else:
+            values["status"] = status
+            values.pop("blocked_on", None)
+            values.pop("resume_status", None)
+        return render_task(values, body_text, work_log_root)
     parts = frontmatter_parts(text)
     if parts is None:
         raise TaskFrontmatterError("task file has no frontmatter.")
@@ -239,7 +267,7 @@ def update_frontmatter_status(text: str, status: str, blocked_on: str) -> str:
         raise TaskFrontmatterError("frontmatter has no `status` field to attach `blocked_on` after.")
     trailing_newline = "\n" if text.endswith("\n") else ""
     updated_text = "\n".join(["---", *updated, "---", *body]) + trailing_newline
-    _ = parse_task_metadata(updated_text)
+    _ = parse_task_metadata(updated_text, work_log_root)
     return updated_text
 
 
@@ -249,24 +277,23 @@ def same_file_state(left: os.stat_result, right: os.stat_result) -> bool:
 
 def replace_if_unchanged(path: Path, text: str, before: os.stat_result) -> None:
     """Replace `path` atomically after checking it did not change since read."""
-    metadata = parse_task_metadata(text)
-    if metadata is not None and metadata.version == TASK_FRONTMATTER_V2:
-        raise TaskFrontmatterError("v2 task mutation is disabled until migration validation and watcher enablement are complete.")
     tmp_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False) as handle:
-            _ = handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-            tmp_path = Path(handle.name)
-        tmp_path.chmod(before.st_mode & 0o7777)
-        after = path.stat()
-        if not same_file_state(before, after):
-            raise TaskFrontmatterError("task file changed while status update was being prepared; retry after rereading it.")
-        os.replace(tmp_path, path)
-    finally:
-        if tmp_path is not None:
-            tmp_path.unlink(missing_ok=True)
+    with task_file_lock(path):
+        try:
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False) as handle:
+                _ = handle.write(text)
+                handle.flush()
+                os.fsync(handle.fileno())
+                tmp_path = Path(handle.name)
+            tmp_path.chmod(before.st_mode & 0o7777)
+            after = path.stat()
+            if not same_file_state(before, after):
+                raise TaskFrontmatterError("task file changed while status update was being prepared; retry after rereading it.")
+            os.replace(tmp_path, path)
+            tmp_path = None
+        finally:
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
 
 
 def current_target_task_paths(root: Path, target: str) -> tuple[Path, ...]:
@@ -286,7 +313,7 @@ def current_target_task_paths(root: Path, target: str) -> tuple[Path, ...]:
                 matches.add(candidate)
             continue
         try:
-            metadata = parse_task_metadata(text)
+            metadata = parse_task_metadata(text, root)
         except TaskFrontmatterError:
             metadata = None
         raw_runat_claim = any(key.strip() == "runat" and sep and same_tmux_target(value.strip(), target) for key, sep, value in (line.partition(":") for line in text.splitlines()))
@@ -361,15 +388,15 @@ def done_close_failed_reason(exc: Exception) -> str:
     return f"{CLOSE_FAILED_PREFIX}: {reason or exc.__class__.__name__}"
 
 
-def mark_done_bookkeeping_failed(path: Path, exc: Exception) -> None:
+def mark_done_bookkeeping_failed(root: Path, path: Path, exc: Exception) -> None:
     rollback_before = path.stat()
     rollback_text = path.read_text(encoding="utf-8")
-    rollback = update_frontmatter_status(rollback_text, "blocked", done_bookkeeping_failed_reason(exc))
+    rollback = update_frontmatter_status(rollback_text, "blocked", done_bookkeeping_failed_reason(exc), root)
     replace_if_unchanged(path, rollback, rollback_before)
 
 
 def finish_closed_done(args: Args, path: Path, text: str, before: os.stat_result) -> tuple[str, str]:
-    metadata = parse_task_metadata(text)
+    metadata = parse_task_metadata(text, args.root)
     if metadata is None:
         raise TaskFrontmatterError("task file has no frontmatter.")
     ensure_manager_has_no_active_children(args.root, path, metadata)
@@ -384,16 +411,16 @@ def finish_closed_done(args: Args, path: Path, text: str, before: os.stat_result
     )
     if metadata.status != "blocked" or not retryable_blocker:
         raise TaskFrontmatterError("--finish-closed-done requires a task blocked by failed done close or close bookkeeping.")
-    _ = update_frontmatter_status(text, "done", "")
+    _ = update_frontmatter_status(text, "done", "", args.root)
     close_session_id = "" if verified_already_closed else args.session_id
     close_args = StopArgs(metadata.runat, 10.0, 2000, False, False, args.root, path.relative_to(args.root).as_posix(), True, 0.0)
     try:
         record_close(close_args, close_session_id)
     except Exception as exc:
-        mark_done_bookkeeping_failed(path, exc)
+        mark_done_bookkeeping_failed(args.root, path, exc)
         raise TaskFrontmatterError(f"done close bookkeeping retry failed; task marked blocked for retry: {exc}") from exc
     after = path.stat()
-    updated = update_frontmatter_status(path.read_text(encoding="utf-8"), "done", "")
+    updated = update_frontmatter_status(path.read_text(encoding="utf-8"), "done", "", args.root)
     replace_if_unchanged(path, updated, after)
     return metadata.runat, close_session_id
 
@@ -405,17 +432,22 @@ def run(args: Args) -> int:
         path = task_path(args.root, args.task_file)
         before = path.stat()
         text = path.read_text(encoding="utf-8")
+        initial_metadata = parse_task_metadata(text, args.root)
+        if initial_metadata is not None and initial_metadata.version == V2_VERSION and not v2_enabled(args.root):
+            raise BlockingError("v2 task writes are disabled until reviewed migration enablement")
+        if initial_metadata is not None and initial_metadata.version != V2_VERSION and v2_enabled(args.root):
+            raise BlockingError("v1 task writes are disabled after v2 enablement")
         if args.finish_closed_done:
             target, session_id = finish_closed_done(args, path, text, before)
         else:
-            metadata = parse_task_metadata(text)
+            metadata = parse_task_metadata(text, args.root)
             if metadata is not None and args.status == "done":
                 ensure_manager_has_no_active_children(args.root, path, metadata)
             target = metadata.runat if metadata is not None and args.status == "done" else ""
-            updated = update_frontmatter_status(text, args.status, args.blocked_on)
+            updated = update_frontmatter_status(text, args.status, args.blocked_on, args.root)
             close_args: StopArgs | None = None
             if target:
-                in_progress = update_frontmatter_status(text, "blocked", DONE_CLOSE_IN_PROGRESS)
+                in_progress = update_frontmatter_status(text, "blocked", DONE_CLOSE_IN_PROGRESS, args.root)
                 replace_if_unchanged(path, in_progress, before)
                 try:
                     assert metadata is not None
@@ -423,7 +455,7 @@ def run(args: Args) -> int:
                 except Exception as exc:
                     rollback_before = path.stat()
                     rollback_text = path.read_text(encoding="utf-8")
-                    rollback = update_frontmatter_status(rollback_text, "blocked", done_close_failed_reason(exc))
+                    rollback = update_frontmatter_status(rollback_text, "blocked", done_close_failed_reason(exc), args.root)
                     replace_if_unchanged(path, rollback, rollback_before)
                     raise
                 before = path.stat()
@@ -433,12 +465,15 @@ def run(args: Args) -> int:
                 try:
                     record_close(close_args, session_id)
                 except Exception as exc:
-                    mark_done_bookkeeping_failed(path, exc)
+                    mark_done_bookkeeping_failed(args.root, path, exc)
                     raise TaskFrontmatterError(f"done close bookkeeping failed after closing agent; task marked blocked for retry: {exc}") from exc
                 before = path.stat()
-                updated = update_frontmatter_status(path.read_text(encoding="utf-8"), args.status, args.blocked_on)
+                updated = update_frontmatter_status(path.read_text(encoding="utf-8"), args.status, args.blocked_on, args.root)
                 replace_if_unchanged(path, updated, before)
-    except (OSError, TaskFrontmatterError) as exc:
+        final_metadata = parse_task_metadata(path.read_text(encoding="utf-8"), args.root)
+        if final_metadata is not None and final_metadata.version == V2_VERSION:
+            _ = blocking_request(args.root, {"operation": "reconcile"})
+    except (OSError, TaskFrontmatterError, BlockingError) as exc:
         print(f"omo_task_status.py: {exc}", file=sys.stderr)
         return 2
     except Exception as exc:

@@ -8,6 +8,8 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
+from omo_manager.omo_blocking import ENABLE_FILE
+from omo_manager.omo_task_metadata import parse_task_metadata
 from omo_manager.omo_record_pending import Args
 from omo_manager.omo_record_pending import ack_sent_line
 from omo_manager.omo_record_pending import recorded_line
@@ -33,7 +35,54 @@ def task_frontmatter(*, status: str = "running", is_manager: bool = False, pendi
     return "\n".join(lines) + "\n"
 
 
+def v2_task_frontmatter() -> str:
+    return """---
+version: v2.0.0
+task_id: task_019f0000-0000-7000-8000-000000000041
+status: running
+runat: wl:2
+tool: codex
+managerat: wl:1
+is_manager: false
+pending_task_items: []
+resolved_task_items: []
+---
+"""
+
+
 class RecordPendingTests(unittest.TestCase):
+    def test_records_human_item_as_v2_object_after_enablement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            task.write_text(v2_task_frontmatter() + "(pending)\nPlease do it.\n", encoding="utf-8")
+            (root / ENABLE_FILE).write_text("version: v2.0.0\nenabled: true\n", encoding="utf-8")
+            line = task.read_text(encoding="utf-8").splitlines().index("(pending)") + 1
+
+            exit_code = run(Args(root, Path("task.md"), line, Path("task.md"), ("finish review",), False))
+
+            text = task.read_text(encoding="utf-8")
+            metadata = parse_task_metadata(text, root)
+            self.assertEqual(0, exit_code)
+            self.assertNotIn("(pending)\n", text)
+            self.assertIsNotNone(metadata)
+            assert metadata is not None
+            self.assertEqual(("finish review",), metadata.pending_task_items)
+            self.assertTrue(metadata.pending_items[0].id.startswith("pi_"))
+
+    def test_rejects_v2_recording_before_enablement_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            original = v2_task_frontmatter() + "(pending)\nPlease do it.\n"
+            task.write_text(original, encoding="utf-8")
+            line = original.splitlines().index("(pending)") + 1
+
+            exit_code = run(Args(root, Path("task.md"), line, Path("task.md"), ("finish review",), False))
+
+            self.assertEqual(2, exit_code)
+            self.assertEqual(original, task.read_text(encoding="utf-8"))
+
     def test_records_items_and_removes_pending_line_in_same_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

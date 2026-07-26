@@ -16,6 +16,11 @@ if __package__ in {None, ""}:
 from omo_manager.omo_agent_status import DEFAULT_ROOT
 from omo_manager.omo_agent_status import TaskFrontmatterError
 from omo_manager.omo_agent_status import parse_task_metadata
+from omo_manager.omo_blocking import generated_id
+from omo_manager.omo_blocking import load_yaml_mapping
+from omo_manager.omo_blocking import render_task
+from omo_manager.omo_blocking import split_task_text
+from omo_manager.omo_blocking import v2_enabled
 from omo_manager.omo_task_status import replace_if_unchanged
 from omo_manager.omo_task_status import task_path
 
@@ -123,17 +128,38 @@ def item_lines(items: tuple[str, ...]) -> list[str]:
     return [f"  - {item}" for item in items]
 
 
-def all_items_recorded(text: str, items: tuple[str, ...]) -> bool:
-    metadata = parse_task_metadata(text)
+def all_items_recorded(text: str, items: tuple[str, ...], work_log_root: Path | None = None) -> bool:
+    metadata = parse_task_metadata(text, work_log_root)
     return metadata is not None and all(item in metadata.pending_task_items for item in items)
 
 
-def add_pending_items(text: str, items: tuple[str, ...]) -> str:
-    metadata = parse_task_metadata(text)
+def add_pending_items(text: str, items: tuple[str, ...], work_log_root: Path | None = None) -> str:
+    metadata = parse_task_metadata(text, work_log_root)
     if metadata is None:
         raise TaskFrontmatterError("target task file has no frontmatter.")
     if metadata.status == "done":
         raise TaskFrontmatterError("target task file is already done; record pending items on an active task.")
+    if work_log_root is not None and metadata.version == "v1.0.0" and v2_enabled(work_log_root):
+        raise TaskFrontmatterError("v1 pending writes are disabled after v2 enablement.")
+    if metadata.version == "v2.0.0":
+        if work_log_root is None or not v2_enabled(work_log_root):
+            raise TaskFrontmatterError("v2 pending writes are disabled until reviewed migration enablement.")
+        frontmatter, body = split_task_text(text)
+        values = load_yaml_mapping(frontmatter)
+        existing = {item["text"] for item in values["pending_task_items"]}
+        for item in items:
+            if item in existing:
+                continue
+            values["pending_task_items"].append(
+                {
+                    "id": generated_id("pi"),
+                    "text": item,
+                    "blocked_on": [],
+                    "notices": [],
+                }
+            )
+            existing.add(item)
+        return render_task(values, body, work_log_root)
     lines = text.splitlines()
     if not lines or lines[0].strip() != "---":
         raise TaskFrontmatterError("target task file has no frontmatter.")
@@ -163,15 +189,38 @@ def add_pending_items(text: str, items: tuple[str, ...]) -> str:
     raise TaskFrontmatterError("target task file has no `pending_task_items` frontmatter field.")
 
 
-def update_texts(pending_text: str, target_text: str, same_file: bool, line: int, items: tuple[str, ...]) -> tuple[str, str]:
+def update_texts(
+    pending_text: str,
+    target_text: str,
+    same_file: bool,
+    line: int,
+    items: tuple[str, ...],
+    work_log_root: Path | None = None,
+) -> tuple[str, str]:
     if same_file:
-        updated = append_line_once(add_pending_items(remove_pending_line(pending_text, line), items), recorded_line(line, items))
+        updated = append_line_once(
+            add_pending_items(remove_pending_line(pending_text, line), items, work_log_root),
+            recorded_line(line, items),
+        )
         return updated, updated
-    return append_line_once(remove_pending_line(pending_text, line), recorded_line(line, items)), add_pending_items(target_text, items)
+    return (
+        append_line_once(remove_pending_line(pending_text, line), recorded_line(line, items)),
+        add_pending_items(target_text, items, work_log_root),
+    )
 
 
-def retry_already_recorded(pending_text: str, target_text: str, line: int, items: tuple[str, ...]) -> bool:
-    return not pending_marker_at_line(pending_text, line) and line_exists(pending_text, recorded_line(line, items)) and all_items_recorded(target_text, items)
+def retry_already_recorded(
+    pending_text: str,
+    target_text: str,
+    line: int,
+    items: tuple[str, ...],
+    work_log_root: Path | None = None,
+) -> bool:
+    return (
+        not pending_marker_at_line(pending_text, line)
+        and line_exists(pending_text, recorded_line(line, items))
+        and all_items_recorded(target_text, items, work_log_root)
+    )
 
 
 def reject_retry_over_new_marker(pending_text: str, line: int, items: tuple[str, ...]) -> None:
@@ -242,12 +291,12 @@ def run(args: Args) -> int:
         pending_text = pending_path.read_text(encoding="utf-8")
         target_text = pending_text if same_file else target_path.read_text(encoding="utf-8")
         reject_retry_over_new_marker(pending_text, args.line, args.items)
-        if retry_already_recorded(pending_text, target_text, args.line, args.items):
+        if retry_already_recorded(pending_text, target_text, args.line, args.items, args.root):
             if args.ack_human:
                 send_human_ack_once(pending_path, args, email_path)
             print(f"recorded {len(args.items)} pending item(s) in {target_path.name}; `(pending)` was already removed from {pending_path.name}:{args.line}")
             return 0
-        updated_pending, updated_target = update_texts(pending_text, target_text, same_file, args.line, args.items)
+        updated_pending, updated_target = update_texts(pending_text, target_text, same_file, args.line, args.items, args.root)
         if same_file:
             replace_if_unchanged(pending_path, updated_pending, pending_before)
         else:

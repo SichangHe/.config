@@ -42,7 +42,7 @@ except ImportError:
         subject_base = None
         TaskFrontmatterError = ValueError
 
-        def parse_task_metadata(_text: str) -> object:
+        def parse_task_metadata(_text: str, _work_log_root: Path | None = None) -> object:
             return None
 
 def default_state_dir() -> Path:
@@ -325,9 +325,9 @@ def target_aliases(target: str) -> set[str]:
     return aliases
 
 
-def runat_targets(text: str) -> list[str]:
+def runat_targets(text: str, work_log_root: Path | None = None) -> list[str]:
     try:
-        metadata = parse_task_metadata(text)
+        metadata = parse_task_metadata(text, work_log_root)
     except TaskFrontmatterError:
         return []
     if metadata is not None:
@@ -335,9 +335,9 @@ def runat_targets(text: str) -> list[str]:
     return []
 
 
-def managerat_target(text: str) -> str:
+def managerat_target(text: str, work_log_root: Path | None = None) -> str:
     try:
-        metadata = parse_task_metadata(text)
+        metadata = parse_task_metadata(text, work_log_root)
     except TaskFrontmatterError:
         return ""
     if metadata is not None:
@@ -452,7 +452,7 @@ def fallback_manager_target_for_file(args: Args, manager_file: Path, requested_t
         return requested_target
     try:
         manager_text = manager_file.read_text(encoding="utf-8")
-        metadata = parse_task_metadata(manager_text) if manager_text else None
+        metadata = parse_task_metadata(manager_text, args.root) if manager_text else None
     except (OSError, TaskFrontmatterError):
         metadata = None
     owner_target = metadata.managerat if metadata is not None else ""
@@ -476,7 +476,7 @@ def task_file_for_target_in_candidates(root: Path, tmux_target: str, candidates:
             continue
         seen.add(resolved)
         try:
-            targets = runat_targets(path.read_text(encoding="utf-8"))
+            targets = runat_targets(path.read_text(encoding="utf-8"), root)
         except OSError:
             continue
         if any(target in aliases for target in targets):
@@ -493,7 +493,7 @@ def inactive_task_files_for_target(root: Path, tmux_target: str) -> list[Path]:
         if resolved in active or not path.is_file():
             continue
         try:
-            targets = runat_targets(path.read_text(encoding="utf-8"))
+            targets = runat_targets(path.read_text(encoding="utf-8"), root)
         except OSError:
             continue
         if any(target in aliases for target in targets):
@@ -510,7 +510,7 @@ def email_route(args: Args, subject: str, body: str = "") -> EmailRoute:
     if manager_file is None:
         for inactive_file in inactive_task_files_for_target(args.root, tmux_target):
             try:
-                inactive_owner_target = managerat_target(inactive_file.read_text(encoding="utf-8"))
+                inactive_owner_target = managerat_target(inactive_file.read_text(encoding="utf-8"), args.root)
             except OSError:
                 inactive_owner_target = ""
             owner_route = current_route_for_owner(args, inactive_owner_target)
@@ -523,7 +523,7 @@ def email_route(args: Args, subject: str, body: str = "") -> EmailRoute:
     except OSError:
         manager_text = ""
     try:
-        metadata = parse_task_metadata(manager_text) if manager_text else None
+        metadata = parse_task_metadata(manager_text, args.root) if manager_text else None
     except TaskFrontmatterError:
         metadata = None
     if metadata is not None:
@@ -540,7 +540,7 @@ def manager_target_for_file(args: Args, manager_file: Path) -> str:
     except OSError:
         return args.manager_target
     try:
-        metadata = parse_task_metadata(text)
+        metadata = parse_task_metadata(text, args.root)
     except TaskFrontmatterError:
         metadata = None
     if metadata is not None:

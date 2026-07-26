@@ -30,6 +30,20 @@ TASK_TEXT = (
     "managerat: old:1\r\n"
 )
 
+V2_MANAGER_SELF_OWNER = """---
+version: v2.0.0
+task_id: task_019f0000-0000-7000-8000-000000000011
+status: running
+runat: old:1
+tool: codex
+managerat: old:1
+is_manager: true
+pending_task_items: []
+resolved_task_items: []
+---
+body
+"""
+
 
 class ManagerOwnerMigrationTests(unittest.TestCase):
     def migration_argv(self, root: Path, old_owner: str = "old:1", new_owner: str = "new:2.3") -> list[str]:
@@ -118,6 +132,34 @@ class ManagerOwnerMigrationTests(unittest.TestCase):
         self.assertEqual("old:1", metadata.runat)
         self.assertEqual("new:2.3", metadata.managerat)
         self.assertTrue(metadata.is_manager)
+
+    def test_legacy_self_owner_repair_rejects_v1_after_enablement_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            legacy = TASK_TEXT.replace("runat: worker:7.0", "runat: old:1").replace("is_manager: false", "is_manager: true")
+            task, todo, todo_bytes = self.write_fixture(root, legacy)
+            original = task.read_bytes()
+            (root / ".omo-task-v2-enabled.yaml").write_text("version: v2.0.0\nenabled: true\n", encoding="utf-8")
+
+            with contextlib.redirect_stderr(io.StringIO()) as stderr:
+                self.assertEqual(1, main(self.migration_argv(root)))
+
+            self.assertIn("v1 task writes are disabled", stderr.getvalue())
+            self.assertEqual(original, task.read_bytes())
+            self.assertEqual(todo_bytes, todo.read_bytes())
+
+    def test_v2_self_owner_repair_rejects_before_enablement_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, todo, todo_bytes = self.write_fixture(root, V2_MANAGER_SELF_OWNER)
+            original = task.read_bytes()
+
+            with contextlib.redirect_stderr(io.StringIO()) as stderr:
+                self.assertEqual(1, main(self.migration_argv(root)))
+
+            self.assertIn("v2 ownership migration is disabled", stderr.getvalue())
+            self.assertEqual(original, task.read_bytes())
+            self.assertEqual(todo_bytes, todo.read_bytes())
 
     def test_legacy_self_owner_repair_still_rejects_other_invalid_metadata(self) -> None:
         legacy = TASK_TEXT.replace("runat: worker:7.0", "runat: old:1").replace("status: blocked", "status: waiting")
@@ -266,8 +308,8 @@ class ManagerOwnerMigrationTests(unittest.TestCase):
             task, todo, todo_bytes = self.write_fixture(root)
             concurrent = task.read_bytes() + b"concurrent manager note\r\n"
 
-            def transform_after_concurrent_write(text: str, old_owner: str, new_owner: str) -> str:
-                updated = manager_owner_migration_text(text, old_owner, new_owner)
+            def transform_after_concurrent_write(text: str, old_owner: str, new_owner: str, work_log_root: Path | None = None) -> str:
+                updated = manager_owner_migration_text(text, old_owner, new_owner, work_log_root)
                 task.write_bytes(concurrent)
                 return updated
 

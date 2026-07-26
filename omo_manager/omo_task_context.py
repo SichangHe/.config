@@ -48,7 +48,7 @@ def infer_active_task(root: Path, target: str) -> Path:
         if path is None or path in seen:
             continue
         seen.add(path)
-        metadata = read_task_metadata(path)
+        metadata = read_task_metadata(path, root)
         if metadata is None or metadata.status not in ACTIVE_STATUSES or not same_tmux_target(metadata.runat, target):
             continue
         matches.append((path, task.section))

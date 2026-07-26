@@ -19,16 +19,17 @@ from pathlib import Path
 
 try:
     from omo_manager.omo_codex_status import current_block, exact_pane_id, status, tail
-    from omo_manager.omo_agent_status import TaskFrontmatterError, parse_task_metadata
-    from omo_manager.omo_task_metadata import TASK_FRONTMATTER_V2
-    from omo_manager.omo_task_lock import task_target_lock
+    from omo_manager.omo_agent_status import DEFAULT_ROOT, TaskFrontmatterError, parse_task_metadata
+    from omo_manager.omo_blocking import V2_VERSION, generated_id, load_yaml_mapping, render_task, split_task_text, v2_enabled
+    from omo_manager.omo_task_metadata import TASK_FRONTMATTER_V1, TASK_FRONTMATTER_V2, first_version, frontmatter_text
+    from omo_manager.omo_task_lock import task_file_lock, task_target_lock
 except ModuleNotFoundError:
     from omo_codex_status import current_block, exact_pane_id, status, tail
-    from omo_agent_status import TaskFrontmatterError, parse_task_metadata
-    from omo_task_metadata import TASK_FRONTMATTER_V2
-    from omo_task_lock import task_target_lock
+    from omo_agent_status import DEFAULT_ROOT, TaskFrontmatterError, parse_task_metadata
+    from omo_blocking import V2_VERSION, generated_id, load_yaml_mapping, render_task, split_task_text, v2_enabled
+    from omo_task_metadata import TASK_FRONTMATTER_V1, TASK_FRONTMATTER_V2, first_version, frontmatter_text
+    from omo_task_lock import task_file_lock, task_target_lock
 
-DEFAULT_ROOT = Path(os.environ.get("OMO_WORK_LOGS_ROOT", Path.home() / "work_logs"))
 HELPER_DIR = Path(__file__).resolve().parent
 DEFAULT_WORKER_INSTRUCTIONS = HELPER_DIR / "WORKER_DEFAULTS.md"
 VL_WORKER_INSTRUCTIONS = HELPER_DIR / "VL_WORKER_DEFAULTS.md"
@@ -254,16 +255,32 @@ def canonical_tmux_pane(tmux_target: str) -> tuple[str, int, int]:
     return session, int(window), int(pane) if dot else 0
 
 
-def manager_owner_migration_text(text: str, old_owner: str, new_owner: str) -> str:
+def migration_source_metadata(text: str, work_log_root: Path | None = None):
+    """Parse migration input while permitting the legacy self-owner defect it repairs."""
+
+    try:
+        return parse_task_metadata(text, work_log_root)
+    except TaskFrontmatterError as exc:
+        if str(exc) != "`managerat` must be different from `runat`.":
+            raise
+        return None
+
+
+def manager_owner_migration_text(text: str, old_owner: str, new_owner: str, work_log_root: Path | None = None) -> str:
     """Return valid task text with only the exact frontmatter owner value changed."""
-    metadata = parse_task_metadata(text)
-    if metadata is not None and metadata.version == TASK_FRONTMATTER_V2:
-        raise ValueError("v2 task mutation is disabled until migration validation and watcher enablement are complete.")
+    metadata = migration_source_metadata(text, work_log_root)
     for label, owner in (("old", old_owner), ("new", new_owner)):
         if TMUX_TARGET_RE.fullmatch(owner) is None:
             raise ValueError(f"{label} manager target must be a full tmux target like `SESSION:WINDOW`.")
     if canonical_tmux_pane(old_owner) == canonical_tmux_pane(new_owner):
         raise ValueError("old and new manager targets must identify different tmux panes.")
+    if metadata is not None and metadata.version == TASK_FRONTMATTER_V2:
+        frontmatter, body = split_task_text(text)
+        values = load_yaml_mapping(frontmatter)
+        if values["managerat"] != old_owner:
+            raise ValueError(f"existing managerat {values['managerat']} does not equal --old-manager-target {old_owner}.")
+        values["managerat"] = new_owner
+        return render_task(values, body)
     lines = text.splitlines(keepends=True)
     if not lines or lines[0].strip() != "---":
         raise ValueError("ownership migration requires an existing task with valid frontmatter.")
@@ -290,7 +307,7 @@ def manager_owner_migration_text(text: str, old_owner: str, new_owner: str) -> s
     lines[owner_idx] = f"{key}{separator}{value[:value_start]}{new_owner}{value[value_end:]}{line_ending}"
     updated = "".join(lines)
     try:
-        updated_metadata = parse_task_metadata(updated)
+        updated_metadata = parse_task_metadata(updated, work_log_root)
     except TaskFrontmatterError as exc:
         if str(exc) == "`managerat` must be different from `runat`.":
             raise ValueError("new manager target must be different from task `runat`.") from exc
@@ -310,26 +327,31 @@ def same_file_identity(left: os.stat_result, right: os.stat_result) -> bool:
 
 def atomic_replace_if_unchanged(path: Path, text: str, before: os.stat_result) -> None:
     """Atomically replace `path` only if it still matches the state that was read."""
-    metadata = parse_task_metadata(text)
-    if metadata is not None and metadata.version == TASK_FRONTMATTER_V2:
-        raise ValueError("v2 task mutation is disabled until migration validation and watcher enablement are complete.")
     tmp_path: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", dir=path.parent, prefix=f".{path.name}.", delete=False) as handle:
-            tmp_path = Path(handle.name)
-            _ = handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-        tmp_path.chmod(before.st_mode & 0o7777)
-        if not same_file_state(before, path.stat()):
-            raise ValueError("task file changed while ownership migration was being prepared; retry after rereading it.")
-        os.replace(tmp_path, path)
-    finally:
-        if tmp_path is not None:
-            tmp_path.unlink(missing_ok=True)
+    with task_file_lock(path):
+        try:
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", dir=path.parent, prefix=f".{path.name}.", delete=False) as handle:
+                tmp_path = Path(handle.name)
+                _ = handle.write(text)
+                handle.flush()
+                os.fsync(handle.fileno())
+            tmp_path.chmod(before.st_mode & 0o7777)
+            if not same_file_state(before, path.stat()):
+                raise ValueError("task file changed while ownership migration was being prepared; retry after rereading it.")
+            os.replace(tmp_path, path)
+            tmp_path = None
+        finally:
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
 
 
-def migrate_manager_owner(path: Path, old_owner: str, new_owner: str, dry_run_only: bool = False) -> None:
+def migrate_manager_owner(
+    path: Path,
+    old_owner: str,
+    new_owner: str,
+    dry_run_only: bool = False,
+    work_log_root: Path | None = None,
+) -> None:
     """Validate and migrate one existing task owner without touching other state."""
     if not path.is_file():
         raise ValueError(f"ownership migration requires an existing task file: {path}")
@@ -340,7 +362,8 @@ def migrate_manager_owner(path: Path, old_owner: str, new_owner: str, dry_run_on
             if not same_file_identity(before, path.stat()):
                 continue
             existing = handle.read()
-            updated = manager_owner_migration_text(existing, old_owner, new_owner)
+            _ = migration_source_metadata(existing, work_log_root)
+            updated = manager_owner_migration_text(existing, old_owner, new_owner, work_log_root)
             if dry_run_only:
                 print(f"dry-run: would change only managerat from {old_owner} to {new_owner} in {path}; no files or tmux panes changed.")
                 return
@@ -597,6 +620,23 @@ def managerat_for_task(args: Args, runat: str) -> str:
 def task_frontmatter(args: Args, runat: str, managerat: str) -> str:
     is_manager = "true" if args.is_manager else "false"
     status = "long_running" if args.is_manager else "running"
+    if v2_enabled(args.root):
+        rendered = render_task(
+            {
+                "version": V2_VERSION,
+                "task_id": generated_id("task"),
+                "status": status,
+                "runat": runat,
+                "tool": effective_tool(args),
+                "managerat": managerat,
+                "is_manager": args.is_manager,
+                "pending_task_items": [],
+                "resolved_task_items": [],
+            },
+            "",
+            args.root,
+        )
+        return rendered.removesuffix("\n")
     return "\n".join(
         [
             "---",
@@ -639,10 +679,28 @@ def replace_frontmatter_fields(text: str, updates: dict[str, str], remove: set[s
 
 
 def launched_frontmatter_text(existing: str, args: Args, tmux_target: str) -> str:
-    metadata = parse_task_metadata(existing)
-    if metadata is not None and metadata.version == TASK_FRONTMATTER_V2:
-        raise ValueError("v2 task mutation is disabled until migration validation and watcher enablement are complete.")
+    metadata = parse_task_metadata(existing, args.root)
     is_manager = args.is_manager or (metadata is not None and metadata.is_manager)
+    if metadata is not None and metadata.version == V2_VERSION:
+        frontmatter, body = split_task_text(existing)
+        values = load_yaml_mapping(frontmatter)
+        desired_status = "long_running" if is_manager else "running"
+        blockers = values.get("blocked_on", [])
+        values["runat"] = tmux_target
+        values["tool"] = effective_tool(args)
+        if args.manager_target:
+            values["managerat"] = args.manager_target
+        if args.is_manager:
+            values["is_manager"] = True
+        if blockers:
+            values["status"] = "blocked"
+            values["resume_status"] = desired_status
+            values["blocked_on"] = blockers
+        else:
+            values["status"] = desired_status
+            values.pop("resume_status", None)
+            values.pop("blocked_on", None)
+        return render_task(values, body, args.root)
     updates = {
         "status": "long_running" if is_manager else "running",
         "runat": tmux_target,
@@ -973,8 +1031,11 @@ def ensure_task_file(args: Args, tmux_target: str) -> Path:
     path = task_path(args.root, args.task_file)
     path.parent.mkdir(parents=True, exist_ok=True)
     existed = path.exists()
+    before = path.stat() if existed else None
     existing = path.read_text(encoding="utf-8") if existed else ""
-    metadata = parse_task_metadata(existing) if existed else None
+    metadata = parse_task_metadata(existing, args.root) if existed else None
+    if metadata is not None and metadata.version != TASK_FRONTMATTER_V2 and v2_enabled(args.root):
+        raise ValueError("v1 task writes are disabled after v2 enablement.")
     if not existed:
         text = new_task_text(args, tmux_target)
         validate_runat_goal_tree(text)
@@ -992,13 +1053,19 @@ def ensure_task_file(args: Args, tmux_target: str) -> Path:
             text += sep + args.prompt_file.read_text(encoding="utf-8").rstrip() + "\n"
     if text != existing or not existed:
         if existed:
-            if parse_task_metadata(text) is None:
+            if parse_task_metadata(text, args.root) is None:
                 validate_runat_header(text)
                 validate_managerat_metadata(text)
-        metadata = parse_task_metadata(text)
-        if metadata is not None and metadata.version == TASK_FRONTMATTER_V2:
+        metadata = parse_task_metadata(text, args.root)
+        if metadata is not None and metadata.version == TASK_FRONTMATTER_V2 and not v2_enabled(args.root):
             raise ValueError("v2 task mutation is disabled until migration validation and watcher enablement are complete.")
-        _ = path.write_text(text, encoding="utf-8")
+        if before is not None:
+            atomic_replace_if_unchanged(path, text, before)
+        else:
+            with task_file_lock(path):
+                if path.exists():
+                    raise ValueError("task file appeared while launch metadata was being prepared; retry")
+                _ = path.write_text(text, encoding="utf-8")
     return path
 
 
@@ -1164,7 +1231,7 @@ def validate_inputs(args: Args) -> str:
     path = task_path(args.root, args.task_file)
     if path.exists() and args.manager_target:
         existing_text = path.read_text(encoding="utf-8")
-        metadata = parse_task_metadata(existing_text)
+        metadata = parse_task_metadata(existing_text, args.root)
         if metadata is not None:
             existing_manager_target = metadata.managerat
         else:
@@ -1175,7 +1242,7 @@ def validate_inputs(args: Args) -> str:
             raise ValueError(f"existing managerat {existing_manager_target} does not match --manager-target {args.manager_target}.")
     elif path.exists():
         existing_text = path.read_text(encoding="utf-8")
-        if parse_task_metadata(existing_text) is None:
+        if parse_task_metadata(existing_text, args.root) is None:
             validate_runat_header(existing_text)
             validate_managerat_metadata(existing_text)
     if path.exists():
@@ -1190,7 +1257,16 @@ def main(argv: list[str]) -> int:
     try:
         args = parse_args(argv)
         if args.migrate_manager_owner:
-            migrate_manager_owner(task_path(args.root, args.task_file), args.old_manager_target, args.new_manager_target, args.dry_run)
+            migration_path = task_path(args.root, args.task_file)
+            migration_text = migration_path.read_text(encoding="utf-8") if migration_path.is_file() else ""
+            _ = migration_source_metadata(migration_text, args.root) if migration_text else None
+            source = frontmatter_text(migration_text)
+            migration_version = first_version(source) if source is not None else ""
+            if migration_version == TASK_FRONTMATTER_V2 and not v2_enabled(args.root):
+                raise ValueError("v2 ownership migration is disabled until reviewed migration enablement is complete.")
+            if migration_version == TASK_FRONTMATTER_V1 and v2_enabled(args.root):
+                raise ValueError("v1 task writes are disabled after v2 enablement.")
+            migrate_manager_owner(migration_path, args.old_manager_target, args.new_manager_target, args.dry_run, args.root)
             return 0
         existing_target = target(args) if args.workdir is None else ""
         ownership_lock = task_target_lock(args.root, existing_target) if existing_target else contextlib.nullcontext()

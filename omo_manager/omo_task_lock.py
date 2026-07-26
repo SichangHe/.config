@@ -33,3 +33,18 @@ def task_target_lock(root: Path, target: str) -> Iterator[None]:
             yield
         finally:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def task_file_lock(path: Path) -> Iterator[None]:
+    """Serialize compare-and-replace writers for one canonical task path."""
+
+    key = hashlib.sha256(str(path.resolve(strict=False)).encode()).hexdigest()
+    lock_path = Path("/tmp") / f"omo-task-file-locks-{os.getuid()}" / key
+    lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with lock_path.open("a", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)

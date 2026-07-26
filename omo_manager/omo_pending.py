@@ -13,6 +13,13 @@ if __package__ in {None, ""}:
 from omo_manager.omo_agent_status import DEFAULT_ROOT
 from omo_manager.omo_agent_status import TaskFrontmatterError
 from omo_manager.omo_agent_status import read_task_metadata
+from omo_manager.omo_blocking import BlockingError
+from omo_manager.omo_blocking import acknowledge
+from omo_manager.omo_blocking import add_items
+from omo_manager.omo_blocking import load_task
+from omo_manager.omo_blocking import replace_item
+from omo_manager.omo_blocking import resolve_item
+from omo_manager.omo_blocking import v2_enabled
 from omo_manager.omo_task_context import current_active_task
 from omo_manager.omo_task_edit import add_pending_items
 from omo_manager.omo_task_edit import append_comment
@@ -23,6 +30,8 @@ from omo_manager.omo_task_edit import remove_pending_items
 from omo_manager.omo_task_edit import replace_pending_item
 from omo_manager.omo_task_edit import replace_if_unchanged
 from omo_manager.omo_task_lock import task_target_lock
+from omo_manager.omo_task_metadata import PendingTaskItem
+from omo_manager.omo_blocking_actor import request as blocking_request
 
 
 @dataclass(frozen=True)
@@ -32,6 +41,15 @@ class Args:
     old_item: str = ""
     new_item: str = ""
     evidence: str = ""
+    item_id: str = ""
+    outcome: str = ""
+    notice_id: str = ""
+
+
+def pending_item_state(item: PendingTaskItem) -> str:
+    if any(dependency.state == "cancelled" for dependency in item.blocked_on):
+        return "cancelled"
+    return "waiting" if item.blocked_on else "ready"
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -41,24 +59,41 @@ def parse_args(argv: list[str]) -> Args:
     add = sub.add_parser("add", help="Add open work.")
     add.add_argument("--item", action="append", required=True)
     replace = sub.add_parser("replace", help="Replace one exact open item.")
-    replace.add_argument("--old-item", required=True)
+    replace.add_argument("--old-item")
+    replace.add_argument("--item-id")
     replace.add_argument("--new-item", required=True)
     remove = sub.add_parser("remove", help="Remove verified completed or cancelled work.")
-    remove.add_argument("--item", action="append", required=True)
+    remove.add_argument("--item", action="append")
+    remove.add_argument("--item-id")
+    remove.add_argument("--outcome", choices=("completed", "cancelled"))
     remove.add_argument("--evidence", required=True)
+    wake_ack = sub.add_parser("wake-ack", help="Acknowledge one durable ready-item notice.")
+    wake_ack.add_argument("--notice-id", required=True)
     parsed = parser.parse_args(argv)
     if parsed.command == "add":
         return Args("add", normalized_items(tuple(parsed.item)))
     if parsed.command == "replace":
-        return Args("replace", old_item=normalized_items((parsed.old_item,))[0], new_item=normalized_items((parsed.new_item,))[0])
+        if bool(parsed.old_item) == bool(parsed.item_id):
+            parser.error("replace requires exactly one of --old-item or --item-id.")
+        old_item = normalized_items((parsed.old_item,))[0] if parsed.old_item else ""
+        return Args("replace", old_item=old_item, new_item=normalized_items((parsed.new_item,))[0], item_id=parsed.item_id or "")
     if parsed.command == "remove":
-        return Args("remove", normalized_items(tuple(parsed.item)), evidence=normalized_comment_message(parsed.evidence))
+        if bool(parsed.item) == bool(parsed.item_id):
+            parser.error("remove requires exactly one of --item or --item-id.")
+        if parsed.item_id and not parsed.outcome:
+            parser.error("remove with --item-id requires --outcome.")
+        if parsed.item and parsed.outcome:
+            parser.error("legacy --item removal does not accept --outcome.")
+        items = normalized_items(tuple(parsed.item or ()))
+        return Args("remove", items, evidence=normalized_comment_message(parsed.evidence), item_id=parsed.item_id or "", outcome=parsed.outcome or "")
+    if parsed.command == "wake-ack":
+        return Args("wake-ack", notice_id=parsed.notice_id)
     return Args("list")
 
 
 def run(args: Args, root: Path = DEFAULT_ROOT) -> int:
     path = current_active_task(root)
-    metadata = read_task_metadata(path)
+    metadata = read_task_metadata(path, root)
     if metadata is None:
         raise TaskFrontmatterError("current work queue metadata is invalid")
     with task_target_lock(root, metadata.runat):
@@ -66,13 +101,55 @@ def run(args: Args, root: Path = DEFAULT_ROOT) -> int:
             raise TaskFrontmatterError("current work queue ownership changed; retry")
         before = path.stat()
         text = path.read_text(encoding="utf-8")
-        current = read_task_metadata(path)
+        current = read_task_metadata(path, root)
         if current is None:
             raise TaskFrontmatterError("current work queue metadata is invalid")
         if args.command == "list":
-            for item in current.pending_task_items:
-                print(item)
+            if current.pending_items:
+                for item in current.pending_items:
+                    print(f"{item.id}\t{item.text}\t{pending_item_state(item)}")
+            else:
+                for item in current.pending_task_items:
+                    print(item)
             return 0
+        if current.version == "v1.0.0" and v2_enabled(root):
+            raise BlockingError("v1 pending writes are disabled after v2 enablement")
+        if current.version == "v2.0.0":
+            if not v2_enabled(root):
+                raise BlockingError("v2 pending writes are disabled until reviewed migration enablement")
+            document = load_task(path, root=root)
+            if args.command == "add":
+                item_ids = add_items(document, args.items)
+                for item_id in item_ids:
+                    print(item_id)
+                return 0
+            if args.command == "replace":
+                if not args.item_id:
+                    raise BlockingError("v2 replacement requires --item-id")
+                replace_item(document, args.item_id, args.new_item)
+                print(f"replaced pending item {args.item_id}")
+                return 0
+            if args.command == "remove":
+                if not args.item_id or not args.outcome:
+                    raise BlockingError("v2 removal requires --item-id and --outcome")
+                resolved = [item for item in document.metadata["resolved_task_items"] if item["id"] == args.item_id]
+                if resolved:
+                    if resolved[0]["outcome"] != args.outcome or resolved[0]["evidence"] != args.evidence:
+                        raise BlockingError("pending item was already resolved with different outcome or evidence")
+                    _ = blocking_request(root, {"operation": "reconcile"})
+                    print(f"pending item {args.item_id} was already resolved as {args.outcome}")
+                    return 0
+                resolve_item(document, args.item_id, args.outcome, args.evidence)
+                _ = blocking_request(root, {"operation": "reconcile"})
+                print(f"resolved pending item {args.item_id} as {args.outcome}")
+                return 0
+            if args.command == "wake-ack":
+                item_id, item_text = acknowledge(document, args.notice_id)
+                print(f"{item_id}\t{item_text}")
+                return 0
+            raise BlockingError("unsupported v2 pending command")
+        if args.command == "wake-ack":
+            raise BlockingError("wake acknowledgment requires a v2 task")
         if args.command == "add":
             updated, count = add_pending_items(text, args.items)
             replace_if_unchanged(path, updated, before)

@@ -130,35 +130,44 @@ class Phase1MetadataRepairTests(unittest.TestCase):
 
 
 class Phase1MutationGateTests(unittest.TestCase):
-    def test_task_status_transform_rejects_v2(self) -> None:
-        with self.assertRaisesRegex(TaskFrontmatterError, "v2 task mutation is disabled"):
-            update_frontmatter_status(running_v2(), "blocked", "waiting")
+    def test_task_status_transform_supports_v2_after_cli_gate(self) -> None:
+        updated = update_frontmatter_status(running_v2(), "blocked", "waiting")
 
-    def test_task_status_atomic_write_rejects_v2_without_touching_file(self) -> None:
+        metadata = parse_task_metadata(updated)
+        self.assertIsNotNone(metadata)
+        assert metadata is not None
+        self.assertEqual("blocked", metadata.status)
+        self.assertEqual("running", metadata.resume_status)
+        self.assertEqual("waiting", metadata.blockers[0].reason)  # type: ignore[union-attr]
+
+    def test_task_status_atomic_write_supports_v2_after_cli_gate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "task.md"
             original = v1_task()
             path.write_text(original, encoding="utf-8")
 
-            with self.assertRaisesRegex(TaskFrontmatterError, "v2 task mutation is disabled"):
-                replace_if_unchanged(path, running_v2(), path.stat())
+            replace_if_unchanged(path, running_v2(), path.stat())
 
-            self.assertEqual(original, path.read_text(encoding="utf-8"))
+            self.assertEqual(running_v2(), path.read_text(encoding="utf-8"))
 
-    def test_task_owner_migration_rejects_v2(self) -> None:
-        with self.assertRaisesRegex(ValueError, "v2 task mutation is disabled"):
-            manager_owner_migration_text(running_v2(), "wl:1", "wl:3")
+    def test_task_owner_migration_supports_validated_v2_yaml(self) -> None:
+        updated = manager_owner_migration_text(running_v2(), "wl:1", "wl:3")
 
-    def test_task_atomic_write_rejects_v2_without_touching_file(self) -> None:
+        metadata = parse_task_metadata(updated)
+        self.assertIsNotNone(metadata)
+        assert metadata is not None
+        self.assertEqual("wl:3", metadata.managerat)
+        self.assertEqual(TASK_ID, metadata.task_id)
+
+    def test_task_atomic_write_supports_v2_after_cli_gate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "task.md"
             original = v1_task()
             path.write_text(original, encoding="utf-8")
 
-            with self.assertRaisesRegex(ValueError, "v2 task mutation is disabled"):
-                atomic_replace_if_unchanged(path, running_v2(), path.stat())
+            atomic_replace_if_unchanged(path, running_v2(), path.stat())
 
-            self.assertEqual(original, path.read_text(encoding="utf-8"))
+            self.assertEqual(running_v2(), path.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

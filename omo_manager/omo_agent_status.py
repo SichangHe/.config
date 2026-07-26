@@ -310,7 +310,7 @@ def blocked_dependency_snapshot(root: Path, task: TaskLine, state: TaskState) ->
                 return False
             if dependency_path not in current_paths:
                 return False
-            dependency = scan_task_state(dependency_path)
+            dependency = scan_task_state(dependency_path, root)
             if dependency is None or task_has_pending_marker(dependency_path):
                 return False
             if not parent.target or not dependency.manager_target or not same_tmux_target(dependency.manager_target, parent.target):
@@ -360,7 +360,7 @@ def blocked_resumable_dependency_snapshot(root: Path, task: TaskLine, state: Tas
     task_path = resolve_task_path(root, task.task_file)
     if task_path is None or task_has_pending_marker(task_path):
         return ""
-    metadata = read_task_metadata(task_path)
+    metadata = read_task_metadata(task_path, root)
     if metadata is None or not metadata.pending_task_items or not has_stopped_resume_evidence(task_path):
         return ""
     current_paths = current_task_paths(root)
@@ -384,7 +384,7 @@ def blocked_resumable_dependency_snapshot(root: Path, task: TaskLine, state: Tas
         dependency_path = resolve_task_path(root, match.group(1))
         if dependency_path is None or dependency_path in seen_paths or dependency_path not in current_paths:
             return ""
-        dependency = scan_task_state(dependency_path)
+        dependency = scan_task_state(dependency_path, root)
         if dependency is None or dependency.status not in {"running", "long_running"} or task_has_pending_marker(dependency_path):
             return ""
         dependency_target = canonical_target(dependency.target)
@@ -490,12 +490,12 @@ def is_main_manager_task_file(path: Path) -> bool:
     return path.name == "work_manager.md" or path.name.startswith("work_manager_")
 
 
-def read_task_metadata(path: Path | None) -> TaskMetadata | None:
+def read_task_metadata(path: Path | None, work_log_root: Path | None = None) -> TaskMetadata | None:
     if path is None:
         return None
     try:
         text = path.read_text(encoding="utf-8")
-        return parse_task_metadata(text)
+        return parse_task_metadata(text, work_log_root)
     except (OSError, TaskFrontmatterError):
         return None
 
@@ -568,8 +568,8 @@ def resolve_task_path(root: Path, task_file: str) -> Path | None:
     return resolved if resolved.is_file() else None
 
 
-def managerat_target(path: Path | None) -> str:
-    metadata = read_task_metadata(path)
+def managerat_target(path: Path | None, work_log_root: Path | None = None) -> str:
+    metadata = read_task_metadata(path, work_log_root)
     return metadata.managerat if metadata is not None else ""
 
 
@@ -579,7 +579,7 @@ def active_vl_submanager_target(root: Path) -> str:
         if task.section != "todo:current" or not is_current_vl_supervisor(task.task_file):
             continue
         state_path = resolve_task_path(root, task.task_file)
-        state = scan_task_state(state_path) if state_path is not None else None
+        state = scan_task_state(state_path, root) if state_path is not None else None
         if state is not None and state.target:
             return state.target
         if task.target:
@@ -594,7 +594,7 @@ def effective_owner_target(root: Path, task: TaskLine, state_path: Path | None =
     ownership are assigned to the active VL submanager so the top-level manager
     does not report or mutate work owned by that submanager.
     """
-    explicit = managerat_target(state_path or resolve_task_path(root, task.task_file))
+    explicit = managerat_target(state_path or resolve_task_path(root, task.task_file), root)
     if explicit:
         return explicit
     if task_line_is_vl(task) and not is_current_vl_supervisor(task.task_file):
@@ -688,13 +688,13 @@ def scan_legacy_task_state(path: Path) -> TaskState | None:
     return TaskState(status, target, port, persistent_role, reason) if status else None
 
 
-def scan_task_state(path: Path) -> TaskState | None:
+def scan_task_state(path: Path, work_log_root: Path | None = None) -> TaskState | None:
     try:
         text = path.read_text(encoding="utf-8")
     except OSError:
         return None
     try:
-        metadata = parse_task_metadata(text)
+        metadata = parse_task_metadata(text, work_log_root)
     except TaskFrontmatterError:
         return None
     if metadata is None:
@@ -720,8 +720,8 @@ def task_has_pending_marker(path: Path | None) -> bool:
     return any(line.strip() == "(pending)" for line in lines)
 
 
-def pending_task_items(path: Path) -> list[str]:
-    metadata = read_task_metadata(path)
+def pending_task_items(path: Path, work_log_root: Path | None = None) -> list[str]:
+    metadata = read_task_metadata(path, work_log_root)
     return list(metadata.pending_task_items) if metadata is not None else []
 
 
@@ -739,10 +739,10 @@ def pending_task_item_rows(root: Path, manager_target: str = "") -> list[StatusR
             continue
         if not task_owned_by_manager(root, task, manager_target, state_path):
             continue
-        state = scan_task_state(state_path)
+        state = scan_task_state(state_path, root)
         if state is None or state.status in {"running", "long_running", "pending", "blocked"}:
             continue
-        for item in pending_task_items(state_path):
+        for item in pending_task_items(state_path, root):
             rows.append(StatusRow(task.task_file, "human_request", f"pending_item={item}", task_status=state.status if state is not None else "missing"))
     return rows
 
@@ -756,7 +756,7 @@ def load_task_state(root: Path, manager_target: str = "") -> tuple[dict[str, Tas
         if task.task_file == "TODO.md":
             continue
         state_path = resolve_task_path(root, task.task_file)
-        state = scan_task_state(state_path) if state_path is not None else None
+        state = scan_task_state(state_path, root) if state_path is not None else None
         if state is None:
             continue
         if task_has_pending_marker(state_path):
@@ -782,7 +782,7 @@ def persistent_blocked_task_lines(root: Path, manager_target: str = "") -> list[
         if task.task_file == "TODO.md" or task.task_file in seen:
             continue
         state_path = resolve_task_path(root, task.task_file)
-        state = scan_task_state(state_path) if state_path is not None else None
+        state = scan_task_state(state_path, root) if state_path is not None else None
         if state is None or state.status != "blocked" or not state.persistent_role:
             continue
         if not task_owned_by_manager(root, task, manager_target, state_path):
@@ -809,7 +809,7 @@ def current_untracked_task_rows(args: Args, skip_targets: set[str], auto_unstick
         if task_has_pending_marker(state_path):
             seen_targets.add(target)
             continue
-        state = scan_task_state(state_path) if state_path is not None else None
+        state = scan_task_state(state_path, args.root) if state_path is not None else None
         if state is not None:
             continue
         row = classify_target(task.task_file, task.target, task_status="unlinked", auto_unstick=auto_unstick, role="todo_current_untracked", unstick_by_target=unstick_by_target, auto_unstick_disabled_reason=auto_unstick_disabled_reason)
@@ -836,7 +836,7 @@ def blocked_idle_vl_task_rows(root: Path, manager_target: str = "", auto_unstick
     for task in candidates:
         add_blocked_idle_vl_row(root, task, "blocked_idle_vl", rows, seen, manager_target, auto_unstick, unstick_by_target, auto_unstick_disabled_reason)
         state_path = resolve_task_path(root, task.task_file)
-        state = scan_task_state(state_path) if state_path is not None else None
+        state = scan_task_state(state_path, root) if state_path is not None else None
         if state is None or state.status != "blocked" or not is_current_vl_supervisor(task.task_file):
             continue
         for match in TASK_RE.finditer(state.reason):
@@ -868,7 +868,7 @@ def add_blocked_idle_vl_row(root: Path, task: TaskLine, role: str, rows: list[St
     state_path = resolve_task_path(root, task.task_file)
     if task_has_pending_marker(state_path):
         return
-    state = scan_task_state(state_path) if state_path is not None else None
+    state = scan_task_state(state_path, root) if state_path is not None else None
     if state is None or state.status != "blocked":
         return
     if not task_owned_by_manager(root, task, manager_target, state_path):
@@ -1009,7 +1009,7 @@ def classify_task(task: TaskLine, record: SessionRecord | None, auto_unstick: bo
 
 def registry_unmanaged_task(record: SessionRecord, root: Path) -> TaskLine:
     path = resolve_task_path(root, record.task_file)
-    state = scan_task_state(path) if path is not None else None
+    state = scan_task_state(path, root) if path is not None else None
     target = record.target or (state.target if state is not None else "")
     port = record.port if record.port is not None or state is None else state.port
     task_status = state.status if state is not None else "unlinked"
@@ -1038,7 +1038,7 @@ def registry_unmanaged_problem_rows(args: Args, records: list[SessionRecord], sk
 
 def todo_unmanaged_task(root: Path, task: TaskLine) -> TaskLine | None:
     path = resolve_task_path(root, task.task_file)
-    state = scan_task_state(path) if path is not None else None
+    state = scan_task_state(path, root) if path is not None else None
     target = task.target
     port = task.port
     task_status = "unlinked"
@@ -1092,7 +1092,7 @@ def current_task_targets(root: Path) -> set[str]:
         if task.section != "todo:current":
             continue
         state_path = resolve_task_path(root, task.task_file)
-        state = scan_task_state(state_path) if state_path is not None else None
+        state = scan_task_state(state_path, root) if state_path is not None else None
         target = state.target if state is not None else task.target
         if target:
             targets.add(target)

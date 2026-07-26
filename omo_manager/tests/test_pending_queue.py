@@ -11,6 +11,7 @@ from omo_manager.omo_agent_status import TaskFrontmatterError
 from omo_manager.omo_pending import Args
 from omo_manager.omo_pending import run
 from omo_manager.omo_task_context import infer_active_task
+from omo_manager.omo_task_metadata import frontmatter_parts
 
 
 def task_text(status: str = "running", items: tuple[str, ...] = ()) -> str:
@@ -65,11 +66,14 @@ class PendingQueueTests(unittest.TestCase):
             (root / "TODO.md").write_text("current:\nsecret-task.md cfg:2\n", encoding="utf-8")
             path.write_text(task_text("long_running"), encoding="utf-8")
             output = StringIO()
-            with patch("omo_manager.omo_pending.current_active_task", return_value=path), redirect_stdout(output):
+            with patch("omo_manager.omo_pending.current_active_task", return_value=path), patch(
+                "omo_manager.omo_task_edit.frontmatter_parts", wraps=frontmatter_parts
+            ) as parse_parts, redirect_stdout(output):
                 self.assertEqual(0, run(Args("add", ("inspect failure",)), root))
                 self.assertEqual(0, run(Args("list"), root))
                 self.assertEqual(0, run(Args("replace", old_item="inspect failure", new_item="repair failure"), root))
                 self.assertEqual(0, run(Args("remove", ("repair failure",), evidence="verified fixed"), root))
+            self.assertGreaterEqual(parse_parts.call_count, 3)
             self.assertNotIn("secret-task", output.getvalue())
             text = path.read_text(encoding="utf-8")
             self.assertIn("verified removed pending item: verified fixed", text)

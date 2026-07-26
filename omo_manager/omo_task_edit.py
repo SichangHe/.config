@@ -17,9 +17,16 @@ from omo_manager.omo_agent_status import DEFAULT_ROOT
 from omo_manager.omo_agent_status import TaskFrontmatterError
 from omo_manager.omo_agent_status import TaskMetadata
 from omo_manager.omo_agent_status import parse_task_metadata
+from omo_manager.omo_agent_status import same_tmux_target
+from omo_manager.omo_blocking import BlockingError
+from omo_manager.omo_blocking import load_task
+from omo_manager.omo_blocking import v2_enabled
+from omo_manager.omo_blocking_actor import request as blocking_request
+from omo_manager.omo_task_context import current_active_task
 from omo_manager.omo_task_status import replace_if_unchanged
 from omo_manager.omo_task_status import task_path
 from omo_manager.omo_task_metadata import TASK_FRONTMATTER_V1
+from omo_manager.omo_task_metadata import frontmatter_parts
 
 PENDING_MARKER = "(pending)"
 REMOVE_REMINDER = "Verify the removed pending item was actually done or cancelled; consider evaluator agents for uncertain verification."
@@ -58,6 +65,9 @@ class Args:
     clear_kind: str = ""
     owner_task_file: Path | None = None
     owner_item: str = ""
+    item_id: str = ""
+    on_task: Path | None = None
+    on_item_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -86,6 +96,9 @@ class ParsedArgs(argparse.Namespace):
     clear_kind: str = ""
     owner_task_file: Path | None = None
     owner_item: str = ""
+    item_id: str = ""
+    on_task: Path | None = None
+    on_item_id: str = ""
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -146,10 +159,35 @@ def parse_args(argv: list[str]) -> Args:
     _ = delegate_parser.add_argument("task_file", type=Path)
     _ = delegate_parser.add_argument("--message-file", type=Path, required=True, help="File containing the worker message body.")
 
+    dependency_add = subparsers.add_parser("dependency-add", help="Add an item dependency owned by a direct child task.")
+    dependency_add.set_defaults(command="dependency-add")
+    _ = dependency_add.add_argument("--task", dest="task_file", type=Path, required=True)
+    _ = dependency_add.add_argument("--item-id", required=True)
+    _ = dependency_add.add_argument("--on-task", type=Path, required=True)
+    _ = dependency_add.add_argument("--on-item-id", required=True)
+
+    dependency_remove = subparsers.add_parser("dependency-remove", help="Remove an item dependency owned by a direct child task.")
+    dependency_remove.set_defaults(command="dependency-remove")
+    _ = dependency_remove.add_argument("--task", dest="task_file", type=Path, required=True)
+    _ = dependency_remove.add_argument("--item-id", required=True)
+    _ = dependency_remove.add_argument("--on-task", type=Path, required=True)
+    _ = dependency_remove.add_argument("--on-item-id", required=True)
+    _ = dependency_remove.add_argument("--evidence", required=True)
+
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     try:
         root = parsed.root.resolve()
         command = canonical_command(parsed.command)
+        if command in {"dependency-add", "dependency-remove"}:
+            return Args(
+                root,
+                parsed.task_file,
+                command,
+                evidence=normalized_comment_message(parsed.evidence) if command == "dependency-remove" else "",
+                item_id=parsed.item_id,
+                on_task=parsed.on_task,
+                on_item_id=parsed.on_item_id,
+            )
         if command == "pending-add":
             items = normalized_items(tuple(parsed.item or ()))
             return Args(root, parsed.task_file, command, items=items)
@@ -286,8 +324,8 @@ def send_marker_clear_ack(comment: str, email_path: Path | None, clear_kind: str
         subprocess.run([str(EMAIL_HELPER), "--manager-human", "--subject-file", str(subject_path), "--message-file", str(body_path)], check=True)
 
 
-def require_metadata(text: str) -> TaskMetadata:
-    metadata = parse_task_metadata(text)
+def require_metadata(text: str, work_log_root: Path | None = None) -> TaskMetadata:
+    metadata = parse_task_metadata(text, work_log_root)
     if metadata is None:
         raise TaskFrontmatterError("task file has no frontmatter.")
     return metadata
@@ -307,12 +345,11 @@ def require_task_file(task_file: Path | None) -> Path:
 
 
 def frontmatter_closing_idx(lines: list[str]) -> int:
-    if not lines or lines[0].strip() != "---":
+    parts = frontmatter_parts("".join(lines))
+    if parts is None:
         raise TaskFrontmatterError("task file has no frontmatter.")
-    for idx, line in enumerate(lines[1:], start=1):
-        if line.strip() == "---":
-            return idx
-    raise TaskFrontmatterError("task frontmatter opening marker has no closing marker.")
+    frontmatter, _body = parts
+    return len(frontmatter) + 1
 
 
 def pending_list_bounds(lines: list[str]) -> PendingListBounds:
@@ -422,8 +459,8 @@ def append_comment_line(text: str, comment_line: str) -> str:
     return f"{text}{separator}{comment_line}{newline}"
 
 
-def summary_text(text: str) -> str:
-    metadata = require_metadata(text)
+def summary_text(text: str, work_log_root: Path | None = None) -> str:
+    metadata = require_metadata(text, work_log_root)
     lines = [
         f"status: {metadata.status}",
         f"runat: {metadata.runat}",
@@ -550,7 +587,7 @@ def validate_marker_clear_semantics(args: Args, text: str) -> None:
     if args.owner_task_file is None or not args.owner_item:
         raise TaskFrontmatterError("`--clear-kind existing-owner-item` requires `--owner-task-file` and `--owner-item`.")
     owner_path = task_path(args.root, args.owner_task_file)
-    metadata = require_metadata(owner_path.read_text(encoding="utf-8"))
+    metadata = require_metadata(owner_path.read_text(encoding="utf-8"), args.root)
     if metadata.status == "done":
         raise TaskFrontmatterError("owner task is already done; cite an active owner task item before clearing the human-origin marker.")
     if args.owner_item not in metadata.pending_task_items:
@@ -605,6 +642,29 @@ def write_if_changed(path: Path, text: str, updated: str, before: os.stat_result
 def run(args: Args) -> int:
     try:
         command = canonical_command(args.command)
+        if command in {"dependency-add", "dependency-remove"}:
+            owner_path = task_path(args.root, require_task_file(args.task_file))
+            source_path = task_path(args.root, require_task_file(args.on_task))
+            caller_path = current_active_task(args.root)
+            caller = load_task(caller_path, root=args.root)
+            owner = load_task(owner_path, root=args.root)
+            if not caller.metadata["is_manager"]:
+                raise BlockingError("dependency changes require an active manager task")
+            if not same_tmux_target(owner.metadata["managerat"], caller.metadata["runat"]):
+                raise BlockingError("the edited task is not directly owned by the current manager")
+            payload: dict[str, object] = {
+                "operation": command,
+                "task": str(owner_path.relative_to(args.root)),
+                "item_id": args.item_id,
+                "on_task": str(source_path.relative_to(args.root)),
+                "on_item_id": args.on_item_id,
+            }
+            if command == "dependency-remove":
+                payload["evidence"] = args.evidence
+            _ = blocking_request(args.root, payload)
+            action = "added" if command == "dependency-add" else "removed"
+            print(f"{action} dependency {'to' if command == 'dependency-add' else 'from'} item {args.item_id}")
+            return 0
         if command == "pending-move":
             if args.source_file is None or args.target_file is None:
                 raise TaskFrontmatterError("pending-move requires source and destination task files.")
@@ -616,6 +676,13 @@ def run(args: Args) -> int:
             target_before = target_path.stat()
             source_text = source_path.read_text(encoding="utf-8")
             target_text = target_path.read_text(encoding="utf-8")
+            source_metadata = parse_task_metadata(source_text, args.root)
+            target_metadata = parse_task_metadata(target_text, args.root)
+            if v2_enabled(args.root) and any(
+                metadata is not None and metadata.version == TASK_FRONTMATTER_V1
+                for metadata in (source_metadata, target_metadata)
+            ):
+                raise TaskFrontmatterError("v1 task writes are disabled after v2 enablement")
             if len(args.items) != 1:
                 raise TaskFrontmatterError("pending-move requires exactly one pending item.")
             updated_source, updated_target, removed_count, added_count = move_pending_item(source_text, target_text, args.items[0])
@@ -628,15 +695,18 @@ def run(args: Args) -> int:
         path = task_path(args.root, require_task_file(args.task_file))
         before = path.stat()
         text = path.read_text(encoding="utf-8")
+        initial_metadata = parse_task_metadata(text, args.root)
+        if initial_metadata is not None and initial_metadata.version == TASK_FRONTMATTER_V1 and v2_enabled(args.root):
+            raise TaskFrontmatterError("v1 task writes are disabled after v2 enablement")
         if command not in {"summary", "pending-list"}:
-            metadata = parse_task_metadata(text)
+            metadata = parse_task_metadata(text, args.root)
             if metadata is not None and metadata.version != TASK_FRONTMATTER_V1:
                 raise TaskFrontmatterError("v2 task mutation is disabled until migration validation and watcher enablement are complete.")
         if command == "summary":
-            print(summary_text(text), end="")
+            print(summary_text(text, args.root), end="")
             return 0
         if command == "pending-list":
-            for item in require_metadata(text).pending_task_items:
+            for item in require_metadata(text, args.root).pending_task_items:
                 print(item)
             return 0
         if command == "pending-add":

@@ -46,6 +46,15 @@ from omo_manager.omo_agent_status import parse_task_lines
 from omo_manager.omo_agent_status import read_task_metadata
 from omo_manager.omo_agent_status import resolve_task_path
 from omo_manager.omo_agent_status import scan_task_state
+from omo_manager.omo_blocking import BlockingError
+from omo_manager.omo_blocking import ENABLE_FILE
+from omo_manager.omo_blocking import WAKE_SOURCE_PREFIX
+from omo_manager.omo_blocking import append_escalation_marker
+from omo_manager.omo_blocking import append_wake_marker
+from omo_manager.omo_blocking import load_task
+from omo_manager.omo_blocking import v2_enabled
+from omo_manager.omo_blocking_actor import BlockingActor
+from omo_manager.omo_blocking_actor import request as blocking_request
 from omo_manager.omo_codex_status import Args as CodexStatusArgs
 from omo_manager.omo_codex_status import inspect as inspect_codex
 from omo_manager.omo_codex_status import tail as codex_tail
@@ -99,6 +108,7 @@ DEFAULT_AGENT_PROBLEM_TIMEOUT_S = float(
     )
 )
 DEFAULT_POLL_BACKSTOP_INTERVAL_S = float(os.environ.get("OMO_MANAGER_POLL_BACKSTOP_INTERVAL_S", "30"))
+BLOCKING_QUEUE_INTERVAL_S = 30.0
 DEFAULT_HUMAN_EMAIL_HELPER = Path(__file__).resolve().parents[1] / "helper.sh" / "email_me.py"
 PENDING_MARKERS = {"(pending)"}
 FOR_MANAGER_MARKERS = ("for manager", "for a manager")
@@ -261,6 +271,32 @@ class Args:
 
 
 @dataclass
+class BlockingActorController:
+    """Start the v2 mutation actor when enablement appears at runtime."""
+
+    root: Path
+    allow_existing: bool = False
+    actor: BlockingActor | None = None
+
+    def ensure(self) -> None:
+        if self.actor is not None or not v2_enabled(self.root):
+            return
+        actor = BlockingActor(self.root)
+        try:
+            actor.start()
+        except BlockingError as exc:
+            if self.allow_existing and "already running" in str(exc):
+                return
+            raise
+        self.actor = actor
+
+    def close(self) -> None:
+        if self.actor is not None:
+            self.actor.close()
+            self.actor = None
+
+
+@dataclass
 class FileState:
     mtimes_ns: dict[Path, int]
 
@@ -361,6 +397,8 @@ class DeliverySuccessEvent:
     seen_at_s: float = 0.0
     clear_root: Path | None = None
     clear_marker: Marker | None = None
+    failure_clear_root: Path | None = None
+    failure_clear_marker: Marker | None = None
     clear_report_key: str = ""
     durable_report_state: Path | None = None
     durable_report_keys: tuple[str, ...] = ()
@@ -445,7 +483,7 @@ def agent_problem_guard_current(guard: AgentProblemGuard) -> bool:
     if guard.root is not None and guard.dependency_task_file:
         task = TaskLine(guard.dependency_task_file, "dependency-guard", "", "", None)
         task_path = resolve_task_path(guard.root, guard.dependency_task_file)
-        state = scan_task_state(task_path) if task_path is not None else None
+        state = scan_task_state(task_path, guard.root) if task_path is not None else None
         return state is not None and blocked_status_dependency_snapshot(guard.root, task, state) == guard.dependency_snapshot
     try:
         result = subprocess.run(guard.command, capture_output=True, text=True, timeout=DEFAULT_AGENT_PROBLEM_TIMEOUT_S, check=False)
@@ -565,6 +603,7 @@ def queue_delivery_failure_event(success_event: DeliverySuccessEvent | None) -> 
         and not success_event.failure_seen_deadlines_s
         and not success_event.failure_dependency_replacements
         and not success_event.failure_dependency_removals
+        and (success_event.failure_clear_root is None or success_event.failure_clear_marker is None)
     ):
         return
     now_s = time.time()
@@ -582,6 +621,8 @@ def queue_delivery_failure_event(success_event: DeliverySuccessEvent | None) -> 
             dependency_guarded_replacements=success_event.failure_dependency_replacements,
             dependency_guarded_removals=success_event.failure_dependency_removals,
             seen_at_s=success_event.seen_at_s,
+            clear_root=success_event.failure_clear_root,
+            clear_marker=success_event.failure_clear_marker,
         )
     )
 
@@ -831,6 +872,9 @@ class MarkdownChangeWatcher:
                 if path.suffix == ".md":
                     changed.add(path)
                     continue
+                if path.name == ENABLE_FILE:
+                    full_scan = True
+                    continue
                 if path.suffix == ".txt" and path.parent.name == "manager_mail":
                     full_scan = True
         return sorted(changed), full_scan, True
@@ -1069,7 +1113,7 @@ def delegate_source(block_lines: list[str]) -> str:
 
 
 def marker_direct_target(args: Args, marker: Marker) -> str:
-    metadata = read_task_metadata(args.root / marker.file)
+    metadata = read_task_metadata(args.root / marker.file, args.root)
     return metadata.runat if metadata is not None else ""
 
 
@@ -1385,7 +1429,7 @@ def remember_manager_delivery_attempt(seen: dict[str, float], key: str, now_s: f
 
 
 def marker_for_manager_target(args: Args, marker: Marker) -> str:
-    metadata = read_task_metadata(args.root / marker.file)
+    metadata = read_task_metadata(args.root / marker.file, args.root)
     if metadata is not None:
         return metadata.managerat or args.manager_target
     return args.manager_target
@@ -1404,8 +1448,8 @@ def blocked_reason_before_pending(lines: list[str], pending_line: int) -> str:
     return ""
 
 
-def blocked_reason_for_marker(path: Path, lines: list[str], pending_line: int) -> str:
-    metadata = read_task_metadata(path)
+def blocked_reason_for_marker(root: Path, path: Path, lines: list[str], pending_line: int) -> str:
+    metadata = read_task_metadata(path, root)
     if metadata is not None:
         return metadata.blocked_on if metadata.status == "blocked" else ""
     return blocked_reason_before_pending(lines, pending_line) if is_main_manager_task_file(path) else ""
@@ -1840,7 +1884,7 @@ def find_markers(root: Path, files: list[Path]) -> list[Marker]:
                     block_text="\n".join(block_lines),
                     pending_tail=pending_tail,
                     file_lines=len(lines),
-                    blocked_reason=blocked_reason_for_marker(path, lines, idx),
+                    blocked_reason=blocked_reason_for_marker(root, path, lines, idx),
                 )
             )
     return markers
@@ -2095,7 +2139,7 @@ def push_direct_ref(
 
 
 def agent_report_target(args: Args, marker: Marker) -> str:
-    metadata = read_task_metadata(args.root / marker.file)
+    metadata = read_task_metadata(args.root / marker.file, args.root)
     if metadata is None:
         return args.manager_target
     return metadata.runat if metadata.is_manager else metadata.managerat
@@ -2173,9 +2217,144 @@ def push_agent_report_ref(
     return 1
 
 
+def is_blocking_wake_marker(args: Args, marker: Marker) -> bool:
+    """Authenticate one watcher-generated ready notice before origin routing."""
+
+    source = adjacent_source_metadata(marker.block_text.splitlines())
+    if not source.startswith(WAKE_SOURCE_PREFIX) or not source.endswith(")"):
+        return False
+    notice_id = source[len(WAKE_SOURCE_PREFIX) : -1]
+    try:
+        document = load_task(args.root / marker.file, root=args.root)
+    except (OSError, BlockingError):
+        return False
+    if document.metadata["status"] not in {"running", "long_running"}:
+        return False
+    for item in document.metadata["pending_task_items"]:
+        if item["blocked_on"]:
+            continue
+        for notice in item["notices"]:
+            if (
+                notice["id"] == notice_id
+                and notice["kind"] == "ready"
+                and notice["state"] == "pending"
+                and notice["recipient_task_id"] == document.metadata["task_id"]
+                and notice["attempt_count"] > 0
+                and notice["retry_after"] is not None
+            ):
+                return marker.block_text.strip() == append_wake_marker("", item, notice).strip()
+    return False
+
+
+def is_manager_blocking_marker(args: Args, marker: Marker) -> bool:
+    """Authenticate a cancellation, cycle-repair, or escalation manager notice."""
+
+    source = adjacent_source_metadata(marker.block_text.splitlines())
+    wake_prefix = "(from manager bidirectional blocking wake "
+    escalation_prefix = "(from manager bidirectional blocking escalation "
+    if source.startswith(wake_prefix) and source.endswith(")"):
+        notice_id = source[len(wake_prefix) : -1]
+        expected_kind = "wake"
+    elif source.startswith(escalation_prefix) and source.endswith(")"):
+        notice_id = source[len(escalation_prefix) : -1]
+        expected_kind = "escalation"
+    else:
+        return False
+    try:
+        document = load_task(args.root / marker.file, root=args.root)
+    except (OSError, BlockingError):
+        return False
+    for item in document.metadata["pending_task_items"]:
+        for notice in item["notices"]:
+            if notice["id"] != notice_id or notice["state"] != "pending" or notice["recipient_task_id"] != document.metadata["task_id"]:
+                continue
+            if expected_kind == "wake" and notice["kind"] in {"dependency_cancelled", "cycle_repair"}:
+                return marker.block_text.strip() == append_wake_marker("", item, notice).strip()
+            if expected_kind == "escalation" and notice["kind"] == "ready" and notice["escalated_at"] is not None:
+                return marker.block_text.strip() == append_escalation_marker("", item, notice).strip()
+    return False
+
+
+def blocking_wake_delivery_event(args: Args, marker: Marker) -> DeliverySuccessEvent:
+    """Clear a transient wake marker after either success or definite failure."""
+
+    return DeliverySuccessEvent(
+        clear_root=args.root,
+        clear_marker=marker,
+        failure_clear_root=args.root,
+        failure_clear_marker=marker,
+    )
+
+
+def push_blocking_wake(args: Args, marker: Marker, now_s: float) -> int:
+    """Deliver a durable ready notice without treating it as human input."""
+
+    del now_s
+    target = marker_direct_target(args, marker)
+    if not target:
+        _ = clear_pending_marker_if_current(args.root, marker)
+        return 1
+    text = direct_message_text(marker, ())
+    event = blocking_wake_delivery_event(args, marker)
+    result = push_marker_delivery(
+        args,
+        marker,
+        text,
+        target,
+        event,
+        failure_fallback_target=main_manager_fallback_target(args, target),
+        failure_fallback_text=with_failed_target_escalation(
+            text,
+            target,
+            DeliveryResult(1, "the ready-notice recipient did not accept delivery"),
+        ),
+        failure_success_event=event,
+        failure_fallback_defer_if_busy=True,
+    )
+    if result.status == 0:
+        if args.dry_run or clear_pending_marker_if_current(args.root, marker):
+            return 0
+        return 1
+    if result.status != ASYNC_DELIVERY_STARTED:
+        _ = clear_pending_marker_if_current(args.root, marker)
+    return result.status
+
+
+def push_manager_blocking_notice(args: Args, marker: Marker) -> int:
+    """Deliver graph-repair decisions to the manager that owns the task."""
+
+    target = marker_for_manager_target(args, marker)
+    if not target:
+        _ = clear_pending_marker_if_current(args.root, marker)
+        return 1
+    text = f"Bidirectional-blocking manager decision required:\n{direct_message_text(marker, ())}"
+    event = blocking_wake_delivery_event(args, marker)
+    result = push_marker_delivery(
+        args,
+        marker,
+        text,
+        target,
+        event,
+        failure_fallback_target=main_manager_fallback_target(args, target),
+        failure_success_event=event,
+        failure_fallback_defer_if_busy=True,
+    )
+    if result.status == 0:
+        if args.dry_run or clear_pending_marker_if_current(args.root, marker):
+            return 0
+        return 1
+    if result.status != ASYNC_DELIVERY_STARTED:
+        _ = clear_pending_marker_if_current(args.root, marker)
+    return result.status
+
+
 def push_ref(args: Args, seen: dict[str, float], now_s: float, marker: Marker, attachments: Sequence[SourceAttachment]) -> int:
     """Deliver one pending marker, guarded by its current file position."""
 
+    if is_manager_blocking_marker(args, marker):
+        return push_manager_blocking_notice(args, marker)
+    if is_blocking_wake_marker(args, marker):
+        return push_blocking_wake(args, marker, now_s)
     if marker.origin == "agent" and marker.source == "agent" and not marker_has_authenticated_agent_report(marker, attachments):
         marker = replace(marker, origin="human", source="manual", delegate_source="")
     if marker.origin == "agent" and marker.source == "agent":
@@ -2458,7 +2637,7 @@ def manager_direct_report_targets(root: Path) -> dict[str, tuple[str, ...]]:
         if task.task_file == "TODO.md" or task.task_file in seen_files or task.section not in AGENT_PENDING_ITEM_SECTIONS:
             continue
         seen_files.add(task.task_file)
-        metadata = read_task_metadata(resolve_task_path(root, task.task_file))
+        metadata = read_task_metadata(resolve_task_path(root, task.task_file), root)
         if (
             metadata is None
             or metadata.status not in {"running", "long_running", "blocked"}
@@ -2531,7 +2710,7 @@ def manager_task_state_reminder_text(root: Path, manager_target: str = "") -> st
         if find_markers(root, [state_path]):
             rows.append(f"task-state: task={task.task_file} status=pending")
             continue
-        state = scan_task_state(state_path)
+        state = scan_task_state(state_path, root)
         if state is not None and state.status in MANAGER_TASK_STATE_OK:
             continue
         status = state.status if state is not None else "missing-status"
@@ -2555,7 +2734,7 @@ def agent_pending_item_reminder_counts(root: Path) -> dict[str, int]:
             continue
         seen.add(task.task_file)
         state_path = resolve_task_path(root, task.task_file)
-        metadata = read_task_metadata(state_path)
+        metadata = read_task_metadata(state_path, root)
         if metadata is None or metadata.status not in {"running", "long_running"} or metadata.runat == "retired":
             continue
         queues.append((metadata.runat, len(metadata.pending_task_items)))
@@ -3488,7 +3667,7 @@ def active_manager_problem_targets(root: Path, output: str, manager_target: str 
             continue
         seen_files.add(task.task_file)
         state_path = resolve_task_path(root, task.task_file)
-        state = scan_task_state(state_path) if state_path is not None else None
+        state = scan_task_state(state_path, root) if state_path is not None else None
         if state is None or state.status not in {"running", "long_running"} or not state.is_manager or not state.target:
             continue
         if any(same_tmux_target(state.target, problem_target) for problem_target in problem_targets):
@@ -3625,7 +3804,7 @@ def dependency_snapshot_state(root: Path) -> dict[str, tuple[TaskLine, str, str]
             continue
         seen_files.add(task.task_file)
         task_path = resolve_task_path(root, task.task_file)
-        state = scan_task_state(task_path) if task_path is not None else None
+        state = scan_task_state(task_path, root) if task_path is not None else None
         if state is None:
             continue
         snapshot = blocked_status_dependency_snapshot(root, task, state)
@@ -3645,7 +3824,7 @@ def blocked_report_snapshot_state(root: Path) -> dict[str, tuple[TaskLine, str, 
             continue
         seen_files.add(task.task_file)
         task_path = resolve_task_path(root, task.task_file)
-        state = scan_task_state(task_path) if task_path is not None else None
+        state = scan_task_state(task_path, root) if task_path is not None else None
         if state is None or state.status != "blocked" or not is_recorded_human_wait(state):
             continue
         identity = "\0".join((state.status, state.target, state.manager_target, state.reason))
@@ -3673,7 +3852,7 @@ def maybe_push_dependency_transitions(args: Args, snapshots: dict[str, str], now
         if not target:
             continue
         task_path = resolve_task_path(args.root, task_file)
-        state = scan_task_state(task_path) if task_path is not None else None
+        state = scan_task_state(task_path, args.root) if task_path is not None else None
         if state is None:
             continue
         text = "\n".join(
@@ -3866,9 +4045,49 @@ def idle_digest_due(args: Args, fallback_mail_activity_s: float, now_wall_s: flo
         return False
 
 
-def scan_once(args: Args, seen: dict[str, float], files: list[Path]) -> bool:
+def queue_blocking_wakes(
+    args: Args,
+    files: list[Path],
+    actor_controller: BlockingActorController | None = None,
+) -> list[Path]:
+    """Reconcile the enabled v2 graph and include newly queued wake files."""
+
+    if not v2_enabled(args.root):
+        return files
+    if actor_controller is not None:
+        actor_controller.ensure()
+    try:
+        response = blocking_request(args.root, {"operation": "queue"})
+    except BlockingError as exc:
+        print(f"omo_pending_watch: bidirectional blocking reconciliation failed: {exc}", file=sys.stderr)
+        return files
+    changed = response.get("changed", [])
+    if not isinstance(changed, list):
+        print("omo_pending_watch: bidirectional blocking actor returned invalid changed paths", file=sys.stderr)
+        return files
+    queued = list(files)
+    for value in changed:
+        if not isinstance(value, str):
+            continue
+        path = (args.root / value).resolve(strict=False)
+        try:
+            path.relative_to(args.root.resolve())
+        except ValueError:
+            continue
+        if path not in queued:
+            queued.append(path)
+    return queued
+
+
+def scan_once(
+    args: Args,
+    seen: dict[str, float],
+    files: list[Path],
+    actor_controller: BlockingActorController | None = None,
+) -> bool:
     """Scan changed Markdown files and deliver newly observed pending refs once."""
 
+    files = queue_blocking_wakes(args, files, actor_controller)
     now_s = time.time()
     changed = drain_delivery_successes(args, seen, now_s)
     todo = args.root / "TODO.md"
@@ -3917,13 +4136,12 @@ def markdown_line_count(path: Path) -> int:
         return 0
 
 
-def main(argv: list[str]) -> int:
-    args = parse_args(argv)
+def run(args: Args, actor_controller: BlockingActorController) -> int:
     seen = new_seen_cache()
     dependency_snapshots: dict[str, str] = {}
     dependency_reported_snapshots: dict[str, str] = {}
     if args.once:
-        _ = scan_once(args, seen, markdown_files(args.root))
+        _ = scan_once(args, seen, markdown_files(args.root), actor_controller)
         _ = wait_for_delivery_successes(args, seen, max(10.0, DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S + 5.0))
         return 0
     watcher = MarkdownChangeWatcher.open(args.root)
@@ -3933,6 +4151,7 @@ def main(argv: list[str]) -> int:
     _ = mtime_changed_markdown_files(args.root, file_state)
     next_full_s = time.monotonic() + args.full_scan_interval_s
     next_poll_s = time.monotonic() + args.poll_backstop_interval_s
+    next_blocking_queue_s = time.monotonic() + BLOCKING_QUEUE_INTERVAL_S
     pending_files = markdown_files(args.root)
     fallback_mail_activity_s = time.time()
     last_digest_check_s = 0.0
@@ -3943,9 +4162,13 @@ def main(argv: list[str]) -> int:
     digest_run: CommandRun | None = None
     worktree_run: CommandRun | None = None
     while True:
+        actor_controller.ensure()
         now_s = time.monotonic()
         now_wall_s = time.time()
         _ = drain_delivery_successes(args, seen, now_wall_s)
+        if v2_enabled(args.root) and now_s >= next_blocking_queue_s:
+            pending_files = queue_blocking_wakes(args, pending_files, actor_controller)
+            next_blocking_queue_s = now_s + BLOCKING_QUEUE_INTERVAL_S
         if now_s >= next_full_s:
             next_full_s = now_s + args.full_scan_interval_s
             next_poll_s = now_s + args.poll_backstop_interval_s
@@ -3955,7 +4178,7 @@ def main(argv: list[str]) -> int:
             next_poll_s = now_s + args.poll_backstop_interval_s
             pending_files = mtime_changed_markdown_files(args.root, file_state)
         if pending_files:
-            _ = scan_once(args, seen, pending_files)
+            _ = scan_once(args, seen, pending_files, actor_controller)
             pending_files = []
         if agent_problem_run is None and now_s - last_agent_problem_check_s >= args.agent_problem_interval_s:
             agent_problem_run = start_command("agent problem check", status_command(args, True), DEFAULT_AGENT_PROBLEM_TIMEOUT_S)
@@ -4005,6 +4228,8 @@ def main(argv: list[str]) -> int:
             last_idle_status_check_s + args.idle_status_interval_s,
             last_digest_check_s + min(args.digest_idle_after_s, 60.0),
         ]
+        if v2_enabled(args.root):
+            deadlines.append(next_blocking_queue_s)
         if watcher is not None:
             deadlines.append(next_poll_s)
         if agent_problem_run is not None or idle_status_run is not None or digest_run is not None or worktree_run is not None:
@@ -4024,6 +4249,16 @@ def main(argv: list[str]) -> int:
             next_poll_s = time.monotonic() + args.poll_backstop_interval_s
         else:
             pending_files = event_files
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    actor_controller = BlockingActorController(args.root, allow_existing=args.once)
+    actor_controller.ensure()
+    try:
+        return run(args, actor_controller)
+    finally:
+        actor_controller.close()
 
 
 def crash_email_sender_target(argv: list[str]) -> str:

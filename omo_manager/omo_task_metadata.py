@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -267,13 +268,13 @@ def parse_v2_metadata(source: str, work_log_root: Path | None = None) -> TaskMet
     return TaskMetadata(*common, pending_items=pending_items, blocked_on=blocker_summary, task_id=task_id, resume_status=str(resume_status), blockers=blockers, resolved_task_items=resolved_items)
 
 
-def validate_required(values: dict[str, object], required: set[str]) -> None:
+def validate_required(values: Mapping[str, object], required: set[str]) -> None:
     missing = required - values.keys()
     if missing:
         raise TaskFrontmatterError(f"missing task frontmatter field: {sorted(missing)[0]}")
 
 
-def parse_common(values: dict[str, object], allowed: set[str]) -> tuple[str, str, str, str, str, bool]:
+def parse_common(values: Mapping[str, object], allowed: set[str]) -> tuple[str, str, str, str, str, bool]:
     extra = values.keys() - allowed
     if extra:
         raise TaskFrontmatterError(f"unknown task frontmatter field: {sorted(extra)[0]}")
@@ -360,8 +361,8 @@ def parse_notice(value: object) -> PendingNotice:
     row = require_mapping(value, "notices", keys)
     kind = require_text(row["kind"], "kind")
     state = require_text(row["state"], "state")
-    if kind not in {"ready", "dependency_cancelled"}:
-        raise TaskFrontmatterError("notice `kind` must be `ready` or `dependency_cancelled`.")
+    if kind not in {"ready", "dependency_cancelled", "cycle_repair"}:
+        raise TaskFrontmatterError("notice `kind` must be `ready`, `dependency_cancelled`, or `cycle_repair`.")
     if state not in {"deferred", "pending", "acked", "superseded"}:
         raise TaskFrontmatterError("notice `state` is invalid.")
     attempts = row["attempt_count"]

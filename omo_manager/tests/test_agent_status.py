@@ -53,6 +53,38 @@ class AgentStatusTests(unittest.TestCase):
             self.assertEqual({"active.md"}, done)
             self.assertEqual(set(), human_pending)
 
+    def test_agent_status_rejects_v2_task_blocker_symlink_escape(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as outside:
+            root = Path(tmp)
+            (root / "linked").symlink_to(Path(outside), target_is_directory=True)
+            (root / "TODO.md").write_text("current:\nactive.md cfg:2\n", encoding="utf-8")
+            (root / "active.md").write_text(
+                """---
+version: v2.0.0
+task_id: task_019f0000-0000-7000-8000-000000000021
+status: blocked
+resume_status: running
+runat: cfg:2
+tool: codex
+managerat: mgr:1
+is_manager: false
+blocked_on:
+  - kind: task
+    task: linked/task.md
+    reason: escaped dependency
+pending_task_items: []
+resolved_task_items: []
+---
+""",
+                encoding="utf-8",
+            )
+
+            current, done, human_pending = load_task_state(root)
+
+            self.assertEqual({}, current)
+            self.assertEqual(set(), done)
+            self.assertEqual(set(), human_pending)
+
     def test_manager_frontmatter_rejects_self_routing(self) -> None:
         with self.assertRaisesRegex(TaskFrontmatterError, "must be different"):
             parse_task_metadata(task_frontmatter("running", runat="wl:16", managerat="wl:16.0", is_manager=True))
