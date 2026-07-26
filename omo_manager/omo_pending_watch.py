@@ -1085,6 +1085,10 @@ def pending_source_paths(marker: Marker) -> list[str]:
 
 
 def marker_attachments(args: Args, marker: Marker) -> list[SourceAttachment]:
+    if marker.origin == "agent" and marker.source == "agent":
+        match = AGENT_POINTER_WITH_TARGET_RE.fullmatch(adjacent_source_metadata(marker.block_text.splitlines()))
+        if match is not None:
+            return [source_attachment(args.root, match.group(2))]
     return [source_attachment(args.root, source) for source in pending_source_paths(marker)]
 
 
@@ -1745,8 +1749,23 @@ def marker_direct_text(marker: Marker, attachments: Sequence[SourceAttachment]) 
 def marker_agent_report_text(marker: Marker, attachments: Sequence[SourceAttachment]) -> str:
     """Render agent work as a report, never as a human instruction."""
 
-    message = html.escape(direct_message_text(marker, attachments), quote=False)
+    payload = "\n\n".join(filter(None, (direct_attachment_text(attachment) for attachment in attachments)))
+    excerpt = truncate_content(payload, PENDING_CONTENT_CHAR_LIMIT)
+    pointer = display_pending_tail(adjacent_source_metadata(marker.block_text.splitlines()))
+    message = html.escape("\n\n".join(filter(None, (excerpt, pointer))), quote=False)
     return "\n".join(("Agent report received; review it and handle any follow-up:", "<agent_report>", message, "</agent_report>"))
+
+
+def agent_report_fallback_text(marker: Marker, attachments: Sequence[SourceAttachment], reason: str) -> str:
+    """Escalate an agent report without including unrelated task-file prose."""
+
+    return "\n".join(
+        (
+            f"Agent report delivery failed for `{marker.file}:{marker.line}`: {reason}.",
+            "Inspect or correct the owning manager target, then deliver the attached report.",
+            marker_agent_report_text(marker, attachments),
+        )
+    )
 
 
 def marker_manager_delegation_text(marker: Marker, attachments: Sequence[SourceAttachment]) -> str:
@@ -2119,7 +2138,7 @@ def push_agent_report_ref(
     if repeated_manager_delivery_is_busy(args, seen, report_key, target, now_s):
         return 1
 
-    failure_text = direct_delivery_fallback_text(marker, attachments, f"owning manager `{target}` rejected the report before paste")
+    failure_text = agent_report_fallback_text(marker, attachments, f"owning manager `{target}` rejected the report before paste")
     result = push_marker_delivery(
         args,
         marker,

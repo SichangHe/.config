@@ -656,6 +656,46 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertNotIn("<human_instruction>", push.call_args.args[2])
             self.assertNotIn("(pending)", task.read_text(encoding="utf-8"))
 
+    def test_agent_report_ignores_consumed_email_pointer_below_it(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            report = valid_agent_report(self, "worker report only\n", name="worker_report_before_consumed_email")
+            mail = root / "manager_mail" / "13083.txt"
+            mail.parent.mkdir()
+            mail.write_text("Subject: human follow-up\n\nhuman request must not join report\n", encoding="utf-8")
+            task = root / "manager.md"
+            task.write_text(
+                f"{task_frontmatter(runat='vl:15', managerat='main:1', is_manager=True)}\n"
+                f"(pending)\n(from agent vl:2 {report})\n\n"
+                "(record and delegate manager_mail/13083.txt)\n"
+                "manager_mail/13083.txt\n"
+                "(pending items recorded line=20: n=1 sha256=deadbeef)\n"
+                "(human ack sent for pending items line=20: n=1 sha256=deadbeef)\n\n"
+                "(pending)\nindependent later request\n",
+                encoding="utf-8",
+            )
+            args = Args(root, "", root / "state", 1, 1, 1, Path("/bin/false"), True, False, manager_target="main:1")
+            markers = find_markers(root, [task])
+            marker = markers[0]
+            attachments = watcher.marker_attachments(args, marker)
+            delivered = watcher.marker_agent_report_text(marker, attachments)
+            fallback = watcher.agent_report_fallback_text(marker, attachments, "owner unavailable")
+
+            self.assertEqual(2, len(markers))
+            self.assertEqual(("agent", "agent"), (marker.origin, marker.source))
+            self.assertEqual(("human", "manual"), (markers[1].origin, markers[1].source))
+            self.assertEqual([str(report)], [attachment.source for attachment in attachments])
+            self.assertIn("worker report only", delivered)
+            self.assertNotIn("manager_mail/13083.txt", delivered)
+            self.assertNotIn("human request must not join report", delivered)
+            self.assertNotIn("pending items recorded", delivered)
+            self.assertNotIn("human ack sent", delivered)
+            self.assertNotIn("manager_mail/13083.txt", fallback)
+            self.assertNotIn("pending items recorded", fallback)
+            self.assertNotIn("independent later request", fallback)
+
     def test_different_agent_report_artifacts_are_delivered_independently(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 

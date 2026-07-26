@@ -201,6 +201,12 @@ class PendingReportDeliveryTests(unittest.TestCase):
             report = valid_report(self, "worker_done_rejected", "target disappeared\n")
             task = root / "worker.md"
             write_report_pointer(task, report)
+            task.write_text(
+                task.read_text(encoding="utf-8")
+                + "\n(record and delegate manager_mail/13083.txt)\n"
+                + "(pending items recorded line=20: n=1 sha256=deadbeef)\n",
+                encoding="utf-8",
+            )
             marker = watcher.find_markers(root, [task])[0]
             args = args_for(root)
             owner_future: Future[None] = Future()
@@ -221,6 +227,9 @@ class PendingReportDeliveryTests(unittest.TestCase):
                 watcher.log_send_result(owner_future, captured[0][0], captured[0][1])
 
             self.assertEqual("main:1", fallback.call_args.args[0])
+            self.assertNotIn("manager_mail/13083.txt", fallback.call_args.args[1])
+            self.assertNotIn("pending items recorded", fallback.call_args.args[1])
+            self.assertIn("target disappeared", fallback.call_args.args[1])
             self.assertFalse(args.state.exists())
             self.assertIn("(pending)", task.read_text(encoding="utf-8"))
 
