@@ -352,6 +352,13 @@ class EmailMeTests(unittest.TestCase):
         self.assertIn("never pass a task owner or delivery", stdout.getvalue())
         self.assertIn("target.", stdout.getvalue())
 
+    def test_help_restricts_no_pwd_footer_to_explicit_instruction(self) -> None:
+        with patch("sys.stdout", new_callable=StringIO) as stdout, self.assertRaises(SystemExit) as raised:
+            email_me.parse_args(["--help"])
+        self.assertEqual(0, raised.exception.code)
+        self.assertIn("Agents must not use this option unless", stdout.getvalue())
+        self.assertIn("explicitly told to.", stdout.getvalue())
+
     def test_parse_args_accepts_sender_tmux_target_alias(self) -> None:
         with patch.object(sys, "stdin", StringIO("body\n")):
             args = email_me.parse_args(["--sender-tmux-target", "wl:7", "--subject", "hi"])

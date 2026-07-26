@@ -95,7 +95,11 @@ def parse_args(argv: list[str]) -> CliArgs:
     _ = parser.add_argument("--subject-file", type=Path, help="Read the email subject from this one-line file instead of an argument.")
     _ = parser.add_argument("--message-file", type=Path, help="Read the email body from this file instead of stdin.")
     _ = parser.add_argument("--dry-run", action="store_true", help="Validate without sending.")
-    _ = parser.add_argument("--no-pwd-footer", action="store_true", help="Send the body exactly as provided, without appending a PWD footer.")
+    _ = parser.add_argument(
+        "--no-pwd-footer",
+        action="store_true",
+        help="Send the body exactly as provided, without appending a PWD footer. Agents must not use this option unless explicitly told to.",
+    )
     _ = parser.add_argument("--tmux-target", help="Normally omit: the helper infers producer identity from the launch environment, then the current pane. Override only to preserve a different verified producer identity; never pass a task owner or delivery target.")
     _ = parser.add_argument("--sender-tmux-target", dest="sender_tmux_target", help="Alias for --tmux-target; use only when forwarding or compressing mail while preserving a different verified producer identity.")
     _ = parser.add_argument("--manager-human", action="store_true", help=argparse.SUPPRESS)
