@@ -61,3 +61,8 @@ See `bidirectional-blocking-design.md` for the reviewed schema and acceptance cr
 - blocking wakes use a separate origin-independent marker path, so they never enter human-instruction or agent-report rendering.
 - wake delivery reuses current target validation and guarded cleanup; a definite failed send clears only the transient marker, while the versioned notice retains retry and escalation state.
 - report-artifact deduplication and direct human email behavior remain unchanged; focused watcher regressions cover those paths alongside blocking-wake delivery.
+
+## compatibility simulation
+
+- `test_bidirectional_simulation.py` builds a disposable Git-backed v1 work log, exercises existing queue edits, performs the reviewed migration, completes a cross-task dependency, and scans simultaneous human and wake markers.
+- the simulation requires human content to retain direct `runat` routing and its human wrapper while the wake reaches its own `runat` without that wrapper; acknowledgment removes only the wake marker.
