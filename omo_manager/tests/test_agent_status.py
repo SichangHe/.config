@@ -1953,6 +1953,25 @@ resolved_task_items: []
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             self.assertEqual("", out.getvalue())
 
+    def test_problems_only_skips_explicit_human_integration_decision_or_authorization(self) -> None:
+        for blocker in (
+            "human decision whether to integrate isolated reviewed branch into the live repository",
+            "human authorization to integrate reviewed isolated commits, then approve migration and controlled watcher startup",
+        ):
+            with self.subTest(blocker=blocker), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                registry = root / "sessions.json"
+                _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+                _ = (root / "TODO.md").write_text("current:\nbidirectional_blocking.md hcfg 2\n", encoding="utf-8")
+                _ = (root / "bidirectional_blocking.md").write_text(
+                    task_frontmatter("blocked", runat="hcfg:2", managerat="wl:1", blocked_on=blocker),
+                    encoding="utf-8",
+                )
+                out = StringIO()
+                with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(out):
+                    self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+                self.assertEqual("", out.getvalue())
+
     def test_problems_only_skips_hvl_review_waiting_variant(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

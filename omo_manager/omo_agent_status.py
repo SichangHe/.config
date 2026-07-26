@@ -119,7 +119,7 @@ HUMAN_WAIT_RE = re.compile(
     |
     \bhuman\s+discussion\b
     |
-    \bhuman\s+approval\b
+    \bhuman\s+(?:approval|authorization|decision)\b
     """,
     re.IGNORECASE | re.VERBOSE,
 )
