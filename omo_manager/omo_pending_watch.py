@@ -1363,6 +1363,10 @@ def manager_delivery_attempt_key(key: str) -> str:
     return f"manager-delivery-attempt:{key}"
 
 
+def agent_problem_attempt_key(key: str) -> str:
+    return f"agent-problem-attempt:{key}"
+
+
 def repeated_manager_delivery_is_busy(args: Args, seen: dict[str, float], key: str, target: str, now_s: float) -> bool:
     """Defer a repeated manager delivery until its target is ready."""
 
@@ -3722,6 +3726,9 @@ def handle_agent_problem_result(
     for owner_target, dispatch in agent_problem_output_by_owner(args, seen, output, now_wall_s).items():
         digest = hashlib.sha256(f"{owner_target}\n{dispatch.digest_text}".encode("utf-8")).hexdigest()[:16]
         key = f"agent-problem:{digest}"
+        attempt_key = agent_problem_attempt_key(key)
+        if seen_contains(seen, attempt_key, now_wall_s):
+            continue
         if not dispatch.blocked_idle_lines and now_wall_s - seen_get(seen, key, now_s=now_wall_s) < args.agent_problem_repeat_s:
             continue
         text = with_manager_policy_reminder(args, dispatch.text)
@@ -3729,6 +3736,8 @@ def handle_agent_problem_result(
         dependency_reported_replacements = dependency_snapshot_replacements_for_problem_lines(args.root, dispatch.problem_lines)
         event = DeliverySuccessEvent(
             seen_keys=(key,),
+            seen_removals=(attempt_key,),
+            failure_seen_delays_s=((attempt_key, PENDING_DELIVERY_FAILURE_RETRY_S),),
             blocked_idle_lines=dispatch.blocked_idle_lines,
             dependency_replacements=dependency_reported_replacements,
             dependency_state=dependency_reported_state if dependency_reported_replacements else None,
@@ -3741,6 +3750,7 @@ def handle_agent_problem_result(
         status = push_manager_text_to_target(args, text, target, event, problem_guard=guard)
         if not delivery_accepted(status):
             continue
+        reserve_async_marker(seen, attempt_key, now_wall_s, status)
         if status == 0:
             for backoff_owner, line in dispatch.blocked_idle_lines:
                 remember_blocked_idle_report(args, seen, backoff_owner, line, now_wall_s)

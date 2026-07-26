@@ -7725,10 +7725,12 @@ class PendingMarkerTests(unittest.TestCase):
 
         with patch("omo_manager.omo_pending_watch.send_to_codex", side_effect=fake_send_to_codex), patch("omo_manager.omo_pending_watch.submit_send", side_effect=fake_submit):
             self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 1000.0))
-            self.assertEqual({}, seen)
+            self.assertTrue(any(key.startswith("agent-problem-attempt:") for key in seen))
+            self.assertFalse(watcher.handle_agent_problem_result(args, seen, result, 1030.0))
+            self.assertEqual(1, len(submitted))
             owner_future.set_exception(RuntimeError("target is not a Codex pane after submit: vl:64"))
             watcher.log_send_result(owner_future, submitted[0][2], submitted[0][3])
-            self.assertEqual({}, seen)
+            self.assertTrue(any(key.startswith("agent-problem-attempt:") for key in seen))
             self.assertEqual(2, len(submitted))
             self.assertEqual("wl:1", submitted[1][0])
             self.assertIn("Delivery to resolved target `vl:64` failed:", submitted[1][1])
@@ -7737,6 +7739,7 @@ class PendingMarkerTests(unittest.TestCase):
             watcher.log_send_result(main_future, submitted[1][2])
             self.assertTrue(watcher.drain_delivery_successes(args, seen, 1001.0))
         self.assertTrue(any(key.startswith("agent-problem:") for key in seen))
+        self.assertFalse(any(key.startswith("agent-problem-attempt:") for key in seen))
 
     def test_manager_delivery_launch_failure_is_retryable(self) -> None:
         from omo_manager import omo_pending_watch as watcher
