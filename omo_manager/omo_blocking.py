@@ -178,7 +178,7 @@ def task_paths(root: Path) -> tuple[Path, ...]:
     seen: set[Path] = set()
     from omo_manager.omo_agent_status import parse_task_lines, resolve_task_path
 
-    live_sections = {"todo:current", "todo:human pending", "todo:low priority", "todo:previous"}
+    live_sections = {"todo:current", "todo:human pending", "todo:low priority"}
     for task in parse_task_lines(root / "TODO.md"):
         if task.section not in live_sections or task.task_file == "TODO.md":
             continue

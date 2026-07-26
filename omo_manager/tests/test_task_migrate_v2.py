@@ -86,6 +86,19 @@ class TaskMigrationV2Tests(unittest.TestCase):
             with self.assertRaisesRegex(BlockingError, "resume-status"):
                 run(Args(root, "plan", root / "migration.yaml"))
 
+    def test_plan_excludes_previous_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "active.md").write_text(v1_task(), encoding="utf-8")
+            (root / "retired.md").write_text(v1_task().replace("status: running", "status: done").replace("runat: cfg:2", "runat: retired"), encoding="utf-8")
+            (root / "TODO.md").write_text("current:\nactive.md cfg:2\nprevious:\nretired.md retired\n", encoding="utf-8")
+            commit(root, "active.md", "retired.md", "TODO.md")
+            plan = root / "migration.yaml"
+
+            self.assertEqual(0, run(Args(root, "plan", plan)))
+
+            self.assertEqual(["active.md"], [row["task"] for row in load_plan(plan, root)])
+
     def test_write_rejects_unreviewed_drift(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
