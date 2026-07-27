@@ -22,7 +22,7 @@ Workflow:
 Safety:
 - keep private bodies in `/tmp` or another owner-only scratch directory
 - export refuses a non-empty output directory
-- snapshot/export use the human mailbox config and search only unread mail from the configured agent address to the configured human address with `[a]` or old `[omo_manager]`
+- snapshot/export use the human mailbox config and search only unread mail from the configured agent address to the configured human address; legacy self-addressed cleanup remains restricted to historical `[a]` or `[omo_manager]` mail
 - the helper re-parses headers and skips boundary mismatches before exporting bodies
 - `trash-superseded` acts only on the explicit UID list
 - before moving mail, `trash-superseded` rechecks each UID still matches that sender/recipient boundary in `INBOX`

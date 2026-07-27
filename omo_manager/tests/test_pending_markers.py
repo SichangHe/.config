@@ -1792,18 +1792,14 @@ class PendingMarkerTests(unittest.TestCase):
         self.assertEqual("Re: PB urgent", normalize_human_subject("Re: [a] wl:9 pb:1 vl:2 PB urgent"))
         self.assertEqual("Re: PB urgent", normalize_human_subject("Re: [a] [wl:9] [pb:1] [vl:2] PB urgent"))
 
-    def test_email_watcher_accepts_no_space_manager_reply_subject(self) -> None:
+    def test_email_watcher_normalizes_legacy_manager_reply_subjects(self) -> None:
         from omo_manager import email_idle_watcher as watcher
 
-        self.assertIn("Re:[a]", watcher.NORMAL_REPLY_SEARCH_PREFIXES)
-        self.assertIn("Re:[omo_manager]", watcher.NORMAL_REPLY_SEARCH_PREFIXES)
-        self.assertNotIn("Re: [omo]", watcher.NORMAL_REPLY_SEARCH_PREFIXES)
         self.assertTrue(watcher.is_manager_subject("Re:[a] VL supervisor follow-up vl_supervisor_5410.md"))
         self.assertTrue(watcher.is_manager_subject("Re:[omo_manager] VL supervisor follow-up vl_supervisor_5410.md"))
         self.assertFalse(watcher.is_manager_subject("Re: [omo] direct agent follow-up"))
         self.assertFalse(watcher.is_manager_subject("Re: pb news"))
         self.assertFalse(watcher.is_manager_subject("Re: pb news setup"))
-        self.assertNotIn("Re: pb news", watcher.NORMAL_REPLY_SEARCH_PREFIXES)
 
     def test_split_email_watcher_accepts_untagged_mail_only_from_human(self) -> None:
         from omo_manager import email_idle_watcher as watcher
@@ -1836,7 +1832,7 @@ class PendingMarkerTests(unittest.TestCase):
                     raise AssertionError(command)
 
             manager_file = root / "work_manager_today.md"
-            args = watcher.Args(root, "", root / "manager_mail", state, manager_file, True, "human@example.test", 0, Path("/bin/false"), manager_target="wl:1", require_subject_tag=False, mail_thresholds=False, inbox_identity="agent@example.test")
+            args = watcher.Args(root, "", root / "manager_mail", state, manager_file, True, "human@example.test", 0, Path("/bin/false"), manager_target="wl:1", mail_thresholds=False, inbox_identity="agent@example.test")
             self.assertTrue(watcher.handle_unseen(Client(), args))
             self.assertTrue(watcher.handle_unseen(Client(), args))
             mail_name = watcher.mail_artifact_name(args, "51")
@@ -1868,7 +1864,7 @@ class PendingMarkerTests(unittest.TestCase):
                     raise AssertionError((command, args))
 
             manager_file = root / "work_manager_today.md"
-            args = watcher.Args(root, "", root / "manager_mail", root / "state", manager_file, True, "human@example.test", 0, Path("/bin/false"), manager_target="wl:1", require_subject_tag=False, mail_thresholds=False)
+            args = watcher.Args(root, "", root / "manager_mail", root / "state", manager_file, True, "human@example.test", 0, Path("/bin/false"), manager_target="wl:1", mail_thresholds=False, inbox_identity="agent@example.test")
             self.assertFalse(watcher.handle_unseen(Client(), args))
             self.assertFalse(manager_file.exists())
 
@@ -1918,11 +1914,11 @@ class PendingMarkerTests(unittest.TestCase):
         old_recent_thread_exists = subject.recent_thread_exists
         subject.recent_thread_exists = lambda key: key == "topic"
         try:
-            self.assertEqual("Re: [a] Topic", prepare_subject("Topic"))
-            self.assertEqual("Re: [a] Topic", prepare_subject("[omo_manager] Topic"))
-            self.assertEqual("Re: [a] Topic", prepare_subject("Re: [omo_manager] Topic"))
-            self.assertEqual("Re: [a] Topic", prepare_subject("[a] Re: Topic"))
-            self.assertEqual("Re: [a] Topic", prepare_subject("[a] [omo] Topic"))
+            self.assertEqual("Re: Topic", prepare_subject("Topic"))
+            self.assertEqual("Re: Topic", prepare_subject("[omo_manager] Topic"))
+            self.assertEqual("Re: Topic", prepare_subject("Re: [omo_manager] Topic"))
+            self.assertEqual("Re: Topic", prepare_subject("[a] Re: Topic"))
+            self.assertEqual("Re: Topic", prepare_subject("[a] [omo] Topic"))
         finally:
             subject.recent_thread_exists = old_recent_thread_exists
 
@@ -1952,25 +1948,25 @@ class PendingMarkerTests(unittest.TestCase):
         subject.recent_thread_header = recent_thread_header
         try:
             self.assertEqual(
-                ("Re: [a] Topic", {"In-Reply-To": "<prior@example.test>", "References": "<root@example.test> <prior@example.test>"}),
+                ("Re: Topic", {"In-Reply-To": "<prior@example.test>", "References": "<root@example.test> <prior@example.test>"}),
                 prepare_subject_and_headers("Topic"),
             )
             self.assertEqual(["topic"], calls)
         finally:
             subject.recent_thread_header = old_recent_thread_header
 
-    def test_email_subject_prepends_tmux_target_after_manager_tag(self) -> None:
-        self.assertEqual("[a] [wl:7] Topic", manager_subject_w_target("Topic", "wl:7"))
-        self.assertEqual("Re: [a] [wl:7] Topic", manager_subject_w_target("Topic", "wl:7", True))
-        self.assertEqual("Re: [a] [wl:7] Topic", prepare_subject("Re: [a] Topic", "wl:7"))
-        self.assertEqual("Re: [a] [wl:7] Topic", prepare_subject("Re: wl:9 wl:6 Topic", "wl:7"))
-        self.assertEqual("Re: [a] [wl:7] Topic", prepare_subject("Re: [a] wl:9 pb:1 vl:2 Topic", "wl:7"))
-        self.assertEqual("Re: [a] [wl:7] Topic", prepare_subject("Re: [a] [wl:9] [pb:1] [vl:2] Topic", "wl:7"))
-        self.assertEqual("Re: [a] [vl:15] Topic", prepare_subject("Re: [wl:9] [pb:1] [vl:2] Topic", "vl:15"))
-        self.assertEqual("[a] [wl:7] Topic", manager_subject_w_target("Topic", "wl:7.0"))
-        self.assertEqual("Re: [a] [wl:7] Topic", prepare_subject("Re: [a] Topic", "wl:7.0"))
-        self.assertEqual("[a] [wl:7.1] Topic", manager_subject_w_target("Topic", "wl:7.1"))
-        self.assertEqual("[a] Topic", prepare_subject("Topic", "not-a-target"))
+    def test_email_subject_prepends_tmux_target_without_manager_tag(self) -> None:
+        self.assertEqual("[wl:7] Topic", manager_subject_w_target("Topic", "wl:7"))
+        self.assertEqual("Re: [wl:7] Topic", manager_subject_w_target("Topic", "wl:7", True))
+        self.assertEqual("Re: [wl:7] Topic", prepare_subject("Re: [a] Topic", "wl:7"))
+        self.assertEqual("Re: [wl:7] Topic", prepare_subject("Re: wl:9 wl:6 Topic", "wl:7"))
+        self.assertEqual("Re: [wl:7] Topic", prepare_subject("Re: [a] wl:9 pb:1 vl:2 Topic", "wl:7"))
+        self.assertEqual("Re: [wl:7] Topic", prepare_subject("Re: [a] [wl:9] [pb:1] [vl:2] Topic", "wl:7"))
+        self.assertEqual("Re: [vl:15] Topic", prepare_subject("Re: [wl:9] [pb:1] [vl:2] Topic", "vl:15"))
+        self.assertEqual("[wl:7] Topic", manager_subject_w_target("Topic", "wl:7.0"))
+        self.assertEqual("Re: [wl:7] Topic", prepare_subject("Re: [a] Topic", "wl:7.0"))
+        self.assertEqual("[wl:7.1] Topic", manager_subject_w_target("Topic", "wl:7.1"))
+        self.assertEqual("Topic", prepare_subject("Topic", "not-a-target"))
 
     def test_email_subject_target_keeps_recent_thread_lookup_key_untargeted(self) -> None:
         from omo_manager import omo_email_subject as subject
@@ -1984,7 +1980,7 @@ class PendingMarkerTests(unittest.TestCase):
 
         subject.recent_thread_header = recent_thread_header
         try:
-            self.assertEqual(("[a] [wl:7] Topic", {}), prepare_subject_and_headers("Topic", "wl:7"))
+            self.assertEqual(("[wl:7] Topic", {}), prepare_subject_and_headers("Topic", "wl:7"))
             self.assertEqual(["topic"], calls)
         finally:
             subject.recent_thread_header = old_recent_thread_header
@@ -2046,14 +2042,14 @@ class PendingMarkerTests(unittest.TestCase):
         self.assertIn(("select", '"INBOX"', True), calls)
         self.assertTrue(any(call[0] == "search" and '"human@example.test"' in call for call in calls))
 
-    def test_email_subject_lookup_error_falls_back_to_new_tag(self) -> None:
+    def test_email_subject_lookup_error_falls_back_without_tag(self) -> None:
         from omo_manager import omo_email_subject as subject
 
         old_recent_thread_exists = subject.recent_thread_exists
         subject.recent_thread_exists = lambda _key: (_ for _ in ()).throw(RuntimeError("imap down"))
         try:
-            self.assertEqual("[a] Topic", prepare_subject("Topic"))
-            self.assertEqual("[a] Topic", prepare_subject("[omo_manager] Topic"))
+            self.assertEqual("Topic", prepare_subject("Topic"))
+            self.assertEqual("Topic", prepare_subject("[omo_manager] Topic"))
         finally:
             subject.recent_thread_exists = old_recent_thread_exists
 
@@ -2066,7 +2062,7 @@ class PendingMarkerTests(unittest.TestCase):
             started_s = time.monotonic()
             with patch.dict(os.environ, {"OMO_MANAGER_EMAIL_THREAD_LOOKUP_DEADLINE_S": "0.05"}):
                 self.assertEqual(
-                    "[a] Updates on manager email filtering manager_market_alert_email_filter_7564.md", prepare_subject("Updates on manager email filtering manager_market_alert_email_filter_7564.md")
+                    "Updates on manager email filtering manager_market_alert_email_filter_7564.md", prepare_subject("Updates on manager email filtering manager_market_alert_email_filter_7564.md")
                 )
             self.assertLess(time.monotonic() - started_s, 1.0)
         finally:
@@ -2860,7 +2856,7 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual(client.stores, [("13", "+FLAGS", r"(\Seen)")])
             self.assertIn("13	", (state / "email-processed-uids.tsv").read_text(encoding="utf-8"))
 
-    def test_email_watcher_rejects_omo_agent_reply_with_pwd(self) -> None:
+    def test_email_watcher_accepts_human_reply_with_legacy_omo_tag_and_pwd(self) -> None:
         from email.message import EmailMessage
         from omo_manager import email_idle_watcher as watcher
 
@@ -2890,12 +2886,12 @@ class PendingMarkerTests(unittest.TestCase):
             manager_file = root / "work_manager_today.md"
             args = watcher.Args(root, "", root / "manager_mail", state, manager_file, True, "me@example.com", 0, Path("/bin/false"), manager_target="wl:1.0", recent_cleanup_threshold=999)
             watcher.handle_unseen(client, args)
-            self.assertFalse(manager_file.exists())
-            self.assertFalse((root / "manager_mail" / "48.txt").exists())
-            self.assertEqual(client.stores, [])
-            self.assertFalse((state / "email-processed-uids.tsv").exists())
+            self.assertIn("(pending)", manager_file.read_text(encoding="utf-8"))
+            self.assertTrue((root / "manager_mail" / "48.txt").exists())
+            self.assertEqual(client.stores, [("48", "+FLAGS", r"(\Seen)")])
+            self.assertIn("48\t", (state / "email-processed-uids.tsv").read_text(encoding="utf-8"))
 
-    def test_email_watcher_rejects_pb_news_reply(self) -> None:
+    def test_email_watcher_accepts_human_reply_without_tag(self) -> None:
         from email.message import EmailMessage
         from omo_manager import email_idle_watcher as watcher
 
@@ -2927,10 +2923,10 @@ class PendingMarkerTests(unittest.TestCase):
             manager_file = root / "work_manager_today.md"
             args = watcher.Args(root, "", root / "manager_mail", state, manager_file, True, "me@example.com", 0, Path("/bin/false"), manager_target="wl:1.0")
             watcher.handle_unseen(client, args)
-            self.assertFalse(manager_file.exists())
-            self.assertFalse((root / "manager_mail" / "50.txt").exists())
-            self.assertEqual(client.stores, [])
-            self.assertFalse((state / "email-processed-uids.tsv").exists())
+            self.assertIn("(pending)", manager_file.read_text(encoding="utf-8"))
+            self.assertTrue((root / "manager_mail" / "50.txt").exists())
+            self.assertEqual(client.stores, [("50", "+FLAGS", r"(\Seen)")])
+            self.assertIn("50\t", (state / "email-processed-uids.tsv").read_text(encoding="utf-8"))
 
     def test_email_watcher_ignores_manager_authored_reply_echo_with_pwd(self) -> None:
         from email.message import EmailMessage
@@ -3076,7 +3072,7 @@ class PendingMarkerTests(unittest.TestCase):
             email_me.ENV_FILE_PATH = env_file
             with (
                 patch.dict(email_me.os.environ, {"EMAIL_ME_FAKE_SEND_LOG": ""}),
-                patch.object(email_me, "prepare_subject_and_headers", return_value=("Re: [a] [wl:1] duplicate-mail prevention", {})),
+                patch.object(email_me, "prepare_subject_and_headers", return_value=("Re: [wl:1] duplicate-mail prevention", {})),
                 patch.object(email_me, "configured_agent_mail", return_value=None),
                 patch.object(email_me, "should_send_manager_email_key", return_value=True),
                 patch.object(email_me, "log_manager_email"),
@@ -3103,10 +3099,11 @@ class PendingMarkerTests(unittest.TestCase):
             captured_message = BytesParser().parsebytes(message_bytes)
             self.assertNotIn("X-OMO-Manager-Email", captured_message)
             self.assertTrue(watcher.has_agent_footer(watcher.message_text(captured_message)))
-            self.assertTrue(watcher.message_text(captured_message).endswith("tmux: wl:1\n"))
+            self.assertRegex(watcher.message_text(captured_message), r"\nPWD: [^\n]+\n\Z")
+            self.assertNotIn("tmux: wl:1\n", watcher.message_text(captured_message))
             human_message = EmailMessage()
             human_message["From"] = "Human <me@example.com>"
-            human_message["Subject"] = "Re: [a] [wl:1] duplicate-mail prevention"
+            human_message["Subject"] = "Re: [wl:1] duplicate-mail prevention"
             human_message.set_content("Please continue.")
 
             class Client:
@@ -4003,7 +4000,7 @@ class PendingMarkerTests(unittest.TestCase):
             finally:
                 watcher.push_email_ref = old_push
             self.assertTrue(client.searches)
-            self.assertEqual(client.searches[0][:6], (None, "UID", "13:*", "FROM", '"me@example.com"', "SUBJECT"))
+            self.assertEqual(client.searches[0], (None, "UID", "13:*", "FROM", '"me@example.com"'))
             self.assertIn("13	", (state / "email-processed-uids.tsv").read_text(encoding="utf-8"))
 
     def test_email_watcher_does_not_run_legacy_push_for_new_pending(self) -> None:

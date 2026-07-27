@@ -18,7 +18,7 @@ from pathlib import Path
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from omo_manager.email_idle_watcher import MANAGER_SUBJECT_TOKENS, message_text, parse_env_config
+from omo_manager.email_idle_watcher import LEGACY_MANAGER_SUBJECT_TOKENS, message_text, parse_env_config
 from omo_manager.omo_email_config import configured_agent_mail, human_config_path
 
 HEADER_FETCH = "(BODY.PEEK[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)])"
@@ -84,7 +84,9 @@ def is_manager_record(record: MailRecord, sender_email: str, recipient_email: st
     sender_matches = senders == [sender_email.casefold()]
     recipients = [address.casefold() for _name, address in getaddresses([record.to]) if address]
     recipient_matches = recipients == [recipient_email.casefold()]
-    subject_matches = any(token.lower() in record.subject.lower() for token in MANAGER_SUBJECT_TOKENS)
+    if sender_email.casefold() != recipient_email.casefold():
+        return sender_matches and recipient_matches
+    subject_matches = any(token.lower() in record.subject.lower() for token in LEGACY_MANAGER_SUBJECT_TOKENS)
     return sender_matches and recipient_matches and subject_matches
 
 
@@ -103,8 +105,11 @@ def load_config() -> dict[str, str]:
 def manager_unread_uids(client: imaplib.IMAP4_SSL, self_email: str) -> list[str]:
     found: list[str] = []
     seen: set[str] = set()
-    for token in MANAGER_SUBJECT_TOKENS:
-        typ, data = client.uid("search", None, "UNSEEN", "FROM", f'"{self_email}"', "SUBJECT", f'"{token}"')
+    settings = configured_agent_mail()
+    criteria = ["UNSEEN", "FROM", f'"{self_email}"']
+    subject_tokens = ("",) if settings is not None else LEGACY_MANAGER_SUBJECT_TOKENS
+    for token in subject_tokens:
+        typ, data = client.uid("search", None, *(criteria + (["SUBJECT", f'"{token}"'] if token else [])))
         if typ != "OK":
             raise RuntimeError(f"IMAP search failed: {typ}")
         for uid in [raw.decode() for raw in data[0].split()] if data and data[0] else []:

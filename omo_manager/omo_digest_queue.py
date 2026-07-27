@@ -168,7 +168,7 @@ def ensure_header(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         "# Manager non-urgent digest queue\n\n"
-        "Durable queue for non-urgent PB/agent digest items. Urgent/breaking items bypass this file and may email the human directly with `[a]`.\n\n"
+        "Durable queue for non-urgent PB/agent digest items. Urgent/breaking items bypass this file and may email the human directly.\n\n"
         "Queued items use `(digest-item)`, not `(pending)`, so markdown pending/report watchers do not create duplicate immediate notifications.\n",
         encoding="utf-8",
     )
@@ -381,7 +381,7 @@ def build_parser() -> argparse.ArgumentParser:
     deliver.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR, help=argparse.SUPPRESS)
     deliver.add_argument("--mail-dir", type=Path, default=Path(DEFAULT_MAIL_DIR) if DEFAULT_MAIL_DIR else None, help=argparse.SUPPRESS)
     deliver.add_argument("--send-helper", type=Path, default=DEFAULT_SEND_HELPER)
-    deliver.add_argument("--subject", default="[a] Non-urgent news digest")
+    deliver.add_argument("--subject", default="Non-urgent news digest")
     deliver.add_argument("--max-items", type=int, default=5)
     deliver.add_argument("--min-human-inbound-idle-min", type=int, default=90, help=argparse.SUPPRESS)
     deliver.add_argument("--min-manager-outbound-idle-min", type=int, default=120, help=argparse.SUPPRESS)

@@ -6,7 +6,7 @@ from email.message import Message
 from pathlib import Path
 from unittest.mock import patch
 
-from omo_manager.omo_manager_mail_compress import MailRecord, cmd_mark_seen, cmd_trash_superseded, ensure_empty_private_dir, export_body, imap_quoted, is_manager_record, mail_boundary, mailbox_exists, parse_uid_text, record_from_msg, write_private
+from omo_manager.omo_manager_mail_compress import MailRecord, cmd_mark_seen, cmd_trash_superseded, ensure_empty_private_dir, export_body, imap_quoted, is_manager_record, mail_boundary, mailbox_exists, manager_unread_uids, parse_uid_text, record_from_msg, write_private
 
 
 class FakeClient:
@@ -45,7 +45,7 @@ class ManagerMailCompressTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_uid_text("5841:*")
 
-    def test_manager_record_boundary_requires_self_and_manager_subject(self) -> None:
+    def test_manager_record_boundary_requires_self_and_legacy_subject(self) -> None:
         self.assertTrue(
             is_manager_record(
                 MailRecord("1", "", "Human <me@example.test>", "Human <me@example.test>", "Re: [a] x", "sha"),
@@ -92,7 +92,7 @@ class ManagerMailCompressTests(unittest.TestCase):
     def test_manager_record_boundary_accepts_agent_to_human_mail(self) -> None:
         self.assertTrue(
             is_manager_record(
-                MailRecord("1", "", "Agent <agent@example.test>", "Human <human@example.test>", "[a] x", "sha"),
+                MailRecord("1", "", "Agent <agent@example.test>", "Human <human@example.test>", "x", "sha"),
                 "agent@example.test",
                 "human@example.test",
             )
@@ -107,6 +107,42 @@ class ManagerMailCompressTests(unittest.TestCase):
         msg["Subject"] = "[a] x"
         record = record_from_msg("1", msg)
         self.assertFalse(is_manager_record(record, "agent@example.test", "human@example.test"))
+
+    def test_manager_unread_uids_uses_exact_sender_only_in_split_mode(self) -> None:
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+
+        class Client:
+            calls: list[tuple[object, ...]] = []
+
+            def uid(self, command: str, *args: object) -> tuple[str, list[bytes]]:
+                self.calls.append((command, *args))
+                return "OK", [b"7"]
+
+        client = Client()
+        with patch("omo_manager.omo_manager_mail_compress.configured_agent_mail", return_value=Settings()):
+            self.assertEqual(["7"], manager_unread_uids(client, "agent@example.test"))
+        self.assertEqual([("search", None, "UNSEEN", "FROM", '"agent@example.test"')], client.calls)
+
+    def test_manager_unread_uids_uses_legacy_subjects_in_self_addressed_mode(self) -> None:
+        class Client:
+            calls: list[tuple[object, ...]] = []
+
+            def uid(self, command: str, *args: object) -> tuple[str, list[bytes]]:
+                self.calls.append((command, *args))
+                return "OK", [b"7"]
+
+        client = Client()
+        with patch("omo_manager.omo_manager_mail_compress.configured_agent_mail", return_value=None):
+            self.assertEqual(["7"], manager_unread_uids(client, "me@example.test"))
+        self.assertEqual(
+            [
+                ("search", None, "UNSEEN", "FROM", '"me@example.test"', "SUBJECT", '"[a]"'),
+                ("search", None, "UNSEEN", "FROM", '"me@example.test"', "SUBJECT", '"[omo_manager]"'),
+            ],
+            client.calls,
+        )
 
     def test_split_cleanup_rejects_wrong_human_mailbox(self) -> None:
         class Settings:
@@ -182,7 +218,7 @@ class ManagerMailCompressTests(unittest.TestCase):
                 ("MOVE", "7", '"[Gmail]/Trash"'): ("OK", [b""]),
             }
         )
-        with patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {"user": "me@example.test"})):
+        with patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {"user": "me@example.test"})), patch("omo_manager.omo_manager_mail_compress.configured_agent_mail", return_value=None):
             self.assertEqual(0, cmd_trash_superseded(Args(uids="7,8", yes=True)))
         self.assertIn(("MOVE", "7", '"[Gmail]/Trash"'), client.uid_calls)
         self.assertTrue(client.logged_out)
@@ -200,7 +236,7 @@ class ManagerMailCompressTests(unittest.TestCase):
                 ("fetch", "7", "(BODY.PEEK[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)])"): ("OK", [(b"header", raw_msg)]),
             }
         )
-        with patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {"user": "me@example.test"})):
+        with patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {"user": "me@example.test"})), patch("omo_manager.omo_manager_mail_compress.configured_agent_mail", return_value=None):
             self.assertEqual(1, cmd_trash_superseded(Args(uids="7", yes=True)))
         self.assertNotIn(("MOVE", "7", '"[Gmail]/Trash"'), client.uid_calls)
 

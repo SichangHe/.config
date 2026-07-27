@@ -38,14 +38,12 @@ except ImportError:
     reply_headers_for_subject = None
     strip_leading_tmux_tags = None
 
-MANAGER_PREFIX = "[a]"
 PWD_FOOTER_RE = re.compile(r"(?:^|\n)(?:>\s*)?PWD: [^\n]+\n?\Z")
 UNQUOTED_PWD_FOOTER_RE = re.compile(r"(?:^|\n)PWD: [^\n]+\n?\Z")
 TMUX_WINDOW_RE = re.compile(r"[^:\n]+:\d+(?:\.\d+)?\Z")
 TMUX_SUBJECT_TAG_RE = re.compile(r"^\s*(?:\[[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?\]|[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)(?:\s+|$)")
 BRACKETED_TMUX_TAG_RE = re.compile(r"\[[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?\]")
-MANAGER_HUMAN_SUBJECT_RE = re.compile(r"^(?:Re:\s*)?\[a\]\s+\[[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?\](?:\s+|$)", re.IGNORECASE)
-TMUX_FOOTER_RE = re.compile(r"(?:^|\n)tmux: [^:\n]+:\d+(?:\.\d+)?\r?\n?\Z", re.IGNORECASE)
+MANAGER_HUMAN_SUBJECT_RE = re.compile(r"^(?:Re:\s*)?\[[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?\](?:\s+|$)", re.IGNORECASE)
 MARKDOWN_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
 INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)(?:\s+#+\s*)?$")
@@ -157,7 +155,7 @@ def normalize_subject(title: str, tmux_target: str = "") -> str:
     if normalized_placeholder == "subject":
         raise ValueError("subject must be a real subject, not the placeholder SUBJECT")
     if re.match(r"^(?:re:\s*)*\[omo\]\s*", lowered):
-        raise ValueError("agent email subject must use [a]; [omo] is deprecated")
+        raise ValueError("agent email subject must not use deprecated [omo]")
     base = stripped
     reply = False
     while True:
@@ -177,10 +175,10 @@ def normalize_subject(title: str, tmux_target: str = "") -> str:
     if clean_target and valid_tmux_target(clean_target) and not base.startswith(f"{bracketed_target} "):
         base = f"{bracketed_target} {base}"
     if lowered.startswith("re:"):
-        return f"Re: {MANAGER_PREFIX} {base}"
+        return f"Re: {base}"
     if reply:
-        return f"Re: {MANAGER_PREFIX} {base}"
-    return f"{MANAGER_PREFIX} {base}"
+        return f"Re: {base}"
+    return base
 
 
 def current_pwd() -> str:
@@ -276,13 +274,10 @@ def validate_manager_human_subject(subject: str) -> None:
 
 def append_pwd_footer(content: str, cwd: str | Path | None = None, tmux_target: str | None = None, require_unquoted_footer: bool = False) -> str:
     pwd_footer = UNQUOTED_PWD_FOOTER_RE if require_unquoted_footer else PWD_FOOTER_RE
-    if pwd_footer.search(content) or TMUX_FOOTER_RE.search(content):
+    if pwd_footer.search(content):
         return content
-    tmux_window = footer_tmux_target(tmux_target)
-    if tmux_window is not None:
-        footer = f"tmux: {tmux_window}"
-    else:
-        footer = f"PWD: {short_pwd(cwd or current_pwd())}"
+    del tmux_target
+    footer = f"PWD: {short_pwd(cwd or current_pwd())}"
     body = content.rstrip("\n")
     return f"{body}\n\n{footer}\n"
 

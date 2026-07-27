@@ -11,7 +11,7 @@ from omo_manager.omo_pending_watch import find_markers
 
 
 class DigestQueueTests(unittest.TestCase):
-    def test_submit_initializes_header_with_a_tag(self) -> None:
+    def test_submit_initializes_header_without_a_tag(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             result = subprocess.run(
@@ -34,7 +34,7 @@ class DigestQueueTests(unittest.TestCase):
             )
             self.assertEqual(0, result.returncode, result.stderr)
             text = (root / "MANAGER_DIGEST_QUEUE.md").read_text(encoding="utf-8")
-            self.assertIn("may email the human directly with `[a]`", text)
+            self.assertIn("may email the human directly.", text)
 
     def test_submit_dedupes_and_pending_watcher_ignores_queue_items(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -301,7 +301,7 @@ class DigestQueueTests(unittest.TestCase):
             with patch.object(omo_digest_queue, "now_local", return_value=datetime.fromisoformat("2026-05-25T15:00:00-07:00")):
                 self.assertEqual(0, omo_digest_queue.command_deliver(args))
             sent_text = (root / "fake-send.log").read_text(encoding="utf-8")
-            self.assertIn("[a] Non-urgent news digest", sent_text)
+            self.assertIn("Non-urgent news digest", sent_text)
             self.assertIn("Queued item", sent_text)
             queue_text = (root / "MANAGER_DIGEST_QUEUE.md").read_text(encoding="utf-8")
             self.assertIn("status: sent", queue_text)
@@ -328,7 +328,7 @@ class DigestQueueTests(unittest.TestCase):
             )
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertEqual("Emailed the human\n", result.stdout)
-            self.assertEqual("[a] [wl:1.0] test\nbody\n", (Path(tmp) / "sent.txt").read_text(encoding="utf-8"))
+            self.assertEqual("[wl:1] test\nbody\n", (Path(tmp) / "sent.txt").read_text(encoding="utf-8"))
 
     def test_first_use_concurrent_submit_and_deliver_preserves_item(self) -> None:
         for _ in range(10):

@@ -4,8 +4,8 @@ Use this when stale manager-human email threads should be moved out of `INBOX`.
 This workflow is reversible cleanup: move mail to `[Gmail]/Trash`, never expunge.
 
 Scope:
-- agent-to-human `[a]` mail
-- old `[omo_manager]` mail for compatibility
+- split-account agent-to-human mail from the configured agent address
+- legacy self-addressed `[a]` or `[omo_manager]` mail
 - `INBOX` only
 
 Classify read-only:

@@ -23,7 +23,6 @@ try:
 except ImportError:
     from omo_email_config import GMAIL_IMAP_HOST, configured_agent_mail, human_config_path
 
-SHORT_MANAGER_TAG = "[a]"
 CONFIG_PATH = human_config_path()
 SUBJECT_TAG_RE = re.compile(r"^\s*\[(?:a|omo_manager|omo)\]\s*", re.IGNORECASE)
 MANAGER_TAG_RE = re.compile(r"^\s*(?:\[a\]|\[omo_manager\])\s*", re.IGNORECASE)
@@ -135,7 +134,7 @@ def validate_subject(subject: str) -> None:
     if PLACEHOLDER_RE.fullmatch(normalized_subject_key(subject)):
         raise SubjectInputError("subject must be a real subject, not the placeholder SUBJECT")
     if RESERVED_AGENT_TAG_RE.match(subject.strip()):
-        raise SubjectInputError("agent email subject must use [a]; [omo] is deprecated")
+        raise SubjectInputError("agent email subject must not use deprecated [omo]")
 
 
 def starts_w_re(subject: str) -> bool:
@@ -143,11 +142,11 @@ def starts_w_re(subject: str) -> bool:
 
 
 def manager_reply_subject(base: str) -> str:
-    return f"Re: {SHORT_MANAGER_TAG} {base.strip()}"
+    return f"Re: {base.strip()}"
 
 
 def manager_subject(base: str) -> str:
-    return f"{SHORT_MANAGER_TAG} {base.strip()}"
+    return base.strip()
 
 
 def canonical_tmux_target(tmux_target: str) -> str:

@@ -67,13 +67,9 @@ DEFAULT_MANAGER_URL = os.environ.get("OMO_MANAGER_URL", "http://127.0.0.1:18790"
 DEFAULT_MANAGER_TARGET = os.environ.get("OMO_MANAGER_TMUX_TARGET", "")
 DEFAULT_MAIL_DIR = Path(os.environ.get("OMO_MANAGER_MAIL_DIR", DEFAULT_ROOT / "manager_mail"))
 CONFIG_PATH = human_config_path()
-MANAGER_REPLY_PREFIX = "Re: [a]"
-MANAGER_SUBJECT_TOKEN = "[a]"
-MANAGER_SUBJECT_TOKENS = (MANAGER_SUBJECT_TOKEN, "[omo_manager]")
-MANAGER_REPLY_SEARCH_PREFIXES = (MANAGER_REPLY_PREFIX, "Re:[a]", "Re: [omo_manager]", "Re:[omo_manager]")
-NORMAL_REPLY_SEARCH_PREFIXES = MANAGER_REPLY_SEARCH_PREFIXES
+LEGACY_MANAGER_SUBJECT_TOKENS = ("[a]", "[omo_manager]")
 MANAGER_REPLY_SUBJECT_RE = re.compile(r"^re:\s*(?:\[a\]|\[omo_manager\])\s*", re.IGNORECASE)
-MANAGER_TARGET_SUBJECT_RE = re.compile(r"^(?:re:\s*)*(?:\[a\]|\[omo_manager\])\s+(?:\[([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\]|([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?))(?:\s+|$)", re.IGNORECASE)
+MANAGER_TARGET_SUBJECT_RE = re.compile(r"^(?:re:\s*)*(?:(?:\[a\]|\[omo_manager\])\s+)?(?:\[([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\]|([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?))(?:\s+|$)", re.IGNORECASE)
 TMUX_TARGET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?$")
 PWD_FOOTER_RE = re.compile(r"(?:^|\n)PWD: [^\n]+\n?\Z")
 TMUX_FOOTER_RE = re.compile(r"(?:^|\n)tmux: [^\r\n]+\r?\n?\Z", re.IGNORECASE)
@@ -154,7 +150,6 @@ class Args:
     unread_compression_threshold: int = DEFAULT_MANAGER_UNREAD_COMPRESSION_THRESHOLD
     recent_cleanup_threshold: int = DEFAULT_MANAGER_RECENT_CLEANUP_THRESHOLD
     recent_cleanup_window_s: float = DEFAULT_MANAGER_RECENT_CLEANUP_WINDOW_S
-    require_subject_tag: bool = True
     mail_thresholds: bool = True
     inbox_identity: str = ""
 
@@ -1307,7 +1302,7 @@ def handle_recovery_email(args: Args, uid: str, txt_path: Path) -> None:
             command = [str(args.restart_script), "--manager-url", args.manager_url, "--root", str(args.root)]
             record_recovery_attempt(last_path, now_s, uid, "refused-non-loopback")
             append_recovery_record(args.root, txt_path, "recovery email recorded; restart refused because manager URL is not loopback", args.manager_file)
-            email_human(args, "[a] Recovery action needed", f"Recovery email {source_ref(args.root, txt_path)} was accepted from the configured self address, but automatic restart was refused because manager-url is not loopback: {args.manager_url}\n\nRun only after correcting configuration:\n\n```sh\n{shell_join(command)}\n```\n")
+            email_human(args, "Recovery action needed", f"Recovery email {source_ref(args.root, txt_path)} was accepted from the configured self address, but automatic restart was refused because manager-url is not loopback: {args.manager_url}\n\nRun only after correcting configuration:\n\n```sh\n{shell_join(command)}\n```\n")
             return
         log_path = recovery_dir / f"recover-{uid}-{int(now_s)}.log"
         command = [str(args.restart_script), "--manager-url", args.manager_url, "--root", str(args.root), "--state-dir", str(args.state_dir)]
@@ -1321,12 +1316,12 @@ def handle_recovery_email(args: Args, uid: str, txt_path: Path) -> None:
                 log_handle.write(f"failed to run restart helper: {exc}\n")
                 record_recovery_attempt(last_path, now_s, uid, "launch-failed")
                 append_recovery_record(args.root, txt_path, f"recovery restart helper could not be launched; see `{log_path}`", args.manager_file)
-                email_human(args, "[a] Recovery action needed", f"Recovery email {source_ref(args.root, txt_path)} was accepted from the configured self address, but automatic restart helper launch failed.\n\nLog: {log_path}\n\nManual recovery command:\n\n```sh\n{shell_join(command)}\n```\n")
+                email_human(args, "Recovery action needed", f"Recovery email {source_ref(args.root, txt_path)} was accepted from the configured self address, but automatic restart helper launch failed.\n\nLog: {log_path}\n\nManual recovery command:\n\n```sh\n{shell_join(command)}\n```\n")
                 return
         record_recovery_attempt(last_path, now_s, uid, f"returncode={result.returncode}")
         if result.returncode != 0:
             append_recovery_record(args.root, txt_path, f"recovery restart failed with exit {result.returncode}; see `{log_path}`", args.manager_file)
-            email_human(args, "[a] Recovery action needed", f"Recovery email {source_ref(args.root, txt_path)} was accepted from the configured self address, but automatic restart failed with exit {result.returncode}.\n\nLog: {log_path}\n\nManual recovery command:\n\n```sh\n{shell_join(command)}\n```\n")
+            email_human(args, "Recovery action needed", f"Recovery email {source_ref(args.root, txt_path)} was accepted from the configured self address, but automatic restart failed with exit {result.returncode}.\n\nLog: {log_path}\n\nManual recovery command:\n\n```sh\n{shell_join(command)}\n```\n")
     finally:
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
@@ -1406,7 +1401,7 @@ def search_manager_mail_uids(client: imaplib.IMAP4_SSL, self_email: str, unread:
         criteria.extend(["SINCE", since.strftime("%d-%b-%Y")])
     found: list[str] = []
     seen: set[str] = set()
-    for token in MANAGER_SUBJECT_TOKENS:
+    for token in LEGACY_MANAGER_SUBJECT_TOKENS:
         typ, data = client.uid("search", *(criteria + ["FROM", f'"{self_email}"', "TO", f'"{self_email}"', "SUBJECT", f'"{token}"']))
         if typ != "OK":
             raise RuntimeError(f"IMAP manager mail search failed: {typ}")
@@ -1432,7 +1427,7 @@ def is_self_addressed_manager_header(msg: Message, self_email: str) -> bool:
     return (
         from_self(sender, self_email)
         and any(address.lower() == normalized_self for _name, address in getaddresses([recipients]))
-        and any(token.lower() in subject.lower() for token in MANAGER_SUBJECT_TOKENS)
+        and any(token.lower() in subject.lower() for token in LEGACY_MANAGER_SUBJECT_TOKENS)
     )
 
 
@@ -1537,10 +1532,6 @@ def fetch_message(client: imaplib.IMAP4_SSL, uid: str) -> Message | None:
     return BytesParser(policy=policy.default).parsebytes(msg_data[0][1])
 
 
-def has_manager_subject_token(subject: str) -> bool:
-    return any(token.lower() in subject.lower() for token in MANAGER_SUBJECT_TOKENS)
-
-
 def sender_display_name(sender: str) -> str:
     name, _address = parseaddr(sender)
     return name.strip().lower()
@@ -1548,8 +1539,7 @@ def sender_display_name(sender: str) -> str:
 
 def manager_authored_message(msg: Message, self_email: str) -> bool:
     sender = str(msg.get("From", ""))
-    subject = str(msg.get("Subject", ""))
-    if not has_manager_subject_token(subject) or not from_self(sender, self_email):
+    if not from_self(sender, self_email):
         return False
     if sender_display_name(sender) == "human":
         return False
@@ -1588,20 +1578,9 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
     handled = False
     manager_file = current_manager_file(args)
     candidate_uids: set[bytes] = set()
-    if args.require_subject_tag:
-        for subject_prefix in NORMAL_REPLY_SEARCH_PREFIXES:
-            candidate_uids.update(search_uids(client, subject_prefix, args.self_email, processed_uids))
-    else:
-        candidate_uids.update(search_sender_uids(client, args.self_email, processed_uids))
+    candidate_uids.update(search_sender_uids(client, args.self_email, processed_uids))
     if unaccepted_pending_uids:
-        if args.require_subject_tag:
-            for subject_prefix in NORMAL_REPLY_SEARCH_PREFIXES:
-                candidate_uids.update(search_processed_uids(client, subject_prefix, args.self_email, sorted(unaccepted_pending_uids, key=lambda value: int(value))))
-        else:
-            candidate_uids.update(search_processed_sender_uids(client, args.self_email, sorted(unaccepted_pending_uids, key=lambda value: int(value))))
-    if args.require_subject_tag:
-        for subject in RECOVERY_SUBJECTS:
-            candidate_uids.update(search_uids(client, subject, args.self_email, processed_uids))
+        candidate_uids.update(search_processed_sender_uids(client, args.self_email, sorted(unaccepted_pending_uids, key=lambda value: int(value))))
     if not candidate_uids:
         logging.info("email scan complete: n=0 processed_next=%s manager_file=%s", uid_search_range(processed_uids), manager_file)
         return maybe_handle_manager_mail_thresholds(client, args)
@@ -1681,9 +1660,8 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
         msg = BytesParser(policy=policy.default).parsebytes(msg_data[0][1])
         sender = str(msg.get("From", ""))
         subject = str(msg.get("Subject", ""))
-        subject_accepted = not args.require_subject_tag or is_manager_subject(subject) or is_recovery_subject(subject)
-        sender_accepted = exact_human_sender(msg, args.self_email, require_transport_identity=not args.require_subject_tag)
-        if not subject_accepted or not sender_accepted:
+        sender_accepted = exact_human_sender(msg, args.self_email, require_transport_identity=bool(args.inbox_identity))
+        if not sender_accepted:
             logging.warning("email candidate rejected after fetch: uid=%s subject=%r from_self=%s", uid, subject, from_self(sender, args.self_email))
             continue
         if manager_authored_message(msg, args.self_email):
@@ -1816,7 +1794,7 @@ def main(argv: list[str]) -> int:
         print(f"email_idle_watcher: missing config keys {sorted(missing)} in {CONFIG_PATH}", file=sys.stderr)
         return 1
     accepted_human = split_settings.human_address if split_settings is not None else config["user"]
-    safe_args = Args(args.root, args.manager_url, args.mail_dir, args.state_dir, args.manager_file, args.once, accepted_human, args.recovery_debounce_s, args.restart_script, args.idle_wait_s, args.manager_target, args.imap_timeout_s, args.pull_interval_s, args.idle_exit_after_s, args.unread_compression_threshold, args.recent_cleanup_threshold, args.recent_cleanup_window_s, require_subject_tag=split_settings is None, mail_thresholds=split_settings is None, inbox_identity=config["user"] if split_settings is not None else "")
+    safe_args = Args(args.root, args.manager_url, args.mail_dir, args.state_dir, args.manager_file, args.once, accepted_human, args.recovery_debounce_s, args.restart_script, args.idle_wait_s, args.manager_target, args.imap_timeout_s, args.pull_interval_s, args.idle_exit_after_s, args.unread_compression_threshold, args.recent_cleanup_threshold, args.recent_cleanup_window_s, mail_thresholds=split_settings is None, inbox_identity=config["user"] if split_settings is not None else "")
     logging.info("email watcher starting: root=%s mail_dir=%s state_dir=%s manager_target=%s manager_url=%s idle_wait_s=%s imap_timeout_s=%s pull_interval_s=%s idle_exit_after_s=%s unread_compression_threshold=%s recent_cleanup_threshold=%s recent_cleanup_window_s=%s", safe_args.root, safe_args.mail_dir, safe_args.state_dir, safe_args.manager_target or "unset", safe_args.manager_url or "unset", safe_args.idle_wait_s, safe_args.imap_timeout_s, safe_args.pull_interval_s, safe_args.idle_exit_after_s, safe_args.unread_compression_threshold, safe_args.recent_cleanup_threshold, int(safe_args.recent_cleanup_window_s))
     while True:
         try:
