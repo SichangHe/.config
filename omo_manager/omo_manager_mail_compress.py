@@ -12,17 +12,19 @@ from dataclasses import dataclass
 from email import policy
 from email.message import Message
 from email.parser import BytesParser
-from email.utils import getaddresses, parseaddr
+from email.utils import getaddresses
 from pathlib import Path
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from omo_manager.email_idle_watcher import CONFIG_PATH, MANAGER_SUBJECT_TOKENS, message_text, parse_env_config
+from omo_manager.email_idle_watcher import MANAGER_SUBJECT_TOKENS, message_text, parse_env_config
+from omo_manager.omo_email_config import configured_agent_mail, human_config_path
 
 HEADER_FETCH = "(BODY.PEEK[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)])"
 FULL_FETCH = "(BODY.PEEK[])"
 TRASH_MAILBOX = "[Gmail]/Trash"
+CONFIG_PATH = human_config_path()
 
 
 @dataclass(frozen=True)
@@ -69,18 +71,19 @@ def record_from_msg(uid: str, msg: Message, body: str = "") -> MailRecord:
     return MailRecord(
         uid=uid,
         date=str(msg.get("Date", "")).replace("\n", " "),
-        sender=str(msg.get("From", "")).replace("\n", " "),
-        to=str(msg.get("To", "")).replace("\n", " "),
+        sender=", ".join(str(value).replace("\n", " ") for value in msg.get_all("From", [])),
+        to=", ".join(str(value).replace("\n", " ") for value in msg.get_all("To", [])),
         subject=str(msg.get("Subject", "")).replace("\n", " "),
         msgid_sha256=msgid_digest(msg),
         body=body.replace("\r\n", "\n"),
     )
 
 
-def is_manager_record(record: MailRecord, self_email: str) -> bool:
-    normalized_self = self_email.lower()
-    sender_matches = parseaddr(record.sender)[1].lower() == normalized_self
-    recipient_matches = any(address.lower() == normalized_self for _name, address in getaddresses([record.to]))
+def is_manager_record(record: MailRecord, sender_email: str, recipient_email: str) -> bool:
+    senders = [address.casefold() for _name, address in getaddresses([record.sender]) if address]
+    sender_matches = senders == [sender_email.casefold()]
+    recipients = [address.casefold() for _name, address in getaddresses([record.to]) if address]
+    recipient_matches = recipients == [recipient_email.casefold()]
     subject_matches = any(token.lower() in record.subject.lower() for token in MANAGER_SUBJECT_TOKENS)
     return sender_matches and recipient_matches and subject_matches
 
@@ -151,11 +154,21 @@ def fetch_records(client: imaplib.IMAP4_SSL, uids: list[str], with_body: bool) -
     return records
 
 
-def accepted_manager_headers(client: imaplib.IMAP4_SSL, uids: list[str], self_email: str) -> tuple[list[MailRecord], list[str]]:
+def accepted_manager_headers(client: imaplib.IMAP4_SSL, uids: list[str], sender_email: str, recipient_email: str) -> tuple[list[MailRecord], list[str]]:
     records = fetch_records(client, uids, with_body=False)
-    accepted = [record for record in records if is_manager_record(record, self_email)]
-    skipped = [record.uid for record in records if not is_manager_record(record, self_email)]
+    accepted = [record for record in records if is_manager_record(record, sender_email, recipient_email)]
+    skipped = [record.uid for record in records if not is_manager_record(record, sender_email, recipient_email)]
     return accepted, skipped
+
+
+def mail_boundary(config: dict[str, str]) -> tuple[str, str]:
+    """Return the exact agent sender and human mailbox recipient boundary."""
+    split_settings = configured_agent_mail()
+    if split_settings is None:
+        return config["user"], config["user"]
+    if config["user"].casefold() != split_settings.human_address.casefold():
+        raise RuntimeError("human cleanup mailbox does not match OMO_HUMAN_EMAIL_ADDRESS")
+    return split_settings.agent_address, split_settings.human_address
 
 
 def open_mailbox(readonly: bool) -> tuple[imaplib.IMAP4_SSL, dict[str, str]]:
@@ -181,8 +194,9 @@ def print_records(records: list[MailRecord]) -> None:
 def cmd_snapshot(_args: argparse.Namespace) -> int:
     client, config = open_mailbox(readonly=True)
     try:
-        uids = manager_unread_uids(client, config["user"])
-        records, skipped = accepted_manager_headers(client, uids, config["user"])
+        sender_email, recipient_email = mail_boundary(config)
+        uids = manager_unread_uids(client, sender_email)
+        records, skipped = accepted_manager_headers(client, uids, sender_email, recipient_email)
         print(f"unread_manager_count={len(records)}")
         if skipped:
             print(f"skipped_boundary_mismatch={len(skipped)}")
@@ -215,7 +229,8 @@ def cmd_export(args: argparse.Namespace) -> int:
     ensure_empty_private_dir(out_dir)
     client, config = open_mailbox(readonly=True)
     try:
-        header_records, skipped = accepted_manager_headers(client, manager_unread_uids(client, config["user"]), config["user"])
+        sender_email, recipient_email = mail_boundary(config)
+        header_records, skipped = accepted_manager_headers(client, manager_unread_uids(client, sender_email), sender_email, recipient_email)
         records = fetch_records(client, [record.uid for record in header_records], with_body=True)
     finally:
         client.logout()
@@ -246,12 +261,13 @@ def cmd_trash_superseded(args: argparse.Namespace) -> int:
         return 2
     client, config = open_mailbox(readonly=False)
     try:
+        sender_email, recipient_email = mail_boundary(config)
         if not mailbox_exists(client, TRASH_MAILBOX):
             print(f"refusing because mailbox is missing: {TRASH_MAILBOX}", file=sys.stderr)
             return 1
         still_in_inbox = inbox_subset(client, requested)
         records = fetch_records(client, still_in_inbox, with_body=False)
-        bad = [record.uid for record in records if not is_manager_record(record, config["user"])]
+        bad = [record.uid for record in records if not is_manager_record(record, sender_email, recipient_email)]
         if bad:
             print(f"refusing boundary mismatch uids={','.join(bad)}", file=sys.stderr)
             return 1

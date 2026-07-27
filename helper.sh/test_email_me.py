@@ -680,6 +680,46 @@ class EmailMeTests(unittest.TestCase):
         self.assertEqual("<prior@example.test>", sent_messages[0]["In-Reply-To"])
         self.assertEqual("<root@example.test> <prior@example.test>", sent_messages[0]["References"])
 
+    def test_split_smtp_sends_from_agent_only_to_configured_human(self) -> None:
+        sent_messages = []
+
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+            app_password = "secret"
+
+        class FakeSmtp:
+            login_args: tuple[str, str] | None = None
+
+            def __init__(self, **_kwargs: object) -> None:
+                return None
+
+            def __enter__(self) -> "FakeSmtp":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def login(self, sender: str, password: str) -> None:
+                self.login_args = (sender, password)
+
+            def send_message(self, msg: object) -> None:
+                sent_messages.append(msg)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            body = Path(tmp) / "body.md"
+            body.write_text("body\n", encoding="utf-8")
+            with (
+                patch.dict(os.environ, {"OMO_MANAGER_STATE_DIR": str(Path(tmp) / "state")}, clear=False),
+                patch.object(email_me, "configured_agent_mail", return_value=Settings()),
+                patch.object(email_me, "prepare_subject_and_headers", return_value=("[a] [wl:1] Topic", {})),
+                patch.object(email_me.smtplib, "SMTP_SSL", FakeSmtp),
+                patch.object(email_me.ssl, "create_default_context", return_value=None),
+            ):
+                self.assertEqual(0, email_me.main(["--manager-human", "--tmux-target", "wl:1", "--subject", "Topic", "--message-file", str(body)]))
+        self.assertEqual("agent@example.test", sent_messages[0]["From"])
+        self.assertEqual("human@example.test", sent_messages[0]["To"])
+
 
 if __name__ == "__main__":
     _ = unittest.main()

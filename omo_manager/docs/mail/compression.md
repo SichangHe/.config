@@ -19,18 +19,13 @@ Workflow:
 - report topics, counts, UID boundary, replacement subjects, skipped boundary, and verification
 - delete the private export directory when raw local copies are no longer needed
 
-Trigger:
-- `email_idle_watcher.py` queues this workflow when unread manager mail is more than `16`
-- the trigger creates manager work only
-- summaries and trash movement still require the explicit workflow above
-
 Safety:
 - keep private bodies in `/tmp` or another owner-only scratch directory
 - export refuses a non-empty output directory
-- snapshot/export search only `INBOX` unread self-addressed manager mail with `[a]` or old `[omo_manager]`
+- snapshot/export use the human mailbox config and search only unread mail from the configured agent address to the configured human address with `[a]` or old `[omo_manager]`
 - the helper re-parses headers and skips boundary mismatches before exporting bodies
 - `trash-superseded` acts only on the explicit UID list
-- before moving mail, `trash-superseded` rechecks each UID is still self-addressed manager mail in `INBOX`
+- before moving mail, `trash-superseded` rechecks each UID still matches that sender/recipient boundary in `INBOX`
 - the helper moves only explicit superseded source mail to `[Gmail]/Trash`
 - it never expunges or permanently deletes message bodies
 

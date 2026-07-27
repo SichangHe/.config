@@ -28,12 +28,14 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 try:
+    from .omo_email_config import GMAIL_IMAP_HOST, configured_agent_mail, human_config_path
     from .omo_email_subject import subject_base
     from .omo_agent_status import TaskFrontmatterError, parse_task_metadata
     from .omo_task_lock import task_file_lock
     from .omo_tmux_send import CodexSendOptions, DEFAULT_TMUX_ENTER_COUNT, require_sendable_codex_target, send_to_codex
 except ImportError:
     try:
+        from omo_email_config import GMAIL_IMAP_HOST, configured_agent_mail, human_config_path
         from omo_email_subject import subject_base
         from omo_agent_status import TaskFrontmatterError, parse_task_metadata
         from omo_task_lock import task_file_lock
@@ -64,7 +66,7 @@ DEFAULT_ROOT = Path(os.environ.get("OMO_WORK_LOGS_ROOT", Path.home() / "work_log
 DEFAULT_MANAGER_URL = os.environ.get("OMO_MANAGER_URL", "http://127.0.0.1:18790")
 DEFAULT_MANAGER_TARGET = os.environ.get("OMO_MANAGER_TMUX_TARGET", "")
 DEFAULT_MAIL_DIR = Path(os.environ.get("OMO_MANAGER_MAIL_DIR", DEFAULT_ROOT / "manager_mail"))
-CONFIG_PATH = Path(os.environ.get("OMO_EMAIL_CONFIG_PATH", Path.home() / ".config/himalaya/config.toml"))
+CONFIG_PATH = human_config_path()
 MANAGER_REPLY_PREFIX = "Re: [a]"
 MANAGER_SUBJECT_TOKEN = "[a]"
 MANAGER_SUBJECT_TOKENS = (MANAGER_SUBJECT_TOKEN, "[omo_manager]")
@@ -152,6 +154,9 @@ class Args:
     unread_compression_threshold: int = DEFAULT_MANAGER_UNREAD_COMPRESSION_THRESHOLD
     recent_cleanup_threshold: int = DEFAULT_MANAGER_RECENT_CLEANUP_THRESHOLD
     recent_cleanup_window_s: float = DEFAULT_MANAGER_RECENT_CLEANUP_WINDOW_S
+    require_subject_tag: bool = True
+    mail_thresholds: bool = True
+    inbox_identity: str = ""
 
 
 class ParsedArgs(argparse.Namespace):
@@ -252,6 +257,36 @@ def message_text(msg: Message) -> str:
 
 def from_self(sender: str, self_email: str) -> bool:
     return parseaddr(sender)[1].lower() == self_email.lower()
+
+
+def exact_human_sender(msg: Message, human_email: str, require_transport_identity: bool) -> bool:
+    """Validate the visible sender and, in split mode, Gmail's transport sender."""
+    if not from_self(str(msg.get("From", "")), human_email):
+        return False
+    sender_header = str(msg.get("Sender", ""))
+    if sender_header and not from_self(sender_header, human_email):
+        return False
+    if not require_transport_identity:
+        return True
+    return_path = str(msg.get("Return-Path", ""))
+    return from_self(return_path, human_email) and gmail_spf_authenticated_sender(msg, human_email)
+
+
+def gmail_spf_authenticated_sender(msg: Message, sender_email: str) -> bool:
+    """Require Gmail's top authentication result to pass SPF for the exact sender."""
+    escaped_sender = re.escape(sender_email.casefold())
+    headers = msg.get_all("Authentication-Results", [])
+    if not headers:
+        return False
+    parts = str(headers[0]).split(";")
+    if parts[0].strip().casefold() not in TRUSTED_AUTH_SERVERS:
+        return False
+    clean_segments = [" ".join(segment.casefold().split()) for segment in parts[1:]]
+    return any(
+        re.search(r"(?:^|\s)spf=pass(?:\s|$)", segment) is not None
+        and re.search(rf"(?:^|\s)smtp\.mailfrom={escaped_sender}(?:\s|$)", segment) is not None
+        for segment in clean_segments
+    )
 
 
 def email_domain(address: str) -> str:
@@ -574,15 +609,34 @@ def source_ref(root: Path, txt_path: Path) -> Path:
 
 
 def processed_uids_path(args: Args) -> Path:
-    return args.state_dir / "email-processed-uids.tsv"
+    return email_uid_state_path(args, "email-processed-uids")
 
 
 def ignored_uids_path(args: Args) -> Path:
-    return args.state_dir / "email-ignored-uids.tsv"
+    return email_uid_state_path(args, "email-ignored-uids")
 
 
 def unaccepted_pending_uids_path(args: Args) -> Path:
-    return args.state_dir / "email-unaccepted-pending-uids.tsv"
+    return email_uid_state_path(args, "email-unaccepted-pending-uids")
+
+
+def email_uid_state_path(args: Args, stem: str) -> Path:
+    """Keep Gmail UID state separate when the watched mailbox changes."""
+    if not args.inbox_identity:
+        return args.state_dir / f"{stem}.tsv"
+    mailbox_id = hashlib.sha256(args.inbox_identity.strip().casefold().encode()).hexdigest()[:12]
+    return args.state_dir / f"{stem}-{mailbox_id}.tsv"
+
+
+def mailbox_state_identity(client: imaplib.IMAP4_SSL, mailbox_address: str) -> str:
+    """Bind Gmail UID state to the mailbox's current UIDVALIDITY epoch."""
+    typ, data = client.response("UIDVALIDITY")
+    if typ != "UIDVALIDITY" or not data or not data[0]:
+        raise RuntimeError("email watcher could not read mailbox UIDVALIDITY")
+    raw_epoch = data[0].decode() if isinstance(data[0], bytes) else str(data[0])
+    if not raw_epoch.isdecimal():
+        raise RuntimeError("email watcher received invalid mailbox UIDVALIDITY")
+    return f"{mailbox_address.casefold()}\0{raw_epoch}"
 
 
 def manager_mail_counts_path(args: Args) -> Path:
@@ -1165,7 +1219,7 @@ def write_mail(args: Args, uid: str, msg: Message, _sender: str, subject: str) -
     for created_dir in reversed(missing_dirs):
         fsync_directory(created_dir.parent)
     args.mail_dir.chmod(0o700)
-    txt_path = args.mail_dir / f"{uid}.txt"
+    txt_path = args.mail_dir / mail_artifact_name(args, uid)
     body = f"Subject: {normalize_human_subject(subject)}\n\n{message_text(msg)}"
     fd = os.open(txt_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -1174,6 +1228,14 @@ def write_mail(args: Args, uid: str, msg: Message, _sender: str, subject: str) -
         os.fsync(handle.fileno())
     fsync_directory(args.mail_dir)
     return txt_path
+
+
+def mail_artifact_name(args: Args, uid: str) -> str:
+    """Keep durable mail pointers unique across mailboxes and UID epochs."""
+    if not args.inbox_identity:
+        return f"{uid}.txt"
+    mailbox_id = hashlib.sha256(args.inbox_identity.strip().casefold().encode()).hexdigest()[:12]
+    return f"{mailbox_id}-{uid}.txt"
 
 
 def write_private_temp(text: str, suffix: str) -> Path:
@@ -1289,6 +1351,19 @@ def search_uids(client: imaplib.IMAP4_SSL, subject: str, self_email: str, proces
     return candidate_uids
 
 
+def search_sender_uids(client: imaplib.IMAP4_SSL, sender_email: str, processed_uids: set[str]) -> set[bytes]:
+    """Find new mail from the only authorized human sender, regardless of subject."""
+    candidate_uids: set[bytes] = set()
+    typ, data = client.uid("search", "UNSEEN", "FROM", f'"{sender_email}"')
+    if typ == "OK" and data and data[0]:
+        candidate_uids.update(data[0].split())
+    if processed_uids:
+        typ, data = client.uid("search", None, "UID", uid_search_range(processed_uids), "FROM", f'"{sender_email}"')
+        if typ == "OK" and data and data[0]:
+            candidate_uids.update(data[0].split())
+    return candidate_uids
+
+
 def chunks(values: list[str], n_values: int) -> list[list[str]]:
     return [values[idx : idx + n_values] for idx in range(0, len(values), n_values)]
 
@@ -1297,6 +1372,16 @@ def search_processed_uids(client: imaplib.IMAP4_SSL, subject: str, self_email: s
     candidate_uids: set[bytes] = set()
     for uid_chunk in chunks(uids, 50):
         typ, data = client.uid("search", None, "UID", ",".join(uid_chunk), "FROM", f'"{self_email}"', "SUBJECT", f'"{subject}"')
+        if typ == "OK" and data and data[0]:
+            candidate_uids.update(data[0].split())
+    return candidate_uids
+
+
+def search_processed_sender_uids(client: imaplib.IMAP4_SSL, sender_email: str, uids: list[str]) -> set[bytes]:
+    """Retry explicitly unaccepted mail from the authorized human sender."""
+    candidate_uids: set[bytes] = set()
+    for uid_chunk in chunks(uids, 50):
+        typ, data = client.uid("search", None, "UID", ",".join(uid_chunk), "FROM", f'"{sender_email}"')
         if typ == "OK" and data and data[0]:
             candidate_uids.update(data[0].split())
     return candidate_uids
@@ -1423,6 +1508,8 @@ def handle_manager_mail_thresholds(client: imaplib.IMAP4_SSL, args: Args) -> boo
 
 
 def maybe_handle_manager_mail_thresholds(client: imaplib.IMAP4_SSL, args: Args) -> bool:
+    if not args.mail_thresholds:
+        return False
     try:
         return handle_manager_mail_thresholds(client, args)
     except (OSError, RuntimeError, imaplib.IMAP4.error) as exc:
@@ -1501,13 +1588,20 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
     handled = False
     manager_file = current_manager_file(args)
     candidate_uids: set[bytes] = set()
-    for subject_prefix in NORMAL_REPLY_SEARCH_PREFIXES:
-        candidate_uids.update(search_uids(client, subject_prefix, args.self_email, processed_uids))
-    if unaccepted_pending_uids:
+    if args.require_subject_tag:
         for subject_prefix in NORMAL_REPLY_SEARCH_PREFIXES:
-            candidate_uids.update(search_processed_uids(client, subject_prefix, args.self_email, sorted(unaccepted_pending_uids, key=lambda value: int(value))))
-    for subject in RECOVERY_SUBJECTS:
-        candidate_uids.update(search_uids(client, subject, args.self_email, processed_uids))
+            candidate_uids.update(search_uids(client, subject_prefix, args.self_email, processed_uids))
+    else:
+        candidate_uids.update(search_sender_uids(client, args.self_email, processed_uids))
+    if unaccepted_pending_uids:
+        if args.require_subject_tag:
+            for subject_prefix in NORMAL_REPLY_SEARCH_PREFIXES:
+                candidate_uids.update(search_processed_uids(client, subject_prefix, args.self_email, sorted(unaccepted_pending_uids, key=lambda value: int(value))))
+        else:
+            candidate_uids.update(search_processed_sender_uids(client, args.self_email, sorted(unaccepted_pending_uids, key=lambda value: int(value))))
+    if args.require_subject_tag:
+        for subject in RECOVERY_SUBJECTS:
+            candidate_uids.update(search_uids(client, subject, args.self_email, processed_uids))
     if not candidate_uids:
         logging.info("email scan complete: n=0 processed_next=%s manager_file=%s", uid_search_range(processed_uids), manager_file)
         return maybe_handle_manager_mail_thresholds(client, args)
@@ -1516,7 +1610,7 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
         uid = raw_uid.decode()
         if uid in ignored_uids:
             continue
-        expected_txt_path = args.mail_dir / f"{uid}.txt"
+        expected_txt_path = args.mail_dir / mail_artifact_name(args, uid)
         pending_ref = existing_source_pending_path_line_in_root(args.root, expected_txt_path, manager_file) if uid in unaccepted_pending_uids else None
         if pending_ref is not None:
             pending_file, pending_line = pending_ref
@@ -1587,7 +1681,9 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
         msg = BytesParser(policy=policy.default).parsebytes(msg_data[0][1])
         sender = str(msg.get("From", ""))
         subject = str(msg.get("Subject", ""))
-        if not (is_manager_subject(subject) or is_recovery_subject(subject)) or not from_self(sender, args.self_email):
+        subject_accepted = not args.require_subject_tag or is_manager_subject(subject) or is_recovery_subject(subject)
+        sender_accepted = exact_human_sender(msg, args.self_email, require_transport_identity=not args.require_subject_tag)
+        if not subject_accepted or not sender_accepted:
             logging.warning("email candidate rejected after fetch: uid=%s subject=%r from_self=%s", uid, subject, from_self(sender, args.self_email))
             continue
         if manager_authored_message(msg, args.self_email):
@@ -1705,24 +1801,35 @@ def watch_inbox(client: imaplib.IMAP4_SSL, args: Args) -> int:
 
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
-    config = parse_env_config(CONFIG_PATH)
+    try:
+        split_settings = configured_agent_mail()
+    except ValueError as exc:
+        print(f"email_idle_watcher: {exc}", file=sys.stderr)
+        return 1
+    config = (
+        {"host": GMAIL_IMAP_HOST, "user": split_settings.agent_address, "password": split_settings.app_password}
+        if split_settings is not None
+        else parse_env_config(CONFIG_PATH)
+    )
     missing = {"host", "user", "password"} - set(config)
     if missing:
         print(f"email_idle_watcher: missing config keys {sorted(missing)} in {CONFIG_PATH}", file=sys.stderr)
         return 1
-    safe_args = Args(args.root, args.manager_url, args.mail_dir, args.state_dir, args.manager_file, args.once, config["user"], args.recovery_debounce_s, args.restart_script, args.idle_wait_s, args.manager_target, args.imap_timeout_s, args.pull_interval_s, args.idle_exit_after_s, args.unread_compression_threshold, args.recent_cleanup_threshold, args.recent_cleanup_window_s)
+    accepted_human = split_settings.human_address if split_settings is not None else config["user"]
+    safe_args = Args(args.root, args.manager_url, args.mail_dir, args.state_dir, args.manager_file, args.once, accepted_human, args.recovery_debounce_s, args.restart_script, args.idle_wait_s, args.manager_target, args.imap_timeout_s, args.pull_interval_s, args.idle_exit_after_s, args.unread_compression_threshold, args.recent_cleanup_threshold, args.recent_cleanup_window_s, require_subject_tag=split_settings is None, mail_thresholds=split_settings is None, inbox_identity=config["user"] if split_settings is not None else "")
     logging.info("email watcher starting: root=%s mail_dir=%s state_dir=%s manager_target=%s manager_url=%s idle_wait_s=%s imap_timeout_s=%s pull_interval_s=%s idle_exit_after_s=%s unread_compression_threshold=%s recent_cleanup_threshold=%s recent_cleanup_window_s=%s", safe_args.root, safe_args.mail_dir, safe_args.state_dir, safe_args.manager_target or "unset", safe_args.manager_url or "unset", safe_args.idle_wait_s, safe_args.imap_timeout_s, safe_args.pull_interval_s, safe_args.idle_exit_after_s, safe_args.unread_compression_threshold, safe_args.recent_cleanup_threshold, int(safe_args.recent_cleanup_window_s))
     while True:
         try:
             with imaplib.IMAP4_SSL(config["host"], timeout=safe_args.imap_timeout_s) as client:
                 client.login(config["user"], config["password"])
                 client.select("INBOX")
+                runtime_args = replace(safe_args, inbox_identity=mailbox_state_identity(client, config["user"])) if split_settings is not None else safe_args
                 logging.info("email watcher connected and selected INBOX")
-                if safe_args.once:
-                    handle_unseen(client, safe_args)
+                if runtime_args.once:
+                    handle_unseen(client, runtime_args)
                     wait_email_pushes()
                     return 0
-                result = watch_inbox(client, safe_args)
+                result = watch_inbox(client, runtime_args)
                 wait_email_pushes()
                 return result
         except Exception as exc:

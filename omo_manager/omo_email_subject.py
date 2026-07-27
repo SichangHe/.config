@@ -18,8 +18,13 @@ from email.parser import BytesParser
 from email.utils import parseaddr, parsedate_to_datetime
 from pathlib import Path
 
+try:
+    from .omo_email_config import GMAIL_IMAP_HOST, configured_agent_mail, human_config_path
+except ImportError:
+    from omo_email_config import GMAIL_IMAP_HOST, configured_agent_mail, human_config_path
+
 SHORT_MANAGER_TAG = "[a]"
-CONFIG_PATH = Path(os.environ.get("OMO_EMAIL_CONFIG_PATH", Path.home() / ".config/himalaya/config.toml"))
+CONFIG_PATH = human_config_path()
 SUBJECT_TAG_RE = re.compile(r"^\s*\[(?:a|omo_manager|omo)\]\s*", re.IGNORECASE)
 MANAGER_TAG_RE = re.compile(r"^\s*(?:\[a\]|\[omo_manager\])\s*", re.IGNORECASE)
 RESERVED_AGENT_TAG_RE = re.compile(r"^(?:re:\s*)*\[omo\]\s*", re.IGNORECASE)
@@ -187,7 +192,12 @@ def find_recent_thread(subject_key: str) -> RecentHeader | None:
     lookup_s = int(os.environ.get("OMO_MANAGER_EMAIL_THREAD_LOOKUP_S", str(DEFAULT_THREAD_LOOKUP_WINDOW_S)))
     if lookup_s <= 0:
         return None
-    config = parse_env_config(Path(os.environ.get("OMO_EMAIL_CONFIG_PATH", CONFIG_PATH)))
+    split_settings = configured_agent_mail()
+    config = (
+        {"host": GMAIL_IMAP_HOST, "user": split_settings.agent_address, "password": split_settings.app_password}
+        if split_settings is not None
+        else parse_env_config(Path(os.environ.get("OMO_EMAIL_CONFIG_PATH", CONFIG_PATH)))
+    )
     if not {"host", "user", "password"} <= set(config):
         return None
     cutoff = datetime.now().astimezone() - timedelta(seconds=lookup_s)
@@ -196,20 +206,35 @@ def find_recent_thread(subject_key: str) -> RecentHeader | None:
     timed_out = False
     try:
         client.login(config["user"], config["password"])
-        typ, _data = client.select("INBOX", readonly=True)
-        if typ != "OK":
-            return None
-        typ, data = client.uid("search", None, "SINCE", cutoff.strftime("%d-%b-%Y"), "FROM", f'"{config["user"]}"')
-        if typ != "OK" or not data or not data[0]:
-            return None
-        for raw_uid in data[0].split():
-            uid = raw_uid.decode() if isinstance(raw_uid, bytes) else str(raw_uid)
-            header = fetch_recent_header(client, uid)
-            if header is None or header.date is None or header.date < cutoff:
+        mailbox_searches = (
+            [
+                ("[Gmail]/Sent Mail", split_settings.agent_address, split_settings.human_address),
+                ("INBOX", split_settings.human_address, split_settings.agent_address),
+            ]
+            if split_settings is not None
+            else [("INBOX", config["user"], "")]
+        )
+        best: RecentHeader | None = None
+        for mailbox, sender, recipient in mailbox_searches:
+            typ, _data = client.select(mailbox, readonly=True)
+            if typ != "OK":
                 continue
-            if parseaddr(header.sender)[1].lower() == config["user"].lower() and normalized_subject_key(header.subject) == subject_key:
-                return header
-        return None
+            criteria = ["SINCE", cutoff.strftime("%d-%b-%Y"), "FROM", f'"{sender}"']
+            if recipient:
+                criteria.extend(["TO", f'"{recipient}"'])
+            typ, data = client.uid("search", None, *criteria)
+            if typ != "OK" or not data or not data[0]:
+                continue
+            for raw_uid in data[0].split():
+                uid = raw_uid.decode() if isinstance(raw_uid, bytes) else str(raw_uid)
+                header = fetch_recent_header(client, uid)
+                if header is None or header.date is None or header.date < cutoff:
+                    continue
+                if parseaddr(header.sender)[1].casefold() != sender.casefold() or normalized_subject_key(header.subject) != subject_key:
+                    continue
+                if best is None or best.date is None or header.date > best.date:
+                    best = header
+        return best
     except SubjectLookupTimeout:
         timed_out = True
         raise

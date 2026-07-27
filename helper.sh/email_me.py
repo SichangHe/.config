@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""Email the human using Gmail SMTP.
-
-Credentials are loaded from `~/.config/.env`:
-- `EMAIL_ME_GMAIL_ADDRESS`
-- `EMAIL_ME_GMAIL_APP_PASSWORD`
-"""
+"""Email the configured human from the agent Gmail account."""
 
 from __future__ import annotations
 
@@ -31,8 +26,10 @@ MANAGER_DIR = Path(__file__).resolve().parents[1] / "omo_manager"
 if MANAGER_DIR.is_dir():
     sys.path.insert(0, str(MANAGER_DIR))
 try:
+    from omo_email_config import configured_agent_mail
     from omo_email_subject import SubjectInputError, canonical_tmux_target, normalized_subject_key, prepare_subject, prepare_subject_and_headers, reply_headers_for_subject, strip_leading_tmux_tags
 except ImportError:
+    configured_agent_mail = None
     SubjectInputError = ValueError
     canonical_tmux_target = None
     normalized_subject_key = None
@@ -456,12 +453,12 @@ def markdown_to_html(text: str) -> str:
     return f'<!doctype html><html><body style="font-family: -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif; line-height: 1.45;">{body}</body></html>\n'
 
 
-def build_message(sender_email: str, title: str, content: str, add_pwd_footer: bool = True, prepared_subject: str | None = None, reply_headers: dict[str, str] | None = None, tmux_target: str | None = None, manager_human: bool = False) -> EmailMessage:
+def build_message(sender_email: str, title: str, content: str, add_pwd_footer: bool = True, prepared_subject: str | None = None, reply_headers: dict[str, str] | None = None, tmux_target: str | None = None, manager_human: bool = False, recipient_email: str | None = None) -> EmailMessage:
     source_target = footer_tmux_target(tmux_target, manager_human)
     msg = EmailMessage()
     msg.add_header("Subject", prepared_subject or normalize_subject(title, source_target or ""))
     msg.add_header("From", sender_email)
-    msg.add_header("To", sender_email)
+    msg.add_header("To", recipient_email or sender_email)
     if reply_headers is not None:
         for name, value in reply_headers.items():
             msg.add_header(name, value)
@@ -631,12 +628,23 @@ def main(argv: list[str]) -> int:
         else:
             print("Email sent.")
         return 0
-    env_values = parse_env_file(ENV_FILE_PATH)
-    sender_email = env_values.get("EMAIL_ME_GMAIL_ADDRESS", "")
-    app_password = env_values.get("EMAIL_ME_GMAIL_APP_PASSWORD", "")
+    try:
+        split_settings = configured_agent_mail() if configured_agent_mail is not None else None
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    if split_settings is not None:
+        sender_email = split_settings.agent_address
+        recipient_email = split_settings.human_address
+        app_password = split_settings.app_password
+    else:
+        env_values = parse_env_file(ENV_FILE_PATH)
+        sender_email = env_values.get("EMAIL_ME_GMAIL_ADDRESS", "")
+        recipient_email = sender_email
+        app_password = env_values.get("EMAIL_ME_GMAIL_APP_PASSWORD", "")
 
     if not sender_email or not app_password:
-        hint = f"Set EMAIL_ME_GMAIL_ADDRESS and EMAIL_ME_GMAIL_APP_PASSWORD in {ENV_FILE_PATH}."
+        hint = "Set OMO_AGENT_GMAIL_ADDRESS, OMO_AGENT_GMAIL_APP_PASSWORD, and OMO_HUMAN_EMAIL_ADDRESS in ~/.config/omo_manager/local.env."
         print(
             hint,
             file=sys.stderr,
@@ -656,6 +664,7 @@ def main(argv: list[str]) -> int:
             reply_headers=reply_headers,
             tmux_target=subject_tmux_target,
             manager_human=args.manager_human,
+            recipient_email=recipient_email,
         )
     except ValueError as exc:
         print(str(exc), file=sys.stderr)

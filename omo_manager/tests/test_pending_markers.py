@@ -1805,6 +1805,103 @@ class PendingMarkerTests(unittest.TestCase):
         self.assertFalse(watcher.is_manager_subject("Re: pb news setup"))
         self.assertNotIn("Re: pb news", watcher.NORMAL_REPLY_SEARCH_PREFIXES)
 
+    def test_split_email_watcher_accepts_untagged_mail_only_from_human(self) -> None:
+        from omo_manager import email_idle_watcher as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            root.mkdir()
+            state = root / "state"
+            state.mkdir()
+            (state / "email-processed-uids.tsv").write_text("51\tlegacy-mailbox\n", encoding="utf-8")
+            (state / "email-unaccepted-pending-uids.tsv").write_text("51\tlegacy-mailbox\n", encoding="utf-8")
+            (state / "email-ignored-uids.tsv").write_text("51\tlegacy-mailbox\n", encoding="utf-8")
+            msg = EmailMessage()
+            msg["From"] = "Human <human@example.test>"
+            msg["Return-Path"] = "<human@example.test>"
+            msg["Authentication-Results"] = "mx.google.com; spf=pass smtp.mailfrom=human@example.test"
+            msg["Subject"] = "Plain request without routing tag"
+            msg.set_content("Please route this request.")
+
+            class Client:
+                def uid(self, command: str, *args: object) -> tuple[str, list[object]]:
+                    if command == "search":
+                        if '"human@example.test"' not in args:
+                            raise AssertionError(f"search did not use exact human sender: {args}")
+                        return "OK", [b"51"]
+                    if command == "fetch":
+                        return "OK", [(b"RFC822", msg.as_bytes())]
+                    if command == "store":
+                        return "OK", [b""]
+                    raise AssertionError(command)
+
+            manager_file = root / "work_manager_today.md"
+            args = watcher.Args(root, "", root / "manager_mail", state, manager_file, True, "human@example.test", 0, Path("/bin/false"), manager_target="wl:1", require_subject_tag=False, mail_thresholds=False, inbox_identity="agent@example.test")
+            self.assertTrue(watcher.handle_unseen(Client(), args))
+            self.assertTrue(watcher.handle_unseen(Client(), args))
+            mail_name = watcher.mail_artifact_name(args, "51")
+            self.assertIn(f"(record and delegate manager_mail/{mail_name})", manager_file.read_text(encoding="utf-8"))
+            self.assertEqual(1, manager_file.read_text(encoding="utf-8").count(f"manager_mail/{mail_name}"))
+            self.assertNotEqual("51.txt", mail_name)
+            self.assertTrue(watcher.processed_uids_path(args).exists())
+            self.assertNotEqual(state / "email-processed-uids.tsv", watcher.processed_uids_path(args))
+
+    def test_split_email_watcher_rejects_wrong_sender_after_fetch(self) -> None:
+        from omo_manager import email_idle_watcher as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            root.mkdir()
+            msg = EmailMessage()
+            msg["From"] = "Human <human@example.test>"
+            msg["Return-Path"] = "<human@example.test>"
+            msg["Authentication-Results"] = "mx.google.com; spf=pass smtp.mailfrom=attacker@example.test"
+            msg["Subject"] = "Plain request"
+            msg.set_content("Must not be accepted.")
+
+            class Client:
+                def uid(self, command: str, *args: object) -> tuple[str, list[object]]:
+                    if command == "search":
+                        return "OK", [b"52"]
+                    if command == "fetch":
+                        return "OK", [(b"RFC822", msg.as_bytes())]
+                    raise AssertionError((command, args))
+
+            manager_file = root / "work_manager_today.md"
+            args = watcher.Args(root, "", root / "manager_mail", root / "state", manager_file, True, "human@example.test", 0, Path("/bin/false"), manager_target="wl:1", require_subject_tag=False, mail_thresholds=False)
+            self.assertFalse(watcher.handle_unseen(Client(), args))
+            self.assertFalse(manager_file.exists())
+
+    def test_split_email_watcher_ignores_forged_lower_auth_result(self) -> None:
+        from omo_manager import email_idle_watcher as watcher
+
+        msg = EmailMessage()
+        msg["From"] = "Human <human@example.test>"
+        msg["Return-Path"] = "<human@example.test>"
+        msg["Authentication-Results"] = "untrusted.example; spf=fail smtp.mailfrom=attacker@example.test"
+        msg["Authentication-Results"] = "mx.google.com; spf=pass smtp.mailfrom=human@example.test"
+        self.assertFalse(watcher.exact_human_sender(msg, "human@example.test", require_transport_identity=True))
+
+    def test_split_email_uid_state_changes_with_uidvalidity(self) -> None:
+        from omo_manager import email_idle_watcher as watcher
+
+        class Client:
+            def __init__(self, epoch: bytes) -> None:
+                self.epoch = epoch
+
+            def response(self, name: str) -> tuple[str, list[bytes]]:
+                self.assert_uidvalidity(name)
+                return "UIDVALIDITY", [self.epoch]
+
+            @staticmethod
+            def assert_uidvalidity(name: str) -> None:
+                if name != "UIDVALIDITY":
+                    raise AssertionError(name)
+
+        first = watcher.mailbox_state_identity(Client(b"100"), "agent@example.test")
+        second = watcher.mailbox_state_identity(Client(b"101"), "agent@example.test")
+        self.assertNotEqual(first, second)
+
     def test_email_subject_normalization_strips_re_and_manager_tags(self) -> None:
         self.assertEqual("topic", normalized_subject_key("Re: Re: [a] Topic"))
         self.assertEqual("topic", normalized_subject_key("Re:[omo_manager] Topic"))
@@ -1912,6 +2009,41 @@ class PendingMarkerTests(unittest.TestCase):
         assert header is not None
         self.assertEqual("<prior@example.test>", header.message_id)
         self.assertEqual("<root@example.test>", header.references)
+
+    def test_email_subject_lookup_uses_agent_inbox_in_split_mode(self) -> None:
+        from omo_manager import omo_email_subject as subject
+
+        calls: list[tuple[object, ...]] = []
+
+        class Settings:
+            agent_address = "agent@example.test"
+            app_password = "secret"
+            human_address = "human@example.test"
+
+        class FakeClient:
+            def __init__(self, host: str, timeout: float) -> None:
+                calls.append(("connect", host, timeout))
+
+            def login(self, user: str, password: str) -> None:
+                calls.append(("login", user, password))
+
+            def select(self, mailbox: str, readonly: bool) -> tuple[str, list[bytes]]:
+                calls.append(("select", mailbox, readonly))
+                return "OK", []
+
+            def uid(self, command: str, *args: str) -> tuple[str, list[bytes]]:
+                calls.append((command, *args))
+                return "OK", [b""]
+
+            def logout(self) -> None:
+                return None
+
+        with patch.object(subject, "configured_agent_mail", return_value=Settings()), patch.object(subject.imaplib, "IMAP4_SSL", FakeClient):
+            self.assertIsNone(subject.find_recent_thread("topic"))
+        self.assertIn(("connect", "imap.gmail.com", 10.0), calls)
+        self.assertIn(("login", "agent@example.test", "secret"), calls)
+        self.assertIn(("select", "[Gmail]/Sent Mail", True), calls)
+        self.assertTrue(any(call[0] == "search" and '"human@example.test"' in call for call in calls))
 
     def test_email_subject_lookup_error_falls_back_to_new_tag(self) -> None:
         from omo_manager import omo_email_subject as subject

@@ -23,18 +23,26 @@ env_state_dir="${OMO_MANAGER_STATE_DIR+x}${OMO_MANAGER_STATE_DIR-}"
 env_mail_dir="${OMO_MANAGER_MAIL_DIR+x}${OMO_MANAGER_MAIL_DIR-}"
 env_email_enable="${OMO_MANAGER_ENABLE_EMAIL_WATCHER+x}${OMO_MANAGER_ENABLE_EMAIL_WATCHER-}"
 env_email_config="${OMO_EMAIL_CONFIG_PATH+x}${OMO_EMAIL_CONFIG_PATH-}"
+env_agent_email="${OMO_AGENT_GMAIL_ADDRESS+x}${OMO_AGENT_GMAIL_ADDRESS-}"
+env_agent_password="${OMO_AGENT_GMAIL_APP_PASSWORD+x}${OMO_AGENT_GMAIL_APP_PASSWORD-}"
+env_human_email="${OMO_HUMAN_EMAIL_ADDRESS+x}${OMO_HUMAN_EMAIL_ADDRESS-}"
+env_human_config="${OMO_HUMAN_EMAIL_CONFIG_PATH+x}${OMO_HUMAN_EMAIL_CONFIG_PATH-}"
 local_env="${OMO_MANAGER_LOCAL_ENV:-$HOME/.config/omo_manager/local.env}"
 if [ -f "$local_env" ]; then
   # shellcheck disable=SC1090
   source "$local_env"
 fi
-[ -n "$env_manager_url" ] && OMO_MANAGER_URL="${env_manager_url#x}"
-[ -n "$env_manager_target" ] && OMO_MANAGER_TMUX_TARGET="${env_manager_target#x}"
-[ -n "$env_root" ] && OMO_WORK_LOGS_ROOT="${env_root#x}"
-[ -n "$env_state_dir" ] && OMO_MANAGER_STATE_DIR="${env_state_dir#x}"
-[ -n "$env_mail_dir" ] && OMO_MANAGER_MAIL_DIR="${env_mail_dir#x}"
-[ -n "$env_email_enable" ] && OMO_MANAGER_ENABLE_EMAIL_WATCHER="${env_email_enable#x}"
-[ -n "$env_email_config" ] && OMO_EMAIL_CONFIG_PATH="${env_email_config#x}"
+[ -n "${env_manager_url#x}" ] && OMO_MANAGER_URL="${env_manager_url#x}"
+[ -n "${env_manager_target#x}" ] && OMO_MANAGER_TMUX_TARGET="${env_manager_target#x}"
+[ -n "${env_root#x}" ] && OMO_WORK_LOGS_ROOT="${env_root#x}"
+[ -n "${env_state_dir#x}" ] && OMO_MANAGER_STATE_DIR="${env_state_dir#x}"
+[ -n "${env_mail_dir#x}" ] && OMO_MANAGER_MAIL_DIR="${env_mail_dir#x}"
+[ -n "${env_email_enable#x}" ] && OMO_MANAGER_ENABLE_EMAIL_WATCHER="${env_email_enable#x}"
+[ -n "${env_email_config#x}" ] && OMO_EMAIL_CONFIG_PATH="${env_email_config#x}"
+[ -n "${env_agent_email#x}" ] && OMO_AGENT_GMAIL_ADDRESS="${env_agent_email#x}"
+[ -n "${env_agent_password#x}" ] && OMO_AGENT_GMAIL_APP_PASSWORD="${env_agent_password#x}"
+[ -n "${env_human_email#x}" ] && OMO_HUMAN_EMAIL_ADDRESS="${env_human_email#x}"
+[ -n "${env_human_config#x}" ] && OMO_HUMAN_EMAIL_CONFIG_PATH="${env_human_config#x}"
 root="${OMO_WORK_LOGS_ROOT:-$HOME/work_logs}"
 manager_url="${OMO_MANAGER_URL:-}"
 manager_target="${OMO_MANAGER_TMUX_TARGET:-}"
@@ -42,6 +50,9 @@ state_base="${XDG_STATE_HOME:-$HOME/.local/state}/omo-manager"
 state_dir="${OMO_MANAGER_STATE_DIR:-$state_base}"
 email_enable="${OMO_MANAGER_ENABLE_EMAIL_WATCHER:-auto}"
 email_config="${OMO_EMAIL_CONFIG_PATH:-$HOME/.config/himalaya/config.toml}"
+agent_email="${OMO_AGENT_GMAIL_ADDRESS:-}"
+agent_password="${OMO_AGENT_GMAIL_APP_PASSWORD:-}"
+human_email="${OMO_HUMAN_EMAIL_ADDRESS:-}"
 mail_dir="${OMO_MANAGER_MAIL_DIR:-$root/manager_mail}"
 email_supervisor_startup_grace_s="${OMO_MANAGER_EMAIL_SUPERVISOR_STARTUP_GRACE_S:-2}"
 watcher_health_timeout_s="${OMO_MANAGER_WATCHER_HEALTH_TIMEOUT_S:-5}"
@@ -57,6 +68,10 @@ export OMO_WORK_LOGS_ROOT="$root"
 export OMO_MANAGER_STATE_DIR="$state_dir"
 export OMO_MANAGER_EMAIL_SUPERVISOR_STARTUP_GRACE_S="$email_supervisor_startup_grace_s"
 export OMO_MANAGER_MAIL_DIR="$mail_dir"
+export OMO_AGENT_GMAIL_ADDRESS="$agent_email"
+export OMO_AGENT_GMAIL_APP_PASSWORD="$agent_password"
+export OMO_HUMAN_EMAIL_ADDRESS="$human_email"
+export OMO_HUMAN_EMAIL_CONFIG_PATH="${OMO_HUMAN_EMAIL_CONFIG_PATH:-$email_config}"
 mkdir -p -m 700 "$state_dir"
 chmod 700 "$state_dir"
 exec 8>"$state_dir/watchers.lock"
@@ -70,10 +85,18 @@ if [ -z "$manager_url" ] && [ -z "$manager_target" ]; then
 fi
 echo "manager_target=${manager_target:-unset} manager_url=${manager_url:-unset}"
 start_email=0
+split_email_values=0
+[ -n "$agent_email" ] && split_email_values=$((split_email_values + 1))
+[ -n "$agent_password" ] && split_email_values=$((split_email_values + 1))
+[ -n "$human_email" ] && split_email_values=$((split_email_values + 1))
+if [ "$split_email_values" -ne 0 ] && [ "$split_email_values" -ne 3 ]; then
+  echo "split email setup requires OMO_AGENT_GMAIL_ADDRESS, OMO_AGENT_GMAIL_APP_PASSWORD, and OMO_HUMAN_EMAIL_ADDRESS together" >&2
+  exit 2
+fi
 case "$email_enable" in
   1|true|yes) start_email=1 ;;
   0|false|no) start_email=0 ;;
-  auto) [ -f "$email_config" ] && start_email=1 || start_email=0 ;;
+  auto) { [ "$split_email_values" -eq 3 ] || [ -f "$email_config" ]; } && start_email=1 || start_email=0 ;;
   *) echo "OMO_MANAGER_ENABLE_EMAIL_WATCHER must be auto, true, or false" >&2; exit 2 ;;
 esac
 
@@ -486,7 +509,7 @@ done
   write_pidfile email "$email_pid" "$email_token"
   echo "started email watcher supervisor pid=$email_pid log=$state_dir/email-watch.log mail_dir=$mail_dir"
 else
-  echo "skipped email watcher; set OMO_MANAGER_ENABLE_EMAIL_WATCHER=true and OMO_EMAIL_CONFIG_PATH to enable"
+  echo "skipped email watcher; configure the split agent/human email values or enable the legacy email config"
 fi
 if ! wait_supervised_child pending "$pending_pid" "$helper_dir/omo_pending_watch.py" "$watcher_health_timeout_s" "$state_dir/pending-watch.log"; then
   if [ "$start_email" -eq 1 ]; then

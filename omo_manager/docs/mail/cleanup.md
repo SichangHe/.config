@@ -4,13 +4,13 @@ Use this when stale manager-human email threads should be moved out of `INBOX`.
 This workflow is reversible cleanup: move mail to `[Gmail]/Trash`, never expunge.
 
 Scope:
-- manager-human `[a]` mail
+- agent-to-human `[a]` mail
 - old `[omo_manager]` mail for compatibility
 - `INBOX` only
 
 Classify read-only:
-- open `INBOX` with the config used by `email_idle_watcher.py`
-- search self-addressed manager mail in scope
+- open the human `INBOX` with `OMO_HUMAN_EMAIL_CONFIG_PATH`
+- search mail from the exact configured agent address to the exact configured human address
 - fetch only flags, size, thread id, date, and subject
 - group by Gmail thread id
 - decide at thread level
@@ -22,11 +22,6 @@ Retain every thread with:
 - link to unresolved `(pending)` email refs in current `work_manager_*.md`
 - long report/update message
 - uncertain routing, active worker relevance, or human-pending relevance
-
-Trigger:
-- `email_idle_watcher.py` queues this workflow when recent manager-human mail within `24` hours is more than `64`
-- the threshold is only a trigger
-- it is not deletion eligibility
 
 Move:
 - rerun the same classification in a read-write `INBOX` session immediately before moving

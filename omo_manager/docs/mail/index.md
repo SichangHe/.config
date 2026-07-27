@@ -1,5 +1,7 @@
 # manager mail
 
+- `accounts.md`
+  - separate agent communication mail from human mailbox cleanup
 - `cleanup.md`
   - clean stale manager-human mail threads conservatively
   - retain unread, recent, active, human-pending, long-report, and uncertain threads

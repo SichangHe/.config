@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from email.message import Message
 from pathlib import Path
 from unittest.mock import patch
 
-from omo_manager.omo_manager_mail_compress import MailRecord, cmd_mark_seen, cmd_trash_superseded, ensure_empty_private_dir, export_body, imap_quoted, is_manager_record, mailbox_exists, parse_uid_text, write_private
+from omo_manager.omo_manager_mail_compress import MailRecord, cmd_mark_seen, cmd_trash_superseded, ensure_empty_private_dir, export_body, imap_quoted, is_manager_record, mail_boundary, mailbox_exists, parse_uid_text, record_from_msg, write_private
 
 
 class FakeClient:
@@ -49,11 +50,13 @@ class ManagerMailCompressTests(unittest.TestCase):
             is_manager_record(
                 MailRecord("1", "", "Human <me@example.test>", "Human <me@example.test>", "Re: [a] x", "sha"),
                 "me@example.test",
+                "me@example.test",
             )
         )
         self.assertTrue(
             is_manager_record(
                 MailRecord("1", "", "Human <me@example.test>", "Human <me@example.test>", "Re: [omo_manager] x", "sha"),
+                "me@example.test",
                 "me@example.test",
             )
         )
@@ -61,11 +64,13 @@ class ManagerMailCompressTests(unittest.TestCase):
             is_manager_record(
                 MailRecord("1", "", "Other <other@example.test>", "Human <me@example.test>", "Re: [omo_manager] x", "sha"),
                 "me@example.test",
+                "me@example.test",
             )
         )
         self.assertFalse(
             is_manager_record(
                 MailRecord("1", "", "me@example.test via Other <other@example.test>", "Human <me@example.test>", "Re: [omo_manager] x", "sha"),
+                "me@example.test",
                 "me@example.test",
             )
         )
@@ -73,14 +78,43 @@ class ManagerMailCompressTests(unittest.TestCase):
             is_manager_record(
                 MailRecord("1", "", "Human <me@example.test>", "Other <other@example.test>", "Re: [omo_manager] x", "sha"),
                 "me@example.test",
+                "me@example.test",
             )
         )
         self.assertFalse(
             is_manager_record(
                 MailRecord("1", "", "Human <me@example.test>", "Human <me@example.test>", "[omo] x", "sha"),
                 "me@example.test",
+                "me@example.test",
             )
         )
+
+    def test_manager_record_boundary_accepts_agent_to_human_mail(self) -> None:
+        self.assertTrue(
+            is_manager_record(
+                MailRecord("1", "", "Agent <agent@example.test>", "Human <human@example.test>", "[a] x", "sha"),
+                "agent@example.test",
+                "human@example.test",
+            )
+        )
+
+    def test_manager_record_boundary_rejects_repeated_address_headers(self) -> None:
+        msg = Message()
+        msg["From"] = "Agent <agent@example.test>"
+        msg["From"] = "Other <other@example.test>"
+        msg["To"] = "Human <human@example.test>"
+        msg["To"] = "Other <other@example.test>"
+        msg["Subject"] = "[a] x"
+        record = record_from_msg("1", msg)
+        self.assertFalse(is_manager_record(record, "agent@example.test", "human@example.test"))
+
+    def test_split_cleanup_rejects_wrong_human_mailbox(self) -> None:
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+
+        with patch("omo_manager.omo_manager_mail_compress.configured_agent_mail", return_value=Settings()), self.assertRaisesRegex(RuntimeError, "does not match"):
+            mail_boundary({"user": "other@example.test"})
 
     def test_imap_quoted_escapes_mailbox_name(self) -> None:
         self.assertEqual('"[Gmail]/Trash"', imap_quoted("[Gmail]/Trash"))

@@ -23,6 +23,7 @@ class WatcherSetupTests(unittest.TestCase):
         email: str = "false",
         health_timeout_s: str = "1",
         email_grace_s: str = "0",
+        extra_env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         home = tmp / "home"
         root = tmp / "work_logs"
@@ -80,6 +81,7 @@ esac
             "FAKE_UV_MODE": fake_uv_mode,
             "FAKE_UV_SLEEP": "5",
         }
+        env.update(extra_env or {})
         return subprocess.run([str(setup)], env=env, text=True, capture_output=True, timeout=8, check=False)
 
     def pid_from_file(self, pid_file: Path) -> int | None:
@@ -228,6 +230,38 @@ esac
             result = self.run_setup(tmp, email="maybe")
             self.assertNotEqual(0, result.returncode)
             self.assertIn("OMO_MANAGER_ENABLE_EMAIL_WATCHER must be auto, true, or false", result.stderr)
+            self.assertFalse((tmp / "state" / "pending-supervisor.pid").exists())
+
+    def test_empty_inherited_values_do_not_erase_local_routing(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            local_env = tmp / "local.env"
+            local_root = tmp / "work_logs"
+            local_env.write_text(
+                f'OMO_WORK_LOGS_ROOT="{local_root}"\nOMO_MANAGER_TMUX_TARGET="wl:1"\n',
+                encoding="utf-8",
+            )
+            try:
+                result = self.run_setup(
+                    tmp,
+                    extra_env={
+                        "OMO_MANAGER_LOCAL_ENV": str(local_env),
+                        "OMO_WORK_LOGS_ROOT": "",
+                        "OMO_MANAGER_TMUX_TARGET": "",
+                    },
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertIn("manager_target=wl:1", result.stdout)
+                self.assertIn(f"--root {local_root}", (tmp / "fake-uv.log").read_text(encoding="utf-8"))
+            finally:
+                self.stop_supervisors(tmp / "state")
+
+    def test_setup_rejects_partial_split_email_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            result = self.run_setup(tmp, extra_env={"OMO_AGENT_GMAIL_ADDRESS": "agent@example.test"})
+            self.assertEqual(2, result.returncode)
+            self.assertIn("requires OMO_AGENT_GMAIL_ADDRESS", result.stderr)
             self.assertFalse((tmp / "state" / "pending-supervisor.pid").exists())
 
     def test_setup_does_not_kill_unowned_email_watcher_processes(self) -> None:
