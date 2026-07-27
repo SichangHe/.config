@@ -468,6 +468,31 @@ class CodexStatusTests(unittest.TestCase):
                 lines = ['────', warning, '› Use /skills to list available skills', '  gpt-5.5']
                 self.assertEqual('error', report_from_lines(lines).status)
 
+    def test_status_error_from_wake_execution_budget_refusal(self) -> None:
+        for refusal in [
+            "• I can’t safely complete another wake prompt in the remaining execution budget.",
+            "I can't safely complete another wake prompt in the remaining execution budget.",
+            "I cannot safely handle this wake prompt within the remaining execution time available.",
+            "I am unable to safely execute the wake prompt in the remaining execution budget.",
+            "I can't safely complete a wake prompt within the remaining execution budget",
+            "I cannot safely handle wake prompt in the remaining execution time!",
+        ]:
+            with self.subTest(refusal=refusal):
+                lines = ['────', refusal, '› Use /skills to list available skills', '  gpt-5.6-terra low']
+                self.assertEqual('error', report_from_lines(lines).status)
+                self.assertEqual([refusal], visible_error_lines(current_block(lines).lines))
+
+    def test_wake_execution_budget_text_in_input_is_not_an_error(self) -> None:
+        lines = [
+            '────',
+            '• Done.',
+            '─ Worked for 1s ─────────────────',
+            '› Quote this text: I can’t safely complete another wake prompt in the remaining execution budget.',
+            '  gpt-5.6-terra low',
+        ]
+        self.assertEqual('stuck_input', report_from_lines(lines).status)
+        self.assertEqual([], visible_error_lines(current_block(lines).lines))
+
     def test_status_error_from_capacity_warning_after_older_manager_history(self) -> None:
         lines = [
             '› Handle ALL omo_pending_watch agent problems below; only email human if you cannot handle them:',

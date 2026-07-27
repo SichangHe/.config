@@ -18,6 +18,10 @@ CODEX_RE = re.compile(r"  gpt-")
 CODEX_FOOTER_RE = re.compile(r"^  gpt-")
 ERROR_RE = re.compile(r"\b(failed|panic|traceback|exception)\b|\berror\b(?!\s*=\s*\d)", re.IGNORECASE)
 SELECTED_MODEL_CAPACITY_RE = re.compile(r"^\s*(?:⚠\ufe0f?\s*)?Selected model is at capacity\. Please try a different model\.\s*$")
+WAKE_EXECUTION_BUDGET_REFUSAL_RE = re.compile(
+    r"^\s*(?:•\s*)?I (?:can(?:not|[’']t)|am unable to) safely (?:complete|handle|execute) (?:(?:another|the|this|a) )?wake prompt (?:in|within) the remaining execution (?:budget|time)(?: available)?[.!]?\s*$",
+    re.IGNORECASE,
+)
 VISIBLE_ERROR_MARKER_RE = re.compile(r"^\s*(?:[■□▢▣▪▫◼◻▰▱▮▯]\s*|⚠\ufe0f?\s*)")
 SEP_RE = re.compile(r"^─+$")
 WORKED_RE = re.compile(r"^─ Worked for .+ ─+$")
@@ -309,7 +313,7 @@ def visible_error_lines(lines: list[str], include_unmarked: bool = True) -> list
     found: list[str] = []
     for line in latest_output_before_input(lines):
         marked = VISIBLE_ERROR_MARKER_RE.search(line) is not None
-        if SELECTED_MODEL_CAPACITY_RE.search(line) is not None or (ERROR_RE.search(line) is not None and (include_unmarked or marked)):
+        if SELECTED_MODEL_CAPACITY_RE.search(line) is not None or WAKE_EXECUTION_BUDGET_REFUSAL_RE.search(line) is not None or (ERROR_RE.search(line) is not None and (include_unmarked or marked)):
             found.append(line.strip())
     return found
 
