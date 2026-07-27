@@ -2042,7 +2042,8 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertIsNone(subject.find_recent_thread("topic"))
         self.assertIn(("connect", "imap.gmail.com", 10.0), calls)
         self.assertIn(("login", "agent@example.test", "secret"), calls)
-        self.assertIn(("select", "[Gmail]/Sent Mail", True), calls)
+        self.assertIn(("select", '"[Gmail]/Sent Mail"', True), calls)
+        self.assertIn(("select", '"INBOX"', True), calls)
         self.assertTrue(any(call[0] == "search" and '"human@example.test"' in call for call in calls))
 
     def test_email_subject_lookup_error_falls_back_to_new_tag(self) -> None:
@@ -2097,6 +2098,7 @@ class PendingMarkerTests(unittest.TestCase):
         started_s = time.monotonic()
         with (
             patch.object(subject.imaplib, "IMAP4_SSL", return_value=SlowLogoutClient()),
+            patch.object(subject, "configured_agent_mail", return_value=None),
             patch.object(subject, "parse_env_config", return_value={"host": "imap.example", "user": "me@example.com", "password": "secret"}),
             patch.dict(os.environ, {"OMO_MANAGER_EMAIL_THREAD_LOOKUP_DEADLINE_S": "0.05"}),
         ):
@@ -2130,6 +2132,7 @@ class PendingMarkerTests(unittest.TestCase):
         started_s = time.monotonic()
         with (
             patch.object(subject.imaplib, "IMAP4_SSL", return_value=MatchingSlowLogoutClient()),
+            patch.object(subject, "configured_agent_mail", return_value=None),
             patch.object(subject, "parse_env_config", return_value={"host": "imap.example", "user": "me@example.com", "password": "secret"}),
             patch.dict(os.environ, {"OMO_MANAGER_EMAIL_THREAD_LOOKUP_DEADLINE_S": "0.05"}),
         ):
@@ -3074,6 +3077,7 @@ class PendingMarkerTests(unittest.TestCase):
             with (
                 patch.dict(email_me.os.environ, {"EMAIL_ME_FAKE_SEND_LOG": ""}),
                 patch.object(email_me, "prepare_subject_and_headers", return_value=("Re: [a] [wl:1] duplicate-mail prevention", {})),
+                patch.object(email_me, "configured_agent_mail", return_value=None),
                 patch.object(email_me, "should_send_manager_email_key", return_value=True),
                 patch.object(email_me, "log_manager_email"),
                 patch.object(email_me.smtplib, "SMTP_SSL", return_value=smtp),

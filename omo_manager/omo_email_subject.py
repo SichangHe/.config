@@ -216,7 +216,8 @@ def find_recent_thread(subject_key: str) -> RecentHeader | None:
         )
         best: RecentHeader | None = None
         for mailbox, sender, recipient in mailbox_searches:
-            typ, _data = client.select(mailbox, readonly=True)
+            quoted_mailbox = '"' + mailbox.replace("\\", "\\\\").replace('"', '\\"') + '"'
+            typ, _data = client.select(quoted_mailbox, readonly=True)
             if typ != "OK":
                 continue
             criteria = ["SINCE", cutoff.strftime("%d-%b-%Y"), "FROM", f'"{sender}"']
