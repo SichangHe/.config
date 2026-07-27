@@ -168,6 +168,19 @@ cmdline_has_arg_pair() {
   return 1
 }
 
+cmdline_has_resolved_path_arg_pair() {
+  local pid="$1" option="$2" value="$3" arg expect=0
+  [ -r "/proc/$pid/cmdline" ] || return 1
+  while IFS= read -r -d '' arg; do
+    if [ "$expect" -eq 1 ]; then
+      same_resolved_path "$arg" "$value" && return 0
+      expect=0
+    fi
+    [ "$arg" = "$option" ] && expect=1
+  done <"/proc/$pid/cmdline"
+  return 1
+}
+
 cmdline_has_fragment() {
   local pid="$1" fragment="$2" arg
   [ -r "/proc/$pid/cmdline" ] || return 1
@@ -327,7 +340,7 @@ owned_supervisor_process() {
   cmdline_has_arg "$pid" "$name-watch-supervisor" || return 1
   cmdline_has_arg "$pid" "$token" || return 1
   cmdline_has_resolved_path_arg "$pid" "$script_path" || return 1
-  cmdline_has_arg_pair "$pid" --root "$root_arg" || return 1
+  cmdline_has_resolved_path_arg_pair "$pid" --root "$root_arg" || return 1
   [ -z "$state_arg" ] || cmdline_has_arg_pair "$pid" --state-dir "$state_arg"
 }
 
@@ -391,7 +404,7 @@ legacy_supervisor_process() {
     return 1
   fi
   [ "${argv[script_index + 1]:-}" = --root ] || return 1
-  [ "${argv[script_index + 2]:-}" = "$root_arg" ] || return 1
+  same_resolved_path "${argv[script_index + 2]:-}" "$root_arg" || return 1
   [ -z "$state_arg" ] || cmdline_has_arg_pair "$pid" --state-dir "$state_arg"
 }
 

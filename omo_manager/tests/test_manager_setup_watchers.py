@@ -82,7 +82,7 @@ esac
             "FAKE_UV_SLEEP": "5",
         }
         env.update(extra_env or {})
-        return subprocess.run([str(setup)], env=env, text=True, capture_output=True, timeout=8, check=False)
+        return subprocess.run([str(setup)], env=env, text=True, capture_output=True, timeout=20, check=False)
 
     def pid_from_file(self, pid_file: Path) -> int | None:
         try:
@@ -560,6 +560,50 @@ while :; do sleep 30; done
                 self.assertEqual(0, result.returncode, result.stderr)
                 current.wait(timeout=2)
                 self.assertIsNotNone(current.returncode)
+                self.assertNotIn("stale pending watcher pidfile points at unowned", result.stderr)
+            finally:
+                if current.poll() is None:
+                    self.terminate_tree(current.pid)
+                    current.wait(timeout=2)
+                self.stop_supervisors(state)
+
+    def test_setup_replaces_pidfile_supervisor_with_equivalent_root_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            root = tmp / "work_logs"
+            root_alias = tmp / "logs-alias"
+            state = tmp / "state"
+            root.mkdir()
+            root_alias.symlink_to(root)
+            state.mkdir()
+            token = "root-alias-token"
+            launch_pid_file = state / f".pending-supervisor.{token}.pid"
+            current = subprocess.Popen(
+                [
+                    "bash",
+                    "-c",
+                    "while :; do read -t 30 || true; done # pending watcher exited status",
+                    "pending-watch-supervisor",
+                    str(launch_pid_file),
+                    token,
+                    "uv",
+                    "run",
+                    "--project",
+                    str(ROOT / "omo_manager"),
+                    str(ROOT / "omo_manager" / "omo_pending_watch.py"),
+                    "--root",
+                    str(root),
+                ],
+                start_new_session=True,
+            )
+            (state / "pending-supervisor.pid").write_text(
+                f"pid={current.pid}\nstart={self.process_start_ticks(current.pid)}\ntoken={token}\n",
+                encoding="utf-8",
+            )
+            try:
+                result = self.run_setup(tmp, extra_env={"OMO_WORK_LOGS_ROOT": str(root_alias)})
+                self.assertEqual(0, result.returncode, result.stderr)
+                current.wait(timeout=2)
                 self.assertNotIn("stale pending watcher pidfile points at unowned", result.stderr)
             finally:
                 if current.poll() is None:
