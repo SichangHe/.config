@@ -2280,6 +2280,136 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertIn("manager_unread\t2\n", counts_text)
             self.assertIn("manager_human_recent_total\t3\n", counts_text)
 
+    def test_split_email_thresholds_read_human_inbox_for_agent_mail(self) -> None:
+        from omo_manager import email_idle_watcher as watcher
+
+        calls: list[tuple[object, ...]] = []
+
+        class Settings:
+            agent_address = "agent@example.test"
+            app_password = "agent-secret"
+            human_address = "human@example.test"
+
+        class Client:
+            def __enter__(self) -> Client:
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def login(self, user: str, password: str) -> None:
+                calls.append(("login", user, password))
+
+            def select(self, mailbox: str) -> tuple[str, list[bytes]]:
+                calls.append(("select", mailbox))
+                return "OK", []
+
+            def response(self, name: str) -> tuple[str, list[bytes]]:
+                self.assert_uidvalidity_name = name
+                return "UIDVALIDITY", [b"17"]
+
+        captured: list[watcher.Args] = []
+
+        def handle(_client: object, args: watcher.Args) -> bool:
+            captured.append(args)
+            return True
+
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.object(watcher, "human_config_path", return_value=Path(tmp) / "human.toml"),
+            patch.object(watcher, "parse_env_config", return_value={"host": "imap.example", "user": "human@example.test", "password": "human-secret"}),
+            patch.object(watcher.imaplib, "IMAP4_SSL", return_value=Client()),
+            patch.object(watcher, "handle_manager_mail_thresholds", side_effect=handle),
+        ):
+            args = watcher.Args(Path(tmp), "", Path(tmp), Path(tmp), None, True, "human@example.test", 0, Path("/bin/false"))
+            self.assertTrue(watcher.handle_split_manager_mail_thresholds(args, Settings()))  # type: ignore[arg-type]
+
+        self.assertEqual([("login", "human@example.test", "human-secret"), ("select", "INBOX")], calls)
+        self.assertEqual("agent@example.test", captured[0].self_email)
+        self.assertEqual("human@example.test", captured[0].manager_mail_recipient)
+        self.assertFalse(captured[0].manager_mail_subject_tags)
+        self.assertTrue(captured[0].mail_thresholds)
+        self.assertNotEqual("email-manager-mail-counts.tsv", watcher.manager_mail_counts_path(captured[0]).name)
+        self.assertNotEqual("email-manager-mail-thresholds.tsv", watcher.manager_mail_threshold_state_path(captured[0]).name)
+
+    def test_split_email_thresholds_run_when_agent_pull_is_disabled(self) -> None:
+        from omo_manager import email_idle_watcher as watcher
+
+        class ThresholdChecked(Exception):
+            pass
+
+        calls = 0
+
+        def threshold_check() -> bool:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise ThresholdChecked
+            return False
+
+        args = watcher.Args(
+            Path("/tmp/logs"),
+            "",
+            Path("/tmp/mail"),
+            Path("/tmp/state"),
+            None,
+            False,
+            "human@example.test",
+            0,
+            Path("/bin/false"),
+            idle_wait_s=60,
+            pull_interval_s=0,
+            idle_exit_after_s=0,
+        )
+        with (
+            patch.object(watcher, "handle_unseen", return_value=False),
+            patch.object(watcher.time, "monotonic", side_effect=[0.0, 61.0]),
+            self.assertRaises(ThresholdChecked),
+        ):
+            watcher.watch_inbox(object(), args, threshold_check)  # type: ignore[arg-type]
+        self.assertEqual(2, calls)
+
+    def test_split_email_counts_do_not_require_legacy_subject_tag(self) -> None:
+        from datetime import datetime
+        from email.message import EmailMessage
+        from email.utils import format_datetime
+        from omo_manager import email_idle_watcher as watcher
+
+        now = datetime.now().astimezone()
+
+        class Client:
+            def uid(self, command: str, *args: object) -> tuple[str, list[object]]:
+                if command == "search":
+                    self.assert_boundary(args)
+                    return "OK", [b"1"]
+                if command == "fetch":
+                    msg = EmailMessage()
+                    msg["From"] = "Agent <agent@example.test>"
+                    msg["To"] = "Human <human@example.test>"
+                    msg["Subject"] = "ordinary untagged update"
+                    msg["Date"] = format_datetime(now)
+                    msg.set_content("body")
+                    return "OK", [(b"HEADER", msg.as_bytes())]
+                raise AssertionError(command)
+
+            def assert_boundary(self, args: tuple[object, ...]) -> None:
+                self_outer.assertIn('"agent@example.test"', args)
+                self_outer.assertIn('"human@example.test"', args)
+                self_outer.assertNotIn("SUBJECT", args)
+
+        self_outer = self
+        counts = watcher.manager_mail_counts(
+            Client(),
+            "agent@example.test",
+            24 * 60 * 60,
+            64,
+            now,
+            recipient_email="human@example.test",
+            require_subject_tags=False,
+        )
+        self.assertEqual(1, counts.unread)
+        self.assertEqual(1, counts.recent_total)
+
     def test_email_watcher_threshold_counts_ignore_ignored_uids(self) -> None:
         from omo_manager import email_idle_watcher as watcher
 

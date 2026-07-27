@@ -25,17 +25,18 @@ from email.utils import parseaddr
 from email.message import Message
 from email.parser import BytesParser
 from pathlib import Path
+from typing import Callable
 from urllib.parse import urlparse
 
 try:
-    from .omo_email_config import GMAIL_IMAP_HOST, configured_agent_mail, human_config_path
+    from .omo_email_config import AgentMailSettings, GMAIL_IMAP_HOST, configured_agent_mail, human_config_path
     from .omo_email_subject import subject_base
     from .omo_agent_status import TaskFrontmatterError, parse_task_metadata
     from .omo_task_lock import task_file_lock
     from .omo_tmux_send import CodexSendOptions, DEFAULT_TMUX_ENTER_COUNT, require_sendable_codex_target, send_to_codex
 except ImportError:
     try:
-        from omo_email_config import GMAIL_IMAP_HOST, configured_agent_mail, human_config_path
+        from omo_email_config import AgentMailSettings, GMAIL_IMAP_HOST, configured_agent_mail, human_config_path
         from omo_email_subject import subject_base
         from omo_agent_status import TaskFrontmatterError, parse_task_metadata
         from omo_task_lock import task_file_lock
@@ -152,6 +153,8 @@ class Args:
     recent_cleanup_window_s: float = DEFAULT_MANAGER_RECENT_CLEANUP_WINDOW_S
     mail_thresholds: bool = True
     inbox_identity: str = ""
+    manager_mail_recipient: str = ""
+    manager_mail_subject_tags: bool = True
 
 
 class ParsedArgs(argparse.Namespace):
@@ -635,11 +638,11 @@ def mailbox_state_identity(client: imaplib.IMAP4_SSL, mailbox_address: str) -> s
 
 
 def manager_mail_counts_path(args: Args) -> Path:
-    return args.state_dir / "email-manager-mail-counts.tsv"
+    return email_uid_state_path(args, "email-manager-mail-counts")
 
 
 def manager_mail_threshold_state_path(args: Args) -> Path:
-    return args.state_dir / "email-manager-mail-thresholds.tsv"
+    return email_uid_state_path(args, "email-manager-mail-thresholds")
 
 
 def load_processed_uids(path: Path) -> set[str]:
@@ -1393,7 +1396,14 @@ def decode_search_uids(data: list[object]) -> list[str]:
     return []
 
 
-def search_manager_mail_uids(client: imaplib.IMAP4_SSL, self_email: str, unread: bool = False, since: datetime | None = None) -> list[str]:
+def search_manager_mail_uids(
+    client: imaplib.IMAP4_SSL,
+    sender_email: str,
+    recipient_email: str,
+    unread: bool = False,
+    since: datetime | None = None,
+    require_subject_tags: bool = True,
+) -> list[str]:
     criteria: list[str] = []
     if unread:
         criteria.append("UNSEEN")
@@ -1401,8 +1411,11 @@ def search_manager_mail_uids(client: imaplib.IMAP4_SSL, self_email: str, unread:
         criteria.extend(["SINCE", since.strftime("%d-%b-%Y")])
     found: list[str] = []
     seen: set[str] = set()
-    for token in LEGACY_MANAGER_SUBJECT_TOKENS:
-        typ, data = client.uid("search", *(criteria + ["FROM", f'"{self_email}"', "TO", f'"{self_email}"', "SUBJECT", f'"{token}"']))
+    subject_tokens = LEGACY_MANAGER_SUBJECT_TOKENS if require_subject_tags else ("",)
+    for token in subject_tokens:
+        boundary = ["FROM", f'"{sender_email}"', "TO", f'"{recipient_email}"']
+        subject = ["SUBJECT", f'"{token}"'] if token else []
+        typ, data = client.uid("search", *(criteria + boundary + subject))
         if typ != "OK":
             raise RuntimeError(f"IMAP manager mail search failed: {typ}")
         for uid in decode_search_uids(data):
@@ -1419,15 +1432,15 @@ def fetch_manager_count_header(client: imaplib.IMAP4_SSL, uid: str) -> Message |
     return BytesParser(policy=policy.default).parsebytes(data[0][1])
 
 
-def is_self_addressed_manager_header(msg: Message, self_email: str) -> bool:
-    normalized_self = self_email.lower()
+def is_manager_mail_header(msg: Message, sender_email: str, recipient_email: str, require_subject_tags: bool) -> bool:
+    normalized_recipient = recipient_email.casefold()
     sender = str(msg.get("From", ""))
     recipients = str(msg.get("To", ""))
     subject = str(msg.get("Subject", ""))
     return (
-        from_self(sender, self_email)
-        and any(address.lower() == normalized_self for _name, address in getaddresses([recipients]))
-        and any(token.lower() in subject.lower() for token in LEGACY_MANAGER_SUBJECT_TOKENS)
+        from_self(sender, sender_email)
+        and any(address.casefold() == normalized_recipient for _name, address in getaddresses([recipients]))
+        and (not require_subject_tags or any(token.lower() in subject.lower() for token in LEGACY_MANAGER_SUBJECT_TOKENS))
     )
 
 
@@ -1444,12 +1457,19 @@ def parsed_message_date(msg: Message) -> datetime | None:
     return dt.astimezone()
 
 
-def recent_manager_mail_uids(client: imaplib.IMAP4_SSL, self_email: str, candidate_uids: list[str], cutoff: datetime) -> list[str]:
+def recent_manager_mail_uids(
+    client: imaplib.IMAP4_SSL,
+    sender_email: str,
+    recipient_email: str,
+    candidate_uids: list[str],
+    cutoff: datetime,
+    require_subject_tags: bool,
+) -> list[str]:
     recent: list[str] = []
     for uid in candidate_uids:
         msg = fetch_manager_count_header(client, uid)
         dt = parsed_message_date(msg)
-        if dt is not None and dt >= cutoff and is_self_addressed_manager_header(msg, self_email):
+        if dt is not None and dt >= cutoff and is_manager_mail_header(msg, sender_email, recipient_email, require_subject_tags):
             recent.append(uid)
     return recent
 
@@ -1460,19 +1480,39 @@ def filter_ignored_uids(uids: list[str], ignored_uids: set[str]) -> list[str]:
     return [uid for uid in uids if uid not in ignored_uids]
 
 
-def manager_mail_counts(client: imaplib.IMAP4_SSL, self_email: str, recent_window_s: float, recent_threshold: int, now: datetime | None = None, ignored_uids: set[str] | None = None) -> ManagerMailCounts:
+def manager_mail_counts(
+    client: imaplib.IMAP4_SSL,
+    sender_email: str,
+    recent_window_s: float,
+    recent_threshold: int,
+    now: datetime | None = None,
+    ignored_uids: set[str] | None = None,
+    recipient_email: str | None = None,
+    require_subject_tags: bool = True,
+) -> ManagerMailCounts:
     now = now or datetime.now().astimezone()
     cutoff = now - timedelta(seconds=recent_window_s)
     ignored = ignored_uids or set()
-    total_uids = filter_ignored_uids(search_manager_mail_uids(client, self_email), ignored)
-    unread_uids = filter_ignored_uids(search_manager_mail_uids(client, self_email, unread=True), ignored)
-    recent_candidates = filter_ignored_uids(search_manager_mail_uids(client, self_email, since=cutoff), ignored)
-    recent_total = len(recent_manager_mail_uids(client, self_email, recent_candidates, cutoff))
+    recipient = recipient_email or sender_email
+    total_uids = filter_ignored_uids(search_manager_mail_uids(client, sender_email, recipient, require_subject_tags=require_subject_tags), ignored)
+    unread_uids = filter_ignored_uids(search_manager_mail_uids(client, sender_email, recipient, unread=True, require_subject_tags=require_subject_tags), ignored)
+    recent_candidates = filter_ignored_uids(search_manager_mail_uids(client, sender_email, recipient, since=cutoff, require_subject_tags=require_subject_tags), ignored)
+    recent_total = len(recent_manager_mail_uids(client, sender_email, recipient, recent_candidates, cutoff, require_subject_tags))
     return ManagerMailCounts(len(total_uids), len(unread_uids), recent_window_s, recent_total, True)
 
 
 def handle_manager_mail_thresholds(client: imaplib.IMAP4_SSL, args: Args) -> bool:
-    counts = manager_mail_counts(client, args.self_email, args.recent_cleanup_window_s, args.recent_cleanup_threshold, ignored_uids=load_processed_uids(ignored_uids_path(args)))
+    recipient = args.manager_mail_recipient or args.self_email
+    ignored_uids = load_processed_uids(ignored_uids_path(args)) if recipient.casefold() == args.self_email.casefold() else set()
+    counts = manager_mail_counts(
+        client,
+        args.self_email,
+        args.recent_cleanup_window_s,
+        args.recent_cleanup_threshold,
+        ignored_uids=ignored_uids,
+        recipient_email=recipient,
+        require_subject_tags=args.manager_mail_subject_tags,
+    )
     save_manager_mail_counts(manager_mail_counts_path(args), counts)
     logging.info("manager mail counts: total=%s unread=%s recent_window_s=%s recent_total=%s recent_exact=%s", counts.total, counts.unread, int(counts.recent_window_s), counts.recent_total, counts.recent_exact)
     threshold_state_path = manager_mail_threshold_state_path(args)
@@ -1509,6 +1549,39 @@ def maybe_handle_manager_mail_thresholds(client: imaplib.IMAP4_SSL, args: Args) 
         return handle_manager_mail_thresholds(client, args)
     except (OSError, RuntimeError, imaplib.IMAP4.error) as exc:
         logging.warning("manager mail threshold check failed: %s", exc)
+        return False
+
+
+def handle_split_manager_mail_thresholds(args: Args, settings: AgentMailSettings) -> bool:
+    """Count agent-to-human mail in the human inbox, separate from request intake."""
+    config_path = human_config_path()
+    config = parse_env_config(config_path)
+    missing = {"host", "user", "password"} - set(config)
+    if missing:
+        raise RuntimeError(f"missing email config keys {sorted(missing)} in {config_path}")
+    if config["user"].casefold() != settings.human_address.casefold():
+        raise RuntimeError("human cleanup mailbox does not match OMO_HUMAN_EMAIL_ADDRESS")
+    with imaplib.IMAP4_SSL(config["host"], timeout=args.imap_timeout_s) as client:
+        client.login(config["user"], config["password"])
+        typ, _data = client.select("INBOX")
+        if typ != "OK":
+            raise RuntimeError(f"IMAP select human INBOX failed: {typ}")
+        threshold_args = replace(
+            args,
+            self_email=settings.agent_address,
+            mail_thresholds=True,
+            inbox_identity=mailbox_state_identity(client, config["user"]),
+            manager_mail_recipient=settings.human_address,
+            manager_mail_subject_tags=False,
+        )
+        return handle_manager_mail_thresholds(client, threshold_args)
+
+
+def maybe_handle_split_manager_mail_thresholds(args: Args, settings: AgentMailSettings) -> bool:
+    try:
+        return handle_split_manager_mail_thresholds(args, settings)
+    except (OSError, RuntimeError, imaplib.IMAP4.error) as exc:
+        logging.warning("split manager mail threshold check failed: %s", exc)
         return False
 
 
@@ -1750,11 +1823,15 @@ def idle_once(client: imaplib.IMAP4_SSL, wait_s: float) -> bool:
     return event_seen
 
 
-def watch_inbox(client: imaplib.IMAP4_SSL, args: Args) -> int:
+def watch_inbox(client: imaplib.IMAP4_SSL, args: Args, threshold_check: Callable[[], bool] | None = None) -> int:
     activity = handle_unseen(client, args)
+    if threshold_check is not None:
+        activity = threshold_check() or activity
     now_s = time.monotonic()
     last_activity_s = now_s
     next_pull_s = now_s + args.pull_interval_s if args.pull_interval_s > 0 else float("inf")
+    threshold_interval_s = min(max(args.idle_wait_s, 1.0), 60.0)
+    next_threshold_s = now_s + threshold_interval_s if threshold_check is not None else float("inf")
     if activity:
         logging.info("email watcher startup scan found candidate mail")
     while True:
@@ -1762,6 +1839,11 @@ def watch_inbox(client: imaplib.IMAP4_SSL, args: Args) -> int:
         if args.idle_exit_after_s > 0 and now_s - last_activity_s >= args.idle_exit_after_s:
             logging.info("email watcher exiting after idle refresh window: idle_s=%.1f", now_s - last_activity_s)
             return 0
+        if now_s >= next_threshold_s:
+            if threshold_check is not None and threshold_check():
+                last_activity_s = time.monotonic()
+            next_threshold_s = time.monotonic() + threshold_interval_s
+            continue
         if now_s >= next_pull_s:
             client.select("INBOX")
             if handle_unseen(client, args):
@@ -1771,6 +1853,7 @@ def watch_inbox(client: imaplib.IMAP4_SSL, args: Args) -> int:
         wait_s = args.idle_wait_s
         if args.pull_interval_s > 0:
             wait_s = min(wait_s, max(0.0, next_pull_s - now_s))
+        wait_s = min(wait_s, max(0.0, next_threshold_s - now_s))
         if idle_once(client, wait_s):
             client.select("INBOX")
             if handle_unseen(client, args):
@@ -1803,11 +1886,14 @@ def main(argv: list[str]) -> int:
                 client.select("INBOX")
                 runtime_args = replace(safe_args, inbox_identity=mailbox_state_identity(client, config["user"])) if split_settings is not None else safe_args
                 logging.info("email watcher connected and selected INBOX")
+                threshold_check = (lambda: maybe_handle_split_manager_mail_thresholds(runtime_args, split_settings)) if split_settings is not None else None
                 if runtime_args.once:
                     handle_unseen(client, runtime_args)
+                    if threshold_check is not None:
+                        threshold_check()
                     wait_email_pushes()
                     return 0
-                result = watch_inbox(client, runtime_args)
+                result = watch_inbox(client, runtime_args, threshold_check)
                 wait_email_pushes()
                 return result
         except Exception as exc:
