@@ -1777,6 +1777,106 @@ class OmoTaskTests(unittest.TestCase):
         tmux.assert_called_once_with(["send-keys", "-t", "cfg:7", "Enter"], check=True)
         sleep.assert_not_called()
 
+    def test_wait_command_started_confirms_trust_only_after_launch_marker(self) -> None:
+        launch_marker = "[omo:test]"
+        trust_prompt = [
+            launch_marker,
+            "Do you trust the contents of this directory?",
+            "1. Yes, proceed",
+            "2. No, quit",
+        ]
+        ready = [*trust_prompt, "────", "› Use /skills to list available skills", "  gpt-5.6-sol"]
+        with (
+            patch("omo_manager.omo_task.tail", side_effect=[trust_prompt, ready]),
+            patch("omo_manager.omo_task.current_command", return_value="codex"),
+            patch("omo_manager.omo_task.tmux") as tmux,
+            patch("omo_manager.omo_task.time.sleep"),
+        ):
+            result = wait_command_started("cfg:7", launch_marker=launch_marker)
+        self.assertEqual(CODEX_LAUNCH_STARTED, result)
+        tmux.assert_called_once_with(["send-keys", "-t", "cfg:7", "Enter"], check=True)
+
+    def test_wait_command_started_does_not_trust_quoted_prompt_text(self) -> None:
+        launch_marker = "[omo:test]"
+        quoted = [
+            launch_marker,
+            "────",
+            "• Do you trust the contents of this directory?",
+            "1. Yes, proceed",
+            "2. No, quit",
+            "",
+            "─ Worked for 1s ─",
+            "› Use /skills to list available skills",
+            "  gpt-5.6-sol",
+        ]
+        with (
+            patch("omo_manager.omo_task.tail", return_value=quoted),
+            patch("omo_manager.omo_task.current_command", return_value="codex"),
+            patch("omo_manager.omo_task.tmux") as tmux,
+            patch("omo_manager.omo_task.time.sleep") as sleep,
+        ):
+            result = wait_command_started("cfg:7", launch_marker=launch_marker)
+        self.assertEqual(CODEX_LAUNCH_STARTED, result)
+        tmux.assert_not_called()
+        sleep.assert_not_called()
+
+    def test_wait_command_started_does_not_trust_without_launch_marker(self) -> None:
+        trust_prompt = [
+            "Do you trust the contents of this directory?",
+            "1. Yes, proceed",
+            "2. No, quit",
+        ]
+        with (
+            patch("omo_manager.omo_task.tail", return_value=trust_prompt),
+            patch("omo_manager.omo_task.current_command", return_value="bash"),
+            patch("omo_manager.omo_task.tmux") as tmux,
+            patch("omo_manager.omo_task.time.monotonic", side_effect=[0, 6]),
+            patch("omo_manager.omo_task.time.sleep"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "Codex launch not verified"):
+                wait_command_started("cfg:7")
+        tmux.assert_not_called()
+
+    def test_wait_command_started_ignores_trust_prompt_before_launch_marker(self) -> None:
+        launch_marker = "[omo:new]"
+        lines = [
+            "Do you trust the contents of this directory?",
+            "1. Yes, proceed",
+            "2. No, quit",
+            launch_marker,
+            "› Use /skills to list available skills",
+            "  gpt-5.6-sol",
+        ]
+        with (
+            patch("omo_manager.omo_task.tail", return_value=lines),
+            patch("omo_manager.omo_task.current_command", return_value="codex"),
+            patch("omo_manager.omo_task.tmux") as tmux,
+            patch("omo_manager.omo_task.time.sleep") as sleep,
+        ):
+            result = wait_command_started("cfg:7", launch_marker=launch_marker)
+        self.assertEqual(CODEX_LAUNCH_STARTED, result)
+        tmux.assert_not_called()
+        sleep.assert_not_called()
+
+    def test_wait_command_started_does_not_repeat_trust_confirmation(self) -> None:
+        launch_marker = "[omo:test]"
+        trust_prompt = [
+            launch_marker,
+            "Do you trust the contents of this directory?",
+            "1. Yes, proceed",
+            "2. No, quit",
+        ]
+        with (
+            patch("omo_manager.omo_task.tail", return_value=trust_prompt),
+            patch("omo_manager.omo_task.current_command", return_value="codex"),
+            patch("omo_manager.omo_task.tmux") as tmux,
+            patch("omo_manager.omo_task.time.monotonic", side_effect=[0, 1, 6]),
+            patch("omo_manager.omo_task.time.sleep"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "trust confirmation did not advance"):
+                wait_command_started("cfg:7", launch_marker=launch_marker)
+        tmux.assert_called_once_with(["send-keys", "-t", "cfg:7", "Enter"], check=True)
+
     def test_wait_command_started_ignores_stale_update_prompt_before_launch_marker(self) -> None:
         launch_marker = "[omo-task-launch:test]"
         lines = [

@@ -51,6 +51,9 @@ CODEX_LAUNCH_MARKER_PREFIX = "[omo:"
 CODEX_LAUNCH_MARKER_DRY_RUN = f"{CODEX_LAUNCH_MARKER_PREFIX}DRY]"
 CODEX_UPDATE_PROMPT_MARKERS = ("update available!", "update now", "press enter to continue")
 CODEX_UPDATE_SUCCESS_MARKERS = ("update ran successfully", "please restart codex")
+CODEX_TRUST_QUESTION = "do you trust the contents of this directory?"
+CODEX_TRUST_YES_RE = re.compile(r"^\s*(?:[>›]\s*)?1\.\s+Yes, proceed\s*$", re.IGNORECASE)
+CODEX_TRUST_NO_RE = re.compile(r"^\s*(?:[>›]\s*)?2\.\s+No, quit\s*$", re.IGNORECASE)
 MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$")
 LINE_RANGE_RE = re.compile(r"^([1-9]\d*)-([1-9]\d*)$")
 HUMAN_INSTRUCTION_CLOSE = "</human_instruction>"
@@ -914,6 +917,14 @@ def has_codex_update_success(lines: list[str]) -> bool:
     return all(marker in text for marker in CODEX_UPDATE_SUCCESS_MARKERS)
 
 
+def has_codex_trust_prompt(lines: list[str]) -> bool:
+    return (
+        any(line.strip().casefold() == CODEX_TRUST_QUESTION for line in lines)
+        and any(CODEX_TRUST_YES_RE.fullmatch(line) is not None for line in lines)
+        and any(CODEX_TRUST_NO_RE.fullmatch(line) is not None for line in lines)
+    )
+
+
 def wait_codex_update_finished(target: str, launch_marker: str, timeout_s: float = 120.0) -> str:
     deadline_s = time.monotonic() + timeout_s
     while time.monotonic() < deadline_s:
@@ -929,6 +940,7 @@ def wait_command_started(target: str, timeout_s: float = 5.0, launch_marker: str
     last_command = ""
     last_status = "unknown"
     saw_non_shell = False
+    trust_confirmed = False
     while time.monotonic() < deadline_s:
         lines = lines_after_launch_marker(tail(target, 200), launch_marker)
         if lines is None:
@@ -937,13 +949,23 @@ def wait_command_started(target: str, timeout_s: float = 5.0, launch_marker: str
             if has_codex_update_prompt(lines):
                 _ = tmux(["send-keys", "-t", target, "Enter"], check=True)
                 return wait_codex_update_finished(target, launch_marker)
-            last_status = status(lines, current_block(lines))
-            if last_status != "not_codex":
-                return CODEX_LAUNCH_STARTED
+            block = current_block(lines)
+            active_status = status(lines, block)
+            if launch_marker and active_status == "not_codex" and has_codex_trust_prompt(block.lines):
+                last_status = "directory trust confirmation still visible"
+                if not trust_confirmed:
+                    _ = tmux(["send-keys", "-t", target, "Enter"], check=True)
+                    trust_confirmed = True
+            else:
+                last_status = active_status
+                if last_status != "not_codex":
+                    return CODEX_LAUNCH_STARTED
         last_command = current_command(target)
         if last_command and last_command not in SHELL_COMMANDS:
             saw_non_shell = True
         time.sleep(0.05)
+    if trust_confirmed and last_status == "directory trust confirmation still visible":
+        raise RuntimeError(f"Codex directory trust confirmation did not advance after {timeout_s:g}s.")
     if saw_non_shell:
         return CODEX_LAUNCH_STARTED
     raise RuntimeError(f"Codex launch not verified after {timeout_s:g}s: pane command={last_command or 'unknown'}, status={last_status}")
