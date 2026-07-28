@@ -1,0 +1,4 @@
+interface:
+  display_name: "SVG Diagram Plotting"
+  short_description: "Create clear, polished SVG diagrams"
+  default_prompt: "Use $svg-diagram-plotting to create an SVG diagram from my requirements."
