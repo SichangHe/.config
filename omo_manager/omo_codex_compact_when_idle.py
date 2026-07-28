@@ -18,6 +18,7 @@ from omo_manager.omo_codex_status import Args as StatusArgs
 from omo_manager.omo_codex_status import Report, inspect
 from omo_manager.omo_tmux_send import CodexSendOptions
 from omo_manager.omo_tmux_send import run_tmux
+from omo_manager.omo_tmux_send import run_control_to_codex
 
 
 COMPACT_MESSAGE = "/compact\n"
@@ -106,7 +107,7 @@ def send_compact(args: Args) -> None:
     report = wait_until_ready(args)
     if report.status != "ready":
         raise RuntimeError(f"target {args.target} is not ready; status: {report.status}")
-    run_tmux(args.target, COMPACT_MESSAGE, CodexSendOptions(1, 0.15, False, args.submit_verify_timeout_s))
+    run_control_to_codex(args.target, COMPACT_MESSAGE, CodexSendOptions(1, 0.15, False, args.submit_verify_timeout_s))
 
 
 def result_message(args: Args, ok: bool, result: str) -> str:

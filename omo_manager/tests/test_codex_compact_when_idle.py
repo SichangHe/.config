@@ -41,10 +41,10 @@ class CodexCompactWhenIdleTests(unittest.TestCase):
     def test_send_compact_uses_safe_tmux_send_after_ready(self) -> None:
         calls: list[tuple[str, str, int]] = []
 
-        def fake_run_tmux(target: str, message: str, options: object) -> None:
+        def fake_run_control(target: str, message: str, options: object) -> None:
             calls.append((target, message, options.enter_count))
 
-        with patch("omo_manager.omo_codex_compact_when_idle.wait_until_ready", return_value=Report("ready", [])), patch("omo_manager.omo_codex_compact_when_idle.run_tmux", side_effect=fake_run_tmux):
+        with patch("omo_manager.omo_codex_compact_when_idle.wait_until_ready", return_value=Report("ready", [])), patch("omo_manager.omo_codex_compact_when_idle.run_control_to_codex", side_effect=fake_run_control):
             send_compact(Args("cfg:1.0", 10, 2, 80, False, False, "", 1, None, 7))
 
         self.assertEqual([("cfg:1.0", COMPACT_MESSAGE, 1)], calls)
