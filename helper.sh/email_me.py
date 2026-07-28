@@ -460,7 +460,7 @@ def build_message(sender_email: str, title: str, content: str, add_pwd_footer: b
     elif reply_headers_for_subject is not None:
         for name, value in reply_headers_for_subject(title).items():
             msg.add_header(name, value)
-    body = append_pwd_footer(content, tmux_target=source_target, require_unquoted_footer=manager_human) if add_pwd_footer or manager_human else content
+    body = append_pwd_footer(content, tmux_target=source_target, require_unquoted_footer=manager_human) if add_pwd_footer else content
     msg.set_content(markdown_links_to_plain(body))
     msg.add_alternative(markdown_to_html(body), subtype="html")
     return msg
@@ -606,8 +606,14 @@ def main(argv: list[str]) -> int:
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
+    try:
+        split_settings = configured_agent_mail() if configured_agent_mail is not None else None
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    add_pwd_footer = False if split_settings is not None else args.add_pwd_footer or args.manager_human
     if args.dry_run:
-        body = append_pwd_footer(args.content, tmux_target=subject_tmux_target) if args.add_pwd_footer else args.content
+        body = append_pwd_footer(args.content, tmux_target=subject_tmux_target, require_unquoted_footer=args.manager_human) if add_pwd_footer else args.content
         print(f"dry-run: email not sent; subject={subject}; body-bytes={len(body.encode())}")
         return 0
     dedupe_subject = normalized_subject_key(args.title) if args.manager_human and normalized_subject_key is not None else subject
@@ -623,11 +629,6 @@ def main(argv: list[str]) -> int:
         else:
             print("Email sent.")
         return 0
-    try:
-        split_settings = configured_agent_mail() if configured_agent_mail is not None else None
-    except ValueError as exc:
-        print(str(exc), file=sys.stderr)
-        return 2
     if split_settings is not None:
         sender_email = split_settings.agent_address
         recipient_email = split_settings.human_address
@@ -654,7 +655,7 @@ def main(argv: list[str]) -> int:
             sender_email=sender_email,
             title=args.title,
             content=args.content,
-            add_pwd_footer=args.add_pwd_footer,
+            add_pwd_footer=add_pwd_footer,
             prepared_subject=subject,
             reply_headers=reply_headers,
             tmux_target=subject_tmux_target,

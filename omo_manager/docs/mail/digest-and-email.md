@@ -19,4 +19,4 @@ Reply subject preparation strips old tmux tags before prepending the selected cu
 
 `omo_manager_setup_watchers.sh` loads `local.env`, exports the manager environment for pending watcher helpers, and passes explicit manager flags only to helpers that still require them. Lookup failures are non-critical and fall back to a normal `[TARGET] SUBJECT` send.
 
-`email_me.py` sends a plain text fallback with Markdown links expanded to bare URLs, emits an email-compatible HTML alternative with escaped raw HTML, renders list-containing bodies as normal HTML instead of wrapping the whole email in `<pre>`, and appends a final `PWD: NAME` footer.
+`email_me.py` sends a plain text fallback with Markdown links expanded to bare URLs, emits an email-compatible HTML alternative with escaped raw HTML, and renders list-containing bodies as normal HTML instead of wrapping the whole email in `<pre>`. Split agent-to-human mail omits the old `PWD` footer because the subject tmux tag identifies the sender and separate accounts prevent self-mail loops.

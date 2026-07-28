@@ -423,6 +423,20 @@ class EmailMeTests(unittest.TestCase):
         self.assertEqual(0, result)
         self.assertIn("body-bytes=5", stdout.getvalue())
 
+    def test_split_dry_run_omits_pwd_footer_by_default(self) -> None:
+        settings = type("Settings", (), {"agent_address": "agent@example.test", "human_address": "human@example.test", "app_password": "secret"})()
+        with patch.object(sys, "stdin", StringIO("body\n")), patch.object(email_me, "configured_agent_mail", return_value=settings), patch("sys.stdout", new_callable=StringIO) as stdout:
+            result = email_me.main(["--dry-run", "--subject", "hi"])
+        self.assertEqual(0, result)
+        self.assertIn("body-bytes=5", stdout.getvalue())
+
+    def test_legacy_manager_dry_run_keeps_loop_footer(self) -> None:
+        with patch.object(sys, "stdin", StringIO("body\n")), patch.object(email_me, "configured_agent_mail", return_value=None), patch.object(email_me, "prepare_subject_and_headers", return_value=("[wl:1] hi", {})), patch.object(email_me, "append_pwd_footer", return_value="body\n\nPWD: config\n") as append_footer, patch("sys.stdout", new_callable=StringIO) as stdout:
+            result = email_me.main(["--dry-run", "--manager-human", "--no-pwd-footer", "--tmux-target", "wl:1", "--subject", "hi"])
+        self.assertEqual(0, result)
+        self.assertIn("body-bytes=18", stdout.getvalue())
+        append_footer.assert_called_once_with("body\n", tmux_target="wl:1", require_unquoted_footer=True)
+
     def test_manager_human_mode_dedupes_and_logs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             state_dir = Path(tmp) / "state"
@@ -673,12 +687,13 @@ class EmailMeTests(unittest.TestCase):
                 "OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "0",
                 "OMO_MANAGER_TMUX_TARGET": "wl:1.0",
             }
-            prepared = ("Re: [a] [wl:1] Topic", {"In-Reply-To": "<prior@example.test>", "References": "<root@example.test> <prior@example.test>"})
-            with patch.dict(os.environ, env, clear=False), patch.object(email_me, "ENV_FILE_PATH", env_file), patch.object(email_me, "prepare_subject_and_headers", return_value=prepared), patch.object(email_me.smtplib, "SMTP_SSL", FakeSmtp), patch.object(email_me.ssl, "create_default_context", return_value=None):
-                self.assertEqual(0, email_me.main(["--manager-human", "--subject-file", str(subject), "--message-file", str(body)]))
-        self.assertEqual("Re: [a] [wl:1] Topic", sent_messages[0]["Subject"])
+            prepared = ("Re: [wl:1] Topic", {"In-Reply-To": "<prior@example.test>", "References": "<root@example.test> <prior@example.test>"})
+            with patch.dict(os.environ, env, clear=False), patch.object(email_me, "ENV_FILE_PATH", env_file), patch.object(email_me, "configured_agent_mail", return_value=None), patch.object(email_me, "prepare_subject_and_headers", return_value=prepared), patch.object(email_me.smtplib, "SMTP_SSL", FakeSmtp), patch.object(email_me.ssl, "create_default_context", return_value=None):
+                self.assertEqual(0, email_me.main(["--manager-human", "--no-pwd-footer", "--subject-file", str(subject), "--message-file", str(body)]))
+        self.assertEqual("Re: [wl:1] Topic", sent_messages[0]["Subject"])
         self.assertEqual("<prior@example.test>", sent_messages[0]["In-Reply-To"])
         self.assertEqual("<root@example.test> <prior@example.test>", sent_messages[0]["References"])
+        self.assertIn("PWD:", sent_messages[0].get_body(preferencelist=("plain",)).get_content())
 
     def test_split_smtp_sends_from_agent_only_to_configured_human(self) -> None:
         sent_messages = []
@@ -712,13 +727,14 @@ class EmailMeTests(unittest.TestCase):
             with (
                 patch.dict(os.environ, {"OMO_MANAGER_STATE_DIR": str(Path(tmp) / "state")}, clear=False),
                 patch.object(email_me, "configured_agent_mail", return_value=Settings()),
-                patch.object(email_me, "prepare_subject_and_headers", return_value=("[a] [wl:1] Topic", {})),
+                patch.object(email_me, "prepare_subject_and_headers", return_value=("[wl:1] Topic", {})),
                 patch.object(email_me.smtplib, "SMTP_SSL", FakeSmtp),
                 patch.object(email_me.ssl, "create_default_context", return_value=None),
             ):
                 self.assertEqual(0, email_me.main(["--manager-human", "--tmux-target", "wl:1", "--subject", "Topic", "--message-file", str(body)]))
         self.assertEqual("agent@example.test", sent_messages[0]["From"])
         self.assertEqual("human@example.test", sent_messages[0]["To"])
+        self.assertNotIn("PWD:", sent_messages[0].get_body(preferencelist=("plain",)).get_content())
 
 
 if __name__ == "__main__":
