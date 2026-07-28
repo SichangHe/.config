@@ -7,10 +7,11 @@ import tempfile
 import unittest
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
-from time import time_ns
+from time import sleep, time_ns
 from unittest.mock import MagicMock, patch
 
 from omo_manager import omo_pending_watch as watcher
+from omo_manager.omo_task_lock import watcher_report_manager_temporary
 
 
 def task_frontmatter(*, runat: str, managerat: str, is_manager: bool = False) -> str:
@@ -54,11 +55,22 @@ def valid_report(test: unittest.TestCase, name: str, message: str, *, target: st
 
 
 def write_report_pointer(path: Path, report: Path, *, runat: str = "vl:2", managerat: str = "vl:15", is_manager: bool = False) -> None:
-    path.write_text(
-        f"{task_frontmatter(runat=runat, managerat=managerat, is_manager=is_manager)}\n"
-        f"(pending)\n(from agent vl:2 {report})\n",
-        encoding="utf-8",
+    owner = task_frontmatter(runat=runat, managerat=managerat, is_manager=is_manager).encode()
+    payload = report.read_bytes()
+    header, separator, message = payload.partition(b"message:\n")
+    if not separator:
+        raise AssertionError("report fixture has no message separator")
+    header_lines = header.decode().splitlines()
+    if len(header_lines) >= 3 and header_lines[2].startswith("[omo-report-owner-prefix: "):
+        del header_lines[2]
+    header_lines.insert(
+        2,
+        "[omo-report-owner-prefix: "
+        f"manager-path-sha256={hashlib.sha256(str(path.resolve()).encode()).hexdigest()} "
+        f"sha256={hashlib.sha256(owner).hexdigest()} size-bytes={len(owner)} separator-bytes=1]",
     )
+    report.write_bytes(("\n".join(header_lines) + "\nmessage:\n").encode() + message)
+    path.write_bytes(owner + b"\n(pending)\n" + f"(from agent vl:2 {report})\n".encode())
 
 
 class PendingReportDeliveryTests(unittest.TestCase):
@@ -121,7 +133,7 @@ class PendingReportDeliveryTests(unittest.TestCase):
             self.assertFalse(args.state.exists())
             self.assertIn("(pending)", task.read_text(encoding="utf-8"))
 
-    def test_async_completion_clears_report_after_marker_line_moves(self) -> None:
+    def test_async_completion_refuses_owner_bytes_changed_after_append(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             report = valid_report(self, "worker_done_move", "line movement is safe\n")
@@ -143,7 +155,8 @@ class PendingReportDeliveryTests(unittest.TestCase):
             watcher.log_send_result(future, captured[0])
             self.assertTrue(watcher.drain_delivery_successes(args, {}, 101.0))
 
-            self.assertNotIn("(pending)", task.read_text(encoding="utf-8"))
+            self.assertTrue(task.read_text(encoding="utf-8").startswith("moved line\n"))
+            self.assertIn("(pending)", task.read_text(encoding="utf-8"))
             self.assertTrue(args.state.read_text(encoding="utf-8").strip())
 
     def test_clear_race_does_not_redeliver_with_fresh_seen_cache(self) -> None:
@@ -168,6 +181,118 @@ class PendingReportDeliveryTests(unittest.TestCase):
 
             with patch.object(watcher, "push_marker_delivery", side_effect=AssertionError("durably consumed report was redelivered")):
                 self.assertTrue(watcher.scan_once(args, {}, [task]))
+            self.assertNotIn("(pending)", task.read_text(encoding="utf-8"))
+
+    def test_live_durable_authority_deduplicates_after_watcher_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            report = valid_report(self, "worker_done_live_authority", "delivered before watcher restart\n")
+            task = root / "worker.md"
+            write_report_pointer(task, report)
+            args = args_for(root)
+            marker = watcher.find_markers(root, [task])[0]
+            report_key = watcher.agent_report_seen_key(args, marker, watcher.marker_attachments(args, marker))
+            with (
+                patch.object(watcher, "REPORT_AUTHORITY_LEASE_S", 2.0),
+                patch.object(watcher, "push_marker_delivery", return_value=watcher.DeliveryResult(0)) as push,
+            ):
+                self.assertTrue(watcher.scan_once(args, {}, [task]))
+            self.assertEqual(1, push.call_count)
+            watcher.REPORT_AUTHORITY_LEASES.pop((args.state.resolve(strict=False), report_key))
+            write_report_pointer(task, report)
+
+            with patch.object(watcher, "push_marker_delivery", side_effect=AssertionError("durably consumed report was redelivered")):
+                self.assertTrue(watcher.scan_once(args, {}, [task]))
+
+            self.assertNotIn("(pending)", task.read_text(encoding="utf-8"))
+
+    def test_dead_durable_authority_is_redelivered(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            report = valid_report(self, "worker_done_dead_authority", "authority expired before receipt\n")
+            task = root / "worker.md"
+            write_report_pointer(task, report)
+            args = args_for(root)
+            marker = watcher.find_markers(root, [task])[0]
+            report_key = watcher.agent_report_seen_key(args, marker, watcher.marker_attachments(args, marker))
+            with (
+                patch.object(watcher, "REPORT_AUTHORITY_LEASE_S", 0.1),
+                patch.object(watcher, "push_marker_delivery", return_value=watcher.DeliveryResult(0)),
+            ):
+                self.assertTrue(watcher.scan_once(args, {}, [task]))
+            watcher.REPORT_AUTHORITY_LEASES.pop((args.state.resolve(strict=False), report_key))
+            write_report_pointer(task, report)
+            sleep(0.3)
+
+            with patch.object(watcher, "push_marker_delivery", return_value=watcher.DeliveryResult(0)) as push:
+                self.assertTrue(watcher.scan_once(args, {}, [task]))
+
+            self.assertEqual(1, push.call_count)
+            self.assertNotIn("(pending)", task.read_text(encoding="utf-8"))
+
+    def test_authority_source_replacement_after_launch_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            helper_directory = root / "helper"
+            helper_directory.mkdir()
+            source_path = Path(watcher.__file__).resolve().with_name("omo_task_lock.py")
+            original_source = source_path.read_bytes()
+            copied_source = helper_directory / "omo_task_lock.py"
+            copied_source.write_bytes(original_source)
+            copied_source.chmod(0o600)
+            copied_watcher = helper_directory / "omo_pending_watch.py"
+            copied_watcher.write_text("# authority source location fixture\n", encoding="utf-8")
+            state = root / "consumed.tsv"
+            key = "replace-authority-source-after-launch"
+            original_popen = subprocess.Popen
+
+            def replace_source_after_launch(*args: object, **kwargs: object) -> subprocess.Popen[bytes]:
+                process = original_popen(*args, **kwargs)  # type: ignore[arg-type]
+                copied_source.write_bytes(original_source + b"\n# replaced after launch\n")
+                return process
+
+            authority_key = (state.resolve(strict=False), key)
+            try:
+                with (
+                    patch.object(watcher, "__file__", str(copied_watcher)),
+                    patch.object(watcher, "REPORT_AUTHORITY_LEASE_S", 10.0),
+                    patch.object(watcher.subprocess, "Popen", side_effect=replace_source_after_launch),
+                ):
+                    evidence = watcher.acquire_report_authority(state, key)
+                self.assertEqual(hashlib.sha256(original_source).hexdigest(), evidence.source_sha256)
+                self.assertFalse(
+                    watcher.watcher_report_authority_is_live(
+                        pid=evidence.pid,
+                        start_ticks=evidence.start_ticks,
+                        lock_path=evidence.lock_path,
+                        lock_dev=evidence.lock_dev,
+                        lock_inode=evidence.lock_inode,
+                        source_path=evidence.source_path,
+                        source_sha256=evidence.source_sha256,
+                        token_sha256=evidence.token_sha256,
+                    )
+                )
+            finally:
+                lease = watcher.REPORT_AUTHORITY_LEASES.pop(authority_key, None)
+                if lease is not None and lease.process.poll() is None:
+                    lease.process.terminate()
+                    lease.process.wait(timeout=5)
+
+    def test_bare_consumed_ledger_does_not_skip_report_delivery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            report = valid_report(self, "worker_done_forged_bare", "bare ledger cannot consume this report\n")
+            task = root / "worker.md"
+            write_report_pointer(task, report)
+            args = args_for(root)
+            marker = watcher.find_markers(root, [task])[0]
+            report_key = watcher.agent_report_seen_key(args, marker, watcher.marker_attachments(args, marker))
+            self.assertTrue(watcher.remember_consumed_report(args.state, report_key))
+
+            with patch.object(watcher, "push_marker_delivery", return_value=watcher.DeliveryResult(0)) as push:
+                self.assertTrue(watcher.scan_once(args, {}, [task]))
+
+            self.assertEqual(1, push.call_count)
             self.assertNotIn("(pending)", task.read_text(encoding="utf-8"))
 
     def test_unknown_post_submit_outcome_is_durable_and_never_falls_back(self) -> None:
@@ -207,6 +332,7 @@ class PendingReportDeliveryTests(unittest.TestCase):
                 + "(pending items recorded line=20: n=1 sha256=deadbeef)\n",
                 encoding="utf-8",
             )
+            before = task.read_bytes()
             marker = watcher.find_markers(root, [task])[0]
             args = args_for(root)
             owner_future: Future[None] = Future()
@@ -232,6 +358,45 @@ class PendingReportDeliveryTests(unittest.TestCase):
             self.assertIn("target disappeared", fallback.call_args.args[1])
             self.assertFalse(args.state.exists())
             self.assertIn("(pending)", task.read_text(encoding="utf-8"))
+            self.assertEqual(before, task.read_bytes())
+
+    def test_report_clear_failure_cleans_its_temporary_and_preserves_all_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            report = valid_report(self, "worker_done_cleanup", "cleanup failure\n")
+            task = root / "worker.md"
+            write_report_pointer(task, report)
+            marker = watcher.find_markers(root, [task])[0]
+            args = args_for(root)
+            report_key = watcher.agent_report_seen_key(args, marker, watcher.marker_attachments(args, marker))
+            temporary = watcher_report_manager_temporary(task, report_key)
+            unrelated = task.with_name(f".{task.name}.unrelated")
+            unrelated.write_bytes(b"unrelated bytes")
+            before = task.read_bytes()
+
+            with patch.object(watcher, "remember_consumed_report_transition", return_value=False):
+                self.assertFalse(watcher.clear_consumed_report_marker(args, marker, report_key))
+
+            self.assertEqual(before, task.read_bytes())
+            self.assertFalse(temporary.exists())
+            self.assertEqual(b"unrelated bytes", unrelated.read_bytes())
+
+    def test_duplicate_report_suffix_is_stale_and_never_deletes_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            report = valid_report(self, "worker_done_duplicate", "duplicate suffix\n")
+            task = root / "worker.md"
+            write_report_pointer(task, report)
+            suffix = task.read_bytes()[task.read_bytes().index(b"\n(pending)\n") :]
+            task.write_bytes(task.read_bytes() + suffix)
+            marker = watcher.find_markers(root, [task])[0]
+            args = args_for(root)
+            report_key = watcher.agent_report_seen_key(args, marker, watcher.marker_attachments(args, marker))
+            before = task.read_bytes()
+
+            self.assertFalse(watcher.clear_consumed_report_marker(args, marker, report_key))
+            self.assertEqual(before, task.read_bytes())
+            self.assertFalse(watcher_report_manager_temporary(task, report_key).exists())
 
     def test_agent_origin_requires_valid_private_hashed_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

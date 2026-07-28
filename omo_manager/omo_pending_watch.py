@@ -12,6 +12,7 @@ import hashlib
 import os
 import random
 import re
+import secrets
 import shlex
 import select
 import stat
@@ -68,6 +69,10 @@ from omo_manager.omo_tmux_send import inspect_lines_for_message
 from omo_manager.omo_tmux_send import require_sendable_codex_target
 from omo_manager.omo_tmux_send import send_capacity_resume as verified_send_capacity_resume
 from omo_manager.omo_tmux_send import send_to_codex as verified_send_to_codex
+from omo_manager.omo_task_lock import watcher_report_authority_is_live
+from omo_manager.omo_task_lock import watcher_report_manager_temporary
+from omo_manager.omo_task_lock import watcher_report_state_maintenance_temporary
+from omo_manager.omo_task_lock import watcher_report_state_temporary
 
 
 def default_state_dir() -> Path:
@@ -135,6 +140,10 @@ AGENT_REPORT_SENT_RE = re.compile(
     r"time=\S+ task-file=[A-Za-z0-9_.-]+\)$"
 )
 AGENT_REPORT_HASH_RE = re.compile(r"^\[message-sha256: ([0-9a-f]{64})\]$")
+AGENT_REPORT_OWNER_RE = re.compile(
+    r"^\[omo-report-owner-prefix: manager-path-sha256=([0-9a-f]{64}) sha256=([0-9a-f]{64}) "
+    r"size-bytes=(0|[1-9][0-9]*) separator-bytes=([12])\]$"
+)
 AGENT_MESSAGE_DIR_RE = re.compile(rf"^/tmp/omo-agent-messages-{os.getuid()}/")
 MANAGER_GENERATED_SOURCE_RE = re.compile(
     r"^(?:\(from manager (?:omo_task_edit delegate-message|bidirectional blocking (?:wake|escalation) [A-Za-z0-9_.:-]+)\)"
@@ -211,6 +220,7 @@ def positive_float_env(name: str, default: float) -> float:
 DEFAULT_SEEN_TTL_S = positive_float_env("OMO_MANAGER_SEEN_TTL_S", 24 * 60 * 60)
 CONSUMED_REPORT_TTL_S = positive_float_env("OMO_MANAGER_CONSUMED_REPORT_TTL_S", 90 * 24 * 60 * 60)
 CONSUMED_REPORT_MAX_ENTRIES = 10_000
+REPORT_AUTHORITY_LEASE_S = min(3600.0, positive_float_env("OMO_MANAGER_REPORT_AUTHORITY_LEASE_S", 10 * 60))
 
 
 @dataclass(frozen=True)
@@ -317,6 +327,21 @@ class SourceAttachment:
     start_line: int = 1
     end_line: int = 0
     error: str = ""
+
+
+@dataclass(frozen=True)
+class AuthenticatedAgentReport:
+    target: str
+    path: Path
+    header_lines: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ReportOwnerBinding:
+    manager_path_sha256: str
+    owner_sha256: str
+    size_bytes: int
+    separator_bytes: int
 
 
 @dataclass(frozen=True)
@@ -429,10 +454,60 @@ CONSUMED_REPORT_CACHE_LOCK = Lock()
 @dataclass
 class ConsumedReportCache:
     signature: tuple[int, int, int, int] | None
-    entries: dict[str, float]
+    entries: dict[str, ConsumedReportEntry]
+
+
+@dataclass(frozen=True)
+class ConsumedReportEntry:
+    timestamp_s: float
+    transition: tuple[str, ...] = ()
 
 
 CONSUMED_REPORT_CACHE: dict[Path, ConsumedReportCache] = {}
+
+
+@dataclass(frozen=True)
+class ReportAuthorityEvidence:
+    role: str
+    pid: int
+    start_ticks: int
+    lock_path: Path
+    lock_dev: int
+    lock_inode: int
+    source_path: Path
+    source_sha256: str
+    token_sha256: str
+
+
+@dataclass(frozen=True)
+class ReportAuthorityLease:
+    process: subprocess.Popen[bytes]
+    evidence: ReportAuthorityEvidence
+
+
+REPORT_AUTHORITY_PROCESSES: list[subprocess.Popen[bytes]] = []
+REPORT_AUTHORITY_LEASES: dict[tuple[Path, str], ReportAuthorityLease] = {}
+MAX_AUTHORITY_SOURCE_BYTES = 4 * 1024 * 1024
+AUTHORITY_SOURCE_BOOTSTRAP = """from __future__ import annotations
+import os
+import sys
+
+source_path = sys.argv[1]
+source_fd = int(sys.argv[2])
+chunks: list[bytes] = []
+remaining = 4 * 1024 * 1024 + 1
+while remaining:
+    chunk = os.read(source_fd, min(1024 * 1024, remaining))
+    if not chunk:
+        break
+    chunks.append(chunk)
+    remaining -= len(chunk)
+source = b"".join(chunks)
+if len(source) > 4 * 1024 * 1024:
+    raise SystemExit(2)
+sys.argv = [source_path, *sys.argv[3:]]
+exec(compile(source, source_path, "exec"), {"__file__": source_path, "__name__": "__main__"})
+"""
 
 
 class PrePasteRejected(RuntimeError):
@@ -683,12 +758,23 @@ def send_to_codex(
         print(message)
         return None
     require_sendable_codex_target(target, inspect_lines_for_message(message))
-    return submit_send(target, message, selected, pending_guard, problem_guard, success_event, failure_fallback)
+    if all(value is None for value in (pending_guard, problem_guard, success_event, failure_fallback)):
+        return submit_send(target, message, selected)
+    return submit_send(
+        target,
+        message,
+        selected,
+        pending_guard=pending_guard,
+        problem_guard=problem_guard,
+        success_event=success_event,
+        failure_fallback=failure_fallback,
+    )
 
 
 def drain_delivery_successes(args: Args, seen: dict[str, float], now_wall_s: float) -> bool:
     """Apply completed background-send side effects on the watcher thread."""
 
+    prune_report_authorities()
     drain_send_results()
     changed = False
     while True:
@@ -698,17 +784,33 @@ def drain_delivery_successes(args: Args, seen: dict[str, float], now_wall_s: flo
             return retry_capacity_advisory(args, seen, now_wall_s) or changed
         seen_at_s = event.seen_at_s or now_wall_s
         durable_ok = True
-        for key in event.durable_report_keys:
-            if event.durable_report_state is not None:
-                durable_ok = remember_consumed_report(event.durable_report_state, key) and durable_ok
-                changed = True
         clear_ok = True
-        if not durable_ok:
-            clear_ok = False
-        elif event.clear_root is not None and event.clear_marker is not None and event.clear_report_key:
-            clear_ok = clear_consumed_report_marker(args, event.clear_marker, event.clear_report_key)
-        elif event.clear_root is not None and event.clear_marker is not None:
-            clear_ok = clear_pending_marker_if_current(event.clear_root, event.clear_marker)
+        if event.clear_root is not None and event.clear_marker is not None and event.clear_report_key:
+            if event.durable_report_state != args.state or event.durable_report_keys != (event.clear_report_key,):
+                durable_ok = False
+                clear_ok = False
+            else:
+                try:
+                    _ = acquire_report_authority(args.state, event.clear_report_key)
+                except (OSError, ValueError) as exc:
+                    print(
+                        f"omo_pending_watch: failed to establish delivered-report authority {event.clear_report_key}: {exc}",
+                        file=sys.stderr,
+                    )
+                    durable_ok = False
+                if durable_ok:
+                    durable_ok = remember_consumed_report(args.state, event.clear_report_key)
+                clear_ok = durable_ok and clear_consumed_report_marker(args, event.clear_marker, event.clear_report_key)
+                changed = True
+        else:
+            for key in event.durable_report_keys:
+                if event.durable_report_state is not None:
+                    durable_ok = remember_consumed_report(event.durable_report_state, key) and durable_ok
+                    changed = True
+            if not durable_ok:
+                clear_ok = False
+            elif event.clear_root is not None and event.clear_marker is not None:
+                clear_ok = clear_pending_marker_if_current(event.clear_root, event.clear_marker)
         for key in event.seen_keys:
             remember_seen(seen, key, seen_at_s)
             changed = True
@@ -1027,47 +1129,71 @@ def adjacent_source_metadata(block_lines: Sequence[str]) -> str:
     return line
 
 
-def valid_agent_report_artifact(source_line: str) -> bool:
+def authenticated_agent_report(source_line: str) -> AuthenticatedAgentReport | None:
     """Authenticate one immutable `omo_report.sh` pointer and artifact."""
 
     match = AGENT_POINTER_WITH_TARGET_RE.fullmatch(source_line)
     if match is None:
-        return False
+        return None
     path = Path(match.group(2))
     expected_dir = Path("/tmp") / f"omo-agent-messages-{os.getuid()}"
     try:
         directory_stat = expected_dir.lstat()
         if not stat.S_ISDIR(directory_stat.st_mode) or expected_dir.resolve(strict=True) != expected_dir:
-            return False
+            return None
         if directory_stat.st_uid != os.getuid() or stat.S_IMODE(directory_stat.st_mode) & 0o077:
-            return False
+            return None
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
         with os.fdopen(fd, "rb") as handle:
             path_stat = os.fstat(handle.fileno())
             if not stat.S_ISREG(path_stat.st_mode) or path_stat.st_uid != os.getuid() or stat.S_IMODE(path_stat.st_mode) & 0o077:
-                return False
+                return None
             payload = handle.read(PENDING_CONTENT_CHAR_LIMIT * 8 + 1)
             if len(payload) > PENDING_CONTENT_CHAR_LIMIT * 8:
-                return False
+                return None
     except OSError:
-        return False
+        return None
     header, separator, message = payload.partition(b"message:\n")
     if not separator:
-        return False
+        return None
     try:
         header_lines = header.decode("utf-8").splitlines()
         _ = message.decode("utf-8")
     except UnicodeDecodeError:
-        return False
-    if len(header_lines) not in {2, 4}:
-        return False
+        return None
+    if len(header_lines) not in {2, 3, 4, 5}:
+        return None
     sent_match = AGENT_REPORT_SENT_RE.fullmatch(header_lines[0])
     hash_match = AGENT_REPORT_HASH_RE.fullmatch(header_lines[1])
     if sent_match is None or sent_match.group(1) != match.group(1) or hash_match is None:
-        return False
-    if len(header_lines) == 4 and (header_lines[2] != "route-warning:" or not header_lines[3]):
-        return False
-    return hashlib.sha256(message).hexdigest() == hash_match.group(1)
+        return None
+    warning_index = 2
+    if len(header_lines) >= 3 and AGENT_REPORT_OWNER_RE.fullmatch(header_lines[2]) is not None:
+        warning_index = 3
+    if len(header_lines) not in {warning_index, warning_index + 2}:
+        return None
+    if len(header_lines) == warning_index + 2 and (header_lines[warning_index] != "route-warning:" or not header_lines[warning_index + 1]):
+        return None
+    if hashlib.sha256(message).hexdigest() != hash_match.group(1):
+        return None
+    return AuthenticatedAgentReport(match.group(1), path, tuple(header_lines))
+
+
+def valid_agent_report_artifact(source_line: str) -> bool:
+    return authenticated_agent_report(source_line) is not None
+
+
+def report_owner_binding(source_line: str, manager: Path) -> ReportOwnerBinding | None:
+    artifact = authenticated_agent_report(source_line)
+    if artifact is None or len(artifact.header_lines) < 3:
+        return None
+    match = AGENT_REPORT_OWNER_RE.fullmatch(artifact.header_lines[2])
+    if match is None:
+        return None
+    binding = ReportOwnerBinding(match.group(1), match.group(2), int(match.group(3)), int(match.group(4)))
+    if binding.manager_path_sha256 != hashlib.sha256(str(manager.resolve(strict=False)).encode()).hexdigest():
+        return None
+    return binding
 
 
 def marker_origin_source(block_lines: list[str]) -> tuple[str, str]:
@@ -1208,7 +1334,7 @@ def read_bounded_receipt_text(state: Path, max_bytes: int = 4 * 1024 * 1024) -> 
     return payload.decode("utf-8", errors="replace")
 
 
-def parse_consumed_report_entries(state: Path, now_s: float) -> tuple[dict[str, float], bool]:
+def parse_consumed_report_entries(state: Path, now_s: float) -> tuple[dict[str, ConsumedReportEntry], bool]:
     try:
         state_stat = state.stat()
         legacy_timestamp = state_stat.st_mtime
@@ -1218,36 +1344,54 @@ def parse_consumed_report_entries(state: Path, now_s: float) -> tuple[dict[str, 
     except OSError as exc:
         print(f"omo_pending_watch: failed to read consumed-report state {state}: {exc}", file=sys.stderr)
         return {}, False
-    entries: dict[str, float] = {}
+    entries: dict[str, ConsumedReportEntry] = {}
     dirty = state_stat.st_size > 4 * 1024 * 1024
     for line in text.splitlines():
-        timestamp_text, separator, key = line.partition("\t")
-        if not separator:
-            timestamp_s, key, dirty = legacy_timestamp, line, True
+        fields = line.split("\t")
+        if len(fields) == 1:
+            timestamp_s, key, transition, dirty = legacy_timestamp, line, (), True
         else:
+            timestamp_text, key, *transition_fields = fields
             try:
                 timestamp_s = float(timestamp_text)
             except ValueError:
                 dirty = True
                 continue
+            transition = tuple(transition_fields)
         if not key or now_s - timestamp_s >= CONSUMED_REPORT_TTL_S:
             dirty = True
             continue
-        entries[key] = max(entries.get(key, 0.0), timestamp_s)
+        entry = ConsumedReportEntry(timestamp_s, transition)
+        previous = entries.get(key)
+        if previous is None or (entry.timestamp_s, bool(entry.transition)) > (previous.timestamp_s, bool(previous.transition)):
+            entries[key] = entry
     if len(entries) > CONSUMED_REPORT_MAX_ENTRIES:
-        entries = dict(sorted(entries.items(), key=lambda item: item[1])[-CONSUMED_REPORT_MAX_ENTRIES:])
+        entries = dict(sorted(entries.items(), key=lambda item: item[1].timestamp_s)[-CONSUMED_REPORT_MAX_ENTRIES:])
         dirty = True
     return entries, dirty
 
 
-def write_consumed_report_entries(state: Path, entries: dict[str, float]) -> None:
+def write_consumed_report_entries(
+    state: Path,
+    entries: dict[str, ConsumedReportEntry],
+    *,
+    temporary: Path | None = None,
+) -> None:
     state.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    selected_temporary = temporary or watcher_report_state_maintenance_temporary(state)
+    if selected_temporary.parent != state.resolve(strict=False).parent:
+        raise OSError("consumed-report temporary escapes its state directory")
     tmp_path: Path | None = None
+    fd: int | None = None
     try:
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=state.parent, prefix=f".{state.name}.", delete=False) as handle:
-            tmp_path = Path(handle.name)
-            for key, timestamp_s in sorted(entries.items(), key=lambda item: item[1]):
-                _ = handle.write(f"{timestamp_s:.6f}\t{key}\n")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(selected_temporary, flags, 0o600)
+        tmp_path = selected_temporary
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd = None
+            for key, entry in sorted(entries.items(), key=lambda item: item[1].timestamp_s):
+                transition = "" if not entry.transition else "\t" + "\t".join(entry.transition)
+                _ = handle.write(f"{entry.timestamp_s:.6f}\t{key}{transition}\n")
             handle.flush()
             os.fsync(handle.fileno())
         tmp_path.chmod(0o600)
@@ -1259,11 +1403,13 @@ def write_consumed_report_entries(state: Path, entries: dict[str, float]) -> Non
         finally:
             os.close(directory_fd)
     finally:
+        if fd is not None:
+            os.close(fd)
         if tmp_path is not None:
             tmp_path.unlink(missing_ok=True)
 
 
-def locked_consumed_report_entries(state: Path, now_s: float, *, force_reload: bool = False) -> dict[str, float]:
+def locked_consumed_report_entries(state: Path, now_s: float, *, force_reload: bool = False) -> dict[str, ConsumedReportEntry]:
     state = state.resolve(strict=False)
     state.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     lock_path = receipt_lock_path(state)
@@ -1278,7 +1424,7 @@ def locked_consumed_report_entries(state: Path, now_s: float, *, force_reload: b
             else:
                 entries = dict(cached.entries)
                 dirty = False
-            expired = [key for key, timestamp_s in entries.items() if now_s - timestamp_s >= CONSUMED_REPORT_TTL_S]
+            expired = [key for key, entry in entries.items() if now_s - entry.timestamp_s >= CONSUMED_REPORT_TTL_S]
             for key in expired:
                 del entries[key]
             dirty = dirty or bool(expired)
@@ -1299,6 +1445,97 @@ def report_was_consumed(state: Path, key: str, now_s: float | None = None) -> bo
     return key in consumed_report_keys(state, now_s)
 
 
+def consumed_report_transition(state: Path, key: str) -> tuple[str, ...] | None:
+    entry = locked_consumed_report_entries(state, time.time()).get(key)
+    return None if entry is None else entry.transition
+
+
+def report_has_local_authority(state: Path, key: str) -> bool:
+    prune_report_authorities()
+    return (state.resolve(strict=False), key) in REPORT_AUTHORITY_LEASES
+
+
+def live_durable_report_authority(
+    state: Path,
+    key: str,
+    transition: tuple[str, ...] | None = None,
+) -> ReportAuthorityEvidence | None:
+    if transition is None:
+        transition = consumed_report_transition(state, key)
+    if transition is None or len(transition) != 17:
+        return None
+    (
+        protocol,
+        manager_digest,
+        pointer_digest,
+        before_digest,
+        before_size_text,
+        after_digest,
+        after_size_text,
+        authority_protocol,
+        authority_role,
+        authority_pid_text,
+        authority_start_text,
+        authority_lock_digest,
+        authority_lock_dev_text,
+        authority_lock_inode_text,
+        authority_source_path,
+        authority_source_digest,
+        authority_token_digest,
+    ) = transition
+    lock_path = report_authority_lock_path(state, key)
+    try:
+        before_size = int(before_size_text)
+        after_size = int(after_size_text)
+        authority_pid = int(authority_pid_text)
+        authority_start = int(authority_start_text)
+        authority_lock_dev = int(authority_lock_dev_text)
+        authority_lock_inode = int(authority_lock_inode_text)
+    except ValueError:
+        return None
+    source_path = Path(authority_source_path).resolve(strict=False)
+    expected_source_path = Path(__file__).resolve().with_name("omo_task_lock.py")
+    if (
+        protocol != "watcher-locked-pointer-transition-v1"
+        or any(re.fullmatch(r"[0-9a-f]{64}", digest) is None for digest in (manager_digest, pointer_digest, before_digest, after_digest))
+        or before_digest == after_digest
+        or before_size <= after_size
+        or after_size < 0
+        or authority_protocol != "watcher-consumption-authority-v1"
+        or authority_role != "bounded-watcher-lease"
+        or authority_lock_digest != hashlib.sha256(str(lock_path).encode()).hexdigest()
+        or source_path != expected_source_path
+    ):
+        return None
+    authority = ReportAuthorityEvidence(
+        role=authority_role,
+        pid=authority_pid,
+        start_ticks=authority_start,
+        lock_path=lock_path,
+        lock_dev=authority_lock_dev,
+        lock_inode=authority_lock_inode,
+        source_path=source_path,
+        source_sha256=authority_source_digest,
+        token_sha256=authority_token_digest,
+    )
+    if not watcher_report_authority_is_live(
+        pid=authority_pid,
+        start_ticks=authority_start,
+        lock_path=lock_path,
+        lock_dev=authority_lock_dev,
+        lock_inode=authority_lock_inode,
+        source_path=source_path,
+        source_sha256=authority_source_digest,
+        token_sha256=authority_token_digest,
+    ):
+        return None
+    return authority
+
+
+def report_has_live_durable_authority(state: Path, key: str, transition: tuple[str, ...] | None = None) -> bool:
+    return live_durable_report_authority(state, key, transition) is not None
+
+
 def remember_consumed_report(state: Path, key: str, now_s: float | None = None) -> bool:
     """Persist one timestamped receipt under a cross-process lock."""
 
@@ -1312,16 +1549,242 @@ def remember_consumed_report(state: Path, key: str, now_s: float | None = None) 
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
                 entries, _dirty = parse_consumed_report_entries(state, timestamp_s)
-                entries[key] = timestamp_s
+                previous = entries.get(key)
+                entries[key] = ConsumedReportEntry(timestamp_s, previous.transition if previous is not None else ())
                 if len(entries) > CONSUMED_REPORT_MAX_ENTRIES:
-                    entries = dict(sorted(entries.items(), key=lambda item: item[1])[-CONSUMED_REPORT_MAX_ENTRIES:])
-                write_consumed_report_entries(state, entries)
+                    entries = dict(sorted(entries.items(), key=lambda item: item[1].timestamp_s)[-CONSUMED_REPORT_MAX_ENTRIES:])
+                write_consumed_report_entries(state, entries, temporary=watcher_report_state_temporary(state, key))
                 CONSUMED_REPORT_CACHE[state] = ConsumedReportCache(receipt_state_signature(state), dict(entries))
             finally:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
         return True
     except OSError as exc:
         print(f"omo_pending_watch: failed to persist consumed report {key}: {exc}", file=sys.stderr)
+        return False
+
+
+def report_authority_lock_path(state: Path, key: str) -> Path:
+    return state.resolve(strict=False).parent / "pending-watch-authority" / f"{hashlib.sha256(key.encode()).hexdigest()}.lock"
+
+
+def process_start_ticks(pid: int) -> int:
+    payload = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    separator = payload.rfind(") ")
+    if separator < 0:
+        raise OSError("process stat is malformed")
+    fields = payload[separator + 2 :].split()
+    if len(fields) <= 19:
+        raise OSError("process stat is incomplete")
+    return int(fields[19])
+
+
+def private_report_authority_fd(path: Path) -> int:
+    directory = path.parent
+    try:
+        directory.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    info = directory.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
+        raise OSError("watcher report-authority directory is unsafe")
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
+    try:
+        lock_info = os.fstat(fd)
+        if not stat.S_ISREG(lock_info.st_mode) or lock_info.st_uid != os.getuid() or stat.S_IMODE(lock_info.st_mode) != 0o600:
+            raise OSError("watcher report-authority lock is unsafe")
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except Exception:
+        os.close(fd)
+        raise
+    return fd
+
+
+def wait_for_process_start_ticks(process: subprocess.Popen[bytes]) -> int:
+    for _ in range(50):
+        if process.poll() is not None:
+            raise OSError("watcher report-authority lease exited during launch")
+        try:
+            return process_start_ticks(process.pid)
+        except (OSError, ValueError):
+            time.sleep(0.01)
+    raise OSError("watcher report-authority lease identity is unavailable")
+
+
+def immutable_authority_source_bytes(source_path: Path) -> bytes:
+    """Read one owned authority-helper source snapshot without a pathname race."""
+
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(source_path, flags)
+    try:
+        before = os.fstat(fd)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.getuid()
+            or before.st_size > MAX_AUTHORITY_SOURCE_BYTES
+        ):
+            raise OSError("watcher authority source is unsafe")
+        chunks: list[bytes] = []
+        remaining = MAX_AUTHORITY_SOURCE_BYTES + 1
+        while remaining:
+            chunk = os.read(fd, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        source = b"".join(chunks)
+        after = os.fstat(fd)
+        if (
+            (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+            != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+            or len(source) != before.st_size
+            or len(source) > MAX_AUTHORITY_SOURCE_BYTES
+        ):
+            raise OSError("watcher authority source changed while creating its execution snapshot")
+        return source
+    finally:
+        os.close(fd)
+
+
+def acquire_report_authority(state: Path, key: str) -> ReportAuthorityEvidence:
+    prune_report_authorities()
+    authority_key = (state.resolve(strict=False), key)
+    existing = REPORT_AUTHORITY_LEASES.get(authority_key)
+    if existing is not None:
+        return existing.evidence
+    path = report_authority_lock_path(state, key)
+    fd = private_report_authority_fd(path)
+    token = secrets.token_hex(32)
+    process: subprocess.Popen[bytes] | None = None
+    try:
+        lock_info = os.fstat(fd)
+        source_path = Path(__file__).resolve().with_name("omo_task_lock.py")
+        source_payload = immutable_authority_source_bytes(source_path)
+        with tempfile.TemporaryFile() as source_snapshot:
+            _ = source_snapshot.write(source_payload)
+            source_snapshot.flush()
+            os.fsync(source_snapshot.fileno())
+            source_snapshot.seek(0)
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-I",
+                    "-S",
+                    "-c",
+                    AUTHORITY_SOURCE_BOOTSTRAP,
+                    str(source_path),
+                    str(source_snapshot.fileno()),
+                    "--hold-watcher-report-authority",
+                    str(fd),
+                    str(path),
+                    token,
+                    f"{REPORT_AUTHORITY_LEASE_S:g}",
+                    str(path.with_name(f"{path.name}.complete")),
+                ],
+                close_fds=True,
+                pass_fds=(fd, source_snapshot.fileno()),
+                start_new_session=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        pid = process.pid
+        start_ticks = wait_for_process_start_ticks(process)
+        evidence = ReportAuthorityEvidence(
+            role="bounded-watcher-lease",
+            pid=pid,
+            start_ticks=start_ticks,
+            lock_path=path,
+            lock_dev=lock_info.st_dev,
+            lock_inode=lock_info.st_ino,
+            source_path=source_path,
+            source_sha256=hashlib.sha256(source_payload).hexdigest(),
+            token_sha256=hashlib.sha256(token.encode()).hexdigest(),
+        )
+        REPORT_AUTHORITY_PROCESSES.append(process)
+        REPORT_AUTHORITY_LEASES[authority_key] = ReportAuthorityLease(process, evidence)
+        os.close(fd)
+        return evidence
+    except Exception:
+        if process is not None and process.poll() is None:
+            process.terminate()
+        os.close(fd)
+        path.unlink(missing_ok=True)
+        raise
+
+
+def prune_report_authorities() -> None:
+    for authority_key, lease in tuple(REPORT_AUTHORITY_LEASES.items()):
+        try:
+            current = lease.evidence.lock_path.lstat()
+        except OSError:
+            current = None
+        if (
+            lease.process.poll() is not None
+            or current is None
+            or (current.st_dev, current.st_ino) != (lease.evidence.lock_dev, lease.evidence.lock_inode)
+        ):
+            del REPORT_AUTHORITY_LEASES[authority_key]
+    REPORT_AUTHORITY_PROCESSES[:] = [process for process in REPORT_AUTHORITY_PROCESSES if process.poll() is None]
+
+
+def remember_consumed_report_transition(
+    state: Path,
+    key: str,
+    manager: Path,
+    pointer: str,
+    before: bytes,
+    after: bytes,
+    now_s: float | None = None,
+    authority: ReportAuthorityEvidence | None = None,
+) -> bool:
+    """Persist watcher delivery and its exact locked pointer-removal transition."""
+
+    if authority is None:
+        try:
+            authority = acquire_report_authority(state, key)
+        except (OSError, ValueError) as exc:
+            print(f"omo_pending_watch: failed to establish report authority {key}: {exc}", file=sys.stderr)
+            return False
+    transition = (
+        "watcher-locked-pointer-transition-v1",
+        hashlib.sha256(str(manager.resolve(strict=False)).encode()).hexdigest(),
+        hashlib.sha256(pointer.encode()).hexdigest(),
+        hashlib.sha256(before).hexdigest(),
+        str(len(before)),
+        hashlib.sha256(after).hexdigest(),
+        str(len(after)),
+        "watcher-consumption-authority-v1",
+        authority.role,
+        str(authority.pid),
+        str(authority.start_ticks),
+        hashlib.sha256(str(authority.lock_path).encode()).hexdigest(),
+        str(authority.lock_dev),
+        str(authority.lock_inode),
+        str(authority.source_path),
+        authority.source_sha256,
+        authority.token_sha256,
+    )
+    timestamp_s = time.time() if now_s is None else now_s
+    state = state.resolve(strict=False)
+    state.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    lock_path = receipt_lock_path(state)
+    try:
+        with CONSUMED_REPORT_CACHE_LOCK, lock_path.open("a", encoding="utf-8") as lock:
+            lock_path.chmod(0o600)
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                entries, _dirty = parse_consumed_report_entries(state, timestamp_s)
+                entries[key] = ConsumedReportEntry(timestamp_s, transition)
+                if len(entries) > CONSUMED_REPORT_MAX_ENTRIES:
+                    entries = dict(sorted(entries.items(), key=lambda item: item[1].timestamp_s)[-CONSUMED_REPORT_MAX_ENTRIES:])
+                write_consumed_report_entries(state, entries, temporary=watcher_report_state_temporary(state, key))
+                CONSUMED_REPORT_CACHE[state] = ConsumedReportCache(receipt_state_signature(state), dict(entries))
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        return True
+    except OSError as exc:
+        print(f"omo_pending_watch: failed to persist consumed report transition {key}: {exc}", file=sys.stderr)
         return False
 
 
@@ -1958,7 +2421,12 @@ def remove_direct_source_header(lines: list[str], idx: int) -> None:
         return
 
 
-def clear_pending_marker_if_current(root: Path, marker: Marker) -> bool:
+def clear_pending_marker_if_current(
+    root: Path,
+    marker: Marker,
+    *,
+    prepare: Callable[[Path, bytes, bytes], bool] | None = None,
+) -> bool:
     """Relocate and clear one delivered block under the shared task-file lock."""
 
     path = root / marker.file
@@ -1983,8 +2451,25 @@ def clear_pending_marker_if_current(root: Path, marker: Marker) -> bool:
             after = path.stat()
             if (after.st_dev, after.st_ino, after.st_mtime_ns, after.st_size) != (before.st_dev, before.st_ino, before.st_mtime_ns, before.st_size):
                 return False
+            before_payload = text.encode("utf-8")
+            after_payload = updated.encode("utf-8")
+            if prepare is not None and not prepare(path, before_payload, after_payload):
+                return False
+            after_prepare = path.stat()
+            if (after_prepare.st_dev, after_prepare.st_ino, after_prepare.st_mtime_ns, after_prepare.st_size) != (
+                before.st_dev,
+                before.st_ino,
+                before.st_mtime_ns,
+                before.st_size,
+            ):
+                return False
             os.replace(tmp_path, path)
             tmp_path = None
+            directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
             return True
     except OSError as exc:
         print(f"omo_pending_watch: failed to clear delivered pending marker in {marker.file}: {exc}", file=sys.stderr)
@@ -1994,11 +2479,134 @@ def clear_pending_marker_if_current(root: Path, marker: Marker) -> bool:
             tmp_path.unlink(missing_ok=True)
 
 
-def clear_consumed_report_marker(args: Args, hint: Marker, report_key: str) -> bool:
-    """Clear one matching report marker even if its line moved after delivery."""
+def clear_consumed_report_marker(
+    args: Args,
+    hint: Marker,
+    report_key: str,
+    authority: ReportAuthorityEvidence | None = None,
+) -> bool:
+    """Record and clear one watcher-delivered report under the manager-file lock."""
 
-    _ = report_key
-    return clear_pending_marker_if_current(args.root, hint)
+    pointer = adjacent_source_metadata(hint.block_text.splitlines())
+    path = args.root / hint.file
+    binding = report_owner_binding(pointer, path)
+    if binding is None:
+        return False
+    tmp_path = watcher_report_manager_temporary(path, report_key)
+    created_temporary = False
+    try:
+        with task_file_lock(path):
+            before = path.lstat()
+            if not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or before.st_size > 64 * 1024 * 1024:
+                return False
+            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(path, flags)
+            try:
+                opened = os.fstat(fd)
+                if (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns) != (
+                    before.st_dev,
+                    before.st_ino,
+                    before.st_size,
+                    before.st_mtime_ns,
+                    before.st_ctime_ns,
+                ):
+                    return False
+                payload = b""
+                while chunk := os.read(fd, 1024 * 1024):
+                    payload += chunk
+                after_read = os.fstat(fd)
+                if (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns) != (
+                    after_read.st_dev,
+                    after_read.st_ino,
+                    after_read.st_size,
+                    after_read.st_mtime_ns,
+                    after_read.st_ctime_ns,
+                ):
+                    return False
+            finally:
+                os.close(fd)
+            owner = payload[: binding.size_bytes]
+            if len(owner) != binding.size_bytes or hashlib.sha256(owner).hexdigest() != binding.owner_sha256:
+                return False
+            expected_separator_bytes = 1 if not owner or owner.endswith(b"\n") else 2
+            if binding.separator_bytes != expected_separator_bytes:
+                return False
+            suffix = b"\n" * binding.separator_bytes + b"(pending)\n" + pointer.encode("utf-8") + b"\n"
+            if payload != owner + suffix:
+                return False
+
+            temporary_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            temporary_fd = os.open(tmp_path, temporary_flags, 0o600)
+            created_temporary = True
+            try:
+                os.fchmod(temporary_fd, stat.S_IMODE(before.st_mode))
+                view = memoryview(owner)
+                while view:
+                    written = os.write(temporary_fd, view)
+                    if written <= 0:
+                        raise OSError("short watcher manager temporary write")
+                    view = view[written:]
+                os.fsync(temporary_fd)
+                temporary_info = os.fstat(temporary_fd)
+                if (
+                    not stat.S_ISREG(temporary_info.st_mode)
+                    or temporary_info.st_uid != before.st_uid
+                    or temporary_info.st_gid != before.st_gid
+                    or stat.S_IMODE(temporary_info.st_mode) != stat.S_IMODE(before.st_mode)
+                ):
+                    return False
+            finally:
+                os.close(temporary_fd)
+            current = path.lstat()
+            if (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns, current.st_ctime_ns) != (
+                before.st_dev,
+                before.st_ino,
+                before.st_size,
+                before.st_mtime_ns,
+                before.st_ctime_ns,
+            ):
+                return False
+            if not remember_consumed_report_transition(
+                args.state,
+                report_key,
+                path,
+                pointer,
+                payload,
+                owner,
+                authority=authority,
+            ):
+                return False
+            current = path.lstat()
+            if (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns, current.st_ctime_ns) != (
+                before.st_dev,
+                before.st_ino,
+                before.st_size,
+                before.st_mtime_ns,
+                before.st_ctime_ns,
+            ):
+                return False
+            os.replace(tmp_path, path)
+            created_temporary = False
+            directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0))
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+            restored = path.lstat()
+            if (
+                path.read_bytes() != owner
+                or restored.st_uid != before.st_uid
+                or restored.st_gid != before.st_gid
+                or stat.S_IMODE(restored.st_mode) != stat.S_IMODE(before.st_mode)
+            ):
+                return False
+            return True
+    except OSError as exc:
+        print(f"omo_pending_watch: failed to restore delivered report owner in {hint.file}: {exc}", file=sys.stderr)
+        return False
+    finally:
+        if created_temporary:
+            tmp_path.unlink(missing_ok=True)
 
 
 def push_marker_delivery(
@@ -2169,8 +2777,15 @@ def push_agent_report_ref(
     """Deliver an immutable report once to the manager that owns its task."""
 
     report_key = agent_report_seen_key(args, marker, attachments)
-    if report_was_consumed(args.state, report_key):
-        return 0 if args.dry_run or clear_consumed_report_marker(args, marker, report_key) else 1
+    transition = consumed_report_transition(args.state, report_key)
+    if transition is not None:
+        if args.dry_run:
+            return 0
+        if report_has_local_authority(args.state, report_key):
+            return 0 if clear_consumed_report_marker(args, marker, report_key) else 1
+        authority = live_durable_report_authority(args.state, report_key, transition)
+        if authority is not None:
+            return 0 if clear_consumed_report_marker(args, marker, report_key, authority) else 1
     if seen_contains(seen, report_key, now_s):
         return 1
 
@@ -2211,9 +2826,9 @@ def push_agent_report_ref(
         return status
     if args.dry_run:
         return 0
-    if remember_consumed_report(args.state, report_key):
+    if clear_consumed_report_marker(args, marker, report_key):
         remember_seen(seen, report_key, now_s)
-        return 0 if args.dry_run or clear_consumed_report_marker(args, marker, report_key) else 1
+        return 0
     return 1
 
 

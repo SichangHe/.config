@@ -1,5 +1,82 @@
 #!/usr/bin/env bash
 set -euo pipefail
+case "$0" in
+  /proc/self/fd/*)
+    if [ "${OMO_REPORT_IMMUTABLE_EXEC:-}" != "1" ]; then
+      echo "immutable report-helper execution identity is missing" >&2
+      exit 2
+    fi
+    ;;
+  *)
+    exec python3 -I -S - "$0" "$@" <<'PY'
+from __future__ import annotations
+
+import hashlib
+import os
+import shutil
+import stat
+import sys
+from pathlib import Path
+
+MAX_HELPER_BYTES = 4 * 1024 * 1024
+source = Path(sys.argv[1]).resolve(strict=True)
+fd = os.open(source, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0))
+try:
+    before = os.fstat(fd)
+    if not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or before.st_size > MAX_HELPER_BYTES:
+        raise RuntimeError("report helper is not a safe owned regular file")
+    chunks: list[bytes] = []
+    remaining = MAX_HELPER_BYTES + 1
+    while remaining:
+        chunk = os.read(fd, min(1024 * 1024, remaining))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    payload = b"".join(chunks)
+    after = os.fstat(fd)
+    if (
+        (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+        != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+        or len(payload) != before.st_size
+        or len(payload) > MAX_HELPER_BYTES
+    ):
+        raise RuntimeError("report helper changed while creating its execution snapshot")
+finally:
+    os.close(fd)
+
+read_fd, write_fd = os.pipe()
+writer = os.fork()
+if writer == 0:
+    os.close(read_fd)
+    try:
+        offset = 0
+        while offset < len(payload):
+            written = os.write(write_fd, payload[offset:])
+            if written <= 0:
+                os._exit(2)
+            offset += written
+    finally:
+        os.close(write_fd)
+    os._exit(0)
+os.close(write_fd)
+os.set_inheritable(read_fd, True)
+bash = shutil.which("bash")
+if bash is None:
+    raise RuntimeError("bash is required")
+environment = dict(os.environ)
+environment.update(
+    {
+        "OMO_REPORT_HELPER_PATH": str(source),
+        "OMO_REPORT_HELPER_SHA256": hashlib.sha256(payload).hexdigest(),
+        "OMO_REPORT_IMMUTABLE_EXEC": "1",
+    }
+)
+os.execve(bash, [bash, f"/proc/self/fd/{read_fd}", *sys.argv[2:]], environment)
+PY
+    ;;
+esac
+readonly OMO_REPORT_HELPER_PATH OMO_REPORT_HELPER_SHA256 OMO_REPORT_IMMUTABLE_EXEC
 local_env="${OMO_MANAGER_LOCAL_ENV:-$HOME/.config/omo_manager/local.env}"
 env_root="${OMO_WORK_LOGS_ROOT:-}"
 if [ -f "$local_env" ]; then
@@ -10,57 +87,125 @@ root="${OMO_WORK_LOGS_ROOT:-$HOME/work_logs}"
 manager_target="${OMO_MANAGER_TMUX_TARGET:-}"
 if [ -n "$env_root" ]; then root="$env_root"; fi
 task_file=""
+producer_target=""
 status=""
 message_file=""
 alloc_message_file=0
+describe=0
 agent="${OMO_AGENT_NAME:-agent}"
 usage() {
   printf '%s\n' \
     "Usage: omo_report.sh --status STATUS --message-file FILE [--agent NAME]" \
+    "       omo_report.sh --describe --status STATUS --message-file FILE [--agent NAME]" \
     "       omo_report.sh --alloc-message-file" \
     "Create report text in a private helper-allocated file, then pass that path with --message-file. A file named REPORT is refused unless it is in a private owner-only directory."
 }
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --status) status="$2"; shift 2 ;;
-    --message-file) message_file="$2"; shift 2 ;;
+    --status|--message-file|--agent)
+      if [ "$#" -lt 2 ]; then echo "missing value for $1" >&2; usage >&2; exit 2; fi
+      option="$1"
+      value="$2"
+      case "$option" in
+        --status) status="$value" ;;
+        --message-file) message_file="$value" ;;
+        --agent) agent="$value" ;;
+      esac
+      shift 2
+      ;;
     --alloc-message-file) alloc_message_file=1; shift ;;
-    --agent) agent="$2"; shift 2 ;;
+    --describe) describe=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
 if [ "$alloc_message_file" -eq 1 ] && [ -n "$message_file" ]; then echo "--alloc-message-file cannot be combined with --message-file" >&2; exit 2; fi
+if [ "$alloc_message_file" -eq 1 ] && [ "$describe" -eq 1 ]; then echo "--alloc-message-file cannot be combined with --describe" >&2; exit 2; fi
 if [ "$alloc_message_file" -eq 0 ] && { [ -z "$status" ] || [ -z "$message_file" ]; }; then usage >&2; exit 2; fi
-root_real=$(python3 -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve())' "$root")
+root_real=$(python3 -I -S -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve())' "$root")
+task_root_real="$root_real"
 if [ -z "$task_file" ]; then
-  task_file=$(python3 - "$root_real" <<'PY'
+  inferred_task=$(python3 -I -S - "$root_real" "$HOME/work_logs" <<'PY'
 from __future__ import annotations
+import hashlib
+import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
-root = Path(sys.argv[1])
-ACTIVE_SECTIONS = {"current", "human pending", "low priority"}
+roots: list[Path] = []
+for root_arg in sys.argv[1:]:
+    root = Path(root_arg).resolve()
+    if root not in roots:
+        roots.append(root)
+TASK_SECTIONS = {"current", "human pending", "low priority", "previous"}
+ACTIVE_TASK_STATUSES = {"running", "long_running", "blocked"}
 TARGET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?$")
+TARGET_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_-])([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)(?![A-Za-z0-9_.-])")
+MAX_ROUTE_FILE_BYTES = 64 * 1024 * 1024
+route_evidence: dict[str, dict[str, object]] = {}
 
-def target_parts(target: str) -> tuple[str, str, str]:
-    session, sep, rest = target.partition(":")
-    if not sep:
-        return "", "", ""
+def route_text(path: Path) -> str | None:
+    path = path.absolute()
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except FileNotFoundError:
+        record: dict[str, object] = {"exists": False, "path": str(path)}
+        previous = route_evidence.setdefault(str(path), record)
+        if previous != record:
+            raise RuntimeError(f"routing evidence changed while resolving: {path}")
+        return None
+    except OSError as exc:
+        raise RuntimeError(f"cannot read routing evidence: {path}") from exc
+    try:
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or before.st_size > MAX_ROUTE_FILE_BYTES:
+            raise RuntimeError(f"routing evidence is not a safe owned regular file: {path}")
+        payload = b""
+        while len(payload) <= MAX_ROUTE_FILE_BYTES:
+            chunk = os.read(fd, min(1024 * 1024, MAX_ROUTE_FILE_BYTES + 1 - len(payload)))
+            if not chunk:
+                break
+            payload += chunk
+        after = os.fstat(fd)
+        identity_before = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+        identity_after = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+        if identity_before != identity_after or len(payload) != before.st_size or len(payload) > MAX_ROUTE_FILE_BYTES:
+            raise RuntimeError(f"routing evidence changed while resolving: {path}")
+    finally:
+        os.close(fd)
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise RuntimeError(f"routing evidence is not UTF-8: {path}") from exc
+    record = {
+        "exists": True,
+        "path": str(path),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "size_bytes": len(payload),
+    }
+    previous = route_evidence.setdefault(str(path), record)
+    if previous != record:
+        raise RuntimeError(f"routing evidence changed while resolving: {path}")
+    return text
+
+def evidence_json() -> str:
+    return json.dumps(list(route_evidence.values()), ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+
+def canonical_tmux_target(target: str) -> tuple[str, int, int] | None:
+    if TARGET_RE.fullmatch(target) is None:
+        return None
+    session, rest = target.split(":", 1)
     window, dot, pane = rest.partition(".")
-    return session, window, pane if dot else ""
+    return session, int(window), int(pane) if dot else 0
 
 def same_tmux_target(left: str, right: str) -> bool:
-    left_session, left_window, left_pane = target_parts(left)
-    right_session, right_window, right_pane = target_parts(right)
-    if not left_session or not right_session:
-        return False
-    if left_session != right_session or left_window != right_window:
-        return False
-    return not left_pane or not right_pane or left_pane == right_pane
+    left_target = canonical_tmux_target(left)
+    return left_target is not None and left_target == canonical_tmux_target(right)
 
 def current_tmux_target() -> str:
     if shutil.which("tmux") is None:
@@ -83,10 +228,10 @@ def current_tmux_target() -> str:
     return f"{session}:{window}.{pane_index}"
 
 def parse_frontmatter(path: Path) -> dict[str, str] | None:
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
+    text = route_text(path)
+    if text is None:
         return None
+    lines = text.splitlines()
     if not lines or lines[0].strip() != "---":
         return None
     try:
@@ -102,22 +247,23 @@ def parse_frontmatter(path: Path) -> dict[str, str] | None:
             values[key.strip()] = value.strip()
     return values
 
-def task_refs(sections: set[str]) -> list[Path]:
+def task_refs(root: Path, sections: set[str]) -> list[tuple[Path, tuple[str, ...]]]:
     todo = root / "TODO.md"
-    try:
-        lines = todo.read_text(encoding="utf-8").splitlines()
-    except OSError:
+    text = route_text(todo)
+    if text is None:
         return []
-    refs: list[Path] = []
+    lines = text.splitlines()
+    refs: list[tuple[Path, tuple[str, ...]]] = []
     seen: set[Path] = set()
     section = ""
     for line in lines:
         stripped = line.strip()
-        if stripped.endswith(":") and stripped[:-1] in ACTIVE_SECTIONS | {"previous"}:
+        if stripped.endswith(":") and stripped[:-1] in TASK_SECTIONS:
             section = stripped[:-1]
             continue
         if section not in sections:
             continue
+        listed_targets = tuple(TARGET_TOKEN_RE.findall(line))
         for match in re.findall(r"`?([A-Za-z0-9_./-]+\.md)`?", line):
             path = (root / match).resolve(strict=False)
             if path in seen or path.name == "TODO.md":
@@ -127,46 +273,48 @@ def task_refs(sections: set[str]) -> list[Path]:
             except ValueError:
                 continue
             seen.add(path)
-            refs.append(path)
+            refs.append((path, listed_targets))
     return refs
-
-def active_task_refs() -> list[Path]:
-    return task_refs(ACTIVE_SECTIONS)
 
 current = current_tmux_target()
 if not current:
     print("current tmux pane/window could not be identified; cannot infer report task", file=sys.stderr)
     raise SystemExit(2)
-matches: list[Path] = []
-for candidate in active_task_refs():
-    metadata = parse_frontmatter(candidate)
-    if metadata is None:
-        continue
-    runat = metadata.get("runat", "")
-    if TARGET_RE.fullmatch(runat) and same_tmux_target(runat, current):
-        matches.append(candidate)
-if len(matches) == 1:
-    print(matches[0].relative_to(root))
-    raise SystemExit(0)
-if len(matches) > 1:
-    current_refs = set(task_refs({"current"}))
-    current_matches = [candidate for candidate in matches if candidate in current_refs]
-    if len(current_matches) == 1:
-        print(current_matches[0].relative_to(root))
+for root in roots:
+    matches: list[Path] = []
+    for candidate, listed_targets in task_refs(root, TASK_SECTIONS):
+        if listed_targets and not any(same_tmux_target(target, current) for target in listed_targets):
+            continue
+        metadata = parse_frontmatter(candidate)
+        if metadata is None or metadata.get("status") not in ACTIVE_TASK_STATUSES:
+            continue
+        runat = metadata.get("runat", "")
+        if TARGET_RE.fullmatch(runat) and same_tmux_target(runat, current):
+            matches.append(candidate)
+    if len(matches) == 1:
+        print(f"{root}\t{matches[0].relative_to(root)}\t{current}\t{evidence_json()}")
         raise SystemExit(0)
-if not matches:
-    print(f"could not infer task file for tmux target {current}", file=sys.stderr)
-else:
-    choices = ", ".join(str(path.relative_to(root)) for path in matches)
-    print(f"multiple active task files match tmux target {current}: {choices}", file=sys.stderr)
+    if len(matches) > 1:
+        current_refs = {candidate for candidate, _ in task_refs(root, {"current"})}
+        current_matches = [candidate for candidate in matches if candidate in current_refs]
+        if len(current_matches) == 1:
+            print(f"{root}\t{current_matches[0].relative_to(root)}\t{current}\t{evidence_json()}")
+            raise SystemExit(0)
+        choices = ", ".join(str(path.relative_to(root)) for path in matches)
+        print(f"multiple active task files match tmux target {current}: {choices}", file=sys.stderr)
+        raise SystemExit(2)
+print(f"could not infer task file for tmux target {current}", file=sys.stderr)
 raise SystemExit(2)
 PY
   )
+  IFS=$'\t' read -r task_root_real task_file producer_target task_route_evidence <<EOF
+$inferred_task
+EOF
 fi
-path_real=$(python3 -c 'from pathlib import Path; import sys; print((Path(sys.argv[1]) / sys.argv[2]).resolve(strict=False))' "$root_real" "$task_file")
-case "$path_real" in "$root_real"/*) ;; *) echo "task file escapes root" >&2; exit 2 ;; esac
+path_real=$(python3 -I -S -c 'from pathlib import Path; import sys; print((Path(sys.argv[1]) / sys.argv[2]).resolve(strict=False))' "$task_root_real" "$task_file")
+case "$path_real" in "$task_root_real"/*) ;; *) echo "task file escapes root" >&2; exit 2 ;; esac
 if [ "$alloc_message_file" -eq 1 ]; then
-  python3 - "$path_real" <<'PY'
+  python3 -I -S - "$path_real" <<'PY'
 from __future__ import annotations
 import os
 import re
@@ -186,14 +334,15 @@ print(path)
 PY
   exit 0
 fi
-python3 - "$message_file" <<'PY'
+python3 -I -S - "$message_file" <<'PY'
 from __future__ import annotations
 import os
 import stat
 import sys
 from pathlib import Path
-path = Path(sys.argv[1]).resolve(strict=False)
-if path.name != "REPORT":
+raw_path = Path(sys.argv[1])
+path = raw_path.resolve(strict=False)
+if raw_path.name != "REPORT":
     raise SystemExit(0)
 try:
     parent_stat = path.parent.stat()
@@ -208,34 +357,86 @@ raise SystemExit(2)
 PY
 if [ ! -f "$message_file" ]; then echo "message file not found" >&2; exit 2; fi
 if [ ! -f "$path_real" ]; then echo "task file not found" >&2; exit 2; fi
-append_info=$(python3 - "$root_real" "$path_real" "$manager_target" <<'PY'
+append_info=$(python3 -I -S - "$task_root_real" "$path_real" "$manager_target" "$producer_target" <<'PY'
 from __future__ import annotations
+import hashlib
+import json
+import os
 import re
+import stat
 import sys
 from datetime import datetime
 from pathlib import Path
 root = Path(sys.argv[1])
 task_path = Path(sys.argv[2])
 main_target = sys.argv[3].strip()
+producer_target = sys.argv[4].strip()
 TARGET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?$")
-ACTIVE_SECTIONS = {"current", "human pending", "low priority"}
+TARGET_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_-])([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)(?![A-Za-z0-9_.-])")
+TASK_SECTIONS = {"current", "human pending", "low priority", "previous"}
 ACTIVE_MANAGER_STATUSES = {"running", "long_running", "blocked"}
+MAX_ROUTE_FILE_BYTES = 64 * 1024 * 1024
+route_evidence: dict[str, dict[str, object]] = {}
+route_local_date = datetime.now().astimezone().strftime("%Y-%m-%d")
 
-def target_parts(target: str) -> tuple[str, str, str]:
-    session, sep, rest = target.partition(":")
-    if not sep:
-        return "", "", ""
+def route_text(path: Path) -> str | None:
+    path = path.absolute()
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except FileNotFoundError:
+        record: dict[str, object] = {"exists": False, "path": str(path)}
+        previous = route_evidence.setdefault(str(path), record)
+        if previous != record:
+            raise RuntimeError(f"routing evidence changed while resolving: {path}")
+        return None
+    except OSError as exc:
+        raise RuntimeError(f"cannot read routing evidence: {path}") from exc
+    try:
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or before.st_size > MAX_ROUTE_FILE_BYTES:
+            raise RuntimeError(f"routing evidence is not a safe owned regular file: {path}")
+        payload = b""
+        while len(payload) <= MAX_ROUTE_FILE_BYTES:
+            chunk = os.read(fd, min(1024 * 1024, MAX_ROUTE_FILE_BYTES + 1 - len(payload)))
+            if not chunk:
+                break
+            payload += chunk
+        after = os.fstat(fd)
+        identity_before = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+        identity_after = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+        if identity_before != identity_after or len(payload) != before.st_size or len(payload) > MAX_ROUTE_FILE_BYTES:
+            raise RuntimeError(f"routing evidence changed while resolving: {path}")
+    finally:
+        os.close(fd)
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise RuntimeError(f"routing evidence is not UTF-8: {path}") from exc
+    record = {
+        "exists": True,
+        "path": str(path),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "size_bytes": len(payload),
+    }
+    previous = route_evidence.setdefault(str(path), record)
+    if previous != record:
+        raise RuntimeError(f"routing evidence changed while resolving: {path}")
+    return text
+
+def evidence_json() -> str:
+    return json.dumps(list(route_evidence.values()), ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+
+def canonical_tmux_target(target: str) -> tuple[str, int, int] | None:
+    if TARGET_RE.fullmatch(target) is None:
+        return None
+    session, rest = target.split(":", 1)
     window, dot, pane = rest.partition(".")
-    return session, window, pane if dot else ""
+    return session, int(window), int(pane) if dot else 0
 
 def same_tmux_target(left: str, right: str) -> bool:
-    left_session, left_window, left_pane = target_parts(left)
-    right_session, right_window, right_pane = target_parts(right)
-    if not left_session or not right_session:
-        return False
-    if left_session != right_session or left_window != right_window:
-        return False
-    return not left_pane or not right_pane or left_pane == right_pane
+    left_target = canonical_tmux_target(left)
+    return left_target is not None and left_target == canonical_tmux_target(right)
 
 def target_session(target: str) -> str:
     return target.split(":", 1)[0] if ":" in target else ""
@@ -244,10 +445,10 @@ def is_named_main_manager_target(target: str) -> bool:
     return target_session(target) in {"main", "omo-manager"}
 
 def parse_frontmatter(path: Path) -> dict[str, str] | None:
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
+    text = route_text(path)
+    if text is None:
         return None
+    lines = text.splitlines()
     if not lines or lines[0].strip() != "---":
         return None
     try:
@@ -264,28 +465,34 @@ def parse_frontmatter(path: Path) -> dict[str, str] | None:
     return values
 
 def main_manager_file() -> Path:
-    today = datetime.now().astimezone().strftime("%Y-%m-%d")
-    return root / f"work_manager_{today}.md"
+    return root / f"work_manager_{route_local_date}.md"
 
-def print_route(path: Path, note: str = "") -> None:
-    print(f"{path}\t{note}")
+def print_route(path: Path, note: str, requested: str, resolved: str, kind: str) -> None:
+    print(path)
+    print(note)
+    print(requested)
+    print(resolved)
+    print(kind)
+    print(evidence_json())
+    print(route_local_date)
 
-def active_task_refs() -> list[Path]:
+def active_task_refs() -> list[tuple[Path, tuple[str, ...]]]:
     todo = root / "TODO.md"
-    try:
-        lines = todo.read_text(encoding="utf-8").splitlines()
-    except OSError:
+    text = route_text(todo)
+    if text is None:
         return []
-    refs: list[Path] = []
+    lines = text.splitlines()
+    refs: list[tuple[Path, tuple[str, ...]]] = []
     seen: set[Path] = set()
     section = ""
     for line in lines:
         stripped = line.strip()
-        if stripped.endswith(":") and stripped[:-1] in ACTIVE_SECTIONS | {"previous"}:
+        if stripped.endswith(":") and stripped[:-1] in TASK_SECTIONS:
             section = stripped[:-1]
             continue
-        if section not in ACTIVE_SECTIONS:
+        if section not in TASK_SECTIONS:
             continue
+        listed_targets = tuple(TARGET_TOKEN_RE.findall(line))
         for match in re.findall(r"`?([A-Za-z0-9_./-]+\.md)`?", line):
             path = (root / match).resolve(strict=False)
             if path in seen or path.name == "TODO.md":
@@ -295,16 +502,16 @@ def active_task_refs() -> list[Path]:
             except ValueError:
                 continue
             seen.add(path)
-            refs.append(path)
+            refs.append((path, listed_targets))
     return refs
 
 metadata = parse_frontmatter(task_path)
 if metadata is None:
     if task_path.name == "work_manager.md":
-        print_route(main_manager_file())
+        print_route(main_manager_file(), "", main_target, main_target, "legacy-main-manager")
         raise SystemExit(0)
     if task_path.name.startswith("work_manager_"):
-        print_route(task_path)
+        print_route(task_path, "", main_target, main_target, "main-manager")
         raise SystemExit(0)
     print("task frontmatter is required to route report", file=sys.stderr)
     raise SystemExit(2)
@@ -313,12 +520,22 @@ if not TARGET_RE.fullmatch(managerat):
     print("task frontmatter `managerat` must be a tmux target", file=sys.stderr)
     raise SystemExit(2)
 if same_tmux_target(managerat, main_target):
-    print_route(main_manager_file())
+    print_route(main_manager_file(), "", managerat, main_target, "configured-main-manager")
     raise SystemExit(0)
 if is_named_main_manager_target(managerat):
-    print_route(main_manager_file())
+    print_route(main_manager_file(), "", managerat, main_target or managerat, "named-main-manager")
     raise SystemExit(0)
-for candidate in active_task_refs():
+if metadata.get("is_manager") == "true":
+    runat = metadata.get("runat", "")
+    if metadata.get("status") not in ACTIVE_MANAGER_STATUSES or not same_tmux_target(runat, producer_target):
+        print("manager task does not bind the active producer target", file=sys.stderr)
+        raise SystemExit(2)
+    print_route(task_path, "", managerat, runat, "active-producer-manager-task")
+    raise SystemExit(0)
+manager_matches: list[tuple[Path, str]] = []
+for candidate, listed_targets in active_task_refs():
+    if listed_targets and not any(same_tmux_target(target, managerat) for target in listed_targets):
+        continue
     candidate_metadata = parse_frontmatter(candidate)
     if (
         candidate_metadata is None
@@ -328,32 +545,30 @@ for candidate in active_task_refs():
         continue
     runat = candidate_metadata.get("runat", "")
     if same_tmux_target(runat, managerat):
-        print_route(candidate)
-        raise SystemExit(0)
+        manager_matches.append((candidate, runat))
+if len(manager_matches) == 1:
+    candidate, runat = manager_matches[0]
+    print_route(candidate, "", managerat, runat, "active-manager-task")
+    raise SystemExit(0)
+if len(manager_matches) > 1:
+    choices = ", ".join(str(candidate.relative_to(root)) for candidate, _ in manager_matches)
+    print(f"multiple active manager task files match tmux target {managerat}: {choices}", file=sys.stderr)
+    raise SystemExit(2)
 note = f"Target manager `{managerat}` has no active manager task file. Main manager: find where that manager moved or reassign this report."
-print_route(main_manager_file(), note)
+print_route(main_manager_file(), note, managerat, main_target, "main-manager-fallback")
 PY
 )
-IFS=$'\t' read -r append_path_real route_note <<EOF
-$append_info
-EOF
-mkdir -p "$(dirname "$append_path_real")"
-stamp=$(date '+%H:%M')
-append_kv() {
-  python3 - "$1" "$2" <<'PY'
-from __future__ import annotations
-import sys
-from urllib.parse import quote
-key, value = sys.argv[1:3]
-if value:
-    print(f" {key}={quote(value, safe=':@._/-%')}", end="")
-PY
-}
-old_legacy_source_line="(from agent ${agent} via omo_report.sh status=${status})"
-old_source_prefix="[omo-message-source: origin=agent agent=${agent} via=omo_report.sh status=${status}"
-old_source_line="${old_source_prefix}"
+mapfile -t append_fields <<<"$append_info"
+if [ "${#append_fields[@]}" -ne 7 ]; then echo "report route resolution returned incomplete evidence" >&2; exit 2; fi
+append_path_real="${append_fields[0]}"
+route_note="${append_fields[1]}"
+requested_manager_target="${append_fields[2]}"
+resolved_manager_target="${append_fields[3]}"
+route_kind="${append_fields[4]}"
+manager_route_evidence="${append_fields[5]}"
+route_local_date="${append_fields[6]}"
+case "$append_path_real" in "$task_root_real"/*) ;; *) echo "report route escapes root" >&2; exit 2 ;; esac
 tmux_target="${TMUX_PANE:-}"
-pointer_label="$agent"
 tmux_info=""
 if command -v tmux >/dev/null 2>&1; then
   if [ -n "$tmux_target" ]; then
@@ -362,163 +577,106 @@ if command -v tmux >/dev/null 2>&1; then
     tmux_info=$(tmux display-message -p '#{session_name}	#{window_index}	#{pane_index}	#{pane_id}	#{window_name}' 2>/dev/null || true)
   fi
 fi
+tmux_session=""
+tmux_window_index=""
+tmux_pane_index=""
+tmux_pane_id=""
+tmux_window_name=""
 if [ -n "$tmux_info" ]; then
   IFS=$'\t' read -r tmux_session tmux_window_index tmux_pane_index tmux_pane_id tmux_window_name <<EOF
 $tmux_info
 EOF
-  old_source_line="${old_source_line}$(append_kv tmux_session "$tmux_session")"
-  old_source_line="${old_source_line}$(append_kv tmux_window_index "$tmux_window_index")"
-  old_source_line="${old_source_line}$(append_kv tmux_pane_index "$tmux_pane_index")"
-  old_source_line="${old_source_line}$(append_kv tmux_pane_id "$tmux_pane_id")"
-  if [ -n "$tmux_session" ] && [ -n "$tmux_window_index" ] && [ -n "$tmux_pane_index" ]; then
-    old_source_line="${old_source_line}$(append_kv tmux_target "${tmux_session}:${tmux_window_index}.${tmux_pane_index}")"
-  fi
-  if [ -n "$tmux_session" ] && [ -n "$tmux_window_index" ]; then
-    pointer_label="${tmux_session}:${tmux_window_index}"
-    if [ -n "$tmux_pane_index" ] && [ "$tmux_pane_index" != "0" ]; then
-      pointer_label="${pointer_label}.${tmux_pane_index}"
-    fi
-  fi
-  old_source_line="${old_source_line}$(append_kv tmux_window_name "$tmux_window_name")"
-elif [ -n "$tmux_target" ]; then
-  old_source_line="${old_source_line}$(append_kv tmux_pane_id "$tmux_target")"
-  pointer_label="$tmux_target"
 fi
-old_source_line="${old_source_line}]"
-old_legacy_source_match="$old_legacy_source_line"
-if [ "$old_source_line" != "${old_source_prefix}]" ]; then
-  old_legacy_source_match=""
-fi
-pointer_info=$(python3 - "$message_file" "$agent" "$status" "$stamp" "$path_real" "$pointer_label" "$route_note" <<'PY'
+helper_path="${OMO_REPORT_HELPER_PATH:?}"
+receiver_path="$(dirname "$helper_path")/omo_report_receipt.py"
+pending_digest_path="$(dirname "$helper_path")/omo_pending_digest.py"
+task_lock_path="$(dirname "$helper_path")/omo_task_lock.py"
+mode="submit"
+if [ "$describe" -eq 1 ]; then mode="describe"; fi
+exec env OMO_REPORT_RECEIVER_BOOTSTRAP=1 PYTHONDONTWRITEBYTECODE=1 python3 -I -S - "$receiver_path" "$pending_digest_path" "$task_lock_path" "$helper_path" \
+  --mode "$mode" \
+  --helper "$helper_path" \
+  --root "$task_root_real" \
+  --task "$path_real" \
+  --manager "$append_path_real" \
+  --requested-manager-target "$requested_manager_target" \
+  --resolved-manager-target "$resolved_manager_target" \
+  --route-kind "$route_kind" \
+  --route-note "$route_note" \
+  --task-route-evidence "$task_route_evidence" \
+  --manager-route-evidence "$manager_route_evidence" \
+  --route-local-date "$route_local_date" \
+  --status "$status" \
+  --message-file "$message_file" \
+  --agent "$agent" \
+  --producer-target "$producer_target" \
+  --tmux-session "$tmux_session" \
+  --tmux-window-index "$tmux_window_index" \
+  --tmux-pane-index "$tmux_pane_index" \
+  --tmux-pane-id "$tmux_pane_id" \
+  --tmux-window-name "$tmux_window_name" <<'PY'
 from __future__ import annotations
+
 import hashlib
 import os
-import re
+import stat
 import sys
-import tempfile
+import types
 from pathlib import Path
-message_path = Path(sys.argv[1])
-agent, status, stamp = sys.argv[2:5]
-task_path = Path(sys.argv[5])
-pointer_label = sys.argv[6]
-route_note = sys.argv[7]
-message_bytes = message_path.read_bytes()
-message_hash = hashlib.sha256(message_bytes).hexdigest()
 
-def safe_part(value: str) -> str:
-    part = re.sub(r"[^A-Za-z0-9._-]+", "_", value.strip()).strip("._-")
-    return part[:80] or "unknown"
+MAX_SOURCE_BYTES = 4 * 1024 * 1024
 
-def safe_label(value: str) -> str:
-    part = re.sub(r"[^A-Za-z0-9:._%-]+", "_", value.strip()).strip("._-")
-    return part[:80] or "unknown"
-
-label = safe_label(pointer_label)
-task_basename = safe_label(task_path.name)
-reports_dir = Path("/tmp") / f"omo-agent-messages-{os.getuid()}"
-reports_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-reports_dir.chmod(0o700)
-report_key_parts = [message_bytes, agent.encode(), status.encode(), label.encode(), str(task_path).encode()]
-if route_note:
-    report_key_parts.append(route_note.encode())
-report_key = hashlib.sha256(b"\0".join(report_key_parts)).hexdigest()
-report_path = reports_dir / f"{safe_part(agent)}_{safe_part(status)}_{report_key}.md"
-pointer_line = f"(from agent {label} {report_path})"
-sent_line = f"(sent from {agent} via omo_report.sh tmux={label} time={stamp} task-file={task_basename})"
-header_lines = [
-        sent_line,
-        f"[message-sha256: {message_hash}]",
-]
-if route_note:
-    header_lines.extend(["route-warning:", route_note])
-header_lines.append("message:")
-header = "\n".join(header_lines).encode("utf-8") + b"\n"
-body = header + message_bytes
-if report_path.exists():
-    current = report_path.read_bytes()
+def source_bytes(raw_path: str) -> tuple[Path, bytes]:
+    path = Path(raw_path).resolve(strict=True)
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0))
     try:
-        current_header, current_message = current.split(b"message:\n", 1)
-        current_header_text = current_header.decode("utf-8")
-    except (UnicodeDecodeError, ValueError) as exc:
-        raise RuntimeError(f"stale or corrupt report file: {report_path}") from exc
-    stable_expected_lines = [
-        f"[message-sha256: {message_hash}]",
-    ]
-    current_header_lines = current_header_text.splitlines()
-    if current_message != message_bytes or any(line not in current_header_lines for line in stable_expected_lines):
-        raise RuntimeError(f"stale or corrupt report file: {report_path}")
-    if current != body:
-        fd, tmp_name = tempfile.mkstemp(prefix=f".{report_path.name}.", suffix=".tmp", dir=reports_dir)
-        tmp_path = Path(tmp_name)
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(body)
-        tmp_path.chmod(0o600)
-        os.replace(tmp_path, report_path)
-    report_path.chmod(0o600)
-else:
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{report_path.name}.", suffix=".tmp", dir=reports_dir)
-    tmp_path = Path(tmp_name)
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(body)
-    tmp_path.chmod(0o600)
-    os.replace(tmp_path, report_path)
-    report_path.chmod(0o600)
-print(f"{message_hash}\t{report_path}\t{pointer_line}")
-PY
-)
-IFS=$'\t' read -r message_hash durable_message_file pointer_line <<EOF
-$pointer_info
-EOF
-lock_path="${append_path_real}.omo_report.lock"
-exec 9>"$lock_path"
-flock 9
-if [ ! -f "$append_path_real" ]; then : >"$append_path_real"; fi
-python3 - "$append_path_real" "$message_hash" "$pointer_line" "$old_legacy_source_match" "$old_source_line" <<'PY'
-from __future__ import annotations
-import re
-import sys
-from pathlib import Path
-path = Path(sys.argv[1])
-message_hash, pointer_line, old_legacy_source_match, old_source_line = sys.argv[2:6]
-hash_line = f"[message-sha256: {message_hash}]"
-lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or before.st_size > MAX_SOURCE_BYTES:
+            raise RuntimeError(f"helper source is not a safe owned regular file: {path}")
+        chunks: list[bytes] = []
+        remaining = MAX_SOURCE_BYTES + 1
+        while remaining:
+            chunk = os.read(fd, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+        after = os.fstat(fd)
+        if (
+            (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+            != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+            or len(payload) != before.st_size
+            or len(payload) > MAX_SOURCE_BYTES
+        ):
+            raise RuntimeError(f"helper source changed while creating its execution snapshot: {path}")
+    finally:
+        os.close(fd)
+    return path, payload
 
-def without_old_report_file(line: str) -> str:
-    line = re.sub(r" report_file=[^ \]]+", "", line)
-    line = re.sub(r" report_sha256=[^ \]]+", "", line)
-    line = re.sub(r" report-file=[^ )]+", "", line)
-    return line
+def load_module(name: str, path: Path, payload: bytes) -> types.ModuleType:
+    module = types.ModuleType(name)
+    module.__file__ = str(path)
+    module.__package__ = "omo_manager"
+    module.__executed_source_sha256__ = hashlib.sha256(payload).hexdigest()
+    sys.modules[name] = module
+    exec(compile(payload, str(path), "exec"), module.__dict__)
+    return module
 
-def without_volatile_tmux(line: str) -> str:
-    line = re.sub(r" tmux_pane_id=[^ \]]+", "", line)
-    line = re.sub(r" tmux_window_name=[^ \]]+", "", line)
-    return line
-
-for idx, line in enumerate(lines):
-    if line.strip() != "(pending)":
-        continue
-    block = lines[idx:]
-    for next_idx, block_line in enumerate(block[1:], start=idx + 1):
-        if block_line.strip() == "(pending)":
-            block = lines[idx:next_idx]
-            break
-    if any(block_line.strip().startswith(("(manager handled:", "(manager routed:")) for block_line in block[1:]):
-        continue
-    stripped_block = [block_line.strip() for block_line in block]
-    normalized_block = [without_old_report_file(block_line) for block_line in stripped_block]
-    stable_source_block = [without_volatile_tmux(block_line) for block_line in normalized_block]
-    stable_old_source_line = without_volatile_tmux(old_source_line)
-    if pointer_line in stripped_block:
-        raise SystemExit(0)
-    if hash_line in stripped_block and (
-        stable_old_source_line in stable_source_block
-        or (old_legacy_source_match and old_legacy_source_match in normalized_block)
-    ):
-        raise SystemExit(0)
-block = [
-    "",
-    "(pending)",
-    pointer_line,
-]
-path.write_text("\n".join(lines + block) + "\n", encoding="utf-8")
+receiver_path, receiver_payload = source_bytes(sys.argv[1])
+pending_path, pending_payload = source_bytes(sys.argv[2])
+lock_path, lock_payload = source_bytes(sys.argv[3])
+helper_path = Path(sys.argv[4]).resolve(strict=True)
+receiver_arguments = sys.argv[5:]
+package = types.ModuleType("omo_manager")
+package.__package__ = "omo_manager"
+package.__path__ = []
+sys.modules["omo_manager"] = package
+load_module("omo_manager.omo_pending_digest", pending_path, pending_payload)
+load_module("omo_manager.omo_task_lock", lock_path, lock_payload)
+receiver = load_module("omo_manager.omo_report_receipt", receiver_path, receiver_payload)
+receiver.__executed_helper_path__ = str(helper_path)
+receiver.__executed_helper_sha256__ = os.environ.get("OMO_REPORT_HELPER_SHA256", "")
+sys.argv = [str(receiver_path), *receiver_arguments]
+raise SystemExit(receiver.main())
 PY

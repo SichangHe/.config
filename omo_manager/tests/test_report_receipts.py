@@ -2179,6 +2179,42 @@ class ReportReceiptTests(unittest.TestCase):
             self.assertFalse(case.manager.exists())
             self.assertFalse((tmp_path / "state").exists())
 
+    def test_task_lock_dependency_edit_after_loading_never_claims_acceptance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            case = fixture(tmp_path)
+            report = copy_report_helper(tmp_path)
+            receiver = report.parent / "omo_report_receipt.py"
+            source = receiver.read_text(encoding="utf-8")
+            marker = "from .omo_task_lock import watcher_report_authority_is_live\n"
+            self.assertIn(marker, source)
+            receiver.write_text(
+                source.replace(
+                    marker,
+                    marker + '\nPath(__file__).with_name("omo_task_lock.py").write_text(' + '"# changed after loading\\n", encoding="utf-8")\n',
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            command = case.command()
+            command[0] = str(report)
+
+            result = subprocess.run(
+                command,
+                cwd=case.root.parent,
+                env=case.env,
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+
+            self.assertEqual(2, result.returncode)
+            self.assertEqual("", result.stdout)
+            self.assertIn("executed helper dependency omo_task_lock", result.stderr)
+            self.assertFalse(case.manager.exists())
+            self.assertFalse((tmp_path / "state").exists())
+
     def test_duplicate_batch_or_attempt_context_is_rejected(self) -> None:
         for body in (
             b"batch: B01\nbatch: B01\n",
