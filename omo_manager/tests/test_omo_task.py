@@ -471,6 +471,22 @@ class OmoTaskTests(unittest.TestCase):
             self.assertIn("reason: persistent specialized manager role", updated)
             self.assertNotIn("reason: persistent manager role", updated)
 
+    def test_v2_manager_relaunch_preserves_external_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            existing = v2_task().replace("resume_status: running", "resume_status: long_running").replace("is_manager: false", "is_manager: true")
+            args = Args(root, "manager.md", "cfg", "2", "codex", root, "", None, False, False, "", "medium", (), manager_target="wl:1", is_manager=True, model="gpt-5.6-terra")
+
+            updated = launched_frontmatter_text(existing, args, "cfg:2")
+            metadata = parse_task_metadata(updated, root)
+
+            self.assertIsNotNone(metadata)
+            assert metadata is not None
+            self.assertEqual("blocked", metadata.status)
+            self.assertEqual("long_running", metadata.resume_status)
+            self.assertIn("waiting for approval", metadata.blocked_on)
+            self.assertIn("persistent manager role", metadata.blocked_on)
+
     def test_vl_worker_launch_requires_manager_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -721,6 +721,7 @@ def launched_frontmatter_text(existing: str, args: Args, tmux_target: str) -> st
         blockers = values.get("blocked_on", [])
         generated = [blocker for blocker in blockers if blocker.get("kind") == "pending_items"]
         persistent = [blocker for blocker in blockers if blocker.get("kind") == "persistent"]
+        external = [blocker for blocker in blockers if blocker.get("kind") not in {"pending_items", "persistent"}]
         if is_manager and not persistent:
             persistent = [{"kind": "persistent", "reason": DEFAULT_LONG_RUNNING_BLOCKED_ON}]
         values["runat"] = tmux_target
@@ -729,10 +730,10 @@ def launched_frontmatter_text(existing: str, args: Args, tmux_target: str) -> st
             values["managerat"] = args.manager_target
         if args.is_manager:
             values["is_manager"] = True
-        if generated:
+        if generated or external:
             values["status"] = "blocked"
             values["resume_status"] = desired_status
-            values["blocked_on"] = [*generated, *persistent]
+            values["blocked_on"] = [*generated, *persistent, *external]
         else:
             values["status"] = desired_status
             values.pop("resume_status", None)
