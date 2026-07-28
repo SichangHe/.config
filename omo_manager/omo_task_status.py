@@ -71,7 +71,7 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--session-id", default="", help="Session id captured by the prior close, if available.")
     _ = parser.add_argument("task_file", type=Path)
     _ = parser.add_argument("status", nargs="?", choices=sorted(TASK_FRONTMATTER_STATUSES))
-    _ = parser.add_argument("--blocked-on", default="", help="Required when setting status to `blocked`; removed for all other statuses.")
+    _ = parser.add_argument("--blocked-on", default="", help="Required when setting status to `blocked`; optional for `long_running`; removed for other statuses.")
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     if parsed.finish_closed_done:
         if parsed.status not in {None, "", "done"}:
@@ -219,25 +219,34 @@ def update_frontmatter_status(text: str, status: str, blocked_on: str, work_log_
         raise TaskFrontmatterError("`--blocked-on` is required when setting status to `blocked`.")
     if "\n" in blocked_on or "\r" in blocked_on:
         raise TaskFrontmatterError("`--blocked-on` must be one line.")
-    if status != "blocked" and blocked_on:
-        raise TaskFrontmatterError("`--blocked-on` is only valid when setting status to `blocked`.")
+    if status not in {"blocked", "long_running"} and blocked_on:
+        raise TaskFrontmatterError("`--blocked-on` is only valid when setting status to `blocked` or `long_running`.")
     if metadata.version == V2_VERSION:
         frontmatter_text, body_text = split_task_text(text)
         values = load_yaml_mapping(frontmatter_text)
         generated = [blocker for blocker in values.get("blocked_on", []) if blocker.get("kind") == "pending_items"]
-        external = [blocker for blocker in values.get("blocked_on", []) if blocker.get("kind") != "pending_items"]
+        persistent = [blocker for blocker in values.get("blocked_on", []) if blocker.get("kind") == "persistent"]
+        external = [blocker for blocker in values.get("blocked_on", []) if blocker.get("kind") not in {"pending_items", "persistent"}]
         if status == "blocked":
             if values["status"] != "blocked":
                 values["resume_status"] = values["status"]
             values["status"] = "blocked"
             added = {"kind": "human", "reason": blocked_on}
-            values["blocked_on"] = [*generated, *external, *([] if added in external else [added])]
+            values["blocked_on"] = [*generated, *persistent, *external, *([] if added in external else [added])]
         elif generated:
             if status == "done":
                 raise TaskFrontmatterError("dependency-blocked task cannot be marked done")
             values["status"] = "blocked"
             values["resume_status"] = status
-            values["blocked_on"] = generated
+            role = [{"kind": "persistent", "reason": blocked_on}] if status == "long_running" else []
+            values["blocked_on"] = [*generated, *role]
+        elif status == "long_running":
+            values["status"] = status
+            if blocked_on:
+                values["blocked_on"] = [{"kind": "persistent", "reason": blocked_on}]
+            else:
+                values.pop("blocked_on", None)
+            values.pop("resume_status", None)
         else:
             values["status"] = status
             values.pop("blocked_on", None)
@@ -256,7 +265,7 @@ def update_frontmatter_status(text: str, status: str, blocked_on: str, work_log_
             continue
         if key == "status":
             updated.append(f"status: {status}")
-            if status == "blocked":
+            if status == "blocked" or (status == "long_running" and blocked_on):
                 updated.append(f"blocked_on: {blocked_on}")
                 inserted_blocked_on = True
             continue

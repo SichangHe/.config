@@ -252,6 +252,10 @@ def parse_v2_metadata(source: str, work_log_root: Path | None = None) -> TaskMet
     if len(set(all_item_ids)) != len(all_item_ids):
         raise TaskFrontmatterError("pending and resolved item ids must be unique within a task.")
     blockers = tuple(parse_blocker(value, work_log_root) for value in require_list(values.get("blocked_on", []), "blocked_on"))
+    if common[1] == "blocked" and not blockers:
+        raise TaskFrontmatterError("`blocked_on` must contain at least one blocker for a blocked v2 task.")
+    if common[1] == "long_running" and any(not isinstance(blocker, PersistentBlocker) for blocker in blockers):
+        raise TaskFrontmatterError("a `long_running` v2 task may only have persistent blockers.")
     notices = [notice for item in (*pending_items, *resolved_items) for notice in item.notices]
     if len({notice.id for notice in notices}) != len(notices):
         raise TaskFrontmatterError("notice ids must be unique within a task.")
@@ -285,8 +289,8 @@ def parse_common(values: Mapping[str, object], allowed: set[str]) -> tuple[str, 
     has_blocked_on = "blocked_on" in values
     if status == "blocked" and not has_blocked_on:
         raise TaskFrontmatterError("`blocked_on` is required when `status` is `blocked`.")
-    if status != "blocked" and has_blocked_on:
-        raise TaskFrontmatterError("`blocked_on` must only exist when `status` is `blocked`.")
+    if status not in {"blocked", "long_running"} and has_blocked_on:
+        raise TaskFrontmatterError("`blocked_on` must only exist when `status` is `blocked` or `long_running`.")
     runat = require_text(values["runat"], "runat")
     managerat = require_text(values["managerat"], "managerat")
     if TARGET_RE.fullmatch(runat) is None and runat != RETIRED_RUNAT:

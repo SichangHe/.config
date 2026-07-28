@@ -5815,6 +5815,25 @@ class PendingMarkerTests(unittest.TestCase):
 
             self.assertIn("1 open pending items", watcher.agent_pending_item_reminder_texts(root)["wl:4"])
 
+    def test_long_running_agent_with_blocked_on_suppresses_pending_item_reminders(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "TODO.md").write_text("current:\ncontact.md wl:4\n", encoding="utf-8")
+            (root / "contact.md").write_text(
+                task_frontmatter(
+                    status="long_running",
+                    blocked_on="persistent contact",
+                    runat="wl:4",
+                    managerat="wl:1",
+                    pending_items=("wait for next review",),
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual({}, watcher.agent_pending_item_reminder_texts(root))
+
     def test_blocked_agent_does_not_receive_pending_item_reminders(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 

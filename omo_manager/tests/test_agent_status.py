@@ -121,6 +121,14 @@ resolved_task_items: []
             self.assertIn("agent-problems: human_request=1", text)
             self.assertIn("human_request: task=done.md evidence=pending_item=preserve human request", text)
 
+    def test_frontmatter_accepts_long_running_with_blocked_on(self) -> None:
+        metadata = parse_task_metadata(task_frontmatter("long_running", blocked_on="persistent contact"))
+
+        self.assertIsNotNone(metadata)
+        assert metadata is not None
+        self.assertEqual("long_running", metadata.status)
+        self.assertEqual("persistent contact", metadata.blocked_on)
+
     def test_frontmatter_accepts_long_running_without_blocked_on(self) -> None:
         metadata = parse_task_metadata(task_frontmatter("long_running"))
 
