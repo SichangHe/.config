@@ -51,9 +51,12 @@ CODEX_LAUNCH_MARKER_PREFIX = "[omo:"
 CODEX_LAUNCH_MARKER_DRY_RUN = f"{CODEX_LAUNCH_MARKER_PREFIX}DRY]"
 CODEX_UPDATE_PROMPT_MARKERS = ("update available!", "update now", "press enter to continue")
 CODEX_UPDATE_SUCCESS_MARKERS = ("update ran successfully", "please restart codex")
-CODEX_TRUST_QUESTION = "do you trust the contents of this directory?"
-CODEX_TRUST_YES_RE = re.compile(r"^\s*(?:[>›]\s*)?1\.\s+Yes, proceed\s*$", re.IGNORECASE)
-CODEX_TRUST_NO_RE = re.compile(r"^\s*(?:[>›]\s*)?2\.\s+No, quit\s*$", re.IGNORECASE)
+CODEX_TRUST_TEXT = "Do you trust the contents of this directory? Working with untrusted contents comes with higher risk of prompt injection. Trusting the directory allows project-local config, hooks, and exec policies to load."
+CODEX_TRUST_CWD_RE = re.compile(r"^> You are in \S.*$")
+CODEX_TRUST_NOTE_RE = re.compile(r"^Note: You’re in a subdirectory of a Git project\. Trusting will apply to the repository root: \S.*$")
+CODEX_TRUST_YES_RE = re.compile(r"^\s*› 1\. Yes, continue\s*$")
+CODEX_TRUST_NO_RE = re.compile(r"^\s*2\. No, quit\s*$")
+CODEX_TRUST_CONFIRM_RE = re.compile(r"^\s*Press enter to continue(?: and create a sandbox\.\.\.)?\s*$")
 MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$")
 LINE_RANGE_RE = re.compile(r"^([1-9]\d*)-([1-9]\d*)$")
 HUMAN_INSTRUCTION_CLOSE = "</human_instruction>"
@@ -877,7 +880,7 @@ def worker_command(command: str, tmux_target: str, prelaunch_source: Path | None
 
 
 def new_launch_marker() -> str:
-    return f"{CODEX_LAUNCH_MARKER_PREFIX}{uuid.uuid4().hex[:6]}]"
+    return f"{CODEX_LAUNCH_MARKER_PREFIX}{uuid.uuid4().hex}]"
 
 
 def tmux(args: list[str], check: bool = False) -> subprocess.CompletedProcess[str]:
@@ -917,50 +920,103 @@ def has_codex_update_success(lines: list[str]) -> bool:
     return all(marker in text for marker in CODEX_UPDATE_SUCCESS_MARKERS)
 
 
+def nonempty_blocks(lines: list[str]) -> list[list[str]]:
+    blocks: list[list[str]] = []
+    for line in lines:
+        if line.strip():
+            if not blocks or not blocks[-1]:
+                blocks.append([line])
+            else:
+                blocks[-1].append(line)
+        elif blocks and blocks[-1]:
+            blocks.append([])
+    return [block for block in blocks if block]
+
+
 def has_codex_trust_prompt(lines: list[str]) -> bool:
+    blocks = nonempty_blocks(lines)
+    if len(blocks) < 4:
+        return False
+    confirm, choices, prompt = blocks[-1], blocks[-2], blocks[-3]
+    header_idx = -4
+    if len(blocks) >= 5 and CODEX_TRUST_NOTE_RE.fullmatch(" ".join(line.strip() for line in blocks[-4])) is not None:
+        header_idx = -5
     return (
-        any(line.strip().casefold() == CODEX_TRUST_QUESTION for line in lines)
-        and any(CODEX_TRUST_YES_RE.fullmatch(line) is not None for line in lines)
-        and any(CODEX_TRUST_NO_RE.fullmatch(line) is not None for line in lines)
+        len(confirm) == 1
+        and CODEX_TRUST_CONFIRM_RE.fullmatch(confirm[0]) is not None
+        and len(choices) == 2
+        and CODEX_TRUST_YES_RE.fullmatch(choices[0]) is not None
+        and CODEX_TRUST_NO_RE.fullmatch(choices[1]) is not None
+        and " ".join(line.strip() for line in prompt) == CODEX_TRUST_TEXT
+        and len(blocks) >= -header_idx
+        and len(blocks[header_idx]) == 1
+        and CODEX_TRUST_CWD_RE.fullmatch(blocks[header_idx][0]) is not None
     )
 
 
-def wait_codex_update_finished(target: str, launch_marker: str, timeout_s: float = 120.0) -> str:
+def marker_is_fresh(launch_marker: str, baseline_lines: tuple[str, ...] | None) -> bool:
+    return bool(launch_marker and baseline_lines is not None and all(line.strip() != launch_marker for line in baseline_lines))
+
+
+def require_same_launch_pane(target: str, pane_id: str) -> None:
+    if exact_pane_id(target) != pane_id:
+        raise RuntimeError(f"tmux target {target} no longer identifies launched pane {pane_id}.")
+
+
+def send_launch_enter(target: str, pane_id: str = "") -> None:
+    delivery_target = target
+    if pane_id:
+        require_same_launch_pane(target, pane_id)
+        delivery_target = pane_id
+    _ = tmux(["send-keys", "-t", delivery_target, "Enter"], check=True)
+
+
+def wait_codex_update_finished(target: str, launch_marker: str, timeout_s: float = 120.0, pane_id: str = "") -> str:
     deadline_s = time.monotonic() + timeout_s
     while time.monotonic() < deadline_s:
-        lines = lines_after_launch_marker(tail(target, 200), launch_marker)
+        captured = capture_pane(pane_id, 200, require=True) if pane_id else tail(target, 200)
+        lines = lines_after_launch_marker(captured, launch_marker)
         if lines is not None and has_codex_update_success(lines):
             return CODEX_LAUNCH_UPDATED
         time.sleep(0.25)
     raise RuntimeError(f"Codex update did not finish after {timeout_s:g}s.")
 
 
-def wait_command_started(target: str, timeout_s: float = 5.0, launch_marker: str = "") -> str:
+def wait_command_started(
+    target: str,
+    timeout_s: float = 5.0,
+    launch_marker: str = "",
+    pane_id: str = "",
+    baseline_lines: tuple[str, ...] | None = None,
+) -> str:
     deadline_s = time.monotonic() + timeout_s
     last_command = ""
     last_status = "unknown"
     saw_non_shell = False
     trust_confirmed = False
+    trust_allowed = bool(pane_id and marker_is_fresh(launch_marker, baseline_lines))
+    inspection_target = pane_id or target
     while time.monotonic() < deadline_s:
-        lines = lines_after_launch_marker(tail(target, 200), launch_marker)
+        captured = capture_pane(pane_id, 200, require=True) if pane_id else tail(target, 200)
+        lines = lines_after_launch_marker(captured, launch_marker)
         if lines is None:
             last_status = "launch marker not visible"
         else:
             if has_codex_update_prompt(lines):
-                _ = tmux(["send-keys", "-t", target, "Enter"], check=True)
-                return wait_codex_update_finished(target, launch_marker)
+                send_launch_enter(target, pane_id)
+                return wait_codex_update_finished(target, launch_marker, pane_id=pane_id)
             block = current_block(lines)
             active_status = status(lines, block)
-            if launch_marker and active_status == "not_codex" and has_codex_trust_prompt(block.lines):
+            if trust_allowed and active_status == "not_codex" and has_codex_trust_prompt(block.lines):
                 last_status = "directory trust confirmation still visible"
                 if not trust_confirmed:
-                    _ = tmux(["send-keys", "-t", target, "Enter"], check=True)
+                    send_launch_enter(target, pane_id)
                     trust_confirmed = True
             else:
                 last_status = active_status
                 if last_status != "not_codex":
                     return CODEX_LAUNCH_STARTED
-        last_command = current_command(target)
+        last_command = current_command(inspection_target)
         if last_command and last_command not in SHELL_COMMANDS:
             saw_non_shell = True
         time.sleep(0.05)
@@ -1052,6 +1108,9 @@ def start_codex(target: str, args: Args) -> None:
     excerpt = human_email_excerpt(args)
     human_instruction_file = write_human_instruction_file(excerpt) if excerpt else None
     try:
+        pane_id = exact_pane_id(target)
+        if not pane_id:
+            raise RuntimeError(f"new task target {target} does not resolve to its exact pane.")
         command = codex_cmd(
             args.session_id,
             args.reasoning_effort,
@@ -1064,12 +1123,16 @@ def start_codex(target: str, args: Args) -> None:
             human_instruction_file,
         )
         for attempt in range(2):
+            baseline_lines = tuple(capture_pane(pane_id, 200, require=True))
             launch_marker = new_launch_marker()
+            if not marker_is_fresh(launch_marker, baseline_lines):
+                raise RuntimeError("new Codex launch marker was already present in the pane baseline.")
             shell_launch = shell_cmd(worker_command(command, target, args.prelaunch_source, launch_marker))
-            _ = tmux(["send-keys", "-t", target, shell_launch, "Enter"], check=True)
-            if wait_command_started(target, launch_marker=launch_marker) != CODEX_LAUNCH_UPDATED:
+            require_same_launch_pane(target, pane_id)
+            _ = tmux(["send-keys", "-t", pane_id, shell_launch, "Enter"], check=True)
+            if wait_command_started(target, launch_marker=launch_marker, pane_id=pane_id, baseline_lines=baseline_lines) != CODEX_LAUNCH_UPDATED:
                 return
-            wait_shell(target, timeout_s=15.0)
+            wait_shell(pane_id, timeout_s=15.0)
         raise RuntimeError("Codex update completed but relaunch showed the update prompt again.")
     finally:
         if human_instruction_file is not None:
@@ -1221,16 +1284,18 @@ def dry_run(args: Args) -> None:
         print("tmux: " + " ".join(shlex.quote(part) for part in launch))
 
 
-def capture_pane(pane_id: str, n_lines: int = 80) -> list[str]:
+def capture_pane(pane_id: str, n_lines: int = 80, *, require: bool = False) -> list[str]:
     """Capture one already-resolved pane without resolving its target again."""
 
     out = subprocess.run(
-        ["tmux", "capture-pane", "-p", "-t", pane_id, "-S", f"-{n_lines}"],
+        ["tmux", "capture-pane", "-p", "-J", "-t", pane_id, "-S", f"-{n_lines}"],
         capture_output=True,
         text=True,
         timeout=5,
         check=False,
     )
+    if out.returncode != 0 and require:
+        raise RuntimeError(f"failed to capture launched tmux pane {pane_id}: {out.stderr.strip()}")
     if out.returncode != 0:
         return []
     lines = [line.rstrip() for line in (out.stdout or "").splitlines()]
