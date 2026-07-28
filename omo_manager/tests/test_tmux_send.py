@@ -63,10 +63,19 @@ def options(**kwargs: object) -> CodexSendOptions:
 class TmuxSendTests(unittest.TestCase):
     def test_exact_capacity_error_rejects_other_errors(self) -> None:
         capacity = ["Selected model is at capacity. Please try a different model.", "› Use /skills to list available skills", "  gpt-5.5"]
+        non_codex = ["Selected model is at capacity. Please try a different model."]
         mixed = ["Selected model is at capacity. Please try a different model.", "■ Error: network failed", "› Use /skills to list available skills", "  gpt-5.5"]
         historical = ["Selected model is at capacity. Please try a different model.", "────", "■ Error: network failed", "› Use /skills to list available skills", "  gpt-5.5"]
+        trailing_goal = [
+            "Selected model is at capacity. Please try a different model.",
+            "› Implement {feature}",
+            "  gpt-5.6-sol medium · ~/.config · Main [default]",
+            "Goal blocked (/goal resume)",
+        ]
 
         self.assertTrue(exact_capacity_error(capacity))
+        self.assertTrue(exact_capacity_error(trailing_goal))
+        self.assertFalse(exact_capacity_error(non_codex))
         self.assertFalse(exact_capacity_error(mixed))
         self.assertFalse(exact_capacity_error(historical))
 

@@ -20,6 +20,7 @@ from omo_manager.omo_codex_status import Args as StatusArgs
 from omo_manager.omo_codex_status import COMPACTING_RE
 from omo_manager.omo_codex_status import Report
 from omo_manager.omo_codex_status import exact_pane_id
+from omo_manager.omo_codex_status import has_selected_model_capacity_warning
 from omo_manager.omo_codex_status import inspect
 from omo_manager.omo_codex_status import interrupt_waiting_subagent_if_present
 from omo_manager.omo_codex_status import is_stock_placeholder_input_text
@@ -153,6 +154,14 @@ def report_output_evidence(report: Report) -> str:
     if tail != errors[-3:]:
         evidence += " output_tail=" + " / ".join(tail)
     return evidence
+
+
+def recover_capacity_error(report: Report) -> Report:
+    """Recover an exact capacity error hidden by a trailing Codex goal footer."""
+
+    if report.status == "not_codex" and has_selected_model_capacity_warning(report.lines):
+        return replace(report, status="error")
+    return report
 
 
 def manager_compaction_needs_reread(report: Report) -> bool:
@@ -972,7 +981,7 @@ def classify_target(task_file: str, target: str, persistent_role: bool = False, 
     """
     if not target:
         return StatusRow(task_file, "not_codex", "target=", persistent_role, task_status)
-    report = report or inspect(StatusArgs(target, 80))
+    report = recover_capacity_error(report or inspect(StatusArgs(target, 80)))
     evidence = f"target={target}"
     unstick = ""
     if role:
@@ -1150,7 +1159,7 @@ def unmanaged_problem_row(row: StatusRow, report_not_codex: bool, report_ready_r
 def manager_problem_row(args: Args, skip_targets: set[str], unstick_by_target: dict[str, str]) -> StatusRow | None:
     if not args.manager_target:
         return None
-    report = inspect(StatusArgs(args.manager_target, 80), detect_waiting_subagent=True)
+    report = recover_capacity_error(inspect(StatusArgs(args.manager_target, 80), detect_waiting_subagent=True))
     evidence = f"target={args.manager_target} role=manager" + report_output_evidence(report)
     if report.status == "waiting_subagent":
         interrupt = interrupt_waiting_subagent_if_present(args.manager_target, report) if args.auto_unstick else "disabled:no_auto_unstick"

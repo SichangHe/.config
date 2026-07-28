@@ -97,6 +97,10 @@
   - immediately before an asynchronous agent-problem paste, reruns the same problem scan without auto-unsticking and skips delivery unless every routed raw problem row is still present; a resumed manager or any changed pane/dependency state therefore invalidates stale captured output
   - email pending refs remain `origin=human source=email action=ack-human`
   - the shared agent-problem pass reminds each ready active agent at its own `runat` when its pending queue is nonempty
+  - for each tracked task `ready` row, including submanagers, captures only the latest visible completed turn from its prompt through the `Worked for` footer; the synthetic main-manager self row is not a tracked task row
+  - if that turn has no executed-shell invocation of `email_me.py` or `omo_report.sh`, sends one direct reminder to the agent to report through the appropriate helper or continue working; quoted instructions and command arguments that merely mention helper names do not count
+  - fingerprints the complete visible turn and atomically stores only the latest reminded fingerprint per canonical target in a private watcher-state ledger, so an unchanged turn is never reminded again, changed turns can be reconsidered, and storage stays bounded by tracked targets
+  - rechecks readiness, the fingerprint, and helper absence immediately before the asynchronous paste; these reminders have no manager fallback and their ready rows are removed from generic manager routing
 
 - agent-problem prompt format
   - starts with ``Handle ALL omo_pending_watch agent problems below; only email human if you cannot handle them:``
@@ -125,6 +129,9 @@
 
 - scoped maintenance
   - all manager-owned worker rows are handled by the same owner-routed problem scan
+  - an exact selected-model-capacity warning is recovered by submitting literal `resume` in the same pane; only a verified submission that leaves the exact warning consumes one of three attempts
+  - executor, pre-paste, paste, submit, and verification failures preserve the three-attempt budget, schedule another same-pane `resume`, and alert the owner not to launch a replacement pane
+  - exact-capacity `error` and `untracked_agent` rows are withheld from generic manager prompts while dedicated recovery runs; after three persistent verified submissions, the owner or main-manager peer receives same-pane recovery instructions
   - non-blocked panes classified as `stuck_input` are submitted with Enter when the Codex status helper says the visible input is safe
   - first and second successful Enter attempts are remembered and suppressed; the third still-stuck report is sent to the owning manager
   - remembered Enter attempts are cleared when that target is no longer reported as stuck

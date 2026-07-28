@@ -16,10 +16,12 @@ from omo_manager.omo_task_metadata import frontmatter_parts
 
 def task_text(status: str = "running", items: tuple[str, ...] = ()) -> str:
     pending = "pending_task_items: []" if not items else "pending_task_items:\n" + "\n".join(f"  - {item}" for item in items)
+    blocked_on = "blocked_on: persistent role\n" if status == "long_running" else ""
     return (
         "---\n"
         "version: v1.0.0\n"
         f"status: {status}\n"
+        f"{blocked_on}"
         "runat: cfg:2\n"
         "tool: codex\n"
         "managerat: cfg:1\n"

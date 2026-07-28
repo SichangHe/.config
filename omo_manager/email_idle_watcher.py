@@ -69,6 +69,8 @@ DEFAULT_MANAGER_TARGET = os.environ.get("OMO_MANAGER_TMUX_TARGET", "")
 DEFAULT_MAIL_DIR = Path(os.environ.get("OMO_MANAGER_MAIL_DIR", DEFAULT_ROOT / "manager_mail"))
 CONFIG_PATH = human_config_path()
 LEGACY_MANAGER_SUBJECT_TOKENS = ("[a]", "[omo_manager]")
+PB_CLEANUP_EXCLUDED_SUBJECT_PREFIXES = ("PB news", "PB stock watch", "PB urgent")
+PB_CLEANUP_EXCLUDED_SUBJECT_RE = re.compile(r"^(?:PB news|PB stock watch|PB urgent)\b", re.IGNORECASE)
 MANAGER_REPLY_SUBJECT_RE = re.compile(r"^re:\s*(?:\[a\]|\[omo_manager\])\s*", re.IGNORECASE)
 MANAGER_TARGET_SUBJECT_RE = re.compile(r"^(?:re:\s*)*(?:(?:\[a\]|\[omo_manager\])\s+)?(?:\[([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\]|([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?))(?:\s+|$)", re.IGNORECASE)
 TMUX_TARGET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?$")
@@ -1432,6 +1434,10 @@ def fetch_manager_count_header(client: imaplib.IMAP4_SSL, uid: str) -> Message |
     return BytesParser(policy=policy.default).parsebytes(data[0][1])
 
 
+def is_mail_cleanup_excluded_subject(subject: str) -> bool:
+    return PB_CLEANUP_EXCLUDED_SUBJECT_RE.match(subject_base(subject)) is not None
+
+
 def is_manager_mail_header(msg: Message, sender_email: str, recipient_email: str, require_subject_tags: bool) -> bool:
     normalized_recipient = recipient_email.casefold()
     sender = str(msg.get("From", ""))
@@ -1442,6 +1448,27 @@ def is_manager_mail_header(msg: Message, sender_email: str, recipient_email: str
         and any(address.casefold() == normalized_recipient for _name, address in getaddresses([recipients]))
         and (not require_subject_tags or any(token.lower() in subject.lower() for token in LEGACY_MANAGER_SUBJECT_TOKENS))
     )
+
+
+def cleanup_manager_mail_uids(
+    client: imaplib.IMAP4_SSL,
+    sender_email: str,
+    recipient_email: str,
+    candidate_uids: list[str],
+    require_subject_tags: bool,
+    header_cache: dict[str, Message | None] | None = None,
+) -> list[str]:
+    cache = header_cache if header_cache is not None else {}
+    accepted: list[str] = []
+    for uid in candidate_uids:
+        if uid not in cache:
+            cache[uid] = fetch_manager_count_header(client, uid)
+        msg = cache[uid]
+        if msg is None or not is_manager_mail_header(msg, sender_email, recipient_email, require_subject_tags):
+            continue
+        if not is_mail_cleanup_excluded_subject(str(msg.get("Subject", ""))):
+            accepted.append(uid)
+    return accepted
 
 
 def parsed_message_date(msg: Message) -> datetime | None:
@@ -1464,12 +1491,17 @@ def recent_manager_mail_uids(
     candidate_uids: list[str],
     cutoff: datetime,
     require_subject_tags: bool,
+    header_cache: dict[str, Message | None] | None = None,
 ) -> list[str]:
+    cache = header_cache if header_cache is not None else {}
     recent: list[str] = []
-    for uid in candidate_uids:
-        msg = fetch_manager_count_header(client, uid)
+    accepted_uids = cleanup_manager_mail_uids(client, sender_email, recipient_email, candidate_uids, require_subject_tags, cache)
+    for uid in accepted_uids:
+        msg = cache[uid]
+        if msg is None:
+            continue
         dt = parsed_message_date(msg)
-        if dt is not None and dt >= cutoff and is_manager_mail_header(msg, sender_email, recipient_email, require_subject_tags):
+        if dt is not None and dt >= cutoff:
             recent.append(uid)
     return recent
 
@@ -1494,10 +1526,13 @@ def manager_mail_counts(
     cutoff = now - timedelta(seconds=recent_window_s)
     ignored = ignored_uids or set()
     recipient = recipient_email or sender_email
-    total_uids = filter_ignored_uids(search_manager_mail_uids(client, sender_email, recipient, require_subject_tags=require_subject_tags), ignored)
-    unread_uids = filter_ignored_uids(search_manager_mail_uids(client, sender_email, recipient, unread=True, require_subject_tags=require_subject_tags), ignored)
+    header_cache: dict[str, Message | None] = {}
+    total_candidates = filter_ignored_uids(search_manager_mail_uids(client, sender_email, recipient, require_subject_tags=require_subject_tags), ignored)
+    unread_candidates = filter_ignored_uids(search_manager_mail_uids(client, sender_email, recipient, unread=True, require_subject_tags=require_subject_tags), ignored)
     recent_candidates = filter_ignored_uids(search_manager_mail_uids(client, sender_email, recipient, since=cutoff, require_subject_tags=require_subject_tags), ignored)
-    recent_total = len(recent_manager_mail_uids(client, sender_email, recipient, recent_candidates, cutoff, require_subject_tags))
+    total_uids = cleanup_manager_mail_uids(client, sender_email, recipient, total_candidates, require_subject_tags, header_cache)
+    unread_uids = cleanup_manager_mail_uids(client, sender_email, recipient, unread_candidates, require_subject_tags, header_cache)
+    recent_total = len(recent_manager_mail_uids(client, sender_email, recipient, recent_candidates, cutoff, require_subject_tags, header_cache))
     return ManagerMailCounts(len(total_uids), len(unread_uids), recent_window_s, recent_total, True)
 
 

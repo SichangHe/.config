@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import os
+import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stderr
@@ -17,6 +18,9 @@ from omo_manager.omo_task_status import run
 from omo_manager.omo_task_status import stop_done_agent
 from omo_manager.omo_task_status import update_frontmatter_status
 from omo_manager.omo_task_status import Args as StatusArgs
+from omo_manager.omo_task_metadata import frontmatter_parts
+from omo_manager.omo_blocking import load_yaml_mapping, render_task, split_task_text, sync_generated_blocker
+from omo_manager.tests.test_task_metadata_v2 import v2_task
 
 
 def task_frontmatter(
@@ -24,6 +28,7 @@ def task_frontmatter(
     status: str = "running",
     blocked_on: str = "",
     pending_items: tuple[str, ...] = (),
+    runat: str = "wl:2",
     managerat: str = "wl:1",
     is_manager: bool = False,
 ) -> str:
@@ -36,7 +41,7 @@ def task_frontmatter(
         lines.append(f"blocked_on: {blocked_on}")
     lines.extend(
         [
-            "runat: wl:2",
+            f"runat: {runat}",
             "tool: codex",
             f"managerat: {managerat}",
             f"is_manager: {str(is_manager).lower()}",
@@ -52,15 +57,85 @@ def task_frontmatter(
 
 
 class TaskStatusTests(unittest.TestCase):
-    def worker_text(self, target: str = "wl:3", *, status: str = "running", blocked_on: str = "", is_manager: bool = False, managerat: str = "wl:1") -> str:
-        return task_frontmatter(status=status, blocked_on=blocked_on, managerat=managerat, is_manager=is_manager).replace("runat: wl:2", f"runat: {target}")
+    def test_stop_done_agent_treats_verified_missing_exact_pane_as_stopped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "worker.md"
+            path.write_text(task_frontmatter(runat="wl:3") + "body\n", encoding="utf-8")
+            metadata = parse_task_metadata(path.read_text(encoding="utf-8"))
+            assert metadata is not None
+
+            with patch("omo_manager.omo_task_status.exact_pane_id", return_value=""), patch("omo_manager.omo_task_status.stop") as stop_call:
+                stop_args, session_id = stop_done_agent(root, path, metadata)
+
+            stop_call.assert_not_called()
+            self.assertEqual("wl:3", stop_args.target)
+            self.assertEqual("", session_id)
+
+    def test_cli_done_closes_verified_missing_pane_and_moves_todo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "manager.md"
+            path.write_text(task_frontmatter(runat="wl:3", is_manager=True) + "body\n", encoding="utf-8")
+            todo = root / "TODO.md"
+            todo.write_text("current:\nmanager.md wl:3\n\nprevious:\n", encoding="utf-8")
+
+            with (
+                patch("omo_manager.omo_task_status.exact_pane_id", return_value=""),
+                patch("omo_manager.omo_task_status.stop") as stop_call,
+                redirect_stdout(io.StringIO()),
+            ):
+                exit_code = run(StatusArgs(root, Path("manager.md"), "done", ""))
+
+            self.assertEqual(0, exit_code)
+            stop_call.assert_not_called()
+            self.assertIn("status: done\nrunat: wl:3", path.read_text(encoding="utf-8"))
+            self.assertIn("tmux target `wl:3`; Codex session id not found", path.read_text(encoding="utf-8"))
+            self.assertIn("current:\n\nprevious:\nmanager.md wl:3\n", todo.read_text(encoding="utf-8"))
+
+    def test_stop_done_agent_accepts_disappearance_during_status_paste(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "worker.md"
+            path.write_text(task_frontmatter(runat="wl:3", is_manager=True) + "body\n", encoding="utf-8")
+            metadata = parse_task_metadata(path.read_text(encoding="utf-8"))
+            assert metadata is not None
+            paste_error = subprocess.CalledProcessError(1, ["tmux", "paste-buffer", "-t", "%3"])
+
+            with (
+                patch("omo_manager.omo_task_status.exact_pane_id", side_effect=("%3", "")),
+                patch("omo_manager.omo_task_status.pane_id", return_value=""),
+                patch("omo_manager.omo_task_status.stop", side_effect=paste_error) as stop_call,
+            ):
+                stop_args, session_id = stop_done_agent(root, path, metadata)
+
+            self.assertEqual("%3", stop_call.call_args.args[0].target)
+            self.assertEqual("wl:3", stop_args.target)
+            self.assertEqual("", session_id)
+
+    def test_stop_done_agent_propagates_failure_for_live_or_reused_pane(self) -> None:
+        for current_pane_id, original_pane_id in (("%3", "%3"), ("%4", ""), ("", "%3")):
+            with self.subTest(current_pane_id=current_pane_id, original_pane_id=original_pane_id), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                path = root / "worker.md"
+                path.write_text(task_frontmatter(runat="wl:3", is_manager=True) + "body\n", encoding="utf-8")
+                metadata = parse_task_metadata(path.read_text(encoding="utf-8"))
+                assert metadata is not None
+
+                with (
+                    patch("omo_manager.omo_task_status.exact_pane_id", side_effect=("%3", current_pane_id)),
+                    patch("omo_manager.omo_task_status.pane_id", return_value=original_pane_id),
+                    patch("omo_manager.omo_task_status.stop", side_effect=RuntimeError("status paste failed")),
+                    self.assertRaisesRegex(RuntimeError, "status paste failed"),
+                ):
+                    stop_done_agent(root, path, metadata)
 
     def test_stop_done_agent_allows_unique_current_worker_to_close_own_pane(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             path = root / "worker.md"
-            path.write_text(self.worker_text() + "body\n", encoding="utf-8")
-            (root / "stale_done.md").write_text(self.worker_text(status="done") + "body\n", encoding="utf-8")
+            path.write_text(task_frontmatter(runat="wl:3") + "body\n", encoding="utf-8")
+            (root / "stale_done.md").write_text(task_frontmatter(status="done", runat="wl:3") + "body\n", encoding="utf-8")
             (root / "TODO.md").write_text("current:\nworker.md wl:3\nstale_done.md wl:3\n\nhuman pending:\nstale.md\n", encoding="utf-8")
             metadata = parse_task_metadata(path.read_text(encoding="utf-8"))
             assert metadata is not None
@@ -78,8 +153,8 @@ class TaskStatusTests(unittest.TestCase):
             with self.subTest(section=section), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 path = root / "worker.md"
-                path.write_text(self.worker_text() + "body\n", encoding="utf-8")
-                (root / "stale.md").write_text(self.worker_text(status="blocked", blocked_on="waiting for human") + "body\n", encoding="utf-8")
+                path.write_text(task_frontmatter(runat="wl:3") + "body\n", encoding="utf-8")
+                (root / "stale.md").write_text(task_frontmatter(status="blocked", blocked_on="waiting for human", runat="wl:3") + "body\n", encoding="utf-8")
                 (root / "TODO.md").write_text(f"Current\nworker.md wl 3\n\n{section}:\nstale.md wl:3\n", encoding="utf-8")
                 metadata = parse_task_metadata(path.read_text(encoding="utf-8"))
                 assert metadata is not None
@@ -94,7 +169,7 @@ class TaskStatusTests(unittest.TestCase):
             with self.subTest(todo_line=todo_line), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 path = root / "worker.md"
-                path.write_text(self.worker_text() + "body\n", encoding="utf-8")
+                path.write_text(task_frontmatter(runat="wl:3") + "body\n", encoding="utf-8")
                 (root / "broken.md").write_text("no frontmatter\n", encoding="utf-8")
                 (root / "TODO.md").write_text(f"current:\nworker.md wl:3\n{todo_line}\n", encoding="utf-8")
                 metadata = parse_task_metadata(path.read_text(encoding="utf-8"))
@@ -110,13 +185,15 @@ class TaskStatusTests(unittest.TestCase):
             root = Path(tmp)
             path = root / "worker.md"
             other = root / "other.md"
-            path.write_text(self.worker_text() + "body\n", encoding="utf-8")
+            path.write_text(task_frontmatter(runat="wl:3") + "body\n", encoding="utf-8")
             metadata = parse_task_metadata(path.read_text(encoding="utf-8"))
             assert metadata is not None
 
             with patch("omo_manager.omo_task_status.exact_pane_id", return_value="%3"), patch(
                 "omo_manager.omo_task_status.current_target_task_paths", side_effect=((path,), (other, path))
-            ), patch("omo_manager.omo_task_status.stop", return_value="session-1"):
+            ), patch(
+                "omo_manager.omo_task_status.stop", return_value="session-1"
+            ):
                 stop_args, _session_id = stop_done_agent(root, path, metadata)
 
             self.assertFalse(stop_args.allow_self)
@@ -125,7 +202,7 @@ class TaskStatusTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             path = root / "worker.md"
-            path.write_text(self.worker_text() + "body\n", encoding="utf-8")
+            path.write_text(task_frontmatter(runat="wl:3") + "body\n", encoding="utf-8")
             (root / "TODO.md").write_text("current:\nworker.md wl:3\n", encoding="utf-8")
             metadata = parse_task_metadata(path.read_text(encoding="utf-8"))
             assert metadata is not None
@@ -134,22 +211,23 @@ class TaskStatusTests(unittest.TestCase):
                 stop_args, _session_id = stop_done_agent(root, path, metadata)
 
             self.assertFalse(stop_args.allow_self)
-            self.assertEqual("wl:3", stop_call.call_args.args[0].target)
+            self.assertEqual("%3", stop_call.call_args.args[0].target)
 
-    def test_stop_done_agent_refuses_prefix_resolved_target(self) -> None:
+    def test_stop_done_agent_does_not_fall_back_to_prefix_resolved_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             path = root / "worker.md"
-            path.write_text(self.worker_text("wl:1", managerat="main:0") + "body\n", encoding="utf-8")
+            path.write_text(task_frontmatter(runat="wl:1", managerat="main:0") + "body\n", encoding="utf-8")
             (root / "TODO.md").write_text("current:\nworker.md wl:1\n", encoding="utf-8")
             metadata = parse_task_metadata(path.read_text(encoding="utf-8"))
             assert metadata is not None
 
             with patch("omo_manager.omo_task_status.exact_pane_id", return_value=""), patch("omo_manager.omo_task_status.stop", return_value="session-1") as stop_call:
-                stop_args, _session_id = stop_done_agent(root, path, metadata)
+                stop_args, session_id = stop_done_agent(root, path, metadata)
 
             self.assertFalse(stop_args.allow_self)
-            self.assertEqual("wl:1", stop_call.call_args.args[0].target)
+            self.assertEqual("", session_id)
+            stop_call.assert_not_called()
 
     def test_stop_done_agent_refuses_self_close_for_manager_or_current_collision(self) -> None:
         cases = {
@@ -160,8 +238,8 @@ class TaskStatusTests(unittest.TestCase):
             with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 path = root / "worker.md"
-                path.write_text(self.worker_text(is_manager=is_manager) + "body\n", encoding="utf-8")
-                (root / "manager.md").write_text(self.worker_text(is_manager=True) + "body\n", encoding="utf-8")
+                path.write_text(task_frontmatter(runat="wl:3", is_manager=is_manager) + "body\n", encoding="utf-8")
+                (root / "manager.md").write_text(task_frontmatter(runat="wl:3", is_manager=True) + "body\n", encoding="utf-8")
                 (root / "TODO.md").write_text(todo_text, encoding="utf-8")
                 metadata = parse_task_metadata(path.read_text(encoding="utf-8"))
                 assert metadata is not None
@@ -175,7 +253,7 @@ class TaskStatusTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             path = root / "worker.md"
-            path.write_text(self.worker_text() + "body\n", encoding="utf-8")
+            path.write_text(task_frontmatter(runat="wl:3") + "body\n", encoding="utf-8")
             (root / "TODO.md").write_text("current:\nworker.md wl:3\n", encoding="utf-8")
             metadata = parse_task_metadata(path.read_text(encoding="utf-8"))
             assert metadata is not None
@@ -204,16 +282,37 @@ class TaskStatusTests(unittest.TestCase):
     def test_long_running_is_a_normal_status_transition(self) -> None:
         text = task_frontmatter() + "body\n"
 
-        updated = update_frontmatter_status(text, "long_running", "")
+        with patch("omo_manager.omo_task_status.frontmatter_parts", wraps=frontmatter_parts) as parse_parts:
+            updated = update_frontmatter_status(text, "long_running", "persistent contact")
 
-        self.assertIn("status: long_running\nrunat:", updated)
+        parse_parts.assert_called_once_with(text)
+        self.assertIn("status: long_running\nblocked_on: persistent contact\nrunat:", updated)
         self.assertIn("body\n", updated)
-        self.assertNotIn("blocked_on:", updated)
 
-    def test_long_running_accepts_blocked_on(self) -> None:
-        updated = update_frontmatter_status(task_frontmatter() + "body\n", "long_running", "persistent role")
+    def test_long_running_requires_blocked_on(self) -> None:
+        with self.assertRaisesRegex(TaskFrontmatterError, "required"):
+            update_frontmatter_status(task_frontmatter() + "body\n", "long_running", "")
 
-        self.assertIn("status: long_running\nblocked_on: persistent role\nrunat:", updated)
+    def test_v2_dependency_blocked_long_running_preserves_resume_reason(self) -> None:
+        updated = update_frontmatter_status(v2_task(), "long_running", "persistent contact")
+
+        metadata = parse_task_metadata(updated)
+
+        self.assertIsNotNone(metadata)
+        assert metadata is not None
+        self.assertEqual("blocked", metadata.status)
+        self.assertEqual("long_running", metadata.resume_status)
+        self.assertIn("persistent contact", metadata.blocked_on)
+
+        frontmatter, body = split_task_text(updated)
+        values = load_yaml_mapping(frontmatter)
+        values["pending_task_items"][0]["blocked_on"] = []
+        self.assertTrue(sync_generated_blocker(values))
+        resumed = parse_task_metadata(render_task(values, body))
+        self.assertIsNotNone(resumed)
+        assert resumed is not None
+        self.assertEqual("long_running", resumed.status)
+        self.assertEqual("persistent contact", resumed.blocked_on)
 
     def test_pending_marker_blocks_status_change(self) -> None:
         text = task_frontmatter() + "(pending)\nplease route\n"

@@ -42,6 +42,7 @@ from omo_manager.omo_agent_status import TaskLine
 from omo_manager.omo_agent_status import blocked_status_dependency_snapshot
 from omo_manager.omo_agent_status import effective_owner_target
 from omo_manager.omo_agent_status import is_main_manager_task_file
+from omo_manager.omo_agent_status import is_human_tmux_target
 from omo_manager.omo_agent_status import is_recorded_human_wait
 from omo_manager.omo_agent_status import parse_task_lines
 from omo_manager.omo_agent_status import read_task_metadata
@@ -62,6 +63,9 @@ from omo_manager.omo_codex_status import tail as codex_tail
 from omo_manager.omo_pending_digest import PENDING_CONTENT_CHAR_LIMIT
 from omo_manager.omo_pending_digest import pending_tail_digest
 from omo_manager.omo_pending_digest import truncate_content
+from omo_manager.omo_ready_report import VisibleTurn
+from omo_manager.omo_ready_report import latest_visible_turn
+from omo_manager.omo_ready_report import turn_invoked_report_helper
 from omo_manager.omo_tmux_send import CodexSendOptions
 from omo_manager.omo_tmux_send import DEFAULT_TMUX_ENTER_COUNT
 from omo_manager.omo_tmux_send import DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S
@@ -167,6 +171,10 @@ MANAGER_TASK_STATE_REMINDER_HEADER = (
 AGENT_PENDING_ITEMS_REMINDER = (
     "You have {count} open pending items. To see them, run `omo_pending.py list`. Continue working and complete them, "
     "and run `omo_pending.py remove` only after verifying an item is complete or cancelled."
+)
+AGENT_READY_REPORT_REMINDER = (
+    "Your latest completed turn did not invoke `email_me.py` or `omo_report.sh`. "
+    "Report through the appropriate helper, or continue working."
 )
 MANAGER_DIRECT_REPORT_LIMIT = 5
 MANAGER_TASK_STATE_OK = {"running", "long_running", "done", "blocked"}
@@ -411,6 +419,7 @@ class DeliverySuccessEvent:
     failure_seen_delays_s: tuple[tuple[str, float], ...] = ()
     failure_seen_deadlines_s: tuple[tuple[str, float], ...] = ()
     capacity_advisory_removals: tuple[tuple[str, str], ...] = ()
+    capacity_alerts: tuple[tuple[ProblemRow, int, str], ...] = ()
     blocked_idle_lines: tuple[tuple[str, str], ...] = ()
     dependency_replacements: tuple[tuple[str, str], ...] = ()
     dependency_removals: tuple[str, ...] = ()
@@ -824,6 +833,8 @@ def drain_delivery_successes(args: Args, seen: dict[str, float], now_wall_s: flo
         for key in event.capacity_advisory_removals:
             CAPACITY_ADVISORY_PENDING.discard(key)
             changed = True
+        for row, attempts, detail in event.capacity_alerts:
+            changed = push_capacity_owner_alert(args, seen, row, attempts, detail, now_wall_s) or changed
         if clear_ok:
             for key in event.seen_after_clear_keys:
                 remember_seen(seen, key, seen_at_s)
@@ -3212,7 +3223,12 @@ def clear_pending_item_reminder_counts(args: Args, seen: dict[str, float], targe
     return key
 
 
-def push_agent_pending_item_reminders(args: Args, seen: dict[str, float], now_wall_s: float) -> bool:
+def push_agent_pending_item_reminders(
+    args: Args,
+    seen: dict[str, float],
+    now_wall_s: float,
+    submitted_targets: set[str] | None = None,
+) -> bool:
     changed = False
     for target, count in agent_pending_item_reminder_counts(args.root).items():
         key = clear_pending_item_reminder_counts(args, seen, target, count)
@@ -3240,7 +3256,250 @@ def push_agent_pending_item_reminders(args: Args, seen: dict[str, float], now_wa
         changed = delivery_accepted(status) or changed
         if delivery_accepted(status):
             remember_seen(seen, key, now_wall_s)
+            if submitted_targets is not None:
+                submitted_targets.add(canonical_target(target))
     return changed
+
+
+def ready_report_ledger_path(args: Args) -> Path:
+    return args.state.with_name(f"{args.state.name}.ready-report-reminders")
+
+
+def ready_report_root_prefix(args: Args) -> str:
+    root_key = hashlib.sha256(str(args.root).encode("utf-8")).hexdigest()[:16]
+    return f"{root_key}:"
+
+
+def read_ready_report_ledger(args: Args) -> dict[str, str]:
+    try:
+        rows = ready_report_ledger_path(args).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {}
+    ledger: dict[str, str] = {}
+    for row in rows:
+        target_key, separator, fingerprint = row.partition("\t")
+        if separator and target_key and fingerprint:
+            ledger[target_key] = fingerprint
+    return ledger
+
+
+def ready_report_target_key(args: Args, target: str) -> str:
+    return f"{ready_report_root_prefix(args)}{canonical_target(target)}"
+
+
+@contextmanager
+def locked_ready_report_ledger(args: Args) -> Iterator[dict[str, str]]:
+    path = ready_report_ledger_path(args)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    lock_path = path.with_name(f"{path.name}.lock")
+    lock_fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600)
+    with os.fdopen(lock_fd, "w", encoding="utf-8") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        ledger = read_ready_report_ledger(args)
+        before = ledger.copy()
+        yield ledger
+        if ledger == before:
+            return
+        temp_path = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp")
+        try:
+            fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                for stored_target, stored_fingerprint in sorted(ledger.items()):
+                    _ = handle.write(f"{stored_target}\t{stored_fingerprint}\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_path, path)
+            directory_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        finally:
+            temp_path.unlink(missing_ok=True)
+
+
+def record_ready_report_key(args: Args, target_key: str, fingerprint: str) -> None:
+    with locked_ready_report_ledger(args) as ledger:
+        ledger[target_key] = fingerprint
+
+
+def reserve_ready_report_key(
+    args: Args,
+    target_key: str,
+    fingerprint: str,
+    active_target_keys: set[str],
+) -> bool:
+    """Durably claim a turn before its async sender can be submitted."""
+
+    reserved = False
+    root_prefix = ready_report_root_prefix(args)
+    with locked_ready_report_ledger(args) as ledger:
+        for stored_target in tuple(ledger):
+            if stored_target.startswith(root_prefix) and stored_target not in active_target_keys:
+                del ledger[stored_target]
+        if ledger.get(target_key) != fingerprint:
+            ledger[target_key] = fingerprint
+            reserved = True
+    return reserved
+
+
+def rollback_ready_report_key(args: Args, target_key: str, fingerprint: str) -> bool:
+    """Release an exact rejected reservation without deleting a newer turn."""
+
+    removed = False
+    with locked_ready_report_ledger(args) as ledger:
+        if ledger.get(target_key) == fingerprint:
+            del ledger[target_key]
+            removed = True
+    return removed
+
+
+def active_ready_report_target_keys(args: Args) -> set[str]:
+    active: set[str] = set()
+    seen_files: set[str] = set()
+    for task in parse_task_lines(args.root / "TODO.md"):
+        if task.task_file == "TODO.md" or task.task_file in seen_files or task.section not in AGENT_PENDING_ITEM_SECTIONS:
+            continue
+        seen_files.add(task.task_file)
+        task_path = resolve_task_path(args.root, task.task_file)
+        state = scan_task_state(task_path, args.root) if task_path is not None else None
+        if state is not None and state.status in {"running", "long_running", "blocked"} and state.target:
+            active.add(ready_report_target_key(args, state.target))
+    return active
+
+
+def prune_ready_report_ledger(args: Args, active_target_keys: set[str]) -> bool:
+    removed = False
+    root_prefix = ready_report_root_prefix(args)
+    with locked_ready_report_ledger(args) as ledger:
+        for target_key in tuple(ledger):
+            if target_key.startswith(root_prefix) and target_key not in active_target_keys:
+                del ledger[target_key]
+                removed = True
+    return removed
+
+
+def ready_report_key(args: Args, target: str, turn: VisibleTurn) -> str:
+    identity = f"{args.root}\0{canonical_target(target)}\0{turn.fingerprint}"
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+
+
+def ready_report_turn(target: str) -> VisibleTurn | None:
+    return latest_visible_turn(codex_tail(target, 2000))
+
+
+def ready_report_task_is_agent(args: Args, line: str, target: str) -> bool:
+    task_file = problem_line_task(line)
+    if not task_file or task_file == "manager" or any_manager_self_problem_line(line):
+        return False
+    task_path = resolve_task_path(args.root, task_file)
+    state = scan_task_state(task_path, args.root) if task_path is not None else None
+    return (
+        state is not None
+        and state.status in {"running", "long_running"}
+        and same_tmux_target(state.target, target)
+    )
+
+
+def ready_report_guard_current(target: str, fingerprint: str) -> bool:
+    turn = ready_report_turn(target)
+    return (
+        turn is not None
+        and turn.fingerprint == fingerprint
+        and not turn_invoked_report_helper(turn)
+        and inspect_codex(CodexStatusArgs(target, 80)).status == "ready"
+    )
+
+
+def run_ready_report_reminder(target: str, fingerprint: str) -> None:
+    def before_paste() -> None:
+        if not ready_report_guard_current(target, fingerprint):
+            raise PrePasteRejected("ready turn resolved or changed before tmux paste")
+
+    options = CodexSendOptions(DEFAULT_TMUX_ENTER_COUNT, 0.15, False, DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S, True)
+    verified_send_to_codex(target, AGENT_READY_REPORT_REMINDER, options, before_paste=before_paste)
+
+
+def log_ready_report_result(future: Future[None], args: Args, target_key: str, seen_key: str) -> None:
+    try:
+        _ = future.result()
+    except Exception as exc:
+        if definitely_rejected_before_paste(exc):
+            _ = rollback_ready_report_key(args, target_key, seen_key)
+            DELIVERY_SUCCESS_EVENTS.put(DeliverySuccessEvent(seen_removals=(seen_key,)))
+        else:
+            print(f"omo_pending_watch: ready-report reminder outcome unknown; suppressing replay: {exc}", file=sys.stderr)
+        return
+
+
+def submit_ready_report_reminder(
+    args: Args,
+    seen: dict[str, float],
+    target: str,
+    turn: VisibleTurn,
+    now_wall_s: float,
+    active_target_keys: set[str] | None = None,
+) -> bool:
+    key = ready_report_key(args, target, turn)
+    target_key = ready_report_target_key(args, target)
+    if key in seen:
+        return False
+    if args.dry_run:
+        if read_ready_report_ledger(args).get(target_key) == key:
+            return False
+        remember_seen(seen, key, now_wall_s)
+        print(f"ready-report reminder due: target={target}\n{AGENT_READY_REPORT_REMINDER}")
+        return True
+    tracked_targets = active_target_keys if active_target_keys is not None else {target_key}
+    if not reserve_ready_report_key(args, target_key, key, tracked_targets):
+        return False
+    remember_seen(seen, key, now_wall_s)
+    try:
+        future = send_executor().submit(run_ready_report_reminder, target, turn.fingerprint)
+    except Exception:
+        _ = rollback_ready_report_key(args, target_key, key)
+        seen.pop(key, None)
+        return False
+    retain_send_result(future, lambda completed: log_ready_report_result(completed, args, target_key, key))
+    return True
+
+
+def handle_ready_report_reminders(
+    args: Args,
+    seen: dict[str, float],
+    output: str,
+    now_wall_s: float,
+    busy_targets: set[str] | None = None,
+) -> tuple[str, bool]:
+    """Remind eligible ready agents directly and remove those rows from manager routing."""
+
+    lines = output.splitlines()
+    if not lines or not lines[0].startswith("agent-problems:"):
+        return output, False
+    active_target_keys = active_ready_report_target_keys(args)
+    suppressed: set[str] = set()
+    changed = prune_ready_report_ledger(args, active_target_keys)
+    seen_targets: set[str] = set()
+    for line in lines[1:]:
+        if problem_line_status(line) != "ready":
+            continue
+        target = problem_line_target(line)
+        canonical = canonical_target(target)
+        if not target or canonical in seen_targets or not ready_report_task_is_agent(args, line, target):
+            continue
+        seen_targets.add(canonical)
+        if canonical in (busy_targets or set()):
+            suppressed.add(line)
+            continue
+        turn = ready_report_turn(target)
+        if turn is None or turn_invoked_report_helper(turn):
+            continue
+        suppressed.add(line)
+        changed = submit_ready_report_reminder(args, seen, target, turn, now_wall_s, active_target_keys) or changed
+    if not suppressed:
+        return output, changed
+    kept = [line for line in lines[1:] if line not in suppressed and not line.startswith("manager-action: ")]
+    return filtered_problem_output(kept) or "", changed
 
 
 def manager_direct_report_targets(root: Path) -> dict[str, tuple[str, ...]]:
@@ -3278,7 +3537,12 @@ def manager_direct_report_retry_key(key: str) -> str:
     return f"{key}:retry-after"
 
 
-def push_manager_direct_report_reminders(args: Args, seen: dict[str, float], now_wall_s: float) -> bool:
+def push_manager_direct_report_reminders(
+    args: Args,
+    seen: dict[str, float],
+    now_wall_s: float,
+    submitted_targets: set[str] | None = None,
+) -> bool:
     changed = False
     for manager_target, reports in manager_direct_report_targets(args.root).items():
         key = manager_direct_report_key(args, manager_target, reports)
@@ -3304,6 +3568,8 @@ def push_manager_direct_report_reminders(args: Args, seen: dict[str, float], now
         status = push_manager_text_to_target(args, text, manager_target, event)
         if delivery_accepted(status):
             remember_seen(seen, key, now_wall_s)
+            if submitted_targets is not None:
+                submitted_targets.add(canonical_target(manager_target))
             changed = True
     return changed
 
@@ -3669,20 +3935,21 @@ def retry_capacity_advisory(args: Args, seen: dict[str, float], now_wall_s: floa
     return True
 
 
-def run_capacity_resume(target: str, options: CodexSendOptions, guard: AgentProblemGuard) -> None:
+def run_capacity_resume(target: str, options: CodexSendOptions, guard: AgentProblemGuard) -> bool:
     def before_paste() -> None:
         if not agent_problem_guard_current(guard):
             raise RuntimeError("selected-model-capacity problem resolved or changed before tmux paste")
 
     model = capacity_model_for_target(target)
     CAPACITY_ADVISORY_DISCOVERIES.put((str(guard.root or ""), model))
-    _ = verified_send_capacity_resume(target, options, before_paste=before_paste)
+    return verified_send_capacity_resume(target, options, before_paste=before_paste)
 
 
 def capacity_alert_text(row: ProblemRow, attempts: int, detail: str) -> str:
     return (
         f"Capacity recovery failed for `{row.task or row.target}` at `{row.target}` after {attempts} resume attempt(s). "
-        f"{detail} Inspect the pane and move the work to another model."
+        f"{detail} Recover the same tmux pane: switch the live Codex model there, or stop Codex and resume its session in "
+        "that same empty pane with `omo_codex_start.py`. Do not launch a replacement pane while the original pane is recoverable."
     )
 
 
@@ -3723,29 +3990,31 @@ def push_capacity_owner_alert(args: Args, seen: dict[str, float], row: ProblemRo
 
 
 def log_capacity_resume_result(
-    future: Future[None],
-    success_event: DeliverySuccessEvent,
+    future: Future[bool],
+    persistent_event: DeliverySuccessEvent,
+    recovered_event: DeliverySuccessEvent,
+    retry_event: DeliverySuccessEvent,
     fallback: DeliveryFailureFallback | None,
-    guard: AgentProblemGuard,
     args: Args,
     row: ProblemRow,
     attempt: int,
 ) -> None:
     try:
-        _ = future.result()
+        recovered = future.result()
     except Exception as exc:
         if fallback is not None:
-            log_send_result(future, success_event, fallback, guard)
+            failed: Future[None] = Future()
+            failed.set_exception(exc)
+            log_send_result(failed, retry_event, fallback)
             return
-        if not agent_problem_guard_current(guard):
-            print("omo_pending_watch: async capacity result is stale after watcher-state refresh", file=sys.stderr)
-            queue_delivery_failure_event(success_event)
-            return
-        queue_delivery_failure_event(success_event)
-        text = capacity_alert_text(row, attempt, f"The resume submission failed: {exc}.")
-        _ = route_capacity_main_manager_alert(args, row, text)
+        queue_delivery_failure_event(retry_event)
+        detail = (
+            f"The resume submission failed before a persistent capacity result was verified: {exc}. "
+            "Retry literal `resume` in this same pane; do not replace the pane. "
+        )
+        DELIVERY_SUCCESS_EVENTS.put(DeliverySuccessEvent(capacity_alerts=((row, attempt - 1, detail),)))
         return
-    DELIVERY_SUCCESS_EVENTS.put(success_event)
+    DELIVERY_SUCCESS_EVENTS.put(recovered_event if recovered else persistent_event)
 
 
 def submit_capacity_resume(
@@ -3762,41 +4031,69 @@ def submit_capacity_resume(
     next_key = f"{prefix}next"
     seen[inflight_key] = now_wall_s
     delay_s = args.agent_problem_interval_s * attempt
-    success_event = DeliverySuccessEvent(
+    persistent_event = DeliverySuccessEvent(
         seen_removals=(inflight_key,),
         seen_values=((attempt_key, now_wall_s), (next_key, now_wall_s + delay_s)),
+    )
+    recovered_event = DeliverySuccessEvent(
+        seen_removals=(
+            inflight_key,
+            next_key,
+            *(f"{prefix}attempt:{index}" for index in range(1, CAPACITY_RESUME_MAX_ATTEMPTS + 1)),
+        ),
+    )
+    retry_at_s = now_wall_s + args.agent_problem_interval_s
+    retry_event = DeliverySuccessEvent(
+        seen_removals=(inflight_key,),
+        seen_values=((next_key, retry_at_s),),
         failure_seen_removals=(inflight_key,),
-        failure_seen_values=((attempt_key, now_wall_s), (next_key, now_wall_s + delay_s)),
+        failure_seen_values=((next_key, retry_at_s),),
     )
-    failure_event = DeliverySuccessEvent(
-        seen_removals=(inflight_key,),
-        seen_values=((attempt_key, now_wall_s), (next_key, now_wall_s + delay_s)),
+    alert = capacity_alert_text(
+        row,
+        attempt - 1,
+        "The resume submission failed before a persistent capacity result was verified. "
+        "Retry literal `resume` in this same pane; do not replace the pane. ",
     )
-    alert = capacity_alert_text(row, attempt, "The latest resume submission was not accepted.")
     owner_target = row.owner_target or args.manager_target
     options = CodexSendOptions(1, 0.15, False, DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S, False)
     guard = AgentProblemGuard(tuple([*status_command(args, True), "--no-auto-unstick"]), (line,), root=args.root)
     fallback = (
-        DeliveryFailureFallback(row.target, owner_target, alert, options, failure_event, problem_guard=guard)
+        DeliveryFailureFallback(row.target, owner_target, alert, options, retry_event)
         if owner_target and not same_tmux_target(row.target, owner_target)
         else None
     )
     if args.dry_run:
         print(f"capacity resume due: target={row.target} attempt={attempt} message=resume")
         del seen[inflight_key]
-        remember_seen(seen, attempt_key, now_wall_s)
-        seen[next_key] = now_wall_s + delay_s
         return True
     try:
         future = send_executor().submit(run_capacity_resume, row.target, options, guard)
     except Exception as exc:
         del seen[inflight_key]
-        remember_seen(seen, attempt_key, now_wall_s)
-        seen[next_key] = now_wall_s + delay_s
-        return push_capacity_owner_alert(args, seen, row, attempt, f"Resume submission failed immediately: {exc}.", now_wall_s)
+        seen[next_key] = retry_at_s
+        _ = push_capacity_owner_alert(
+            args,
+            seen,
+            row,
+            attempt - 1,
+            f"Resume submission failed immediately before verification: {exc}. "
+            "Retry literal `resume` in this same pane; do not replace the pane. ",
+            now_wall_s,
+        )
+        return True
     retain_send_result(
         future,
-        lambda completed: log_capacity_resume_result(completed, success_event, fallback, guard, args, row, attempt),
+        lambda completed: log_capacity_resume_result(
+            completed,
+            persistent_event,
+            recovered_event,
+            retry_event,
+            fallback,
+            args,
+            row,
+            attempt,
+        ),
     )
     return True
 
@@ -3812,6 +4109,8 @@ def handle_capacity_problems(args: Args, seen: dict[str, float], output: str, no
         CAPACITY_ADVISORY_PENDING.update((str(args.root), model) for model in capacity_models([row.target for _line, row in capacity_lines]))
         changed = retry_capacity_advisory(args, seen, now_wall_s) or changed
     for line, row in capacity_lines:
+        if is_human_tmux_target(row.target):
+            continue
         prefix = capacity_state_prefix(args, row.target)
         attempts = capacity_attempt_count(args, seen, row.target, now_wall_s)
         if f"{prefix}inflight" in seen:
@@ -3829,7 +4128,7 @@ def handle_capacity_problems(args: Args, seen: dict[str, float], output: str, no
         if now_wall_s < seen.get(f"{prefix}next", 0.0):
             continue
         changed = submit_capacity_resume(args, row, line, attempts + 1, seen, now_wall_s) or changed
-    suppressed_capacity_lines = {line for line, row in capacity_lines if row.status == "error"}
+    suppressed_capacity_lines = {line for line, row in capacity_lines if not is_human_tmux_target(row.target)}
     kept = [line for line in lines[1:] if line not in suppressed_capacity_lines and not line.startswith("manager-action: ")]
     return filtered_problem_output(kept) or "", changed
 
@@ -4513,8 +4812,9 @@ def handle_agent_problem_result(
 ) -> bool:
     """Filter, throttle, and route status-problem output."""
 
-    pending_reminders_changed = push_agent_pending_item_reminders(args, seen, now_wall_s)
-    direct_report_reminders_changed = push_manager_direct_report_reminders(args, seen, now_wall_s)
+    reminder_targets: set[str] = set()
+    pending_reminders_changed = push_agent_pending_item_reminders(args, seen, now_wall_s, reminder_targets)
+    direct_report_reminders_changed = push_manager_direct_report_reminders(args, seen, now_wall_s, reminder_targets)
     reminders_changed = pending_reminders_changed or direct_report_reminders_changed
     if result.timed_out:
         print("omo_pending_watch: agent problem check timed out", file=sys.stderr)
@@ -4537,6 +4837,10 @@ def handle_agent_problem_result(
     if result.stderr.strip():
         output = f"{output}\nstderr:\n{result.stderr.strip()}".strip()
     output, capacity_changed = handle_capacity_problems(args, seen, output, now_wall_s)
+    if not output:
+        return capacity_changed or dependency_changed or reminders_changed
+    output, ready_report_changed = handle_ready_report_reminders(args, seen, output, now_wall_s, reminder_targets)
+    reminders_changed = reminders_changed or ready_report_changed
     if not output:
         return capacity_changed or dependency_changed or reminders_changed
     compaction_changed = maybe_push_manager_compaction_reminder(args, seen, output, now_wall_s)

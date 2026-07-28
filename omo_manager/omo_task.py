@@ -54,6 +54,7 @@ CODEX_UPDATE_SUCCESS_MARKERS = ("update ran successfully", "please restart codex
 MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$")
 LINE_RANGE_RE = re.compile(r"^([1-9]\d*)-([1-9]\d*)$")
 HUMAN_INSTRUCTION_CLOSE = "</human_instruction>"
+DEFAULT_LONG_RUNNING_BLOCKED_ON = "persistent manager role"
 
 
 @dataclass(frozen=True)
@@ -621,6 +622,7 @@ def task_frontmatter(args: Args, runat: str, managerat: str) -> str:
     is_manager = "true" if args.is_manager else "false"
     status = "long_running" if args.is_manager else "running"
     if v2_enabled(args.root):
+        blocked_on = [{"kind": "persistent", "reason": DEFAULT_LONG_RUNNING_BLOCKED_ON}] if args.is_manager else []
         rendered = render_task(
             {
                 "version": V2_VERSION,
@@ -630,6 +632,7 @@ def task_frontmatter(args: Args, runat: str, managerat: str) -> str:
                 "tool": effective_tool(args),
                 "managerat": managerat,
                 "is_manager": args.is_manager,
+                **({"blocked_on": blocked_on} if blocked_on else {}),
                 "pending_task_items": [],
                 "resolved_task_items": [],
             },
@@ -642,6 +645,7 @@ def task_frontmatter(args: Args, runat: str, managerat: str) -> str:
             "---",
             f"version: {TASK_FRONTMATTER_VERSION}",
             f"status: {status}",
+            *([f"blocked_on: {DEFAULT_LONG_RUNNING_BLOCKED_ON}"] if args.is_manager else []),
             f"runat: {runat}",
             f"tool: {effective_tool(args)}",
             f"managerat: {managerat}",
@@ -678,7 +682,36 @@ def replace_frontmatter_fields(text: str, updates: dict[str, str], remove: set[s
     return text
 
 
+def repair_legacy_long_running_manager(text: str, root: Path) -> str:
+    """Add the required persistent reason during an explicit manager relaunch."""
+
+    source = frontmatter_text(text)
+    if source is None:
+        return text
+    version = first_version(source)
+    if version == V2_VERSION:
+        values = load_yaml_mapping(source)
+        if values.get("status") != "long_running" or values.get("is_manager") is not True or values.get("blocked_on"):
+            return text
+        frontmatter, body = split_task_text(text)
+        values = load_yaml_mapping(frontmatter)
+        values["blocked_on"] = [{"kind": "persistent", "reason": DEFAULT_LONG_RUNNING_BLOCKED_ON}]
+        return render_task(values, body, root)
+    fields: dict[str, str] = {}
+    for line in source.splitlines():
+        if not line or line[0].isspace() or line.startswith("-"):
+            continue
+        key, separator, value = line.partition(":")
+        if separator:
+            fields[key] = value.strip()
+    if fields.get("status") != "long_running" or fields.get("is_manager") != "true" or fields.get("blocked_on"):
+        return text
+    return replace_frontmatter_fields(text, {"blocked_on": DEFAULT_LONG_RUNNING_BLOCKED_ON})
+
+
 def launched_frontmatter_text(existing: str, args: Args, tmux_target: str) -> str:
+    if args.is_manager:
+        existing = repair_legacy_long_running_manager(existing, args.root)
     metadata = parse_task_metadata(existing, args.root)
     is_manager = args.is_manager or (metadata is not None and metadata.is_manager)
     if metadata is not None and metadata.version == V2_VERSION:
@@ -686,20 +719,27 @@ def launched_frontmatter_text(existing: str, args: Args, tmux_target: str) -> st
         values = load_yaml_mapping(frontmatter)
         desired_status = "long_running" if is_manager else "running"
         blockers = values.get("blocked_on", [])
+        generated = [blocker for blocker in blockers if blocker.get("kind") == "pending_items"]
+        persistent = [blocker for blocker in blockers if blocker.get("kind") == "persistent"]
+        if is_manager and not persistent:
+            persistent = [{"kind": "persistent", "reason": DEFAULT_LONG_RUNNING_BLOCKED_ON}]
         values["runat"] = tmux_target
         values["tool"] = effective_tool(args)
         if args.manager_target:
             values["managerat"] = args.manager_target
         if args.is_manager:
             values["is_manager"] = True
-        if blockers:
+        if generated:
             values["status"] = "blocked"
             values["resume_status"] = desired_status
-            values["blocked_on"] = blockers
+            values["blocked_on"] = [*generated, *persistent]
         else:
             values["status"] = desired_status
             values.pop("resume_status", None)
-            values.pop("blocked_on", None)
+            if is_manager:
+                values["blocked_on"] = persistent
+            else:
+                values.pop("blocked_on", None)
         return render_task(values, body, args.root)
     updates = {
         "status": "long_running" if is_manager else "running",
@@ -710,7 +750,9 @@ def launched_frontmatter_text(existing: str, args: Args, tmux_target: str) -> st
         updates["managerat"] = args.manager_target
     if args.is_manager:
         updates["is_manager"] = "true"
-    return replace_frontmatter_fields(existing, updates, {"blocked_on"})
+    if is_manager:
+        updates["blocked_on"] = metadata.blocked_on if metadata is not None and metadata.status == "long_running" and metadata.blocked_on else DEFAULT_LONG_RUNNING_BLOCKED_ON
+    return replace_frontmatter_fields(existing, updates, set() if is_manager else {"blocked_on"})
 
 
 def new_task_text(args: Args, tmux_target: str, validate_target: bool = True) -> str:
@@ -1032,7 +1074,10 @@ def ensure_task_file(args: Args, tmux_target: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     existed = path.exists()
     before = path.stat() if existed else None
-    existing = path.read_text(encoding="utf-8") if existed else ""
+    stored_existing = path.read_text(encoding="utf-8") if existed else ""
+    existing = stored_existing
+    if existed and args.is_manager:
+        existing = repair_legacy_long_running_manager(existing, args.root)
     metadata = parse_task_metadata(existing, args.root) if existed else None
     if metadata is not None and metadata.version != TASK_FRONTMATTER_V2 and v2_enabled(args.root):
         raise ValueError("v1 task writes are disabled after v2 enablement.")
@@ -1224,13 +1269,15 @@ def validate_inputs(args: Args) -> str:
         raise ValueError(raw_model_flag_error)
     if args.tool != "pcodx" and any("mcp_servers." in flag for flag in args.codex_flags):
         raise ValueError("MCP server config requires --tool pcodx.")
-    if args.workdir is not None and args.prompt_file is None and is_vl_agent(args.task_file, target(args)):
+    if args.workdir is not None and args.prompt_file is None and is_vl_agent(args.task_file, target(args)) and not args.resume_idle:
         raise ValueError("VL launches require --prompt-file so the end-goal and reviewer guidance has task-local context.")
     if args.workdir is not None and is_vl_agent(args.task_file, target(args)) and not is_vl_submanager_task_file(args.task_file) and not args.manager_target:
         raise ValueError("VL worker launches require --manager-target for the owning submanager.")
     path = task_path(args.root, args.task_file)
     if path.exists() and args.manager_target:
         existing_text = path.read_text(encoding="utf-8")
+        if args.is_manager:
+            existing_text = repair_legacy_long_running_manager(existing_text, args.root)
         metadata = parse_task_metadata(existing_text, args.root)
         if metadata is not None:
             existing_manager_target = metadata.managerat
@@ -1242,6 +1289,8 @@ def validate_inputs(args: Args) -> str:
             raise ValueError(f"existing managerat {existing_manager_target} does not match --manager-target {args.manager_target}.")
     elif path.exists():
         existing_text = path.read_text(encoding="utf-8")
+        if args.is_manager:
+            existing_text = repair_legacy_long_running_manager(existing_text, args.root)
         if parse_task_metadata(existing_text, args.root) is None:
             validate_runat_header(existing_text)
             validate_managerat_metadata(existing_text)

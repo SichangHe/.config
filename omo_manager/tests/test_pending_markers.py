@@ -5815,25 +5815,6 @@ class PendingMarkerTests(unittest.TestCase):
 
             self.assertIn("1 open pending items", watcher.agent_pending_item_reminder_texts(root)["wl:4"])
 
-    def test_long_running_agent_with_blocked_on_suppresses_pending_item_reminders(self) -> None:
-        from omo_manager import omo_pending_watch as watcher
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "TODO.md").write_text("current:\ncontact.md wl:4\n", encoding="utf-8")
-            (root / "contact.md").write_text(
-                task_frontmatter(
-                    status="long_running",
-                    blocked_on="persistent contact",
-                    runat="wl:4",
-                    managerat="wl:1",
-                    pending_items=("wait for next review",),
-                ),
-                encoding="utf-8",
-            )
-
-            self.assertEqual({}, watcher.agent_pending_item_reminder_texts(root))
-
     def test_blocked_agent_does_not_receive_pending_item_reminders(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
@@ -5994,8 +5975,9 @@ class PendingMarkerTests(unittest.TestCase):
                 (root / name).write_text(task_frontmatter(runat=f"vl:{index}", managerat="wl:1"), encoding="utf-8")
             args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/missing-status.py"), False, False, manager_target="wl:1")
             seen: dict[str, float] = {}
+            submitted_targets: set[str] = set()
             with patch.object(watcher, "push_manager_text_to_target", return_value=watcher.ASYNC_DELIVERY_STARTED) as push:
-                self.assertTrue(watcher.push_manager_direct_report_reminders(args, seen, 1000.0))
+                self.assertTrue(watcher.push_manager_direct_report_reminders(args, seen, 1000.0, submitted_targets))
                 self.assertFalse(watcher.push_manager_direct_report_reminders(args, seen, 1001.0))
                 event = push.call_args.args[3]
                 with patch("omo_manager.omo_pending_watch.time.time", return_value=1002.0):
@@ -6005,6 +5987,7 @@ class PendingMarkerTests(unittest.TestCase):
                 self.assertTrue(watcher.push_manager_direct_report_reminders(args, seen, 1603.0))
 
             self.assertEqual(2, push.call_count)
+            self.assertEqual({"wl:1"}, submitted_targets)
             self.assertEqual("wl:1", push.call_args.args[2])
             self.assertEqual(
                 "You have 6 direct reports (vl:1, vl:2, vl:3, vl:4, vl:5, vl:6), too many. Delegate some of them to submanagers.",
@@ -8661,7 +8644,7 @@ printf 'header\\n(pending)\\nchanged\\n' > {task}
                 assert row is not None
                 self.assertEqual(watcher.CAPACITY_ERROR_TEXT, row.output)
 
-    def test_capacity_untracked_agent_resumes_and_remains_reported(self) -> None:
+    def test_capacity_untracked_agent_resumes_without_generic_manager_row(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
         args = Args(
@@ -8688,9 +8671,8 @@ printf 'header\\n(pending)\\nchanged\\n' > {task}
             self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
 
         self.assertIn("capacity resume due: target=wl:6 attempt=1 message=resume", out.getvalue())
-        self.assertIn(watcher.AGENT_PROBLEM_HEADER, out.getvalue())
-        self.assertIn("1 not tracked in any task file", out.getvalue())
-        self.assertIn(f"wl:6 <output>{watcher.CAPACITY_ERROR_TEXT}</output>", out.getvalue())
+        self.assertNotIn(watcher.AGENT_PROBLEM_HEADER, out.getvalue())
+        self.assertNotIn("not tracked in any task file", out.getvalue())
         self.assertIsNone(
             watcher.capacity_problem_row(
                 "untracked_agent: task=tmux:wl:6 evidence=target=wl:6 role=tmux_unmanaged "
@@ -8710,37 +8692,41 @@ printf 'header\\n(pending)\\nchanged\\n' > {task}
 
         self.assertIn("capacity resume due: target=wl:2.1 attempt=1 message=resume", out.getvalue())
 
-    def test_capacity_resume_uses_linear_retry_timing_and_exhausts_to_owner(self) -> None:
+    def test_capacity_verified_persistent_resumes_use_linear_timing_and_exhaust_to_owner(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
-        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, True, manager_target="wl:1", agent_problem_interval_s=10.0)
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1", agent_problem_interval_s=10.0)
         row = "error: task=worker.md evidence=target=vl:2 output=Selected model is at capacity. Please try a different model. owner_target=vl:64"
         result = watcher.CommandOutput("agent-problems", 3, f"agent-problems: error=1\n{row}\n", "")
         seen: dict[str, float] = {}
-        out = StringIO()
         alerts: list[tuple[str, str]] = []
 
         def fake_push(_args: Args, text: str, target: str, *_pos: object, **_kwargs: object) -> int:
             alerts.append((target, text))
             return 0
 
-        with redirect_stdout(out), patch.object(watcher, "capacity_model_for_target", return_value="gpt-5.5"), patch.object(
+        class ImmediateExecutor:
+            def submit(self, function: object, *submit_args: object) -> Future[bool]:
+                future: Future[bool] = Future()
+                future.set_result(False)
+                return future
+
+        with patch.object(watcher, "send_executor", return_value=ImmediateExecutor()), patch.object(
             watcher, "push_manager_text_to_target", side_effect=fake_push
         ):
-            self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 1000.0))
-            self.assertFalse(watcher.handle_agent_problem_result(args, seen, result, 1009.0))
-            self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 1010.0))
-            self.assertFalse(watcher.handle_agent_problem_result(args, seen, result, 1029.0))
-            self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 1030.0))
+            for now_s, expected_attempts in ((1000.0, 1), (1010.0, 2), (1030.0, 3)):
+                self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, now_s))
+                watcher.drain_send_results()
+                self.assertTrue(watcher.drain_delivery_successes(args, seen, now_s))
+                self.assertEqual(expected_attempts, watcher.capacity_attempt_count(args, seen, "vl:2", now_s))
             self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 1031.0))
 
-        self.assertEqual(1, out.getvalue().count("attempt=1"))
-        self.assertEqual(1, out.getvalue().count("attempt=2"))
-        self.assertEqual(1, out.getvalue().count("attempt=3"))
         self.assertEqual("vl:64", alerts[0][0])
         self.assertIn("after 3 resume attempt(s)", alerts[0][1])
+        self.assertIn("Recover the same tmux pane", alerts[0][1])
+        self.assertIn("Do not launch a replacement pane", alerts[0][1])
 
-    def test_capacity_immediate_submit_failure_escalates_attempt_count(self) -> None:
+    def test_capacity_immediate_submit_failure_preserves_retry_budget(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
         args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1", agent_problem_interval_s=10.0)
@@ -8753,10 +8739,141 @@ printf 'header\\n(pending)\\nchanged\\n' > {task}
         with patch.object(watcher, "send_executor", return_value=executor), patch.object(watcher, "push_capacity_owner_alert", return_value=True) as alert:
             self.assertTrue(watcher.submit_capacity_resume(args, row, line, 1, seen, 1000.0))
 
-        self.assertEqual(1, alert.call_args.args[3])
-        self.assertIn("failed immediately", alert.call_args.args[4])
-        self.assertEqual(1, watcher.capacity_attempt_count(args, seen, row.target, 1001.0))
+        self.assertEqual(0, alert.call_args.args[3])
+        self.assertIn("failed immediately before verification", alert.call_args.args[4])
+        self.assertIn("Retry literal `resume` in this same pane", alert.call_args.args[4])
+        self.assertIn("do not replace the pane", alert.call_args.args[4])
+        self.assertEqual(0, watcher.capacity_attempt_count(args, seen, row.target, 1001.0))
         self.assertEqual(1010.0, seen[f"{watcher.capacity_state_prefix(args, row.target)}next"])
+
+    def test_capacity_async_transport_failure_preserves_budget_and_retries_same_pane(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1", agent_problem_interval_s=10.0)
+        line = "error: task=manager evidence=target=wl:1 role=manager output=Selected model is at capacity. Please try a different model. owner_target=wl:1"
+        row = watcher.capacity_problem_row(line)
+        assert row is not None
+        future: Future[bool] = Future()
+        future.set_exception(RuntimeError("tmux paste failed"))
+        executor = MagicMock()
+        executor.submit.return_value = future
+        seen: dict[str, float] = {}
+
+        with patch.object(watcher, "send_executor", return_value=executor), patch.object(
+            watcher, "agent_problem_guard_current", return_value=True
+        ), patch.object(watcher, "route_capacity_main_manager_alert", return_value=True) as alert:
+            self.assertTrue(watcher.submit_capacity_resume(args, row, line, 1, seen, 1000.0))
+            watcher.drain_send_results()
+            self.assertTrue(watcher.drain_delivery_successes(args, seen, 1001.0))
+
+        self.assertEqual(0, watcher.capacity_attempt_count(args, seen, row.target, 1001.0))
+        self.assertEqual(1010.0, seen[f"{watcher.capacity_state_prefix(args, row.target)}next"])
+        alert_text = alert.call_args.args[2]
+        self.assertIn("after 0 resume attempt(s)", alert_text)
+        self.assertIn("Retry literal `resume` in this same pane", alert_text)
+        self.assertIn("Do not launch a replacement pane", alert_text)
+
+    def test_capacity_human_owned_target_is_reported_without_automatic_resume(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1")
+        line = "error: task=contact.md evidence=target=hcfg:2 output=Selected model is at capacity. Please try a different model. owner_target=wl:1"
+        output = f"agent-problems: error=1\n{line}"
+
+        with patch.object(watcher, "submit_capacity_resume") as submit:
+            filtered, changed = watcher.handle_capacity_problems(args, {}, output, 1000.0)
+
+        self.assertFalse(changed)
+        self.assertIn(line, filtered)
+        submit.assert_not_called()
+
+    def test_capacity_async_main_manager_failure_alert_is_rate_limited(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1", agent_problem_interval_s=10.0)
+        line = "error: task=manager evidence=target=wl:1 role=manager output=Selected model is at capacity. Please try a different model. owner_target=wl:1"
+        row = watcher.capacity_problem_row(line)
+        assert row is not None
+        futures: list[Future[bool]] = []
+        for _ in range(2):
+            future: Future[bool] = Future()
+            future.set_exception(RuntimeError("tmux paste failed"))
+            futures.append(future)
+        executor = MagicMock()
+        executor.submit.side_effect = futures
+        seen: dict[str, float] = {}
+
+        with patch.object(watcher, "send_executor", return_value=executor), patch.object(
+            watcher, "agent_problem_guard_current", return_value=True
+        ), patch.object(watcher, "route_capacity_main_manager_alert", return_value=True) as alert:
+            for now_s in (1000.0, 1010.0):
+                self.assertTrue(watcher.submit_capacity_resume(args, row, line, 1, seen, now_s))
+                watcher.drain_send_results()
+                self.assertTrue(watcher.drain_delivery_successes(args, seen, now_s))
+
+        alert.assert_called_once()
+
+    def test_capacity_pre_paste_guard_failure_still_alerts_without_consuming_budget(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1", agent_problem_interval_s=10.0)
+        line = "error: task=manager evidence=target=wl:1 role=manager output=Selected model is at capacity. Please try a different model. owner_target=wl:1"
+        row = watcher.capacity_problem_row(line)
+        assert row is not None
+        future: Future[bool] = Future()
+        future.set_exception(RuntimeError("selected-model-capacity problem resolved or changed before tmux paste"))
+        executor = MagicMock()
+        executor.submit.return_value = future
+        seen: dict[str, float] = {}
+
+        with patch.object(watcher, "send_executor", return_value=executor), patch.object(
+            watcher, "agent_problem_guard_current", return_value=False
+        ), patch.object(watcher, "route_capacity_main_manager_alert", return_value=True) as alert:
+            self.assertTrue(watcher.submit_capacity_resume(args, row, line, 1, seen, 1000.0))
+            watcher.drain_send_results()
+            self.assertTrue(watcher.drain_delivery_successes(args, seen, 1001.0))
+
+        self.assertEqual(0, watcher.capacity_attempt_count(args, seen, row.target, 1001.0))
+        alert_text = alert.call_args.args[2]
+        self.assertIn("before tmux paste", alert_text)
+        self.assertIn("Retry literal `resume` in this same pane", alert_text)
+        self.assertIn("Do not launch a replacement pane", alert_text)
+
+    def test_capacity_dry_run_does_not_consume_verified_attempt(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, True, manager_target="wl:1", agent_problem_interval_s=10.0)
+        line = "error: task=worker.md evidence=target=vl:2 output=Selected model is at capacity. Please try a different model. owner_target=vl:64"
+        row = watcher.capacity_problem_row(line)
+        assert row is not None
+        seen: dict[str, float] = {}
+
+        with redirect_stdout(StringIO()):
+            self.assertTrue(watcher.submit_capacity_resume(args, row, line, 1, seen, 1000.0))
+
+        self.assertEqual(0, watcher.capacity_attempt_count(args, seen, row.target, 1001.0))
+
+    def test_capacity_exhausted_untracked_agent_alerts_owner_without_generic_row(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, True, manager_target="wl:1", agent_problem_interval_s=10.0, agent_problem_repeat_s=300.0)
+        line = (
+            "untracked_agent: task=tmux:wl:6 evidence=target=wl:6 role=tmux_unmanaged "
+            f"output={watcher.CAPACITY_ERROR_TEXT} owner_target=wl:1"
+        )
+        result = watcher.CommandOutput("agent-problems", 3, f"agent-problems: untracked_agent=1\n{line}\n", "")
+        prefix = watcher.capacity_state_prefix(args, "wl:6")
+        seen = {f"{prefix}attempt:{attempt}": 1000.0 + attempt for attempt in range(1, 4)}
+        out = StringIO()
+
+        with redirect_stdout(out), patch.object(watcher, "push_manager_text_to_target", return_value=0) as alert:
+            self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 1010.0))
+
+        self.assertNotIn(watcher.AGENT_PROBLEM_HEADER, out.getvalue())
+        alert_text = alert.call_args.args[1]
+        self.assertIn("after 3 resume attempt(s)", alert_text)
+        self.assertIn("Recover the same tmux pane", alert_text)
+        self.assertIn("Do not launch a replacement pane", alert_text)
 
     def test_capacity_retry_state_clears_when_target_recovers(self) -> None:
         from omo_manager import omo_pending_watch as watcher

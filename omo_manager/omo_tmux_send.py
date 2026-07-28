@@ -26,6 +26,7 @@ try:
         current_block,
         current_input_text,
         file_search_overlay_input_text,
+        has_codex_model_footer,
         has_plan_prompt,
         inspect,
         SELECTED_MODEL_CAPACITY_RE,
@@ -41,6 +42,7 @@ except ModuleNotFoundError:
         current_block,
         current_input_text,
         file_search_overlay_input_text,
+        has_codex_model_footer,
         has_plan_prompt,
         inspect,
         SELECTED_MODEL_CAPACITY_RE,
@@ -403,7 +405,8 @@ def require_sendable_codex_target(target: str, n_lines: int = 80) -> tuple[str, 
 
 
 def exact_capacity_error(lines: list[str]) -> bool:
-    return status(lines, current_block(lines)) == "error" and only_exact_capacity_warning(lines)
+    has_layout = any(has_codex_model_footer(lines[: index + 1]) for index in range(len(lines)))
+    return has_layout and only_exact_capacity_warning(lines)
 
 
 def only_exact_capacity_warning(lines: list[str]) -> bool:
@@ -702,14 +705,18 @@ def verify_capacity_resume(target: str, options: CodexSendOptions) -> bool:
         current_status = status(lines, current_block(lines))
         if current_status in {"running", "waiting_subagent"} and not is_real_input_text(current_input_text(lines)):
             return True
+        if exact_capacity_error(lines):
+            now_s = time.monotonic()
+            if now_s >= deadline_s:
+                return False
+            time.sleep(min(0.25, max(0.05, deadline_s - now_s)))
+            continue
         if current_status == "not_codex":
             raise RuntimeError(f"target is not a Codex pane after capacity resume: {target}")
         if current_status == "error" and not exact_capacity_error(lines):
             raise RuntimeError(f"target has a different Codex error after capacity resume: {target}")
         now_s = time.monotonic()
         if now_s >= deadline_s:
-            if exact_capacity_error(lines):
-                return False
             raise RuntimeError(f"capacity resume not verified after {options.submit_verify_timeout_s:g}s: status={current_status}")
         time.sleep(min(0.25, max(0.05, deadline_s - now_s)))
 

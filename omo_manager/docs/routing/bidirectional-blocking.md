@@ -8,6 +8,7 @@
   - v1 task files remain readable and keep their existing string-item writers
   - `omo_task_migrate.py plan` assigns immutable task and item ids in reviewed bytes
   - planning requires every scoped task file to be tracked, clean, and committed
+  - v1 `long_running` tasks missing `blocked_on` require a reviewed `--long-running-reason TASK=REASON` choice because their old records lack the now-required persistent reason
   - commit the generated plan before `dry-run` or `write`; commit all migrated task bytes before `enable`
   - `dry-run` accepts only each planned v1 or v2 hash
   - `write` is restart-safe and rejects every other hash

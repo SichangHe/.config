@@ -20,6 +20,7 @@ def task_frontmatter(*, status: str = "running", pending_items: tuple[str, ...] 
         "---",
         "version: v1.0.0",
         f"status: {status}",
+        *(["blocked_on: persistent role"] if status == "long_running" else []),
         "runat: wl:2",
         "tool: codex",
         "managerat: wl:1",
@@ -76,7 +77,7 @@ class TaskEditTests(unittest.TestCase):
             self.assertEqual(0, exit_code)
             self.assertEqual(task_frontmatter(pending_items=("finish review", "email human")) + "body\n", task.read_text(encoding="utf-8"))
 
-    def test_adds_pending_items_to_long_running_task_without_blocker(self) -> None:
+    def test_adds_pending_items_to_long_running_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             task = root / "task.md"

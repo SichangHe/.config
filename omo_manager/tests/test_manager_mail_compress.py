@@ -6,7 +6,7 @@ from email.message import Message
 from pathlib import Path
 from unittest.mock import patch
 
-from omo_manager.omo_manager_mail_compress import MailRecord, cmd_mark_seen, cmd_trash_superseded, ensure_empty_private_dir, export_body, imap_quoted, is_manager_record, mail_boundary, mailbox_exists, manager_unread_uids, parse_uid_text, record_from_msg, write_private
+from omo_manager.omo_manager_mail_compress import MailRecord, accepted_manager_headers, cmd_mark_seen, cmd_trash_superseded, ensure_empty_private_dir, export_body, imap_quoted, is_manager_record, mail_boundary, mailbox_exists, manager_unread_uids, parse_uid_text, record_from_msg, write_private
 
 
 class FakeClient:
@@ -98,6 +98,30 @@ class ManagerMailCompressTests(unittest.TestCase):
             )
         )
 
+    def test_manager_record_boundary_excludes_pb_cleanup_subjects(self) -> None:
+        for subject in (
+            "PB news",
+            "Re: PB news setup",
+            "[a] PB stock watch: NVDA",
+            "Re: [omo_manager] [wl:9] PB urgent",
+        ):
+            with self.subTest(subject=subject):
+                self.assertFalse(
+                    is_manager_record(
+                        MailRecord("1", "", "Agent <agent@example.test>", "Human <human@example.test>", subject, "sha"),
+                        "agent@example.test",
+                        "human@example.test",
+                    )
+                )
+
+        self.assertTrue(
+            is_manager_record(
+                MailRecord("1", "", "Agent <agent@example.test>", "Human <human@example.test>", "PB newsletter", "sha"),
+                "agent@example.test",
+                "human@example.test",
+            )
+        )
+
     def test_manager_record_boundary_rejects_repeated_address_headers(self) -> None:
         msg = Message()
         msg["From"] = "Agent <agent@example.test>"
@@ -123,7 +147,12 @@ class ManagerMailCompressTests(unittest.TestCase):
         client = Client()
         with patch("omo_manager.omo_manager_mail_compress.configured_agent_mail", return_value=Settings()):
             self.assertEqual(["7"], manager_unread_uids(client, "agent@example.test"))
-        self.assertEqual([("search", None, "UNSEEN", "FROM", '"agent@example.test"')], client.calls)
+        self.assertEqual(
+            [
+                ("search", None, "UNSEEN", "FROM", '"agent@example.test"')
+            ],
+            client.calls,
+        )
 
     def test_manager_unread_uids_uses_legacy_subjects_in_self_addressed_mode(self) -> None:
         class Client:
@@ -143,6 +172,34 @@ class ManagerMailCompressTests(unittest.TestCase):
             ],
             client.calls,
         )
+
+    def test_snapshot_and_export_header_filter_keeps_pb_newsletter_only(self) -> None:
+        def raw(subject: str) -> bytes:
+            return (
+                "From: Agent <agent@example.test>\r\n"
+                "To: Human <human@example.test>\r\n"
+                f"Subject: {subject}\r\n"
+                "Message-ID: <one@example.test>\r\n\r\n"
+            ).encode()
+
+        client = FakeClient(
+            {
+                ("fetch", "1", "(BODY.PEEK[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)])"): ("OK", [(b"header", raw("PB newsletter"))]),
+                ("fetch", "2", "(BODY.PEEK[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)])"): ("OK", [(b"header", raw("PB news"))]),
+                ("fetch", "3", "(BODY.PEEK[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)])"): ("OK", [(b"header", raw("PB stock watch"))]),
+                ("fetch", "4", "(BODY.PEEK[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)])"): ("OK", [(b"header", raw("PB urgent"))]),
+            }
+        )
+
+        accepted, skipped = accepted_manager_headers(
+            client,  # type: ignore[arg-type]
+            ["1", "2", "3", "4"],
+            "agent@example.test",
+            "human@example.test",
+        )
+
+        self.assertEqual(["1"], [record.uid for record in accepted])
+        self.assertEqual(["2", "3", "4"], skipped)
 
     def test_split_cleanup_rejects_wrong_human_mailbox(self) -> None:
         class Settings:
@@ -208,7 +265,7 @@ class ManagerMailCompressTests(unittest.TestCase):
         raw_msg = (
             b"From: Human <me@example.test>\r\n"
             b"To: Human <me@example.test>\r\n"
-            b"Subject: [a] summary\r\n"
+            b"Subject: [a] PB newsletter\r\n"
             b"Message-ID: <one@example.test>\r\n\r\n"
         )
         client = FakeClient(
@@ -222,6 +279,23 @@ class ManagerMailCompressTests(unittest.TestCase):
             self.assertEqual(0, cmd_trash_superseded(Args(uids="7,8", yes=True)))
         self.assertIn(("MOVE", "7", '"[Gmail]/Trash"'), client.uid_calls)
         self.assertTrue(client.logged_out)
+
+    def test_trash_superseded_refuses_pb_cleanup_subject(self) -> None:
+        raw_msg = (
+            b"From: Human <me@example.test>\r\n"
+            b"To: Human <me@example.test>\r\n"
+            b"Subject: [a] PB urgent\r\n"
+            b"Message-ID: <one@example.test>\r\n\r\n"
+        )
+        client = FakeClient(
+            {
+                ("search", None, "UID", "7"): ("OK", [b"7"]),
+                ("fetch", "7", "(BODY.PEEK[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)])"): ("OK", [(b"header", raw_msg)]),
+            }
+        )
+        with patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {"user": "me@example.test"})), patch("omo_manager.omo_manager_mail_compress.configured_agent_mail", return_value=None):
+            self.assertEqual(1, cmd_trash_superseded(Args(uids="7", yes=True)))
+        self.assertNotIn(("MOVE", "7", '"[Gmail]/Trash"'), client.uid_calls)
 
     def test_trash_superseded_refuses_boundary_mismatch(self) -> None:
         raw_msg = (

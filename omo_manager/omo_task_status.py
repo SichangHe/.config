@@ -29,6 +29,7 @@ from omo_manager.omo_blocking import v2_enabled
 from omo_manager.omo_codex_status import exact_pane_id
 from omo_manager.omo_codex_stop import Args as StopArgs
 from omo_manager.omo_codex_stop import has_close_note
+from omo_manager.omo_codex_stop import pane_id
 from omo_manager.omo_codex_stop import record_close
 from omo_manager.omo_codex_stop import stop
 from omo_manager.omo_agent_status import frontmatter_parts
@@ -71,7 +72,7 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--session-id", default="", help="Session id captured by the prior close, if available.")
     _ = parser.add_argument("task_file", type=Path)
     _ = parser.add_argument("status", nargs="?", choices=sorted(TASK_FRONTMATTER_STATUSES))
-    _ = parser.add_argument("--blocked-on", default="", help="Required when setting status to `blocked`; optional for `long_running`; removed for other statuses.")
+    _ = parser.add_argument("--blocked-on", default="", help="Required when setting status to `blocked`; removed for all other statuses.")
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     if parsed.finish_closed_done:
         if parsed.status not in {None, "", "done"}:
@@ -215,8 +216,8 @@ def update_frontmatter_status(text: str, status: str, blocked_on: str, work_log_
         raise TaskFrontmatterError(
             "task file still has `pending_task_items`; verify each pending item is actually complete or cancelled, then remove it before marking done."
         )
-    if status == "blocked" and not blocked_on:
-        raise TaskFrontmatterError("`--blocked-on` is required when setting status to `blocked`.")
+    if status in {"blocked", "long_running"} and not blocked_on:
+        raise TaskFrontmatterError("`--blocked-on` is required when setting status to `blocked` or `long_running`.")
     if "\n" in blocked_on or "\r" in blocked_on:
         raise TaskFrontmatterError("`--blocked-on` must be one line.")
     if status not in {"blocked", "long_running"} and blocked_on:
@@ -242,10 +243,7 @@ def update_frontmatter_status(text: str, status: str, blocked_on: str, work_log_
             values["blocked_on"] = [*generated, *role]
         elif status == "long_running":
             values["status"] = status
-            if blocked_on:
-                values["blocked_on"] = [{"kind": "persistent", "reason": blocked_on}]
-            else:
-                values.pop("blocked_on", None)
+            values["blocked_on"] = [{"kind": "persistent", "reason": blocked_on}]
             values.pop("resume_status", None)
         else:
             values["status"] = status
@@ -265,14 +263,14 @@ def update_frontmatter_status(text: str, status: str, blocked_on: str, work_log_
             continue
         if key == "status":
             updated.append(f"status: {status}")
-            if status == "blocked" or (status == "long_running" and blocked_on):
+            if status in {"blocked", "long_running"}:
                 updated.append(f"blocked_on: {blocked_on}")
                 inserted_blocked_on = True
             continue
         if key == "blocked_on":
             continue
         updated.append(line)
-    if status == "blocked" and not inserted_blocked_on:
+    if status in {"blocked", "long_running"} and not inserted_blocked_on:
         raise TaskFrontmatterError("frontmatter has no `status` field to attach `blocked_on` after.")
     trailing_newline = "\n" if text.endswith("\n") else ""
     updated_text = "\n".join(["---", *updated, "---", *body]) + trailing_newline
@@ -351,13 +349,20 @@ def stop_done_agent(root: Path, path: Path, metadata: TaskMetadata) -> tuple[Sto
     task_file = path.relative_to(root).as_posix()
     with task_target_lock(root, metadata.runat):
         stable_pane_id = exact_pane_id(metadata.runat)
+        record_args = StopArgs(metadata.runat, 10.0, 2000, False, False, root, task_file, True, 0.0)
+        if not stable_pane_id:
+            return record_args, ""
         allow_self = bool(stable_pane_id and worker_self_close_allowed(root, path, metadata))
         if allow_self:
             allow_self = worker_self_close_allowed(root, path, metadata) and exact_pane_id(metadata.runat) == stable_pane_id
-        stop_target = stable_pane_id if allow_self else metadata.runat
-        stop_args = StopArgs(stop_target, 10.0, 2000, False, allow_self, root, task_file, True, 0.0)
-        session_id = stop(stop_args)
-    record_args = StopArgs(metadata.runat, 10.0, 2000, False, allow_self, root, task_file, True, 0.0)
+        stop_args = StopArgs(stable_pane_id, 10.0, 2000, False, allow_self, root, task_file, True, 0.0)
+        try:
+            session_id = stop(stop_args)
+        except Exception:
+            if exact_pane_id(metadata.runat) or pane_id(stable_pane_id):
+                raise
+            session_id = ""
+    record_args = replace(record_args, allow_self=allow_self)
     return record_args, session_id
 
 

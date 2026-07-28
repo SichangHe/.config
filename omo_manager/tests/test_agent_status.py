@@ -11,6 +11,8 @@ from omo_manager.omo_codex_status import Args as CodexStatusArgs, Report
 
 
 def task_frontmatter(status: str, runat: str = "cfg:1", managerat: str = "mgr:1", *, is_manager: bool = False, pending_items: tuple[str, ...] = (), blocked_on: str = "") -> str:
+    if status == "long_running" and not blocked_on:
+        blocked_on = "persistent role"
     lines = [
         "---",
         "version: v1.0.0",
@@ -129,13 +131,9 @@ resolved_task_items: []
         self.assertEqual("long_running", metadata.status)
         self.assertEqual("persistent contact", metadata.blocked_on)
 
-    def test_frontmatter_accepts_long_running_without_blocked_on(self) -> None:
-        metadata = parse_task_metadata(task_frontmatter("long_running"))
-
-        self.assertIsNotNone(metadata)
-        assert metadata is not None
-        self.assertEqual("long_running", metadata.status)
-        self.assertEqual("", metadata.blocked_on)
+    def test_frontmatter_rejects_long_running_without_blocked_on(self) -> None:
+        with self.assertRaisesRegex(TaskFrontmatterError, "required"):
+            parse_task_metadata(task_frontmatter("running").replace("status: running", "status: long_running"))
 
     def test_long_running_ready_is_quiet_but_error_is_reported(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -635,6 +633,34 @@ resolved_task_items: []
             self.assertIn("agent-problems: error=1", text)
             self.assertIn("error: task=active.md", text)
             self.assertNotIn("ready: task=active.md", text)
+
+    def test_problems_only_recovers_capacity_error_before_trailing_goal_footer(self) -> None:
+        pane = [
+            '• Context compacted',
+            '',
+            '⚠ Selected model is at capacity. Please try a different model.',
+            '',
+            '› Use /skills to list available skills',
+            '',
+            '  gpt-5.5 medium · ~/.config',
+            '  Goal blocked (/goal resume)',
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[{"task_file":"active.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
+            _ = (root / "active.md").write_text(task_frontmatter("running", runat="cfg:1"), encoding="utf-8")
+            out = StringIO()
+            with patch("omo_manager.omo_codex_status.tail", return_value=pane), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present") as unstick, redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+
+            unstick.assert_not_called()
+            text = out.getvalue()
+            self.assertIn("agent-problems: error=1", text)
+            self.assertIn("error: task=active.md", text)
+            self.assertIn("output=⚠ Selected model is at capacity. Please try a different model.", text)
+            self.assertNotIn("not_codex: task=active.md", text)
 
     def test_error_evidence_prefers_warning_line_above_input_box(self) -> None:
         pane = ['────', '⚠ Selected model is at capacity. Please try a different model.', 'note', 'detail', '› Explain this codebase', '  gpt-5.5']

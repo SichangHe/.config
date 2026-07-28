@@ -18,7 +18,7 @@ from pathlib import Path
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from omo_manager.email_idle_watcher import LEGACY_MANAGER_SUBJECT_TOKENS, message_text, parse_env_config
+from omo_manager.email_idle_watcher import LEGACY_MANAGER_SUBJECT_TOKENS, is_mail_cleanup_excluded_subject, message_text, parse_env_config
 from omo_manager.omo_email_config import configured_agent_mail, human_config_path
 
 HEADER_FETCH = "(BODY.PEEK[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)])"
@@ -80,6 +80,8 @@ def record_from_msg(uid: str, msg: Message, body: str = "") -> MailRecord:
 
 
 def is_manager_record(record: MailRecord, sender_email: str, recipient_email: str) -> bool:
+    if is_mail_cleanup_excluded_subject(record.subject):
+        return False
     senders = [address.casefold() for _name, address in getaddresses([record.sender]) if address]
     sender_matches = senders == [sender_email.casefold()]
     recipients = [address.casefold() for _name, address in getaddresses([record.to]) if address]

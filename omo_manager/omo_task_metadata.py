@@ -78,6 +78,12 @@ class HumanBlocker:
 
 
 @dataclass(frozen=True)
+class PersistentBlocker:
+    kind: str
+    reason: str
+
+
+@dataclass(frozen=True)
 class TaskBlocker:
     kind: str
     task: str
@@ -90,7 +96,7 @@ class LegacyBlocker:
     text: str
 
 
-TaskBlockerEntry: TypeAlias = PendingItemsBlocker | HumanBlocker | TaskBlocker | LegacyBlocker
+TaskBlockerEntry: TypeAlias = PendingItemsBlocker | HumanBlocker | PersistentBlocker | TaskBlocker | LegacyBlocker
 
 
 @dataclass(frozen=True)
@@ -252,8 +258,8 @@ def parse_v2_metadata(source: str, work_log_root: Path | None = None) -> TaskMet
     if len(set(all_item_ids)) != len(all_item_ids):
         raise TaskFrontmatterError("pending and resolved item ids must be unique within a task.")
     blockers = tuple(parse_blocker(value, work_log_root) for value in require_list(values.get("blocked_on", []), "blocked_on"))
-    if common[1] == "blocked" and not blockers:
-        raise TaskFrontmatterError("`blocked_on` must contain at least one blocker for a blocked v2 task.")
+    if common[1] in {"blocked", "long_running"} and not blockers:
+        raise TaskFrontmatterError("`blocked_on` must contain at least one blocker for a blocked or long_running v2 task.")
     if common[1] == "long_running" and any(not isinstance(blocker, PersistentBlocker) for blocker in blockers):
         raise TaskFrontmatterError("a `long_running` v2 task may only have persistent blockers.")
     notices = [notice for item in (*pending_items, *resolved_items) for notice in item.notices]
@@ -287,8 +293,8 @@ def parse_common(values: Mapping[str, object], allowed: set[str]) -> tuple[str, 
     if status not in TASK_FRONTMATTER_STATUSES:
         raise TaskFrontmatterError("`status` must be `running`, `long_running`, `blocked`, or `done`.")
     has_blocked_on = "blocked_on" in values
-    if status == "blocked" and not has_blocked_on:
-        raise TaskFrontmatterError("`blocked_on` is required when `status` is `blocked`.")
+    if status in {"blocked", "long_running"} and not has_blocked_on:
+        raise TaskFrontmatterError("`blocked_on` is required when `status` is `blocked` or `long_running`.")
     if status not in {"blocked", "long_running"} and has_blocked_on:
         raise TaskFrontmatterError("`blocked_on` must only exist when `status` is `blocked` or `long_running`.")
     runat = require_text(values["runat"], "runat")
@@ -436,6 +442,9 @@ def parse_blocker(value: object, work_log_root: Path | None = None) -> TaskBlock
     if kind == "human":
         row = require_mapping(value, "blocked_on", {"kind", "reason"})
         return HumanBlocker(kind, require_text(row["reason"], "reason"))
+    if kind == "persistent":
+        row = require_mapping(value, "blocked_on", {"kind", "reason"})
+        return PersistentBlocker(kind, require_text(row["reason"], "reason"))
     if kind == "task":
         row = require_mapping(value, "blocked_on", {"kind", "task", "reason"})
         return TaskBlocker(kind, canonical_task_reference(row["task"], work_log_root), require_text(row["reason"], "reason"))
@@ -448,7 +457,7 @@ def parse_blocker(value: object, work_log_root: Path | None = None) -> TaskBlock
 def blocker_text(blocker: TaskBlockerEntry) -> str:
     if isinstance(blocker, PendingItemsBlocker):
         return "pending_items"
-    if isinstance(blocker, HumanBlocker):
+    if isinstance(blocker, (HumanBlocker, PersistentBlocker)):
         return blocker.reason
     if isinstance(blocker, TaskBlocker):
         return blocker.reason

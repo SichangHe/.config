@@ -24,7 +24,7 @@
 ## active state
 
 - current migration: add `long_running` as a first-class active status for managers and human-facing interactive agents
-- `long_running` status behavior: no idle/ready close reminder; preserve error, stuck-input, malformed-state, launch-failure, task-state, and pending-item handling
+- `long_running` status behavior: require `blocked_on` like `blocked`; suppress idle/ready close reminders; preserve error, stuck-input, malformed-state, launch-failure, task-state, and pending-item handling
 - superseded temporary rule: do not key reminder suppression from `blocked_on: long-running`; migrate that intent to `status: long_running`
 - authorized mail routing: ordinary addressed email goes only to the task `runat`; no manager FYI copy
 - authorized manager override: `for manager` or `for a manager` at the beginning or end of active unquoted content routes to `managerat`; matching ignores case, surrounding punctuation, and edge whitespace while preserving internal spacing
@@ -110,7 +110,7 @@
 
 ## checklist
 
-- [x] `long_running` schema and lifecycle
+- [ ] `long_running` requires `blocked_on` across schema, lifecycle, launcher, docs, and tests
 - [ ] direct-by-default mail routing and manager markers
 - [x] task-file-opaque agent pending-item commands
 - [x] agent-targeted idle pending-item reminders

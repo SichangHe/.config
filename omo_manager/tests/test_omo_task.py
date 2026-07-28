@@ -39,6 +39,7 @@ from omo_manager.omo_task import (
     wait_shell,
     write_human_instruction_file,
 )
+from omo_manager.tests.test_task_metadata_v2 import v2_task
 
 
 VALID_GOAL_TREE = "implement manager check\n- reject missing task goal tree\n"
@@ -326,23 +327,24 @@ class OmoTaskTests(unittest.TestCase):
             self.assertIsNotNone(metadata)
             assert metadata is not None
             self.assertEqual("long_running", metadata.status)
+            self.assertEqual("persistent manager role", metadata.blocked_on)
             self.assertTrue(metadata.is_manager)
 
     def test_manager_relaunch_clears_blocker_for_long_running(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             existing = (
-                "---\\n"
-                "version: v1.0.0\\n"
-                "status: blocked\\n"
-                "blocked_on: waiting for a manager decision\\n"
-                "runat: cfg:2\\n"
-                "tool: codex\\n"
-                "managerat: wl:1\\n"
-                "is_manager: true\\n"
-                "pending_task_items: []\\n"
-                "---\\n"
-                "continue coordination\\n"
+                "---\n"
+                "version: v1.0.0\n"
+                "status: blocked\n"
+                "blocked_on: waiting for a manager decision\n"
+                "runat: cfg:2\n"
+                "tool: codex\n"
+                "managerat: wl:1\n"
+                "is_manager: true\n"
+                "pending_task_items: []\n"
+                "---\n"
+                "continue coordination\n"
             )
             args = Args(root, "manager.md", "cfg", "2", "codex", root, "", None, False, False, "", "medium", (), manager_target="wl:1", is_manager=True, model="gpt-5.6-terra")
 
@@ -352,7 +354,122 @@ class OmoTaskTests(unittest.TestCase):
             self.assertIsNotNone(metadata)
             assert metadata is not None
             self.assertEqual("long_running", metadata.status)
-            self.assertEqual("", metadata.blocked_on)
+            self.assertEqual("persistent manager role", metadata.blocked_on)
+
+    def test_manager_relaunch_repairs_legacy_long_running_without_blocked_on(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            existing = (
+                "---\n"
+                "version: v1.0.0\n"
+                "status: long_running\n"
+                "runat: cfg:2\n"
+                "tool: codex\n"
+                "managerat: wl:1\n"
+                "is_manager: true\n"
+                "pending_task_items: []\n"
+                "---\n"
+                "continue coordination\n"
+            )
+            args = Args(root, "manager.md", "cfg", "2", "codex", root, "", None, False, False, "", "medium", (), manager_target="wl:1", is_manager=True, model="gpt-5.6-terra")
+
+            metadata = parse_task_metadata(launched_frontmatter_text(existing, args, "cfg:2"))
+
+            self.assertIsNotNone(metadata)
+            assert metadata is not None
+            self.assertEqual("long_running", metadata.status)
+            self.assertEqual("persistent manager role", metadata.blocked_on)
+
+    def test_manager_relaunch_repairs_frontmatter_when_body_mentions_blocked_on(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            existing = (
+                "---\nversion: v1.0.0\nstatus: long_running\nrunat: cfg:2\ntool: codex\n"
+                "managerat: wl:1\nis_manager: true\npending_task_items:\n  - [ ] review migration\n---\n"
+                "A body example may mention blocked_on: without defining the field.\n"
+            )
+            args = Args(root, "manager.md", "cfg", "2", "codex", root, "", None, False, False, "", "medium", (), manager_target="wl:1", is_manager=True, model="gpt-5.6-terra")
+
+            metadata = parse_task_metadata(launched_frontmatter_text(existing, args, "cfg:2"))
+
+            self.assertIsNotNone(metadata)
+            assert metadata is not None
+            self.assertEqual("persistent manager role", metadata.blocked_on)
+            self.assertEqual(("[ ] review migration",), metadata.pending_task_items)
+
+    def test_manager_relaunch_preserves_custom_persistent_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            existing = (
+                "---\nversion: v1.0.0\nstatus: long_running\nblocked_on: persistent human-facing audit contact\n"
+                "runat: cfg:2\ntool: codex\nmanagerat: wl:1\nis_manager: true\npending_task_items: []\n---\nbody\n"
+            )
+            args = Args(root, "manager.md", "cfg", "2", "codex", root, "", None, False, False, "", "medium", (), manager_target="wl:1", is_manager=True, model="gpt-5.6-terra")
+
+            metadata = parse_task_metadata(launched_frontmatter_text(existing, args, "cfg:2"))
+
+            self.assertIsNotNone(metadata)
+            assert metadata is not None
+            self.assertEqual("persistent human-facing audit contact", metadata.blocked_on)
+
+    def test_manager_relaunch_validation_and_write_repair_legacy_long_running(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "manager.md"
+            task.write_text(
+                "---\nversion: v1.0.0\nstatus: long_running\nrunat: cfg:2\ntool: codex\nmanagerat: wl:1\nis_manager: true\npending_task_items: []\n---\ncontinue coordination\n",
+                encoding="utf-8",
+            )
+            (root / "MANAGER.md").write_text("manager instructions\n", encoding="utf-8")
+            args = Args(root, "manager.md", "cfg", "2", "codex", root, "", None, False, False, "", "medium", (), manager_target="wl:1", is_manager=True, model="gpt-5.6-terra")
+
+            self.assertEqual("", validate_inputs(args))
+            metadata = parse_task_metadata(ensure_task_file(args, "cfg:2").read_text(encoding="utf-8"))
+
+            self.assertIsNotNone(metadata)
+            assert metadata is not None
+            self.assertEqual("long_running", metadata.status)
+            self.assertEqual("persistent manager role", metadata.blocked_on)
+
+    def test_v2_manager_relaunch_repairs_legacy_long_running_without_blocked_on(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            existing = (
+                "---\n"
+                "version: v2.0.0\n"
+                "task_id: task_019f0000-0000-7000-8000-000000000001\n"
+                "status: long_running\n"
+                "runat: cfg:2\n"
+                "tool: codex\n"
+                "managerat: wl:1\n"
+                "is_manager: true\n"
+                "pending_task_items: []\n"
+                "resolved_task_items: []\n"
+                "---\n"
+                "continue coordination\n"
+            )
+            args = Args(root, "manager.md", "cfg", "2", "codex", root, "", None, False, False, "", "medium", (), manager_target="wl:1", is_manager=True, model="gpt-5.6-terra")
+
+            metadata = parse_task_metadata(launched_frontmatter_text(existing, args, "cfg:2"))
+
+            self.assertIsNotNone(metadata)
+            assert metadata is not None
+            self.assertEqual("long_running", metadata.status)
+            self.assertEqual("persistent manager role", metadata.blocked_on)
+
+    def test_v2_manager_relaunch_preserves_persistent_reason_with_generated_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            existing = v2_task().replace("resume_status: running", "resume_status: long_running").replace("is_manager: false", "is_manager: true").replace(
+                "  - kind: human\n    reason: waiting for approval",
+                "  - kind: persistent\n    reason: persistent specialized manager role",
+            )
+            args = Args(root, "manager.md", "cfg", "2", "codex", root, "", None, False, False, "", "medium", (), manager_target="wl:1", is_manager=True, model="gpt-5.6-terra")
+
+            updated = launched_frontmatter_text(existing, args, "cfg:2")
+
+            self.assertIn("reason: persistent specialized manager role", updated)
+            self.assertNotIn("reason: persistent manager role", updated)
 
     def test_vl_worker_launch_requires_manager_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

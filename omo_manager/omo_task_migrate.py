@@ -28,6 +28,11 @@ from omo_manager.omo_blocking import task_hash
 from omo_manager.omo_blocking import task_paths
 from omo_manager.omo_task_metadata import TASK_FRONTMATTER_V1
 from omo_manager.omo_task_metadata import TASK_FRONTMATTER_V2
+from omo_manager.omo_task_metadata import TaskFrontmatterError
+from omo_manager.omo_task_metadata import TaskMetadata
+from omo_manager.omo_task_metadata import first_version
+from omo_manager.omo_task_metadata import frontmatter_parts
+from omo_manager.omo_task_metadata import frontmatter_text
 from omo_manager.omo_task_metadata import parse_task_metadata
 from omo_manager.omo_task_lock import task_target_lock
 from omo_manager.omo_task_lock import task_file_lock
@@ -41,6 +46,7 @@ class Args:
     command: str
     plan: Path
     resume_statuses: tuple[tuple[str, str], ...] = ()
+    long_running_reasons: tuple[tuple[str, str], ...] = ()
 
 
 def parse_resume_status(value: str) -> tuple[str, str]:
@@ -50,6 +56,13 @@ def parse_resume_status(value: str) -> tuple[str, str]:
     return task, status
 
 
+def parse_long_running_reason(value: str) -> tuple[str, str]:
+    task, separator, reason = value.partition("=")
+    if not separator or not task or not reason.strip() or "\n" in reason or "\r" in reason:
+        raise argparse.ArgumentTypeError("--long-running-reason must be TASK=one-line reason")
+    return task, reason.strip()
+
+
 def parse_args(argv: list[str]) -> Args:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
@@ -57,12 +70,19 @@ def parse_args(argv: list[str]) -> Args:
     plan = sub.add_parser("plan", help="Write one immutable migration plan.")
     plan.add_argument("--output", dest="plan", type=Path, required=True)
     plan.add_argument("--resume-status", action="append", type=parse_resume_status, default=[])
+    plan.add_argument("--long-running-reason", action="append", type=parse_long_running_reason, default=[])
     for command in ("dry-run", "write", "enable"):
         operation = sub.add_parser(command, help=f"{command} one reviewed migration plan.")
         operation.add_argument("--plan", type=Path, required=True)
     parsed = parser.parse_args(argv)
     path = parsed.plan if hasattr(parsed, "plan") else parsed.output
-    return Args(parsed.root.resolve(), parsed.command, path.resolve(), tuple(getattr(parsed, "resume_status", ())))
+    return Args(
+        parsed.root.resolve(),
+        parsed.command,
+        path.resolve(),
+        tuple(getattr(parsed, "resume_status", ())),
+        tuple(getattr(parsed, "long_running_reason", ())),
+    )
 
 
 def path_in_root(root: Path, relative: str) -> Path:
@@ -74,10 +94,73 @@ def path_in_root(root: Path, relative: str) -> Path:
     return path
 
 
-def v2_metadata(text: str, resume_status: str | None, work_log_root: Path | None = None) -> tuple[dict[str, Any], str]:
-    metadata = parse_task_metadata(text, work_log_root)
+def normalized_legacy_long_running_text(text: str, reason: str) -> str | None:
+    parts = frontmatter_parts(text)
+    if parts is None:
+        return None
+    frontmatter, body = parts
+    fields = v1_fields(frontmatter)
+    status = fields.get("status")
+    if fields.get("version", (None, ""))[1] != TASK_FRONTMATTER_V1 or status is None or status[1] != "long_running" or "blocked_on" in fields:
+        return None
+    frontmatter.insert(status[0] + 1, f"blocked_on: {reason}")
+    trailing_newline = "\n" if text.endswith("\n") else ""
+    return "\n".join(["---", *frontmatter, "---", *body]) + trailing_newline
+
+
+def v1_fields(frontmatter: list[str]) -> dict[str, tuple[int, str]]:
+    fields: dict[str, tuple[int, str]] = {}
+    for index, line in enumerate(frontmatter):
+        if line.startswith("  - "):
+            continue
+        key, separator, value = line.partition(":")
+        if separator and key in {"version", "status", "blocked_on"} and key not in fields:
+            fields[key] = (index, value.strip())
+    return fields
+
+
+def v1_status(text: str) -> str:
+    parts = frontmatter_parts(text)
+    if parts is None:
+        return ""
+    return v1_fields(parts[0]).get("status", (None, ""))[1]
+
+
+def v1_metadata_for_migration(
+    text: str, long_running_reason: str | None, work_log_root: Path | None = None
+) -> tuple[TaskMetadata, bool]:
+    try:
+        metadata = parse_task_metadata(text, work_log_root)
+        normalized_legacy_reason = False
+    except TaskFrontmatterError:
+        if normalized_legacy_long_running_text(text, "required reason") is None:
+            raise
+        if long_running_reason is None:
+            raise BlockingError("every legacy long_running task requires a reviewed --long-running-reason choice") from None
+        normalized = normalized_legacy_long_running_text(text, long_running_reason)
+        assert normalized is not None
+        metadata = parse_task_metadata(normalized, work_log_root)
+        normalized_legacy_reason = True
     if metadata is None or metadata.version != TASK_FRONTMATTER_V1:
         raise BlockingError("migration planning requires v1 task metadata")
+    if metadata.status == "long_running" and not metadata.blocked_on:
+        if long_running_reason is None:
+            raise BlockingError("every legacy long_running task requires a reviewed --long-running-reason choice")
+        normalized = normalized_legacy_long_running_text(text, long_running_reason)
+        if normalized is None:
+            raise BlockingError("legacy long_running task could not be normalized")
+        metadata = parse_task_metadata(normalized, work_log_root)
+        assert metadata is not None
+        normalized_legacy_reason = True
+    return metadata, normalized_legacy_reason
+
+
+def v2_metadata(
+    text: str, resume_status: str | None, long_running_reason: str | None, work_log_root: Path | None = None
+) -> tuple[dict[str, Any], str]:
+    metadata, normalized_legacy_reason = v1_metadata_for_migration(text, long_running_reason, work_log_root)
+    if long_running_reason is not None and metadata.status != "long_running":
+        raise BlockingError("--long-running-reason is only valid for a long_running task")
     _frontmatter, body = split_task_text(text)
     migrated: dict[str, Any] = {
         "version": V2_VERSION,
@@ -97,28 +180,38 @@ def v2_metadata(text: str, resume_status: str | None, work_log_root: Path | None
             raise BlockingError("every blocked task requires a reviewed --resume-status choice")
         migrated["resume_status"] = resume_status
         migrated["blocked_on"] = [{"kind": "legacy", "text": metadata.blocked_on}]
+    elif metadata.status == "long_running":
+        if long_running_reason is not None and metadata.blocked_on and not normalized_legacy_reason:
+            raise BlockingError("--long-running-reason is only for a legacy long_running task missing `blocked_on`")
+        migrated["blocked_on"] = [{"kind": "persistent", "reason": metadata.blocked_on or long_running_reason}]
+    elif long_running_reason is not None:
+        raise BlockingError("--long-running-reason is only valid for a long_running task")
     elif resume_status is not None:
         raise BlockingError("--resume-status is only valid for a blocked task")
     return migrated, body
 
 
-def make_plan(root: Path, resume_statuses: dict[str, str]) -> dict[str, Any]:
+def make_plan(root: Path, resume_statuses: dict[str, str], long_running_reasons: dict[str, str]) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     used_resume: set[str] = set()
+    used_long_running_reasons: set[str] = set()
     for path in task_paths(root):
         text = path.read_text(encoding="utf-8")
-        metadata = parse_task_metadata(text, root)
-        if metadata is None:
-            raise BlockingError("active task has no frontmatter")
         relative = str(path.relative_to(root))
-        if metadata.version == TASK_FRONTMATTER_V2:
+        version = first_version(frontmatter_text(text) or "")
+        if version == TASK_FRONTMATTER_V2:
+            _ = parse_task_metadata(text, root)
             continue
-        if metadata.version != TASK_FRONTMATTER_V1:
+        if version != TASK_FRONTMATTER_V1:
             raise BlockingError("active task uses an unsupported metadata version")
         resume = resume_statuses.get(relative)
         if resume is not None:
             used_resume.add(relative)
-        migrated, body = v2_metadata(text, resume, root)
+        long_running_reason = long_running_reasons.get(relative)
+        if long_running_reason is not None:
+            if v1_status(text) == "long_running":
+                used_long_running_reasons.add(relative)
+        migrated, body = v2_metadata(text, resume, long_running_reason, root)
         rendered = render_task(migrated, body)
         rows.append(
             {
@@ -130,6 +223,8 @@ def make_plan(root: Path, resume_statuses: dict[str, str]) -> dict[str, Any]:
         )
     if unused := set(resume_statuses) - used_resume:
         raise BlockingError(f"resume status names an absent or nonblocked task: {sorted(unused)[0]}")
+    if unused := set(long_running_reasons) - used_long_running_reasons:
+        raise BlockingError(f"long-running reason names an absent or non-long_running task: {sorted(unused)[0]}")
     return {"version": PLAN_VERSION, "tasks": rows}
 
 
@@ -248,7 +343,7 @@ def run(args: Args) -> int:
         if args.plan.exists():
             raise BlockingError("migration plan output already exists")
         require_clean_committed(task_paths(args.root), "migration task inputs")
-        plan = make_plan(args.root, dict(args.resume_statuses))
+        plan = make_plan(args.root, dict(args.resume_statuses), dict(args.long_running_reasons))
         write_private(args.plan, yaml.safe_dump(plan, allow_unicode=True, sort_keys=False, width=160))
         print(f"planned {len(plan['tasks'])} task(s)")
         return 0
@@ -272,9 +367,9 @@ def run(args: Args) -> int:
     require_clean_committed([path for path, _row, state in states if state == "v1"], "v1 migration task inputs")
     for path, row, state in states:
         if state == "v1":
-            metadata = parse_task_metadata(path.read_text(encoding="utf-8"), args.root)
+            metadata = parse_task_metadata(row["v2_text"], args.root)
             if metadata is None:
-                raise BlockingError("migration task metadata disappeared")
+                raise BlockingError("migration plan task metadata disappeared")
             with task_target_lock(args.root, metadata.runat):
                 write_private(path, row["v2_text"], row["v1_sha256"])
     _ = validate_plan_state(args.root, rows)

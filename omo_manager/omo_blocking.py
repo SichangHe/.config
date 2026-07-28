@@ -239,24 +239,36 @@ def pending_item(metadata: dict[str, Any], item_id: str) -> dict[str, Any]:
 
 
 def external_blockers(metadata: dict[str, Any]) -> list[dict[str, Any]]:
-    return [blocker for blocker in metadata.get("blocked_on", []) if blocker.get("kind") != "pending_items"]
+    return [blocker for blocker in metadata.get("blocked_on", []) if blocker.get("kind") not in {"pending_items", "persistent"}]
+
+
+def persistent_blockers(metadata: dict[str, Any]) -> list[dict[str, Any]]:
+    return [blocker for blocker in metadata.get("blocked_on", []) if blocker.get("kind") == "persistent"]
 
 
 def sync_generated_blocker(metadata: dict[str, Any]) -> bool:
     blocked_ids = [item["id"] for item in metadata["pending_task_items"] if item["blocked_on"]]
     external = external_blockers(metadata)
+    persistent = persistent_blockers(metadata)
     old = metadata.get("blocked_on", [])
     new: list[dict[str, Any]] = []
     if blocked_ids:
         new.append({"kind": "pending_items", "item_ids": blocked_ids})
     new.extend(external)
-    if new:
+    new.extend(persistent)
+    if blocked_ids or external:
         metadata["blocked_on"] = new
         if metadata["status"] != "blocked":
             metadata["resume_status"] = metadata["status"]
             metadata["status"] = "blocked"
         elif metadata.get("resume_status") not in {"running", "long_running"}:
             raise BlockingError("blocked task is missing a valid resume status")
+    elif persistent:
+        metadata["blocked_on"] = persistent
+        if metadata["status"] == "blocked":
+            metadata["status"] = metadata.pop("resume_status")
+            if metadata["status"] != "long_running":
+                raise BlockingError("persistent blocker requires long_running resume status")
     elif metadata["status"] == "blocked" and old and all(blocker.get("kind") == "pending_items" for blocker in old):
         metadata["status"] = metadata.pop("resume_status")
         metadata.pop("blocked_on", None)

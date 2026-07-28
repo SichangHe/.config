@@ -62,7 +62,9 @@ resolved_task_items:
     - `human` with nonempty `reason`
     - `task` with canonical in-root `task` and nonempty `reason`
     - `legacy` with the exact nonempty v1 scalar in `text`
+    - `persistent` with nonempty `reason` for a `long_running` role
   - `human`, `task`, and `legacy` entries remain manager-owned lifecycle blockers
+  - `persistent` records why a `long_running` role remains open; preserve it through generated dependency transitions, but do not treat it as a pending-item delivery blocker
   - item dependencies are never duplicated at top level
 - `resume_status` is required for every `status: blocked` task
   - its value is `running` or `long_running`
@@ -100,7 +102,7 @@ resolved_task_items:
   - the final completed dependency creates one durable pending notice
 - lifecycle
   - if an item becomes ready while any external task blocker remains, retain the notice without delivery
-  - otherwise, if a blocked task has only generated `pending_items` blockers and now has an actionable item, atomically remove generated blockers, restore `resume_status`, and make the notice deliverable
+  - otherwise, if a blocked task has only generated `pending_items` blockers plus any `persistent` role blocker and now has an actionable item, atomically remove generated blockers, restore `resume_status`, preserve the persistent role blocker when resuming `long_running`, and make the notice deliverable
   - never clear human or external blockers automatically
   - every blocker edit reconciles retained notices
     - adding a lifecycle blocker supersedes any pending or acknowledged ready notice
