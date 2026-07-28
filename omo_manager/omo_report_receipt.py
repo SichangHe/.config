@@ -1471,7 +1471,7 @@ def validate_receipt_bytes(
     publication_effect = effects.get("receipt_publication")
     if (
         not isinstance(locks, dict)
-        or set(locks) != {"adjacent_report", "route_evidence", "task_file"}
+        or set(locks) != {"adjacent_report", "allocation_replay", "route_evidence", "task_file"}
         or not isinstance(acknowledgment_effect, dict)
         or not isinstance(allocation_effect, dict)
         or not isinstance(manager_effect, dict)
@@ -1710,11 +1710,25 @@ def validate_receipt_bytes(
     ):
         raise ReceiptError("durable receipt watcher path effects are inconsistent")
     report_lock = locks.get("adjacent_report")
+    allocation_replay_lock = locks.get("allocation_replay")
     task_lock = locks.get("task_file")
     route_locks = locks.get("route_evidence")
-    if not isinstance(report_lock, dict) or not isinstance(task_lock, dict) or not isinstance(route_locks, list):
+    if (
+        not isinstance(report_lock, dict)
+        or not isinstance(allocation_replay_lock, dict)
+        or not isinstance(task_lock, dict)
+        or not isinstance(route_locks, list)
+    ):
         raise ReceiptError("durable receipt lock effects are malformed")
-    if report_lock.get("path") != str(plan.report_lock) or task_lock.get("path") != str(plan.task_lock):
+    if (
+        report_lock.get("path") != str(plan.report_lock)
+        or allocation_replay_lock.get("path") != str(
+            allocation_lock_path(plan, Path(realized_allocation_file))
+        )
+        or allocation_replay_lock.get("directory") != str(plan.receipt_directory)
+        or allocation_replay_lock.get("operation") != "create-or-open-and-flock-exclusive"
+        or task_lock.get("path") != str(plan.task_lock)
+    ):
         raise ReceiptError("durable receipt lock paths are inconsistent")
     expected_route_locks = {(str(target), str(lock_path)) for target, lock_path in plan.route_locks if target != plan.manager}
     actual_route_locks = {(str(item.get("source")), str(item.get("path"))) for item in route_locks if isinstance(item, dict)}
@@ -2003,6 +2017,7 @@ def preflight_transaction_set(
     )
     locks = {
         "acknowledgment": str(plan.acknowledgment_lock),
+        "allocation_replay": str(allocation_lock_path(plan, realized_allocation_file)),
         "adjacent_report": str(plan.report_lock),
         "routing": [
             {"path": str(lock_path), "source": str(source)}
@@ -2203,6 +2218,7 @@ def validate_transaction_commitment_bytes(
     if not isinstance(preflight_allocation, dict) or not isinstance(allocation, dict):
         raise ReceiptError("transaction commitment allocation is malformed")
     expected_allocation_keys = {
+        "allocation_replay_lock",
         "directory",
         "directory_at_submission",
         "file",
@@ -2215,6 +2231,7 @@ def validate_transaction_commitment_bytes(
     allocation_file = allocation.get("file")
     allocation_file_state = allocation.get("file_at_submission")
     allocation_directory_state = allocation.get("directory_at_submission")
+    allocation_replay_lock = allocation.get("allocation_replay_lock")
     helper_allocated = isinstance(allocation_file, str) and Path(allocation_file).parent == allocation_directory
     if (
         set(allocation) != expected_allocation_keys
@@ -2232,6 +2249,7 @@ def validate_transaction_commitment_bytes(
         or allocation_file_state.get("sha256") != plan.input_info["sha256"]
         or allocation_file_state.get("size") != plan.input_info["size_bytes"]
         or not isinstance(allocation_directory_state, dict)
+        or not isinstance(allocation_replay_lock, dict)
     ):
         raise ReceiptError("transaction commitment allocation is inconsistent")
     if helper_allocated and (
@@ -2241,6 +2259,22 @@ def validate_transaction_commitment_bytes(
         or allocation_directory_state.get("mode") != "0700"
     ):
         raise ReceiptError("transaction commitment allocation directory is inconsistent")
+    expected_allocation_lock_path = allocation_lock_path(plan, Path(allocation_file))
+    if (
+        set(allocation_replay_lock)
+        != {"before", "directory", "directory_before", "operation", "path"}
+        or allocation_replay_lock.get("path") != str(expected_allocation_lock_path)
+        or allocation_replay_lock.get("directory") != str(plan.receipt_directory)
+        or allocation_replay_lock.get("operation") != "create-or-open-and-flock-exclusive"
+        or not isinstance(allocation_replay_lock.get("before"), dict)
+        or not isinstance(allocation_replay_lock.get("directory_before"), dict)
+        or not validate_optional_regular(
+            expected_allocation_lock_path,
+            "committed allocation replay lock",
+            exact_mode=0o600,
+        )
+    ):
+        raise ReceiptError("transaction commitment allocation replay lock is inconsistent")
     if require_current_allocation_identity:
         validate_current_allocation_identity(plan, parsed)
     commitment = parsed.get("commitment")
@@ -2282,10 +2316,22 @@ def read_transaction_commitment(
     )
 
 
-def transaction_commitment_bytes(plan: Plan) -> bytes:
+def transaction_commitment_bytes(
+    plan: Plan,
+    *,
+    allocation_replay_lock_before: dict[str, object],
+    allocation_replay_lock_directory_before: dict[str, object],
+) -> bytes:
     allocation_directory = Path("/tmp") / f"omo-report-drafts-{os.getuid()}"
     record: dict[str, object] = {
         "allocation": {
+            "allocation_replay_lock": {
+                "before": allocation_replay_lock_before,
+                "directory": str(plan.receipt_directory),
+                "directory_before": allocation_replay_lock_directory_before,
+                "operation": "create-or-open-and-flock-exclusive",
+                "path": str(allocation_lock_path(plan)),
+            },
             "directory": str(allocation_directory),
             "directory_at_submission": path_state(allocation_directory),
             "file": str(plan.message_path),
@@ -2369,19 +2415,32 @@ def reject_pending_allocation_rebind(plan: Plan) -> None:
         raise ReceiptError("pending report transaction is already bound to a different allocation")
 
 
-def allocation_lock_path(plan: Plan) -> Path:
-    digest = hashlib.sha256(str(plan.message_path).encode()).hexdigest()
+def allocation_lock_path(plan: Plan, allocation_file: Path | None = None) -> Path:
+    bound_file = plan.message_path if allocation_file is None else allocation_file
+    digest = hashlib.sha256(str(bound_file).encode()).hexdigest()
     return plan.receipt_directory / f".allocation-{digest}.lock"
 
 
 def create_or_reuse_transaction_commitment(plan: Plan) -> dict[str, object]:
-    with adjacent_report_lock(allocation_lock_path(plan)):
+    lock_path = allocation_lock_path(plan)
+    lock_before = path_state(lock_path)
+    lock_directory_before = path_state(lock_path.parent)
+    with adjacent_report_lock(lock_path):
+        _ = validate_optional_regular(
+            allocation_lock_path(plan),
+            "allocation replay lock",
+            exact_mode=0o600,
+        )
         existing = read_transaction_commitment(plan, require_current_allocation_identity=True)
         if existing is not None:
             return existing
         reject_pending_allocation_rebind(plan)
         require_absent(plan.transaction_commitment_temporary, "transaction commitment temporary file")
-        payload = transaction_commitment_bytes(plan)
+        payload = transaction_commitment_bytes(
+            plan,
+            allocation_replay_lock_before=lock_before,
+            allocation_replay_lock_directory_before=lock_directory_before,
+        )
         write_new_file(plan.transaction_commitment_temporary, payload, 0o600)
         try:
             os.link(
@@ -2435,6 +2494,7 @@ def public_preflight_binding(plan: Plan, transaction: dict[str, object] | None =
         *(str(item["path"]) for item in routing_sources if isinstance(item, dict)),
         str(allocation["file"]),
         str(locks["acknowledgment"]),
+        str(locks["allocation_replay"]),
         str(locks["adjacent_report"]),
         str(locks["watcher_authority"]),
         *(str(item["path"]) for item in route_locks if isinstance(item, dict)),
@@ -2853,6 +2913,13 @@ def submit(plan: Plan) -> tuple[bytes, bytes] | None:
                     "temporary_before": receipt_temporary_before,
                 },
                 "locks": {
+                    "allocation_replay": {
+                        **committed_allocation["allocation_replay_lock"],
+                        "after": path_state(
+                            Path(str(committed_allocation["allocation_replay_lock"]["path"]))
+                        ),
+                        "directory_after": path_state(plan.receipt_directory),
+                    },
                     "adjacent_report": {
                         "after": path_state(plan.report_lock),
                         "before": report_lock_before,

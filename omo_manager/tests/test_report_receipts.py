@@ -285,7 +285,10 @@ def preflight_paths(preflight: dict[str, object]) -> set[str]:
     paths.update(str(path) for path in preflight["directories"])  # type: ignore[union-attr]
     paths.update(str(path) for path in preflight["temporary_files"])  # type: ignore[union-attr]
     paths.update(str(path) for path in records.values())
-    paths.update(str(locks[key]) for key in ("acknowledgment", "adjacent_report", "watcher_authority"))
+    paths.update(
+        str(locks[key])
+        for key in ("acknowledgment", "allocation_replay", "adjacent_report", "watcher_authority")
+    )
     route_locks = locks["routing"]
     assert isinstance(route_locks, list)
     paths.update(str(item["path"]) for item in route_locks)
@@ -431,11 +434,18 @@ class ReportReceiptTests(unittest.TestCase):
             self.assertNotIn(str(draft_b), json.dumps(receipt, sort_keys=True))
             self.assertLessEqual(side_effect_paths(receipt["side_effects"]), preflight_paths(receipt["preflight"]))
             self.assertTrue(all(not Path(path).exists() for path in receipt["preflight"]["temporary_files"]))
+            draft_b_lock = receipt_path.parent / f".allocation-{hashlib.sha256(str(draft_b).encode()).hexdigest()}.lock"
+            draft_b_lock.write_bytes(b"")
+            draft_b_lock.chmod(0o644)
             accepted_b = run_report_from(case, draft_b)
             self.assertEqual(accepted_a.stdout, accepted_b.stdout)
             self.assertEqual(owner, case.manager.read_bytes())
             records = list(receipt_path.parent.glob("*.json"))
             self.assertEqual(2, len(records))
+            Path(str(receipt["preflight"]["locks"]["allocation_replay"])).unlink()
+            deleted_lock_replay = run_report_from(case, draft_a)
+            self.assertEqual(2, deleted_lock_replay.returncode)
+            self.assertIn("allocation replay lock is inconsistent", deleted_lock_replay.stderr)
 
     def test_disappeared_draft_replacement_cannot_finish_after_watcher_restart(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1464,6 +1474,12 @@ class ReportReceiptTests(unittest.TestCase):
             self.assertIn("after", effects["private_envelope"])
             self.assertIn("before", effects["locks"]["adjacent_report"])
             self.assertIn("after", effects["locks"]["adjacent_report"])
+            allocation_replay = effects["locks"]["allocation_replay"]
+            self.assertEqual(preflight["locks"]["allocation_replay"], allocation_replay["path"])
+            self.assertEqual("create-or-open-and-flock-exclusive", allocation_replay["operation"])
+            self.assertEqual(0o600, Path(str(allocation_replay["path"])).stat().st_mode & 0o777)
+            self.assertEqual({"exists": False}, allocation_replay["before"])
+            self.assertTrue(allocation_replay["after"]["exists"])
             self.assertIn("before", effects["locks"]["task_file"])
             self.assertIn("after", effects["locks"]["task_file"])
             for lock in effects["locks"]["route_evidence"]:
