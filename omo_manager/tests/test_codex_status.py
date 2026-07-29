@@ -2,7 +2,7 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from omo_manager.omo_codex_status import Args, Report, can_submit_stuck_input, current_block, current_input_text, exact_pane_id, final_assistant_output, has_compacting_indicator, has_terminal_enter_prompt_after_codex_footer, has_waiting_subagent_prompt, inspect, interrupt_waiting_subagent_if_present, last_output, report_from_lines, status, submit_stuck_input_if_present, tail, visible_error_lines
+from omo_manager.omo_codex_status import Args, Report, can_submit_stuck_input, current_block, current_input_text, exact_pane_id, final_assistant_output, has_compacting_indicator, has_resume_paused_goal_prompt, has_terminal_enter_prompt_after_codex_footer, has_waiting_subagent_prompt, inspect, interrupt_waiting_subagent_if_present, last_output, report_from_lines, status, submit_stuck_input_if_present, tail, visible_error_lines
 from omo_manager.omo_tmux_send import error_signature, exact_capacity_error
 
 
@@ -66,6 +66,136 @@ class CodexStatusTests(unittest.TestCase):
 
     def test_status_requires_codex_marker_in_last_line(self) -> None:
         self.assertEqual('not_codex', status(['shell'], current_block(['shell'])))
+
+    def test_paused_goal_resume_snapshot_is_submit_safe_stuck_input(self) -> None:
+        lines = [
+            '• The vlexp:6 delivery actually succeeded despite the stale verification error: the manager is live Codex and responded to the',
+            '  exact alert. Both workers’ blockers are real. I’m checking the named replacement-review chain and preservation coordinator so',
+            '  the blockers are not merely parked without an owner.',
+            '',
+            '⚠ Selected model is at capacity. Please try a different model.',
+            '',
+            '',
+            '› <agent_message>',
+            '  Capacity advisory: models currently capacity-limited: gpt-5.6-sol. Prioritize work using other models for now.',
+            '  </agent_message>',
+            '',
+            '',
+            '■ Conversation interrupted - tell the model what to do differently. Something went wrong? Hit `/feedback` to report the issue.',
+            '',
+            '⚠ This session was recorded with model `gpt-5.6-sol` but is resuming with `gpt-5.6-terra`. Consider switching back to `gpt-5.6-',
+            '  sol` as it may affect Codex performance.',
+            '',
+            '',
+            '  Resume paused goal?',
+            '  Goal: Complete the two open `/shagent` migration items through the staged local-only inventory, independent reviews, revers',
+            '',
+            '› 1. Resume goal   Mark it active and continue when idle',
+            '  2. Leave paused  Keep it paused; use /goal resume later',
+            '',
+            '  Press enter to confirm or esc to go back',
+        ]
+
+        report = report_from_lines(lines)
+
+        self.assertTrue(has_resume_paused_goal_prompt(lines))
+        self.assertEqual('stuck_input', report.status)
+        self.assertTrue(report.can_submit_input)
+        self.assertEqual('', report.input_blocker)
+
+    def test_paused_goal_resume_chooser_allows_modest_copy_variation(self) -> None:
+        lines = [
+            '⚠ Selected model is at capacity. Please try a different model.',
+            '⚠ This session started with model `gpt-5.6-sol` but is resuming with `gpt-5.6-terra` after 47 seconds.',
+            'Resume the paused goal?',
+            'Goal: Finish the bounded task.',
+            '1. Resume goal and continue automatically',
+            '› 2. Leave paused until /goal resume is used',
+            'Press Return to confirm or Escape to go back',
+        ]
+
+        report = report_from_lines(lines)
+
+        self.assertEqual('stuck_input', report.status)
+        self.assertFalse(report.can_submit_input)
+        self.assertEqual('resume_goal_not_selected', report.input_blocker)
+
+    def test_paused_goal_menu_in_completed_output_does_not_override_ready_state(self) -> None:
+        lines = [
+            '⚠ Selected model is at capacity. Please try a different model.',
+            '⚠ This session was recorded with model `gpt-5.6-sol` but is resuming with `gpt-5.6-terra`.',
+            'Resume paused goal?',
+            'Goal: Finish the bounded task.',
+            '› 1. Resume goal',
+            '2. Leave paused',
+            'Press enter to confirm or esc to go back',
+            '─ Worked for 1s ─',
+            '› Use /skills to list available skills',
+            '  gpt-5.6-terra',
+        ]
+
+        report = report_from_lines(lines)
+
+        self.assertFalse(has_resume_paused_goal_prompt(lines))
+        self.assertEqual('ready', report.status)
+        self.assertFalse(report.can_submit_input)
+
+    def test_incomplete_paused_goal_menu_is_not_submit_safe(self) -> None:
+        lines = [
+            '⚠ Selected model is at capacity. Please try a different model.',
+            '⚠ This session was recorded with model `gpt-5.6-sol` but is resuming with `gpt-5.6-terra`.',
+            'Resume paused goal?',
+            'Goal: Finish the bounded task.',
+            '› 1. Resume goal',
+            'Press enter to confirm or esc to go back',
+        ]
+
+        report = report_from_lines(lines)
+
+        self.assertFalse(has_resume_paused_goal_prompt(lines))
+        self.assertEqual('not_codex', report.status)
+        self.assertFalse(report.can_submit_input)
+
+    def test_paused_goal_menu_requires_capacity_resume_warning_and_goal_context(self) -> None:
+        menu = [
+            'Resume paused goal?',
+            'Goal: Finish the bounded task.',
+            '› 1. Resume goal',
+            '2. Leave paused',
+            'Press enter to confirm or esc to go back',
+        ]
+        cases = (
+            menu,
+            ['⚠ Selected model is at capacity. Please try a different model.', *menu],
+            ['⚠ This session was recorded with model `gpt-5.6-sol` but is resuming with `gpt-5.6-terra`.', *menu],
+            [
+                '⚠ Selected model is at capacity. Please try a different model.',
+                '⚠ This session was recorded with model `gpt-5.6-sol` but is resuming with `gpt-5.6-terra`.',
+                *[line for line in menu if not line.startswith('Goal:')],
+            ],
+        )
+
+        for lines in cases:
+            with self.subTest(lines=lines):
+                self.assertFalse(has_resume_paused_goal_prompt(lines))
+                self.assertFalse(report_from_lines(lines).can_submit_input)
+
+    def test_paused_goal_menu_with_conflicting_selection_is_not_submit_safe(self) -> None:
+        lines = [
+            '⚠ Selected model is at capacity. Please try a different model.',
+            '⚠ This session was recorded with model `gpt-5.6-sol` but is resuming with `gpt-5.6-terra`.',
+            'Resume paused goal?',
+            'Goal: Finish the bounded task.',
+            '› 1. Resume goal',
+            '› 2. Leave paused',
+            'Press enter to confirm or esc to go back',
+        ]
+
+        report = report_from_lines(lines)
+
+        self.assertEqual('stuck_input', report.status)
+        self.assertFalse(report.can_submit_input)
+        self.assertEqual('resume_goal_not_selected', report.input_blocker)
 
     def test_exact_file_search_overlay_is_recoverable_stuck_input(self) -> None:
         lines = [
@@ -877,6 +1007,41 @@ class CodexStatusTests(unittest.TestCase):
         with patch('omo_manager.omo_codex_status.tail', return_value=['────', 'done', '─ Worked for 1s ─', '  gpt-5.5', 'Press Enter to continue...']), patch('omo_manager.omo_codex_status.exact_pane_id', return_value='%7'), patch('omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)) as run:
             self.assertEqual('sent_enter', submit_stuck_input_if_present('cfg:1.0', report))
         run.assert_called_once_with(['tmux', 'send-keys', '-t', '%7', 'Enter'], capture_output=True, text=True, timeout=5, check=False)
+
+    def test_submit_stuck_input_if_present_confirms_selected_resume_goal(self) -> None:
+        lines = [
+            '⚠ Selected model is at capacity. Please try a different model.',
+            '⚠ This session was recorded with model `gpt-5.6-sol` but is resuming with `gpt-5.6-terra`.',
+            'Resume paused goal?',
+            'Goal: Finish the bounded task.',
+            '› 1. Resume goal   Mark it active and continue when idle',
+            '  2. Leave paused  Keep it paused; use /goal resume later',
+            'Press enter to confirm or esc to go back',
+        ]
+        report = report_from_lines(lines)
+
+        with patch('omo_manager.omo_codex_status.tail', return_value=lines), patch('omo_manager.omo_codex_status.exact_pane_id', return_value='%7'), patch('omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)) as run:
+            self.assertEqual('sent_enter', submit_stuck_input_if_present('cfg:1.0', report))
+
+        run.assert_called_once_with(['tmux', 'send-keys', '-t', '%7', 'Enter'], capture_output=True, text=True, timeout=5, check=False)
+
+    def test_submit_stuck_input_if_present_rechecks_changed_resume_selection(self) -> None:
+        resume_lines = [
+            '⚠ Selected model is at capacity. Please try a different model.',
+            '⚠ This session was recorded with model `gpt-5.6-sol` but is resuming with `gpt-5.6-terra`.',
+            'Resume paused goal?',
+            'Goal: Finish the bounded task.',
+            '› 1. Resume goal',
+            '  2. Leave paused',
+            'Press enter to confirm or esc to go back',
+        ]
+        leave_lines = [line.replace('› 1.', '  1.').replace('  2.', '› 2.') for line in resume_lines]
+        report = report_from_lines(resume_lines)
+
+        with patch('omo_manager.omo_codex_status.tail', return_value=leave_lines), patch('omo_manager.omo_codex_status.subprocess.run') as run:
+            self.assertEqual('not_safe:resume_goal_not_selected', submit_stuck_input_if_present('cfg:1.0', report))
+
+        run.assert_not_called()
 
     def test_submit_stuck_input_if_present_ignores_latest_placeholder(self) -> None:
         report = Report('stuck_input', ['› Continue task'], 'Continue task', True)

@@ -34,6 +34,12 @@ BACKGROUND_RUNNING_RE = re.compile(r"^• .*?\b(?:Waiting for background termina
 QUEUE_MESSAGE_FOOTER_RE = re.compile(r"\btab to queue message\b")
 TERMINAL_ENTER_PROMPT_RE = re.compile(r"^\s*\[?press enter(?:/return)?(?: to continue)?(?:\.\.\.)?\]?\s*$", re.IGNORECASE)
 PLAN_PROMPT_RE = re.compile(r"\bCreate a plan\?\s+shift\s+\+\s+tab\s+use Plan mode\s+esc dismiss\s*$")
+RESUME_PAUSED_GOAL_RE = re.compile(r"^\s*Resume (?:the )?paused goal\?\s*$", re.IGNORECASE)
+PAUSED_GOAL_RE = re.compile(r"^\s*Goal:\s+\S", re.IGNORECASE)
+RESUME_GOAL_CHOICE_RE = re.compile(r"^\s*(?P<selected>›\s*)?1\.\s+Resume goal\b", re.IGNORECASE)
+LEAVE_PAUSED_CHOICE_RE = re.compile(r"^\s*(?P<selected>›\s*)?2\.\s+Leave paused\b", re.IGNORECASE)
+CHOICE_CONFIRM_RE = re.compile(r"^\s*Press (?:enter|return) to confirm or esc(?:ape)? to go back\s*$", re.IGNORECASE)
+SESSION_MODEL_RESUME_RE = re.compile(r"\bThis session (?:was recorded|started) with model\b.+?\bis resuming with\b", re.IGNORECASE)
 FILE_SEARCH_NO_MATCHES_RE = re.compile(r"^\s*no matches\s*$", re.IGNORECASE)
 FILE_SEARCH_HELP_RE = re.compile(r"\benter insert\s*·\s*esc close\s*·\s*←/→ switch search modes\b")
 FILE_SEARCH_MODES_RE = re.compile(r"\[All Results\]\s+Filesystem Only\s+Plugins\s*$")
@@ -140,6 +146,45 @@ def has_terminal_enter_prompt_after_codex_footer(lines: list[str]) -> bool:
 
 def has_plan_prompt(lines: list[str]) -> bool:
     return any(PLAN_PROMPT_RE.search(line) is not None for line in lines[-10:])
+
+
+def resume_paused_goal_selection(lines: list[str]) -> str:
+    """Return the selected action for the currently visible paused-goal chooser."""
+
+    visible = [line.rstrip() for line in lines if line.strip()]
+    if not visible or CHOICE_CONFIRM_RE.fullmatch(visible[-1]) is None:
+        return ""
+    prompt_start = max(0, len(visible) - 30)
+    prompt_idx = next((idx for idx in range(len(visible) - 2, prompt_start - 1, -1) if RESUME_PAUSED_GOAL_RE.fullmatch(visible[idx]) is not None), -1)
+    if prompt_idx < 0:
+        return ""
+    capacity_idx = next((idx for idx in range(prompt_idx - 1, prompt_start - 1, -1) if SELECTED_MODEL_CAPACITY_RE.fullmatch(visible[idx]) is not None), -1)
+    if capacity_idx < 0 or SESSION_MODEL_RESUME_RE.search(" ".join(line.strip() for line in visible[capacity_idx + 1 : prompt_idx])) is None:
+        return ""
+    goal_idx = next((idx for idx in range(prompt_idx + 1, len(visible) - 1) if PAUSED_GOAL_RE.match(visible[idx]) is not None), -1)
+    if goal_idx < 0:
+        return ""
+    resume_idx = next((idx for idx in range(goal_idx + 1, len(visible) - 1) if RESUME_GOAL_CHOICE_RE.match(visible[idx]) is not None), -1)
+    if resume_idx < 0:
+        return ""
+    leave_idx = next((idx for idx in range(resume_idx + 1, len(visible) - 1) if LEAVE_PAUSED_CHOICE_RE.match(visible[idx]) is not None), -1)
+    if leave_idx < 0:
+        return ""
+    resume_match = RESUME_GOAL_CHOICE_RE.match(visible[resume_idx])
+    leave_match = LEAVE_PAUSED_CHOICE_RE.match(visible[leave_idx])
+    resume_selected = resume_match is not None and bool(resume_match.group("selected"))
+    leave_selected = leave_match is not None and bool(leave_match.group("selected"))
+    if resume_selected == leave_selected:
+        return "unknown"
+    if resume_selected:
+        return "resume"
+    if leave_selected:
+        return "leave"
+    raise AssertionError("unreachable")
+
+
+def has_resume_paused_goal_prompt(lines: list[str]) -> bool:
+    return bool(resume_paused_goal_selection(lines))
 
 
 def current_block(lines: list[str]) -> Block:
@@ -407,6 +452,8 @@ def is_stock_placeholder_input_text(input_text: str) -> bool:
 def can_submit_stuck_input(lines: list[str]) -> bool:
     if has_file_search_overlay(lines):
         return True
+    if resume_paused_goal_selection(lines) == "resume":
+        return True
     if has_terminal_enter_prompt_after_codex_footer(lines):
         return True
     if has_plan_prompt(lines):
@@ -421,6 +468,8 @@ def can_submit_stuck_input(lines: list[str]) -> bool:
 def stuck_input_blocker(lines: list[str], input_text: str) -> str:
     if has_file_search_overlay(lines):
         return ""
+    if has_resume_paused_goal_prompt(lines):
+        return "resume_goal_not_selected"
     if has_terminal_enter_prompt_after_codex_footer(lines):
         return ""
     if has_plan_prompt(lines):
@@ -500,6 +549,8 @@ def status(lines: list[str], block: Block, *, detect_waiting_subagent: bool = Fa
     if not lines:
         return "not_codex"
     if has_file_search_overlay(lines):
+        return "stuck_input"
+    if has_resume_paused_goal_prompt(lines):
         return "stuck_input"
     if detect_waiting_subagent and has_waiting_subagent_prompt(lines):
         return "waiting_subagent"
