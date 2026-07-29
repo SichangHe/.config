@@ -702,8 +702,10 @@ def launched_frontmatter_text(existing: str, args: Args, tmux_target: str) -> st
         values["runat"] = tmux_target
         values["tool"] = effective_tool(args)
         if args.manager_target:
-    is_long_running = is_manager or (metadata is not None and (metadata.status == "long_running" or metadata.resume_status == "long_running"))
             values["managerat"] = args.manager_target
+    is_long_running = is_manager or (
+        metadata is not None and (metadata.status == "long_running" or metadata.resume_status == "long_running")
+    )
         if args.is_manager:
             values["is_manager"] = True
         if generated or external:

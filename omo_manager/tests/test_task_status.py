@@ -289,9 +289,11 @@ class TaskStatusTests(unittest.TestCase):
         self.assertIn("status: long_running\nblocked_on: persistent contact\nrunat:", updated)
         self.assertIn("body\n", updated)
 
-    def test_long_running_requires_blocked_on(self) -> None:
-        with self.assertRaisesRegex(TaskFrontmatterError, "required"):
-            update_frontmatter_status(task_frontmatter() + "body\n", "long_running", "")
+    def test_long_running_allows_missing_blocked_on(self) -> None:
+        updated = update_frontmatter_status(task_frontmatter() + "body\n", "long_running", "")
+
+        self.assertIn("status: long_running\nrunat:", updated)
+        self.assertNotIn("blocked_on:", updated)
 
     def test_v2_dependency_blocked_long_running_preserves_resume_reason(self) -> None:
         updated = update_frontmatter_status(v2_task(), "long_running", "persistent contact")

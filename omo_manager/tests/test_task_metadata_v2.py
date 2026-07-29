@@ -71,7 +71,7 @@ pending_task_items:
 
 
 class TaskMetadataV2Tests(unittest.TestCase):
-    def test_long_running_requires_and_accepts_blocked_on(self) -> None:
+    def test_long_running_optionally_accepts_persistent_blocked_on(self) -> None:
         text = v2_task().replace("status: blocked\nresume_status: running", "status: long_running").replace(
             f"  - kind: pending_items\n    item_ids: [{ITEM_ID}]\n", ""
         ).replace("  - kind: human\n    reason: waiting for approval", "  - kind: persistent\n    reason: waiting for approval")
@@ -82,8 +82,10 @@ class TaskMetadataV2Tests(unittest.TestCase):
         assert metadata is not None
         self.assertEqual("long_running", metadata.status)
         self.assertIn("waiting for approval", metadata.blocked_on)
-        with self.assertRaisesRegex(TaskFrontmatterError, "blocked_on"):
-            parse_task_metadata(text.replace("blocked_on:\n  - kind: persistent\n    reason: waiting for approval\n", ""))
+        without_blocker = parse_task_metadata(text.replace("blocked_on:\n  - kind: persistent\n    reason: waiting for approval\n", ""))
+        self.assertIsNotNone(without_blocker)
+        assert without_blocker is not None
+        self.assertEqual("", without_blocker.blocked_on)
 
     def test_dual_reader_preserves_v1_scalar_item(self) -> None:
         metadata = parse_task_metadata(v1_task())

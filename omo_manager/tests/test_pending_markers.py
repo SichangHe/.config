@@ -5802,7 +5802,7 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertIn("11 open pending items", reminders["wl:4"])
             self.assertNotIn("large 0", reminders["wl:4"])
 
-    def test_long_running_agent_keeps_pending_item_reminders(self) -> None:
+    def test_long_running_agent_without_blocked_on_keeps_pending_item_reminders(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -5861,6 +5861,50 @@ class PendingMarkerTests(unittest.TestCase):
                 task_frontmatter(status="long_running", runat="wl:4", managerat="wl:1", pending_items=("continue review",)),
                 encoding="utf-8",
             )
+    def test_blockerless_long_running_status_update_delivers_pending_reminder(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+        from omo_manager.omo_task_status import update_frontmatter_status
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "TODO.md").write_text("current:\ncontact.md wl:4\n", encoding="utf-8")
+            (root / "contact.md").write_text(
+                update_frontmatter_status(
+                    task_frontmatter(runat="wl:4", managerat="wl:1", pending_items=("continue review",)),
+                    "long_running",
+                    "",
+                    root,
+                ),
+                encoding="utf-8",
+            )
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1")
+
+            with patch.object(watcher, "inspect_codex", return_value=MagicMock(status="ready")), patch.object(
+                watcher, "try_send_delivery_text", return_value=watcher.DeliveryResult(watcher.ASYNC_DELIVERY_STARTED)
+            ) as push:
+                self.assertTrue(watcher.push_agent_pending_item_reminders(args, {}, 1000.0))
+
+            self.assertEqual("wl:4", push.call_args.args[2])
+
+    def test_long_running_agent_with_blocked_on_suppresses_pending_item_reminders(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "TODO.md").write_text("current:\ncontact.md wl:4\n", encoding="utf-8")
+            (root / "contact.md").write_text(
+                task_frontmatter(
+                    status="long_running",
+                    blocked_on="persistent contact",
+                    runat="wl:4",
+                    managerat="wl:1",
+                    pending_items=("wait for next review",),
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual({}, watcher.agent_pending_item_reminder_texts(root))
+
             args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1")
             with patch.object(watcher, "inspect_codex", return_value=MagicMock(status="running")), patch.object(
                 watcher, "try_send_delivery_text", return_value=watcher.DeliveryResult(0)
@@ -6153,7 +6197,7 @@ class PendingMarkerTests(unittest.TestCase):
             _ = status_script.write_text(
                 "#!/usr/bin/env python3\n"
                 "print('agent-problems: malformed_task=1')\n"
-                "print(\"malformed_task: task=vl_broken.md evidence=strict metadata error: `blocked_on` is required when `status` is `long_running`; repair task frontmatter before relying on lifecycle status owner_target=vl:15\")\n"
+                "print(\"malformed_task: task=vl_broken.md evidence=strict metadata error: `blocked_on` is required when `status` is `blocked`; repair task frontmatter before relying on lifecycle status owner_target=vl:15\")\n"
                 "raise SystemExit(3)\n",
                 encoding="utf-8",
             )
@@ -6175,7 +6219,7 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual("wl:1", calls[0][calls[0].index("--manager-target") + 1])
             text = calls[0][1]
             self.assertIn("1 active tasks have malformed metadata; repair their task frontmatter before relying on lifecycle status:", text)
-            self.assertIn("vl_broken.md <metadata_error>strict metadata error: `blocked_on` is required when `status` is `long_running`; repair task frontmatter before relying on lifecycle status</metadata_error>", text)
+            self.assertIn("vl_broken.md <metadata_error>strict metadata error: `blocked_on` is required when `status` is `blocked`; repair task frontmatter before relying on lifecycle status</metadata_error>", text)
             self.assertNotIn("owner_target", text)
             self.assertNotIn("not codex", text)
 
