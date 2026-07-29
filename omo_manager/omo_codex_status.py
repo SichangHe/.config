@@ -18,6 +18,7 @@ CODEX_RE = re.compile(r"  gpt-")
 CODEX_FOOTER_RE = re.compile(r"^  gpt-")
 ERROR_RE = re.compile(r"\b(failed|panic|traceback|exception)\b|\berror\b(?!\s*=\s*\d)", re.IGNORECASE)
 SELECTED_MODEL_CAPACITY_RE = re.compile(r"^\s*(?:⚠\ufe0f?\s*)?Selected model is at capacity\. Please try a different model\.\s*$")
+UNRELATED_FATAL_LINE_RE = re.compile(r"^\s*(?:(?:[A-Za-z][\w-]*\s+)?failed\b|error\b|exception\b|fatal\b|panic\b|traceback\b)", re.I)
 WAKE_EXECUTION_BUDGET_REFUSAL_RE = re.compile(
     r"^\s*(?:•\s*)?I (?:can(?:not|[’']t)|am unable to) safely (?:complete|handle|execute) (?:(?:another|the|this|a) )?wake prompt (?:in|within) the remaining execution (?:budget|time)(?: available)?[.!]?\s*$",
     re.IGNORECASE,
@@ -309,9 +310,67 @@ def has_selected_model_capacity_warning(lines: list[str]) -> bool:
     return any(SELECTED_MODEL_CAPACITY_RE.search(line) is not None for line in latest_output_before_input(lines))
 
 
+def ignorable_codex_apps_transport_lines(lines: list[str]) -> set[int]:
+    """Return complete wrapped `codex_apps` no-account warning lines."""
+
+    ignored: set[int] = set()
+    start_index: int | None = None
+    for index, line in enumerate(lines):
+        compact_line = re.sub(r"\s+", "", line).replace("\ufe0f", "").casefold()
+        if compact_line.startswith("⚠mcpclientfor"):
+            start_index = index
+            continue
+        if start_index is None:
+            continue
+        warning_lines = lines[start_index : index + 1]
+        warning = "\n".join(warning_lines)
+        compact_warning = re.sub(r"\s+", "", warning).replace("\ufe0f", "").casefold()
+        if not compact_warning.endswith("⚠mcpstartupincomplete(failed:codex_apps)"):
+            continue
+        statuses = re.findall(r"http(\d{3})", compact_warning)
+        inner_lines = warning_lines[1:-1]
+        has_unrelated_marked_line = any(
+            VISIBLE_ERROR_MARKER_RE.search(inner) is not None and "mcp startup incomplete" not in inner.casefold()
+            for inner in inner_lines
+        )
+        has_unrelated_fatal_line = any(UNRELATED_FATAL_LINE_RE.search(inner) is not None for inner in inner_lines)
+        residual = compact_warning
+        for expected in (
+            "`codex_apps`failedtostart",
+            "mcpstartupfailed",
+            "mcpserverfailed",
+            "sendmessageerrortransport",
+            "]error:unexpected",
+            '{"error":',
+            '"type":"proxy_error"',
+            "(failed:codex_apps)",
+        ):
+            residual = residual.replace(expected, "", 1)
+        has_unrelated_fatal_text = re.search(r"(?:error|failed|exception|fatal|panic|traceback)", residual) is not None
+        if (
+            compact_warning.startswith("⚠mcpclientfor`codex_apps`failedtostart:")
+            and "sendmessageerrortransport[rmcp::transport::worker::workertransport" in compact_warning
+            and "noavailableaccounts" in compact_warning
+            and statuses
+            and set(statuses) == {"401"}
+            and compact_warning.count("mcpclientfor") == 1
+            and compact_warning.count("⚠") == 2
+            and not has_unrelated_marked_line
+            and not has_unrelated_fatal_line
+            and not has_unrelated_fatal_text
+        ):
+            ignored.update(range(start_index, index + 1))
+        start_index = None
+    return ignored
+
+
 def visible_error_lines(lines: list[str], include_unmarked: bool = True) -> list[str]:
     found: list[str] = []
-    for line in latest_output_before_input(lines):
+    output = latest_output_before_input(lines)
+    ignorable_transport = ignorable_codex_apps_transport_lines(output)
+    for index, line in enumerate(output):
+        if index in ignorable_transport:
+            continue
         marked = VISIBLE_ERROR_MARKER_RE.search(line) is not None
         if SELECTED_MODEL_CAPACITY_RE.search(line) is not None or WAKE_EXECUTION_BUDGET_REFUSAL_RE.search(line) is not None or (ERROR_RE.search(line) is not None and (include_unmarked or marked)):
             found.append(line.strip())

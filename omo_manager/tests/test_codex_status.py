@@ -593,6 +593,69 @@ class CodexStatusTests(unittest.TestCase):
         warning = ['────', '⚠ Selected model is at capacity. Please try a different model.', '› Explain this codebase', '  gpt-5.5']
         self.assertEqual(['⚠ Selected model is at capacity. Please try a different model.'], visible_error_lines(current_block(warning).lines))
 
+    def test_status_keeps_abbreviated_codex_apps_failures_visible(self) -> None:
+        for error in (
+            '■ codex_apps startup failed: HTTP 401; no available accounts',
+            '■ codex_apps startup failed: 401; no available accounts',
+            '■ codex_apps startup failed: HTTP 401',
+            '■ codex_apps startup failed: HTTP 500; no available accounts',
+            '■ another_connector startup failed: HTTP 401; no available accounts',
+            '■ codex_apps startup failed: no available accounts; HTTP 401; slack startup failed HTTP 500',
+            '■ codex_apps startup failed: HTTP 401; no available accounts; slack startup failed HTTP 401',
+            '■ codex_apps request failed: HTTP 401; no available accounts',
+            '■ codex_apps startup failed: HTTP 401; no available accounts; error: cache corrupt',
+            '■ codex_apps startup failed: HTTP 401; no available accounts; slack failed',
+        ):
+            with self.subTest(error=error):
+                lines = ['────', error, '› Use /skills to list available skills', '  gpt-5.5']
+                self.assertEqual('error', report_from_lines(lines).status)
+                self.assertEqual([error], visible_error_lines(current_block(lines).lines))
+
+    def test_status_ignores_only_complete_codex_apps_transport_startup_warning(self) -> None:
+        failure = '⚠ MCP client for `codex_apps` failed to start: MCP startup failed: handshaking with MCP server failed: Send message error Transport'
+        unexpected = '  [rmcp::transport::worker::WorkerTransport<rmcp::transport::streamable_http_client::StreamableHttpClientWorker'
+        unexpected_continued = '  <codex_rmcp_client::http_client_adapter::StreamableHttpClientAdapter>>] error: unexpected'
+        response = '  server response: HTTP 401: {"error":{"message":"No available accounts","type":"proxy_error","code":401}}, when send initialize request'
+        incomplete = '⚠ MCP startup incomplete (failed: codex_apps)'
+        harmless = ['────', failure, unexpected, unexpected_continued, response, '', incomplete, '› Use /skills to list available skills', '  gpt-5.6-terra']
+        self.assertEqual('ready', report_from_lines(harmless).status)
+        self.assertEqual([], visible_error_lines(current_block(harmless).lines))
+
+        for lines in (
+            ['────', failure, '› Use /skills to list available skills', '  gpt-5.6-terra'],
+            ['────', incomplete, '› Use /skills to list available skills', '  gpt-5.6-terra'],
+            ['────', failure, unexpected, unexpected_continued, response.replace('HTTP 401', 'HTTP 500'), incomplete, '› Use /skills to list available skills', '  gpt-5.6-terra'],
+            ['────', failure, unexpected, unexpected_continued, response, '■ Error: cache corrupt', incomplete, '› Use /skills to list available skills', '  gpt-5.6-terra'],
+            ['────', failure, unexpected, unexpected_continued, response, 'error: cache corrupt', incomplete, '› Use /skills to list available skills', '  gpt-5.6-terra'],
+            ['────', failure, unexpected, unexpected_continued, response, 'database error: cache corrupt', incomplete, '› Use /skills to list available skills', '  gpt-5.6-terra'],
+            ['────', failure, unexpected, unexpected_continued, 'slack failed', response, '', incomplete, '› Use /skills to list available skills', '  gpt-5.6-terra'],
+            ['────', f'{failure}; slack failed', unexpected, unexpected_continued, response, '', incomplete, '› Use /skills to list available skills', '  gpt-5.6-terra'],
+            ['────', failure, '⚠ MCP client for `slack` failed to start: HTTP 401', response, incomplete, '› Use /skills to list available skills', '  gpt-5.6-terra'],
+        ):
+            with self.subTest(lines=lines):
+                self.assertEqual('error', report_from_lines(lines).status)
+                self.assertNotEqual([], visible_error_lines(current_block(lines).lines))
+
+        wrapped_boundaries = [
+            '────',
+            '⚠ MCP client for `codex_apps` failed to',
+            '  start: MCP startup failed: handshaking with MCP server failed: Send message error Transport',
+            unexpected,
+            unexpected_continued,
+            response,
+            '⚠ MCP startup incomplete (failed:',
+            '  codex_apps)',
+            '› Use /skills to list available skills',
+            '  gpt-5.6-terra',
+        ]
+        self.assertEqual('ready', report_from_lines(wrapped_boundaries).status)
+        self.assertEqual([], visible_error_lines(current_block(wrapped_boundaries).lines))
+
+        token_wrapped = [line.replace('HTTP 401', 'HTT\nP 401').replace('⚠ ', '⚠️ ') for line in harmless]
+        token_wrapped = [part for line in token_wrapped for part in line.splitlines()]
+        self.assertEqual('ready', report_from_lines(token_wrapped).status)
+        self.assertEqual([], visible_error_lines(current_block(token_wrapped).lines))
+
     def test_ready_input_stays_ready_after_benign_error_text(self) -> None:
         lines = ['────', 'No error found', '› Use /skills to list available skills', '  gpt-5.5']
         self.assertEqual('ready', report_from_lines(lines).status)

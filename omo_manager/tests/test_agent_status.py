@@ -634,6 +634,30 @@ resolved_task_items: []
             self.assertIn("error: task=active.md", text)
             self.assertNotIn("ready: task=active.md", text)
 
+    def test_problems_only_treats_codex_apps_no_account_warning_as_ready(self) -> None:
+        pane = [
+            '────',
+            '⚠ MCP client for `codex_apps` failed to start: MCP startup failed: handshaking with MCP server failed: Send message error Transport',
+            '  [rmcp::transport::worker::WorkerTransport<rmcp::transport::streamable_http_client::StreamableHttpClientWorker',
+            '  <codex_rmcp_client::http_client_adapter::StreamableHttpClientAdapter>>] error: unexpected',
+            '  server response: HTTP 401: {"error":{"message":"No available accounts","type":"proxy_error","code":401}}, when send initialize request',
+            '',
+            '⚠ MCP startup incomplete (failed: codex_apps)',
+            '› Use /skills to list available skills',
+            '  gpt-5.5',
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[{"task_file":"active.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
+            _ = (root / "active.md").write_text(task_frontmatter("running", runat="cfg:1"), encoding="utf-8")
+            out = StringIO()
+            with patch("omo_manager.omo_codex_status.tail", return_value=pane), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertIn("ready: task=active.md", out.getvalue())
+            self.assertNotIn("error: task=active.md", out.getvalue())
+
     def test_problems_only_recovers_capacity_error_before_trailing_goal_footer(self) -> None:
         pane = [
             '• Context compacted',
