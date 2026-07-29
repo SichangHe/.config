@@ -371,9 +371,9 @@ class OmoTaskTests(unittest.TestCase):
             self.assertIsNotNone(metadata)
             assert metadata is not None
             self.assertEqual("long_running", metadata.status)
-            self.assertEqual("persistent manager role", metadata.blocked_on)
+            self.assertEqual("", metadata.blocked_on)
 
-    def test_manager_relaunch_repairs_legacy_long_running_without_blocked_on(self) -> None:
+    def test_manager_relaunch_preserves_long_running_without_blocked_on(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             existing = (
@@ -395,9 +395,9 @@ class OmoTaskTests(unittest.TestCase):
             self.assertIsNotNone(metadata)
             assert metadata is not None
             self.assertEqual("long_running", metadata.status)
-            self.assertEqual("persistent manager role", metadata.blocked_on)
+            self.assertEqual("", metadata.blocked_on)
 
-    def test_manager_relaunch_repairs_frontmatter_when_body_mentions_blocked_on(self) -> None:
+    def test_manager_relaunch_preserves_missing_frontmatter_blocked_on_when_body_mentions_it(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             existing = (
@@ -411,7 +411,7 @@ class OmoTaskTests(unittest.TestCase):
 
             self.assertIsNotNone(metadata)
             assert metadata is not None
-            self.assertEqual("persistent manager role", metadata.blocked_on)
+            self.assertEqual("", metadata.blocked_on)
             self.assertEqual(("[ ] review migration",), metadata.pending_task_items)
 
     def test_manager_relaunch_preserves_custom_persistent_reason(self) -> None:
@@ -429,7 +429,23 @@ class OmoTaskTests(unittest.TestCase):
             assert metadata is not None
             self.assertEqual("persistent human-facing audit contact", metadata.blocked_on)
 
-    def test_manager_relaunch_validation_and_write_repair_legacy_long_running(self) -> None:
+    def test_worker_relaunch_preserves_long_running_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            existing = (
+                "---\nversion: v1.0.0\nstatus: long_running\nblocked_on: persistent human-facing audit contact\n"
+                "runat: cfg:2\ntool: codex\nmanagerat: wl:1\nis_manager: false\npending_task_items: []\n---\nbody\n"
+            )
+            args = Args(root, "worker.md", "cfg", "2", "codex", root, "", None, False, False, "", "medium", (), manager_target="wl:1", model="gpt-5.6-terra")
+
+            metadata = parse_task_metadata(launched_frontmatter_text(existing, args, "cfg:2"))
+
+            self.assertIsNotNone(metadata)
+            assert metadata is not None
+            self.assertEqual("long_running", metadata.status)
+            self.assertEqual("persistent human-facing audit contact", metadata.blocked_on)
+
+    def test_manager_relaunch_validation_and_write_preserves_blockerless_long_running(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             task = root / "manager.md"
@@ -446,9 +462,9 @@ class OmoTaskTests(unittest.TestCase):
             self.assertIsNotNone(metadata)
             assert metadata is not None
             self.assertEqual("long_running", metadata.status)
-            self.assertEqual("persistent manager role", metadata.blocked_on)
+            self.assertEqual("", metadata.blocked_on)
 
-    def test_v2_manager_relaunch_repairs_legacy_long_running_without_blocked_on(self) -> None:
+    def test_v2_manager_relaunch_preserves_long_running_without_blocked_on(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             existing = (
@@ -472,7 +488,7 @@ class OmoTaskTests(unittest.TestCase):
             self.assertIsNotNone(metadata)
             assert metadata is not None
             self.assertEqual("long_running", metadata.status)
-            self.assertEqual("persistent manager role", metadata.blocked_on)
+            self.assertEqual("", metadata.blocked_on)
 
     def test_v2_manager_relaunch_preserves_persistent_reason_with_generated_blocker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -488,6 +504,22 @@ class OmoTaskTests(unittest.TestCase):
             self.assertIn("reason: persistent specialized manager role", updated)
             self.assertNotIn("reason: persistent manager role", updated)
 
+    def test_v2_worker_relaunch_preserves_long_running_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            existing = v2_task().replace("status: blocked\nresume_status: running", "status: long_running").replace(
+                "  - kind: pending_items\n    item_ids: [pi_019f0000-0000-7000-8000-000000000003]\n  - kind: human\n    reason: waiting for approval\n",
+                "  - kind: persistent\n    reason: persistent human-facing audit contact\n",
+            )
+            args = Args(root, "worker.md", "cfg", "2", "codex", root, "", None, False, False, "", "medium", (), manager_target="wl:1", model="gpt-5.6-terra")
+
+            metadata = parse_task_metadata(launched_frontmatter_text(existing, args, "cfg:2"), root)
+
+            self.assertIsNotNone(metadata)
+            assert metadata is not None
+            self.assertEqual("long_running", metadata.status)
+            self.assertEqual("persistent human-facing audit contact", metadata.blocked_on)
+
     def test_v2_manager_relaunch_preserves_external_blocker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -502,7 +534,7 @@ class OmoTaskTests(unittest.TestCase):
             self.assertEqual("blocked", metadata.status)
             self.assertEqual("long_running", metadata.resume_status)
             self.assertIn("waiting for approval", metadata.blocked_on)
-            self.assertIn("persistent manager role", metadata.blocked_on)
+            self.assertNotIn("persistent manager role", metadata.blocked_on)
 
     def test_vl_worker_launch_requires_manager_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

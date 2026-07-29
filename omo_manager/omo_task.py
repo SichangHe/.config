@@ -688,51 +688,21 @@ def replace_frontmatter_fields(text: str, updates: dict[str, str], remove: set[s
     return text
 
 
-def repair_legacy_long_running_manager(text: str, root: Path) -> str:
-    """Add the required persistent reason during an explicit manager relaunch."""
-
-    source = frontmatter_text(text)
-    if source is None:
-        return text
-    version = first_version(source)
-    if version == V2_VERSION:
-        values = load_yaml_mapping(source)
-        if values.get("status") != "long_running" or values.get("is_manager") is not True or values.get("blocked_on"):
-            return text
-        frontmatter, body = split_task_text(text)
-        values = load_yaml_mapping(frontmatter)
-        values["blocked_on"] = [{"kind": "persistent", "reason": DEFAULT_LONG_RUNNING_BLOCKED_ON}]
-        return render_task(values, body, root)
-    fields: dict[str, str] = {}
-    for line in source.splitlines():
-        if not line or line[0].isspace() or line.startswith("-"):
-            continue
-        key, separator, value = line.partition(":")
-        if separator:
-            fields[key] = value.strip()
-    if fields.get("status") != "long_running" or fields.get("is_manager") != "true" or fields.get("blocked_on"):
-        return text
-    return replace_frontmatter_fields(text, {"blocked_on": DEFAULT_LONG_RUNNING_BLOCKED_ON})
-
-
 def launched_frontmatter_text(existing: str, args: Args, tmux_target: str) -> str:
-    if args.is_manager:
-        existing = repair_legacy_long_running_manager(existing, args.root)
     metadata = parse_task_metadata(existing, args.root)
     is_manager = args.is_manager or (metadata is not None and metadata.is_manager)
     if metadata is not None and metadata.version == V2_VERSION:
         frontmatter, body = split_task_text(existing)
         values = load_yaml_mapping(frontmatter)
-        desired_status = "long_running" if is_manager else "running"
+        desired_status = "long_running" if is_long_running else "running"
         blockers = values.get("blocked_on", [])
         generated = [blocker for blocker in blockers if blocker.get("kind") == "pending_items"]
         persistent = [blocker for blocker in blockers if blocker.get("kind") == "persistent"]
         external = [blocker for blocker in blockers if blocker.get("kind") not in {"pending_items", "persistent"}]
-        if is_manager and not persistent:
-            persistent = [{"kind": "persistent", "reason": DEFAULT_LONG_RUNNING_BLOCKED_ON}]
         values["runat"] = tmux_target
         values["tool"] = effective_tool(args)
         if args.manager_target:
+    is_long_running = is_manager or (metadata is not None and (metadata.status == "long_running" or metadata.resume_status == "long_running"))
             values["managerat"] = args.manager_target
         if args.is_manager:
             values["is_manager"] = True
@@ -743,13 +713,13 @@ def launched_frontmatter_text(existing: str, args: Args, tmux_target: str) -> st
         else:
             values["status"] = desired_status
             values.pop("resume_status", None)
-            if is_manager:
+            if is_long_running and persistent:
                 values["blocked_on"] = persistent
             else:
                 values.pop("blocked_on", None)
         return render_task(values, body, args.root)
     updates = {
-        "status": "long_running" if is_manager else "running",
+        "status": "long_running" if is_long_running else "running",
         "runat": tmux_target,
         "tool": effective_tool(args),
     }
@@ -757,9 +727,9 @@ def launched_frontmatter_text(existing: str, args: Args, tmux_target: str) -> st
         updates["managerat"] = args.manager_target
     if args.is_manager:
         updates["is_manager"] = "true"
-    if is_manager:
-        updates["blocked_on"] = metadata.blocked_on if metadata is not None and metadata.status == "long_running" and metadata.blocked_on else DEFAULT_LONG_RUNNING_BLOCKED_ON
-    return replace_frontmatter_fields(existing, updates, set() if is_manager else {"blocked_on"})
+    if is_long_running and metadata is not None and metadata.status == "long_running" and metadata.blocked_on:
+        updates["blocked_on"] = metadata.blocked_on
+    return replace_frontmatter_fields(existing, updates, set() if "blocked_on" in updates else {"blocked_on"})
 
 
 def new_task_text(args: Args, tmux_target: str, validate_target: bool = True) -> str:
@@ -1162,8 +1132,6 @@ def ensure_task_file(args: Args, tmux_target: str) -> Path:
     before = path.stat() if existed else None
     stored_existing = path.read_text(encoding="utf-8") if existed else ""
     existing = stored_existing
-    if existed and args.is_manager:
-        existing = repair_legacy_long_running_manager(existing, args.root)
     metadata = parse_task_metadata(existing, args.root) if existed else None
     if metadata is not None and metadata.version != TASK_FRONTMATTER_V2 and v2_enabled(args.root):
         raise ValueError("v1 task writes are disabled after v2 enablement.")
@@ -1364,8 +1332,6 @@ def validate_inputs(args: Args) -> str:
     path = task_path(args.root, args.task_file)
     if path.exists() and args.manager_target:
         existing_text = path.read_text(encoding="utf-8")
-        if args.is_manager:
-            existing_text = repair_legacy_long_running_manager(existing_text, args.root)
         metadata = parse_task_metadata(existing_text, args.root)
         if metadata is not None:
             existing_manager_target = metadata.managerat
@@ -1377,8 +1343,6 @@ def validate_inputs(args: Args) -> str:
             raise ValueError(f"existing managerat {existing_manager_target} does not match --manager-target {args.manager_target}.")
     elif path.exists():
         existing_text = path.read_text(encoding="utf-8")
-        if args.is_manager:
-            existing_text = repair_legacy_long_running_manager(existing_text, args.root)
         if parse_task_metadata(existing_text, args.root) is None:
             validate_runat_header(existing_text)
             validate_managerat_metadata(existing_text)
