@@ -2112,7 +2112,7 @@ class PendingMarkerTests(unittest.TestCase):
 
         with patch.object(subject, "configured_agent_mail", return_value=Settings()), patch.object(subject.imaplib, "IMAP4_SSL", FakeClient):
             self.assertIsNone(subject.find_recent_thread("topic"))
-        self.assertIn(("connect", "imap.gmail.com", 10.0), calls)
+        self.assertIn(("connect", "imap.gmail.com", subject.DEFAULT_THREAD_LOOKUP_OPERATION_TIMEOUT_S), calls)
         self.assertIn(("login", "agent@example.test", "secret"), calls)
         self.assertIn(("select", '"[Gmail]/Sent Mail"', True), calls)
         self.assertIn(("select", '"INBOX"', True), calls)

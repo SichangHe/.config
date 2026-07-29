@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from io import StringIO
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 MODULE_PATH = Path(__file__).with_name("email_me.py")
 SPEC = importlib.util.spec_from_file_location("email_me", MODULE_PATH)
@@ -548,8 +548,9 @@ class EmailMeTests(unittest.TestCase):
         matching = omo_email_subject.RecentHeader("human@example.test", "Re: [hcfg:1.0] Topic", None)
         sibling = omo_email_subject.RecentHeader("human@example.test", "Re: [hcfg:1.1] Topic", None)
 
-        def select(predicate: object) -> object:
+        def select(predicate: object, subject_query: str) -> object:
             self.assertTrue(callable(predicate))
+            self.assertEqual("hcfg:1", subject_query)
             self.assertTrue(predicate(matching))
             self.assertFalse(predicate(sibling))
             return matching
@@ -562,8 +563,9 @@ class EmailMeTests(unittest.TestCase):
         competing = omo_email_subject.RecentHeader("human@example.test", "Re: [hcfg:1] [wl:2] Topic", None)
         missing_separator = omo_email_subject.RecentHeader("human@example.test", "Re: [hcfg:1]Topic", None)
 
-        def select(predicate: object) -> None:
+        def select(predicate: object, subject_query: str) -> None:
             self.assertTrue(callable(predicate))
+            self.assertEqual("hcfg:1", subject_query)
             self.assertFalse(predicate(nonleading))
             self.assertFalse(predicate(competing))
             self.assertFalse(predicate(missing_separator))
@@ -575,13 +577,34 @@ class EmailMeTests(unittest.TestCase):
     def test_target_thread_lookup_accepts_alternating_legacy_reply_prefixes(self) -> None:
         matching = omo_email_subject.RecentHeader("human@example.test", "Re: [a] Re: [hcfg:1] Topic", None)
 
-        def select(predicate: object) -> object:
+        def select(predicate: object, subject_query: str) -> object:
             self.assertTrue(callable(predicate))
+            self.assertEqual("hcfg:1", subject_query)
             self.assertTrue(predicate(matching))
             return matching
 
         with patch.object(omo_email_subject, "find_recent_thread_matching", side_effect=select):
             self.assertEqual(matching, omo_email_subject.find_recent_thread_for_tmux_target("hcfg:1"))
+
+    def test_thread_lookup_deadline_covers_both_mailboxes(self) -> None:
+        self.assertGreaterEqual(
+            omo_email_subject.DEFAULT_THREAD_LOOKUP_DEADLINE_S,
+            9 * omo_email_subject.DEFAULT_THREAD_LOOKUP_OPERATION_TIMEOUT_S,
+        )
+
+    def test_recent_headers_are_fetched_in_one_batch(self) -> None:
+        client = Mock()
+        client.uid.return_value = (
+            "OK",
+            [
+                (b"1", b"From: human@example.test\nSubject: [wl:1] First\n\n"),
+                b")",
+                (b"2", b"From: agent@example.test\nSubject: [wl:1] Second\n\n"),
+            ],
+        )
+        headers = omo_email_subject.fetch_recent_headers(client, ["1", "2"])
+        self.assertEqual(["[wl:1] First", "[wl:1] Second"], [header.subject for header in headers])
+        client.uid.assert_called_once_with("fetch", "1,2", "(BODY.PEEK[HEADER.FIELDS (DATE FROM SUBJECT MESSAGE-ID REFERENCES)])")
 
     def test_dry_run_can_omit_pwd_footer(self) -> None:
         with patch.object(sys, "stdin", StringIO("body\n")), patch("sys.stdout", new_callable=StringIO) as stdout:

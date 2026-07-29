@@ -34,7 +34,8 @@ BRACKETED_TMUX_TAG_RE = re.compile(r"\[([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\]"
 BRACKETED_TMUX_PREFIX_RE = re.compile(r"^\[([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\](?:\s+|$)")
 PLACEHOLDER_RE = re.compile(r"subject\W*", re.IGNORECASE)
 DEFAULT_THREAD_LOOKUP_WINDOW_S = 3 * 24 * 60 * 60
-DEFAULT_THREAD_LOOKUP_DEADLINE_S = 5.0
+DEFAULT_THREAD_LOOKUP_DEADLINE_S = 30.0
+DEFAULT_THREAD_LOOKUP_OPERATION_TIMEOUT_S = 3.0
 
 
 class SubjectInputError(ValueError):
@@ -189,7 +190,7 @@ def parsed_header_date(raw_date: str) -> datetime | None:
     return parsed.astimezone()
 
 
-def find_recent_thread_matching(matches: Callable[[RecentHeader], bool]) -> RecentHeader | None:
+def find_recent_thread_matching(matches: Callable[[RecentHeader], bool], subject_query: str = "") -> RecentHeader | None:
     lookup_s = int(os.environ.get("OMO_MANAGER_EMAIL_THREAD_LOOKUP_S", str(DEFAULT_THREAD_LOOKUP_WINDOW_S)))
     if lookup_s <= 0:
         return None
@@ -202,7 +203,7 @@ def find_recent_thread_matching(matches: Callable[[RecentHeader], bool]) -> Rece
     if not {"host", "user", "password"} <= set(config):
         return None
     cutoff = datetime.now().astimezone() - timedelta(seconds=lookup_s)
-    timeout_s = float(os.environ.get("OMO_MANAGER_EMAIL_THREAD_LOOKUP_TIMEOUT_S", "10"))
+    timeout_s = float(os.environ.get("OMO_MANAGER_EMAIL_THREAD_LOOKUP_TIMEOUT_S", str(DEFAULT_THREAD_LOOKUP_OPERATION_TIMEOUT_S)))
     client = imaplib.IMAP4_SSL(config["host"], timeout=timeout_s)
     timed_out = False
     try:
@@ -224,12 +225,13 @@ def find_recent_thread_matching(matches: Callable[[RecentHeader], bool]) -> Rece
             criteria = ["SINCE", cutoff.strftime("%d-%b-%Y"), "FROM", f'"{sender}"']
             if recipient:
                 criteria.extend(["TO", f'"{recipient}"'])
+            if subject_query:
+                criteria.extend(["SUBJECT", f'"{subject_query}"'])
             typ, data = client.uid("search", None, *criteria)
             if typ != "OK" or not data or not data[0]:
                 continue
-            for raw_uid in data[0].split():
-                uid = raw_uid.decode() if isinstance(raw_uid, bytes) else str(raw_uid)
-                header = fetch_recent_header(client, uid)
+            uids = [raw_uid.decode() if isinstance(raw_uid, bytes) else str(raw_uid) for raw_uid in data[0].split()]
+            for header in fetch_recent_headers(client, uids):
                 if header is None or header.date is None or header.date < cutoff:
                     continue
                 if parseaddr(header.sender)[1].casefold() != sender.casefold() or not matches(header):
@@ -269,17 +271,27 @@ def find_recent_thread_for_tmux_target(tmux_target: str) -> RecentHeader | None:
         leading = BRACKETED_TMUX_PREFIX_RE.match(text)
         return len(targets) == 1 and leading is not None and canonical_tmux_target(leading.group(1)) == target
 
-    return find_recent_thread_matching(
-        has_exact_leading_target
-    )
+    return find_recent_thread_matching(has_exact_leading_target, target)
+
+
+def fetch_recent_headers(client: imaplib.IMAP4_SSL, uids: list[str]) -> list[RecentHeader]:
+    if not uids:
+        return []
+    typ, data = client.uid("fetch", ",".join(uids), "(BODY.PEEK[HEADER.FIELDS (DATE FROM SUBJECT MESSAGE-ID REFERENCES)])")
+    if typ != "OK" or not data:
+        return []
+    headers: list[RecentHeader] = []
+    for item in data:
+        if not isinstance(item, tuple):
+            continue
+        msg = BytesParser(policy=policy.default).parsebytes(item[1])
+        headers.append(RecentHeader(str(msg.get("From", "")), str(msg.get("Subject", "")), parsed_header_date(str(msg.get("Date", ""))), str(msg.get("Message-ID", "")), str(msg.get("References", ""))))
+    return headers
 
 
 def fetch_recent_header(client: imaplib.IMAP4_SSL, uid: str) -> RecentHeader | None:
-    typ, data = client.uid("fetch", uid, "(BODY.PEEK[HEADER.FIELDS (DATE FROM SUBJECT MESSAGE-ID REFERENCES)])")
-    if typ != "OK" or not data or not isinstance(data[0], tuple):
-        return None
-    msg = BytesParser(policy=policy.default).parsebytes(data[0][1])
-    return RecentHeader(str(msg.get("From", "")), str(msg.get("Subject", "")), parsed_header_date(str(msg.get("Date", ""))), str(msg.get("Message-ID", "")), str(msg.get("References", "")))
+    headers = fetch_recent_headers(client, [uid])
+    return headers[0] if headers else None
 
 
 def recent_thread_exists(subject_key: str) -> bool:
