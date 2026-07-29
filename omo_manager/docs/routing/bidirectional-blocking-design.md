@@ -64,11 +64,12 @@ resolved_task_items:
     - `legacy` with the exact nonempty v1 scalar in `text`
     - `persistent` with nonempty `reason` for a `long_running` role
   - `human`, `task`, and `legacy` entries remain manager-owned lifecycle blockers
-  - `persistent` records why a `long_running` role remains open; preserve it through generated dependency transitions, but do not treat it as a pending-item delivery blocker
+  - `persistent` records why a `long_running` role remains open; preserve it through generated dependency transitions and suppress that role's pending-item reminders
   - item dependencies are never duplicated at top level
 - `resume_status` is required for every `status: blocked` task
   - its value is `running` or `long_running`
   - it is absent for all other states
+- every `status: blocked` task has a nonempty `blocked_on`
 
 ## commands
 
