@@ -363,6 +363,7 @@ class ProblemRow:
     pending_item: str = ""
     owner_target: str = ""
     unstick: str = ""
+    metadata_error: str = ""
     main_manager: bool = False
 
 
@@ -576,7 +577,10 @@ def agent_problem_guard_current(guard: AgentProblemGuard) -> bool:
     if result.returncode != 3:
         return False
     expected = Counter(guard.problem_lines)
-    current = Counter(result.stdout.splitlines())
+    current_lines = result.stdout.splitlines()
+    if any(line.startswith("malformed_task: ") for line in current_lines) and not any(line.startswith("malformed_task: ") for line in guard.problem_lines):
+        return False
+    current = Counter(current_lines)
     return bool(expected) and not expected - current
 
 
@@ -3756,14 +3760,14 @@ def status_command(args: Args, problems_only: bool = False) -> list[str]:
 
 
 def agent_problem_count_line(lines: list[str]) -> str:
-    counts = {"not_codex": 0, "blocked_idle": 0, "error": 0, "manager_compaction": 0, "manager_waiting_subagent": 0, "ready": 0, "stuck_input": 0, "untracked_agent": 0, "done-registry-stale": 0}
+    counts = {"malformed_task": 0, "not_codex": 0, "blocked_idle": 0, "error": 0, "manager_compaction": 0, "manager_waiting_subagent": 0, "ready": 0, "stuck_input": 0, "untracked_agent": 0, "done-registry-stale": 0}
     for line in lines:
-        problem_match = re.match(r"^(not_codex|blocked_idle|error|manager_compaction|manager_waiting_subagent|ready|stuck_input|untracked_agent): ", line)
+        problem_match = re.match(r"^(malformed_task|not_codex|blocked_idle|error|manager_compaction|manager_waiting_subagent|ready|stuck_input|untracked_agent): ", line)
         if problem_match is not None:
             counts[problem_match.group(1)] += 1
         elif line.startswith("done-stale: "):
             counts["done-registry-stale"] += 1
-    parts = [f"{status}={counts[status]}" for status in ("not_codex", "blocked_idle", "error", "manager_compaction", "manager_waiting_subagent", "ready", "stuck_input", "untracked_agent") if counts[status]]
+    parts = [f"{status}={counts[status]}" for status in ("malformed_task", "not_codex", "blocked_idle", "error", "manager_compaction", "manager_waiting_subagent", "ready", "stuck_input", "untracked_agent") if counts[status]]
     if counts["done-registry-stale"]:
         parts.append(f"done-registry-stale={counts['done-registry-stale']}")
     return f"agent-problems: {' '.join(parts)}" if parts else ""
@@ -3775,12 +3779,12 @@ def count_line_value(count_line: str, name: str) -> int:
 
 
 def agent_status_count_line(lines: list[str], count_line: str) -> str:
-    counts = {"not_codex": 0, "running": 0, "blocked_idle": 0, "error": 0, "ready": 0, "stuck_input": 0, "human_request": 0}
+    counts = {"malformed_task": 0, "not_codex": 0, "running": 0, "blocked_idle": 0, "error": 0, "ready": 0, "stuck_input": 0, "human_request": 0}
     for line in lines:
-        match = re.match(r"^(not_codex|running|blocked_idle|error|ready|stuck_input|human_request): ", line)
+        match = re.match(r"^(malformed_task|not_codex|running|blocked_idle|error|ready|stuck_input|human_request): ", line)
         if match is not None:
             counts[match.group(1)] += 1
-    parts = [f"{status}={counts[status]}" for status in ("not_codex", "running", "blocked_idle", "error", "ready", "stuck_input", "human_request")]
+    parts = [f"{status}={counts[status]}" for status in ("malformed_task", "not_codex", "running", "blocked_idle", "error", "ready", "stuck_input", "human_request")]
     return f"agent-status: {' '.join(parts)} done-registry-stale={count_line_value(count_line, 'done-registry-stale')} pruned={count_line_value(count_line, 'pruned')}"
 
 
@@ -3798,12 +3802,12 @@ def problem_line_target(line: str) -> str:
 
 
 def problem_line_task(line: str) -> str:
-    match = re.match(r"^(?:not_codex|blocked_idle|error|human_request|manager_compaction|manager_waiting_subagent|ready|stuck_input|untracked_agent|done-stale): task=(\S+)", line)
+    match = re.match(r"^(?:malformed_task|not_codex|blocked_idle|error|human_request|manager_compaction|manager_waiting_subagent|ready|stuck_input|untracked_agent|done-stale): task=(\S+)", line)
     return match.group(1) if match is not None else ""
 
 
 def problem_line_status(line: str) -> str:
-    match = re.match(r"^(not_codex|blocked_idle|error|human_request|manager_compaction|manager_waiting_subagent|ready|stuck_input|untracked_agent|done-stale): ", line)
+    match = re.match(r"^(malformed_task|not_codex|blocked_idle|error|human_request|manager_compaction|manager_waiting_subagent|ready|stuck_input|untracked_agent|done-stale): ", line)
     return match.group(1) if match is not None else ""
 
 
@@ -3832,6 +3836,7 @@ def parse_problem_row(line: str) -> ProblemRow | None:
         pending_item=problem_line_value(line, "pending_item"),
         owner_target=problem_line_owner_target(line),
         unstick=problem_line_unstick(line),
+        metadata_error=re.sub(r"\s+owner_target=\S+$", "", line.partition(" evidence=")[2]) if status == "malformed_task" else "",
         main_manager=bool(task == "manager" and re.search(r"\brole=manager\b", line)),
     )
 
@@ -4260,6 +4265,8 @@ def problem_row_line(row: ProblemRow) -> str:
     if row.status == "blocked_idle":
         reason = row.reason or row.output
         return f"{label} {tagged_text('blocked_on', reason)}"
+    if row.status == "malformed_task":
+        return f"{label} {tagged_text('metadata_error', row.metadata_error)}"
     if row.status == "done-stale":
         return label
     return label
@@ -4269,6 +4276,7 @@ def problem_section(status: str, rows: list[ProblemRow]) -> list[str]:
     if not rows:
         return []
     headings = {
+        "malformed_task": f"{len(rows)} active tasks have malformed metadata; repair their task frontmatter before relying on lifecycle status:",
         "not_codex": f"{len(rows)} not codex; check if agent failed to launch:",
         "blocked_idle": f"{len(rows)} blocked agents are ready; if they are not actually blocked, correct their status, otherwise make sure whatever is blocking them is being resolved:",
         "error": f"{len(rows)} have visible errors; inspect the pane, fix the error, or restart them:",
@@ -4288,7 +4296,7 @@ def format_agent_problem_report(lines: list[str]) -> str:
     rows = [row for line in lines if (row := parse_problem_row(line)) is not None and row.status != "human_request"]
     if not rows:
         return ""
-    order = ("not_codex", "untracked_agent", "blocked_idle", "error", "manager_compaction", "manager_waiting_subagent", "ready", "stuck_input", "done-stale")
+    order = ("malformed_task", "not_codex", "untracked_agent", "blocked_idle", "error", "manager_compaction", "manager_waiting_subagent", "ready", "stuck_input", "done-stale")
     parts = [AGENT_PROBLEM_HEADER, DELIVERY_RECOVERY_POLICY]
     for status in order:
         parts.extend(problem_section(status, [row for row in rows if row.status == status]))
@@ -4311,7 +4319,7 @@ def agent_problem_output_by_owner(args: Args, seen: dict[str, float], output: st
             continue
         if suppress_enter_attempt_row(args, seen, line, now_wall_s):
             continue
-        line_owner = problem_line_owner_target(line)
+        line_owner = "" if problem_line_status(line) == "malformed_task" else problem_line_owner_target(line)
         owner = backoff_owner_target or line_owner
         backoff_owner = backoff_owner_target or line_owner
         digest_groups.setdefault(owner, []).append(line)
@@ -4812,9 +4820,10 @@ def handle_agent_problem_result(
 ) -> bool:
     """Filter, throttle, and route status-problem output."""
 
+    visibility_only = result.returncode == 3 and any(line.startswith("malformed_task: ") for line in result.stdout.splitlines())
     reminder_targets: set[str] = set()
-    pending_reminders_changed = push_agent_pending_item_reminders(args, seen, now_wall_s, reminder_targets)
-    direct_report_reminders_changed = push_manager_direct_report_reminders(args, seen, now_wall_s, reminder_targets)
+    pending_reminders_changed = False if visibility_only else push_agent_pending_item_reminders(args, seen, now_wall_s, reminder_targets)
+    direct_report_reminders_changed = False if visibility_only else push_manager_direct_report_reminders(args, seen, now_wall_s, reminder_targets)
     reminders_changed = pending_reminders_changed or direct_report_reminders_changed
     if result.timed_out:
         print("omo_pending_watch: agent problem check timed out", file=sys.stderr)
@@ -4823,7 +4832,7 @@ def handle_agent_problem_result(
     dependency_reported_state = dependency_reported_snapshots if dependency_reported_snapshots is not None else {}
     prune_dependency_reported_snapshots(args.root, dependency_reported_state)
     previous_dependency_reported_state = dict(dependency_reported_state)
-    dependency_changed = maybe_push_dependency_transitions(args, dependency_state, now_wall_s)
+    dependency_changed = False if visibility_only else maybe_push_dependency_transitions(args, dependency_state, now_wall_s)
     if result.returncode == 0:
         enter_changed = clear_all_enter_attempts(args, seen)
         capacity_changed = clear_resolved_capacity_state(args, seen, set())
@@ -4836,14 +4845,22 @@ def handle_agent_problem_result(
         return dependency_changed or reminders_changed
     if result.stderr.strip():
         output = f"{output}\nstderr:\n{result.stderr.strip()}".strip()
-    output, capacity_changed = handle_capacity_problems(args, seen, output, now_wall_s)
+    if visibility_only:
+        output = filtered_problem_output([line for line in output.splitlines() if line.startswith("malformed_task: ")]) or ""
+    if visibility_only:
+        capacity_changed = False
+    else:
+        output, capacity_changed = handle_capacity_problems(args, seen, output, now_wall_s)
     if not output:
         return capacity_changed or dependency_changed or reminders_changed
-    output, ready_report_changed = handle_ready_report_reminders(args, seen, output, now_wall_s, reminder_targets)
+    if visibility_only:
+        ready_report_changed = False
+    else:
+        output, ready_report_changed = handle_ready_report_reminders(args, seen, output, now_wall_s, reminder_targets)
     reminders_changed = reminders_changed or ready_report_changed
     if not output:
         return capacity_changed or dependency_changed or reminders_changed
-    compaction_changed = maybe_push_manager_compaction_reminder(args, seen, output, now_wall_s)
+    compaction_changed = False if visibility_only else maybe_push_manager_compaction_reminder(args, seen, output, now_wall_s)
     output = filter_manager_compaction_output(output, args.manager_target) or ""
     if not output:
         return capacity_changed or compaction_changed or dependency_changed or reminders_changed

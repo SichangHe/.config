@@ -86,6 +86,8 @@
 - agent-problem routing
   - runs `omo_agent_status.py --problems-only` every `--agent-problem-interval-s` seconds, default `30` unless `OMO_MANAGER_AGENT_PROBLEM_INTERVAL_S` overrides it
   - scans all task owners; `OMO_MANAGER_TMUX_TARGET` only adds the main-manager self-check
+  - delivers each `malformed_task` finding with its strict metadata error to the configured main manager because malformed metadata cannot supply a trusted owner
+  - treats any scan containing `malformed_task` as visibility-only: it cannot send input, auto-unstick, interrupt, stop, or replace any pane
   - dispatches each problem group to the row's `owner_target`, falling back to `OMO_MANAGER_TMUX_TARGET` only when no owner is known
   - detects task files with frontmatter `status: running` whose pane is `error`, `not_codex`, `ready`, or `stuck_input`
   - detects blocked task files whose pane is `error`, `not_codex`, or `stuck_input`; a `ready` blocked manager is quiet only for a human wait or an owned acyclic tree of exact comma-separated blocker lists whose distinct leaves are valid running tasks without pending reports

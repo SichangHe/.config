@@ -6144,6 +6144,88 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertIn("1 not codex; check if agent failed to launch:", text)
             self.assertIn("task.md cfg:1 <output></output>", text)
 
+    def test_agent_problem_check_delivers_malformed_task_detail_end_to_end(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            status_script = root / "status.py"
+            _ = status_script.write_text(
+                "#!/usr/bin/env python3\n"
+                "print('agent-problems: malformed_task=1')\n"
+                "print(\"malformed_task: task=vl_broken.md evidence=strict metadata error: `blocked_on` is required when `status` is `long_running`; repair task frontmatter before relying on lifecycle status owner_target=vl:15\")\n"
+                "raise SystemExit(3)\n",
+                encoding="utf-8",
+            )
+            status_script.chmod(0o700)
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, status_script, False, False, manager_target="wl:1", agent_problem_repeat_s=300.0)
+            calls: list[list[str]] = []
+            real_run = subprocess.run
+
+            def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+                if command and command[0] == str(status_script):
+                    return real_run(command, **kwargs)
+                calls.append(capture_delivery_call(command))
+                return subprocess.CompletedProcess(command, 0)
+
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+                self.assertTrue(watcher.maybe_push_agent_problems(args, {}, 1000.0))
+
+            self.assertEqual(1, len(calls))
+            self.assertEqual("wl:1", calls[0][calls[0].index("--manager-target") + 1])
+            text = calls[0][1]
+            self.assertIn("1 active tasks have malformed metadata; repair their task frontmatter before relying on lifecycle status:", text)
+            self.assertIn("vl_broken.md <metadata_error>strict metadata error: `blocked_on` is required when `status` is `long_running`; repair task frontmatter before relying on lifecycle status</metadata_error>", text)
+            self.assertNotIn("owner_target", text)
+            self.assertNotIn("not codex", text)
+
+    def test_problem_recovery_guard_rejects_new_malformed_task(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        capacity_line = "error: task=worker.md evidence=target=cfg:1 output=Selected model is at capacity. Please try a different model."
+        malformed_line = "malformed_task: task=broken.md evidence=strict metadata error: missing field"
+        command = ("status",)
+        result = subprocess.CompletedProcess(command, 3, f"agent-problems: malformed_task=1 error=1\n{malformed_line}\n{capacity_line}\n", "")
+
+        with patch("omo_manager.omo_pending_watch.subprocess.run", return_value=result):
+            self.assertFalse(watcher.agent_problem_guard_current(watcher.AgentProblemGuard(command, (capacity_line,))))
+            self.assertTrue(watcher.agent_problem_guard_current(watcher.AgentProblemGuard(command, (malformed_line,))))
+
+    def test_malformed_task_scan_disables_other_watcher_actions(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1", agent_problem_repeat_s=300.0)
+        result = watcher.CommandOutput(
+            "agent-problems",
+            3,
+            "\n".join(
+                [
+                    "agent-problems: malformed_task=1 error=1 ready=1 manager_compaction=1",
+                    "malformed_task: task=broken.md evidence=strict metadata error: missing field",
+                    "error: task=capacity.md evidence=target=cfg:1 output=Selected model is at capacity. Please try a different model. owner_target=cfg:9",
+                    "ready: task=ready.md evidence=target=cfg:2 output=idle owner_target=cfg:9",
+                    "manager_compaction: task=manager evidence=target=wl:1 role=manager output=Compacting",
+                ]
+            ),
+            "",
+        )
+        never = AssertionError("malformed scans must not perform watcher actions")
+
+        with patch.object(watcher, "push_agent_pending_item_reminders", side_effect=never), patch.object(
+            watcher, "push_manager_direct_report_reminders", side_effect=never
+        ), patch.object(watcher, "maybe_push_dependency_transitions", side_effect=never), patch.object(
+            watcher, "handle_capacity_problems", side_effect=never
+        ), patch.object(watcher, "handle_ready_report_reminders", side_effect=never), patch.object(
+            watcher, "maybe_push_manager_compaction_reminder", side_effect=never
+        ), patch.object(watcher, "push_manager_text_to_target", return_value=0) as push, redirect_stdout(StringIO()):
+            self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
+        push.assert_called_once()
+        self.assertEqual("wl:1", push.call_args.args[2])
+        delivered = push.call_args.args[1]
+        self.assertIn("broken.md <metadata_error>strict metadata error: missing field</metadata_error>", delivered)
+        self.assertNotIn("capacity.md", delivered)
+        self.assertNotIn("ready.md", delivered)
+
     def test_agent_problem_check_reports_stuck_input_after_three_enter_attempts(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 

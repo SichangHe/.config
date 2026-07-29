@@ -130,6 +130,24 @@ resolved_task_items: []
             self.assertIn("untracked_agent: task=broken_manager.md", text)
             self.assertIn("unstick=disabled:malformed_task_present", text)
 
+    def test_problems_only_reports_malformed_active_low_priority_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("low priority:\nbroken_manager.md cfg 7\n", encoding="utf-8")
+            malformed = task_frontmatter("running", runat="cfg:7", is_manager=True).replace("status: running", "status: long_running")
+            _ = (root / "broken_manager.md").write_text(malformed, encoding="utf-8")
+            out = StringIO()
+
+            with redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+
+            text = out.getvalue()
+            self.assertIn("agent-problems: malformed_task=1", text)
+            self.assertIn("malformed_task: task=broken_manager.md", text)
+            self.assertIn("`blocked_on` is required", text)
+
     def test_malformed_active_aliases_report_once_without_unstick(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
