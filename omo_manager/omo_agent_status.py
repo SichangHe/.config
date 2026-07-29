@@ -1056,9 +1056,18 @@ def registry_unmanaged_task(record: SessionRecord, root: Path) -> TaskLine:
     return TaskLine(record.task_file, "registry-unmanaged", "", target, port, task_status, state.persistent_role if state is not None else False)
 
 
-def registry_unmanaged_problem_rows(args: Args, records: list[SessionRecord], skip_targets: set[str], auto_unstick: bool, unstick_by_target: dict[str, str], auto_unstick_disabled_reason: str) -> list[StatusRow]:
+def registry_unmanaged_problem_rows(
+    args: Args,
+    records: list[SessionRecord],
+    skip_targets: set[str],
+    auto_unstick: bool,
+    unstick_by_target: dict[str, str],
+    auto_unstick_disabled_reason: str,
+    active_targets: set[str],
+) -> list[StatusRow]:
     rows: list[StatusRow] = []
     seen_targets = {canonical_target(target) for target in skip_targets if target}
+    claimed_targets = {canonical_target(target) for target in active_targets if target}
     for record in records:
         target = canonical_target(record.target)
         if not target or target in seen_targets:
@@ -1066,6 +1075,8 @@ def registry_unmanaged_problem_rows(args: Args, records: list[SessionRecord], sk
         if task_has_pending_marker(resolve_task_path(args.root, record.task_file)):
             continue
         task = registry_unmanaged_task(record, args.root)
+        if task.status == "done" and target in claimed_targets:
+            continue
         if not task_owned_by_manager(args.root, task, args.manager_target):
             continue
         row = classify_target(task.task_file, task.target, task.persistent_role, task.status, auto_unstick, role="registry_unmanaged", unstick_by_target=unstick_by_target, auto_unstick_disabled_reason=auto_unstick_disabled_reason)
@@ -1126,16 +1137,15 @@ def owned_todo_targets(args: Args) -> set[str]:
     return targets
 
 
-def current_task_targets(root: Path) -> set[str]:
+def active_task_targets(root: Path, *, include_pending_delivery: bool = False) -> set[str]:
+    """Return authoritative targets owned by indexed non-completed tasks."""
+
     targets: set[str] = set()
     for task in parse_task_lines(root / "TODO.md"):
-        if task.section != "todo:current":
-            continue
         state_path = resolve_task_path(root, task.task_file)
         state = scan_task_state(state_path, root) if state_path is not None else None
-        target = state.target if state is not None else task.target
-        if target:
-            targets.add(target)
+        if state is not None and state.status != "done" and state.target and (include_pending_delivery or not task_has_pending_marker(state_path)):
+            targets.add(state.target)
     return targets
 
 
@@ -1312,8 +1322,7 @@ def main(argv: list[str]) -> int:
         rows.extend(malformed_rows)
         inspected_targets = {display_target(task, choose_session(task, records)) for task in tasks}
         if args.problems_only:
-            manager_args = replace(args, auto_unstick=auto_unstick)
-            manager_row = manager_problem_row(manager_args, inspected_targets, unstick_by_target)
+            manager_row = manager_problem_row(replace(args, auto_unstick=auto_unstick), inspected_targets, unstick_by_target)
             if args.manager_target:
                 inspected_targets.add(args.manager_target)
             if manager_row is not None:
@@ -1331,16 +1340,26 @@ def main(argv: list[str]) -> int:
             generic_blocked_idle_rows = blocked_idle_task_rows(args.root, "", auto_unstick, unstick_by_target, auto_unstick_disabled_reason, inspected_targets, inspected_task_files)
             rows.extend(generic_blocked_idle_rows)
             inspected_targets.update(row.target for row in generic_blocked_idle_rows if row.target)
+            all_active_targets = active_task_targets(args.root, include_pending_delivery=True)
+            inspected_targets.update(active_task_targets(args.root))
             inspected_tasks = [*tasks]
             inspected_targets.update(display_target(task, choose_session(task, records)) for task in inspected_tasks)
-            unmanaged_rows = registry_unmanaged_problem_rows(task_args, records, inspected_targets, auto_unstick, unstick_by_target, auto_unstick_disabled_reason)
+            unmanaged_rows = registry_unmanaged_problem_rows(
+                task_args,
+                records,
+                inspected_targets,
+                auto_unstick,
+                unstick_by_target,
+                auto_unstick_disabled_reason,
+                all_active_targets,
+            )
             rows.extend(unmanaged_rows)
             inspected_targets.update(record.target for record in records if record.target)
             inspected_targets.update(row.target for row in unmanaged_rows if row.target)
+            inspected_targets.update(all_active_targets)
             todo_rows = todo_unmanaged_problem_rows(task_args, inspected_targets, auto_unstick, unstick_by_target, auto_unstick_disabled_reason)
             rows.extend(todo_rows)
             inspected_targets.update(owned_todo_targets(task_args))
-            inspected_targets.update(current_task_targets(args.root))
             inspected_targets.update(row.target for row in todo_rows if row.target)
             tmux_rows = tmux_unmanaged_problem_rows(task_args, inspected_targets, auto_unstick, unstick_by_target, auto_unstick_disabled_reason)
             rows.extend(tmux_rows)

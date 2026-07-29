@@ -1,8 +1,10 @@
 # codex status and stuck handling
 
-`omo_codex_status.py` reads a tmux window tail and reports `not_codex`, `running`, `error`, `ready`, or `stuck_input` plus the current response tail.
+`omo_codex_status.py` reads an exact numeric tmux pane and reports `not_codex`, `running`, `error`, `ready`, or `stuck_input` plus the current response tail. A target without a pane suffix means pane `.0`. Before capture or input, the helper verifies tmux resolved the requested session, window, and pane and then uses the immutable pane id, so a missing target such as `wl:1.0` cannot prefix-resolve to `wl:18.0`.
 
 It detects the Codex TUI by `  gpt-` on the last visible line, or by a final `tab to queue message` footer paired with visible Codex running output, and extracts output between the last separator and `- Worked for ... -`.
+
+The watcher ignores two exact non-actionable `codex_apps` startup conditions: one line containing startup, HTTP `401`, and `no available accounts`; or the complete four-line transport-handshake record containing the client failure, expected transport detail, no-account HTTP response, and `MCP startup incomplete (failed: codex_apps)`. Any added error, missing or changed record line, other HTTP status, or other connector remains an error.
 
 It reports `stuck_input` when the current Codex input box contains non-placeholder text; known placeholder suggestions such as `Use /skills to list available skills` and `Run /review on my current changes` remain non-stuck. It also reports `stuck_input` for an exact terminal `Press Enter` continuation prompt only when the previous two visible lines are a completed `Worked for` line and the Codex model footer.
 

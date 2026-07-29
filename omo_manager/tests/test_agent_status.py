@@ -107,13 +107,13 @@ resolved_task_items: []
             self.assertEqual(set(), done)
             self.assertEqual(set(), human_pending)
 
-    def test_problems_only_reports_long_running_manager_without_required_reason(self) -> None:
+    def test_problems_only_reports_malformed_active_manager(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nbroken_manager.md cfg 7\n", encoding="utf-8")
-            malformed = task_frontmatter("running", runat="cfg:7", is_manager=True).replace("status: running", "status: long_running")
+            malformed = task_frontmatter("long_running", runat="cfg:7", is_manager=True).replace("tool: codex\n", "")
             _ = (root / "broken_manager.md").write_text(malformed, encoding="utf-8")
             out = StringIO()
 
@@ -125,7 +125,7 @@ resolved_task_items: []
             text = out.getvalue()
             self.assertIn("agent-problems: malformed_task=1", text)
             self.assertIn("malformed_task: task=broken_manager.md", text)
-            self.assertIn("`blocked_on` is required", text)
+            self.assertIn("missing task frontmatter field: tool", text)
             self.assertEqual(1, text.count("malformed_task: task=broken_manager.md"))
             self.assertIn("untracked_agent: task=broken_manager.md", text)
             self.assertIn("unstick=disabled:malformed_task_present", text)
@@ -136,7 +136,7 @@ resolved_task_items: []
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("low priority:\nbroken_manager.md cfg 7\n", encoding="utf-8")
-            malformed = task_frontmatter("running", runat="cfg:7", is_manager=True).replace("status: running", "status: long_running")
+            malformed = task_frontmatter("long_running", runat="cfg:7", is_manager=True).replace("tool: codex\n", "")
             _ = (root / "broken_manager.md").write_text(malformed, encoding="utf-8")
             out = StringIO()
 
@@ -146,7 +146,7 @@ resolved_task_items: []
             text = out.getvalue()
             self.assertIn("agent-problems: malformed_task=1", text)
             self.assertIn("malformed_task: task=broken_manager.md", text)
-            self.assertIn("`blocked_on` is required", text)
+            self.assertIn("missing task frontmatter field: tool", text)
 
     def test_malformed_active_aliases_report_once_without_unstick(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -154,7 +154,7 @@ resolved_task_items: []
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("human pending:\nbroken.md cfg 8\n./broken.md cfg 8\n", encoding="utf-8")
-            malformed = task_frontmatter("running", runat="cfg:8").replace("status: running", "status: long_running")
+            malformed = task_frontmatter("long_running", runat="cfg:8").replace("tool: codex\n", "")
             _ = (root / "broken.md").write_text(malformed, encoding="utf-8")
             out = StringIO()
             report = Report("stuck_input", ["queued input"], "queued input", True)
@@ -173,7 +173,7 @@ resolved_task_items: []
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nbroken_manager.md cfg 8\n./broken_manager.md cfg 9\n", encoding="utf-8")
-            malformed = task_frontmatter("running", runat="cfg:8", is_manager=True).replace("status: running", "status: long_running")
+            malformed = task_frontmatter("long_running", runat="cfg:8", is_manager=True).replace("tool: codex\n", "")
             _ = (root / "broken_manager.md").write_text(malformed, encoding="utf-8")
             report = Report("waiting_subagent", ["waiting for reviewer"])
             out = StringIO()
@@ -193,7 +193,7 @@ resolved_task_items: []
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nbroken.md\n", encoding="utf-8")
-            malformed = task_frontmatter("running", runat="cfg:9").replace("status: running", "status: long_running")
+            malformed = task_frontmatter("long_running", runat="cfg:9").replace("tool: codex\n", "")
             _ = (root / "broken.md").write_text(malformed, encoding="utf-8")
             out = StringIO()
             report = Report("stuck_input", ["queued input"], "queued input", True)
@@ -231,9 +231,12 @@ resolved_task_items: []
         self.assertEqual("long_running", metadata.status)
         self.assertEqual("persistent contact", metadata.blocked_on)
 
-    def test_frontmatter_rejects_long_running_without_blocked_on(self) -> None:
-        with self.assertRaisesRegex(TaskFrontmatterError, "required"):
-            parse_task_metadata(task_frontmatter("running").replace("status: running", "status: long_running"))
+    def test_frontmatter_accepts_long_running_without_blocked_on(self) -> None:
+        metadata = parse_task_metadata(task_frontmatter("running").replace("status: running", "status: long_running"))
+
+        self.assertIsNotNone(metadata)
+        assert metadata is not None
+        self.assertEqual("", metadata.blocked_on)
 
     def test_long_running_ready_is_quiet_but_error_is_reported(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2595,6 +2598,106 @@ resolved_task_items: []
             text = out.getvalue()
             self.assertIn("agent-problems: ready=1", text)
             self.assertIn("ready: task=active.md evidence=target=vl:1.0 role=registry_unmanaged task_status=running", text)
+
+    def test_problems_only_does_not_attribute_reused_target_to_completed_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            todo = root / "TODO.md"
+            todo_text = "human pending:\nactive.md wl 3\n\nprevious:\ncompleted.md wl 3\n"
+            _ = todo.write_text(todo_text, encoding="utf-8")
+            active = root / "active.md"
+            _ = active.write_text(
+                task_frontmatter("blocked", runat="wl:3", blocked_on="human decision on the required guarantee"),
+                encoding="utf-8",
+            )
+            completed = root / "completed.md"
+            completed_text = task_frontmatter("done", runat="wl:3")
+            _ = completed.write_text(completed_text, encoding="utf-8")
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["later task output"])) as inspect, redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--no-auto-unstick"]))
+
+            self.assertEqual("", out.getvalue())
+            self.assertEqual(["wl:3"], [call.args[0].target for call in inspect.call_args_list])
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+            self.assertEqual(completed_text, completed.read_text(encoding="utf-8"))
+
+    def test_problems_only_pending_active_target_suppresses_completed_todo_attribution(self) -> None:
+        for active_target in ("wl:3", "wl:3.0"):
+            with self.subTest(active_target=active_target), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                registry = root / "sessions.json"
+                _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+                _ = (root / "TODO.md").write_text("current:\nactive.md wl 3\n\nprevious:\ncompleted.md wl 3\n", encoding="utf-8")
+                _ = (root / "active.md").write_text(f"{task_frontmatter('running', runat=active_target)}(pending)\nrecover delivery\n", encoding="utf-8")
+                _ = (root / "completed.md").write_text(task_frontmatter("done", runat="wl:3"), encoding="utf-8")
+                out = StringIO()
+                with patch("omo_manager.omo_agent_status.inspect", side_effect=AssertionError("reused target must not be inspected as completed")), redirect_stdout(out):
+                    self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--no-auto-unstick"]))
+
+                self.assertEqual("", out.getvalue())
+
+    def test_problems_only_pending_active_target_keeps_completed_registry_bookkeeping_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[{"task_file":"completed.md","tmux_target":"wl:3.0","started_at_s":1}]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nactive.md wl 3\n\nprevious:\ncompleted.md wl 3\n", encoding="utf-8")
+            _ = (root / "active.md").write_text(f"{task_frontmatter('running', runat='wl:3')}(pending)\nrecover delivery\n", encoding="utf-8")
+            _ = (root / "completed.md").write_text(task_frontmatter("done", runat="wl:3"), encoding="utf-8")
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", side_effect=AssertionError("reused target must not be inspected as completed")), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--no-auto-unstick"]))
+
+            text = out.getvalue()
+            self.assertIn("done-stale: task=completed.md", text)
+            self.assertNotIn("ready: task=completed.md", text)
+
+    def test_problems_only_reused_registry_target_keeps_only_stale_bookkeeping(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[{"task_file":"completed.md","tmux_target":"wl:3.0","started_at_s":1}]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("human pending:\nactive.md wl 3\n\nprevious:\ncompleted.md wl 3\n", encoding="utf-8")
+            _ = (root / "active.md").write_text(
+                task_frontmatter("blocked", runat="wl:3", blocked_on="human decision on the required guarantee"),
+                encoding="utf-8",
+            )
+            _ = (root / "completed.md").write_text(task_frontmatter("done", runat="wl:3"), encoding="utf-8")
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["later task output"])) as inspect, redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--no-auto-unstick"]))
+
+            text = out.getvalue()
+            self.assertIn("done-stale: task=completed.md", text)
+            self.assertNotIn("ready: task=completed.md", text)
+            self.assertNotIn("later task output", text)
+            self.assertEqual(["wl:3"], [call.args[0].target for call in inspect.call_args_list])
+
+    def test_problems_only_keeps_active_reused_target_problems_visible(self) -> None:
+        cases = (
+            ("running", "", Report("ready", ["idle"]), "ready"),
+            ("blocked", "dependency unavailable", Report("ready", ["idle"]), "blocked_idle"),
+            ("running", "", Report("error", ["fatal"]), "error"),
+            ("running", "", Report("stuck_input", ["› retry report delivery"], "retry report delivery", True), "stuck_input"),
+        )
+        for status, blocked_on, report, expected in cases:
+            with self.subTest(expected=expected), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                registry = root / "sessions.json"
+                _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+                _ = (root / "TODO.md").write_text("current:\nactive.md wl 3\n\nprevious:\ncompleted.md wl 3\n", encoding="utf-8")
+                _ = (root / "active.md").write_text(task_frontmatter(status, runat="wl:3", blocked_on=blocked_on), encoding="utf-8")
+                _ = (root / "completed.md").write_text(task_frontmatter("done", runat="wl:3"), encoding="utf-8")
+                out = StringIO()
+                with patch("omo_manager.omo_agent_status.inspect", return_value=report), redirect_stdout(out):
+                    self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--no-auto-unstick"]))
+
+                text = out.getvalue()
+                self.assertIn(f"{expected}: task=active.md evidence=target=wl:3", text)
+                self.assertNotIn("task=completed.md", text)
 
     def test_problems_only_reports_later_ready_stale_running_duplicate_registry_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

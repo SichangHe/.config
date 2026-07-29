@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Fail fast when a VL experiment launch lacks helper or verifier setup."""
+
 from __future__ import annotations
 
 import argparse
@@ -8,6 +9,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -45,8 +47,13 @@ def parse_args(argv: list[str]) -> Args:
     return Args(parsed.vlh, verus, parsed.artifact_root, parsed.require_staged_verus, not parsed.allow_openrouter, parsed.evidence_dir)
 
 
-def run_cmd(args: list[str], timeout_s: float = 15.0) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(args, capture_output=True, text=True, timeout=timeout_s)
+def run_cmd(
+    args: list[str],
+    timeout_s: float = 15.0,
+    env: dict[str, str] | None = None,
+    cwd: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(args, capture_output=True, text=True, timeout=timeout_s, env=env, cwd=cwd)
 
 
 def sha256(path: Path) -> str:
@@ -75,10 +82,21 @@ def check_vlh(vlh: Path | None) -> CheckResult:
         intended = executable(vlh)
         if found_path != intended:
             raise ValueError(f"`vlh` resolves to {found_path}; expected {intended}")
-    help_result = run_cmd([str(found_path), "help"])
+    with tempfile.TemporaryDirectory(prefix="omo-vlh-help-") as scratch:
+        scratch_path = Path(scratch)
+        help_env = {
+            "HOME": str(scratch_path / "home"),
+            "PATH": os.environ.get("PATH", ""),
+            "XDG_CONFIG_HOME": str(scratch_path / "xdg"),
+            "VLH_RESOURCE_DIR": str(scratch_path / "resources"),
+        }
+        help_result = run_cmd([str(found_path), "help"], env=help_env, cwd=scratch_path)
     if help_result.returncode != 0:
         raise ValueError(f"`vlh help` failed with exit {help_result.returncode}: {help_result.stderr.strip()}")
-    return CheckResult("vlh", f"path={found_path}\nhelp_exit=0")
+    return CheckResult(
+        "vlh",
+        f"path={found_path}\nhelp_exit=0\nhelp_state=fresh_scratch_removed",
+    )
 
 
 def find_verus(verus: Path | None) -> Path:

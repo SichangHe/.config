@@ -809,11 +809,52 @@ class OmoTaskTests(unittest.TestCase):
             finally:
                 evidence.unlink(missing_ok=True)
             self.assertIn("exit_status: FileNotFoundError: [Errno 2] tmux unavailable", text)
+
     def test_codex_cmd_resumes_quoted_session(self) -> None:
         self.assertTrue(codex_cmd("abc").startswith("bunx @openai/codex --dangerously-bypass-approvals-and-sandbox resume abc "))
         self.assertTrue(codex_cmd("abc def").startswith("bunx @openai/codex --dangerously-bypass-approvals-and-sandbox resume 'abc def' "))
         self.assertTrue(codex_cmd("abc", tool="pcodx").startswith(f"{PCODX_WRAPPER} resume abc "))
         self.assertIn(str(DEFAULT_WORKER_INSTRUCTIONS), codex_cmd("abc", tool="pcodx"))
+
+    def test_codex_cmd_can_resume_without_submitting_prompt(self) -> None:
+        self.assertEqual(
+            "bunx @openai/codex --dangerously-bypass-approvals-and-sandbox resume abc",
+            codex_cmd("abc", include_prompt=False),
+        )
+
+    def test_resume_idle_requires_session_and_rejects_prompt(self) -> None:
+        with self.assertRaises(SystemExit):
+            parse_args(["--task-file", "x.md", "--resume-idle"])
+        with self.assertRaises(SystemExit):
+            parse_args(["--task-file", "x.md", "--session-id", "abc", "--resume-idle"])
+        with self.assertRaises(SystemExit):
+            parse_args([
+                "--task-file",
+                "x.md",
+                "--tmux-session",
+                "hvl",
+                "--workdir",
+                "/tmp",
+                "--session-id",
+                "abc",
+                "--resume-idle",
+                "--prompt-file",
+                "/tmp/prompt",
+            ])
+
+    def test_resume_idle_launch_does_not_require_model_override(self) -> None:
+        args = parse_args([
+            "--task-file",
+            "x.md",
+            "--tmux-session",
+            "cfg",
+            "--workdir",
+            "/tmp",
+            "--session-id",
+            "abc",
+            "--resume-idle",
+        ])
+        self.assertTrue(args.resume_idle)
 
     def test_codex_cmd_uses_prompt_argument_from_file(self) -> None:
         expected_paths = f"{DEFAULT_WORKER_INSTRUCTIONS} /tmp/prompt.md"
@@ -1719,7 +1760,7 @@ class OmoTaskTests(unittest.TestCase):
             launch_line = next(line for line in text.splitlines() if "tmux send-keys" in line)
             source_idx = launch_line.index("source ")
             prelaunch_idx = launch_line.index(str(prelaunch))
-            export_idx = launch_line.index("export OMO_AGENT_TMUX_TARGET=cfg:DRYRUN")
+            export_idx = launch_line.index("export OMO_AGENT_TMUX_TARGET=cfg:2")
             marker_idx = launch_line.index("[omo:DRY]")
             exec_idx = launch_line.index("exec bunx @openai/codex")
             self.assertLess(source_idx, prelaunch_idx)
@@ -1788,6 +1829,63 @@ class OmoTaskTests(unittest.TestCase):
             self.assertEqual((), wait_command_started_mock.call_args.kwargs["baseline_lines"])
             launch_marker = wait_command_started_mock.call_args.kwargs["launch_marker"]
             self.assertRegex(launch_marker, r"^\[omo:[0-9a-f]{32}\]$")
+
+    def test_start_codex_resume_idle_submits_no_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = Args(Path(tmp), "x.md", "hvl", "9", "codex", Path(tmp), "x", None, False, False, "abc", "", (), resume_idle=True)
+            with patch("omo_manager.omo_task.exact_pane_id", return_value="%9"), patch("omo_manager.omo_task.capture_pane", return_value=[]), patch(
+                "omo_manager.omo_task.tmux"
+            ) as tmux, patch("omo_manager.omo_task.wait_command_started"):
+                start_codex("hvl:9", args)
+            command = tmux.call_args.args[0][3]
+            self.assertIn("resume abc", command)
+            self.assertNotIn("$(cat --", command)
+
+    def test_resume_idle_dry_run_uses_exact_target_and_no_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "x.md").write_text(VALID_GOAL_TREE, encoding="utf-8")
+            out = io.StringIO()
+            argv = [
+                "--root",
+                str(root),
+                "--task-file",
+                "x.md",
+                "--tmux-session",
+                "cfg",
+                "--tmux-window",
+                "9",
+                "--workdir",
+                str(root),
+                "--session-id",
+                "abc",
+                "--resume-idle",
+                "--dry-run",
+            ]
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(0, main(argv))
+            text = out.getvalue()
+            self.assertIn("todo_line: x.md cfg:9", text)
+            self.assertIn("new-window -P -F", text)
+            self.assertIn("-t cfg:9", text)
+            self.assertIn("send-keys -t cfg:9", text)
+            self.assertIn("resume abc", text)
+            self.assertNotIn("$(cat --", text)
+
+    def test_vl_resume_idle_does_not_require_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "vl_worker.md").write_text(VALID_GOAL_TREE, encoding="utf-8")
+            args = Args(root, "vl_worker.md", "vl", "9", "codex", root, "x", None, False, False, "abc", "", (), manager_target="mgr:1", resume_idle=True)
+            validate_inputs(args)
+
+    def test_new_window_honors_requested_window_index(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = Args(Path(tmp), "x.md", "cfg", "9", "codex", Path(tmp), "x", None, False, False, "abc", "", (), resume_idle=True)
+            with patch("omo_manager.omo_task.tmux") as tmux, patch("omo_manager.omo_task.wait_shell"):
+                tmux.return_value.stdout = "cfg:9\n"
+                self.assertEqual("cfg:9", new_window(args))
+            self.assertEqual("=cfg:9", tmux.call_args.args[0][5])
 
     def test_start_codex_relaunches_after_runtime_update(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

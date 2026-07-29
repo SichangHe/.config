@@ -5,8 +5,8 @@ from __future__ import annotations
 import argparse
 import contextlib
 import fcntl
-import os
 import hashlib
+import os
 import re
 import shlex
 import subprocess
@@ -89,6 +89,7 @@ class Args:
     human_email_file: Path | None = None
     human_email_lines: tuple[int, int] | None = None
     human_email_text: str | None = None
+    resume_idle: bool = False
 
 
 class ParsedArgs(argparse.Namespace):
@@ -114,6 +115,7 @@ class ParsedArgs(argparse.Namespace):
     new_manager_target: str = ""
     human_email_file: Path | None = None
     human_email_lines: tuple[int, int] | None = None
+    resume_idle: bool = False
 
 
 def codex_flags_model_error(codex_flags: tuple[str, ...]) -> str:
@@ -157,6 +159,7 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--no-link", action="store_true")
     _ = parser.add_argument("--dry-run", action="store_true", help="Print the planned launch or ownership migration without changing files or tmux.")
     _ = parser.add_argument("--session-id", default="", help="Codex session id to resume in a new worker window.")
+    _ = parser.add_argument("--resume-idle", action="store_true", help="Resume --session-id without submitting a prompt.")
     _ = parser.add_argument("--model", default="", help="Model to use for a new worker launch.")
     _ = parser.add_argument("--reasoning-effort", choices=("low", "medium", "high", "xhigh", "max", "ultra"), default="", help="Start Codex with `model_reasoning_effort` for this worker.")
     _ = parser.add_argument("--codex-flag", action="append", help="Extra raw Codex argv token. Repeat for flags and values; use `--codex-flag=--flag` when the token starts with `--`.")
@@ -194,6 +197,7 @@ def parse_args(argv: list[str]) -> Args:
                 parsed.prompt_file,
                 parsed.no_link,
                 parsed.session_id,
+                parsed.resume_idle,
                 parsed.model,
                 parsed.reasoning_effort,
                 parsed.codex_flag,
@@ -208,9 +212,15 @@ def parse_args(argv: list[str]) -> Args:
             parser.error("--migrate-manager-owner only accepts --root, --task-file, explicit old/new manager targets, and optional --dry-run.")
     if parsed.workdir is not None and not parsed.tmux_session:
         parser.error("--workdir requires --tmux-session.")
+    if parsed.resume_idle and not parsed.session_id:
+        parser.error("--resume-idle requires --session-id.")
+    if parsed.resume_idle and parsed.workdir is None:
+        parser.error("--resume-idle requires --workdir.")
+    if parsed.resume_idle and parsed.prompt_file is not None:
+        parser.error("--resume-idle does not accept --prompt-file.")
     if parsed.human_email_file is not None and parsed.workdir is None:
         parser.error("--human-email-file and --human-email-lines require --workdir.")
-    if parsed.workdir is not None and (not parsed.model.strip() or not parsed.reasoning_effort.strip()):
+    if parsed.workdir is not None and not parsed.resume_idle and (not parsed.model.strip() or not parsed.reasoning_effort.strip()):
         parser.error("--workdir requires nonempty --model MODEL and --reasoning-effort EFFORT.")
     if invalid_model := model_error(parsed.model):
         parser.error(invalid_model)
@@ -242,6 +252,7 @@ def parse_args(argv: list[str]) -> Args:
         model=parsed.model,
         human_email_file=parsed.human_email_file,
         human_email_lines=parsed.human_email_lines,
+        resume_idle=parsed.resume_idle,
     )
 
 
@@ -282,6 +293,8 @@ def manager_owner_migration_text(text: str, old_owner: str, new_owner: str, work
     if canonical_tmux_pane(old_owner) == canonical_tmux_pane(new_owner):
         raise ValueError("old and new manager targets must identify different tmux panes.")
     if metadata is not None and metadata.version == TASK_FRONTMATTER_V2:
+        if canonical_tmux_pane(metadata.runat) == canonical_tmux_pane(new_owner):
+            raise ValueError("new manager target must be different from task `runat`.")
         frontmatter, body = split_task_text(text)
         values = load_yaml_mapping(frontmatter)
         if values["managerat"] != old_owner:
@@ -860,6 +873,7 @@ def codex_cmd(
     model: str = "",
     manager_file: Path | None = None,
     human_instruction_file: Path | None = None,
+    include_prompt: bool = True,
 ) -> str:
     try:
         args = list(COMMAND_BY_TOOL[tool])
@@ -873,7 +887,8 @@ def codex_cmd(
     if session_id:
         args.extend(("resume", session_id))
     parts = [shlex.quote(arg) for arg in args]
-    parts.append(prompt_input(prompt_file, vl_agent, manager_file, human_instruction_file))
+    if include_prompt:
+        parts.append(prompt_input(prompt_file, vl_agent, manager_file, human_instruction_file))
     return " ".join(parts)
 
 
@@ -1042,6 +1057,8 @@ def wait_command_started(
 def new_window_command(args: Args) -> list[str]:
     name = args.window_name or Path(args.task_file).stem
     return ["new-window", "-P", "-F", "#{session_name}:#{window_index}", "-t", target(args), "-n", name, "-c", str(args.workdir)]
+
+
 def launch_input_state(path: Path | None) -> str:
     """Describe one launch input without retaining its content in the error summary."""
     if path is None:
@@ -1114,7 +1131,7 @@ def retain_new_window_failure(args: Args, error: subprocess.CalledProcessError |
 
 def start_codex(target: str, args: Args) -> None:
     vl_agent = is_vl_agent(args.task_file, target)
-    if vl_agent and args.prompt_file is None:
+    if vl_agent and args.prompt_file is None and not args.resume_idle:
         raise ValueError("VL launches require --prompt-file so the end-goal and reviewer guidance has task-local context.")
     manager_file = args.root / "MANAGER.md" if args.is_manager else None
     excerpt = human_email_excerpt(args)
@@ -1133,6 +1150,7 @@ def start_codex(target: str, args: Args) -> None:
             args.model,
             manager_file,
             human_instruction_file,
+            not args.resume_idle,
         )
         for attempt in range(2):
             baseline_lines = tuple(capture_pane(pane_id, 200, require=True))
@@ -1194,7 +1212,7 @@ def ensure_task_file(args: Args, tmux_target: str) -> Path:
         if existed:
             sep = "" if not text or text.endswith("\n") else "\n"
             text += sep + args.prompt_file.read_text(encoding="utf-8").rstrip() + "\n"
-    if text != existing or not existed:
+    if text != stored_existing or not existed:
         if existed:
             if parse_task_metadata(text, args.root) is None:
                 validate_runat_header(text)
@@ -1268,7 +1286,7 @@ def link_todo(args: Args, tmux_target: str) -> None:
 
 
 def dry_run(args: Args) -> None:
-    tmux_target = f"{args.tmux_session}:DRYRUN" if args.workdir is not None else target(args)
+    tmux_target = target(args) if args.workdir is None or args.tmux_window else f"{args.tmux_session}:DRYRUN"
     path = task_path(args.root, args.task_file)
     print(f"task_file: {path}")
     if not args.no_link:
@@ -1278,7 +1296,7 @@ def dry_run(args: Args) -> None:
             print(f"prelaunch_source: {args.prelaunch_source}")
         command = ["tmux", *new_window_command(args)]
         print("tmux: " + " ".join(shlex.quote(part) for part in command))
-        launch_target = f"{args.tmux_session}:DRYRUN"
+        launch_target = tmux_target
         manager_file = args.root / "MANAGER.md" if args.is_manager else None
         human_instruction_file = Path(tempfile.gettempdir()) / "omo-human-instruction.DRYRUN" if args.human_email_file is not None else None
         launch_command = codex_cmd(
@@ -1291,6 +1309,7 @@ def dry_run(args: Args) -> None:
             args.model,
             manager_file,
             human_instruction_file,
+            not args.resume_idle,
         )
         launch = ["tmux", "send-keys", "-t", launch_target, shell_cmd(worker_command(launch_command, launch_target, args.prelaunch_source, CODEX_LAUNCH_MARKER_DRY_RUN)), "Enter"]
         print("tmux: " + " ".join(shlex.quote(part) for part in launch))
@@ -1339,8 +1358,14 @@ def validate_existing_target_runtime(args: Args) -> str:
 
 
 def validate_inputs(args: Args) -> str:
-    if args.workdir is not None and (not args.model.strip() or not args.reasoning_effort.strip()):
+    if args.workdir is not None and not args.resume_idle and (not args.model.strip() or not args.reasoning_effort.strip()):
         raise ValueError("--workdir requires nonempty --model MODEL and --reasoning-effort EFFORT.")
+    if args.resume_idle and not args.session_id:
+        raise ValueError("--resume-idle requires --session-id.")
+    if args.resume_idle and args.workdir is None:
+        raise ValueError("--resume-idle requires --workdir.")
+    if args.resume_idle and args.prompt_file is not None:
+        raise ValueError("--resume-idle does not accept --prompt-file.")
     if invalid_model := model_error(args.model):
         raise ValueError(invalid_model)
     if (args.human_email_file is None) != (args.human_email_lines is None):
@@ -1351,11 +1376,11 @@ def validate_inputs(args: Args) -> str:
         _ = human_email_excerpt(args)
     if args.workdir is not None:
         _ = validate_launch_session(args)
-    if args.workdir is not None:
+    if args.workdir is not None and not args.resume_idle:
         readable_file(DEFAULT_WORKER_INSTRUCTIONS, "worker defaults")
         if is_vl_agent(args.task_file, target(args)):
             readable_file(VL_WORKER_INSTRUCTIONS, "VL worker defaults")
-    if args.workdir is not None and args.is_manager:
+    if args.workdir is not None and args.is_manager and not args.resume_idle:
         readable_file(args.root / "MANAGER.md", "manager instructions")
     if args.prompt_file is not None and not args.prompt_file.is_file():
         raise ValueError(f"prompt file not found: {args.prompt_file}")

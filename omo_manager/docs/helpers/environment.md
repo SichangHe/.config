@@ -2,7 +2,7 @@
 
 `pyproject.toml`, `.python-version`, and `uv.lock` define the manager-helper Python environment.
 
-`omo_manager_setup_watchers.sh` starts pending and email watchers through `uv run --project ~/.config/omo_manager` when `uv` is installed, falling back to direct script execution otherwise. Setup refresh records supervisor pid files in the manager state directory, stops pidfile-owned supervisors, stale current-format supervisors with a setup-owned launch pidfile under that state directory, and exact old supervisor command lines for the configured root/state, then verifies the expected watcher child process is running before reporting `watchers ready`.
+`omo_manager_setup_watchers.sh` resolves its entrypoint symlink before starting pending and email watchers through `uv run --project ~/.config/omo_manager` when `uv` is installed, falling back to direct script execution otherwise. Setup refresh records supervisor pid files in the manager state directory, treats symlink and canonical watcher script paths as the same owned process, stops stale current-format supervisors with a setup-owned launch pidfile under that state directory and exact old supervisor command lines for the configured root/state, then verifies the expected watcher child process is running before reporting `watchers ready`.
 
 Pidfile-owned means the pid, process start ticks, token, root/state args, and supervisor marker all match. Standalone watchers and current-format supervisors without matching ownership evidence are left running; this is process hygiene for same-user helper scripts, not a Unix security boundary.
 

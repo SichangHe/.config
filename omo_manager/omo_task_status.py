@@ -26,17 +26,20 @@ from omo_manager.omo_blocking import render_task
 from omo_manager.omo_blocking import split_task_text
 from omo_manager.omo_blocking import V2_VERSION
 from omo_manager.omo_blocking import v2_enabled
-from omo_manager.omo_codex_status import exact_pane_id
 from omo_manager.omo_codex_stop import Args as StopArgs
+from omo_manager.omo_codex_stop import capture
+from omo_manager.omo_codex_stop import close_note
 from omo_manager.omo_codex_stop import has_close_note
+from omo_manager.omo_codex_stop import moved_todo_text
 from omo_manager.omo_codex_stop import pane_id
 from omo_manager.omo_codex_stop import record_close
 from omo_manager.omo_codex_stop import stop
-from omo_manager.omo_agent_status import frontmatter_parts
 from omo_manager.omo_agent_status import parse_task_metadata
 from omo_manager.omo_agent_status import parse_task_lines
+from omo_manager.omo_codex_status import exact_pane_id
 from omo_manager.omo_task_lock import task_target_lock
 from omo_manager.omo_task_lock import task_file_lock
+from omo_manager.omo_task_metadata import frontmatter_parts
 from omo_manager.omo_blocking_actor import request as blocking_request
 
 PENDING_MARKER = "(pending)"
@@ -54,6 +57,10 @@ class Args:
     blocked_on: str
     finish_closed_done: bool = False
     session_id: str = ""
+    finish_replaced_done: bool = False
+    replacement_task: Path | None = None
+    stopped_evidence: str = ""
+    replacement_pane_evidence: str = ""
 
 
 class ParsedArgs(argparse.Namespace):
@@ -63,17 +70,44 @@ class ParsedArgs(argparse.Namespace):
     blocked_on: str = ""
     finish_closed_done: bool = False
     session_id: str = ""
+    finish_replaced_done: bool = False
+    replacement_task: Path | None = None
+    stopped_evidence: str = ""
+    replacement_pane_evidence: str = ""
 
 
 def parse_args(argv: list[str]) -> Args:
     parser = argparse.ArgumentParser(description=__doc__)
     _ = parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     _ = parser.add_argument("--finish-closed-done", action="store_true", help="Finish done bookkeeping after the agent was already closed by a failed prior run.")
+    _ = parser.add_argument("--finish-replaced-done", action="store_true", help="Finish a stopped stale record without signaling its pane after proving an explicit live replacement.")
     _ = parser.add_argument("--session-id", default="", help="Session id captured by the prior close, if available.")
+    _ = parser.add_argument("--replacement-task", type=Path, help="Active replacement task file; required with --finish-replaced-done.")
+    _ = parser.add_argument("--stopped-evidence", default="", help="Exact evidence from a prior verified pending-item removal; required with --finish-replaced-done.")
+    _ = parser.add_argument("--replacement-pane-evidence", default="", help="Exact text currently visible in the replacement pane; required with --finish-replaced-done.")
     _ = parser.add_argument("task_file", type=Path)
     _ = parser.add_argument("status", nargs="?", choices=sorted(TASK_FRONTMATTER_STATUSES))
     _ = parser.add_argument("--blocked-on", default="", help="Required when setting status to `blocked`; optional for `long_running`; removed for other statuses.")
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
+    if parsed.finish_closed_done and parsed.finish_replaced_done:
+        parser.error("--finish-closed-done and --finish-replaced-done are mutually exclusive.")
+    if parsed.finish_replaced_done:
+        if parsed.status not in {None, "", "done"}:
+            parser.error("--finish-replaced-done only supports status `done`.")
+        if parsed.session_id:
+            parser.error("--session-id is only valid with --finish-closed-done.")
+        if parsed.replacement_task is None or not parsed.stopped_evidence.strip() or not parsed.replacement_pane_evidence.strip():
+            parser.error("--finish-replaced-done requires --replacement-task, --stopped-evidence, and --replacement-pane-evidence.")
+        return Args(
+            parsed.root.resolve(),
+            parsed.task_file,
+            "done",
+            parsed.blocked_on.strip(),
+            finish_replaced_done=True,
+            replacement_task=parsed.replacement_task.expanduser().resolve(strict=False),
+            stopped_evidence=parsed.stopped_evidence.strip(),
+            replacement_pane_evidence=parsed.replacement_pane_evidence.strip(),
+        )
     if parsed.finish_closed_done:
         if parsed.status not in {None, "", "done"}:
             parser.error("--finish-closed-done only supports status `done`.")
@@ -82,6 +116,8 @@ def parse_args(argv: list[str]) -> Args:
         parser.error("status is required unless --finish-closed-done is used.")
     if parsed.session_id:
         parser.error("--session-id is only valid with --finish-closed-done.")
+    if parsed.replacement_task is not None or parsed.stopped_evidence or parsed.replacement_pane_evidence:
+        parser.error("replacement evidence is only valid with --finish-replaced-done.")
     return Args(parsed.root.resolve(), parsed.task_file, parsed.status, parsed.blocked_on.strip())
 
 
@@ -412,39 +448,122 @@ def mark_done_bookkeeping_failed(root: Path, path: Path, exc: Exception) -> None
     replace_if_unchanged(path, rollback, rollback_before)
 
 
+def finish_done_transaction(root: Path, path: Path, text: str, before: os.stat_result) -> None:
+    """Atomically replace each bookkeeping file and roll back `TODO.md` if the task replacement fails."""
+    todo = root / "TODO.md"
+    if not todo.exists():
+        replace_if_unchanged(path, text, before)
+        return
+    todo_before = todo.stat()
+    todo_text = todo.read_text(encoding="utf-8")
+    task_file = path.relative_to(root).as_posix()
+    updated_todo = moved_todo_text(root, task_file, todo_text)
+    if updated_todo == todo_text:
+        replace_if_unchanged(path, text, before)
+        return
+    replace_if_unchanged(todo, updated_todo, todo_before)
+    moved_todo_state = todo.stat()
+    try:
+        replace_if_unchanged(path, text, before)
+    except Exception as exc:
+        try:
+            replace_if_unchanged(todo, todo_text, moved_todo_state)
+        except Exception as rollback_exc:
+            raise TaskFrontmatterError(f"task update failed and TODO rollback also failed: {rollback_exc}") from exc
+        raise
+
+
+def replacement_task_text(args: Args, stale_path: Path, stale_text: str, stale_before: os.stat_result) -> str:
+    replacement_path = args.replacement_task
+    if replacement_path is None or replacement_path == stale_path:
+        raise TaskFrontmatterError("replacement task must be a distinct explicit file.")
+    if args.root not in replacement_path.parents:
+        raise TaskFrontmatterError("replacement task must be under the work-log root.")
+    if not replacement_path.is_file():
+        raise TaskFrontmatterError(f"replacement task file not found: {replacement_path}")
+    stale = parse_task_metadata(stale_text, args.root)
+    if stale is None:
+        raise TaskFrontmatterError("task file has no frontmatter.")
+    _ = update_frontmatter_status(stale_text, "done", "", args.root)
+    if stale.status not in {"blocked", "running", "long_running"}:
+        raise TaskFrontmatterError("--finish-replaced-done requires a blocked stale task or an empty running stale task.")
+    ensure_manager_has_no_active_children(args.root, stale_path, stale)
+    verified_line = f"(verified removed pending item: {args.stopped_evidence})"
+    verified_empty_line = f"(verified empty stale task: {args.stopped_evidence})"
+    if stale.pending_task_items:
+        if stale.status != "blocked" or verified_line not in stale_text.splitlines():
+            raise TaskFrontmatterError("stopped evidence does not match an exact verified pending-item removal in the blocked stale task.")
+    elif verified_empty_line not in stale_text.splitlines() and (stale.status != "blocked" or verified_line not in stale_text.splitlines()):
+        raise TaskFrontmatterError("empty stale task requires an exact verified empty-stale-task record.")
+    replacement_before = replacement_path.stat()
+    replacement_text = replacement_path.read_text(encoding="utf-8")
+    replacement = parse_task_metadata(replacement_text, args.root)
+    if replacement is None:
+        raise TaskFrontmatterError("replacement task file has no frontmatter.")
+    if replacement.status not in {"running", "long_running", "blocked"} or not replacement.pending_task_items:
+        raise TaskFrontmatterError("replacement task must be active with at least one real pending item.")
+    if not task_is_in_todo_section(args.root, replacement_path, "current"):
+        raise TaskFrontmatterError("replacement task must be listed in the current TODO section.")
+    if not same_tmux_target(stale.runat, replacement.runat):
+        raise TaskFrontmatterError("replacement task `runat` does not match the stale reused pane.")
+    if (stale.managerat, stale.tool, stale.is_manager) != (replacement.managerat, replacement.tool, replacement.is_manager):
+        raise TaskFrontmatterError("replacement task ownership or role does not match the stale task.")
+    pane_id = exact_pane_id(stale.runat)
+    if not pane_id:
+        raise TaskFrontmatterError("stale reused pane is not an exact live pane target.")
+    pane_text = capture(pane_id, 2000)
+    if args.replacement_pane_evidence not in pane_text:
+        raise TaskFrontmatterError("replacement pane evidence is missing from the live reused pane.")
+    if exact_pane_id(stale.runat) != pane_id:
+        raise TaskFrontmatterError("stale reused pane changed while replacement evidence was checked; retry.")
+    if not same_file_state(stale_before, stale_path.stat()):
+        raise TaskFrontmatterError("stale task changed while replacement evidence was being checked; retry.")
+    if not same_file_state(replacement_before, replacement_path.stat()):
+        raise TaskFrontmatterError("replacement task changed while evidence was being checked; retry.")
+    return update_frontmatter_status(stale_text, "done", "", args.root)
+
+
 def finish_closed_done(args: Args, path: Path, text: str, before: os.stat_result) -> tuple[str, str]:
     metadata = parse_task_metadata(text, args.root)
     if metadata is None:
         raise TaskFrontmatterError("task file has no frontmatter.")
     ensure_manager_has_no_active_children(args.root, path, metadata)
+    matching_close_note = has_close_note(text, metadata.runat, args.session_id)
     verified_already_closed = (
         not metadata.is_manager
         and is_close_failed_reason(metadata.blocked_on)
         and not exact_pane_id(metadata.runat)
         and task_is_in_todo_section(args.root, path, "previous")
     )
-    retryable_blocker = is_bookkeeping_failed_reason(metadata.blocked_on) or verified_already_closed or (
-        metadata.blocked_on == DONE_CLOSE_IN_PROGRESS and has_close_note(text, metadata.runat, args.session_id)
-    )
-    if metadata.status != "blocked" or not retryable_blocker:
-        raise TaskFrontmatterError("--finish-closed-done requires a task blocked by failed done close or close bookkeeping.")
-    _ = update_frontmatter_status(text, "done", "", args.root)
     close_session_id = "" if verified_already_closed else args.session_id
-    close_args = StopArgs(metadata.runat, 10.0, 2000, False, False, args.root, path.relative_to(args.root).as_posix(), True, 0.0)
+    retryable_blocker = is_bookkeeping_failed_reason(metadata.blocked_on) or (
+        matching_close_note and (metadata.blocked_on == DONE_CLOSE_IN_PROGRESS or is_close_failed_reason(metadata.blocked_on))
+    ) or verified_already_closed
+    if metadata.status != "blocked" or not retryable_blocker:
+        raise TaskFrontmatterError("--finish-closed-done requires failed close bookkeeping or a matching prior-close note on a failed close.")
+    bookkept = text if matching_close_note else text.rstrip("\n") + close_note(metadata.runat, close_session_id)
+    updated = update_frontmatter_status(bookkept, "done", "", args.root)
     try:
-        record_close(close_args, close_session_id)
+        finish_done_transaction(args.root, path, updated, before)
     except Exception as exc:
         mark_done_bookkeeping_failed(args.root, path, exc)
         raise TaskFrontmatterError(f"done close bookkeeping retry failed; task marked blocked for retry: {exc}") from exc
-    after = path.stat()
-    updated = update_frontmatter_status(path.read_text(encoding="utf-8"), "done", "", args.root)
-    replace_if_unchanged(path, updated, after)
     return metadata.runat, close_session_id
+
+
+def finish_replaced_done(args: Args, path: Path, text: str, before: os.stat_result) -> str:
+    updated = replacement_task_text(args, path, text, before)
+    finish_done_transaction(args.root, path, updated, before)
+    metadata = parse_task_metadata(text, args.root)
+    if metadata is None:
+        raise TaskFrontmatterError("task file has no frontmatter.")
+    return metadata.runat
 
 
 def run(args: Args) -> int:
     target = ""
     session_id = ""
+    preserved_replacement = False
     try:
         path = task_path(args.root, args.task_file)
         before = path.stat()
@@ -454,7 +573,10 @@ def run(args: Args) -> int:
             raise BlockingError("v2 task writes are disabled until reviewed migration enablement")
         if initial_metadata is not None and initial_metadata.version != V2_VERSION and v2_enabled(args.root):
             raise BlockingError("v1 task writes are disabled after v2 enablement")
-        if args.finish_closed_done:
+        if args.finish_replaced_done:
+            target = finish_replaced_done(args, path, text, before)
+            preserved_replacement = True
+        elif args.finish_closed_done:
             target, session_id = finish_closed_done(args, path, text, before)
         else:
             metadata = parse_task_metadata(text, args.root)
@@ -497,7 +619,9 @@ def run(args: Args) -> int:
         print(f"omo_task_status.py: failed to close done agent: {exc}", file=sys.stderr)
         return 2
     if args.status == "done":
-        if target:
+        if preserved_replacement:
+            print(f"Finalized stale task without signaling reused replacement pane {target}.")
+        elif target:
             print(done_close_message(target, session_id))
         print(DONE_REMINDER)
     return 0

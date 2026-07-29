@@ -153,7 +153,7 @@ class Args:
     unread_compression_threshold: int = DEFAULT_MANAGER_UNREAD_COMPRESSION_THRESHOLD
     recent_cleanup_threshold: int = DEFAULT_MANAGER_RECENT_CLEANUP_THRESHOLD
     recent_cleanup_window_s: float = DEFAULT_MANAGER_RECENT_CLEANUP_WINDOW_S
-    mail_thresholds: bool = True
+    mail_thresholds: bool = False
     inbox_identity: str = ""
     manager_mail_recipient: str = ""
     manager_mail_subject_tags: bool = True
@@ -201,7 +201,26 @@ def parse_args(argv: list[str]) -> Args:
     manager_file = parsed.manager_file
     if manager_file is not None and not manager_file.is_absolute():
         manager_file = root / manager_file
-    return Args(root, parsed.manager_url.rstrip("/"), parsed.mail_dir, parsed.state_dir, manager_file, parsed.once, "", parsed.recovery_debounce_s, parsed.restart_script, parsed.idle_wait_s, parsed.manager_target.strip(), parsed.imap_timeout_s, parsed.pull_interval_s, parsed.idle_exit_after_s, parsed.unread_compression_threshold, parsed.recent_cleanup_threshold, parsed.recent_cleanup_window_s)
+    return Args(
+        root,
+        parsed.manager_url.rstrip("/"),
+        parsed.mail_dir,
+        parsed.state_dir,
+        manager_file,
+        parsed.once,
+        "",
+        parsed.recovery_debounce_s,
+        parsed.restart_script,
+        parsed.idle_wait_s,
+        parsed.manager_target.strip(),
+        parsed.imap_timeout_s,
+        parsed.pull_interval_s,
+        parsed.idle_exit_after_s,
+        parsed.unread_compression_threshold,
+        parsed.recent_cleanup_threshold,
+        parsed.recent_cleanup_window_s,
+        mail_thresholds=True,
+    )
 
 
 def current_manager_file(args: Args) -> Path:
@@ -605,6 +624,10 @@ def source_ref(root: Path, txt_path: Path) -> Path:
     try:
         return txt_path.relative_to(root)
     except ValueError:
+        pass
+    try:
+        return txt_path.resolve(strict=False).relative_to(root.resolve(strict=False))
+    except (OSError, RuntimeError, ValueError):
         return txt_path
 
 

@@ -293,16 +293,14 @@ def section_bounds(lines: list[str], name: str) -> tuple[int, int] | None:
     return start, end
 
 
-def move_todo_to_previous(root: Path, task_file: str) -> None:
-    todo = root / "TODO.md"
-    if not todo.exists():
-        return
+def moved_todo_text(root: Path, task_file: str, text: str) -> str:
+    """Return `TODO.md` text with the task moved from `current` to `previous`."""
     ref = task_ref(root, task_file)
     aliases = {task_file, ref, str(task_path(root, task_file))}
-    lines = todo.read_text(encoding="utf-8").splitlines()
+    lines = text.splitlines()
     current = section_bounds(lines, "current")
     if current is None:
-        return
+        return text
     current_start, current_end = current
     source_idx = -1
     for idx in range(current_start + 1, current_end):
@@ -311,7 +309,7 @@ def move_todo_to_previous(root: Path, task_file: str) -> None:
             source_idx = idx
             break
     if source_idx < 0:
-        return
+        return text
     moved = lines.pop(source_idx).strip()
     moved_token = moved.split(maxsplit=1)[0]
     if moved_token != ref:
@@ -331,10 +329,19 @@ def move_todo_to_previous(root: Path, task_file: str) -> None:
         if token in aliases:
             if token != ref:
                 lines[idx] = lines[idx].replace(token, ref, 1)
-            _ = todo.write_text("\n".join(lines) + "\n", encoding="utf-8")
-            return
+            return "\n".join(lines) + "\n"
     lines.insert(previous_start + 1, moved)
-    _ = todo.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return "\n".join(lines) + "\n"
+
+
+def move_todo_to_previous(root: Path, task_file: str) -> None:
+    todo = root / "TODO.md"
+    if not todo.exists():
+        return
+    text = todo.read_text(encoding="utf-8")
+    updated = moved_todo_text(root, task_file, text)
+    if updated != text:
+        _ = todo.write_text(updated, encoding="utf-8")
 
 
 def wait_shell(target: str, deadline_s: float) -> None:

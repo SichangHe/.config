@@ -195,3 +195,7 @@ google-chrome-for-testing/
 /browser-use-opencode/
 opencode/tui.json
 omo_manager/local.env
+agent_skills/.system/
+calibre/
+pb-browser-scripts.env
+tokscale/
