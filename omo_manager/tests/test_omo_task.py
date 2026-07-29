@@ -944,6 +944,107 @@ class OmoTaskTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "nonempty model identifier"):
             validate_inputs(args)
 
+    def test_validate_inputs_rejects_worker_launch_in_human_session(self) -> None:
+        args = parse_args(
+            [
+                "--task-file",
+                "x.md",
+                "--tmux-session",
+                "hcfg",
+                "--workdir",
+                "/tmp",
+                "--model",
+                "gpt-5.6-sol",
+                "--reasoning-effort",
+                "medium",
+            ]
+        )
+
+        with patch(
+            "omo_manager.omo_task.subprocess.run",
+            return_value=subprocess.CompletedProcess(["tmux"], 0, "hcfg\n", ""),
+        ), self.assertRaisesRegex(ValueError, "human-owned `h\\*` tmux sessions"):
+            validate_inputs(args)
+
+    def test_validate_inputs_resolves_human_session_alias_before_launch(self) -> None:
+        args = parse_args(
+            [
+                "--task-file",
+                "x.md",
+                "--tmux-session",
+                "=hcfg",
+                "--workdir",
+                "/tmp",
+                "--model",
+                "gpt-5.6-sol",
+                "--reasoning-effort",
+                "medium",
+            ]
+        )
+
+        with patch(
+            "omo_manager.omo_task.subprocess.run",
+            return_value=subprocess.CompletedProcess(["tmux"], 0, "hcfg\n", ""),
+        ), self.assertRaisesRegex(ValueError, "authoritative human email excerpt"):
+            validate_inputs(args)
+
+    def test_validate_inputs_allows_named_human_session_from_authoritative_email(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mail = root / "manager_mail"
+            mail.mkdir()
+            (mail / "request.txt").write_text("Please launch my direct agent in hreview now.\n", encoding="utf-8")
+            (root / "x.md").write_text(
+                "---\nversion: v1.0.0\nstatus: blocked\nblocked_on: awaiting relaunch\nrunat: old:1\ntool: codex\n"
+                "managerat: mgr:1\nis_manager: false\npending_task_items: []\n---\n"
+                "keep this worker available\n- continue the direct human task\n",
+                encoding="utf-8",
+            )
+            args = Args(
+                root,
+                "x.md",
+                "=hreview",
+                "",
+                "codex",
+                root,
+                "",
+                None,
+                False,
+                False,
+                "",
+                "medium",
+                (),
+                model="gpt-5.6-sol",
+                manager_target="mgr:1",
+                human_email_file=Path("manager_mail/request.txt"),
+                human_email_lines=(1, 1),
+            )
+
+            with patch(
+                "omo_manager.omo_task.subprocess.run",
+                return_value=subprocess.CompletedProcess(["tmux"], 0, "hreview\n", ""),
+            ):
+                self.assertEqual("Please launch my direct agent in hreview now.\n", validate_inputs(args))
+
+    def test_new_window_binds_the_resolved_session_exactly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = Args(Path(tmp), "x.md", "cfg", "9", "codex", Path(tmp), "x", None, False, False, "", "medium", (), model="gpt-5.6-sol")
+            with patch("omo_manager.omo_task.resolved_launch_session_name", return_value="cfg"), patch("omo_manager.omo_task.tmux") as tmux, patch(
+                "omo_manager.omo_task.wait_shell"
+            ):
+                tmux.return_value.stdout = "cfg:9\n"
+                self.assertEqual("cfg:9", new_window(args))
+            self.assertEqual("=cfg:9", tmux.call_args.args[0][5])
+
+    def test_new_window_rechecks_human_session_before_creation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = Args(Path(tmp), "x.md", "cfg", "", "codex", Path(tmp), "x", None, False, False, "", "medium", (), model="gpt-5.6-sol")
+            with patch("omo_manager.omo_task.resolved_launch_session_name", return_value="hcfg"), patch("omo_manager.omo_task.tmux") as tmux, self.assertRaisesRegex(
+                ValueError, "human-owned `h\\*` tmux sessions"
+            ):
+                new_window(args)
+            tmux.assert_not_called()
+
     def test_raw_model_flags_are_rejected(self) -> None:
         raw_argvs = (
             ("--codex-flag=--model", "--codex-flag", "gpt-5.6-terra"),

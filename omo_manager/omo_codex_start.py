@@ -256,6 +256,8 @@ def wait_started(pane: Pane, marker: str, timeout_s: float) -> str:
 
 def start(args: Args) -> str:
     pane = resolve_pane(args.target)
+    if pane.target.partition(":")[0].startswith("h"):
+        raise StartError("omo_codex_start cannot modify a human-owned `h*` tmux session; use the human-authorized task launcher.")
     require_same_shell(pane)
     if os.environ.get("TMUX_PANE") == pane.pane_id:
         raise StartError("run this helper from a different pane than the empty target.")

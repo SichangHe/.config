@@ -410,6 +410,46 @@ def target_session(tmux_target: str) -> str:
     return tmux_target.split(":", 1)[0]
 
 
+def is_human_tmux_session(tmux_target: str) -> bool:
+    """Return whether a target belongs to the human-only `h*` namespace."""
+
+    return target_session(tmux_target).startswith("h")
+
+
+def resolved_launch_session_name(session_target: str) -> str:
+    """Resolve tmux aliases before applying the human-session boundary."""
+
+    result = subprocess.run(
+        ["tmux", "display-message", "-p", "-t", session_target, "#S"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    resolved = result.stdout.strip() if result.returncode == 0 else ""
+    return resolved or target_session(session_target).lstrip("=")
+
+
+def human_authorized_launch_session(args: Args, session_name: str) -> bool:
+    """Require auditable human text naming an `h*` launch session."""
+
+    if args.human_email_file is None or args.human_email_lines is None:
+        return False
+    excerpt = human_email_excerpt(args)
+    return re.search(rf"(?<![A-Za-z0-9_.-]){re.escape(session_name)}(?=$|[^A-Za-z0-9_.-])", excerpt) is not None
+
+
+def validate_launch_session(args: Args) -> str:
+    """Resolve and authorize the tmux session used for a new window."""
+
+    session_name = resolved_launch_session_name(args.tmux_session)
+    if session_name.startswith("h") and not human_authorized_launch_session(args, session_name):
+        raise ValueError(
+            "launches in human-owned `h*` tmux sessions require an authoritative human email excerpt naming that exact session."
+        )
+    return session_name
+
+
 def is_vl_task_file(task_file: str) -> bool:
     return Path(task_file).name.startswith("vl_")
 
@@ -1001,7 +1041,7 @@ def wait_command_started(
 
 def new_window_command(args: Args) -> list[str]:
     name = args.window_name or Path(args.task_file).stem
-    return ["new-window", "-P", "-F", "#{session_name}:#{window_index}", "-t", args.tmux_session, "-n", name, "-c", str(args.workdir)]
+    return ["new-window", "-P", "-F", "#{session_name}:#{window_index}", "-t", target(args), "-n", name, "-c", str(args.workdir)]
 def launch_input_state(path: Path | None) -> str:
     """Describe one launch input without retaining its content in the error summary."""
     if path is None:
@@ -1114,11 +1154,13 @@ def start_codex(target: str, args: Args) -> None:
 def new_window(args: Args) -> str:
     if args.workdir is None:
         return target(args)
+    session_name = validate_launch_session(args)
+    bound_args = replace(args, tmux_session=f"={session_name}")
     try:
-        out = tmux(new_window_command(args), check=True)
+        out = tmux(new_window_command(bound_args), check=True)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as error:
         try:
-            evidence = retain_new_window_failure(args, error)
+            evidence = retain_new_window_failure(bound_args, error)
         except OSError as evidence_error:
             raise RuntimeError(f"tmux new-window failed; diagnostic retention failed: {evidence_error}") from error
         raise RuntimeError(f"tmux new-window failed; diagnostic: {evidence}") from error
@@ -1307,6 +1349,8 @@ def validate_inputs(args: Args) -> str:
         raise ValueError("--human-email-file and --human-email-lines require --workdir.")
     if args.human_email_file is not None:
         _ = human_email_excerpt(args)
+    if args.workdir is not None:
+        _ = validate_launch_session(args)
     if args.workdir is not None:
         readable_file(DEFAULT_WORKER_INSTRUCTIONS, "worker defaults")
         if is_vl_agent(args.task_file, target(args)):

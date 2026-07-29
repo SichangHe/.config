@@ -17,7 +17,7 @@ if __package__ in {None, ""}:
 from omo_manager.omo_codex_status import Args as StatusArgs
 from omo_manager.omo_codex_status import Report, inspect
 from omo_manager.omo_tmux_send import CodexSendOptions
-from omo_manager.omo_tmux_send import run_tmux
+from omo_manager.omo_tmux_send import send_system_to_codex as run_tmux
 from omo_manager.omo_tmux_send import run_control_to_codex
 
 

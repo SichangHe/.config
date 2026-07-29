@@ -133,6 +133,18 @@ class ManagerRotateTests(unittest.TestCase):
                 with self.assertRaisesRegex(RotationError, "coordinator pane must differ"):
                     preflight(args)
 
+    def test_preflight_rejects_human_owned_session_before_process_inspection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pane = PaneIdentity("hcfg:2.0", "%42", "@9", 100, root)
+            args = Args("hcfg:2.0", root, root / "state", None, None, 2.0, 0.01, None)
+            with patch("omo_manager.omo_manager_rotate.resolve_exact_pane", return_value=pane), patch(
+                "omo_manager.omo_manager_rotate.read_processes"
+            ) as read_processes, self.assertRaisesRegex(RotationError, "human-owned"):
+                preflight(args)
+
+            read_processes.assert_not_called()
+
     def test_argv_parsing_supports_long_short_and_equals_forms(self) -> None:
         models, efforts = option_values(
             (

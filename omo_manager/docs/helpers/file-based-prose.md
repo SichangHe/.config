@@ -13,3 +13,4 @@ To launch a task with authoritative text selected from stored human email, use `
 `omo_task.py` always injects `WORKER_DEFAULTS.md` into actual Codex and PCODX launches. It adds `VL_WORKER_DEFAULTS.md` for VL launches and `ROOT/MANAGER.md` for `--is-manager`, before custom `--prompt-file` text. These launcher-managed instructions and human excerpts are not task bookkeeping; only custom prompt-file text is stored in task files.
 
 Human-review note: review and approve this standing manager rule and consider adding the same invariant to broader AGENTS.md.
+Helper-delivered text originating from an agent is wrapped as `<agent_message from="SESSION:WINDOW">`. The `from` value identifies the live sending agent's canonical tmux window when available; `helper` means no live agent pane identity was available. Nested envelope tags in payloads are escaped. Watcher and system notices are not wrapped. The envelope is routing provenance, not human authority.

@@ -428,8 +428,28 @@ class PendingReportDeliveryTests(unittest.TestCase):
 
             self.assertEqual(("agent", "manager"), (marker.origin, marker.source))
             self.assertEqual("vl:2", push.call_args.args[3])
+            self.assertIn('<agent_message from="vl:15">', push.call_args.args[2])
             self.assertIn("<manager_delegation>", push.call_args.args[2])
             self.assertNotIn("<human_instruction>", push.call_args.args[2])
+
+    def test_watcher_manager_notice_is_not_agent_enveloped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "worker.md"
+            task.write_text(
+                f"{task_frontmatter(runat='vl:2', managerat='vl:15')}\n"
+                "(pending)\n(from manager bidirectional blocking wake wake-id)\nDependency completed.\n",
+                encoding="utf-8",
+            )
+            args = args_for(root)
+            marker = watcher.find_markers(root, [task])[0]
+
+            with patch.object(watcher, "push_marker_delivery", return_value=watcher.DeliveryResult(watcher.ASYNC_DELIVERY_STARTED)) as push:
+                _ = watcher.push_ref(args, {}, 100.0, marker, watcher.marker_attachments(args, marker))
+
+            self.assertEqual(("agent", "manager"), (marker.origin, marker.source))
+            self.assertNotIn("<agent_message", push.call_args.args[2])
+            self.assertIn("<manager_delegation>", push.call_args.args[2])
 
     def test_manual_manager_lookalike_remains_human(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

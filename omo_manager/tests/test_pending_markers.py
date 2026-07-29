@@ -696,6 +696,31 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertNotIn("pending items recorded", fallback)
             self.assertNotIn("independent later request", fallback)
 
+    def test_agent_report_delivery_has_producer_envelope(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            report = valid_agent_report(self, "worker result\n", target="vl:2", name="worker_report_envelope")
+            task = root / "manager.md"
+            task.write_text(
+                f"{task_frontmatter(runat='vl:15', managerat='main:1', is_manager=True)}\n"
+                f"(pending)\n(from agent vl:2 {report})\n",
+                encoding="utf-8",
+            )
+            args = Args(root, "", root / "state", 1, 1, 1, Path("/bin/false"), True, False, manager_target="main:1")
+            marker = find_markers(root, [task])[0]
+
+            with patch.object(watcher, "push_marker_delivery", return_value=watcher.DeliveryResult(watcher.ASYNC_DELIVERY_STARTED)) as push:
+                self.assertEqual(
+                    watcher.ASYNC_DELIVERY_STARTED,
+                    watcher.push_ref(args, {}, 100.0, marker, watcher.marker_attachments(args, marker)),
+                )
+
+            self.assertIn('<agent_message from="vl:2">', push.call_args.args[2])
+            self.assertIn("<agent_report>", push.call_args.args[2])
+            self.assertIn('<agent_message from="vl:2">', push.call_args.kwargs["failure_fallback_text"])
+
     def test_different_agent_report_artifacts_are_delivered_independently(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
@@ -6212,7 +6237,9 @@ class PendingMarkerTests(unittest.TestCase):
                 calls.append(capture_delivery_call(command))
                 return subprocess.CompletedProcess(command, 0)
 
-            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+            with patch.object(watcher, "agent_problem_target_is_ready", return_value=True), patch(
+                "omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run
+            ):
                 self.assertTrue(watcher.maybe_push_agent_problems(args, {}, 1000.0))
 
             self.assertEqual(1, len(calls))
@@ -6474,7 +6501,9 @@ class PendingMarkerTests(unittest.TestCase):
             calls.append(capture_delivery_call(command))
             return subprocess.CompletedProcess(command, 0)
 
-        with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+        with patch.object(watcher, "inspect_codex", return_value=MagicMock(status="ready")), patch(
+            "omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run
+        ):
             self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
         self.assertEqual(2, len(calls))
         by_target = {call[call.index("--manager-target") + 1]: call[1] for call in calls}
@@ -6485,6 +6514,128 @@ class PendingMarkerTests(unittest.TestCase):
         self.assertIn("local.md wl:3 <output>idle</output>", by_target["wl:16"])
         self.assertNotIn("owned.md", by_target["wl:16"])
         self.assertNotIn("blocked agents are ready", by_target["wl:16"])
+
+    def test_agent_problem_target_gate_requires_ready_and_throttles_all_problem_sets(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1", agent_problem_repeat_s=300.0)
+        seen: dict[str, float] = {}
+        with patch.object(watcher, "inspect_codex", return_value=MagicMock(status="running")) as inspect:
+            self.assertFalse(watcher.agent_problem_target_is_ready(args, seen, "wl:1", 1000.0))
+            inspect.assert_called_once()
+        with patch.object(watcher, "inspect_codex", return_value=MagicMock(status="ready")):
+            self.assertTrue(watcher.agent_problem_target_is_ready(args, seen, "wl:1", 1000.0))
+            watcher.remember_seen(seen, watcher.agent_problem_target_attempt_key("wl:1"), 1000.0)
+            self.assertFalse(watcher.agent_problem_target_is_ready(args, seen, "wl:1", 1299.0))
+            self.assertTrue(watcher.agent_problem_target_is_ready(args, seen, "wl:1", 1300.0))
+
+    def test_agent_problem_check_does_not_queue_notice_for_busy_manager(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1", agent_problem_repeat_s=300.0)
+        result = watcher.CommandOutput(
+            "agent-problems",
+            3,
+            "agent-problems: ready=1\nready: task=worker.md evidence=target=vl:2 task_status=running output=idle owner_target=wl:1\n",
+            "",
+        )
+        with patch.object(watcher, "agent_problem_target_is_ready", return_value=False), patch.object(
+            watcher, "push_manager_text_to_target"
+        ) as push:
+            self.assertFalse(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
+            push.assert_not_called()
+
+    def test_agent_problem_check_reserves_manager_wide_cooldown_before_async_completion(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1", agent_problem_repeat_s=300.0)
+        first = watcher.CommandOutput(
+            "agent-problems",
+            3,
+            "agent-problems: ready=1\nready: task=first.md evidence=target=vl:2 task_status=running output=idle owner_target=wl:1\n",
+            "",
+        )
+        changed = watcher.CommandOutput(
+            "agent-problems",
+            3,
+            "agent-problems: ready=1\nready: task=second.md evidence=target=vl:3 task_status=running output=different owner_target=wl:1\n",
+            "",
+        )
+        seen: dict[str, float] = {}
+        with patch.object(watcher, "inspect_codex", return_value=MagicMock(status="ready")), patch.object(
+            watcher, "push_manager_text_to_target", return_value=watcher.ASYNC_DELIVERY_STARTED
+        ) as push:
+            self.assertTrue(watcher.handle_agent_problem_result(args, seen, first, 1000.0))
+            self.assertFalse(watcher.handle_agent_problem_result(args, seen, changed, 1001.0))
+            self.assertEqual(1, push.call_count)
+
+    def test_delayed_problem_completion_does_not_rollback_newer_manager_cooldown(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1", agent_problem_repeat_s=300.0)
+
+        def result(task: str) -> watcher.CommandOutput:
+            return watcher.CommandOutput(
+                "agent-problems",
+                3,
+                f"agent-problems: ready=1\nready: task={task} evidence=target=vl:2 task_status=running output=idle owner_target=wl:1\n",
+                "",
+            )
+
+        events: list[watcher.DeliverySuccessEvent] = []
+
+        def capture_send(_args: Args, _text: str, _target: str, event: watcher.DeliverySuccessEvent, **_kwargs: object) -> int:
+            events.append(event)
+            return watcher.ASYNC_DELIVERY_STARTED
+
+        seen: dict[str, float] = {}
+        with patch.object(watcher, "inspect_codex", return_value=MagicMock(status="ready")), patch.object(
+            watcher, "push_manager_text_to_target", side_effect=capture_send
+        ) as push:
+            self.assertTrue(watcher.handle_agent_problem_result(args, seen, result("first.md"), 1000.0))
+            self.assertTrue(watcher.handle_agent_problem_result(args, seen, result("second.md"), 1301.0))
+            watcher.DELIVERY_SUCCESS_EVENTS.put(events[0])
+            self.assertTrue(watcher.drain_delivery_successes(args, seen, 1400.0))
+            self.assertFalse(watcher.handle_agent_problem_result(args, seen, result("third.md"), 1401.0))
+            self.assertEqual(2, push.call_count)
+
+    def test_agent_problem_guard_rejects_manager_that_became_busy_before_paste(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        line = "ready: task=worker.md"
+        guard = watcher.AgentProblemGuard(("status",), (line,), ready_target="wl:1")
+        current = subprocess.CompletedProcess(guard.command, 3, f"agent-problems: ready=1\n{line}\n", "")
+        with patch.object(watcher, "inspect_codex", return_value=MagicMock(status="running")), patch(
+            "omo_manager.omo_pending_watch.subprocess.run", return_value=current
+        ) as status_run:
+            self.assertFalse(watcher.agent_problem_guard_current(guard))
+            status_run.assert_called_once()
+
+    def test_busy_recovery_managers_send_one_throttled_human_fallback(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1", agent_problem_repeat_s=300.0)
+        output = "agent-problems: error=1\nerror: task=manager evidence=target=wl:1 role=manager output=fatal"
+        seen: dict[str, float] = {}
+        with patch.object(watcher, "active_manager_problem_targets", return_value=["wl:2", "wl:3"]), patch.object(
+            watcher, "inspect_codex", return_value=MagicMock(status="running")
+        ), patch.object(watcher, "email_human_manager_problem", return_value=True) as email:
+            self.assertTrue(watcher.route_or_email_manager_problem(args, seen, output, 1000.0))
+            self.assertFalse(watcher.route_or_email_manager_problem(args, seen, output + " changed", 1001.0))
+            self.assertEqual(1, email.call_count)
+
+    def test_missing_recovery_managers_send_one_throttled_human_fallback(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1", agent_problem_repeat_s=300.0)
+        output = "agent-problems: error=1\nerror: task=manager evidence=target=wl:1 role=manager output=fatal"
+        seen: dict[str, float] = {}
+        with patch.object(watcher, "active_manager_problem_targets", return_value=[]), patch.object(
+            watcher, "email_human_manager_problem", return_value=True
+        ) as email:
+            self.assertTrue(watcher.route_or_email_manager_problem(args, seen, output, 1000.0))
+            self.assertFalse(watcher.route_or_email_manager_problem(args, seen, output + " changed", 1001.0))
+            self.assertEqual(1, email.call_count)
 
     def test_agent_problem_check_formats_untracked_agent_group(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -6527,7 +6678,9 @@ class PendingMarkerTests(unittest.TestCase):
             return subprocess.CompletedProcess(command, 0)
 
         seen: dict[str, float] = {}
-        with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+        with patch.object(watcher, "agent_problem_target_is_ready", return_value=True), patch(
+            "omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run
+        ):
             self.assertFalse(watcher.handle_agent_problem_result(args, seen, result, 1000.0))
             self.assertFalse(watcher.handle_agent_problem_result(args, seen, result, 1001.0))
             self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 1002.0))
@@ -6557,7 +6710,9 @@ class PendingMarkerTests(unittest.TestCase):
             calls.append(capture_delivery_call(command))
             return subprocess.CompletedProcess(command, 0)
 
-        with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run), patch.object(watcher, "email_human_manager_problem", side_effect=AssertionError("unexpected human email")):
+        with patch.object(watcher, "agent_problem_target_is_ready", return_value=True), patch(
+            "omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run
+        ), patch.object(watcher, "email_human_manager_problem", side_effect=AssertionError("unexpected human email")):
             self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
         self.assertEqual(1, len(calls))
         self.assertEqual("vl:15", calls[0][calls[0].index("--manager-target") + 1])
@@ -6681,7 +6836,9 @@ class PendingMarkerTests(unittest.TestCase):
                 calls.append(capture_delivery_call(command))
                 return subprocess.CompletedProcess(command, 0)
 
-            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+            with patch.object(watcher, "agent_problem_target_is_ready", return_value=True), patch(
+                "omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run
+            ):
                 self.assertTrue(watcher.maybe_push_agent_problems(args, {}, 1000.0))
             self.assertEqual("vl:15", calls[0][calls[0].index("--manager-target") + 1])
             pushed_text = calls[0][1]
@@ -6750,7 +6907,9 @@ class PendingMarkerTests(unittest.TestCase):
             f"agent-problems: not_codex=1\n{stale_line}\n",
             "",
         )
-        with patch("omo_manager.omo_pending_watch.subprocess.run", return_value=still_failed):
+        with patch.object(watcher, "inspect_codex", return_value=MagicMock(status="ready")), patch(
+            "omo_manager.omo_pending_watch.subprocess.run", return_value=still_failed
+        ):
             self.assertTrue(watcher.agent_problem_guard_current(guard))
 
     def test_blocked_manager_dependency_snapshot_alerts_on_valid_to_valid_changes(self) -> None:
@@ -6891,12 +7050,16 @@ class PendingMarkerTests(unittest.TestCase):
             )
             snapshots: dict[str, str] = {}
             reported_snapshots: dict[str, str] = {}
-            with patch.object(watcher, "push_manager_text_to_target", return_value=1):
+            with patch.object(watcher, "agent_problem_target_is_ready", return_value=True), patch.object(
+                watcher, "push_manager_text_to_target", return_value=1
+            ):
                 self.assertFalse(watcher.handle_agent_problem_result(args, {}, result, 1000.0, snapshots, reported_snapshots))
             self.assertIn("manager.md", snapshots)
             self.assertNotIn("manager.md", reported_snapshots)
 
-            with patch.object(watcher, "push_manager_text_to_target", return_value=0) as push:
+            with patch.object(watcher, "agent_problem_target_is_ready", return_value=True), patch.object(
+                watcher, "push_manager_text_to_target", return_value=0
+            ) as push:
                 self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1001.0, snapshots, reported_snapshots))
             self.assertEqual(1, push.call_count)
             self.assertIn("manager.md", reported_snapshots)
@@ -7035,10 +7198,49 @@ class PendingMarkerTests(unittest.TestCase):
                 task_frontmatter("blocked", runat="cfg:1", managerat="main:0", is_manager=True, blocked_on="leaf-b.md"),
                 encoding="utf-8",
             )
-            with patch.object(watcher, "push_manager_text_to_target", return_value=watcher.ASYNC_DELIVERY_STARTED) as push:
+            with patch.object(watcher, "inspect_codex", return_value=MagicMock(status="ready")), patch.object(
+                watcher, "push_manager_text_to_target", return_value=watcher.ASYNC_DELIVERY_STARTED
+            ) as push:
                 self.assertTrue(watcher.maybe_push_dependency_transitions(args, snapshots, 1001.0))
                 self.assertFalse(watcher.maybe_push_dependency_transitions(args, snapshots, 1002.0))
                 self.assertEqual(1, push.call_count)
+
+    def test_dependency_changes_send_at_most_one_aggregate_to_same_manager(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "TODO.md").write_text(
+                "current:\nmanager-a.md cfg:1\nmanager-b.md cfg:2\nleaf-a1.md cfg:3\nleaf-b1.md cfg:4\nleaf-a2.md cfg:5\nleaf-b2.md cfg:6\n",
+                encoding="utf-8",
+            )
+            for task, target, blocker in (("manager-a.md", "cfg:1", "leaf-a1.md"), ("manager-b.md", "cfg:2", "leaf-a2.md")):
+                _ = (root / task).write_text(
+                    task_frontmatter("blocked", runat=target, managerat="main:0", is_manager=True, blocked_on=blocker),
+                    encoding="utf-8",
+                )
+            for task, target, manager in (
+                ("leaf-a1.md", "cfg:3", "cfg:1"),
+                ("leaf-b1.md", "cfg:4", "cfg:1"),
+                ("leaf-a2.md", "cfg:5", "cfg:2"),
+                ("leaf-b2.md", "cfg:6", "cfg:2"),
+            ):
+                _ = (root / task).write_text(task_frontmatter("running", runat=target, managerat=manager), encoding="utf-8")
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="main:0", agent_problem_repeat_s=300.0)
+            snapshots: dict[str, str] = {}
+            seen: dict[str, float] = {}
+            self.assertFalse(watcher.maybe_push_dependency_transitions(args, snapshots, 1000.0, seen))
+            for task, target, blocker in (("manager-a.md", "cfg:1", "leaf-b1.md"), ("manager-b.md", "cfg:2", "leaf-b2.md")):
+                _ = (root / task).write_text(
+                    task_frontmatter("blocked", runat=target, managerat="main:0", is_manager=True, blocked_on=blocker),
+                    encoding="utf-8",
+                )
+            with patch.object(watcher, "inspect_codex", return_value=MagicMock(status="ready")), patch.object(
+                watcher, "push_manager_text_to_target", return_value=watcher.ASYNC_DELIVERY_STARTED
+            ) as push:
+                self.assertTrue(watcher.maybe_push_dependency_transitions(args, snapshots, 1001.0, seen))
+            self.assertEqual(1, push.call_count)
+            self.assertEqual(1, sum(snapshot == watcher.dependency_snapshot_state(root)[task][1] for task, snapshot in snapshots.items() if task.startswith("manager-")))
 
     def test_resumable_worker_dependency_snapshot_alerts_on_valid_change(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -7181,7 +7383,9 @@ class PendingMarkerTests(unittest.TestCase):
                 calls.append(capture_delivery_call(command))
                 return subprocess.CompletedProcess(command, 0)
 
-            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+            with patch.object(watcher, "agent_problem_target_is_ready", return_value=True), patch(
+                "omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run
+            ):
                 self.assertTrue(watcher.maybe_push_agent_problems(args, {}, 1000.0))
             self.assertEqual(1, len(calls))
             self.assertEqual("vl:15", calls[0][calls[0].index("--manager-target") + 1])
@@ -7239,7 +7443,9 @@ class PendingMarkerTests(unittest.TestCase):
                 calls.append(capture_delivery_call(command))
                 return subprocess.CompletedProcess(command, 0)
 
-            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run), patch.object(watcher, "email_human_manager_problem", side_effect=AssertionError("unexpected human email")):
+            with patch.object(watcher, "agent_problem_target_is_ready", return_value=True), patch(
+                "omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run
+            ), patch.object(watcher, "email_human_manager_problem", side_effect=AssertionError("unexpected human email")):
                 self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
             self.assertEqual(1, len(calls))
             self.assertEqual("wl:2", calls[0][calls[0].index("--manager-target") + 1])
@@ -7269,7 +7475,9 @@ class PendingMarkerTests(unittest.TestCase):
                 calls.append(capture_delivery_call(command))
                 return subprocess.CompletedProcess(command, 0)
 
-            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run), patch.object(watcher, "email_human_manager_problem", side_effect=AssertionError("unexpected human email")):
+            with patch.object(watcher, "agent_problem_target_is_ready", return_value=True), patch(
+                "omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run
+            ), patch.object(watcher, "email_human_manager_problem", side_effect=AssertionError("unexpected human email")):
                 self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
             self.assertEqual(1, len(calls))
             self.assertEqual("wl:2", calls[0][calls[0].index("--manager-target") + 1])
@@ -7296,7 +7504,9 @@ class PendingMarkerTests(unittest.TestCase):
                 target = command[command.index("--target") + 1]
                 return subprocess.CompletedProcess(command, 2 if target == "wl:2" else 0)
 
-            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run), patch.object(watcher, "email_human_manager_problem", side_effect=AssertionError("unexpected human email")):
+            with patch.object(watcher, "agent_problem_target_is_ready", return_value=True), patch(
+                "omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run
+            ), patch.object(watcher, "email_human_manager_problem", side_effect=AssertionError("unexpected human email")):
                 self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
             self.assertEqual(["wl:2"], [call[call.index("--manager-target") + 1] for call in calls])
 
@@ -7323,7 +7533,9 @@ class PendingMarkerTests(unittest.TestCase):
                 calls.append(capture_delivery_call(command))
                 return subprocess.CompletedProcess(command, 0)
 
-            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run), patch.object(watcher, "email_human_manager_problem", side_effect=AssertionError("unexpected human email")):
+            with patch.object(watcher, "agent_problem_target_is_ready", return_value=True), patch(
+                "omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run
+            ), patch.object(watcher, "email_human_manager_problem", side_effect=AssertionError("unexpected human email")):
                 self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 1000.0))
             self.assertEqual(["wl:2", "wl:3"], [call[call.index("--manager-target") + 1] for call in calls])
             self.assertIn("manager (this is the main manager) wl:1.0 <output>Selected model is at capacity</output>", calls[0][1])
@@ -7561,9 +7773,9 @@ class PendingMarkerTests(unittest.TestCase):
         )
         seen: dict[str, float] = {}
         delivery = watcher.DeliveryResult(watcher.ASYNC_DELIVERY_STARTED)
-        with patch.object(watcher, "active_manager_problem_targets", return_value=["vl:2"]), patch.object(
-            watcher, "try_send_delivery_text", return_value=delivery
-        ) as push:
+        with patch.object(watcher, "agent_problem_target_is_ready", return_value=True), patch.object(
+            watcher, "active_manager_problem_targets", return_value=["vl:2"]
+        ), patch.object(watcher, "try_send_delivery_text", return_value=delivery) as push:
             self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 1000.0))
             self.assertFalse(watcher.handle_agent_problem_result(args, seen, result, 1030.0))
 
@@ -7589,9 +7801,9 @@ class PendingMarkerTests(unittest.TestCase):
             events.append(kwargs["success_event"])
             return watcher.DeliveryResult(watcher.ASYNC_DELIVERY_STARTED)
 
-        with patch.object(watcher, "active_manager_problem_targets", return_value=["vl:2"]), patch.object(
-            watcher, "try_send_delivery_text", side_effect=capture_send
-        ) as push:
+        with patch.object(watcher, "agent_problem_target_is_ready", return_value=True), patch.object(
+            watcher, "active_manager_problem_targets", return_value=["vl:2"]
+        ), patch.object(watcher, "try_send_delivery_text", side_effect=capture_send) as push:
             self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 1000.0))
             with patch.object(watcher.time, "time", return_value=1001.0):
                 watcher.queue_delivery_failure_event(events[0])
@@ -7618,9 +7830,9 @@ class PendingMarkerTests(unittest.TestCase):
             events.append(kwargs["success_event"])
             return watcher.DeliveryResult(watcher.ASYNC_DELIVERY_STARTED)
 
-        with patch.object(watcher, "active_manager_problem_targets", return_value=["vl:2"]), patch.object(
-            watcher, "try_send_delivery_text", side_effect=capture_send
-        ) as push:
+        with patch.object(watcher, "agent_problem_target_is_ready", return_value=True), patch.object(
+            watcher, "active_manager_problem_targets", return_value=["vl:2"]
+        ), patch.object(watcher, "try_send_delivery_text", side_effect=capture_send) as push:
             self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 1000.0))
             watcher.DELIVERY_SUCCESS_EVENTS.put(events[0])
             self.assertTrue(watcher.drain_delivery_successes(args, seen, 1400.0))
@@ -8127,7 +8339,7 @@ class PendingMarkerTests(unittest.TestCase):
         self.assertIs(event, calls[0][2])
         self.assertIn("async delivery failed: target is not a Codex pane after submit: vl:64", err.getvalue())
 
-    def test_agent_problem_owner_async_failure_falls_back_and_records_seen_after_main_success(self) -> None:
+    def test_agent_problem_owner_async_failure_does_not_fallback_into_main_manager(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
         args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1", agent_problem_repeat_s=300.0)
@@ -8144,7 +8356,6 @@ class PendingMarkerTests(unittest.TestCase):
         )
         seen: dict[str, float] = {}
         owner_future: Future[None] = Future()
-        main_future: Future[None] = Future()
         submitted: list[tuple[str, str, watcher.DeliverySuccessEvent | None, watcher.DeliveryFailureFallback | None]] = []
 
         def fake_send_to_codex(
@@ -8163,23 +8374,9 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual("vl:64", target)
             return owner_future
 
-        def fake_submit(
-            target: str,
-            message: str,
-            _options: watcher.CodexSendOptions,
-            pending_guard: watcher.PendingGuard | None = None,
-            problem_guard: watcher.AgentProblemGuard | None = None,
-            success_event: watcher.DeliverySuccessEvent | None = None,
-            failure_fallback: watcher.DeliveryFailureFallback | None = None,
-        ) -> Future[None]:
-            self.assertIsNone(pending_guard)
-            self.assertIsNotNone(problem_guard)
-            self.assertIsNone(failure_fallback)
-            submitted.append((target, message, success_event, failure_fallback))
-            self.assertEqual("wl:1", target)
-            return main_future
-
-        with patch("omo_manager.omo_pending_watch.send_to_codex", side_effect=fake_send_to_codex), patch("omo_manager.omo_pending_watch.submit_send", side_effect=fake_submit):
+        with patch.object(watcher, "inspect_codex", return_value=MagicMock(status="ready")), patch(
+            "omo_manager.omo_pending_watch.send_to_codex", side_effect=fake_send_to_codex
+        ), patch("omo_manager.omo_pending_watch.submit_send", side_effect=AssertionError("unexpected fallback")):
             self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 1000.0))
             self.assertTrue(any(key.startswith("agent-problem-attempt:") for key in seen))
             self.assertFalse(watcher.handle_agent_problem_result(args, seen, result, 1030.0))
@@ -8187,15 +8384,8 @@ class PendingMarkerTests(unittest.TestCase):
             owner_future.set_exception(RuntimeError("target is not a Codex pane after submit: vl:64"))
             watcher.log_send_result(owner_future, submitted[0][2], submitted[0][3])
             self.assertTrue(any(key.startswith("agent-problem-attempt:") for key in seen))
-            self.assertEqual(2, len(submitted))
-            self.assertEqual("wl:1", submitted[1][0])
-            self.assertIn("Delivery to resolved target `vl:64` failed:", submitted[1][1])
-            self.assertIn("worker.md vl:2 <output>idle</output>", submitted[1][1])
-            main_future.set_result(None)
-            watcher.log_send_result(main_future, submitted[1][2])
             self.assertTrue(watcher.drain_delivery_successes(args, seen, 1001.0))
-        self.assertTrue(any(key.startswith("agent-problem:") for key in seen))
-        self.assertFalse(any(key.startswith("agent-problem-attempt:") for key in seen))
+        self.assertEqual(1, len(submitted))
 
     def test_manager_delivery_launch_failure_is_retryable(self) -> None:
         from omo_manager import omo_pending_watch as watcher
