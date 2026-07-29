@@ -48,7 +48,7 @@ class TaskEditTests(unittest.TestCase):
 
             self.assertEqual(0, exit_code)
             self.assertEqual(
-                "status: running\nrunat: wl:2\nmanagerat: wl:1\nis_manager: false\npending_task_items:\n  - finish review\n",
+                "task_file: task.md\nstatus: running\nrunat: wl:2\nmanagerat: wl:1\nis_manager: false\npending_task_items:\n  - finish review\n",
                 stdout.getvalue(),
             )
             self.assertNotIn("body should stay private", stdout.getvalue())

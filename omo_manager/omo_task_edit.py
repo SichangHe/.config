@@ -106,7 +106,7 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    summary_parser = subparsers.add_parser("summary", help="Print task frontmatter summary and pending_task_items.")
+    summary_parser = subparsers.add_parser("summary", help="Print task path, frontmatter summary, and pending_task_items.")
     summary_parser.set_defaults(command="summary")
     _ = summary_parser.add_argument("task_file", type=Path)
 
@@ -703,6 +703,7 @@ def run(args: Args) -> int:
             if metadata is not None and metadata.version != TASK_FRONTMATTER_V1:
                 raise TaskFrontmatterError("v2 task mutation is disabled until migration validation and watcher enablement are complete.")
         if command == "summary":
+            print(f"task_file: {path.relative_to(args.root).as_posix()}")
             print(summary_text(text, args.root), end="")
             return 0
         if command == "pending-list":
