@@ -51,7 +51,7 @@ Reject fields that are not in the schema. All comments stay inside Markdown bodi
 `blocked` requires `blocked_on`; `long_running` may include it. Other statuses MUST NOT include it.
 ALL other fields are required.
 
-`managerat` MUST be different from `runat`. In a worker task file, `managerat` is the manager that owns the task. In a manager task file, `runat` is the manager pane that receives pending blocks already written to that manager file. Every task's `runat` receives ordinary pending delivery; `managerat` receives only manager-marked content, matched case-insensitively with surrounding punctuation ignored.
+`managerat` MUST be different from `runat`. In a worker task file, `managerat` is the manager that owns the task. In a manager task file, `runat` is the manager pane that receives pending blocks already written to that manager file. Every task's `runat` receives ordinary pending delivery. Its `managerat` receives manager-marked content, matched case-insensitively with surrounding punctuation ignored, and authenticated private reports produced by the task.
 
 `runat` is normally a tmux target. `runat: retired` is valid for blocked persistent roles whose pane no longer exists. As a read-only historical compatibility exception, the manager status helper also validates completed child records with `status: done` and `runat: retired` while checking whether their parent can close; it does not rewrite those records or accept that combination in active-task operations.
 
@@ -77,7 +77,9 @@ For a stopped stale record whose `runat` is occupied by an active replacement, u
 
 `omo_pending_watch.py` scans for `(pending)` markers. Ordinary task-file messages go directly to that task's `runat`, send no manager copy, and clear the consumed marker only after verified delivery when the original block is unchanged or bounded by a later `(pending)`. `for manager` or `for a manager` at the beginning or end of active unquoted pending-block or directly linked readable content routes to `managerat`; matching ignores case, surrounding punctuation, and edge whitespace, while linked content is resolved once through the existing attachment path policy. Literal `DM` and `DM only` text has no routing meaning. The receiving agent maintains its own pending queue through `omo_pending.py`.
 
-`omo_report.sh` infers the reporting worker task file from the current tmux pane, finds its `managerat`, and appends the `(pending)` report block to that manager's task file. Workers invoke it without `--task-file`, `--root`, `--manager-target`, or other manual route flags. If `managerat` is the main manager target, the destination is the dated `work_manager_YYYY-MM-DD.md` file.
+`omo_report.sh` infers the reporting producer task file from the current tmux pane, finds its `managerat`, and appends the `(pending)` report block to that manager's task file. This applies to worker and manager producers; a manager's report never routes back to its own producer task. Producers invoke it without `--task-file`, `--root`, `--manager-target`, or other manual route flags. If `managerat` is the main manager target, the destination is the dated `work_manager_YYYY-MM-DD.md` file.
+
+When a reused target matches blocked historical tasks, `omo_report.sh` prefers the only `running` or `long_running` task. A sole blocked task remains reportable, and unresolved collisions fail as ambiguous.
 
 `email_idle_watcher.py` appends an addressed human email as a route-neutral pending pointer to the addressed active task file. The pending watcher then applies the same direct-or-manager marker policy. Unaddressed manager-thread mail remains on the current main-manager file.
 

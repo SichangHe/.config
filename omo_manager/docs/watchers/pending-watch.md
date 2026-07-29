@@ -59,7 +59,7 @@
   - unmarked pending blocks are `origin=human source=manual` because prompts appended to `work_manager*.md` are human-origin unless explicitly marked otherwise
   - human-origin refs routed to a manager require the manager acknowledgement flow; ordinary direct delivery sends no manager acknowledgement
   - manager-bound markers are reserved while an asynchronous send is active; failed sends back off for ten minutes, and later duplicate attempts wait until the manager is ready
-  - worker-task agent reports route to frontmatter `managerat`; manager-task agent reports route to that manager task's `runat`
+  - `omo_report.sh` stores worker- and manager-produced reports on the resolved manager task; the watcher delivers an authenticated report on a manager task to that receiving task's `runat`, while compatibility reports on worker tasks route to their `managerat`
   - every pending delivery identity hashes stable task path, content, source attachments, and route semantics, never file line; line numbers remain lookup/display hints
   - every watcher-owned marker clear relocates the unchanged pending block, takes the shared `task_file_lock`, rereads under the lock, and performs a stat-guarded atomic replacement so concurrent compliant writers are preserved
   - accepted agent reports are fsynced to `pending-watch-consumed-reports.tsv` before marker cleanup, so line movement, cleanup races, repeated pointers, watcher restarts, and identical `omo_report.sh` resubmissions cannot redeliver them

@@ -1715,25 +1715,31 @@ class ReportReceiptTests(unittest.TestCase):
             self.assertIn("(pending)", case.manager.read_text(encoding="utf-8"))
             self.assertFalse(Path(files["private_receipt"]).exists())
 
-    def test_live_manager_hierarchy_uses_exact_owner_record_and_bounded_evidence(self) -> None:
+    def test_live_manager_hierarchy_routes_to_upper_manager_with_bounded_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             case = fixture(Path(tmp), body=b"batch: B01\nattempt: attempt-0002\nprivate migration report\n", managerat="vlexp:5")
             producer = case.root / "vlexp_path_migration_exec.md"
-            unrelated = case.root / "vlexp_replenish.md"
+            upper_manager = case.root / "vlexp_replenish.md"
+            historical_manager = case.root / "vlexp_historical.md"
             (case.root / "worker.md").unlink()
-            producer.write_text(
-                frontmatter(runat="vlexp:13", managerat="vlexp:5", is_manager=True),
-                encoding="utf-8",
+            producer_text = frontmatter(runat="vlexp:13", managerat="vlexp:5", is_manager=True)
+            producer.write_text(producer_text, encoding="utf-8")
+            upper_manager_text = frontmatter(runat="vlexp:5", managerat="vlexp:1", is_manager=True)
+            upper_manager.write_text(upper_manager_text, encoding="utf-8")
+            historical_manager_text = frontmatter(runat="vlexp:5", managerat="vlexp:1", is_manager=True).replace(
+                "status: running",
+                "status: blocked\nblocked_on: historical manager task",
             )
-            unrelated_text = frontmatter(runat="vlexp:5", managerat="vlexp:1", is_manager=True)
-            unrelated.write_text(unrelated_text, encoding="utf-8")
+            historical_manager.write_text(historical_manager_text, encoding="utf-8")
             noise_lines: list[str] = []
             for index in range(20, 40):
                 name = f"unrelated_{index}.md"
                 noise_lines.append(f"{name} other:{index}")
                 (case.root / name).write_text(frontmatter(runat=f"other:{index}", managerat="main:0.0"), encoding="utf-8")
             (case.root / "TODO.md").write_text(
-                "current:\nvlexp_path_migration_exec.md vlexp:13\nvlexp_replenish.md vlexp:5\n" + "\n".join(noise_lines) + "\n",
+                "current:\nvlexp_path_migration_exec.md vlexp:13\nvlexp_replenish.md vlexp:5\nvlexp_historical.md vlexp:5\n"
+                + "\n".join(noise_lines)
+                + "\n",
                 encoding="utf-8",
             )
             tmux = Path(case.env["PATH"].split(":", 1)[0]) / "tmux"
@@ -1743,33 +1749,34 @@ class ReportReceiptTests(unittest.TestCase):
             description = json.loads(run_report(case, describe=True).stdout)
 
             self.assertEqual(str(producer), description["routing"]["task"])
-            self.assertEqual(str(producer), description["routing"]["manager"])
+            self.assertEqual(str(upper_manager), description["routing"]["manager"])
             self.assertEqual("vlexp:5", description["routing"]["requested_manager_target"])
-            self.assertEqual("vlexp:13", description["routing"]["resolved_manager_target"])
-            self.assertEqual("active-producer-manager-task", description["routing"]["route_kind"])
-            self.assertNotIn("vlexp_replenish.md", json.dumps(description))
+            self.assertEqual("vlexp:5", description["routing"]["resolved_manager_target"])
+            self.assertEqual("active-manager-task", description["routing"]["route_kind"])
+            self.assertNotIn("unrelated_20.md", json.dumps(description))
             self.assertLess(len(json.dumps(description).encode()), 4096)
 
             case.env["OMO_REPORT_ACK_TIMEOUT_S"] = "0"
             pending = run_report(case)
             self.assertEqual(0, pending.returncode, pending.stderr)
             self.assertFalse(json.loads(pending.stdout)["accepted"])
-            manager_run = run_manager_watcher_once(case, producer)
+            manager_run = run_manager_watcher_once(case, upper_manager)
             self.assertEqual(0, manager_run.returncode, manager_run.stderr)
-            self.assertEqual("vlexp:13", manager_run.stdout.strip())
+            self.assertEqual("vlexp:5", manager_run.stdout.strip())
             result = run_report(case)
 
             self.assertEqual(0, result.returncode, result.stderr)
             acceptance = json.loads(result.stdout)
             self.assertTrue(acceptance["accepted"])
-            self.assertEqual("vlexp:13", acceptance["routing"]["resolved_manager_target"])
-            self.assertNotIn("vlexp_replenish.md", result.stdout)
-            self.assertEqual(unrelated_text, unrelated.read_text(encoding="utf-8"))
+            self.assertEqual("vlexp:5", acceptance["routing"]["resolved_manager_target"])
+            self.assertEqual(producer_text, producer.read_text(encoding="utf-8"))
+            self.assertEqual(upper_manager_text, upper_manager.read_text(encoding="utf-8"))
+            self.assertEqual(historical_manager_text, historical_manager.read_text(encoding="utf-8"))
             self.assertNotIn("(pending)", producer.read_text(encoding="utf-8"))
             receipt = private_receipt(acceptance)
             self.addCleanup(cleanup_private_tmp, receipt)
             evidence_paths = {Path(str(item["path"])).name for item in receipt["routing"]["route_evidence"]}
-            self.assertEqual({"TODO.md", "vlexp_path_migration_exec.md"}, evidence_paths)
+            self.assertEqual({"TODO.md", "vlexp_historical.md", "vlexp_path_migration_exec.md", "vlexp_replenish.md"}, evidence_paths)
 
     def test_failure_and_missing_or_ambiguous_routes_emit_no_acceptance(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

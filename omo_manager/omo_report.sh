@@ -143,6 +143,7 @@ for root_arg in sys.argv[1:]:
         roots.append(root)
 TASK_SECTIONS = {"current", "human pending", "low priority", "previous"}
 ACTIVE_TASK_STATUSES = {"running", "long_running", "blocked"}
+RUNNING_TASK_STATUSES = {"running", "long_running"}
 TARGET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?$")
 TARGET_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_-])([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)(?![A-Za-z0-9_.-])")
 MAX_ROUTE_FILE_BYTES = 64 * 1024 * 1024
@@ -282,19 +283,26 @@ if not current:
     raise SystemExit(2)
 for root in roots:
     matches: list[Path] = []
+    running_matches: list[Path] = []
     for candidate, listed_targets in task_refs(root, TASK_SECTIONS):
         if listed_targets and not any(same_tmux_target(target, current) for target in listed_targets):
             continue
         metadata = parse_frontmatter(candidate)
-        if metadata is None or metadata.get("status") not in ACTIVE_TASK_STATUSES:
+        status = metadata.get("status") if metadata is not None else None
+        if status not in ACTIVE_TASK_STATUSES:
             continue
         runat = metadata.get("runat", "")
         if TARGET_RE.fullmatch(runat) and same_tmux_target(runat, current):
             matches.append(candidate)
+            if status in RUNNING_TASK_STATUSES:
+                running_matches.append(candidate)
     if len(matches) == 1:
         print(f"{root}\t{matches[0].relative_to(root)}\t{current}\t{evidence_json()}")
         raise SystemExit(0)
     if len(matches) > 1:
+        if len(running_matches) == 1:
+            print(f"{root}\t{running_matches[0].relative_to(root)}\t{current}\t{evidence_json()}")
+            raise SystemExit(0)
         current_refs = {candidate for candidate, _ in task_refs(root, {"current"})}
         current_matches = [candidate for candidate in matches if candidate in current_refs]
         if len(current_matches) == 1:
@@ -357,7 +365,7 @@ raise SystemExit(2)
 PY
 if [ ! -f "$message_file" ]; then echo "message file not found" >&2; exit 2; fi
 if [ ! -f "$path_real" ]; then echo "task file not found" >&2; exit 2; fi
-append_info=$(python3 -I -S - "$task_root_real" "$path_real" "$manager_target" "$producer_target" <<'PY'
+append_info=$(python3 -I -S - "$task_root_real" "$path_real" "$manager_target" <<'PY'
 from __future__ import annotations
 import hashlib
 import json
@@ -370,11 +378,11 @@ from pathlib import Path
 root = Path(sys.argv[1])
 task_path = Path(sys.argv[2])
 main_target = sys.argv[3].strip()
-producer_target = sys.argv[4].strip()
 TARGET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?$")
 TARGET_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_-])([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)(?![A-Za-z0-9_.-])")
 TASK_SECTIONS = {"current", "human pending", "low priority", "previous"}
 ACTIVE_MANAGER_STATUSES = {"running", "long_running", "blocked"}
+RUNNING_MANAGER_STATUSES = {"running", "long_running"}
 MAX_ROUTE_FILE_BYTES = 64 * 1024 * 1024
 route_evidence: dict[str, dict[str, object]] = {}
 route_local_date = datetime.now().astimezone().strftime("%Y-%m-%d")
@@ -525,32 +533,29 @@ if same_tmux_target(managerat, main_target):
 if is_named_main_manager_target(managerat):
     print_route(main_manager_file(), "", managerat, main_target or managerat, "named-main-manager")
     raise SystemExit(0)
-if metadata.get("is_manager") == "true":
-    runat = metadata.get("runat", "")
-    if metadata.get("status") not in ACTIVE_MANAGER_STATUSES or not same_tmux_target(runat, producer_target):
-        print("manager task does not bind the active producer target", file=sys.stderr)
-        raise SystemExit(2)
-    print_route(task_path, "", managerat, runat, "active-producer-manager-task")
-    raise SystemExit(0)
 manager_matches: list[tuple[Path, str]] = []
+running_manager_matches: list[tuple[Path, str]] = []
 for candidate, listed_targets in active_task_refs():
     if listed_targets and not any(same_tmux_target(target, managerat) for target in listed_targets):
         continue
     candidate_metadata = parse_frontmatter(candidate)
-    if (
-        candidate_metadata is None
-        or candidate_metadata.get("is_manager") != "true"
-        or candidate_metadata.get("status") not in ACTIVE_MANAGER_STATUSES
-    ):
+    status = candidate_metadata.get("status") if candidate_metadata is not None else None
+    if candidate_metadata is None or candidate_metadata.get("is_manager") != "true" or status not in ACTIVE_MANAGER_STATUSES:
         continue
     runat = candidate_metadata.get("runat", "")
     if same_tmux_target(runat, managerat):
         manager_matches.append((candidate, runat))
+        if status in RUNNING_MANAGER_STATUSES:
+            running_manager_matches.append((candidate, runat))
 if len(manager_matches) == 1:
     candidate, runat = manager_matches[0]
     print_route(candidate, "", managerat, runat, "active-manager-task")
     raise SystemExit(0)
 if len(manager_matches) > 1:
+    if len(running_manager_matches) == 1:
+        candidate, runat = running_manager_matches[0]
+        print_route(candidate, "", managerat, runat, "active-manager-task")
+        raise SystemExit(0)
     choices = ", ".join(str(candidate.relative_to(root)) for candidate, _ in manager_matches)
     print(f"multiple active manager task files match tmux target {managerat}: {choices}", file=sys.stderr)
     raise SystemExit(2)

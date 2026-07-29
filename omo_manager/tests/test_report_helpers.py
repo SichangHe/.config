@@ -151,10 +151,7 @@ class ReportHelperTests(unittest.TestCase):
                 encoding="utf-8",
             )
             _ = (root / "current.md").write_text(task_frontmatter(), encoding="utf-8")
-            _ = (root / "stale.md").write_text(
-                task_frontmatter(status="blocked").replace("status: blocked", "status: blocked\nblocked_on: waiting for human review"),
-                encoding="utf-8",
-            )
+            _ = (root / "stale.md").write_text(task_frontmatter(), encoding="utf-8")
 
             result = subprocess.run(
                 [str(OMO_DIR / "omo_report.sh"), "--alloc-message-file"],
@@ -176,6 +173,107 @@ class ReportHelperTests(unittest.TestCase):
             report_file = Path(result.stdout.strip())
             self.assertTrue(report_file.name.startswith("current."))
             report_file.unlink()
+
+    def test_omo_report_prefers_running_task_without_disabling_blocked_reports(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "logs"
+            root.mkdir()
+            bin_dir = tmp_path / "bin"
+            bin_dir.mkdir()
+            write_fake_tmux(bin_dir)
+            local_env = tmp_path / "local.env"
+            local_env.write_text(f"OMO_WORK_LOGS_ROOT={root}\n", encoding="utf-8")
+            _ = (root / "running.md").write_text(task_frontmatter(), encoding="utf-8")
+            _ = (root / "blocked.md").write_text(
+                task_frontmatter(status="blocked").replace("status: blocked", "status: blocked\nblocked_on: waiting for human review"),
+                encoding="utf-8",
+            )
+            env = {
+                **os.environ,
+                "OMO_MANAGER_LOCAL_ENV": str(local_env),
+                "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                "TMUX_PANE": "%1701",
+                "XDG_STATE_HOME": str(tmp_path / "state"),
+            }
+            cases = (
+                ("collision", "current:\nrunning.md cfg:7\nblocked.md cfg:7\n", "running."),
+                ("blocked only", "current:\nblocked.md cfg:7\n", "blocked."),
+            )
+            for name, todo_text, prefix in cases:
+                with self.subTest(name=name):
+                    (root / "TODO.md").write_text(todo_text, encoding="utf-8")
+                    result = subprocess.run(
+                        [str(OMO_DIR / "omo_report.sh"), "--alloc-message-file"],
+                        cwd=tmp,
+                        env=env,
+                        text=True,
+                        capture_output=True,
+                        timeout=10,
+                        check=False,
+                    )
+
+                    self.assertEqual(0, result.returncode, result.stderr)
+                    report_file = Path(result.stdout.strip())
+                    self.assertTrue(report_file.name.startswith(prefix))
+                    report_file.unlink()
+
+    def test_omo_report_manager_producer_routes_to_upper_manager_without_manual_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "logs"
+            root.mkdir()
+            bin_dir = tmp_path / "bin"
+            bin_dir.mkdir()
+            write_fake_tmux(bin_dir)
+            local_env = tmp_path / "local.env"
+            local_env.write_text(f"OMO_WORK_LOGS_ROOT={root}\nOMO_MANAGER_TMUX_TARGET=main:0.0\n", encoding="utf-8")
+            (root / "TODO.md").write_text("current:\nproducer.md cfg:7\nupper.md cfg:6\n", encoding="utf-8")
+            producer = root / "producer.md"
+            producer.write_text(task_frontmatter(runat="cfg:7", managerat="cfg:6", is_manager=True, status="long_running"), encoding="utf-8")
+            upper = root / "upper.md"
+            upper.write_text(task_frontmatter(runat="cfg:6", managerat="main:0.0", is_manager=True, status="long_running"), encoding="utf-8")
+            env = {
+                **os.environ,
+                "OMO_MANAGER_LOCAL_ENV": str(local_env),
+                "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                "TMUX_PANE": "%1701",
+                "XDG_STATE_HOME": str(tmp_path / "state"),
+            }
+
+            alloc = subprocess.run(
+                [str(OMO_DIR / "omo_report.sh"), "--alloc-message-file"],
+                cwd=tmp,
+                env=env,
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+            self.assertEqual(0, alloc.returncode, alloc.stderr)
+            report_file = Path(alloc.stdout.strip())
+            self.assertTrue(report_file.name.startswith("producer."))
+            report_file.write_text("manager report\n", encoding="utf-8")
+
+            submit = subprocess.run(
+                [str(OMO_DIR / "omo_report.sh"), "--status", "done", "--message-file", str(report_file)],
+                cwd=tmp,
+                env=env,
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+
+            self.assertEqual(0, submit.returncode, submit.stderr)
+            self.assertNotIn("(pending)", producer.read_text(encoding="utf-8"))
+            upper_text = upper.read_text(encoding="utf-8")
+            self.assertIn("(pending)", upper_text)
+            report_match = re.search(r"^\(from agent cfg:7 (/tmp/[^)]+)\)$", upper_text, flags=re.MULTILINE)
+            self.assertIsNotNone(report_match)
+            assert report_match is not None
+            self.assertIn("task-file=producer.md", Path(report_match.group(1)).read_text(encoding="utf-8"))
+            self.assertFalse(dated_manager_file(root).exists())
 
     def test_omo_report_keeps_pane_collisions_ambiguous_without_one_current_match(self) -> None:
         todo_cases = {
