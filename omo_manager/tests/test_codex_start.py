@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,7 +8,7 @@ from unittest.mock import patch
 
 import yaml
 
-from omo_manager.omo_codex_start import Args, Pane, StartError, current_todo_entries, launch_command, post_marker_lines, prompt_text, require_same_shell, start, validate_task
+from omo_manager.omo_codex_start import Args, Pane, StartError, current_todo_entries, launch_command, post_marker_lines, prompt_text, require_same_shell, resolve_pane, start, validate_task
 
 
 class CodexStartTests(unittest.TestCase):
@@ -41,6 +42,20 @@ class CodexStartTests(unittest.TestCase):
         text = "---\n" + yaml.safe_dump({key: value for key, value in fields.items() if value is not None}, sort_keys=False) + "---\n\nGoal.\n"
         (root / "worker.md").write_text(text, encoding="utf-8")
         (root / "TODO.md").write_text(f"current:\n\nworker.md {runat}\n", encoding="utf-8")
+
+    def test_resolve_pane_accepts_exact_window_and_pane_targets(self) -> None:
+        result = subprocess.CompletedProcess([], 0, "wl:18.0\t%18\t@18\tzsh\t/tmp\n", "")
+        for target in ("wl:18", "wl:18.0"):
+            with self.subTest(target=target), patch("omo_manager.omo_codex_start.run", return_value=result):
+                self.assertEqual(Pane("wl:18.0", "%18", "@18", "zsh", Path("/tmp")), resolve_pane(target))
+
+    def test_resolve_pane_rejects_ambiguous_identity_fallbacks(self) -> None:
+        mismatches = (("wl:18", "wl:1.0"), ("wl:18", "other:18.0"), ("wl:18.1", "wl:18.0"))
+        for requested, resolved in mismatches:
+            with self.subTest(requested=requested, resolved=resolved):
+                result = subprocess.CompletedProcess([], 0, f"{resolved}\t%18\t@18\tzsh\t/tmp\n", "")
+                with patch("omo_manager.omo_codex_start.run", return_value=result), self.assertRaisesRegex(StartError, "does not exist exactly"):
+                    resolve_pane(requested)
 
     def test_validate_task_requires_active_exact_todo_and_same_pane(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:

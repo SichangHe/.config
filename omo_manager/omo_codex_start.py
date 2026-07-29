@@ -21,11 +21,11 @@ from pathlib import Path
 
 try:
     from omo_manager.omo_codex_status import current_block, status as classify_status, tail
-    from omo_manager.omo_task_metadata import TASK_FRONTMATTER_STATUSES, parse_task_metadata
+    from omo_manager.omo_task_metadata import TARGET_RE, TASK_FRONTMATTER_STATUSES, parse_task_metadata
     from omo_manager.omo_task_lock import task_file_lock, task_target_lock
 except ModuleNotFoundError:
     from omo_codex_status import current_block, status as classify_status, tail
-    from omo_task_metadata import TASK_FRONTMATTER_STATUSES, parse_task_metadata
+    from omo_task_metadata import TARGET_RE, TASK_FRONTMATTER_STATUSES, parse_task_metadata
     from omo_task_lock import task_file_lock, task_target_lock
 
 HELPER_DIR = Path(__file__).resolve().parent
@@ -109,7 +109,18 @@ def run(command: list[str], *, timeout_s: float = 10.0) -> subprocess.CompletedP
     return subprocess.run(command, capture_output=True, text=True, timeout=timeout_s, check=False)
 
 
+def target_identity(target: str) -> tuple[str, int, int | None] | None:
+    if TARGET_RE.fullmatch(target) is None:
+        return None
+    session, window_and_pane = target.split(":", 1)
+    window, separator, pane = window_and_pane.partition(".")
+    return session, int(window), int(pane) if separator else None
+
+
 def resolve_pane(target: str) -> Pane:
+    requested_identity = target_identity(target)
+    if requested_identity is None:
+        raise StartError(f"tmux target must be exact SESSION:WINDOW[.PANE]: {target}")
     result = run(
         [
             "tmux",
@@ -125,6 +136,13 @@ def resolve_pane(target: str) -> Pane:
     fields = result.stdout.rstrip("\n").split("\t")
     if len(fields) != 5 or not fields[1].startswith("%") or not fields[2].startswith("@"):
         raise StartError(f"tmux returned invalid identity for target: {target}")
+    resolved_identity = target_identity(fields[0])
+    if resolved_identity is None:
+        raise StartError(f"tmux returned invalid identity for target: {target}")
+    requested_session, requested_window, requested_pane = requested_identity
+    resolved_session, resolved_window, resolved_pane = resolved_identity
+    if (requested_session, requested_window) != (resolved_session, resolved_window) or (requested_pane is not None and requested_pane != resolved_pane):
+        raise StartError(f"tmux target does not exist exactly as requested: {target}")
     return Pane(fields[0], fields[1], fields[2], fields[3], Path(fields[4]))
 
 
