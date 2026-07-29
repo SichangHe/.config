@@ -719,6 +719,37 @@ def scan_task_state(path: Path, work_log_root: Path | None = None) -> TaskState 
     return TaskState(metadata.status, target, port, persistent_role, metadata.blocked_on, metadata.managerat, metadata.is_manager, metadata.tool)
 
 
+def malformed_active_task_rows(root: Path) -> list[StatusRow]:
+    """Report active TODO records that strict task metadata rejects."""
+    rows: list[StatusRow] = []
+    seen: set[Path] = set()
+    for task in parse_task_lines(root / "TODO.md"):
+        if task.task_file == "TODO.md":
+            continue
+        if task.section not in {"todo:current", "todo:human pending", "todo:low priority"}:
+            continue
+        state_path = resolve_task_path(root, task.task_file)
+        if state_path is None or state_path in seen:
+            continue
+        seen.add(state_path)
+        try:
+            text = state_path.read_text(encoding="utf-8")
+            _ = parse_task_metadata(text, root)
+        except OSError:
+            continue
+        except TaskFrontmatterError as exc:
+            reason = " ".join(str(exc).split())
+            rows.append(
+                StatusRow(
+                    task.task_file,
+                    "malformed_task",
+                    f"strict metadata error: {reason}; repair task frontmatter before relying on lifecycle status",
+                    target=task.target,
+                )
+            )
+    return rows
+
+
 def task_has_pending_marker(path: Path | None) -> bool:
     if path is None:
         return False
@@ -1201,18 +1232,18 @@ def registry_prune(args: Args, completed: set[str]) -> int:
 
 def format_summary(rows: list[StatusRow], completed_stale_count: int, pruned_count: int) -> str:
     rows = [row for row in rows if not is_quiet_blocked_active_row(row)]
-    counts: dict[str, int] = {"not_codex": 0, "running": 0, "blocked_idle": 0, "error": 0, "ready": 0, "stuck_input": 0, "human_request": 0}
+    counts: dict[str, int] = {"not_codex": 0, "running": 0, "blocked_idle": 0, "error": 0, "ready": 0, "stuck_input": 0, "human_request": 0, "malformed_task": 0}
     for row in rows:
         counts[row.status] = counts.get(row.status, 0) + 1
     lines = [
-        f"agent-status: not_codex={counts['not_codex']} running={counts['running']} blocked_idle={counts['blocked_idle']} error={counts['error']} ready={counts['ready']} stuck_input={counts['stuck_input']} human_request={counts['human_request']} done-registry-stale={completed_stale_count} pruned={pruned_count}",
+        f"agent-status: not_codex={counts['not_codex']} running={counts['running']} blocked_idle={counts['blocked_idle']} error={counts['error']} ready={counts['ready']} stuck_input={counts['stuck_input']} human_request={counts['human_request']} malformed_task={counts['malformed_task']} done-registry-stale={completed_stale_count} pruned={pruned_count}",
     ]
     for row in sorted(rows, key=lambda item: (item.status != "error", item.status, item.task_file)):
         lines.append(f"{row.status}: task={row.task_file} evidence={row.evidence}")
     return "\n".join(lines)
 
 
-PROBLEM_STATUSES = {"blocked_idle", "error", "human_request", "manager_compaction", "manager_waiting_subagent", "not_codex", "ready", "stuck_input", "untracked_agent"}
+PROBLEM_STATUSES = {"blocked_idle", "error", "human_request", "malformed_task", "manager_compaction", "manager_waiting_subagent", "not_codex", "ready", "stuck_input", "untracked_agent"}
 
 
 def is_quiet_blocked_active_row(row: StatusRow) -> bool:
@@ -1238,10 +1269,10 @@ def format_problem_summary(rows: list[StatusRow], completed_stale: set[str] | di
     problem_rows = [row for row in rows if row.status in PROBLEM_STATUSES and not is_quiet_blocked_active_row(row)]
     if not problem_rows and not completed_stale_evidence_map:
         return ""
-    counts: dict[str, int] = {"not_codex": 0, "blocked_idle": 0, "error": 0, "human_request": 0, "manager_compaction": 0, "manager_waiting_subagent": 0, "ready": 0, "stuck_input": 0, "untracked_agent": 0}
+    counts: dict[str, int] = {"not_codex": 0, "blocked_idle": 0, "error": 0, "human_request": 0, "malformed_task": 0, "manager_compaction": 0, "manager_waiting_subagent": 0, "ready": 0, "stuck_input": 0, "untracked_agent": 0}
     for row in problem_rows:
         counts[row.status] = counts.get(row.status, 0) + 1
-    parts = [f"{status}={counts[status]}" for status in ("not_codex", "blocked_idle", "error", "human_request", "manager_compaction", "manager_waiting_subagent", "ready", "stuck_input", "untracked_agent") if counts[status]]
+    parts = [f"{status}={counts[status]}" for status in ("not_codex", "blocked_idle", "error", "human_request", "malformed_task", "manager_compaction", "manager_waiting_subagent", "ready", "stuck_input", "untracked_agent") if counts[status]]
     if completed_stale_evidence_map:
         parts.append(f"done-registry-stale={len(completed_stale_evidence_map)}")
     lines = [f"agent-problems: {' '.join(parts)}"]
@@ -1273,13 +1304,16 @@ def main(argv: list[str]) -> int:
         tasks = list(current.values())
         if args.problems_only:
             tasks = [task for task in tasks if task.status in {"running", "long_running"}]
-        auto_unstick = args.problems_only and args.auto_unstick
-        auto_unstick_disabled_reason = "no_auto_unstick" if args.problems_only and not args.auto_unstick else "not_problems_only"
+        malformed_rows = malformed_active_task_rows(args.root)
+        auto_unstick = args.problems_only and args.auto_unstick and not malformed_rows
+        auto_unstick_disabled_reason = "malformed_task_present" if malformed_rows else "no_auto_unstick" if args.problems_only and not args.auto_unstick else "not_problems_only"
         unstick_by_target: dict[str, str] = {}
         rows = [classify_task(task, choose_session(task, records), auto_unstick, unstick_by_target, args.manager_target, auto_unstick_disabled_reason) for task in tasks]
+        rows.extend(malformed_rows)
         inspected_targets = {display_target(task, choose_session(task, records)) for task in tasks}
         if args.problems_only:
-            manager_row = manager_problem_row(args, inspected_targets, unstick_by_target)
+            manager_args = replace(args, auto_unstick=auto_unstick)
+            manager_row = manager_problem_row(manager_args, inspected_targets, unstick_by_target)
             if args.manager_target:
                 inspected_targets.add(args.manager_target)
             if manager_row is not None:

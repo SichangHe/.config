@@ -107,6 +107,88 @@ resolved_task_items: []
             self.assertEqual(set(), done)
             self.assertEqual(set(), human_pending)
 
+    def test_problems_only_reports_long_running_manager_without_required_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nbroken_manager.md cfg 7\n", encoding="utf-8")
+            malformed = task_frontmatter("running", runat="cfg:7", is_manager=True).replace("status: running", "status: long_running")
+            _ = (root / "broken_manager.md").write_text(malformed, encoding="utf-8")
+            out = StringIO()
+
+            report = Report("stuck_input", ["queued input"], "queued input", True)
+            with patch("omo_manager.omo_agent_status.inspect", return_value=report), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present") as submit, redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            submit.assert_not_called()
+
+            text = out.getvalue()
+            self.assertIn("agent-problems: malformed_task=1", text)
+            self.assertIn("malformed_task: task=broken_manager.md", text)
+            self.assertIn("`blocked_on` is required", text)
+            self.assertEqual(1, text.count("malformed_task: task=broken_manager.md"))
+            self.assertIn("untracked_agent: task=broken_manager.md", text)
+            self.assertIn("unstick=disabled:malformed_task_present", text)
+
+    def test_malformed_active_aliases_report_once_without_unstick(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("human pending:\nbroken.md cfg 8\n./broken.md cfg 8\n", encoding="utf-8")
+            malformed = task_frontmatter("running", runat="cfg:8").replace("status: running", "status: long_running")
+            _ = (root / "broken.md").write_text(malformed, encoding="utf-8")
+            out = StringIO()
+            report = Report("stuck_input", ["queued input"], "queued input", True)
+
+            with patch("omo_manager.omo_agent_status.inspect", return_value=report), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present") as submit, redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+
+            submit.assert_not_called()
+            text = out.getvalue()
+            self.assertEqual(1, text.count("malformed_task: task=broken.md"))
+            self.assertIn("unstick=disabled:malformed_task_present", text)
+
+    def test_malformed_manager_target_does_not_interrupt_waiting_subagent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nbroken_manager.md cfg 8\n./broken_manager.md cfg 9\n", encoding="utf-8")
+            malformed = task_frontmatter("running", runat="cfg:8", is_manager=True).replace("status: running", "status: long_running")
+            _ = (root / "broken_manager.md").write_text(malformed, encoding="utf-8")
+            report = Report("waiting_subagent", ["waiting for reviewer"])
+            out = StringIO()
+
+            with patch("omo_manager.omo_agent_status.inspect", return_value=report), patch("omo_manager.omo_agent_status.interrupt_waiting_subagent_if_present") as interrupt, redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "cfg:9"]))
+
+            interrupt.assert_not_called()
+            text = out.getvalue()
+            self.assertIn("malformed_task: task=broken_manager.md", text)
+            self.assertIn("manager_waiting_subagent: task=manager", text)
+            self.assertIn("interrupt=disabled:no_auto_unstick", text)
+
+    def test_targetless_malformed_task_does_not_unstick_raw_tmux_pane(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nbroken.md\n", encoding="utf-8")
+            malformed = task_frontmatter("running", runat="cfg:9").replace("status: running", "status: long_running")
+            _ = (root / "broken.md").write_text(malformed, encoding="utf-8")
+            out = StringIO()
+            report = Report("stuck_input", ["queued input"], "queued input", True)
+
+            with patch("omo_manager.omo_agent_status.inspect", return_value=report), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present") as submit, patch("omo_manager.omo_agent_status.tmux_list_panes", return_value=["cfg:9"]), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+
+            submit.assert_not_called()
+            text = out.getvalue()
+            self.assertIn("malformed_task: task=broken.md", text)
+            self.assertIn("untracked_agent: task=tmux:cfg:9", text)
+            self.assertIn("unstick=disabled:malformed_task_present", text)
+
     def test_frontmatter_pending_task_items_report_after_done(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
