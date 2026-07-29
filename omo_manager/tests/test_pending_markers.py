@@ -233,6 +233,23 @@ def write_report_worker_task(root: Path, name: str = "task.md", *, runat: str = 
 
 class PendingMarkerTests(unittest.TestCase):
     def setUp(self) -> None:
+        self._email_tmp = tempfile.TemporaryDirectory(prefix="omo-pending-watch-test-email.")
+        self.addCleanup(self._email_tmp.cleanup)
+        email_root = Path(self._email_tmp.name)
+        self._email_env_patch = patch.dict(
+            os.environ,
+            {
+                "EMAIL_ME_FAKE_SEND_LOG": str(email_root / "sent.log"),
+                "OMO_AGENT_GMAIL_ADDRESS": "",
+                "OMO_AGENT_GMAIL_APP_PASSWORD": "",
+                "OMO_HUMAN_EMAIL_ADDRESS": "",
+                "OMO_HUMAN_EMAIL_CONFIG_PATH": str(email_root / "missing-email-config.toml"),
+                "OMO_MANAGER_LOCAL_ENV": str(email_root / "missing-local.env"),
+                "OMO_MANAGER_STATE_DIR": str(email_root / "state"),
+            },
+        )
+        self._email_env_patch.start()
+        self.addCleanup(self._email_env_patch.stop)
         pending_watcher.CAPACITY_ADVISORY_PENDING.clear()
         with pending_watcher.PENDING_SENDS_LOCK:
             pending_watcher.PENDING_SENDS.clear()

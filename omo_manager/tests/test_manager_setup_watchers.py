@@ -11,6 +11,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SETUP = ROOT / "omo_manager" / "omo_manager_setup_watchers.sh"
+TEST_MANAGER_TARGET = "omo-watcher-test:1"
 
 
 class WatcherSetupTests(unittest.TestCase):
@@ -69,9 +70,16 @@ esac
         fake_uv.chmod(0o755)
         env = {
             **os.environ,
+            "EMAIL_ME_FAKE_SEND_LOG": str(tmp / "email-send.log"),
             "HOME": str(home),
+            "OMO_AGENT_GMAIL_ADDRESS": "",
+            "OMO_AGENT_GMAIL_APP_PASSWORD": "",
+            "OMO_AGENT_TMUX_TARGET": "omo-watcher-test:0",
+            "OMO_HUMAN_EMAIL_ADDRESS": "",
+            "OMO_HUMAN_EMAIL_CONFIG_PATH": str(tmp / "missing-email-config.toml"),
             "OMO_MANAGER_LOCAL_ENV": "/dev/null",
-            "OMO_MANAGER_TMUX_TARGET": "wl:1",
+            "OMO_MANAGER_TMUX_TARGET": TEST_MANAGER_TARGET,
+            "OMO_MANAGER_URL": "",
             "OMO_WORK_LOGS_ROOT": str(root),
             "OMO_MANAGER_STATE_DIR": str(state),
             "OMO_MANAGER_ENABLE_EMAIL_WATCHER": email,
@@ -238,7 +246,7 @@ esac
             local_env = tmp / "local.env"
             local_root = tmp / "work_logs"
             local_env.write_text(
-                f'OMO_WORK_LOGS_ROOT="{local_root}"\nOMO_MANAGER_TMUX_TARGET="wl:1"\n',
+                f'OMO_WORK_LOGS_ROOT="{local_root}"\nOMO_MANAGER_TMUX_TARGET="{TEST_MANAGER_TARGET}"\n',
                 encoding="utf-8",
             )
             try:
@@ -251,7 +259,7 @@ esac
                     },
                 )
                 self.assertEqual(0, result.returncode, result.stderr)
-                self.assertIn("manager_target=wl:1", result.stdout)
+                self.assertIn(f"manager_target={TEST_MANAGER_TARGET}", result.stdout)
                 self.assertIn(f"--root {local_root}", (tmp / "fake-uv.log").read_text(encoding="utf-8"))
             finally:
                 self.stop_supervisors(tmp / "state")
@@ -287,7 +295,18 @@ esac
             root.mkdir()
             direct = subprocess.Popen(
                 ["setsid", str(ROOT / "omo_manager" / "omo_pending_watch.py"), "--root", str(root)],
-                env={**os.environ, "OMO_MANAGER_TMUX_TARGET": "wl:1"},
+                env={
+                    **os.environ,
+                    "EMAIL_ME_FAKE_SEND_LOG": str(tmp / "email-send.log"),
+                    "OMO_AGENT_GMAIL_ADDRESS": "",
+                    "OMO_AGENT_GMAIL_APP_PASSWORD": "",
+                    "OMO_HUMAN_EMAIL_ADDRESS": "",
+                    "OMO_HUMAN_EMAIL_CONFIG_PATH": str(tmp / "missing-email-config.toml"),
+                    "OMO_MANAGER_LOCAL_ENV": str(tmp / "missing-local.env"),
+                    "OMO_MANAGER_STATE_DIR": str(tmp / "direct-state"),
+                    "OMO_MANAGER_TMUX_TARGET": TEST_MANAGER_TARGET,
+                    "OMO_MANAGER_URL": "",
+                },
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
