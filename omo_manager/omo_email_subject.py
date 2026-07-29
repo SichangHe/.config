@@ -9,7 +9,7 @@ import re
 import signal
 import sys
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -30,6 +30,8 @@ RESERVED_AGENT_TAG_RE = re.compile(r"^(?:re:\s*)*\[omo\]\s*", re.IGNORECASE)
 RE_PREFIX_RE = re.compile(r"^\s*re:\s*", re.IGNORECASE)
 TMUX_TARGET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?$")
 TMUX_SUBJECT_TAG_RE = re.compile(r"^\s*(?:\[[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?\]|[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)(?:\s+|$)")
+BRACKETED_TMUX_TAG_RE = re.compile(r"\[([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\]")
+BRACKETED_TMUX_PREFIX_RE = re.compile(r"^\[([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\](?:\s+|$)")
 PLACEHOLDER_RE = re.compile(r"subject\W*", re.IGNORECASE)
 DEFAULT_THREAD_LOOKUP_WINDOW_S = 3 * 24 * 60 * 60
 DEFAULT_THREAD_LOOKUP_DEADLINE_S = 5.0
@@ -187,7 +189,7 @@ def parsed_header_date(raw_date: str) -> datetime | None:
     return parsed.astimezone()
 
 
-def find_recent_thread(subject_key: str) -> RecentHeader | None:
+def find_recent_thread_matching(matches: Callable[[RecentHeader], bool]) -> RecentHeader | None:
     lookup_s = int(os.environ.get("OMO_MANAGER_EMAIL_THREAD_LOOKUP_S", str(DEFAULT_THREAD_LOOKUP_WINDOW_S)))
     if lookup_s <= 0:
         return None
@@ -230,7 +232,7 @@ def find_recent_thread(subject_key: str) -> RecentHeader | None:
                 header = fetch_recent_header(client, uid)
                 if header is None or header.date is None or header.date < cutoff:
                     continue
-                if parseaddr(header.sender)[1].casefold() != sender.casefold() or normalized_subject_key(header.subject) != subject_key:
+                if parseaddr(header.sender)[1].casefold() != sender.casefold() or not matches(header):
                     continue
                 if best is None or best.date is None or header.date > best.date:
                     best = header
@@ -246,6 +248,30 @@ def find_recent_thread(subject_key: str) -> RecentHeader | None:
                 client.logout()
         except (SubjectLookupTimeout, OSError, imaplib.IMAP4.error):
             pass
+
+
+def find_recent_thread(subject_key: str) -> RecentHeader | None:
+    return find_recent_thread_matching(lambda header: normalized_subject_key(header.subject) == subject_key)
+
+
+def find_recent_thread_for_tmux_target(tmux_target: str) -> RecentHeader | None:
+    target = canonical_tmux_target(tmux_target)
+
+    def has_exact_leading_target(header: RecentHeader) -> bool:
+        text = header.subject.strip()
+        while True:
+            next_text = RE_PREFIX_RE.sub("", text, count=1).strip()
+            next_text = SUBJECT_TAG_RE.sub("", next_text, count=1).strip()
+            if next_text == text:
+                break
+            text = next_text
+        targets = BRACKETED_TMUX_TAG_RE.findall(text)
+        leading = BRACKETED_TMUX_PREFIX_RE.match(text)
+        return len(targets) == 1 and leading is not None and canonical_tmux_target(leading.group(1)) == target
+
+    return find_recent_thread_matching(
+        has_exact_leading_target
+    )
 
 
 def fetch_recent_header(client: imaplib.IMAP4_SSL, uid: str) -> RecentHeader | None:
@@ -301,6 +327,16 @@ def recent_thread_header(subject_key: str) -> RecentHeader | None:
         return None
 
 
+def recent_thread_header_for_tmux_target(tmux_target: str) -> RecentHeader | None:
+    try:
+        deadline_s = float(os.environ.get("OMO_MANAGER_EMAIL_THREAD_LOOKUP_DEADLINE_S", str(DEFAULT_THREAD_LOOKUP_DEADLINE_S)))
+        with recent_thread_lookup_deadline(deadline_s):
+            return find_recent_thread_for_tmux_target(tmux_target)
+    except Exception as exc:
+        print(f"omo_email_subject: recent thread lookup skipped: {exc}", file=sys.stderr)
+        return None
+
+
 def reply_headers_for_subject(subject: str) -> dict[str, str]:
     header = recent_thread_header(normalized_subject_key(subject))
     return reply_headers_from_recent_header(header)
@@ -326,6 +362,13 @@ def prepare_subject_and_headers(subject: str, tmux_target: str = "") -> tuple[st
     if starts_w_re(stripped) or header is not None:
         return manager_subject_w_target(base, tmux_target, True), reply_headers_from_recent_header(header)
     return manager_subject_w_target(base, tmux_target), {}
+
+
+def prepare_latest_thread_for_tmux_target(tmux_target: str) -> tuple[str, dict[str, str]]:
+    header = recent_thread_header_for_tmux_target(tmux_target)
+    if header is None:
+        raise SubjectInputError(f"no recent email thread found for tmux target {canonical_tmux_target(tmux_target)}; pass --subject or --subject-file")
+    return manager_subject_w_target(subject_base(header.subject), tmux_target, True), reply_headers_from_recent_header(header)
 
 
 def fallback_subject(subject: str, tmux_target: str = "") -> str:

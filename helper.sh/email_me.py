@@ -8,6 +8,7 @@ import fcntl
 import hashlib
 import os
 import re
+import secrets
 import smtplib
 import ssl
 import subprocess
@@ -27,7 +28,7 @@ if MANAGER_DIR.is_dir():
     sys.path.insert(0, str(MANAGER_DIR))
 try:
     from omo_email_config import configured_agent_mail
-    from omo_email_subject import SubjectInputError, canonical_tmux_target, normalized_subject_key, prepare_subject, prepare_subject_and_headers, reply_headers_for_subject, strip_leading_tmux_tags
+    from omo_email_subject import SubjectInputError, canonical_tmux_target, normalized_subject_key, prepare_latest_thread_for_tmux_target, prepare_subject, prepare_subject_and_headers, reply_headers_for_subject, strip_leading_tmux_tags
 except ImportError:
     configured_agent_mail = None
     SubjectInputError = ValueError
@@ -35,6 +36,7 @@ except ImportError:
     normalized_subject_key = None
     prepare_subject = None
     prepare_subject_and_headers = None
+    prepare_latest_thread_for_tmux_target = None
     reply_headers_for_subject = None
     strip_leading_tmux_tags = None
 
@@ -56,7 +58,7 @@ HR_RE = re.compile(r"^\s{0,3}([-*_])(?:\s*\1){2,}\s*$")
 
 @dataclass(frozen=True)
 class CliArgs:
-    title: str
+    title: str | None
     content: str
     dry_run: bool
     add_pwd_footer: bool
@@ -78,7 +80,7 @@ class ParsedArgs(argparse.Namespace):
 
 def parse_args(argv: list[str]) -> CliArgs:
     parser = argparse.ArgumentParser(
-        usage="email_me.py [--dry-run] (--subject TEXT | --subject-file FILE) [--message-file FILE]",
+        usage="email_me.py [--dry-run] [--subject TEXT | --subject-file FILE] [--message-file FILE]",
         description=(
             "Email the human with manager-safe subject handling. The body accepts Markdown input, but plain text is preferred. "
             "Reads the email body from standard input by default; "
@@ -103,8 +105,6 @@ def parse_args(argv: list[str]) -> CliArgs:
         parser.error("pass email subject with --subject or --subject-file; pass email body by standard input or --message-file.")
     if parsed.subject is not None and parsed.subject_file is not None:
         parser.error("pass email subject with --subject or --subject-file, not both.")
-    if parsed.subject is None and parsed.subject_file is None:
-        parser.error("email subject required.")
     if parsed.subject_file is not None:
         try:
             raw_title = parsed.subject_file.read_text(encoding="utf-8")
@@ -119,7 +119,6 @@ def parse_args(argv: list[str]) -> CliArgs:
         if "\r" in title or "\0" in title:
             parser.error("subject file must contain exactly one text line.")
     else:
-        assert parsed.subject is not None
         title = parsed.subject
     if parsed.message_file is not None:
         try:
@@ -128,7 +127,7 @@ def parse_args(argv: list[str]) -> CliArgs:
             parser.error(f"message file not readable: {exc}")
     else:
         content = sys.stdin.read()
-    for ch in title:
+    for ch in title or "":
         codepoint = ord(ch)
         if codepoint < 32 or codepoint == 127:
             parser.error("`title` must not contain control characters.")
@@ -594,16 +593,30 @@ def fake_send_log_path() -> Path | None:
     return Path(value) if value else None
 
 
+def maybe_print_thread_reminder() -> None:
+    if secrets.randbelow(8) == 0:
+        print("Tip: omit --subject to continue this tmux window's latest email thread.")
+
+
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
     try:
         subject_tmux_target = footer_tmux_target(args.tmux_target, args.manager_human)
         if args.manager_human and subject_tmux_target is None:
             raise ValueError("manager-human email requires a tmux target.")
-        if prepare_subject_and_headers is not None:
+        if args.title is None:
+            if subject_tmux_target is None:
+                raise ValueError("email without a subject requires an inferred tmux target.")
+            if prepare_latest_thread_for_tmux_target is None:
+                raise ValueError("email thread lookup is unavailable; pass --subject or --subject-file.")
+            subject, reply_headers = prepare_latest_thread_for_tmux_target(subject_tmux_target)
+            title = subject
+        elif prepare_subject_and_headers is not None:
             subject, reply_headers = prepare_subject_and_headers(args.title, subject_tmux_target or "")
+            title = args.title
         else:
             subject, reply_headers = normalize_subject(args.title, subject_tmux_target or ""), {}
+            title = args.title
         if args.manager_human:
             try:
                 validate_manager_human_subject(subject)
@@ -628,7 +641,7 @@ def main(argv: list[str]) -> int:
         body = append_pwd_footer(args.content, tmux_target=subject_tmux_target, require_unquoted_footer=args.manager_human) if add_pwd_footer else args.content
         print(f"dry-run: email not sent; subject={subject}; body-bytes={len(body.encode())}")
         return 0
-    dedupe_subject = normalized_subject_key(args.title) if args.manager_human and normalized_subject_key is not None else subject
+    dedupe_subject = normalized_subject_key(title) if args.manager_human and normalized_subject_key is not None else subject
     if args.manager_human and not should_send_manager_email_key(dedupe_subject, subject, args.content):
         print("Skipped duplicate human email")
         return 0
@@ -640,6 +653,7 @@ def main(argv: list[str]) -> int:
             print("Emailed the human")
         else:
             print("Email sent.")
+        maybe_print_thread_reminder()
         return 0
     if split_settings is not None:
         sender_email = split_settings.agent_address
@@ -665,7 +679,7 @@ def main(argv: list[str]) -> int:
     try:
         msg = build_message(
             sender_email=sender_email,
-            title=args.title,
+            title=title,
             content=args.content,
             add_pwd_footer=add_pwd_footer,
             prepared_subject=subject,
@@ -702,6 +716,7 @@ def main(argv: list[str]) -> int:
         print("Emailed the human")
     else:
         print("Email sent.")
+    maybe_print_thread_reminder()
     return 0
 
 

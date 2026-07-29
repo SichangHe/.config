@@ -16,6 +16,7 @@ assert SPEC and SPEC.loader
 email_me = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = email_me
 SPEC.loader.exec_module(email_me)
+omo_email_subject = sys.modules["omo_email_subject"]
 
 SHELL_SENSITIVE_BODY = """literal $HOME
 literal $(touch /tmp/email-me-should-not-run)
@@ -44,7 +45,7 @@ class EmailMeTests(unittest.TestCase):
         self.assertIsNotNone(plain)
         self.assertEqual(f"body\n\nPWD: {Path(tmp).name}\n", plain.get_content())
 
-    def test_appends_tmux_footer_to_body(self) -> None:
+    def test_tmux_context_still_uses_pwd_footer(self) -> None:
         result = subprocess.CompletedProcess(["tmux"], 0, stdout="wl:2\n", stderr="")
         with (
             patch.dict(os.environ, {"TMUX": "/tmp/tmux-session"}, clear=False),
@@ -53,7 +54,7 @@ class EmailMeTests(unittest.TestCase):
             msg = email_me.build_message("me@example.com", "hi", "body\n")
         plain = msg.get_body(preferencelist=("plain",))
         self.assertIsNotNone(plain)
-        self.assertEqual("body\n\ntmux: wl:2\n", plain.get_content())
+        self.assertEqual(f"body\n\nPWD: {Path.cwd().name}\n", plain.get_content())
         run.assert_called_once_with(
             ["tmux", "display-message", "-p", "#S:#I"],
             check=False,
@@ -71,16 +72,16 @@ class EmailMeTests(unittest.TestCase):
             msg = email_me.build_message("me@example.com", "hi", "body\n", tmux_target="wl:7")
         plain = msg.get_body(preferencelist=("plain",))
         self.assertIsNotNone(plain)
-        self.assertEqual("[a] [wl:7] hi", msg["Subject"])
-        self.assertEqual("body\n\ntmux: wl:7\n", plain.get_content())
+        self.assertEqual("[wl:7] hi", msg["Subject"])
+        self.assertEqual(f"body\n\nPWD: {Path.cwd().name}\n", plain.get_content())
         run.assert_not_called()
 
     def test_zero_pane_tmux_target_uses_window_tag(self) -> None:
         msg = email_me.build_message("me@example.com", "hi", "body\n", tmux_target="wl:7.0")
         plain = msg.get_body(preferencelist=("plain",))
         self.assertIsNotNone(plain)
-        self.assertEqual("[a] [wl:7] hi", msg["Subject"])
-        self.assertEqual("body\n\ntmux: wl:7\n", plain.get_content())
+        self.assertEqual("[wl:7] hi", msg["Subject"])
+        self.assertEqual(f"body\n\nPWD: {Path.cwd().name}\n", plain.get_content())
 
     def test_stale_env_tmux_target_does_not_override_exact_caller_pane(self) -> None:
         result = subprocess.CompletedProcess(["tmux"], 0, stdout="wl:0.0\n", stderr="")
@@ -137,7 +138,7 @@ class EmailMeTests(unittest.TestCase):
             msg = email_me.build_message("me@example.com", "hi", "body\n")
         plain = msg.get_body(preferencelist=("plain",))
         self.assertIsNotNone(plain)
-        self.assertEqual("body\n\ntmux: wl:2\n", plain.get_content())
+        self.assertEqual(f"body\n\nPWD: {Path.cwd().name}\n", plain.get_content())
         run.assert_called_once()
 
     def test_tmux_lookup_failure_falls_back_to_pwd_footer(self) -> None:
@@ -181,19 +182,19 @@ class EmailMeTests(unittest.TestCase):
         self.assertIsNotNone(plain)
         self.assertEqual(content, plain.get_content())
 
-    def test_keeps_existing_tmux_footer(self) -> None:
+    def test_existing_tmux_footer_does_not_replace_pwd_footer(self) -> None:
         content = "body\n\ntmux: wl:2\n"
         msg = email_me.build_message("me@example.com", "hi", content)
         plain = msg.get_body(preferencelist=("plain",))
         self.assertIsNotNone(plain)
-        self.assertEqual(content, plain.get_content())
+        self.assertEqual(f"{content.rstrip()}\n\nPWD: {Path.cwd().name}\n", plain.get_content())
 
-    def test_keeps_existing_tmux_footer_with_crlf(self) -> None:
+    def test_existing_crlf_tmux_footer_does_not_replace_pwd_footer(self) -> None:
         content = "body\r\n\r\ntmux: wl:2\r\n"
         msg = email_me.build_message("me@example.com", "hi", content)
         plain = msg.get_body(preferencelist=("plain",))
         self.assertIsNotNone(plain)
-        self.assertEqual("body\n\ntmux: wl:2\n", plain.get_content())
+        self.assertEqual(f"body\n\ntmux: wl:2\n\nPWD: {Path.cwd().name}\n", plain.get_content())
 
     def test_quoted_tmux_text_gets_current_footer(self) -> None:
         content = "body\n\n> tmux: wl:2\n"
@@ -237,7 +238,7 @@ class EmailMeTests(unittest.TestCase):
             msg = email_me.build_message("me@example.com", "hi", "body\n", add_pwd_footer=False)
         plain = msg.get_body(preferencelist=("plain",))
         self.assertIsNotNone(plain)
-        self.assertEqual("[a] [wl:2] hi", msg["Subject"])
+        self.assertEqual("[wl:2] hi", msg["Subject"])
         self.assertEqual("body\n", plain.get_content())
         run.assert_called_once()
 
@@ -245,44 +246,44 @@ class EmailMeTests(unittest.TestCase):
         for subject in ("[a] hi", "[omo_manager] hi"):
             with self.subTest(subject=subject):
                 msg = email_me.build_message("me@example.com", subject, "body")
-                self.assertEqual("[a] hi", msg["Subject"])
+                self.assertEqual("hi", msg["Subject"])
 
     def test_uses_short_manager_subject_prefix_by_default(self) -> None:
         msg = email_me.build_message("me@example.com", "hi", "body")
-        self.assertEqual("[a] hi", msg["Subject"])
+        self.assertEqual("hi", msg["Subject"])
 
     def test_preserves_manager_reply_subject(self) -> None:
         for subject in ("Re: [a] hi", "Re:[a] hi", "Re: [omo_manager] hi", "Re:[omo_manager] hi", "Re:  [omo_manager] hi"):
             with self.subTest(subject=subject):
                 msg = email_me.build_message("me@example.com", subject, "body")
-                self.assertEqual("Re: [a] hi", msg["Subject"])
+                self.assertEqual("Re: hi", msg["Subject"])
 
     def test_manager_reply_subject_adds_thread_headers_when_found(self) -> None:
         with patch.object(email_me, "reply_headers_for_subject", return_value={"In-Reply-To": "<old@example.test>", "References": "<root@example.test> <old@example.test>"}) as headers:
             msg = email_me.build_message("me@example.com", "Re: manager_status_email_unification_followup_7872.md status answer", "body")
         headers.assert_called_once_with("Re: manager_status_email_unification_followup_7872.md status answer")
-        self.assertEqual("Re: [a] manager_status_email_unification_followup_7872.md status answer", msg["Subject"])
+        self.assertEqual("Re: manager_status_email_unification_followup_7872.md status answer", msg["Subject"])
         self.assertEqual("<old@example.test>", msg["In-Reply-To"])
         self.assertEqual("<root@example.test> <old@example.test>", msg["References"])
 
     def test_fallback_subject_normalizer_matches_manager_basics(self) -> None:
         with patch.object(email_me, "prepare_subject", None):
-            self.assertEqual("[a] hi", email_me.normalize_subject("[omo_manager] hi"))
-            self.assertEqual("Re: [a] hi", email_me.normalize_subject("Re: [omo_manager] hi"))
-            self.assertEqual("[a] [wl:7] hi", email_me.normalize_subject("[omo_manager] hi", "wl:7"))
-            self.assertEqual("Re: [a] [wl:7] hi", email_me.normalize_subject("Re: [omo_manager] hi", "wl:7"))
+            self.assertEqual("hi", email_me.normalize_subject("[omo_manager] hi"))
+            self.assertEqual("Re: hi", email_me.normalize_subject("Re: [omo_manager] hi"))
+            self.assertEqual("[wl:7] hi", email_me.normalize_subject("[omo_manager] hi", "wl:7"))
+            self.assertEqual("Re: [wl:7] hi", email_me.normalize_subject("Re: [omo_manager] hi", "wl:7"))
             with self.assertRaisesRegex(ValueError, "placeholder SUBJECT"):
                 email_me.normalize_subject("[a] SUBJECT")
-            with self.assertRaisesRegex(ValueError, r"\[omo\] is deprecated"):
+            with self.assertRaisesRegex(ValueError, r"deprecated \[omo\]"):
                 email_me.normalize_subject("Re: Re: [omo] direct")
 
     def test_rejects_non_manager_reply_subject(self) -> None:
-        with self.assertRaisesRegex(ValueError, r"\[omo\] is deprecated"):
+        with self.assertRaisesRegex(ValueError, r"deprecated \[omo\]"):
             email_me.build_message("me@example.com", "Re: [omo] hi", "body")
-        with self.assertRaisesRegex(ValueError, r"\[omo\] is deprecated"):
+        with self.assertRaisesRegex(ValueError, r"deprecated \[omo\]"):
             email_me.build_message("me@example.com", "Re:[omo] hi", "body")
         msg = email_me.build_message("me@example.com", "Re: hi", "body")
-        self.assertEqual("Re: [a] hi", msg["Subject"])
+        self.assertEqual("Re: hi", msg["Subject"])
 
     def test_markdown_gets_html_and_plain_url_fallback(self) -> None:
         body = "# Update\n\n- See [Story](https://example.com/a?b=1&c=2).\n- Run `echo $HOME`.\n\n> quoted <raw>\n"
@@ -365,6 +366,11 @@ class EmailMeTests(unittest.TestCase):
         self.assertEqual("hi", args.title)
         self.assertEqual(SHELL_SENSITIVE_BODY, args.content)
         self.assertTrue(args.add_pwd_footer)
+
+    def test_parse_args_allows_omitted_subject(self) -> None:
+        with patch.object(sys, "stdin", StringIO("body\n")):
+            args = email_me.parse_args([])
+        self.assertIsNone(args.title)
 
     def test_parse_args_can_disable_pwd_footer(self) -> None:
         with patch.object(sys, "stdin", StringIO("body\n")):
@@ -450,6 +456,133 @@ class EmailMeTests(unittest.TestCase):
         self.assertEqual(0, result)
         self.assertIn("dry-run: email not sent", stdout.getvalue())
 
+    def test_omitted_subject_reuses_latest_thread_for_inferred_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            body = Path(tmp) / "body.md"
+            body.write_text("body\n", encoding="utf-8")
+            env = {
+                "EMAIL_ME_FAKE_SEND_LOG": str(Path(tmp) / "sent.txt"),
+                "OMO_MANAGER_STATE_DIR": str(Path(tmp) / "state"),
+                "OMO_MANAGER_TMUX_TARGET": "wl:1.0",
+            }
+            prepared = ("Re: [wl:1] Existing topic", {"In-Reply-To": "<prior@example.test>"})
+            with (
+                patch.dict(os.environ, env, clear=False),
+                patch.object(email_me, "prepare_latest_thread_for_tmux_target", return_value=prepared) as prepare,
+                patch.object(email_me, "maybe_print_thread_reminder"),
+            ):
+                result = email_me.main(["--manager-human", "--message-file", str(body)])
+            self.assertEqual(0, result)
+            prepare.assert_called_once_with("wl:1")
+            self.assertEqual("Re: [wl:1] Existing topic\nbody\n", (Path(tmp) / "sent.txt").read_text(encoding="utf-8"))
+
+    def test_omitted_subject_fails_when_no_thread_exists(self) -> None:
+        with (
+            patch.dict(os.environ, {"OMO_MANAGER_TMUX_TARGET": "wl:1"}, clear=False),
+            patch.object(sys, "stdin", StringIO("body\n")),
+            patch.object(
+                email_me,
+                "prepare_latest_thread_for_tmux_target",
+                side_effect=email_me.SubjectInputError("no recent email thread found for tmux target wl:1"),
+            ),
+            patch("sys.stderr", new_callable=StringIO) as stderr,
+        ):
+            result = email_me.main(["--manager-human"])
+        self.assertEqual(2, result)
+        self.assertIn("no recent email thread", stderr.getvalue())
+
+    def test_omitted_subject_preserves_reply_headers_on_smtp_message(self) -> None:
+        sent_messages = []
+
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+            app_password = "secret"
+
+        class FakeSmtp:
+            def __init__(self, **_kwargs: object) -> None:
+                return None
+
+            def __enter__(self) -> "FakeSmtp":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def login(self, _sender: str, _password: str) -> None:
+                return None
+
+            def send_message(self, msg: object) -> None:
+                sent_messages.append(msg)
+
+        prepared = (
+            "Re: [wl:1] Existing topic",
+            {"In-Reply-To": "<prior@example.test>", "References": "<root@example.test> <prior@example.test>"},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch.dict(os.environ, {"OMO_MANAGER_STATE_DIR": str(Path(tmp) / "state")}, clear=False),
+                patch.object(sys, "stdin", StringIO("body\n")),
+                patch.object(email_me, "configured_agent_mail", return_value=Settings()),
+                patch.object(email_me, "prepare_latest_thread_for_tmux_target", return_value=prepared),
+                patch.object(email_me, "maybe_print_thread_reminder"),
+                patch.object(email_me.smtplib, "SMTP_SSL", FakeSmtp),
+                patch.object(email_me.ssl, "create_default_context", return_value=None),
+            ):
+                self.assertEqual(0, email_me.main(["--manager-human", "--tmux-target", "wl:1"]))
+        self.assertEqual("Re: [wl:1] Existing topic", sent_messages[0]["Subject"])
+        self.assertEqual("<prior@example.test>", sent_messages[0]["In-Reply-To"])
+        self.assertEqual("<root@example.test> <prior@example.test>", sent_messages[0]["References"])
+
+    def test_thread_reminder_is_printed_one_in_eight(self) -> None:
+        with patch.object(email_me.secrets, "randbelow", return_value=0), patch("sys.stdout", new_callable=StringIO) as stdout:
+            email_me.maybe_print_thread_reminder()
+        self.assertIn("omit --subject", stdout.getvalue())
+
+    def test_thread_reminder_is_otherwise_quiet(self) -> None:
+        with patch.object(email_me.secrets, "randbelow", return_value=1), patch("sys.stdout", new_callable=StringIO) as stdout:
+            email_me.maybe_print_thread_reminder()
+        self.assertEqual("", stdout.getvalue())
+
+    def test_target_thread_lookup_matches_zero_pane_alias_only(self) -> None:
+        matching = omo_email_subject.RecentHeader("human@example.test", "Re: [hcfg:1.0] Topic", None)
+        sibling = omo_email_subject.RecentHeader("human@example.test", "Re: [hcfg:1.1] Topic", None)
+
+        def select(predicate: object) -> object:
+            self.assertTrue(callable(predicate))
+            self.assertTrue(predicate(matching))
+            self.assertFalse(predicate(sibling))
+            return matching
+
+        with patch.object(omo_email_subject, "find_recent_thread_matching", side_effect=select):
+            self.assertEqual(matching, omo_email_subject.find_recent_thread_for_tmux_target("hcfg:1"))
+
+    def test_target_thread_lookup_rejects_nonleading_and_competing_tags(self) -> None:
+        nonleading = omo_email_subject.RecentHeader("human@example.test", "Re: Topic [hcfg:1]", None)
+        competing = omo_email_subject.RecentHeader("human@example.test", "Re: [hcfg:1] [wl:2] Topic", None)
+        missing_separator = omo_email_subject.RecentHeader("human@example.test", "Re: [hcfg:1]Topic", None)
+
+        def select(predicate: object) -> None:
+            self.assertTrue(callable(predicate))
+            self.assertFalse(predicate(nonleading))
+            self.assertFalse(predicate(competing))
+            self.assertFalse(predicate(missing_separator))
+            return None
+
+        with patch.object(omo_email_subject, "find_recent_thread_matching", side_effect=select):
+            self.assertIsNone(omo_email_subject.find_recent_thread_for_tmux_target("hcfg:1"))
+
+    def test_target_thread_lookup_accepts_alternating_legacy_reply_prefixes(self) -> None:
+        matching = omo_email_subject.RecentHeader("human@example.test", "Re: [a] Re: [hcfg:1] Topic", None)
+
+        def select(predicate: object) -> object:
+            self.assertTrue(callable(predicate))
+            self.assertTrue(predicate(matching))
+            return matching
+
+        with patch.object(omo_email_subject, "find_recent_thread_matching", side_effect=select):
+            self.assertEqual(matching, omo_email_subject.find_recent_thread_for_tmux_target("hcfg:1"))
+
     def test_dry_run_can_omit_pwd_footer(self) -> None:
         with patch.object(sys, "stdin", StringIO("body\n")), patch("sys.stdout", new_callable=StringIO) as stdout:
             result = email_me.main(["--dry-run", "--no-pwd-footer", "--subject", "hi"])
@@ -492,8 +625,8 @@ class EmailMeTests(unittest.TestCase):
             self.assertEqual(0, second)
             self.assertIn("Emailed the human", stdout.getvalue())
             self.assertIn("Skipped duplicate human email", stdout.getvalue())
-            self.assertEqual("[a] [wl:1] Manager update\nbody\n", send_log.read_text(encoding="utf-8"))
-            self.assertIn("[a] [wl:1] Manager update", (state_dir / "human-email-sent.tsv").read_text(encoding="utf-8"))
+            self.assertEqual("[wl:1] Manager update\nbody\n", send_log.read_text(encoding="utf-8"))
+            self.assertIn("[wl:1] Manager update", (state_dir / "human-email-sent.tsv").read_text(encoding="utf-8"))
 
     def test_manager_human_mode_rejects_missing_tmux_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -524,14 +657,14 @@ class EmailMeTests(unittest.TestCase):
                 "OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "0",
                 "OMO_MANAGER_TMUX_TARGET": "wl:1.0",
             }
-            prepared = ("Re: [a] [wl:1] manager_status_email_unification_followup_7872.md status answer", {"In-Reply-To": "<prior@example.test>", "References": "<prior@example.test>"})
+            prepared = ("Re: [wl:1] manager_status_email_unification_followup_7872.md status answer", {"In-Reply-To": "<prior@example.test>", "References": "<prior@example.test>"})
             with patch.dict(os.environ, env, clear=False), patch.object(email_me, "prepare_subject_and_headers", return_value=prepared) as prepare, patch.object(email_me, "reply_headers_for_subject") as headers:
                 result = email_me.main(["--manager-human", "--subject-file", str(subject), "--message-file", str(body)])
             self.assertEqual(0, result)
             prepare.assert_called_once_with("manager_status_email_unification_followup_7872.md status answer", "wl:1")
             headers.assert_not_called()
-            self.assertEqual("Re: [a] [wl:1] manager_status_email_unification_followup_7872.md status answer\nbody\n", send_log.read_text(encoding="utf-8"))
-            self.assertIn("Re: [a] [wl:1] manager_status_email_unification_followup_7872.md status answer", (state_dir / "human-email-sent.tsv").read_text(encoding="utf-8"))
+            self.assertEqual("Re: [wl:1] manager_status_email_unification_followup_7872.md status answer\nbody\n", send_log.read_text(encoding="utf-8"))
+            self.assertIn("Re: [wl:1] manager_status_email_unification_followup_7872.md status answer", (state_dir / "human-email-sent.tsv").read_text(encoding="utf-8"))
 
     def test_manager_human_mode_passes_tmux_target_to_subject_preparation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -546,12 +679,12 @@ class EmailMeTests(unittest.TestCase):
                 "OMO_MANAGER_STATE_DIR": str(state_dir),
                 "OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "0",
             }
-            prepared = ("[a] [wl:7] Topic", {})
+            prepared = ("[wl:7] Topic", {})
             with patch.dict(os.environ, env, clear=False), patch.object(email_me, "prepare_subject_and_headers", return_value=prepared) as prepare:
                 result = email_me.main(["--manager-human", "--tmux-target", "wl:7", "--subject-file", str(subject), "--message-file", str(body)])
             self.assertEqual(0, result)
             prepare.assert_called_once_with("Topic", "wl:7")
-            self.assertEqual("[a] [wl:7] Topic\nbody\n", send_log.read_text(encoding="utf-8"))
+            self.assertEqual("[wl:7] Topic\nbody\n", send_log.read_text(encoding="utf-8"))
 
     def test_manager_human_mode_rejects_stale_agent_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -596,10 +729,10 @@ class EmailMeTests(unittest.TestCase):
                 "OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "0",
                 "OMO_MANAGER_TMUX_TARGET": "wl:1.0",
             }
-            with patch.dict(os.environ, env, clear=False), patch.object(email_me, "prepare_subject_and_headers", return_value=("Re: [a] Untagged source subject", {})):
+            with patch.dict(os.environ, env, clear=False), patch.object(email_me, "prepare_subject_and_headers", return_value=("Re: Untagged source subject", {})):
                 result = email_me.main(["--manager-human", "--subject-file", str(subject), "--message-file", str(body)])
             self.assertEqual(0, result)
-            self.assertEqual("Re: [a] [wl:1] Untagged source subject\nbody\n", send_log.read_text(encoding="utf-8"))
+            self.assertEqual("Re: [wl:1] Untagged source subject\nbody\n", send_log.read_text(encoding="utf-8"))
 
     def test_manager_human_mode_rejects_multiple_prepared_tmux_tags(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -627,12 +760,12 @@ class EmailMeTests(unittest.TestCase):
                 "EMAIL_ME_FAKE_SEND_LOG": str(send_log),
                 "OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "0",
             }
-            prepared = ("[a] [wl:7] Topic", {})
+            prepared = ("[wl:7] Topic", {})
             with patch.dict(os.environ, env, clear=False), patch.object(email_me, "prepare_subject_and_headers", return_value=prepared) as prepare:
                 result = email_me.main(["--tmux-target", "wl:7", "--subject-file", str(subject), "--message-file", str(body)])
             self.assertEqual(0, result)
             prepare.assert_called_once_with("Topic", "wl:7")
-            self.assertEqual("[a] [wl:7] Topic\nbody\n", send_log.read_text(encoding="utf-8"))
+            self.assertEqual("[wl:7] Topic\nbody\n", send_log.read_text(encoding="utf-8"))
 
     def test_sender_tmux_target_preserves_source_tag_for_forwarded_mail(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -652,7 +785,7 @@ class EmailMeTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=False), patch.object(email_me.subprocess, "run") as run:
                 result = email_me.main(["--manager-human", "--sender-tmux-target", "vl:15", "--subject-file", str(subject), "--message-file", str(body)])
             self.assertEqual(0, result)
-            self.assertEqual("Re: [a] [vl:15] Topic\nbody\n", send_log.read_text(encoding="utf-8"))
+            self.assertEqual("Re: [vl:15] Topic\nbody\n", send_log.read_text(encoding="utf-8"))
             run.assert_not_called()
 
     def test_no_pwd_footer_still_passes_tmux_target_to_subject_preparation(self) -> None:
@@ -666,12 +799,12 @@ class EmailMeTests(unittest.TestCase):
                 "EMAIL_ME_FAKE_SEND_LOG": str(send_log),
                 "OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "0",
             }
-            prepared = ("[a] [wl:7] Topic", {})
+            prepared = ("[wl:7] Topic", {})
             with patch.dict(os.environ, env, clear=False), patch.object(email_me, "prepare_subject_and_headers", return_value=prepared) as prepare:
                 result = email_me.main(["--no-pwd-footer", "--tmux-target", "wl:7", "--subject-file", str(subject), "--message-file", str(body)])
             self.assertEqual(0, result)
             prepare.assert_called_once_with("Topic", "wl:7")
-            self.assertEqual("[a] [wl:7] Topic\nbody\n", send_log.read_text(encoding="utf-8"))
+            self.assertEqual("[wl:7] Topic\nbody\n", send_log.read_text(encoding="utf-8"))
 
     def test_manager_human_dedupe_survives_thread_subject_transition(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -688,13 +821,13 @@ class EmailMeTests(unittest.TestCase):
                 "OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "0",
                 "OMO_MANAGER_TMUX_TARGET": "wl:1.0",
             }
-            prepared = [("[a] [wl:1] Topic", {}), ("Re: [a] [wl:1] Topic", {"In-Reply-To": "<prior@example.test>", "References": "<prior@example.test>"})]
+            prepared = [("[wl:1] Topic", {}), ("Re: [wl:1] Topic", {"In-Reply-To": "<prior@example.test>", "References": "<prior@example.test>"})]
             with patch.dict(os.environ, env, clear=False), patch.object(email_me, "prepare_subject_and_headers", side_effect=prepared):
                 first = email_me.main(["--manager-human", "--subject-file", str(subject), "--message-file", str(body)])
                 second = email_me.main(["--manager-human", "--subject-file", str(subject), "--message-file", str(body)])
             self.assertEqual(0, first)
             self.assertEqual(0, second)
-            self.assertEqual("[a] [wl:1] Topic\nbody\n", send_log.read_text(encoding="utf-8"))
+            self.assertEqual("[wl:1] Topic\nbody\n", send_log.read_text(encoding="utf-8"))
 
     def test_manager_human_smtp_path_uses_prepared_reply_headers(self) -> None:
         sent_messages = []
