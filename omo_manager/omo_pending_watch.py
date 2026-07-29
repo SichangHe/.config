@@ -72,7 +72,8 @@ from omo_manager.omo_tmux_send import DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S
 from omo_manager.omo_tmux_send import inspect_lines_for_message
 from omo_manager.omo_tmux_send import require_sendable_codex_target
 from omo_manager.omo_tmux_send import send_capacity_resume as verified_send_capacity_resume
-from omo_manager.omo_tmux_send import send_to_codex as verified_send_to_codex
+from omo_manager.omo_tmux_send import send_system_to_codex as verified_send_to_codex
+from omo_manager.omo_tmux_send import wrap_agent_message
 from omo_manager.omo_task_lock import watcher_report_authority_is_live
 from omo_manager.omo_task_lock import watcher_report_manager_temporary
 from omo_manager.omo_task_lock import watcher_report_state_maintenance_temporary
@@ -2282,6 +2283,16 @@ def marker_agent_report_text(marker: Marker, attachments: Sequence[SourceAttachm
     return "\n".join(("Agent report received; review it and handle any follow-up:", "<agent_report>", message, "</agent_report>"))
 
 
+def marker_agent_source_target(marker: Marker) -> str:
+    """Extract the report producer target for envelope provenance."""
+
+    for line in marker.block_text.splitlines():
+        match = AGENT_POINTER_WITH_TARGET_RE.fullmatch(line.strip())
+        if match is not None:
+            return match.group(1)
+    return ""
+
+
 def agent_report_fallback_text(marker: Marker, attachments: Sequence[SourceAttachment], reason: str) -> str:
     """Escalate an agent report without including unrelated task-file prose."""
 
@@ -2816,11 +2827,15 @@ def push_agent_report_ref(
     if repeated_manager_delivery_is_busy(args, seen, report_key, target, now_s):
         return 1
 
-    failure_text = agent_report_fallback_text(marker, attachments, f"owning manager `{target}` rejected the report before paste")
+    producer_target = marker_agent_source_target(marker)
+    failure_text = wrap_agent_message(
+        agent_report_fallback_text(marker, attachments, f"owning manager `{target}` rejected the report before paste"),
+        source_target=producer_target,
+    )
     result = push_marker_delivery(
         args,
         marker,
-        marker_agent_report_text(marker, attachments),
+        wrap_agent_message(marker_agent_report_text(marker, attachments), source_target=producer_target),
         target,
         event,
         failure_fallback_target=fallback_target,

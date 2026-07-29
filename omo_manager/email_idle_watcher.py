@@ -33,14 +33,14 @@ try:
     from .omo_email_subject import subject_base
     from .omo_agent_status import TaskFrontmatterError, parse_task_metadata
     from .omo_task_lock import task_file_lock
-    from .omo_tmux_send import CodexSendOptions, DEFAULT_TMUX_ENTER_COUNT, require_sendable_codex_target, send_to_codex
+    from .omo_tmux_send import CodexSendOptions, DEFAULT_TMUX_ENTER_COUNT, require_sendable_codex_target, send_system_to_codex as send_to_codex
 except ImportError:
     try:
         from omo_email_config import AgentMailSettings, GMAIL_IMAP_HOST, configured_agent_mail, human_config_path
         from omo_email_subject import subject_base
         from omo_agent_status import TaskFrontmatterError, parse_task_metadata
         from omo_task_lock import task_file_lock
-        from omo_tmux_send import CodexSendOptions, DEFAULT_TMUX_ENTER_COUNT, require_sendable_codex_target, send_to_codex
+        from omo_tmux_send import CodexSendOptions, DEFAULT_TMUX_ENTER_COUNT, require_sendable_codex_target, send_system_to_codex as send_to_codex
     except ImportError:
         subject_base = None
         TaskFrontmatterError = ValueError

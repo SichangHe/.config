@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import yaml
 
-from omo_manager.omo_codex_start import Args, Pane, StartError, current_todo_entries, launch_command, post_marker_lines, prompt_text, require_same_shell, validate_task
+from omo_manager.omo_codex_start import Args, Pane, StartError, current_todo_entries, launch_command, post_marker_lines, prompt_text, require_same_shell, start, validate_task
 
 
 class CodexStartTests(unittest.TestCase):
@@ -116,6 +116,17 @@ class CodexStartTests(unittest.TestCase):
         with patch("omo_manager.omo_codex_start.resolve_pane", return_value=running):
             with self.assertRaisesRegex(StartError, "not an empty shell"):
                 require_same_shell(expected)
+
+    def test_start_rejects_human_owned_session_before_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            pane = Pane("hcfg:2.0", "%2", "@2", "zsh", root)
+            with patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane), patch(
+                "omo_manager.omo_codex_start.require_same_shell"
+            ) as require_shell, self.assertRaisesRegex(StartError, "human-owned"):
+                start(self.args(root, target="hcfg:2"))
+
+            require_shell.assert_not_called()
 
 
 if __name__ == "__main__":

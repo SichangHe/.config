@@ -696,6 +696,31 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertNotIn("pending items recorded", fallback)
             self.assertNotIn("independent later request", fallback)
 
+    def test_agent_report_delivery_has_producer_envelope(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            report = valid_agent_report(self, "worker result\n", target="vl:2", name="worker_report_envelope")
+            task = root / "manager.md"
+            task.write_text(
+                f"{task_frontmatter(runat='vl:15', managerat='main:1', is_manager=True)}\n"
+                f"(pending)\n(from agent vl:2 {report})\n",
+                encoding="utf-8",
+            )
+            args = Args(root, "", root / "state", 1, 1, 1, Path("/bin/false"), True, False, manager_target="main:1")
+            marker = find_markers(root, [task])[0]
+
+            with patch.object(watcher, "push_marker_delivery", return_value=watcher.DeliveryResult(watcher.ASYNC_DELIVERY_STARTED)) as push:
+                self.assertEqual(
+                    watcher.ASYNC_DELIVERY_STARTED,
+                    watcher.push_ref(args, {}, 100.0, marker, watcher.marker_attachments(args, marker)),
+                )
+
+            self.assertIn('<agent_message from="vl:2">', push.call_args.args[2])
+            self.assertIn("<agent_report>", push.call_args.args[2])
+            self.assertIn('<agent_message from="vl:2">', push.call_args.kwargs["failure_fallback_text"])
+
     def test_different_agent_report_artifacts_are_delivered_independently(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 

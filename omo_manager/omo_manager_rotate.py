@@ -368,6 +368,8 @@ def invocation_is_target(pane: PaneIdentity, processes: dict[int, ProcessInfo]) 
 
 def preflight(args: Args) -> Preflight:
     pane = resolve_exact_pane(args.target)
+    if pane.canonical_target.partition(":")[0].startswith("h"):
+        raise RotationError("manager rotation cannot modify a human-owned `h*` tmux session.")
     processes = read_processes()
     invoked_from_target = invocation_is_target(pane, processes)
     if args.coordinator_token is not None and invoked_from_target:

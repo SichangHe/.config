@@ -410,6 +410,35 @@ def target_session(tmux_target: str) -> str:
     return tmux_target.split(":", 1)[0]
 
 
+def is_human_tmux_session(tmux_target: str) -> bool:
+    """Return whether a target belongs to the human-only `h*` namespace."""
+
+    return target_session(tmux_target).startswith("h")
+
+
+def resolved_launch_session_name(session_target: str) -> str:
+    """Resolve tmux aliases before applying the human-session boundary."""
+
+    result = subprocess.run(
+        ["tmux", "display-message", "-p", "-t", session_target, "#S"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    resolved = result.stdout.strip() if result.returncode == 0 else ""
+    return resolved or target_session(session_target).lstrip("=")
+
+
+def human_authorized_launch_session(args: Args, session_name: str) -> bool:
+    """Require auditable human text naming an `h*` launch session."""
+
+    if args.human_email_file is None or args.human_email_lines is None:
+        return False
+    excerpt = human_email_excerpt(args)
+    return re.search(rf"(?<![A-Za-z0-9_.-]){re.escape(session_name)}(?=$|[^A-Za-z0-9_.-])", excerpt) is not None
+
+
 def is_vl_task_file(task_file: str) -> bool:
     return Path(task_file).name.startswith("vl_")
 
@@ -1307,6 +1336,12 @@ def validate_inputs(args: Args) -> str:
         raise ValueError("--human-email-file and --human-email-lines require --workdir.")
     if args.human_email_file is not None:
         _ = human_email_excerpt(args)
+    if args.workdir is not None:
+        session_name = resolved_launch_session_name(args.tmux_session)
+        if session_name.startswith("h") and not human_authorized_launch_session(args, session_name):
+            raise ValueError(
+                "launches in human-owned `h*` tmux sessions require an authoritative human email excerpt naming that exact session."
+            )
     if args.workdir is not None:
         readable_file(DEFAULT_WORKER_INSTRUCTIONS, "worker defaults")
         if is_vl_agent(args.task_file, target(args)):
