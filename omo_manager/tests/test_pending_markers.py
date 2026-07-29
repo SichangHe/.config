@@ -5895,6 +5895,16 @@ class PendingMarkerTests(unittest.TestCase):
 
             self.assertEqual({}, watcher.agent_pending_item_reminder_texts(root))
 
+    def test_pending_item_reminder_only_wakes_ready_agent(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "TODO.md").write_text("current:\ncontact.md wl:4\n", encoding="utf-8")
+            (root / "contact.md").write_text(
+                task_frontmatter(status="long_running", runat="wl:4", managerat="wl:1", pending_items=("continue review",)),
+                encoding="utf-8",
+            )
             args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1")
             with patch.object(watcher, "inspect_codex", return_value=MagicMock(status="running")), patch.object(
                 watcher, "try_send_delivery_text", return_value=watcher.DeliveryResult(0)
@@ -5917,16 +5927,6 @@ class PendingMarkerTests(unittest.TestCase):
                 self.assertTrue(watcher.push_agent_pending_item_reminders(args, seen, 1001.0 + args.agent_problem_repeat_s + 1))
                 self.assertEqual(2, push.call_count)
 
-    def test_pending_item_reminder_only_wakes_ready_agent(self) -> None:
-        from omo_manager import omo_pending_watch as watcher
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "TODO.md").write_text("current:\ncontact.md wl:4\n", encoding="utf-8")
-            (root / "contact.md").write_text(
-                task_frontmatter(status="long_running", runat="wl:4", managerat="wl:1", pending_items=("continue review",)),
-                encoding="utf-8",
-            )
     def test_timed_out_problem_scan_still_sends_pending_item_reminder(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
