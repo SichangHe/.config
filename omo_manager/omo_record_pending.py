@@ -50,11 +50,22 @@ class ParsedArgs(argparse.Namespace):
 
 
 def parse_args(argv: list[str]) -> Args:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""Use this helper for pending blocks that create new task items. It
+validates that the `(pending)` marker is still at --line before atomically
+recording the items and removing the marker.
+
+Quote human-origin requests as closely as possible in --item. For email-origin
+requests, pass --email-file so --ack-human reuses the original subject.
+--task-file is only for atomic initial assignment to a new owner; keep task-file
+paths out of worker prompts.""",
+    )
     _ = parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     _ = parser.add_argument("--pending-file", type=Path, required=True, help="Task file containing the consumed `(pending)` line.")
     _ = parser.add_argument("--line", type=int, required=True, help="One-based line number whose stripped content is `(pending)`.")
-    _ = parser.add_argument("--task-file", type=Path, help="Task file that receives `pending_task_items`; defaults to --pending-file.")
+    _ = parser.add_argument("--task-file", type=Path, help="Initial owner task file that receives `pending_task_items`; defaults to --pending-file.")
     _ = parser.add_argument("--item", action="append", default=[], help="Pending task item to append. Pass once per item.")
     _ = parser.add_argument("--ack-human", action="store_true", help="Email the human after the pending marker and items are recorded.")
     _ = parser.add_argument("--email-file", type=Path, help="Stored `manager_mail/*.txt` file whose `Subject:` header should be used for the human acknowledgement.")

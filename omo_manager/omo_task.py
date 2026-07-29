@@ -159,7 +159,26 @@ def parse_args(argv: list[str]) -> Args:
         description=__doc__,
         allow_abbrev=False,
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=("Ownership migration: omo_task.py --root ROOT --task-file TASK.md --migrate-manager-owner --old-manager-target OLD --new-manager-target NEW [--dry-run]"),
+        epilog="""Launch behavior:
+  With --workdir, create or update task frontmatter, link the task in TODO.md
+  unless --no-link is passed, open a tmux window with its normal shell, and
+  start Codex there. --prompt-file becomes Codex's initial prompt argument.
+  Every new launch requires --model and --reasoning-effort; model selection in
+  --codex-flag is rejected. Pass --is-manager for manager launches.
+  WORKER_DEFAULTS.md is injected into every prompt, followed by MANAGER.md for
+  manager launches. Do not repeat instructions to read those files.
+  For a launch caused by email, pass --human-email-file and the exact relevant
+  --human-email-lines. Keep --prompt-file narrowly task-specific.
+  Keep --task-file as manager-side bookkeeping and out of worker prompts.
+
+Model guidance:
+  gpt-5.6-sol medium is the default; use max for hard tasks and ultra only for
+  very hard tasks. Use gpt-5.6-sol low for submanagers, gpt-5.6-terra medium for
+  easier routine tasks, and gpt-5.6-luna xhigh for trivial minimal tasks. Terra
+  and Luna are unreliable decision makers.
+
+Ownership migration:
+  omo_task.py --root ROOT --task-file TASK.md --migrate-manager-owner --old-manager-target OLD --new-manager-target NEW [--dry-run]""",
     )
     _ = parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     _ = parser.add_argument("--task-file", required=True)

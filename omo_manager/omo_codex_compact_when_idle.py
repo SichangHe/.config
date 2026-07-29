@@ -58,7 +58,11 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--interval-s", type=float, default=5.0, help="Polling interval in seconds; default: 5.")
     _ = parser.add_argument("--lines", type=int, default=80, help="Codex status tail lines to inspect; default: 80.")
     _ = parser.add_argument("--background", action="store_true", help="Start a detached worker and return immediately.")
-    _ = parser.add_argument("--notify-target", default="", help="Optional tmux target to notify after success or failure.")
+    _ = parser.add_argument(
+        "--notify-target",
+        default="",
+        help="Different tmux target to notify after success or failure; omit when the caller is the target.",
+    )
     _ = parser.add_argument("--notify-enter-count", type=int, default=1, help="Enter keys to send after the optional notification; default: 1.")
     _ = parser.add_argument("--log-file", type=Path, help="Background worker stdout/stderr file; default: private temp log.")
     _ = parser.add_argument("--submit-verify-timeout-s", type=float, default=5.0, help="Seconds to verify `/compact` left the input after Enter; default: 5.")

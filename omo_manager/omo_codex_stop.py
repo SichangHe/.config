@@ -57,7 +57,13 @@ class ParsedArgs(argparse.Namespace):
 
 
 def parse_args(argv: list[str]) -> Args:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""This is the lower-level stop helper used by
+`omo_task_status.py TASK.md done`. Use it directly only for a non-task pane or
+recovery; normal task closure goes through `omo_task_status.py`.""",
+    )
     _ = parser.add_argument("--target", required=True, help="tmux pane/window target, e.g. `cfg:2.0`.")
     _ = parser.add_argument("--wait-s", type=float, default=10.0)
     _ = parser.add_argument("--lines", type=int, default=2000)

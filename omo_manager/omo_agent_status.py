@@ -235,7 +235,13 @@ class ParsedArgs(argparse.Namespace):
 
 
 def parse_args(argv: list[str]) -> Args:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""The helper reads task links from TODO.md, treats each linked
+task's frontmatter as authoritative status, and correlates that state with tmux.
+Use --problems-only --no-auto-unstick for a read-only one-shot diagnosis.""",
+    )
     _ = parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     _ = parser.add_argument("--registry", type=Path, default=DEFAULT_REGISTRY)
     _ = parser.add_argument("--prune-completed", action="store_true", help="Remove completed/previous tasks from sessions.json after writing a .bak.TIMESTAMP backup.")

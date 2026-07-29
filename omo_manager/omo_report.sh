@@ -98,7 +98,10 @@ usage() {
     "Usage: omo_report.sh --status STATUS --message-file FILE [--agent NAME]" \
     "       omo_report.sh --describe --status STATUS --message-file FILE [--agent NAME]" \
     "       omo_report.sh --alloc-message-file" \
-    "Create report text in a private helper-allocated file, then pass that path with --message-file. A file named REPORT is refused unless it is in a private owner-only directory."
+    "" \
+    "Allocate a private task-specific draft first, write the report through an editor or other non-shell text channel, then submit it with --status blocked|in-progress|done and --message-file." \
+    "The helper infers routing from the producer pane; do not pass task-file, root, manager-target, or other manual route flags." \
+    "A file named REPORT is refused unless it is in a private owner-only directory. Use --describe to validate and resolve a submission without recording it."
 }
 while [ "$#" -gt 0 ]; do
   case "$1" in

@@ -77,7 +77,14 @@ class ParsedArgs(argparse.Namespace):
 
 
 def parse_args(argv: list[str]) -> Args:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""The helper refuses status changes while the task has a live
+`(pending)` marker. It also refuses `done` while pending_task_items is nonempty.
+Use the `done` status for normal task closure: it owns TODO movement and worker
+shutdown.""",
+    )
     _ = parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     _ = parser.add_argument("--finish-closed-done", action="store_true", help="Finish done bookkeeping after the agent was already closed by a failed prior run.")
     _ = parser.add_argument("--finish-replaced-done", action="store_true", help="Finish a stopped stale record without signaling its pane after proving an explicit live replacement.")

@@ -132,13 +132,21 @@ def parse_args(argv: list[str]) -> Args:
     _ = remove_parser.add_argument("--item", action="append", required=True, help="Pending task item to remove. Pass once per item.")
     _ = remove_parser.add_argument("--evidence", required=True, help="One-line evidence that the removed item is complete or cancelled.")
 
-    move_parser = subparsers.add_parser("pending-move", help="Move one pending_task_item from one task file to another.")
+    move_parser = subparsers.add_parser(
+        "pending-move",
+        help="Move one pending_task_item from one task file to another.",
+        description="Atomically transfer one still-open item to its initial owner. Use only for initial routing.",
+    )
     move_parser.set_defaults(command="pending-move")
     _ = move_parser.add_argument("--from", dest="from_file", type=Path, required=True, help="Source task file containing the pending item.")
     _ = move_parser.add_argument("--to", dest="to_file", type=Path, required=True, help="Destination task file that should receive the pending item.")
     _ = move_parser.add_argument("--item", required=True, help="Pending task item to move.")
 
-    marker_clear_parser = subparsers.add_parser("pending-marker-clear", help="Remove one pending marker without adding pending_task_items.")
+    marker_clear_parser = subparsers.add_parser(
+        "pending-marker-clear",
+        help="Remove one pending marker without adding pending_task_items.",
+        description="Clear a consumed `(pending)` marker when no new pending task item should be added.",
+    )
     marker_clear_parser.set_defaults(command="pending-marker-clear")
     _ = marker_clear_parser.add_argument("task_file", type=Path)
     _ = marker_clear_parser.add_argument("--line", type=int, required=True, help="One-based line number whose stripped content is `(pending)`.")
@@ -155,7 +163,11 @@ def parse_args(argv: list[str]) -> Args:
     _ = comment_parser.add_argument("legacy_message", nargs="?", help="Compatibility positional comment text.")
     _ = comment_parser.add_argument("--message", help="One-line comment text to append.")
 
-    delegate_parser = subparsers.add_parser("delegate-message", help="Append a pending message block to a worker task file.")
+    delegate_parser = subparsers.add_parser(
+        "delegate-message",
+        help="Append a pending message block to a worker task file.",
+        description="Append a manager-owned worker message for delivery by omo_pending_watch.py.",
+    )
     delegate_parser.set_defaults(command="delegate-message")
     _ = delegate_parser.add_argument("task_file", type=Path)
     _ = delegate_parser.add_argument("--message-file", type=Path, required=True, help="File containing the worker message body.")

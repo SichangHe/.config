@@ -1060,8 +1060,12 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--mail-dir", type=Path, default=None)
     _ = parser.add_argument("--digest-script", type=Path, default=None)
     _ = parser.add_argument("--digest-idle-after-s", type=float, default=DEFAULT_DIGEST_IDLE_AFTER_S)
-    _ = parser.add_argument("--once", action="store_true")
-    _ = parser.add_argument("--dry-run", action="store_true")
+    _ = parser.add_argument("--once", action="store_true", help="Run one scan, then exit.")
+    _ = parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Inspect pending markers and frontmatter routing without notifying targets; normally combine with --once.",
+    )
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     if parsed.idle_status_interval_s <= 0:
         parser.error("--idle-status-interval-s must be positive.")
