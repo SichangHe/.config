@@ -95,7 +95,7 @@ def parse_args(argv: list[str]) -> CliArgs:
         action="store_true",
         help="Send the body exactly as provided, without appending a PWD footer. Agents must not use this option unless explicitly told to.",
     )
-    _ = parser.add_argument("--tmux-target", help="Normally omit: the helper infers producer identity from the launch environment, then the current pane. Override only to preserve a different verified producer identity; never pass a task owner or delivery target.")
+    _ = parser.add_argument("--tmux-target", help="Normally omit: the helper infers producer identity from the exact current pane, then the launch environment. Override only to preserve a different verified producer identity; never pass a task owner or delivery target.")
     _ = parser.add_argument("--sender-tmux-target", dest="sender_tmux_target", help="Alias for --tmux-target; use only when forwarding or compressing mail while preserving a different verified producer identity.")
     _ = parser.add_argument("--manager-human", action="store_true", help=argparse.SUPPRESS)
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
@@ -196,9 +196,13 @@ def current_pwd() -> str:
 def current_tmux_window() -> str | None:
     if not os.environ.get("TMUX"):
         return None
+    command = ["tmux", "display-message", "-p"]
+    if pane_id := os.environ.get("TMUX_PANE", "").strip():
+        command.extend(("-t", pane_id))
+    command.append("#S:#I.#P" if pane_id else "#S:#I")
     try:
         result = subprocess.run(
-            ["tmux", "display-message", "-p", "#S:#I"],
+            command,
             check=False,
             capture_output=True,
             text=True,
@@ -242,17 +246,25 @@ def env_manager_tmux_target() -> str | None:
     return None
 
 
+def inferred_tmux_target(manager_human: bool) -> str | None:
+    agent_target = env_tmux_target()
+    has_pane_id = bool(os.environ.get("TMUX_PANE", "").strip())
+    current_target = current_tmux_window() if has_pane_id else None
+    if current_target is not None:
+        current_target = canonical_email_tmux_target(current_target)
+        return agent_target if agent_target == current_target else current_target
+    fallback_target = agent_target or (env_manager_tmux_target() if manager_human else None)
+    if fallback_target is not None:
+        return fallback_target
+    return None if has_pane_id else current_tmux_window()
+
+
 def footer_tmux_target(explicit_tmux_target: str | None = None, manager_human: bool = False) -> str | None:
     if explicit_tmux_target is not None:
         if not valid_tmux_target(explicit_tmux_target):
             raise ValueError("tmux target must have shape session:window or session:window.pane.")
         return canonical_email_tmux_target(explicit_tmux_target)
-    if manager_human:
-        # A worker can inherit its manager's target while it still has an
-        # authoritative agent target.  Attribute direct worker mail to that
-        # worker, not to the manager that launched it.
-        return env_tmux_target() or env_manager_tmux_target() or current_tmux_window()
-    return env_tmux_target() or current_tmux_window()
+    return inferred_tmux_target(manager_human)
 
 
 def clean_subject_tmux_tags(subject: str) -> str:

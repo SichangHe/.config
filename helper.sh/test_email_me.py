@@ -26,7 +26,7 @@ literal `touch /tmp/email-me-should-not-run-backtick`
 
 class EmailMeTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.env_patch = patch.dict(os.environ, {"OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "0", "TMUX": "", "OMO_AGENT_TMUX_TARGET": "", "OMO_MANAGER_TMUX_TARGET": ""})
+        self.env_patch = patch.dict(os.environ, {"OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "0", "TMUX": "", "TMUX_PANE": "", "OMO_AGENT_TMUX_TARGET": "", "OMO_MANAGER_TMUX_TARGET": ""})
         self.env_patch.start()
 
     def tearDown(self) -> None:
@@ -82,17 +82,50 @@ class EmailMeTests(unittest.TestCase):
         self.assertEqual("[a] [wl:7] hi", msg["Subject"])
         self.assertEqual("body\n\ntmux: wl:7\n", plain.get_content())
 
-    def test_env_tmux_target_overrides_caller_tmux_footer(self) -> None:
-        result = subprocess.CompletedProcess(["tmux"], 0, stdout="wl:0\n", stderr="")
+    def test_stale_env_tmux_target_does_not_override_exact_caller_pane(self) -> None:
+        result = subprocess.CompletedProcess(["tmux"], 0, stdout="wl:0.0\n", stderr="")
         with (
-            patch.dict(os.environ, {"TMUX": "/tmp/tmux-session", "OMO_AGENT_TMUX_TARGET": "wl:4"}, clear=False),
+            patch.dict(os.environ, {"TMUX": "/tmp/tmux-session", "TMUX_PANE": "%42", "OMO_AGENT_TMUX_TARGET": "wl:4"}, clear=False),
             patch.object(email_me.subprocess, "run", return_value=result) as run,
         ):
             msg = email_me.build_message("me@example.com", "hi", "body\n")
         plain = msg.get_body(preferencelist=("plain",))
         self.assertIsNotNone(plain)
-        self.assertEqual("[a] [wl:4] hi", msg["Subject"])
-        self.assertEqual("body\n\ntmux: wl:4\n", plain.get_content())
+        self.assertEqual("[wl:0] hi", msg["Subject"])
+        self.assertEqual(f"body\n\nPWD: {Path.cwd().name}\n", plain.get_content())
+        run.assert_called_once_with(
+            ["tmux", "display-message", "-p", "-t", "%42", "#S:#I.#P"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+
+    def test_matching_env_tmux_target_preserves_exact_nonzero_pane(self) -> None:
+        result = subprocess.CompletedProcess(["tmux"], 0, stdout="wl:4.1\n", stderr="")
+        with (
+            patch.dict(os.environ, {"TMUX": "/tmp/tmux-session", "TMUX_PANE": "%42", "OMO_AGENT_TMUX_TARGET": "wl:4.1"}, clear=False),
+            patch.object(email_me.subprocess, "run", return_value=result),
+        ):
+            msg = email_me.build_message("me@example.com", "hi", "body\n")
+        self.assertEqual("[wl:4.1] hi", msg["Subject"])
+
+    def test_stale_sibling_pane_suffix_does_not_override_exact_pane(self) -> None:
+        result = subprocess.CompletedProcess(["tmux"], 0, stdout="wl:4.2\n", stderr="")
+        with (
+            patch.dict(os.environ, {"TMUX": "/tmp/tmux-session", "TMUX_PANE": "%42", "OMO_AGENT_TMUX_TARGET": "wl:4.1"}, clear=False),
+            patch.object(email_me.subprocess, "run", return_value=result),
+        ):
+            msg = email_me.build_message("me@example.com", "hi", "body\n")
+        self.assertEqual("[wl:4.2] hi", msg["Subject"])
+
+    def test_env_tmux_target_is_fallback_without_exact_pane_identity(self) -> None:
+        with (
+            patch.dict(os.environ, {"TMUX": "/tmp/tmux-session", "TMUX_PANE": "", "OMO_AGENT_TMUX_TARGET": "wl:4"}, clear=False),
+            patch.object(email_me.subprocess, "run") as run,
+        ):
+            msg = email_me.build_message("me@example.com", "hi", "body\n")
+        self.assertEqual("[wl:4] hi", msg["Subject"])
         run.assert_not_called()
 
     def test_malformed_env_tmux_target_falls_back_to_caller_tmux(self) -> None:
@@ -347,10 +380,10 @@ class EmailMeTests(unittest.TestCase):
         with patch("sys.stdout", new_callable=StringIO) as stdout, self.assertRaises(SystemExit) as raised:
             email_me.parse_args(["--help"])
         self.assertEqual(0, raised.exception.code)
-        self.assertIn("Normally omit: the helper infers producer identity", stdout.getvalue())
-        self.assertIn("then the current pane", stdout.getvalue())
-        self.assertIn("never pass a task owner or delivery", stdout.getvalue())
-        self.assertIn("target.", stdout.getvalue())
+        help_text = " ".join(stdout.getvalue().split())
+        self.assertIn("Normally omit: the helper infers producer identity", help_text)
+        self.assertIn("from the exact current pane, then the launch environment", help_text)
+        self.assertIn("never pass a task owner or delivery target.", help_text)
 
     def test_help_restricts_no_pwd_footer_to_explicit_instruction(self) -> None:
         with patch("sys.stdout", new_callable=StringIO) as stdout, self.assertRaises(SystemExit) as raised:
@@ -520,7 +553,7 @@ class EmailMeTests(unittest.TestCase):
             prepare.assert_called_once_with("Topic", "wl:7")
             self.assertEqual("[a] [wl:7] Topic\nbody\n", send_log.read_text(encoding="utf-8"))
 
-    def test_manager_human_mode_prefers_agent_target_over_inherited_manager_target(self) -> None:
+    def test_manager_human_mode_rejects_stale_agent_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             state_dir = Path(tmp) / "state"
             send_log = Path(tmp) / "sent.txt"
@@ -534,13 +567,21 @@ class EmailMeTests(unittest.TestCase):
                 "OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "0",
                 "OMO_MANAGER_TMUX_TARGET": "wl:1.0",
                 "TMUX": "/tmp/tmux-session",
+                "TMUX_PANE": "%42",
                 "OMO_AGENT_TMUX_TARGET": "vl:2",
             }
-            with patch.dict(os.environ, env, clear=False), patch.object(email_me.subprocess, "run") as run:
+            current = subprocess.CompletedProcess(["tmux"], 0, stdout="vl:3.0\n", stderr="")
+            with patch.dict(os.environ, env, clear=False), patch.object(email_me.subprocess, "run", return_value=current) as run:
                 result = email_me.main(["--manager-human", "--subject-file", str(subject), "--message-file", str(body)])
             self.assertEqual(0, result)
-            self.assertEqual("Re: [a] [vl:2] Topic\nbody\n", send_log.read_text(encoding="utf-8"))
-            run.assert_not_called()
+            self.assertEqual("Re: [vl:3] Topic\nbody\n", send_log.read_text(encoding="utf-8"))
+            run.assert_called_once_with(
+                ["tmux", "display-message", "-p", "-t", "%42", "#S:#I.#P"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
 
     def test_manager_human_mode_repairs_untagged_prepared_reply(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
