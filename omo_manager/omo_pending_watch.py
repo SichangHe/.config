@@ -59,6 +59,13 @@ from omo_manager.omo_blocking_actor import BlockingActor
 from omo_manager.omo_blocking_actor import request as blocking_request
 from omo_manager.omo_codex_status import Args as CodexStatusArgs
 from omo_manager.omo_codex_status import inspect as inspect_codex
+from omo_manager.amh_problem_claim import ProblemClaim
+from omo_manager.amh_problem_claim import locked_claims
+from omo_manager.amh_problem_claim import issue_problem
+from omo_manager.amh_problem_claim import issue_path
+from omo_manager.amh_problem_claim import read_claims
+from omo_manager.amh_problem_claim import read_issues
+from omo_manager.amh_problem_claim import sync_problem_issues
 from omo_manager.omo_codex_status import tail as codex_tail
 from omo_manager.omo_pending_digest import PENDING_CONTENT_CHAR_LIMIT
 from omo_manager.omo_pending_digest import pending_tail_digest
@@ -81,7 +88,7 @@ from omo_manager.omo_task_lock import watcher_report_state_temporary
 
 
 def default_state_dir() -> Path:
-    return Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "omo-manager"
+    return Path(os.environ.get("OMO_MANAGER_STATE_DIR", Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "omo-manager"))
 
 
 @contextmanager
@@ -408,6 +415,9 @@ class AgentProblemGuard:
     dependency_task_file: str = ""
     dependency_snapshot: str = ""
     ready_target: str = ""
+    problem_id: str = ""
+    problem_owner_target: str = ""
+    problem_claim_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -566,7 +576,7 @@ def send_executor() -> ThreadPoolExecutor:
     return _send_executor
 
 
-def agent_problem_guard_current(guard: AgentProblemGuard) -> bool:
+def agent_problem_evidence_current(guard: AgentProblemGuard) -> bool:
     if guard.root is not None and guard.dependency_task_file:
         task = TaskLine(guard.dependency_task_file, "dependency-guard", "", "", None)
         task_path = resolve_task_path(guard.root, guard.dependency_task_file)
@@ -588,6 +598,14 @@ def agent_problem_guard_current(guard: AgentProblemGuard) -> bool:
     return problem_is_current and (not guard.ready_target or inspect_codex(CodexStatusArgs(guard.ready_target, 80)).status == "ready")
 
 
+def agent_problem_guard_current(guard: AgentProblemGuard) -> bool:
+    if guard.problem_id and guard.problem_claim_path is not None and active_problem_claim(
+        read_claims(guard.problem_claim_path), guard.problem_id, guard.problem_owner_target, time.time()
+    ) is not None:
+        return False
+    return agent_problem_evidence_current(guard)
+
+
 def run_verified_send(
     target: str,
     message: str,
@@ -606,11 +624,20 @@ def run_verified_send(
             pending_guard.pending_text,
         ):
             raise PrePasteRejected("pending marker cleared before tmux paste")
-        if problem_guard is not None and not agent_problem_guard_current(problem_guard):
+        if problem_guard is not None and not agent_problem_evidence_current(problem_guard):
             raise PrePasteRejected("agent problem resolved or changed before tmux paste")
 
     try:
-        verified_send_to_codex(target, message, options, before_paste=before_paste if pending_guard is not None or problem_guard is not None else None)
+        if problem_guard is not None and problem_guard.problem_id and problem_guard.problem_claim_path is not None:
+            with locked_claims(problem_guard.problem_claim_path) as claims:
+                issue = read_issues(issue_path(problem_guard.problem_claim_path)).get(problem_guard.problem_id)
+                if issue is None or canonical_target(issue.manager_target) != canonical_target(problem_guard.problem_owner_target):
+                    raise PrePasteRejected("agent problem changed before tmux paste")
+                if active_problem_claim(claims, problem_guard.problem_id, problem_guard.problem_owner_target, time.time()) is not None:
+                    raise PrePasteRejected("agent problem was claimed before tmux paste")
+                verified_send_to_codex(target, message, options, before_paste=before_paste)
+        else:
+            verified_send_to_codex(target, message, options, before_paste=before_paste if pending_guard is not None or problem_guard is not None else None)
     except Exception as exc:
         if definitely_rejected_before_paste(exc) and not isinstance(exc, PrePasteRejected):
             raise PrePasteRejected(str(exc)) from exc
@@ -4396,6 +4423,44 @@ def agent_problem_output_by_owner(args: Args, seen: dict[str, float], output: st
     return outputs
 
 
+def problem_claim_id(owner_target: str, problem_lines: Sequence[str]) -> str:
+    evidence = "\n".join(problem_lines)
+    return hashlib.sha256(f"{canonical_target(owner_target)}\n{evidence}".encode("utf-8")).hexdigest()[:16]
+
+
+def problem_claim_path(args: Args) -> Path:
+    return args.state.parent / "amh-problem-claims.json"
+
+
+def active_problem_claim(claims: dict[str, ProblemClaim], problem_id: str, owner_target: str, now_wall_s: float) -> ProblemClaim | None:
+    claim = claims.get(problem_id)
+    if claim is None or canonical_target(claim.manager_target) != canonical_target(owner_target) or claim.expires_at_s <= now_wall_s:
+        return None
+    return claim
+
+
+def problem_claim_instructions(problem_id: str, expired_claim: ProblemClaim | None = None) -> str:
+    lines = [f"problem-id: {problem_id}"]
+    if expired_claim is not None:
+        lines.append(f"Previously claimed by {expired_claim.manager_target} but still present after 10 minutes; previous action: {expired_claim.action}")
+    lines.append(f"Claim responsibility for 10 minutes with: `amh_problem.py claim {problem_id} --action 'ONE CONCRETE NEXT ACTION'`")
+    lines.append("A claim is not resolution; only a later independent watcher scan can prove this problem is gone.")
+    return "\n".join(lines)
+
+
+def authoritative_problem_groups(args: Args, output: str) -> dict[str, tuple[str, ...]]:
+    groups: dict[str, list[str]] = {}
+    for line in output.splitlines()[1:]:
+        row = parse_problem_row(line)
+        if row is None or row.status == "human_request":
+            continue
+        owner = "" if row.status == "malformed_task" else row.owner_target
+        target = owner or args.manager_target
+        if target:
+            groups.setdefault(target, []).append(line)
+    return {target: tuple(lines) for target, lines in groups.items()}
+
+
 def filtered_problem_output(body_lines: list[str], *, suppress_message: str = "") -> str | None:
     count_line = agent_problem_count_line(body_lines)
     if not count_line:
@@ -4905,6 +4970,7 @@ def handle_agent_problem_result(
     previous_dependency_reported_state = dict(dependency_reported_state)
     dependency_changed = False if visibility_only else maybe_push_dependency_transitions(args, dependency_state, now_wall_s, seen)
     if result.returncode == 0:
+        sync_problem_issues(problem_claim_path(args), {}, now_wall_s)
         enter_changed = clear_all_enter_attempts(args, seen)
         capacity_changed = clear_resolved_capacity_state(args, seen, set())
         return clear_manager_compaction_active(args, seen) or enter_changed or capacity_changed or dependency_changed or reminders_changed
@@ -4914,6 +4980,12 @@ def handle_agent_problem_result(
     output = result.stdout.strip()
     if not output:
         return dependency_changed or reminders_changed
+    raw_groups = authoritative_problem_groups(args, output)
+    active_problems = {
+        problem_claim_id(owner_target, problem_lines): (owner_target, problem_lines)
+        for owner_target, problem_lines in raw_groups.items()
+    }
+    sync_problem_issues(problem_claim_path(args), active_problems, now_wall_s)
     if result.stderr.strip():
         output = f"{output}\nstderr:\n{result.stderr.strip()}".strip()
     if visibility_only:
@@ -4944,18 +5016,27 @@ def handle_agent_problem_result(
     if not output:
         return capacity_changed or manager_problem_sent or compaction_changed or dependency_changed or reminders_changed
     changed = capacity_changed or manager_problem_sent or compaction_changed or dependency_changed or reminders_changed
+    claim_path = problem_claim_path(args)
+    claims = read_claims(claim_path)
     for owner_target, dispatch in agent_problem_output_by_owner(args, seen, output, now_wall_s).items():
-        digest = hashlib.sha256(f"{owner_target}\n{dispatch.digest_text}".encode("utf-8")).hexdigest()[:16]
-        key = f"agent-problem:{digest}"
+        claim_owner_target = owner_target or args.manager_target
+        problem_id = problem_claim_id(claim_owner_target, dispatch.problem_lines)
+        claim = claims.get(problem_id)
+        if active_problem_claim(claims, problem_id, claim_owner_target, now_wall_s) is not None:
+            continue
+        expired_claim = claim if claim is not None and canonical_target(claim.manager_target) == canonical_target(claim_owner_target) else None
+        key = f"agent-problem:{problem_id}"
         attempt_key = agent_problem_attempt_key(key)
         if seen_contains(seen, attempt_key, now_wall_s):
             continue
-        if not dispatch.blocked_idle_lines and now_wall_s - seen_get(seen, key, now_s=now_wall_s) < args.agent_problem_repeat_s:
+        expired_claim_due = expired_claim is not None and seen_get(seen, key, now_s=now_wall_s) < expired_claim.expires_at_s
+        if not expired_claim_due and not dispatch.blocked_idle_lines and now_wall_s - seen_get(seen, key, now_s=now_wall_s) < args.agent_problem_repeat_s:
             continue
-        text = with_manager_policy_reminder(args, dispatch.text)
+        text = with_manager_policy_reminder(args, f"{dispatch.text}\n\n{problem_claim_instructions(problem_id, expired_claim)}")
         target = owner_target or args.manager_target
         if (not target and not args.dry_run) or not agent_problem_target_is_ready(args, seen, target, now_wall_s):
             continue
+        issue_problem(claim_path, problem_id, claim_owner_target, dispatch.problem_lines, now_wall_s)
         dependency_reported_replacements = dependency_snapshot_replacements_for_problem_lines(args.root, dispatch.problem_lines)
         target_attempt_key = agent_problem_target_attempt_key(target)
         event = DeliverySuccessEvent(
@@ -4971,6 +5052,9 @@ def handle_agent_problem_result(
             tuple([*status_command(args, True), "--no-auto-unstick"]),
             dispatch.problem_lines,
             ready_target=target,
+            problem_id=problem_id,
+            problem_owner_target=claim_owner_target,
+            problem_claim_path=claim_path,
         )
         status = push_manager_text_to_target(args, text, target, event, problem_guard=guard)
         if not delivery_accepted(status):

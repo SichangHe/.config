@@ -6,6 +6,7 @@ This directory is non-authoritative helper documentation. Manager operating inst
 - `environment.md` Python environment and watcher setup wrapper
 - `quiet-checks.md` low-token aggregate check helpers
 - `agent-reports.md` durable agent-to-manager reports through `omo_report.sh`
+- `amh_problem.py claim ID --action TEXT` claims one unchanged watcher problem for exactly 10 minutes; only the watcher can resolve it
 - `report-routing-human-answers.md` concise answers about report routing, `seen`, watcher restart, unsticking, and digests
 - `omo_record_pending.py` records pending items from a delivered `(pending)` block, removes that marker, and optionally emails the human
 - `omo_task_edit.py` manager-only task-file edits: `summary`, `pending-list`, `pending-add`, `pending-replace`, `pending-remove`, `pending-move`, `pending-marker-clear`, `comment-add`, and `delegate-message`

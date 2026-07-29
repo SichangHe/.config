@@ -97,6 +97,9 @@
   - detects `untracked_agent` panes when a non-`h*` tmux session contains a running, ready, errored, or stuck Codex pane that no task file owns
   - agent-problem prompts start with a direct helper instruction and do not need human acknowledgement
   - immediately before an asynchronous agent-problem paste, reruns the same problem scan without auto-unsticking and skips delivery unless every routed raw problem row is still present; a resumed manager or any changed pane/dependency state therefore invalidates stale captured output
+  - every manager problem notice has a stable 16-character `problem-id` and gives the exact `amh_problem.py claim ID --action 'ONE CONCRETE NEXT ACTION'` command
+  - a matching manager claim suppresses only the unchanged problem for 10 minutes; the manager cannot mark it resolved, and an independent watcher scan removes its claim only after the problem disappears
+  - an unchanged problem whose claim expires is delivered again immediately with the previous claimant and action, bypassing the ordinary 30-minute unchanged-problem interval
   - email pending refs remain `origin=human source=email action=ack-human`
   - the shared agent-problem pass reminds each ready active agent at its own `runat` when its pending queue is nonempty
   - for each tracked task `ready` row, including submanagers, captures only the latest visible completed turn from its prompt through the `Worked for` footer; the synthetic main-manager self row is not a tracked task row
