@@ -406,6 +406,7 @@ class AgentProblemGuard:
     root: Path | None = None
     dependency_task_file: str = ""
     dependency_snapshot: str = ""
+    ready_target: str = ""
 
 
 @dataclass(frozen=True)
@@ -569,7 +570,8 @@ def agent_problem_guard_current(guard: AgentProblemGuard) -> bool:
         task = TaskLine(guard.dependency_task_file, "dependency-guard", "", "", None)
         task_path = resolve_task_path(guard.root, guard.dependency_task_file)
         state = scan_task_state(task_path, guard.root) if task_path is not None else None
-        return state is not None and blocked_status_dependency_snapshot(guard.root, task, state) == guard.dependency_snapshot
+        current = state is not None and blocked_status_dependency_snapshot(guard.root, task, state) == guard.dependency_snapshot
+        return current and (not guard.ready_target or inspect_codex(CodexStatusArgs(guard.ready_target, 80)).status == "ready")
     try:
         result = subprocess.run(guard.command, capture_output=True, text=True, timeout=DEFAULT_AGENT_PROBLEM_TIMEOUT_S, check=False)
     except (OSError, subprocess.SubprocessError):
@@ -581,7 +583,8 @@ def agent_problem_guard_current(guard: AgentProblemGuard) -> bool:
     if any(line.startswith("malformed_task: ") for line in current_lines) and not any(line.startswith("malformed_task: ") for line in guard.problem_lines):
         return False
     current = Counter(current_lines)
-    return bool(expected) and not expected - current
+    problem_is_current = bool(expected) and not expected - current
+    return problem_is_current and (not guard.ready_target or inspect_codex(CodexStatusArgs(guard.ready_target, 80)).status == "ready")
 
 
 def run_verified_send(
@@ -1889,6 +1892,25 @@ def agent_problem_attempt_key(key: str) -> str:
     return f"agent-problem-attempt:{key}"
 
 
+def agent_problem_target_attempt_key(target: str) -> str:
+    return f"agent-problem-target-attempt:{canonical_target(target)}"
+
+
+def manager_problem_human_attempt_key(args: Args) -> str:
+    return f"manager-problem-human-attempt:{args.root}"
+
+
+def agent_problem_target_is_ready(args: Args, seen: dict[str, float], target: str, now_s: float) -> bool:
+    """Allow one problem aggregate per interval, only when its manager is ready."""
+
+    if args.dry_run:
+        return True
+    key = agent_problem_target_attempt_key(target)
+    if seen_contains(seen, key, now_s) and now_s - seen_get(seen, key, now_s=now_s) < args.agent_problem_repeat_s:
+        return False
+    return inspect_codex(CodexStatusArgs(target, 80)).status == "ready"
+
+
 def repeated_manager_delivery_is_busy(args: Args, seen: dict[str, float], key: str, target: str, now_s: float) -> bool:
     """Defer a repeated manager delivery until its target is ready."""
 
@@ -3080,7 +3102,8 @@ def push_manager_text_to_target(
     if not scoped_args.manager_target:
         print("omo_pending_watch: OMO_MANAGER_TMUX_TARGET is required outside --dry-run", file=sys.stderr)
         return 1
-    fallback_target = main_manager_fallback_target(args, scoped_args.manager_target)
+    fallback_target = "" if problem_guard is not None else main_manager_fallback_target(args, scoped_args.manager_target)
+    fallback_problem_guard = replace(problem_guard, ready_target=fallback_target) if problem_guard is not None and fallback_target else problem_guard
     result = try_send_delivery_text(
         "manager delivery",
         text,
@@ -3089,13 +3112,16 @@ def push_manager_text_to_target(
         failure_fallback_target=fallback_target,
         failure_pending_guard=PendingGuard(args.root, marker.file, marker.line, marker.digest, marker.block_text) if marker is not None else None,
         problem_guard=problem_guard,
-        failure_problem_guard=problem_guard,
+        failure_problem_guard=fallback_problem_guard,
+        failure_fallback_defer_if_busy=problem_guard is not None,
     )
     if result.status in {0, ASYNC_DELIVERY_STARTED} or not target_unavailable(result):
         return result.status
     if not fallback_target:
         return result.status
     if marker is not None and not pending_marker_present(args.root, marker.file, marker.line, marker.digest, marker.block_text):
+        return result.status
+    if problem_guard is not None and inspect_codex(CodexStatusArgs(fallback_target, 80)).status != "ready":
         return result.status
     return try_send_delivery_text(
         "manager delivery",
@@ -3107,7 +3133,7 @@ def push_manager_text_to_target(
         pending_digest=marker.digest if marker is not None else "",
         pending_text=marker.block_text if marker is not None else "",
         success_event=success_event,
-        problem_guard=problem_guard,
+        problem_guard=fallback_problem_guard,
     ).status
 
 
@@ -4618,6 +4644,17 @@ def manager_problem_seen_key(args: Args, output: str) -> str:
     return f"manager-self-problem:{digest}"
 
 
+def email_human_manager_problem_once(args: Args, seen: dict[str, float], output: str, key: str, now_wall_s: float) -> bool:
+    human_attempt_key = manager_problem_human_attempt_key(args)
+    if seen_contains(seen, human_attempt_key, now_wall_s) and now_wall_s - seen_get(seen, human_attempt_key, now_s=now_wall_s) < args.agent_problem_repeat_s:
+        return False
+    sent = email_human_manager_problem(args, output)
+    if sent:
+        remember_seen(seen, key, now_wall_s)
+        remember_seen(seen, human_attempt_key, now_wall_s)
+    return sent
+
+
 def route_or_email_manager_problem(args: Args, seen: dict[str, float], output: str, now_wall_s: float) -> bool:
     if not output:
         return False
@@ -4629,10 +4666,7 @@ def route_or_email_manager_problem(args: Args, seen: dict[str, float], output: s
         return False
     targets = active_manager_problem_targets(args.root, output, args.manager_target)
     if not targets:
-        sent = email_human_manager_problem(args, output)
-        if sent:
-            remember_seen(seen, key, now_wall_s)
-        return sent
+        return email_human_manager_problem_once(args, seen, output, key, now_wall_s)
     route_target = args.reminder_choice(targets)
     targets = [route_target, *(target for target in targets if target != route_target)]
     text = manager_problem_route_text(args, output)
@@ -4641,11 +4675,14 @@ def route_or_email_manager_problem(args: Args, seen: dict[str, float], output: s
         seen_removals=(attempt_key,),
         failure_seen_delays_s=((attempt_key, PENDING_DELIVERY_FAILURE_RETRY_S),),
     )
-    guard = AgentProblemGuard(
-        tuple([*status_command(args, True), "--no-auto-unstick"]),
-        tuple(output.splitlines()[1:]),
-    )
     for target in targets:
+        if not agent_problem_target_is_ready(args, seen, target, now_wall_s):
+            continue
+        guard = AgentProblemGuard(
+            tuple([*status_command(args, True), "--no-auto-unstick"]),
+            tuple(output.splitlines()[1:]),
+            ready_target=target,
+        )
         if args.dry_run:
             print(f"manager problem route due: target={target}\n{text}", flush=True)
             remember_seen(seen, key, now_wall_s)
@@ -4653,13 +4690,11 @@ def route_or_email_manager_problem(args: Args, seen: dict[str, float], output: s
         result = try_send_delivery_text("manager problem routing", text, target, success_event=event, problem_guard=guard)
         if delivery_accepted(result.status):
             reserve_async_marker(seen, attempt_key, now_wall_s, result.status)
+            remember_seen(seen, agent_problem_target_attempt_key(target), now_wall_s)
             if result.status == 0:
                 remember_seen(seen, key, now_wall_s)
             return True
-    sent = email_human_manager_problem(args, output)
-    if sent:
-        remember_seen(seen, key, now_wall_s)
-    return sent
+    return email_human_manager_problem_once(args, seen, output, key, now_wall_s)
 
 
 def email_human_manager_problem(args: Args, output: str) -> bool:
@@ -4760,10 +4795,16 @@ def blocked_report_snapshot_state(root: Path) -> dict[str, tuple[TaskLine, str, 
     return snapshots
 
 
-def maybe_push_dependency_transitions(args: Args, snapshots: dict[str, str], now_wall_s: float) -> bool:
+def maybe_push_dependency_transitions(
+    args: Args,
+    snapshots: dict[str, str],
+    now_wall_s: float,
+    seen: dict[str, float] | None = None,
+) -> bool:
     """Alert once when an otherwise-valid blocked-manager graph changes."""
 
     changed = False
+    delivery_seen = seen if seen is not None else {}
     current = dependency_snapshot_state(args.root)
     for task_file in tuple(snapshots):
         if task_file not in current:
@@ -4778,6 +4819,8 @@ def maybe_push_dependency_transitions(args: Args, snapshots: dict[str, str], now
         target = owner_target or args.manager_target
         if not target:
             continue
+        if not agent_problem_target_is_ready(args, delivery_seen, target, now_wall_s):
+            continue
         task_path = resolve_task_path(args.root, task_file)
         state = scan_task_state(task_path, args.root) if task_path is not None else None
         if state is None:
@@ -4790,6 +4833,7 @@ def maybe_push_dependency_transitions(args: Args, snapshots: dict[str, str], now
                 f"{task_file} {state.target} <blocked_on>{html.escape(state.reason)}</blocked_on>",
             ]
         )
+        target_attempt_key = agent_problem_target_attempt_key(target)
         event = DeliverySuccessEvent(
             failure_dependency_replacements=((task_file, snapshot, previous),),
             dependency_state=snapshots,
@@ -4801,10 +4845,12 @@ def maybe_push_dependency_transitions(args: Args, snapshots: dict[str, str], now
             root=args.root,
             dependency_task_file=task_file,
             dependency_snapshot=snapshot,
+            ready_target=target,
         )
         status = push_manager_text_to_target(args, text, target, event, problem_guard=guard)
         if not delivery_accepted(status):
             continue
+        remember_seen(delivery_seen, target_attempt_key, now_wall_s)
         snapshots[task_file] = snapshot
         changed = True
     return changed
@@ -4832,7 +4878,7 @@ def handle_agent_problem_result(
     dependency_reported_state = dependency_reported_snapshots if dependency_reported_snapshots is not None else {}
     prune_dependency_reported_snapshots(args.root, dependency_reported_state)
     previous_dependency_reported_state = dict(dependency_reported_state)
-    dependency_changed = False if visibility_only else maybe_push_dependency_transitions(args, dependency_state, now_wall_s)
+    dependency_changed = False if visibility_only else maybe_push_dependency_transitions(args, dependency_state, now_wall_s, seen)
     if result.returncode == 0:
         enter_changed = clear_all_enter_attempts(args, seen)
         capacity_changed = clear_resolved_capacity_state(args, seen, set())
@@ -4883,7 +4929,10 @@ def handle_agent_problem_result(
             continue
         text = with_manager_policy_reminder(args, dispatch.text)
         target = owner_target or args.manager_target
+        if (not target and not args.dry_run) or not agent_problem_target_is_ready(args, seen, target, now_wall_s):
+            continue
         dependency_reported_replacements = dependency_snapshot_replacements_for_problem_lines(args.root, dispatch.problem_lines)
+        target_attempt_key = agent_problem_target_attempt_key(target)
         event = DeliverySuccessEvent(
             seen_keys=(key,),
             seen_removals=(attempt_key,),
@@ -4896,11 +4945,13 @@ def handle_agent_problem_result(
         guard = AgentProblemGuard(
             tuple([*status_command(args, True), "--no-auto-unstick"]),
             dispatch.problem_lines,
+            ready_target=target,
         )
         status = push_manager_text_to_target(args, text, target, event, problem_guard=guard)
         if not delivery_accepted(status):
             continue
         reserve_async_marker(seen, attempt_key, now_wall_s, status)
+        remember_seen(seen, target_attempt_key, now_wall_s)
         if status == 0:
             for backoff_owner, line in dispatch.blocked_idle_lines:
                 remember_blocked_idle_report(args, seen, backoff_owner, line, now_wall_s)
