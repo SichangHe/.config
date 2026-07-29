@@ -41,6 +41,8 @@ COMMAND_BY_TOOL = {
 DEFAULT_TOOL = "codex"
 TASK_FRONTMATTER_VERSION = "v1.0.0"
 TMUX_TARGET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?$")
+TMUX_SESSION_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
+TMUX_SESSION_ID_RE = re.compile(r"^\$\d+$")
 SHELL_COMMANDS = {"bash", "dash", "fish", "sh", "zsh"}
 BULLET_MARKERS = ("- ", "* ")
 PENDING_TASK_ITEMS_MARKER = "(above are pending task items)"
@@ -60,6 +62,11 @@ CODEX_TRUST_CONFIRM_RE = re.compile(r"^\s*Press enter to continue(?: and create 
 MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$")
 LINE_RANGE_RE = re.compile(r"^([1-9]\d*)-([1-9]\d*)$")
 HUMAN_INSTRUCTION_CLOSE = "</human_instruction>"
+HUMAN_LAUNCH_REQUEST_RE = re.compile(r"^\s*(?:please\s+)?(?:launch|create|start|open|spawn)\b", flags=re.IGNORECASE)
+HUMAN_LAUNCH_NEGATION_RE = re.compile(
+    r"\b(?:no|not|never|without|cannot|cant|dont|wont|wouldnt|shouldnt|couldnt|mustnt|isnt|arent|wasnt|werent|doesnt|didnt|havent|hasnt|hadnt|neednt|shant|[a-z]+n['‘’ʼ＇]t)\b",
+    flags=re.IGNORECASE,
+)
 DEFAULT_LONG_RUNNING_BLOCKED_ON = "persistent manager role"
 
 
@@ -116,6 +123,13 @@ class ParsedArgs(argparse.Namespace):
     human_email_file: Path | None = None
     human_email_lines: tuple[int, int] | None = None
     resume_idle: bool = False
+
+
+@dataclass(frozen=True)
+class LaunchSession:
+    name: str
+    target: str
+    create: bool
 
 
 def codex_flags_model_error(codex_flags: tuple[str, ...]) -> str:
@@ -210,8 +224,10 @@ def parse_args(argv: list[str]) -> Args:
             )
         ):
             parser.error("--migrate-manager-owner only accepts --root, --task-file, explicit old/new manager targets, and optional --dry-run.")
-    if parsed.workdir is not None and not parsed.tmux_session:
-        parser.error("--workdir requires --tmux-session.")
+    if not parsed.migrate_manager_owner and not parsed.tmux_session:
+        parser.error("--tmux-session is required.")
+    if parsed.tmux_session and TMUX_SESSION_RE.fullmatch(parsed.tmux_session) is None:
+        parser.error("--tmux-session must be an exact session name starting with a letter and containing only letters, numbers, `_`, or `-`.")
     if parsed.resume_idle and not parsed.session_id:
         parser.error("--resume-idle requires --session-id.")
     if parsed.resume_idle and parsed.workdir is None:
@@ -234,7 +250,7 @@ def parse_args(argv: list[str]) -> Args:
         parsed.tmux_session,
         parsed.tmux_window,
         parsed.tool,
-        parsed.workdir,
+        parsed.workdir.resolve() if parsed.workdir is not None else None,
         parsed.window_name,
         parsed.prompt_file,
         parsed.no_link,
@@ -430,26 +446,32 @@ def is_human_tmux_session(tmux_target: str) -> bool:
 
 
 def resolved_launch_session_name(session_target: str) -> str:
-    """Resolve tmux aliases before applying the human-session boundary."""
+    """Resolve the exact requested session before applying the human-session boundary."""
 
     result = subprocess.run(
-        ["tmux", "display-message", "-p", "-t", session_target, "#S"],
+        ["tmux", "display-message", "-p", "-t", f"={session_target}:", "#S"],
         capture_output=True,
         text=True,
         timeout=10,
         check=False,
     )
     resolved = result.stdout.strip() if result.returncode == 0 else ""
-    return resolved or target_session(session_target).lstrip("=")
+    return resolved or session_target
 
 
 def human_authorized_launch_session(args: Args, session_name: str) -> bool:
-    """Require auditable human text naming an `h*` launch session."""
+    """Require one direct human launch request naming the exact `h*` session."""
 
     if args.human_email_file is None or args.human_email_lines is None:
         return False
     excerpt = human_email_excerpt(args)
-    return re.search(rf"(?<![A-Za-z0-9_.-]){re.escape(session_name)}(?=$|[^A-Za-z0-9_.-])", excerpt) is not None
+    session_re = re.compile(rf"(?<![A-Za-z0-9_.-]){re.escape(session_name)}(?=$|[^A-Za-z0-9_.-])")
+    return any(
+        HUMAN_LAUNCH_REQUEST_RE.match(line) is not None
+        and HUMAN_LAUNCH_NEGATION_RE.search(line) is None
+        and session_re.search(line) is not None
+        for line in excerpt.splitlines()
+    )
 
 
 def validate_launch_session(args: Args) -> str:
@@ -458,9 +480,38 @@ def validate_launch_session(args: Args) -> str:
     session_name = resolved_launch_session_name(args.tmux_session)
     if session_name.startswith("h") and not human_authorized_launch_session(args, session_name):
         raise ValueError(
-            "launches in human-owned `h*` tmux sessions require an authoritative human email excerpt naming that exact session."
+            "launches in human-owned `h*` tmux sessions require an authoritative direct launch request naming that exact session."
         )
     return session_name
+
+
+def launch_session(args: Args) -> LaunchSession:
+    """Choose existing-window launch or missing-session creation without mutation."""
+
+    if args.workdir is None:
+        raise ValueError("--workdir is required to launch a new worker.")
+    session_name = validate_launch_session(args)
+    result = tmux(["display-message", "-p", "-t", f"={session_name}:", "#{session_id}\t#{session_path}"])
+    if result.returncode != 0:
+        if args.tmux_window:
+            raise ValueError(f"cannot create missing tmux session `{session_name}` at requested --tmux-window {args.tmux_window}.")
+        return LaunchSession(session_name, f"={session_name}", True)
+    session_details = result.stdout.removesuffix("\n")
+    session_id, separator, session_workdir_text = session_details.partition("\t")
+    if not separator or TMUX_SESSION_ID_RE.fullmatch(session_id) is None or not session_workdir_text or "\n" in session_workdir_text:
+        raise RuntimeError(f"tmux session `{session_name}` did not report one usable session_id and session_path.")
+    session_workdir = Path(session_workdir_text)
+    try:
+        same_workdir = os.path.samefile(args.workdir, session_workdir)
+    except OSError as error:
+        raise ValueError(
+            f"cannot verify that --workdir `{args.workdir}` matches tmux session `{session_name}` session_path `{session_workdir}`: {error}"
+        ) from error
+    if not same_workdir:
+        raise ValueError(
+            f"--workdir `{args.workdir}` does not match tmux session `{session_name}` session_path `{session_workdir}`; both must identify the same directory."
+        )
+    return LaunchSession(session_name, session_id, False)
 
 
 def is_vl_task_file(task_file: str) -> bool:
@@ -1054,8 +1105,10 @@ def wait_command_started(
     raise RuntimeError(f"Codex launch not verified after {timeout_s:g}s: pane command={last_command or 'unknown'}, status={last_status}")
 
 
-def new_window_command(args: Args) -> list[str]:
+def new_window_command(args: Args, create_session: bool = False) -> list[str]:
     name = args.window_name or Path(args.task_file).stem
+    if create_session:
+        return ["new-session", "-d", "-P", "-F", "#{session_name}:#{window_index}", "-s", args.tmux_session.lstrip("="), "-n", name, "-c", str(args.workdir)]
     return ["new-window", "-P", "-F", "#{session_name}:#{window_index}", "-t", target(args), "-n", name, "-c", str(args.workdir)]
 
 
@@ -1075,8 +1128,8 @@ def launch_input_state(path: Path | None) -> str:
         return f"path={path!s} state_error={error}"
 
 
-def retain_new_window_failure(args: Args, error: subprocess.CalledProcessError | subprocess.TimeoutExpired | OSError) -> Path:
-    """Persist enough evidence to diagnose a tmux new-window failure after the caller exits."""
+def retain_tmux_launch_failure(args: Args, command: list[str], error: subprocess.CalledProcessError | subprocess.TimeoutExpired | OSError) -> Path:
+    """Persist enough evidence to diagnose a tmux launch failure after the caller exits."""
     try:
         session_state = tmux(
             ["list-windows", "-t", args.tmux_session, "-F", "#{window_index}:#{window_name}:#{pane_current_command}:#{pane_current_path}:#{pane_id}"],
@@ -1084,7 +1137,6 @@ def retain_new_window_failure(args: Args, error: subprocess.CalledProcessError |
     except (OSError, subprocess.SubprocessError) as state_error:
         session_state = subprocess.CompletedProcess([], 1, "", str(state_error))
     task = task_path(args.root, args.task_file)
-    command = new_window_command(args)
     tmux_env = {key: os.environ.get(key, "") for key in ("TMUX", "TMUX_PANE", "TERM", "OMO_AGENT_TMUX_TARGET", "OMO_MANAGER_TMUX_TARGET")}
     safe_args = replace(
         args,
@@ -1100,7 +1152,7 @@ def retain_new_window_failure(args: Args, error: subprocess.CalledProcessError |
     else:
         exit_status = f"{type(error).__name__}: {error}"
     lines = [
-        "omo_task tmux new-window failure",
+        f"omo_task tmux {command[0]} failure",
         f"args: {safe_args!r}",
         f"process_cwd: {Path.cwd()}",
         f"tmux_env: {tmux_env!r}",
@@ -1121,7 +1173,7 @@ def retain_new_window_failure(args: Args, error: subprocess.CalledProcessError |
     with tempfile.NamedTemporaryFile(
         mode="w",
         encoding="utf-8",
-        prefix="omo-task-new-window-failure-",
+        prefix="omo-task-tmux-launch-failure-",
         suffix=".log",
         delete=False,
     ) as evidence:
@@ -1172,16 +1224,17 @@ def start_codex(target: str, args: Args) -> None:
 def new_window(args: Args) -> str:
     if args.workdir is None:
         return target(args)
-    session_name = validate_launch_session(args)
-    bound_args = replace(args, tmux_session=f"={session_name}")
+    session = launch_session(args)
+    bound_args = replace(args, tmux_session=session.target)
+    command = new_window_command(bound_args, session.create)
     try:
-        out = tmux(new_window_command(bound_args), check=True)
+        out = tmux(command, check=True)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as error:
         try:
-            evidence = retain_new_window_failure(bound_args, error)
+            evidence = retain_tmux_launch_failure(bound_args, command, error)
         except OSError as evidence_error:
-            raise RuntimeError(f"tmux new-window failed; diagnostic retention failed: {evidence_error}") from error
-        raise RuntimeError(f"tmux new-window failed; diagnostic: {evidence}") from error
+            raise RuntimeError(f"tmux {command[0]} failed; diagnostic retention failed: {evidence_error}") from error
+        raise RuntimeError(f"tmux {command[0]} failed; diagnostic: {evidence}") from error
     tmux_target = out.stdout.strip()
     wait_shell(tmux_target)
     return tmux_target
@@ -1286,15 +1339,17 @@ def link_todo(args: Args, tmux_target: str) -> None:
 
 
 def dry_run(args: Args) -> None:
-    tmux_target = target(args) if args.workdir is None or args.tmux_window else f"{args.tmux_session}:DRYRUN"
+    session = launch_session(args) if args.workdir is not None else None
+    tmux_target = target(args) if session is None else f"{session.name}:{args.tmux_window or 'DRYRUN'}"
     path = task_path(args.root, args.task_file)
     print(f"task_file: {path}")
     if not args.no_link:
         print(f"todo_line: {todo_line(args, tmux_target)}")
-    if args.workdir is not None:
+    if session is not None:
+        bound_args = replace(args, tmux_session=session.target)
         if args.prelaunch_source is not None:
             print(f"prelaunch_source: {args.prelaunch_source}")
-        command = ["tmux", *new_window_command(args)]
+        command = ["tmux", *new_window_command(bound_args, session.create)]
         print("tmux: " + " ".join(shlex.quote(part) for part in command))
         launch_target = tmux_target
         manager_file = args.root / "MANAGER.md" if args.is_manager else None
@@ -1358,6 +1413,12 @@ def validate_existing_target_runtime(args: Args) -> str:
 
 
 def validate_inputs(args: Args) -> str:
+    if not args.tmux_session:
+        raise ValueError("--tmux-session is required.")
+    if TMUX_SESSION_RE.fullmatch(args.tmux_session) is None:
+        raise ValueError("--tmux-session must be an exact session name starting with a letter and containing only letters, numbers, `_`, or `-`.")
+    if args.workdir is not None and not args.workdir.is_dir():
+        raise ValueError(f"--workdir must be an existing directory: {args.workdir}")
     if args.workdir is not None and not args.resume_idle and (not args.model.strip() or not args.reasoning_effort.strip()):
         raise ValueError("--workdir requires nonempty --model MODEL and --reasoning-effort EFFORT.")
     if args.resume_idle and not args.session_id:

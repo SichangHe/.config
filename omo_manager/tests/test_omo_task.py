@@ -15,6 +15,7 @@ from omo_manager.omo_task import (
     Args,
     DEFAULT_TOOL,
     DEFAULT_WORKER_INSTRUCTIONS,
+    LaunchSession,
     PCODX_WRAPPER,
     PENDING_TASK_ITEMS_MARKER,
     VL_WORKER_INSTRUCTIONS,
@@ -729,14 +730,61 @@ class OmoTaskTests(unittest.TestCase):
     def test_new_window_uses_tmux_new_window_shape_without_starting_codex(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             args = Args(Path(tmp), 'x.md', 'cfg', '', 'codex', Path(tmp), 'x', None, False, False, '', '', ())
-            with patch('omo_manager.omo_task.tmux') as tmux, patch('omo_manager.omo_task.wait_shell') as wait_shell, patch('omo_manager.omo_task.start_codex') as start_codex_mock:
-                tmux.return_value.stdout = 'cfg:7\n'
+            session_path = subprocess.CompletedProcess(["tmux"], 0, f"$1\t{tmp}\n", "")
+            created = subprocess.CompletedProcess(["tmux"], 0, "cfg:7\n", "")
+            with patch("omo_manager.omo_task.resolved_launch_session_name", return_value="cfg"), patch(
+                'omo_manager.omo_task.tmux', side_effect=[session_path, created]
+            ) as tmux, patch('omo_manager.omo_task.wait_shell') as wait_shell, patch('omo_manager.omo_task.start_codex') as start_codex_mock:
                 self.assertEqual('cfg:7', new_window(args))
-            command = tmux.call_args.args[0]
+            command = tmux.call_args_list[1].args[0]
             self.assertEqual(['new-window', '-P'], command[:2])
             self.assertNotIn('bunx @openai/codex --dangerously-bypass-approvals-and-sandbox', command)
             wait_shell.assert_called_once_with('cfg:7')
             start_codex_mock.assert_not_called()
+
+    def test_new_window_creates_missing_named_session_at_workdir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = Args(Path(tmp), "x.md", "newcfg", "", "codex", Path(tmp), "worker", None, False, False, "", "", ())
+            missing = subprocess.CompletedProcess(["tmux"], 1, "", "can't find session: newcfg")
+            created = subprocess.CompletedProcess(["tmux"], 0, "newcfg:0\n", "")
+            with patch("omo_manager.omo_task.resolved_launch_session_name", return_value="newcfg"), patch(
+                "omo_manager.omo_task.tmux", side_effect=[missing, created]
+            ) as tmux_mock, patch("omo_manager.omo_task.wait_shell") as wait_shell:
+                self.assertEqual("newcfg:0", new_window(args))
+            command = tmux_mock.call_args_list[1].args[0]
+            self.assertEqual(["new-session", "-d", "-P"], command[:3])
+            self.assertEqual("newcfg", command[command.index("-s") + 1])
+            self.assertEqual(str(Path(tmp)), command[command.index("-c") + 1])
+            wait_shell.assert_called_once_with("newcfg:0")
+
+    def test_missing_session_creation_retains_tmux_failure_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = Args(Path(tmp), "x.md", "newcfg", "", "codex", Path(tmp), "worker", None, False, False, "", "", ())
+            missing = subprocess.CompletedProcess(["tmux"], 1, "", "can't find session: newcfg")
+            failure = subprocess.CalledProcessError(1, ["tmux", "new-session"], output="tmux-out", stderr="tmux-err")
+            state = subprocess.CompletedProcess(["tmux", "list-windows"], 1, "", "session unavailable")
+            with patch("omo_manager.omo_task.resolved_launch_session_name", return_value="newcfg"), patch(
+                "omo_manager.omo_task.tmux", side_effect=[missing, failure, state]
+            ), self.assertRaisesRegex(RuntimeError, r"tmux new-session failed; diagnostic: (.+)") as raised:
+                _ = new_window(args)
+            evidence = Path(raised.exception.args[0].split("diagnostic: ", 1)[1])
+            try:
+                text = evidence.read_text(encoding="utf-8")
+            finally:
+                evidence.unlink(missing_ok=True)
+            self.assertIn("omo_task tmux new-session failure", text)
+            self.assertIn("tmux_command: tmux new-session -d -P", text)
+            self.assertIn("stderr: tmux-err", text)
+
+    def test_new_window_rejects_session_workdir_mismatch_before_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as other:
+            args = Args(Path(tmp), "x.md", "cfg", "", "codex", Path(tmp), "worker", None, False, False, "", "", ())
+            session_path = subprocess.CompletedProcess(["tmux"], 0, f"$1\t{other}\n", "")
+            with patch("omo_manager.omo_task.resolved_launch_session_name", return_value="cfg"), patch(
+                "omo_manager.omo_task.tmux", return_value=session_path
+            ) as tmux_mock, self.assertRaisesRegex(ValueError, "both must identify the same directory"):
+                _ = new_window(args)
+            self.assertEqual(["display-message", "-p", "-t", "=cfg:", "#{session_id}\t#{session_path}"], tmux_mock.call_args.args[0])
 
     def test_new_window_retains_tmux_failure_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -756,7 +804,9 @@ class OmoTaskTests(unittest.TestCase):
             )
             failure = subprocess.CalledProcessError(1, ["tmux", "new-window"], output="tmux-out", stderr="tmux-err")
             state = subprocess.CompletedProcess(["tmux", "list-windows"], 0, "1:manager:bunx:/tmp:%1\n", "")
-            with patch("omo_manager.omo_task.tmux", side_effect=[failure, state]):
+            with patch("omo_manager.omo_task.launch_session", return_value=LaunchSession("cfg", "$1", False)), patch(
+                "omo_manager.omo_task.tmux", side_effect=[failure, state]
+            ):
                 with self.assertRaisesRegex(RuntimeError, r"diagnostic: (.+)") as raised:
                     _ = new_window(args)
             evidence = Path(raised.exception.args[0].split("diagnostic: ", 1)[1])
@@ -782,7 +832,9 @@ class OmoTaskTests(unittest.TestCase):
             args = Args(root, "x.md", "cfg", "", "codex", root, "worker", None, False, False, "", "", ())
             timeout = subprocess.TimeoutExpired(["tmux", "new-window"], 10, output="partial-out", stderr="partial-err")
             state = subprocess.CompletedProcess(["tmux", "list-windows"], 1, "", "session unavailable")
-            with patch("omo_manager.omo_task.tmux", side_effect=[timeout, state]):
+            with patch("omo_manager.omo_task.launch_session", return_value=LaunchSession("cfg", "$1", False)), patch(
+                "omo_manager.omo_task.tmux", side_effect=[timeout, state]
+            ):
                 with self.assertRaisesRegex(RuntimeError, r"diagnostic: (.+)") as raised:
                     _ = new_window(args)
             evidence = Path(raised.exception.args[0].split("diagnostic: ", 1)[1])
@@ -800,7 +852,9 @@ class OmoTaskTests(unittest.TestCase):
             args = Args(root, "x.md", "cfg", "", "codex", root, "worker", None, False, False, "", "", ())
             failure = FileNotFoundError(2, "tmux unavailable")
             state = subprocess.CompletedProcess(["tmux", "list-windows"], 1, "", "tmux unavailable")
-            with patch("omo_manager.omo_task.tmux", side_effect=[failure, state]):
+            with patch("omo_manager.omo_task.launch_session", return_value=LaunchSession("cfg", "$1", False)), patch(
+                "omo_manager.omo_task.tmux", side_effect=[failure, state]
+            ):
                 with self.assertRaisesRegex(RuntimeError, r"diagnostic: (.+)") as raised:
                     _ = new_window(args)
             evidence = Path(raised.exception.args[0].split("diagnostic: ", 1)[1])
@@ -824,9 +878,9 @@ class OmoTaskTests(unittest.TestCase):
 
     def test_resume_idle_requires_session_and_rejects_prompt(self) -> None:
         with self.assertRaises(SystemExit):
-            parse_args(["--task-file", "x.md", "--resume-idle"])
+            parse_args(["--task-file", "x.md", "--tmux-session", "cfg", "--resume-idle"])
         with self.assertRaises(SystemExit):
-            parse_args(["--task-file", "x.md", "--session-id", "abc", "--resume-idle"])
+            parse_args(["--task-file", "x.md", "--tmux-session", "cfg", "--session-id", "abc", "--resume-idle"])
         with self.assertRaises(SystemExit):
             parse_args([
                 "--task-file",
@@ -953,10 +1007,21 @@ class OmoTaskTests(unittest.TestCase):
             self.assertIn("prompt\n", sent)
 
     def test_parse_args_accepts_repeatable_codex_flags(self) -> None:
-        args = parse_args(["--task-file", "x.md", "--reasoning-effort", "xhigh", "--codex-flag=--profile", "--codex-flag", "deep-review"])
+        args = parse_args(
+            ["--task-file", "x.md", "--tmux-session", "cfg", "--reasoning-effort", "xhigh", "--codex-flag=--profile", "--codex-flag", "deep-review"]
+        )
         self.assertEqual("xhigh", args.reasoning_effort)
         self.assertEqual(("--profile", "deep-review"), args.codex_flags)
         self.assertEqual(DEFAULT_TOOL, args.tool)
+
+    def test_parse_args_requires_exact_tmux_session_name(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()) as stderr, self.assertRaises(SystemExit):
+            parse_args(["--task-file", "x.md"])
+        self.assertIn("--tmux-session is required", stderr.getvalue())
+        for invalid in ("=cfg", "cfg:2", "cfg.other", "2cfg"):
+            with self.subTest(invalid=invalid), contextlib.redirect_stderr(io.StringIO()) as stderr, self.assertRaises(SystemExit):
+                parse_args(["--task-file", "x.md", "--tmux-session", invalid])
+            self.assertIn("exact session name", stderr.getvalue())
 
     def test_parse_args_requires_model_and_reasoning_for_launch(self) -> None:
         base = ["--task-file", "x.md", "--tmux-session", "cfg", "--workdir", "/tmp"]
@@ -979,7 +1044,7 @@ class OmoTaskTests(unittest.TestCase):
     def test_model_must_be_a_safe_identifier(self) -> None:
         for model in (" ", "gpt-5.6-terra\n--profile", "gpt-5.6-terra\r--profile", "gpt-5.6-terra\u2028--profile"):
             with self.subTest(model=model), contextlib.redirect_stderr(io.StringIO()) as stderr, self.assertRaises(SystemExit):
-                parse_args(["--task-file", "x.md", "--model", model])
+                parse_args(["--task-file", "x.md", "--tmux-session", "cfg", "--model", model])
             self.assertIn("nonempty model identifier", stderr.getvalue())
         args = Args(Path("/tmp"), "x.md", "cfg", "2", "codex", None, "", None, False, False, "", "", (), model="bad\nmodel")
         with self.assertRaisesRegex(ValueError, "nonempty model identifier"):
@@ -1007,13 +1072,13 @@ class OmoTaskTests(unittest.TestCase):
         ), self.assertRaisesRegex(ValueError, "human-owned `h\\*` tmux sessions"):
             validate_inputs(args)
 
-    def test_validate_inputs_resolves_human_session_alias_before_launch(self) -> None:
+    def test_validate_inputs_checks_exact_human_session_before_launch(self) -> None:
         args = parse_args(
             [
                 "--task-file",
                 "x.md",
                 "--tmux-session",
-                "=hcfg",
+                "hcfg",
                 "--workdir",
                 "/tmp",
                 "--model",
@@ -1026,7 +1091,7 @@ class OmoTaskTests(unittest.TestCase):
         with patch(
             "omo_manager.omo_task.subprocess.run",
             return_value=subprocess.CompletedProcess(["tmux"], 0, "hcfg\n", ""),
-        ), self.assertRaisesRegex(ValueError, "authoritative human email excerpt"):
+        ), self.assertRaisesRegex(ValueError, "authoritative direct launch request"):
             validate_inputs(args)
 
     def test_validate_inputs_allows_named_human_session_from_authoritative_email(self) -> None:
@@ -1044,7 +1109,7 @@ class OmoTaskTests(unittest.TestCase):
             args = Args(
                 root,
                 "x.md",
-                "=hreview",
+                "hreview",
                 "",
                 "codex",
                 root,
@@ -1067,15 +1132,80 @@ class OmoTaskTests(unittest.TestCase):
             ):
                 self.assertEqual("Please launch my direct agent in hreview now.\n", validate_inputs(args))
 
-    def test_new_window_binds_the_resolved_session_exactly(self) -> None:
+    def test_validate_inputs_rejects_non_authorizing_human_session_mentions(self) -> None:
+        for excerpt in (
+            "hreview is unavailable.\n",
+            "Do not launch hreview.\n",
+            "> Please launch hreview.\n",
+            "Please launch no worker in hreview.\n",
+            "Please launch hreview, but do not start anything there.\n",
+            "Please launch hreview, but don’t start anything there.\n",
+            "Please launch hreview, but won’t that alter the session?\n",
+            "Please launch hreview, but shouldn’t we wait?\n",
+        ):
+            with self.subTest(excerpt=excerpt), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                mail = root / "manager_mail"
+                mail.mkdir()
+                (mail / "request.txt").write_text(excerpt, encoding="utf-8")
+                (root / "x.md").write_text(
+                    "---\nversion: v1.0.0\nstatus: blocked\nblocked_on: awaiting relaunch\nrunat: old:1\ntool: codex\n"
+                    "managerat: mgr:1\nis_manager: false\npending_task_items: []\n---\n"
+                    "keep this worker available\n- continue the direct human task\n",
+                    encoding="utf-8",
+                )
+                args = Args(
+                    root,
+                    "x.md",
+                    "hreview",
+                    "",
+                    "codex",
+                    root,
+                    "",
+                    None,
+                    False,
+                    False,
+                    "",
+                    "medium",
+                    (),
+                    model="gpt-5.6-sol",
+                    manager_target="mgr:1",
+                    human_email_file=Path("manager_mail/request.txt"),
+                    human_email_lines=(1, 1),
+                )
+
+                with patch(
+                    "omo_manager.omo_task.subprocess.run",
+                    return_value=subprocess.CompletedProcess(["tmux"], 0, "hreview\n", ""),
+                ), self.assertRaisesRegex(ValueError, "authoritative direct launch request"):
+                    validate_inputs(args)
+
+    def test_new_window_binds_the_validated_existing_session_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             args = Args(Path(tmp), "x.md", "cfg", "9", "codex", Path(tmp), "x", None, False, False, "", "medium", (), model="gpt-5.6-sol")
-            with patch("omo_manager.omo_task.resolved_launch_session_name", return_value="cfg"), patch("omo_manager.omo_task.tmux") as tmux, patch(
-                "omo_manager.omo_task.wait_shell"
-            ):
-                tmux.return_value.stdout = "cfg:9\n"
+            session_path = subprocess.CompletedProcess(["tmux"], 0, f"$1\t{tmp}\n", "")
+            created = subprocess.CompletedProcess(["tmux"], 0, "cfg:9\n", "")
+            with patch("omo_manager.omo_task.resolved_launch_session_name", return_value="cfg"), patch(
+                "omo_manager.omo_task.tmux", side_effect=[session_path, created]
+            ) as tmux, patch("omo_manager.omo_task.wait_shell"):
                 self.assertEqual("cfg:9", new_window(args))
-            self.assertEqual("=cfg:9", tmux.call_args.args[0][5])
+            self.assertEqual("$1:9", tmux.call_args_list[1].args[0][5])
+
+    def test_replaced_existing_session_fails_without_retargeting_its_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = Args(Path(tmp), "x.md", "cfg", "", "codex", Path(tmp), "x", None, False, False, "", "medium", (), model="gpt-5.6-sol")
+            session_path = subprocess.CompletedProcess(["tmux"], 0, f"$1\t{tmp}\n", "")
+            failure = subprocess.CalledProcessError(1, ["tmux", "new-window"], stderr="can't find session: $1")
+            replacement = subprocess.CompletedProcess(["tmux", "list-windows"], 1, "", "can't find session: $1")
+            with patch("omo_manager.omo_task.resolved_launch_session_name", return_value="cfg"), patch(
+                "omo_manager.omo_task.tmux", side_effect=[session_path, failure, replacement]
+            ) as tmux_mock, self.assertRaisesRegex(RuntimeError, r"diagnostic: (.+)") as raised:
+                _ = new_window(args)
+            evidence = Path(raised.exception.args[0].split("diagnostic: ", 1)[1])
+            evidence.unlink(missing_ok=True)
+            command = tmux_mock.call_args_list[1].args[0]
+            self.assertEqual("$1", command[command.index("-t") + 1])
+            self.assertNotIn("=cfg", command)
 
     def test_new_window_rechecks_human_session_before_creation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1096,7 +1226,7 @@ class OmoTaskTests(unittest.TestCase):
         )
         for raw_argv in raw_argvs:
             with self.subTest(raw_argv=raw_argv), contextlib.redirect_stderr(io.StringIO()) as stderr, self.assertRaises(SystemExit):
-                parse_args(["--task-file", "x.md", *raw_argv])
+                parse_args(["--task-file", "x.md", "--tmux-session", "cfg", *raw_argv])
             self.assertIn("use --model MODEL", stderr.getvalue())
 
     def test_programmatic_raw_model_flags_are_rejected(self) -> None:
@@ -1167,12 +1297,12 @@ class OmoTaskTests(unittest.TestCase):
     def test_parse_args_accepts_new_reasoning_efforts(self) -> None:
         for effort in ("max", "ultra"):
             with self.subTest(effort=effort):
-                args = parse_args(["--task-file", "x.md", "--reasoning-effort", effort])
+                args = parse_args(["--task-file", "x.md", "--tmux-session", "cfg", "--reasoning-effort", effort])
                 self.assertEqual(effort, args.reasoning_effort)
                 self.assertIn(f'model_reasoning_effort="{effort}"', codex_cmd(reasoning_effort=effort))
 
     def test_parse_args_accepts_prelaunch_source(self) -> None:
-        args = parse_args(["--task-file", "x.md", "--prelaunch-source", "/tmp/pre launch.sh"])
+        args = parse_args(["--task-file", "x.md", "--tmux-session", "cfg", "--prelaunch-source", "/tmp/pre launch.sh"])
         self.assertEqual(Path("/tmp/pre launch.sh"), args.prelaunch_source)
 
     def test_parse_args_accepts_paired_human_email_options(self) -> None:
@@ -1209,7 +1339,7 @@ class OmoTaskTests(unittest.TestCase):
         )
         for options in invalid_options:
             with self.subTest(options=options), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
-                parse_args(["--task-file", "x.md", *options])
+                parse_args(["--task-file", "x.md", "--tmux-session", "cfg", *options])
 
     def test_migration_rejects_human_email_options(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()) as stderr, self.assertRaises(SystemExit):
@@ -1255,6 +1385,8 @@ class OmoTaskTests(unittest.TestCase):
                 [
                     "--task-file",
                     "x.md",
+                    "--tmux-session",
+                    "cfg",
                     "--human-email-file",
                     "manager_mail/request.md",
                     "--human-email-lines",
@@ -1460,7 +1592,7 @@ class OmoTaskTests(unittest.TestCase):
             self.assertNotIn(DEFAULT_WORKER_INSTRUCTIONS.read_text(encoding="utf-8"), text)
 
     def test_parse_args_resolves_relative_prelaunch_source(self) -> None:
-        args = parse_args(["--task-file", "x.md", "--prelaunch-source", "omo_manager/WORKER_DEFAULTS.md"])
+        args = parse_args(["--task-file", "x.md", "--tmux-session", "cfg", "--prelaunch-source", "omo_manager/WORKER_DEFAULTS.md"])
         self.assertEqual((Path.cwd() / "omo_manager" / "WORKER_DEFAULTS.md").resolve(), args.prelaunch_source)
 
     def test_parse_args_rejects_removed_vl_preflight_flags(self) -> None:
@@ -1509,12 +1641,12 @@ class OmoTaskTests(unittest.TestCase):
             self.assertFalse((root / "TODO.md").exists())
 
     def test_parse_args_accepts_pcodx_tool(self) -> None:
-        args = parse_args(["--task-file", "x.md", "--tool", "pcodx"])
+        args = parse_args(["--task-file", "x.md", "--tmux-session", "cfg", "--tool", "pcodx"])
         self.assertEqual("pcodx", args.tool)
         self.assertTrue(args.tool_explicit)
 
     def test_parse_args_accepts_is_manager(self) -> None:
-        args = parse_args(["--task-file", "x.md", "--is-manager"])
+        args = parse_args(["--task-file", "x.md", "--tmux-session", "cfg", "--is-manager"])
         self.assertTrue(args.is_manager)
 
     def test_new_task_file_writes_is_manager_frontmatter(self) -> None:
@@ -1753,7 +1885,7 @@ class OmoTaskTests(unittest.TestCase):
                 str(prelaunch),
                 "--dry-run",
             ]
-            with contextlib.redirect_stdout(out):
+            with patch("omo_manager.omo_task.launch_session", return_value=LaunchSession("cfg", "$1", False)), contextlib.redirect_stdout(out):
                 self.assertEqual(0, main(argv))
             text = out.getvalue()
             self.assertIn(f"prelaunch_source: {prelaunch}", text)
@@ -1803,7 +1935,9 @@ class OmoTaskTests(unittest.TestCase):
     def test_new_window_can_resume_session_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             args = Args(Path(tmp), 'x.md', 'cfg', '', 'codex', Path(tmp), 'x', None, False, False, '11111111-1111-1111-1111-111111111111', '', ())
-            with patch('omo_manager.omo_task.tmux') as tmux, patch('omo_manager.omo_task.wait_shell'), patch('omo_manager.omo_task.start_codex') as start_codex_mock:
+            with patch("omo_manager.omo_task.launch_session", return_value=LaunchSession("cfg", "$1", False)), patch(
+                'omo_manager.omo_task.tmux'
+            ) as tmux, patch('omo_manager.omo_task.wait_shell'), patch('omo_manager.omo_task.start_codex') as start_codex_mock:
                 tmux.return_value.stdout = 'cfg:7\n'
                 self.assertEqual('cfg:7', new_window(args))
             start_codex_mock.assert_not_called()
@@ -1862,7 +1996,7 @@ class OmoTaskTests(unittest.TestCase):
                 "--resume-idle",
                 "--dry-run",
             ]
-            with contextlib.redirect_stdout(out):
+            with patch("omo_manager.omo_task.launch_session", return_value=LaunchSession("cfg", "$1", False)), contextlib.redirect_stdout(out):
                 self.assertEqual(0, main(argv))
             text = out.getvalue()
             self.assertIn("todo_line: x.md cfg:9", text)
@@ -1882,10 +2016,12 @@ class OmoTaskTests(unittest.TestCase):
     def test_new_window_honors_requested_window_index(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             args = Args(Path(tmp), "x.md", "cfg", "9", "codex", Path(tmp), "x", None, False, False, "abc", "", (), resume_idle=True)
-            with patch("omo_manager.omo_task.tmux") as tmux, patch("omo_manager.omo_task.wait_shell"):
+            with patch("omo_manager.omo_task.launch_session", return_value=LaunchSession("cfg", "$1", False)), patch(
+                "omo_manager.omo_task.tmux"
+            ) as tmux, patch("omo_manager.omo_task.wait_shell"):
                 tmux.return_value.stdout = "cfg:9\n"
                 self.assertEqual("cfg:9", new_window(args))
-            self.assertEqual("=cfg:9", tmux.call_args.args[0][5])
+            self.assertEqual("$1:9", tmux.call_args.args[0][5])
 
     def test_start_codex_relaunches_after_runtime_update(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2253,7 +2389,7 @@ class OmoTaskTests(unittest.TestCase):
             prompt = root / "prompt.md"
             prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
             out = io.StringIO()
-            with contextlib.redirect_stdout(out):
+            with patch("omo_manager.omo_task.launch_session", return_value=LaunchSession("cfg", "$1", False)), contextlib.redirect_stdout(out):
                 self.assertEqual(
                     0,
                     main(
@@ -2283,6 +2419,44 @@ class OmoTaskTests(unittest.TestCase):
             self.assertIn("export OMO_AGENT_TMUX_TARGET=cfg:DRYRUN", out.getvalue())
             self.assertFalse((root / "x.md").exists())
             self.assertFalse((root / "TODO.md").exists())
+
+    def test_missing_session_dry_run_prints_new_session_plan_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.md"
+            prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
+            out = io.StringIO()
+            missing = subprocess.CompletedProcess(["tmux"], 1, "", "can't find session: newcfg")
+            with patch("omo_manager.omo_task.resolved_launch_session_name", return_value="newcfg"), patch(
+                "omo_manager.omo_task.tmux", return_value=missing
+            ) as tmux_mock, contextlib.redirect_stdout(out):
+                result = main(
+                    [
+                        "--root",
+                        str(root),
+                        "--task-file",
+                        "x.md",
+                        "--tmux-session",
+                        "newcfg",
+                        "--manager-target",
+                        "mgr:1",
+                        "--workdir",
+                        str(root),
+                        "--model",
+                        "gpt-5.6-terra",
+                        "--reasoning-effort",
+                        "medium",
+                        "--prompt-file",
+                        str(prompt),
+                        "--dry-run",
+                    ]
+                )
+            self.assertEqual(0, result)
+            self.assertIn("tmux: tmux new-session -d -P", out.getvalue())
+            self.assertIn("todo_line: x.md newcfg:DRYRUN", out.getvalue())
+            self.assertFalse((root / "x.md").exists())
+            self.assertFalse((root / "TODO.md").exists())
+            self.assertEqual(1, tmux_mock.call_count)
 
     def test_main_dry_run_rejects_missing_goal_tree_before_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2321,7 +2495,10 @@ class OmoTaskTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             with contextlib.redirect_stderr(io.StringIO()):
-                self.assertEqual(1, main(["--root", str(root), "--task-file", "x.md", "--manager-target", "mgr:1", "--dry-run"]))
+                self.assertEqual(
+                    1,
+                    main(["--root", str(root), "--task-file", "x.md", "--tmux-session", "cfg", "--manager-target", "mgr:1", "--dry-run"]),
+                )
             self.assertFalse((root / "x.md").exists())
             self.assertFalse((root / "TODO.md").exists())
 
@@ -2363,6 +2540,35 @@ class OmoTaskTests(unittest.TestCase):
             self.assertIn("does not create or launch `wl:2`", stderr.getvalue())
             self.assertFalse((root / "x.md").exists())
             self.assertFalse((root / "TODO.md").exists())
+
+    def test_missing_session_without_workdir_cannot_launch_or_mutate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.md"
+            prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
+            stderr = io.StringIO()
+            with patch("omo_manager.omo_task.exact_pane_id", return_value=""), patch("omo_manager.omo_task.tmux") as tmux_mock, contextlib.redirect_stderr(stderr):
+                result = main(
+                    [
+                        "--root",
+                        str(root),
+                        "--task-file",
+                        "x.md",
+                        "--tmux-session",
+                        "missingcfg",
+                        "--tmux-window",
+                        "2",
+                        "--prompt-file",
+                        str(prompt),
+                        "--manager-target",
+                        "wl:1",
+                    ]
+                )
+            self.assertEqual(1, result)
+            self.assertIn("use --workdir to launch a new worker", stderr.getvalue())
+            self.assertFalse((root / "x.md").exists())
+            self.assertFalse((root / "TODO.md").exists())
+            tmux_mock.assert_not_called()
 
     def test_existing_target_mode_rejects_invalid_states_without_mutation(self) -> None:
         for target_status in ("not_codex", "error", "stuck_input"):
@@ -2506,7 +2712,24 @@ class OmoTaskTests(unittest.TestCase):
             prompt = root / "prompt.md"
             prompt.write_text("runat: cfg:2 pcodx\nimplement manager check\n", encoding="utf-8")
             with contextlib.redirect_stderr(io.StringIO()):
-                self.assertEqual(1, main(["--root", str(root), "--task-file", "x.md", "--manager-target", "mgr:1", "--prompt-file", str(prompt), "--dry-run"]))
+                self.assertEqual(
+                    1,
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "--task-file",
+                            "x.md",
+                            "--tmux-session",
+                            "cfg",
+                            "--manager-target",
+                            "mgr:1",
+                            "--prompt-file",
+                            str(prompt),
+                            "--dry-run",
+                        ]
+                    ),
+                )
             self.assertFalse((root / "x.md").exists())
             self.assertFalse((root / "TODO.md").exists())
 
@@ -2596,7 +2819,7 @@ class OmoTaskTests(unittest.TestCase):
             self.assertFalse((root / "TODO.md").exists())
 
     def test_rejects_raw_mcp_server_config_without_pcodx_tool(self) -> None:
-        args = parse_args(["--task-file", "x.md", "--codex-flag=--config=mcp_servers.pcodx_partial_compact.command=\"bun\""])
+        args = parse_args(["--task-file", "x.md", "--tmux-session", "cfg", "--codex-flag=--config=mcp_servers.pcodx_partial_compact.command=\"bun\""])
         with self.assertRaisesRegex(ValueError, "MCP server config requires --tool pcodx"):
             validate_inputs(args)
 
