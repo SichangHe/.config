@@ -53,6 +53,39 @@ class TaskEditTests(unittest.TestCase):
             )
             self.assertNotIn("body should stay private", stdout.getvalue())
 
+    def test_summary_combines_files_sorted_by_manager_then_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "zeta.md").write_text(task_frontmatter().replace("managerat: wl:1", "managerat: wl:3"), encoding="utf-8")
+            (root / "beta.md").write_text(task_frontmatter().replace("managerat: wl:1", "managerat: wl:1"), encoding="utf-8")
+            (root / "alpha.md").write_text(task_frontmatter().replace("managerat: wl:1", "managerat: wl:1"), encoding="utf-8")
+            stdout = io.StringIO()
+
+            with redirect_stdout(stdout):
+                exit_code = run(parse_args(["--root", str(root), "summary", "zeta.md", "beta.md", "alpha.md"]))
+
+            self.assertEqual(0, exit_code)
+            self.assertEqual(
+                "task_file: alpha.md\nstatus: running\nrunat: wl:2\nmanagerat: wl:1\nis_manager: false\npending_task_items: []\n"
+                "task_file: beta.md\nstatus: running\nrunat: wl:2\nmanagerat: wl:1\nis_manager: false\npending_task_items: []\n"
+                "task_file: zeta.md\nstatus: running\nrunat: wl:2\nmanagerat: wl:3\nis_manager: false\npending_task_items: []\n",
+                stdout.getvalue(),
+            )
+
+    def test_summary_rejects_invalid_file_without_partial_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "valid.md").write_text(task_frontmatter(), encoding="utf-8")
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                exit_code = run(parse_args(["--root", str(root), "summary", "valid.md", "missing.md"]))
+
+            self.assertEqual(2, exit_code)
+            self.assertEqual("", stdout.getvalue())
+            self.assertIn("missing.md", stderr.getvalue())
+
     def test_lists_pending_items_one_per_line(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

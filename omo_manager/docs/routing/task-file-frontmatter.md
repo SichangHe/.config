@@ -69,7 +69,7 @@ For a stopped stale record whose `runat` is occupied by an active replacement, u
 
 `omo_task.py` creates new task files with correct placeholder frontmatter. Ordinary workers start `running`; `--is-manager` tasks start `long_running`. `managerat` is the current tmux window; `runat`, `tool`, and `is_manager` are mandatory; `pending_task_items` is empty. Each agent then manages its own queue with `omo_pending.py`, without receiving the task path.
 
-`omo_task_edit.py summary TASK.md` gives managers an overview without reading the whole task body. Managers read task files directly only for overview or troubleshooting; routine mutations go through `omo_task_edit.py`, `omo_record_pending.py`, or `omo_task_status.py`.
+`omo_task_edit.py summary TASK.md [TASK.md ...]` gives managers an overview without reading task bodies. With multiple files, it sorts by `managerat`, then the path-derived `task_file` label. Managers read task files directly only for overview or troubleshooting; routine mutations go through `omo_task_edit.py`, `omo_record_pending.py`, or `omo_task_status.py`.
 
 `omo_task_edit.py comment-add TASK.md --message TEXT` appends `TEXT` as a parenthesized task-file comment after validating the task frontmatter.
 

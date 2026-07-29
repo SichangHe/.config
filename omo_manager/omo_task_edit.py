@@ -68,6 +68,7 @@ class Args:
     item_id: str = ""
     on_task: Path | None = None
     on_item_id: str = ""
+    task_files: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -108,7 +109,7 @@ def parse_args(argv: list[str]) -> Args:
 
     summary_parser = subparsers.add_parser("summary", help="Print task path, frontmatter summary, and pending_task_items.")
     summary_parser.set_defaults(command="summary")
-    _ = summary_parser.add_argument("task_file", type=Path)
+    _ = summary_parser.add_argument("task_file", type=Path, nargs="+")
 
     list_parser = subparsers.add_parser("pending-list", aliases=["list"], help="Print pending_task_items, one item per line.")
     list_parser.set_defaults(command="pending-list")
@@ -178,6 +179,9 @@ def parse_args(argv: list[str]) -> Args:
     try:
         root = parsed.root.resolve()
         command = canonical_command(parsed.command)
+        if command == "summary":
+            task_files = tuple(parsed.task_file)
+            return Args(root, task_files[0], command, task_files=task_files)
         if command in {"dependency-add", "dependency-remove"}:
             return Args(
                 root,
@@ -475,6 +479,18 @@ def summary_text(text: str, work_log_root: Path | None = None) -> str:
     return "\n".join(lines) + "\n"
 
 
+def summary_output(root: Path, task_files: tuple[Path, ...]) -> str:
+    """Return validated task summaries sorted by manager then task-file label."""
+    summaries: list[tuple[str, str, str]] = []
+    for task_file in task_files:
+        path = task_path(root, task_file)
+        text = path.read_text(encoding="utf-8")
+        metadata = require_metadata(text, root)
+        label = path.relative_to(root).as_posix()
+        summaries.append((metadata.managerat, label, summary_text(text, root)))
+    return "".join(f"task_file: {label}\n{text}" for _, label, text in sorted(summaries))
+
+
 def line_is_pending_marker(text: str, line_number: int) -> bool:
     lines = text.splitlines()
     return 1 <= line_number <= len(lines) and lines[line_number - 1].strip() == PENDING_MARKER
@@ -692,6 +708,11 @@ def run(args: Args) -> int:
             print(f"moved {removed_count} pending item(s) from {source_path.name} to {target_path.name}; {added_note}")
             return 0
 
+        if command == "summary":
+            task_files = args.task_files or (require_task_file(args.task_file),)
+            print(summary_output(args.root, task_files), end="")
+            return 0
+
         path = task_path(args.root, require_task_file(args.task_file))
         before = path.stat()
         text = path.read_text(encoding="utf-8")
@@ -702,10 +723,6 @@ def run(args: Args) -> int:
             metadata = parse_task_metadata(text, args.root)
             if metadata is not None and metadata.version != TASK_FRONTMATTER_V1:
                 raise TaskFrontmatterError("v2 task mutation is disabled until migration validation and watcher enablement are complete.")
-        if command == "summary":
-            print(f"task_file: {path.relative_to(args.root).as_posix()}")
-            print(summary_text(text, args.root), end="")
-            return 0
         if command == "pending-list":
             for item in require_metadata(text, args.root).pending_task_items:
                 print(item)

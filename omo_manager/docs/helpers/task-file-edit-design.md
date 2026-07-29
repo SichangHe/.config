@@ -28,8 +28,10 @@ unchanged since it was read.
 
 ## subcommands
 
-`summary TASK.md`
-- print status, runat, managerat, is_manager, and pending items
+`summary TASK.md [TASK.md ...]`
+- print status, runat, managerat, is_manager, and pending items for each task
+- sort combined summaries by `managerat`, then path-derived `task_file` label
+- validate every input before printing, so an invalid file produces no partial summary
 - does not print the whole task body
 
 `pending-list TASK.md`
