@@ -691,6 +691,9 @@ def replace_frontmatter_fields(text: str, updates: dict[str, str], remove: set[s
 def launched_frontmatter_text(existing: str, args: Args, tmux_target: str) -> str:
     metadata = parse_task_metadata(existing, args.root)
     is_manager = args.is_manager or (metadata is not None and metadata.is_manager)
+    is_long_running = is_manager or (
+        metadata is not None and (metadata.status == "long_running" or metadata.resume_status == "long_running")
+    )
     if metadata is not None and metadata.version == V2_VERSION:
         frontmatter, body = split_task_text(existing)
         values = load_yaml_mapping(frontmatter)
@@ -703,9 +706,6 @@ def launched_frontmatter_text(existing: str, args: Args, tmux_target: str) -> st
         values["tool"] = effective_tool(args)
         if args.manager_target:
             values["managerat"] = args.manager_target
-    is_long_running = is_manager or (
-        metadata is not None and (metadata.status == "long_running" or metadata.resume_status == "long_running")
-    )
         if args.is_manager:
             values["is_manager"] = True
         if generated or external:
