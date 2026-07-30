@@ -1478,20 +1478,149 @@ resolved_task_items: []
 
                 self.assertIn("not_codex: task=worker.md", out.getvalue())
 
-    def test_problems_only_reports_blocked_worker_even_with_running_dependency(self) -> None:
+    def test_problems_only_suppresses_deliberately_closed_manager_with_live_dependency(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
-            _ = (root / "TODO.md").write_text("current:\nworker.md cfg:1\n", encoding="utf-8")
-            _ = (root / "worker.md").write_text(task_frontmatter("blocked", runat="cfg:1", blocked_on="dependency.md"), encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nworker.md cfg:1\ndependency.md cfg:2\n", encoding="utf-8")
+            _ = (root / "worker.md").write_text(
+                task_frontmatter("blocked", runat="cfg:1", is_manager=True, blocked_on="dependency.md replacement custody pending")
+                + "(manager closed Codex agent 07-29 17:20 PDT; tmux target `cfg:1`; session_id: `old`.)\n",
+                encoding="utf-8",
+            )
             _ = (root / "dependency.md").write_text(task_frontmatter("running", runat="cfg:2", managerat="cfg:1"), encoding="utf-8")
+            out = StringIO()
+
+            def fake_inspect(args: object, **_: object) -> Report:
+                return Report("running", ["working"]) if getattr(args, "target") == "cfg:2" else Report("not_codex", [])
+
+            with patch("omo_manager.omo_agent_status.inspect", side_effect=fake_inspect), redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+
+            self.assertEqual("", out.getvalue())
+
+    def test_problems_only_suppresses_long_running_closed_manager_with_live_dependency(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nvlexp_replenish_safe.md vl:4\nvl_rebuild_mgr.md vl:5\n", encoding="utf-8")
+            _ = (root / "vlexp_replenish_safe.md").write_text(
+                task_frontmatter("long_running", runat="vl:4", is_manager=True, blocked_on="vl_rebuild_mgr.md replacement custody pending")
+                + "(manager closed Codex agent 07-29 17:20 PDT; tmux target `vl:4`; session_id: `old`.)\n",
+                encoding="utf-8",
+            )
+            _ = (root / "vl_rebuild_mgr.md").write_text(task_frontmatter("long_running", runat="vl:5", managerat="vl:4", is_manager=True, blocked_on="persistent role"), encoding="utf-8")
+            out = StringIO()
+
+            def fake_inspect(args: object, **_: object) -> Report:
+                return Report("running", ["working"]) if getattr(args, "target") == "vl:5" else Report("not_codex", [])
+
+            with patch("omo_manager.omo_agent_status.inspect", side_effect=fake_inspect), redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+
+            self.assertEqual("", out.getvalue())
+
+    def test_problems_only_keeps_closed_long_running_manager_alerts(self) -> None:
+        cases = {
+            "visible_output": ("vl_rebuild_mgr.md", Report("not_codex", ["shell prompt"])),
+            "error": ("vl_rebuild_mgr.md", Report("error", ["failure"])),
+            "stuck_input": ("vl_rebuild_mgr.md", Report("stuck_input", ["queued input"])),
+            "pending_dependency": ("vl_rebuild_mgr.md", Report("not_codex", [])),
+            "missing": ("missing.md", Report("not_codex", [])),
+            "terminal": ("vl_rebuild_mgr.md", Report("not_codex", [])),
+            "self": ("vlexp_replenish_safe.md", Report("not_codex", [])),
+            "duplicate": ("vl_rebuild_mgr.md, vl_rebuild_mgr.md", Report("not_codex", [])),
+            "target_reuse": ("vl_rebuild_mgr.md", Report("not_codex", [])),
+        }
+        for name, (blocker, manager_report) in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                registry = root / "sessions.json"
+                _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+                todo = "current:\nvlexp_replenish_safe.md vl:4\n"
+                if name not in {"missing", "self"}:
+                    todo += "vl_rebuild_mgr.md vl:5\n"
+                if name == "target_reuse":
+                    todo += "reused.md vl:5\n"
+                _ = (root / "TODO.md").write_text(todo, encoding="utf-8")
+                _ = (root / "vlexp_replenish_safe.md").write_text(
+                    task_frontmatter("long_running", runat="vl:4", is_manager=True, blocked_on=f"{blocker} replacement custody pending")
+                    + "(manager closed Codex agent 07-29 17:20 PDT; tmux target `vl:4`; session_id: `old`.)\n",
+                    encoding="utf-8",
+                )
+                if name not in {"missing", "self"}:
+                    dependency_status = "done" if name == "terminal" else "long_running"
+                    dependency_text = task_frontmatter(dependency_status, runat="vl:5", managerat="vl:4", is_manager=True, blocked_on="persistent role")
+                    if name == "pending_dependency":
+                        dependency_text += "(pending)\n"
+                    _ = (root / "vl_rebuild_mgr.md").write_text(dependency_text, encoding="utf-8")
+                if name == "target_reuse":
+                    _ = (root / "reused.md").write_text(task_frontmatter("running", runat="vl:5"), encoding="utf-8")
+                out = StringIO()
+
+                def fake_inspect(args: object, **_: object) -> Report:
+                    return manager_report if getattr(args, "target") == "vl:4" else Report("running", ["working"])
+
+                with patch("omo_manager.omo_agent_status.inspect", side_effect=fake_inspect), redirect_stdout(out):
+                    self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+
+                self.assertIn("task=vlexp_replenish_safe.md", out.getvalue())
+
+    def test_problems_only_suppresses_closed_manager_with_v2_task_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nmanager.md cfg:1\ndependency.md cfg:2\n", encoding="utf-8")
+            _ = (root / "manager.md").write_text(
+                """---
+version: v2.0.0
+task_id: task_019f0000-0000-7000-8000-000000000021
+status: blocked
+resume_status: running
+runat: cfg:1
+tool: codex
+managerat: mgr:1
+is_manager: true
+blocked_on:
+  - kind: task
+    task: dependency.md
+    reason: replacement custody pending
+pending_task_items: []
+resolved_task_items: []
+---
+(manager closed Codex agent 07-29 17:20 PDT; tmux target `cfg:1`; session_id: `old`.)
+""",
+                encoding="utf-8",
+            )
+            _ = (root / "dependency.md").write_text(task_frontmatter("long_running", runat="cfg:2", managerat="cfg:1", blocked_on="persistent role"), encoding="utf-8")
+
+            def fake_inspect(args: object, **_: object) -> Report:
+                return Report("running", ["working"]) if getattr(args, "target") == "cfg:2" else Report("not_codex", [])
+
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", side_effect=fake_inspect), redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertEqual("", out.getvalue())
+
+    def test_problems_only_reports_closed_manager_with_self_dependency(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nmanager.md cfg:1\n", encoding="utf-8")
+            _ = (root / "manager.md").write_text(
+                task_frontmatter("blocked", runat="cfg:1", is_manager=True, blocked_on="manager.md replacement custody pending")
+                + "(manager closed Codex agent 07-29 17:20 PDT; tmux target `cfg:1`; session_id: `old`.)\n",
+                encoding="utf-8",
+            )
             out = StringIO()
 
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("not_codex", [])), redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
-
-            self.assertIn("not_codex: task=worker.md", out.getvalue())
+            self.assertIn("not_codex: task=manager.md", out.getvalue())
 
     def test_problems_only_suppresses_resumable_stopped_worker_with_running_dependency(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

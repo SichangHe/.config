@@ -85,6 +85,7 @@ BLOCKED_DEPENDENCY_LIST_RE = re.compile(r"`?[A-Za-z0-9_./-]+\.md`?(?:\s*,\s*`?[A
 CODEX_SESSION_ID_RE = re.compile(r"\b(?:codex\s+session|session_id)\b[^.\n]{0,120}\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b", re.IGNORECASE)
 STOPPED_RECORD_RE = re.compile(r"\b(?:preserved|record-only|stopped)\b", re.IGNORECASE)
 RESUME_RE = re.compile(r"\bresum(?:e|able|ed|ing)\b", re.IGNORECASE)
+CLOSED_CODEX_RECORD_RE = re.compile(r"\bmanager closed Codex agent\b[^\n]*\btmux target\s+`?([^`;\s]+)`?", re.IGNORECASE)
 TARGET_SESSION_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*):")
 LOOSE_TARGET_RE = re.compile(r"\b([a-z][A-Za-z0-9_-]*)\s+(\d+)\b")
 PORT_RE = re.compile(r"\bport [`']?(\d{2,5})[`']?")
@@ -369,6 +370,10 @@ def has_stopped_resume_evidence(path: Path) -> bool:
     return CODEX_SESSION_ID_RE.search(text) is not None and STOPPED_RECORD_RE.search(text) is not None and RESUME_RE.search(text) is not None
 
 
+def has_closed_codex_evidence(path: Path, target: str) -> bool:
+    return any(same_tmux_target(match.group(1), target) for match in CLOSED_CODEX_RECORD_RE.finditer(task_body_text(path)))
+
+
 def blocked_resumable_dependency_snapshot(root: Path, task: TaskLine, state: TaskState) -> str:
     """Describe an intentionally stopped worker with active blocker records."""
 
@@ -434,6 +439,51 @@ def blocked_dependencies_are_active(root: Path, task: TaskLine, state: TaskState
 def blocked_resumable_dependencies_are_active(root: Path, task: TaskLine, state: TaskState) -> bool:
     """Accept a stopped worker only when its resume and blocker records are live."""
     return bool(blocked_resumable_dependency_snapshot(root, task, state))
+
+
+def blocked_closed_manager_dependency_is_active(root: Path, task: TaskLine, state: TaskState) -> bool:
+    """Accept a deliberately closed manager with a live named dependency."""
+    if state.status not in {"blocked", "long_running"} or not state.is_manager:
+        return False
+    task_path = resolve_task_path(root, task.task_file)
+    if task_path is None or task_has_pending_marker(task_path) or task_path not in current_task_paths(root) or not has_closed_codex_evidence(task_path, state.target):
+        return False
+    current_paths = current_task_paths(root)
+    metadata = read_task_metadata(task_path, root)
+    if metadata is None:
+        return False
+    if metadata.blockers:
+        dependency_names = [blocker.task for blocker in metadata.blockers if blocker.kind == "task"]
+        if len(dependency_names) != len(metadata.blockers):
+            return False
+    else:
+        dependency_names = [match.group(1) for match in TASK_RE.finditer(state.reason)]
+    if not dependency_names or len(set(dependency_names)) != len(dependency_names):
+        return False
+    seen_targets = {canonical_target(state.target)} if state.target else set()
+    dependency_paths: set[Path] = set()
+    for dependency_name in dependency_names:
+        dependency_path = resolve_task_path(root, dependency_name)
+        dependency = scan_task_state(dependency_path, root) if dependency_path is not None else None
+        dependency_target = canonical_target(dependency.target) if dependency is not None else ""
+        if dependency_path is None or dependency_path == task_path or dependency_path not in current_paths or dependency is None or dependency.status not in {"running", "long_running"} or task_has_pending_marker(dependency_path) or not dependency_target or dependency_target in seen_targets:
+            return False
+        seen_targets.add(dependency_target)
+        dependency_paths.add(dependency_path)
+    for current_path in current_paths - {task_path, *dependency_paths}:
+        current = scan_task_state(current_path, root)
+        if current is not None and canonical_target(current.target) in seen_targets:
+            return False
+    return True
+
+
+def quiet_closed_manager_not_codex(root: Path, task: TaskLine, row: StatusRow) -> bool:
+    """Return whether a closed manager's empty exact target is intentionally quiet."""
+    if row.status != "not_codex" or " output=" in row.evidence:
+        return False
+    task_path = resolve_task_path(root, task.task_file)
+    state = scan_task_state(task_path, root) if task_path is not None else None
+    return state is not None and same_tmux_target(row.target, state.target) and blocked_closed_manager_dependency_is_active(root, task, state)
 
 
 def is_recorded_human_wait(state: TaskState) -> bool:
@@ -940,10 +990,15 @@ def add_blocked_idle_vl_row(root: Path, task: TaskLine, role: str, rows: list[St
             return
         quiet_dependency = blocked_dependencies_are_active(root, task, state) and idle_status == "ready"
         quiet_resumable = blocked_resumable_dependencies_are_active(root, task, state) and idle_status == "not_codex" and " output=" not in classified.evidence and not target_resolves_exactly(target)
+        quiet_closed_manager = (
+            blocked_closed_manager_dependency_is_active(root, task, state)
+            and idle_status == "not_codex"
+            and " output=" not in classified.evidence
+        )
     reason = state.reason or "blocked with no reason in latest status line"
     evidence = classified.evidence if classified is not None else f"target={target} role={role} task_status=blocked"
     evidence += f" idle_status={idle_status} reason={reason}"
-    status = "ready" if quiet_dependency or quiet_resumable else idle_status if idle_status in {"error", "not_codex", "stuck_input"} else "blocked_idle"
+    status = "ready" if quiet_dependency or quiet_resumable or quiet_closed_manager else idle_status if idle_status in {"error", "not_codex", "stuck_input"} else "blocked_idle"
     rows.append(StatusRow(task.task_file, status, evidence, state.persistent_role, state.status, target, classified.unstick if classified is not None else ""))
     seen.add(seen_key)
 
@@ -1372,7 +1427,18 @@ def main(argv: list[str]) -> int:
             tmux_rows = tmux_unmanaged_problem_rows(task_args, inspected_targets, auto_unstick, unstick_by_target, auto_unstick_disabled_reason)
             rows.extend(tmux_rows)
             inspected_targets.update(row.target for row in tmux_rows if row.target)
-            rows = add_owner_to_status_rows(args.root, [row for row in rows if not is_quiet_long_running_ready_row(row)])
+            rows = add_owner_to_status_rows(
+                args.root,
+                [
+                    row
+                    for row in rows
+                    if not is_quiet_long_running_ready_row(row)
+                    and not (
+                        (current_task := current.get(row.task_file)) is not None
+                        and quiet_closed_manager_not_codex(args.root, current_task, row)
+                    )
+                ],
+            )
         else:
             untracked_rows = current_untracked_task_rows(task_args, inspected_targets, auto_unstick, unstick_by_target, auto_unstick_disabled_reason)
             rows.extend(untracked_rows)
