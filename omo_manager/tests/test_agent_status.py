@@ -1522,6 +1522,28 @@ resolved_task_items: []
 
             self.assertEqual("", out.getvalue())
 
+    def test_problems_only_suppresses_closed_manager_in_previous_with_current_live_dependency(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nvl_rebuild_mgr.md vl:5\n\nprevious:\nvlexp_replenish_safe.md vl:4\n", encoding="utf-8")
+            _ = (root / "vlexp_replenish_safe.md").write_text(
+                task_frontmatter("long_running", runat="vl:4", is_manager=True, blocked_on="vl_rebuild_mgr.md replacement custody pending")
+                + "(manager closed Codex agent 07-29 17:20 PDT; tmux target `vl:4`; session_id: `old`.)\n",
+                encoding="utf-8",
+            )
+            _ = (root / "vl_rebuild_mgr.md").write_text(task_frontmatter("long_running", runat="vl:5", managerat="vl:4", is_manager=True, blocked_on="persistent role"), encoding="utf-8")
+            out = StringIO()
+
+            def fake_inspect(args: object, **_: object) -> Report:
+                return Report("running", ["working"]) if getattr(args, "target") == "vl:5" else Report("not_codex", [])
+
+            with patch("omo_manager.omo_agent_status.inspect", side_effect=fake_inspect), redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+
+            self.assertEqual("", out.getvalue())
+
     def test_problems_only_keeps_closed_long_running_manager_alerts(self) -> None:
         cases = {
             "visible_output": ("vl_rebuild_mgr.md", Report("not_codex", ["shell prompt"])),

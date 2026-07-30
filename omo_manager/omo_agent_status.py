@@ -446,7 +446,7 @@ def blocked_closed_manager_dependency_is_active(root: Path, task: TaskLine, stat
     if state.status not in {"blocked", "long_running"} or not state.is_manager:
         return False
     task_path = resolve_task_path(root, task.task_file)
-    if task_path is None or task_has_pending_marker(task_path) or task_path not in current_task_paths(root) or not has_closed_codex_evidence(task_path, state.target):
+    if task_path is None or task_has_pending_marker(task_path) or not has_closed_codex_evidence(task_path, state.target):
         return False
     current_paths = current_task_paths(root)
     metadata = read_task_metadata(task_path, root)
