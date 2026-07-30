@@ -59,6 +59,7 @@ CODEX_RUNNING_EMPTY_INPUT_TEXTS = {
     "Implement {feature}",
 }
 TMUX_TARGET_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*):(\d+)(?:\.(\d+))?$")
+TMUX_PANE_ID_RE = re.compile(r"^%[0-9]+$")
 
 
 @dataclass(frozen=True)
@@ -117,9 +118,8 @@ def exact_pane_id(target: str) -> str:
     return pane_id if separator and resolved == canonical and pane_id.startswith("%") else ""
 
 
-def tail(target: str, n_lines: int) -> list[str]:
-    pane_id = exact_pane_id(target)
-    if not pane_id:
+def tail_pane_id(pane_id: str, n_lines: int) -> list[str]:
+    if TMUX_PANE_ID_RE.fullmatch(pane_id) is None:
         return []
     out = subprocess.run(["tmux", "capture-pane", "-p", "-t", pane_id, "-S", f"-{n_lines}"], capture_output=True, text=True, timeout=5, check=False)
     if out.returncode != 0:
@@ -128,6 +128,11 @@ def tail(target: str, n_lines: int) -> list[str]:
     while lines and not lines[-1]:
         lines.pop()
     return lines
+
+
+def tail(target: str, n_lines: int) -> list[str]:
+    pane_id = exact_pane_id(target)
+    return tail_pane_id(pane_id, n_lines) if pane_id else []
 
 
 def has_codex_model_footer(lines: list[str]) -> bool:

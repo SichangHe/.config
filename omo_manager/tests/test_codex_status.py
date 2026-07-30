@@ -2,7 +2,7 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from omo_manager.omo_codex_status import Args, Report, can_submit_stuck_input, current_block, current_input_text, exact_pane_id, final_assistant_output, has_compacting_indicator, has_resume_paused_goal_prompt, has_terminal_enter_prompt_after_codex_footer, has_waiting_subagent_prompt, inspect, interrupt_waiting_subagent_if_present, last_output, report_from_lines, status, submit_stuck_input_if_present, tail, visible_error_lines
+from omo_manager.omo_codex_status import Args, Report, can_submit_stuck_input, current_block, current_input_text, exact_pane_id, final_assistant_output, has_compacting_indicator, has_resume_paused_goal_prompt, has_terminal_enter_prompt_after_codex_footer, has_waiting_subagent_prompt, inspect, interrupt_waiting_subagent_if_present, last_output, report_from_lines, status, submit_stuck_input_if_present, tail, tail_pane_id, visible_error_lines
 from omo_manager.omo_tmux_send import error_signature, exact_capacity_error
 
 
@@ -897,6 +897,13 @@ class CodexStatusTests(unittest.TestCase):
         with patch('omo_manager.omo_codex_status.exact_pane_id', return_value=''), patch('omo_manager.omo_codex_status.subprocess.run') as run:
             self.assertEqual([], tail('wl:1.0', 20))
         run.assert_not_called()
+
+    def test_tail_pane_id_captures_only_canonical_pane(self) -> None:
+        result = subprocess.CompletedProcess(['tmux'], 0, 'ready  \n\n', '')
+        with patch('omo_manager.omo_codex_status.subprocess.run', return_value=result) as run:
+            self.assertEqual(['ready'], tail_pane_id('%42', 20))
+            self.assertEqual([], tail_pane_id('cfg:1.0', 20))
+        run.assert_called_once_with(['tmux', 'capture-pane', '-p', '-t', '%42', '-S', '-20'], capture_output=True, text=True, timeout=5, check=False)
 
     def test_submit_stuck_input_if_present_sends_enter_for_stuck_input(self) -> None:
         report = Report('stuck_input', ['› Continue task'], 'Continue task', True)

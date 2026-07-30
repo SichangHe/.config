@@ -13,9 +13,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from omo_manager.omo_codex_status import Report
 from omo_manager.omo_tmux_send import Args
 from omo_manager.omo_tmux_send import CodexSendOptions
+from omo_manager.omo_tmux_send import ExistingInputAuthorization
+from omo_manager.omo_tmux_send import ExistingInputCapture
 from omo_manager.omo_tmux_send import async_job_from_query
+from omo_manager.omo_tmux_send import capture_complete_existing_input
 from omo_manager.omo_tmux_send import clear_existing_input_before_send
+from omo_manager.omo_tmux_send import exact_existing_input_text
 from omo_manager.omo_tmux_send import exact_capacity_error
+from omo_manager.omo_tmux_send import existing_input_authorization
 from omo_manager.omo_tmux_send import launch_async
 from omo_manager.omo_tmux_send import main
 from omo_manager.omo_tmux_send import message_probes
@@ -33,6 +38,8 @@ from omo_manager.omo_tmux_send import send_message_file_to_codex
 from omo_manager.omo_tmux_send import send_capacity_resume
 from omo_manager.omo_tmux_send import send_system_to_codex
 from omo_manager.omo_tmux_send import send_to_codex
+from omo_manager.omo_tmux_send import submit_existing_to_codex
+from omo_manager.omo_tmux_send import text_sha256
 from omo_manager.omo_tmux_send import verify_submit
 from omo_manager.omo_tmux_send import verify_capacity_resume
 from omo_manager.omo_tmux_send import wait_capacity_resume_paste
@@ -139,6 +146,12 @@ class TmuxSendTests(unittest.TestCase):
             _ = path.write_text(text, encoding="utf-8")
             self.assertEqual(text, read_message(Args("cfg:1.0", path, options())))
 
+    def test_read_message_file_keeps_normal_crlf_behavior(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "message.txt"
+            _ = path.write_bytes(b"first\r\nsecond\r\n")
+            self.assertEqual("first\nsecond\n", read_message(Args("cfg:1.0", path, options())))
+
     def test_private_temp_file_is_0600_and_preserves_text(self) -> None:
         path = write_private_temp("secret text\n")
         try:
@@ -154,6 +167,21 @@ class TmuxSendTests(unittest.TestCase):
         with patch("sys.stderr", new_callable=StringIO):
             with self.assertRaises(SystemExit):
                 parse_args(["--target", "cfg:1.0", "--message-file", "prompt.md", "--enter-count", "0"])
+
+    def test_parse_submit_existing_requires_one_exact_authorization(self) -> None:
+        from_file = parse_args(["--target", "cfg:1.0", "--submit-existing-file", "prompt.md"])
+        from_digest = parse_args(["--target", "cfg:1.0", "--submit-existing-sha256", "a" * 64])
+
+        self.assertEqual(Path("prompt.md"), from_file.submit_existing_file)
+        self.assertEqual("a" * 64, from_digest.submit_existing_sha256)
+        for argv in (
+            ["--target", "cfg:1.0", "--message-file", "prompt.md", "--submit-existing-file", "existing.md"],
+            ["--target", "cfg:1.0", "--submit-existing-file", "existing.md", "--submit-existing-sha256", "a" * 64],
+            ["--target", "cfg:1.0", "--submit-existing-sha256", "A" * 64],
+        ):
+            with self.subTest(argv=argv), patch("sys.stderr", new_callable=StringIO):
+                with self.assertRaises(SystemExit):
+                    parse_args(argv)
 
     def test_parse_accepts_deprecated_dispatch_flags_without_paste_only_mode(self) -> None:
         args = parse_args(["--target", "cfg:1.0", "--message-file", "prompt.md", "--enter", "--ready-timeout-s", "300"])
@@ -572,32 +600,11 @@ class TmuxSendTests(unittest.TestCase):
 
         enter.assert_called_once_with("cfg:1.0")
 
-    def test_clear_existing_input_before_send_submits_existing_real_input(self) -> None:
-        before = Report("stuck_input", ["› Draft the manager reply"], "Draft the manager reply", True)
-        after = Report("running", ["• Working"], "", False)
-        with patch("omo_manager.omo_tmux_send.inspect", side_effect=[before, after]), patch("omo_manager.omo_tmux_send.subprocess.run", return_value=subprocess.CompletedProcess(["tmux"], 0)) as run, patch("omo_manager.omo_tmux_send.time.sleep") as sleep:
-            self.assertEqual("sent_enter", clear_existing_input_before_send("cfg:1.0", options()))
-        run.assert_called_once()
-        sleep.assert_called_once()
-
-    def test_clear_existing_input_before_send_submits_even_when_report_says_unsafe(self) -> None:
-        before = Report("stuck_input", ["› Continue task"], "Continue task", False, "compacting")
-        after = Report("running", ["• Working"], "", False)
-        with patch("omo_manager.omo_tmux_send.inspect", side_effect=[before, after]), patch("omo_manager.omo_tmux_send.subprocess.run", return_value=subprocess.CompletedProcess(["tmux"], 0)) as run:
-            self.assertEqual("sent_enter", clear_existing_input_before_send("cfg:1.0", options()))
-        run.assert_called_once()
-
-    def test_clear_existing_input_before_send_submits_running_queued_input(self) -> None:
-        before = Report("running", ["• Working"], "queued worker message", False, "queued_running_input")
-        after = Report("running", ["• Working"], "", False)
-        with patch("omo_manager.omo_tmux_send.inspect", side_effect=[before, after]), patch("omo_manager.omo_tmux_send.subprocess.run", return_value=subprocess.CompletedProcess(["tmux"], 0)) as run:
-            self.assertEqual("sent_enter", clear_existing_input_before_send("cfg:1.0", options()))
-        run.assert_called_once()
-
-    def test_clear_existing_input_before_send_refuses_to_paste_if_input_remains(self) -> None:
+    def test_clear_existing_input_before_send_refuses_unverified_input(self) -> None:
         report = Report("stuck_input", ["› Continue task"], "Continue task", False, "compacting")
-        with patch("omo_manager.omo_tmux_send.inspect", side_effect=[report, report]), patch("omo_manager.omo_tmux_send.subprocess.run", return_value=subprocess.CompletedProcess(["tmux"], 0)):
-            self.assertEqual("still_input", clear_existing_input_before_send("cfg:1.0", options()))
+        with patch("omo_manager.omo_tmux_send.inspect", return_value=report), patch("omo_manager.omo_tmux_send.subprocess.run") as run:
+            self.assertEqual("existing_input", clear_existing_input_before_send("cfg:1.0", options()))
+        run.assert_not_called()
 
     def test_clear_existing_input_before_send_fails_closed_when_inspect_fails(self) -> None:
         with patch("omo_manager.omo_tmux_send.inspect", side_effect=RuntimeError("tmux unavailable")):
@@ -609,15 +616,176 @@ class TmuxSendTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "existing input appeared"):
                 require_no_existing_input("cfg:1.0")
 
-    def test_run_tmux_stops_before_paste_when_stuck_input_remains(self) -> None:
+    def test_existing_input_authorization_reads_exact_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            prompt = Path(tmp) / "prompt.txt"
+            _ = prompt.write_text("approved prompt", encoding="utf-8")
+            authorization = existing_input_authorization(Args("cfg:1.0", None, options(), submit_existing_file=prompt))
+
+        self.assertEqual("approved prompt", authorization.text)
+        self.assertEqual(text_sha256("approved prompt"), authorization.sha256)
+
+    def test_submit_existing_file_rejects_crlf_normalization(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            prompt = Path(tmp) / "prompt.txt"
+            _ = prompt.write_bytes(b"approved prompt\r\n")
+            authorization = existing_input_authorization(Args("cfg:1.0", None, options(), submit_existing_file=prompt))
+
+        self.assertEqual("approved prompt\r\n", authorization.text)
+        with patch("omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None), patch(
+            "omo_manager.omo_tmux_send.capture_complete_existing_input", return_value=ExistingInputCapture("%42", "approved prompt\n")
+        ), patch("omo_manager.omo_tmux_send.send_enter") as enter:
+            with self.assertRaisesRegex(RuntimeError, "exactly match"):
+                submit_existing_to_codex("cfg:1.0", authorization, options())
+
+        enter.assert_not_called()
+
+    def test_main_submit_existing_file_uses_file_authorization(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            prompt = Path(tmp) / "prompt.txt"
+            _ = prompt.write_text("approved prompt", encoding="utf-8")
+            with patch("omo_manager.omo_tmux_send.submit_existing_to_codex") as submit:
+                self.assertEqual(0, main(["--target", "cfg:1.0", "--submit-existing-file", str(prompt)]))
+
+        authorization = submit.call_args.args[1]
+        self.assertEqual("approved prompt", authorization.text)
+        self.assertEqual(text_sha256("approved prompt"), authorization.sha256)
+
+    def test_exact_existing_input_text_preserves_whitespace(self) -> None:
+        lines = ["• Working", "›  leading ", " continuation  ", "  gpt-5.5"]
+
+        self.assertEqual(" leading \n continuation  ", exact_existing_input_text(lines))
+
+    def test_exact_existing_input_text_rejects_partial_input(self) -> None:
+        lines = ["› approved prompt", "• Working", "  gpt-5.5"]
+
+        with self.assertRaisesRegex(RuntimeError, "partial"):
+            exact_existing_input_text(lines)
+
+    def test_exact_existing_input_text_rejects_ambiguous_trailing_blank_line(self) -> None:
+        lines = ["› approved prompt", "", "  gpt-5.5"]
+
+        with self.assertRaisesRegex(RuntimeError, "ambiguous trailing blank"):
+            exact_existing_input_text(lines)
+
+    def test_submit_existing_rejects_trailing_blank_before_enter(self) -> None:
+        authorization = ExistingInputAuthorization(text_sha256("approved prompt"), "approved prompt")
+        result = subprocess.CompletedProcess(["tmux"], 0, stdout="› approved prompt\n\n  gpt-5.5\n")
+        with patch("omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None), patch(
+            "omo_manager.omo_tmux_send.exact_pane_id", return_value="%42"
+        ), patch("omo_manager.omo_tmux_send.subprocess.run", return_value=result), patch("omo_manager.omo_tmux_send.send_enter") as enter:
+            with self.assertRaisesRegex(RuntimeError, "ambiguous trailing blank"):
+                submit_existing_to_codex("cfg:1.0", authorization, options())
+
+        enter.assert_not_called()
+
+    def test_capture_complete_existing_input_uses_only_resolved_target(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0, stdout="• Working\n› target only\n  gpt-5.5\n")
+
+        with patch("omo_manager.omo_tmux_send.exact_pane_id", return_value="%42"), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
+            self.assertEqual("target only", capture_complete_existing_input("cfg:1.0").text)
+
+        self.assertEqual([["tmux", "capture-pane", "-p", "-J", "-N", "-t", "%42", "-S", "-2000"]], calls)
+
+    def test_submit_existing_digest_sends_exact_authorized_input(self) -> None:
+        authorization = ExistingInputAuthorization(text_sha256("approved prompt"))
+        selected = options()
+        with patch("omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None), patch(
+            "omo_manager.omo_tmux_send.capture_complete_existing_input",
+            side_effect=[ExistingInputCapture("%42", "approved prompt"), ExistingInputCapture("%42", "approved prompt")],
+        ), patch("omo_manager.omo_tmux_send.revalidate_error_transition", return_value=["• Working", "  gpt-5.5"]), patch(
+            "omo_manager.omo_tmux_send.send_enter"
+        ) as enter, patch("omo_manager.omo_tmux_send.verify_authorized_existing_submit") as verify:
+            submit_existing_to_codex("cfg:1.0", authorization, selected)
+
+        enter.assert_called_once_with("%42")
+        verify.assert_called_once_with("cfg:1.0", authorization, selected, "%42", None)
+
+    def test_submit_existing_rejects_mismatched_input_before_enter(self) -> None:
+        authorization = ExistingInputAuthorization(text_sha256("approved prompt"), "approved prompt")
+        with patch("omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None), patch(
+            "omo_manager.omo_tmux_send.capture_complete_existing_input", return_value=ExistingInputCapture("%42", "different prompt")
+        ), patch("omo_manager.omo_tmux_send.send_enter") as enter:
+            with self.assertRaisesRegex(RuntimeError, "exactly match"):
+                submit_existing_to_codex("cfg:1.0", authorization, options())
+
+        enter.assert_not_called()
+
+    def test_submit_existing_rejects_changed_input_before_enter(self) -> None:
+        authorization = ExistingInputAuthorization(text_sha256("approved prompt"), "approved prompt")
+        with patch("omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None), patch(
+            "omo_manager.omo_tmux_send.capture_complete_existing_input",
+            side_effect=[ExistingInputCapture("%42", "approved prompt"), ExistingInputCapture("%42", "changed prompt")],
+        ), patch("omo_manager.omo_tmux_send.revalidate_error_transition", return_value=["• Working", "  gpt-5.5"]), patch(
+            "omo_manager.omo_tmux_send.send_enter"
+        ) as enter:
+            with self.assertRaisesRegex(RuntimeError, "exactly match"):
+                submit_existing_to_codex("cfg:1.0", authorization, options())
+
+        enter.assert_not_called()
+
+    def test_submit_existing_rejects_replaced_target_before_enter(self) -> None:
+        authorization = ExistingInputAuthorization(text_sha256("approved prompt"), "approved prompt")
+        with patch("omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None), patch(
+            "omo_manager.omo_tmux_send.capture_complete_existing_input",
+            side_effect=[ExistingInputCapture("%42", "approved prompt"), ExistingInputCapture("%43", "approved prompt")],
+        ), patch("omo_manager.omo_tmux_send.revalidate_error_transition", return_value=["• Working", "  gpt-5.5"]), patch(
+            "omo_manager.omo_tmux_send.send_enter"
+        ) as enter:
+            with self.assertRaisesRegex(RuntimeError, "pane changed"):
+                submit_existing_to_codex("cfg:1.0", authorization, options())
+
+        enter.assert_not_called()
+
+    def test_submit_existing_verifies_the_pinned_pane_after_target_rebinding(self) -> None:
+        authorization = ExistingInputAuthorization(text_sha256("approved prompt"), "approved prompt")
+        with patch("omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None), patch(
+            "omo_manager.omo_tmux_send.capture_complete_existing_input",
+            side_effect=[ExistingInputCapture("%42", "approved prompt"), ExistingInputCapture("%42", "approved prompt")],
+        ), patch("omo_manager.omo_tmux_send.revalidate_error_transition", return_value=["• Working", "  gpt-5.5"]), patch(
+            "omo_manager.omo_tmux_send.tail", side_effect=AssertionError("symbolic target must not be read during verification")
+        ), patch("omo_manager.omo_tmux_send.tail_pane_id", return_value=["• Working", "  gpt-5.5"]) as tail_pane, patch(
+            "omo_manager.omo_tmux_send.send_enter"
+        ) as enter:
+            submit_existing_to_codex("cfg:1.0", authorization, options())
+
+        enter.assert_called_once_with("%42")
+        tail_pane.assert_called_once_with("%42", 2000)
+
+    def test_submit_existing_rejects_normalized_difference_before_enter(self) -> None:
+        authorization = ExistingInputAuthorization(text_sha256("approved prompt"), "approved prompt")
+        with patch("omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None), patch(
+            "omo_manager.omo_tmux_send.capture_complete_existing_input", return_value=ExistingInputCapture("%42", "approved prompt ")
+        ), patch("omo_manager.omo_tmux_send.send_enter") as enter:
+            with self.assertRaisesRegex(RuntimeError, "exactly match"):
+                submit_existing_to_codex("cfg:1.0", authorization, options())
+
+        enter.assert_not_called()
+
+    def test_submit_existing_does_not_inspect_human_owned_target(self) -> None:
+        authorization = ExistingInputAuthorization(text_sha256("approved prompt"))
+        with patch("omo_manager.omo_tmux_send.require_sendable_codex_target") as sendable, patch(
+            "omo_manager.omo_tmux_send.capture_complete_existing_input"
+        ) as capture:
+            with self.assertRaisesRegex(RuntimeError, "human-owned"):
+                submit_existing_to_codex("hteam:1.0", authorization, options())
+
+        sendable.assert_not_called()
+        capture.assert_not_called()
+
+    def test_run_tmux_stops_before_paste_when_existing_input_is_present(self) -> None:
         calls: list[list[str]] = []
 
         def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
             calls.append(command)
             return subprocess.CompletedProcess(command, 0)
 
-        with patch("omo_manager.omo_tmux_send.clear_existing_input_before_send", return_value="still_input"), patch("omo_manager.omo_tmux_send.require_sendable_codex_target"), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
-            with self.assertRaisesRegex(RuntimeError, "target existing input not cleared"):
+        with patch("omo_manager.omo_tmux_send.clear_existing_input_before_send", return_value="existing_input"), patch("omo_manager.omo_tmux_send.require_sendable_codex_target"), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
+            with self.assertRaisesRegex(RuntimeError, "target existing input blocks normal"):
                 run_tmux("cfg:1.0", "prompt\n", options())
 
         self.assertFalse(any(command[:2] == ["tmux", "paste-buffer"] for command in calls))
