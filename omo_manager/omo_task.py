@@ -510,12 +510,16 @@ def launch_session(args: Args) -> LaunchSession:
     if args.workdir is None:
         raise ValueError("--workdir is required to launch a new worker.")
     session_name = validate_launch_session(args)
-    result = tmux(["display-message", "-p", "-t", f"={session_name}:", "#{session_id}\t#{session_path}"])
-    if result.returncode != 0:
+    exact_session_target = f"={session_name}:"
+    result = tmux(["display-message", "-p", "-t", exact_session_target, "#{session_id}\t#{session_path}"])
+    session_details = result.stdout.removesuffix("\n")
+    session_missing = result.returncode != 0
+    if result.returncode == 0 and not session_details.strip():
+        session_missing = tmux(["has-session", "-t", exact_session_target]).returncode != 0
+    if session_missing:
         if args.tmux_window:
             raise ValueError(f"cannot create missing tmux session `{session_name}` at requested --tmux-window {args.tmux_window}.")
         return LaunchSession(session_name, f"={session_name}", True)
-    session_details = result.stdout.removesuffix("\n")
     session_id, separator, session_workdir_text = session_details.partition("\t")
     if not separator or TMUX_SESSION_ID_RE.fullmatch(session_id) is None or not session_workdir_text or "\n" in session_workdir_text:
         raise RuntimeError(f"tmux session `{session_name}` did not report one usable session_id and session_path.")

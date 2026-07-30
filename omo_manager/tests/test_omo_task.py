@@ -757,6 +757,43 @@ class OmoTaskTests(unittest.TestCase):
             self.assertEqual(str(Path(tmp)), command[command.index("-c") + 1])
             wait_shell.assert_called_once_with("newcfg:0")
 
+    def test_blank_session_display_creates_only_after_exact_absence_check(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = Args(Path(tmp), "x.md", "newcfg", "", "codex", Path(tmp), "worker", None, False, False, "", "", ())
+            blank = subprocess.CompletedProcess(["tmux"], 0, "\t\n", "")
+            missing = subprocess.CompletedProcess(["tmux"], 1, "", "can't find session: newcfg")
+            created = subprocess.CompletedProcess(["tmux"], 0, "newcfg:0\n", "")
+            with patch("omo_manager.omo_task.resolved_launch_session_name", return_value="newcfg"), patch(
+                "omo_manager.omo_task.tmux", side_effect=[blank, missing, created]
+            ) as tmux_mock, patch("omo_manager.omo_task.wait_shell"):
+                self.assertEqual("newcfg:0", new_window(args))
+            self.assertEqual(["has-session", "-t", "=newcfg:"], tmux_mock.call_args_list[1].args[0])
+            self.assertEqual("new-session", tmux_mock.call_args_list[2].args[0][0])
+
+    def test_blank_session_display_for_existing_session_remains_invalid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = Args(Path(tmp), "x.md", "cfg", "", "codex", Path(tmp), "worker", None, False, False, "", "", ())
+            blank = subprocess.CompletedProcess(["tmux"], 0, "\t\n", "")
+            exists = subprocess.CompletedProcess(["tmux"], 0, "", "")
+            with patch("omo_manager.omo_task.resolved_launch_session_name", return_value="cfg"), patch(
+                "omo_manager.omo_task.tmux", side_effect=[blank, exists]
+            ) as tmux_mock, self.assertRaisesRegex(RuntimeError, "did not report one usable session_id and session_path"):
+                _ = new_window(args)
+            self.assertEqual(["has-session", "-t", "=cfg:"], tmux_mock.call_args_list[1].args[0])
+            self.assertEqual(2, tmux_mock.call_count)
+
+    def test_blank_missing_session_keeps_requested_window_guard(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = Args(Path(tmp), "x.md", "newcfg", "4", "codex", Path(tmp), "worker", None, False, False, "", "", ())
+            blank = subprocess.CompletedProcess(["tmux"], 0, "\t\n", "")
+            missing = subprocess.CompletedProcess(["tmux"], 1, "", "can't find session: newcfg")
+            with patch("omo_manager.omo_task.resolved_launch_session_name", return_value="newcfg"), patch(
+                "omo_manager.omo_task.tmux", side_effect=[blank, missing]
+            ) as tmux_mock, self.assertRaisesRegex(ValueError, "cannot create missing tmux session `newcfg` at requested --tmux-window 4"):
+                _ = new_window(args)
+            self.assertEqual(["has-session", "-t", "=newcfg:"], tmux_mock.call_args_list[1].args[0])
+            self.assertEqual(2, tmux_mock.call_count)
+
     def test_missing_session_creation_retains_tmux_failure_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             args = Args(Path(tmp), "x.md", "newcfg", "", "codex", Path(tmp), "worker", None, False, False, "", "", ())
