@@ -2099,6 +2099,53 @@ resolved_task_items: []
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             self.assertEqual("", out.getvalue())
 
+    def test_problems_only_skips_exact_human_wait(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("human pending:\nreview.md cfg 1\n", encoding="utf-8")
+            _ = (root / "review.md").write_text(
+                task_frontmatter("blocked", runat="cfg:1", managerat="mgr:1", blocked_on="human"),
+                encoding="utf-8",
+            )
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertEqual("", out.getvalue())
+
+    def test_problems_only_reports_faults_for_exact_human_wait(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("human pending:\nreview.md cfg 1\n", encoding="utf-8")
+            _ = (root / "review.md").write_text(
+                task_frontmatter("blocked", runat="cfg:1", managerat="mgr:1", blocked_on="human"),
+                encoding="utf-8",
+            )
+            for fault in ("error", "not_codex", "stuck_input"):
+                with self.subTest(fault=fault):
+                    out = StringIO()
+                    with patch("omo_manager.omo_agent_status.inspect", return_value=Report(fault, ["problem"])), redirect_stdout(out):
+                        self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+                    self.assertIn(f"{fault}: task=review.md", out.getvalue())
+
+    def test_problems_only_reports_close_non_human_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("human pending:\nreview.md cfg 1\n", encoding="utf-8")
+            _ = (root / "review.md").write_text(
+                task_frontmatter("blocked", runat="cfg:1", managerat="mgr:1", blocked_on="human-readable output unavailable"),
+                encoding="utf-8",
+            )
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertIn("blocked_idle: task=review.md", out.getvalue())
+
     def test_problems_only_skips_hvl_human_approval_wait(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

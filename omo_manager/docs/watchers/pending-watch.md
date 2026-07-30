@@ -90,7 +90,7 @@
   - treats any scan containing `malformed_task` as visibility-only: it cannot send input, auto-unstick, interrupt, stop, or replace any pane
   - dispatches each problem group to the row's `owner_target`, falling back to `OMO_MANAGER_TMUX_TARGET` only when no owner is known
   - detects task files with frontmatter `status: running` whose pane is `error`, `not_codex`, `ready`, or `stuck_input`
-  - detects blocked task files whose pane is `error`, `not_codex`, or `stuck_input`; a `ready` blocked manager is quiet only for a human wait or an owned acyclic tree of exact comma-separated blocker lists whose distinct leaves are valid running tasks without pending reports
+  - detects blocked task files whose pane is `error`, `not_codex`, or `stuck_input`; exact `blocked_on: human` and other recorded human waits silence only a healthy `ready` pane, while a `ready` blocked manager is also quiet for an owned acyclic tree of exact comma-separated blocker lists whose distinct leaves are valid running tasks without pending reports
   - remembers each accepted dependency tree in process-local state and alerts once if a blocker list or valid leaf target changes; it also alerts when a node becomes missing, inactive, malformed, cyclic, ambiguously owned, target-reusing, or report-bearing
   - detects manager pane problems when `OMO_MANAGER_TMUX_TARGET` is set
   - detects completed task files whose agents still appear open
