@@ -62,9 +62,24 @@ CODEX_TRUST_CONFIRM_RE = re.compile(r"^\s*Press enter to continue(?: and create 
 MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$")
 LINE_RANGE_RE = re.compile(r"^([1-9]\d*)-([1-9]\d*)$")
 HUMAN_INSTRUCTION_CLOSE = "</human_instruction>"
-HUMAN_LAUNCH_REQUEST_RE = re.compile(r"^\s*(?:please\s+)?(?:launch|create|start|open|spawn)\b", flags=re.IGNORECASE)
+HUMAN_LAUNCH_REQUEST_RE = re.compile(
+    r"^\s*(?:please\s+)?(?:"
+    r"(?:launch|create|start|open|spawn)\b|"
+    r"(?:give\s+me|set\s+up|i\s+(?:want|need|would\s+like))\b.*\b(?:agent|manager|worker)\b"
+    r")",
+    flags=re.IGNORECASE,
+)
+HUMAN_DIRECT_LAUNCH_TARGET_RE = re.compile(
+    r"^\s*(?:please\s+)?(?:launch|create|start|open|spawn)\s+[`'\"]?([A-Za-z0-9_](?:[A-Za-z0-9_.-]*[A-Za-z0-9_-])?)",
+    flags=re.IGNORECASE,
+)
 HUMAN_LAUNCH_NEGATION_RE = re.compile(
     r"\b(?:no|not|never|without|cannot|cant|dont|wont|wouldnt|shouldnt|couldnt|mustnt|isnt|arent|wasnt|werent|doesnt|didnt|havent|hasnt|hadnt|neednt|shant|[a-z]+n['‘’ʼ＇]t)\b",
+    flags=re.IGNORECASE,
+)
+HUMAN_LAUNCH_ROLE_RE = re.compile(r"\b(?:agent|manager|worker|window|pane|session)\b", flags=re.IGNORECASE)
+HUMAN_LAUNCH_ROLE_TARGET_RE = re.compile(
+    r"\b(?:in|into|at)\s+[`'\"]?([A-Za-z0-9_](?:[A-Za-z0-9_.-]*[A-Za-z0-9_-])?)",
     flags=re.IGNORECASE,
 )
 DEFAULT_LONG_RUNNING_BLOCKED_ON = "persistent manager role"
@@ -484,13 +499,18 @@ def human_authorized_launch_session(args: Args, session_name: str) -> bool:
     if args.human_email_file is None or args.human_email_lines is None:
         return False
     excerpt = human_email_excerpt(args)
-    session_re = re.compile(rf"(?<![A-Za-z0-9_.-]){re.escape(session_name)}(?=$|[^A-Za-z0-9_.-])")
-    return any(
-        HUMAN_LAUNCH_REQUEST_RE.match(line) is not None
-        and HUMAN_LAUNCH_NEGATION_RE.search(line) is None
-        and session_re.search(line) is not None
-        for line in excerpt.splitlines()
-    )
+    session_re = re.compile(rf"(?<![A-Za-z0-9_.-]){re.escape(session_name)}(?=$|[^A-Za-z0-9_-])")
+    for line in excerpt.splitlines():
+        if HUMAN_LAUNCH_REQUEST_RE.match(line) is None or HUMAN_LAUNCH_NEGATION_RE.search(line) is not None or session_re.search(line) is None:
+            continue
+        role = HUMAN_LAUNCH_ROLE_RE.search(line)
+        role_target = HUMAN_LAUNCH_ROLE_TARGET_RE.search(line, role.end()) if role is not None else None
+        if role_target is not None and role_target.group(1) == session_name:
+            return True
+        direct_target = HUMAN_DIRECT_LAUNCH_TARGET_RE.match(line)
+        if role_target is None and direct_target is not None and direct_target.group(1) == session_name:
+            return True
+    return False
 
 
 def validate_launch_session(args: Args) -> str:

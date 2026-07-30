@@ -1169,6 +1169,53 @@ class OmoTaskTests(unittest.TestCase):
             ):
                 self.assertEqual("Please launch my direct agent in hreview now.\n", validate_inputs(args))
 
+    def test_validate_inputs_allows_alternative_explicit_agent_request(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mail = root / "manager_mail"
+            mail.mkdir()
+            request = "Give me a smart interactive agent in hvl to review the bugs to be reported.\n"
+            (mail / "request.txt").write_text(request, encoding="utf-8")
+            (root / "x.md").write_text(
+                "---\nversion: v1.0.0\nstatus: blocked\nblocked_on: awaiting relaunch\nrunat: old:1\ntool: codex\n"
+                "managerat: mgr:1\nis_manager: false\npending_task_items: []\n---\n"
+                "keep this worker available\n- continue the direct human task\n",
+                encoding="utf-8",
+            )
+            args = Args(
+                root,
+                "x.md",
+                "hvl",
+                "",
+                "codex",
+                root,
+                "",
+                None,
+                False,
+                False,
+                "",
+                "medium",
+                (),
+                model="gpt-5.6-sol",
+                manager_target="mgr:1",
+                human_email_file=Path("manager_mail/request.txt"),
+                human_email_lines=(1, 1),
+            )
+
+            with patch(
+                "omo_manager.omo_task.subprocess.run",
+                return_value=subprocess.CompletedProcess(["tmux"], 0, "hvl\n", ""),
+            ):
+                self.assertEqual(request, validate_inputs(args))
+
+            punctuated = "Give me a smart interactive agent in hvl.\n"
+            (mail / "request.txt").write_text(punctuated, encoding="utf-8")
+            with patch(
+                "omo_manager.omo_task.subprocess.run",
+                return_value=subprocess.CompletedProcess(["tmux"], 0, "hvl\n", ""),
+            ):
+                self.assertEqual(punctuated, validate_inputs(args))
+
     def test_validate_inputs_rejects_non_authorizing_human_session_mentions(self) -> None:
         for excerpt in (
             "hreview is unavailable.\n",
@@ -1179,6 +1226,10 @@ class OmoTaskTests(unittest.TestCase):
             "Please launch hreview, but don’t start anything there.\n",
             "Please launch hreview, but won’t that alter the session?\n",
             "Please launch hreview, but shouldn’t we wait?\n",
+            "Give me an agent in hother to review hreview.\n",
+            "Give me an agent to review hreview, please.\n",
+            "I need a worker for hreview, please.\n",
+            "Launch hother to review hreview.\n",
         ):
             with self.subTest(excerpt=excerpt), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
