@@ -3,11 +3,11 @@
 - `accounts.md`
   - separate agent communication mail from human mailbox cleanup
 - `cleanup.md`
-  - clean stale manager-human mail threads conservatively
-  - retain unread, recent, active, human-pending, long-report, and uncertain threads
+  - shared classification and execution safeguards for manager mail
+  - clean stale manager-human threads conservatively and recoverably
 - `compression.md`
-  - compress unread manager-sent mail into replacement summaries
-  - move only explicitly superseded source messages to Trash
+  - compress only fully superseded unread manager-sent mail
+  - inherit cleanup safeguards and move sources only after replacement
 - `email-idle-watcher.md`
   - ingest human email into durable manager pending blocks
 - `digest-and-email.md`
