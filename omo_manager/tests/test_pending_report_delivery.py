@@ -108,6 +108,23 @@ class PendingReportDeliveryTests(unittest.TestCase):
 
             self.assertEqual(first_key, watcher.agent_report_seen_key(args, marker, watcher.marker_attachments(args, marker)))
 
+    def test_report_identity_distinguishes_message_updates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "worker.md"
+            args = args_for(root)
+            first = valid_report(self, "worker_progress_first", "first update\n")
+            write_report_pointer(task, first)
+            first_marker = watcher.find_markers(root, [task])[0]
+            first_key = watcher.agent_report_seen_key(args, first_marker, watcher.marker_attachments(args, first_marker))
+
+            second = valid_report(self, "worker_progress_second", "second update\n")
+            write_report_pointer(task, second)
+            second_marker = watcher.find_markers(root, [task])[0]
+            second_key = watcher.agent_report_seen_key(args, second_marker, watcher.marker_attachments(args, second_marker))
+
+            self.assertNotEqual(first_key, second_key)
+
     def test_report_guard_uses_line_only_as_lookup_hint(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

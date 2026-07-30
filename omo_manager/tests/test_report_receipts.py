@@ -1523,7 +1523,10 @@ class ReportReceiptTests(unittest.TestCase):
             pending = run_report(case)
 
             self.assertEqual(0, pending.returncode, pending.stderr)
-            self.assertFalse(json.loads(pending.stdout)["accepted"])
+            pending_output = json.loads(pending.stdout)
+            self.assertFalse(pending_output["accepted"])
+            self.assertEqual("routed; manager acknowledgment pending", pending_output["reason"])
+            self.assertTrue(pending_output["retry_required"])
             self.assertFalse(Path(description["files"]["private_receipt"]).exists())
             self.assertIn("(pending)", case.manager.read_text(encoding="utf-8"))
 
@@ -1534,6 +1537,8 @@ class ReportReceiptTests(unittest.TestCase):
             self.assertEqual(0, accepted.returncode, accepted.stderr)
             acceptance = json.loads(accepted.stdout)
             self.assertTrue(acceptance["accepted"])
+            self.assertEqual("manager acknowledged routed report", acceptance["reason"])
+            self.assertFalse(acceptance["retry_required"])
             self.assertNotIn("(pending)", case.manager.read_text(encoding="utf-8"))
             receipt = private_receipt(acceptance)
             self.addCleanup(cleanup_private_tmp, receipt)
