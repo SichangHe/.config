@@ -5,7 +5,7 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
-from omo_manager.omo_agent_status import Args, TaskFrontmatterError, classify_task, format_problem_summary, format_summary, load_local_env, load_task_state, main, parse_task_lines, parse_task_metadata, persistent_blocked_task_lines, registry_prune, session_records
+from omo_manager.omo_agent_status import Args, TaskFrontmatterError, classify_task, format_problem_summary, format_summary, load_local_env, load_task_state, main, parse_task_lines, parse_task_metadata, persistent_blocked_task_lines, registry_prune, report_output_evidence, session_records
 from omo_manager.omo_agent_status import SessionRecord, StatusRow, TaskLine
 from omo_manager.omo_codex_status import Args as CodexStatusArgs, Report
 
@@ -54,6 +54,22 @@ class AgentStatusTests(unittest.TestCase):
             self.assertEqual({}, current)
             self.assertEqual({"active.md"}, done)
             self.assertEqual(set(), human_pending)
+
+    def test_output_evidence_strips_complete_benign_codex_apps_warning(self) -> None:
+        lines = [
+            '⚠ MCP client for `codex_apps` failed to start: MCP startup failed: handshaking with MCP server failed: Send message error Transport',
+            '  [rmcp::transport::worker::WorkerTransport<rmcp::transport::streamable_http_client::StreamableHttpClientWorker',
+            '  <codex_rmcp_client::http_client_adapter::StreamableHttpClientAdapter>>] error: unexpected',
+            '  server response: HTTP 401: {"error":{"message":"No available accounts","type":"proxy_error","code":401}}, when send initialize request',
+            '',
+            '⚠ MCP startup incomplete (failed: codex_apps)',
+            '• Waiting for work.',
+        ]
+
+        evidence = report_output_evidence(Report("ready", lines))
+
+        self.assertEqual(" output=• Waiting for work.", evidence)
+        self.assertNotIn("codex_apps", evidence)
 
     def test_agent_status_rejects_v2_task_blocker_symlink_escape(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as outside:

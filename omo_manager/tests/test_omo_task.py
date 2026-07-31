@@ -1814,12 +1814,13 @@ class OmoTaskTests(unittest.TestCase):
             def fake_start(_target: str, _args: Args) -> None:
                 events.append("start_codex")
 
+            out = io.StringIO()
             with (
                 patch("omo_manager.omo_task.new_window", return_value="cfg:7") as new_window_mock,
                 patch("omo_manager.omo_task.ensure_task_file", side_effect=fake_ensure),
                 patch("omo_manager.omo_task.link_todo", side_effect=fake_link),
                 patch("omo_manager.omo_task.start_codex", side_effect=fake_start),
-                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stdout(out),
             ):
                 self.assertEqual(
                     0,
@@ -1846,6 +1847,46 @@ class OmoTaskTests(unittest.TestCase):
                 )
             new_window_mock.assert_called_once()
             self.assertEqual(["ensure_task_file", "link_todo", "start_codex"], events)
+            self.assertIn("wait patiently for the agent to report instead of eagerly checking its status", out.getvalue())
+
+    def test_main_resume_idle_does_not_promise_agent_report(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            out = io.StringIO()
+            (root / "x.md").write_text(
+                "---\nversion: v1.0.0\nstatus: blocked\nblocked_on: idle session\nrunat: cfg:7\ntool: codex\n"
+                "managerat: mgr:1\nis_manager: false\npending_task_items: []\n---\n"
+                "resume the existing session\n- restore the idle agent\n",
+                encoding="utf-8",
+            )
+            with (
+                patch("omo_manager.omo_task.new_window", return_value="cfg:7"),
+                patch("omo_manager.omo_task.ensure_task_file", return_value=root / "x.md"),
+                patch("omo_manager.omo_task.link_todo"),
+                patch("omo_manager.omo_task.start_codex"),
+                contextlib.redirect_stdout(out),
+            ):
+                self.assertEqual(
+                    0,
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "--task-file",
+                            "x.md",
+                            "--tmux-session",
+                            "cfg",
+                            "--workdir",
+                            str(root),
+                            "--session-id",
+                            "abc",
+                            "--resume-idle",
+                            "--manager-target",
+                            "mgr:1",
+                        ]
+                    ),
+                )
+            self.assertNotIn("wait patiently for the agent to report", out.getvalue())
 
     def test_main_does_not_start_codex_when_task_link_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

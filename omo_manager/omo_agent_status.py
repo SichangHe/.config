@@ -21,6 +21,7 @@ from omo_manager.omo_codex_status import COMPACTING_RE
 from omo_manager.omo_codex_status import Report
 from omo_manager.omo_codex_status import exact_pane_id
 from omo_manager.omo_codex_status import has_selected_model_capacity_warning
+from omo_manager.omo_codex_status import ignorable_codex_apps_transport_lines
 from omo_manager.omo_codex_status import inspect
 from omo_manager.omo_codex_status import interrupt_waiting_subagent_if_present
 from omo_manager.omo_codex_status import is_stock_placeholder_input_text
@@ -138,12 +139,13 @@ MANAGER_MD_REREAD_NEGATIVE_RE = re.compile(
 def report_output_evidence(report: Report) -> str:
     if not report.lines:
         return ""
-    evidence_lines = report.lines
+    ignored = ignorable_codex_apps_transport_lines(report.lines)
+    evidence_lines = [line for index, line in enumerate(report.lines) if index not in ignored]
     if report.status == "running" and is_stock_placeholder_input_text(report.input_text):
-        for idx in range(len(report.lines) - 1, -1, -1):
-            line = report.lines[idx].lstrip()
+        for idx in range(len(evidence_lines) - 1, -1, -1):
+            line = evidence_lines[idx].lstrip()
             if line.startswith("›") and is_stock_placeholder_input_text(line[1:].strip()):
-                evidence_lines = [candidate for candidate in report.lines[:idx] if candidate.strip()]
+                evidence_lines = [candidate for candidate in evidence_lines[:idx] if candidate.strip()]
                 break
     tail = evidence_lines[-3:]
     if not tail:
