@@ -657,9 +657,15 @@ class TmuxSendTests(unittest.TestCase):
         self.assertEqual(" leading \n continuation  ", exact_existing_input_text(lines))
 
     def test_exact_existing_input_text_accepts_observed_footer_shapes(self) -> None:
-        for lines in (["• Working", "› approved prompt", "  gpt-5.5"], ["• Working", "› approved prompt", "", "  gpt-5.5"]):
-            with self.subTest(lines=lines):
+        for footer in ("  gpt-5.5", "  tab to queue message                                                                                    28% context left"):
+            lines = ["• Working", "› approved prompt", footer]
+            with self.subTest(footer=footer):
                 self.assertEqual("approved prompt", exact_existing_input_text(lines))
+
+    def test_exact_existing_input_text_accepts_prior_prompt_before_layout_boundary(self) -> None:
+        lines = ["› prior prompt", "• Working", "› approved prompt", "  gpt-5.5"]
+
+        self.assertEqual("approved prompt", exact_existing_input_text(lines))
 
     def test_exact_existing_input_text_rejects_partial_input(self) -> None:
         lines = ["› approved prompt", "• Working", "  gpt-5.5"]
@@ -668,33 +674,77 @@ class TmuxSendTests(unittest.TestCase):
             exact_existing_input_text(lines)
 
     def test_exact_existing_input_text_rejects_ambiguous_trailing_blank_line(self) -> None:
-        for blank_lines in (["", ""], [" "], ["\t"], ["\N{NO-BREAK SPACE}"]):
-            lines = ["› approved prompt", *blank_lines, "  gpt-5.5"]
-            with self.subTest(blank_lines=blank_lines), self.assertRaisesRegex(RuntimeError, "ambiguous trailing blank"):
-                exact_existing_input_text(lines)
+        for footer in ("  gpt-5.5", "  tab to queue message                                                                                    28% context left"):
+            for blank_lines in ([""], ["", ""], [" "], ["\t"], ["\N{NO-BREAK SPACE}"]):
+                lines = ["› approved prompt", *blank_lines, footer]
+                with self.subTest(footer=footer, blank_lines=blank_lines), self.assertRaisesRegex(RuntimeError, "ambiguous trailing blank"):
+                    exact_existing_input_text(lines)
 
-    def test_submit_existing_accepts_footer_spacer_before_enter(self) -> None:
+    def test_submit_existing_accepts_exact_input_before_footer(self) -> None:
         authorization = ExistingInputAuthorization(text_sha256("approved prompt"), "approved prompt")
-        result = subprocess.CompletedProcess(["tmux"], 0, stdout="• Working\n› approved prompt\n\n  gpt-5.5\n")
-        with patch("omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None), patch(
-            "omo_manager.omo_tmux_send.exact_pane_id", return_value="%42"
-        ), patch("omo_manager.omo_tmux_send.subprocess.run", return_value=result), patch(
-            "omo_manager.omo_tmux_send.revalidate_error_transition", return_value=["• Working", "  gpt-5.5"]
-        ), patch("omo_manager.omo_tmux_send.send_enter") as enter:
-            submit_existing_to_codex("cfg:1.0", authorization, options(submit_verify_timeout_s=0))
+        for footer in ("  gpt-5.5", "  tab to queue message                                                                                    28% context left"):
+            result = subprocess.CompletedProcess(["tmux"], 0, stdout=f"• Working\n› approved prompt\n{footer}\n")
+            with self.subTest(footer=footer), patch("omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None), patch(
+                "omo_manager.omo_tmux_send.exact_pane_id", return_value="%42"
+            ), patch("omo_manager.omo_tmux_send.subprocess.run", return_value=result), patch(
+                "omo_manager.omo_tmux_send.revalidate_error_transition", return_value=["• Working", "  gpt-5.5"]
+            ), patch("omo_manager.omo_tmux_send.send_enter") as enter:
+                submit_existing_to_codex("cfg:1.0", authorization, options(submit_verify_timeout_s=0))
 
-        enter.assert_called_once_with("%42")
+            enter.assert_called_once_with("%42")
 
     def test_submit_existing_rejects_ambiguous_trailing_blank_before_enter(self) -> None:
         authorization = ExistingInputAuthorization(text_sha256("approved prompt"), "approved prompt")
-        for trailing_rows in ("\n\n", " \n", "\t\n", "\N{NO-BREAK SPACE}\n"):
-            result = subprocess.CompletedProcess(["tmux"], 0, stdout=f"› approved prompt\n{trailing_rows}  gpt-5.5\n")
-            with self.subTest(trailing_rows=trailing_rows), patch(
+        for footer in ("  gpt-5.5", "  tab to queue message                                                                                    28% context left"):
+            for trailing_rows in ("\n", "\n\n", " \n", "\t\n", "\N{NO-BREAK SPACE}\n"):
+                result = subprocess.CompletedProcess(["tmux"], 0, stdout=f"› approved prompt\n{trailing_rows}{footer}\n")
+                with self.subTest(footer=footer, trailing_rows=trailing_rows), patch(
+                    "omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None
+                ), patch("omo_manager.omo_tmux_send.exact_pane_id", return_value="%42"), patch(
+                    "omo_manager.omo_tmux_send.subprocess.run", return_value=result
+                ), patch("omo_manager.omo_tmux_send.send_enter") as enter:
+                    with self.assertRaisesRegex(RuntimeError, "ambiguous trailing blank"):
+                        submit_existing_to_codex("cfg:1.0", authorization, options())
+
+                    enter.assert_not_called()
+
+    def test_submit_existing_rejects_ambiguous_prompt_suffix_before_enter(self) -> None:
+        authorization = ExistingInputAuthorization(text_sha256("approved suffix"), "approved suffix")
+        result = subprocess.CompletedProcess(["tmux"], 0, stdout="› unapproved prefix\n› approved suffix\n  gpt-5.5\n")
+        with patch("omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None), patch(
+            "omo_manager.omo_tmux_send.exact_pane_id", return_value="%42"
+        ), patch("omo_manager.omo_tmux_send.subprocess.run", return_value=result), patch(
+            "omo_manager.omo_tmux_send.send_enter"
+        ) as enter:
+            with self.assertRaisesRegex(RuntimeError, "ambiguous prompt markers"):
+                submit_existing_to_codex("cfg:1.0", authorization, options())
+
+        enter.assert_not_called()
+
+    def test_submit_existing_rejects_footer_substrings_in_prompt_rows_before_enter(self) -> None:
+        authorization = ExistingInputAuthorization(text_sha256("approved prompt"), "approved prompt")
+        for spoofed_footer in (" continuation mentions  gpt-5.5", " continuation says tab to queue message"):
+            result = subprocess.CompletedProcess(["tmux"], 0, stdout=f"› approved prompt\n{spoofed_footer}\n")
+            with self.subTest(spoofed_footer=spoofed_footer), patch(
                 "omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None
             ), patch("omo_manager.omo_tmux_send.exact_pane_id", return_value="%42"), patch(
                 "omo_manager.omo_tmux_send.subprocess.run", return_value=result
             ), patch("omo_manager.omo_tmux_send.send_enter") as enter:
-                with self.assertRaisesRegex(RuntimeError, "ambiguous trailing blank"):
+                with self.assertRaisesRegex(RuntimeError, "complete Codex view"):
+                    submit_existing_to_codex("cfg:1.0", authorization, options())
+
+                enter.assert_not_called()
+
+    def test_submit_existing_preserves_unicode_line_separators_before_authorization(self) -> None:
+        authorization = ExistingInputAuthorization(text_sha256("approved\nsuffix"), "approved\nsuffix")
+        for separator in ("\N{NEXT LINE}", "\N{LINE SEPARATOR}", "\N{PARAGRAPH SEPARATOR}"):
+            result = subprocess.CompletedProcess(["tmux"], 0, stdout=f"› approved{separator}suffix\n  gpt-5.5\n")
+            with self.subTest(separator=separator), patch("omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None), patch(
+                "omo_manager.omo_tmux_send.exact_pane_id", return_value="%42"
+            ), patch("omo_manager.omo_tmux_send.subprocess.run", return_value=result), patch(
+                "omo_manager.omo_tmux_send.send_enter"
+            ) as enter:
+                with self.assertRaisesRegex(RuntimeError, "exactly match"):
                     submit_existing_to_codex("cfg:1.0", authorization, options())
 
                 enter.assert_not_called()
@@ -735,7 +785,7 @@ class TmuxSendTests(unittest.TestCase):
 
         enter.assert_not_called()
 
-    def test_submit_existing_rejects_changed_input_before_enter(self) -> None:
+    def test_submit_existing_rejects_changed_file_text_before_enter(self) -> None:
         authorization = ExistingInputAuthorization(text_sha256("approved prompt"), "approved prompt")
         with patch("omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None), patch(
             "omo_manager.omo_tmux_send.capture_complete_existing_input",
@@ -744,6 +794,19 @@ class TmuxSendTests(unittest.TestCase):
             "omo_manager.omo_tmux_send.send_enter"
         ) as enter:
             with self.assertRaisesRegex(RuntimeError, "exactly match"):
+                submit_existing_to_codex("cfg:1.0", authorization, options())
+
+        enter.assert_not_called()
+
+    def test_submit_existing_rejects_changed_digest_before_enter(self) -> None:
+        authorization = ExistingInputAuthorization(text_sha256("approved prompt"))
+        with patch("omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None), patch(
+            "omo_manager.omo_tmux_send.capture_complete_existing_input",
+            side_effect=[ExistingInputCapture("%42", "approved prompt"), ExistingInputCapture("%42", "changed prompt")],
+        ), patch("omo_manager.omo_tmux_send.revalidate_error_transition", return_value=["• Working", "  gpt-5.5"]), patch(
+            "omo_manager.omo_tmux_send.send_enter"
+        ) as enter:
+            with self.assertRaisesRegex(RuntimeError, "content digest"):
                 submit_existing_to_codex("cfg:1.0", authorization, options())
 
         enter.assert_not_called()
@@ -775,6 +838,40 @@ class TmuxSendTests(unittest.TestCase):
 
         enter.assert_called_once_with("%42")
         tail_pane.assert_called_once_with("%42", 2000)
+
+    def test_submit_existing_reauthorizes_exact_input_before_retry_enter(self) -> None:
+        authorization = ExistingInputAuthorization(text_sha256("approved prompt"), "approved prompt")
+        with patch("omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None), patch(
+            "omo_manager.omo_tmux_send.capture_complete_existing_input",
+            side_effect=[ExistingInputCapture("%42", "approved prompt")] * 3,
+        ) as capture, patch("omo_manager.omo_tmux_send.revalidate_error_transition", return_value=["• Working", "  gpt-5.5"]), patch(
+            "omo_manager.omo_tmux_send.tail_pane_id", side_effect=[["› approved prompt", "  gpt-5.5"], ["• Working", "  gpt-5.5"]]
+        ), patch("omo_manager.omo_tmux_send.time.monotonic", side_effect=[0.0, 0.0, 0.25]), patch(
+            "omo_manager.omo_tmux_send.time.sleep"
+        ), patch("omo_manager.omo_tmux_send.send_enter") as enter:
+            submit_existing_to_codex("cfg:1.0", authorization, options())
+
+        self.assertEqual(3, capture.call_count)
+        self.assertEqual([("%42",), ("%42",)], [call.args for call in enter.call_args_list])
+
+    def test_submit_existing_stops_retry_when_authorized_text_changes(self) -> None:
+        authorization = ExistingInputAuthorization(text_sha256("approved prompt"), "approved prompt")
+        with patch("omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None), patch(
+            "omo_manager.omo_tmux_send.capture_complete_existing_input",
+            side_effect=[
+                ExistingInputCapture("%42", "approved prompt"),
+                ExistingInputCapture("%42", "approved prompt"),
+                ExistingInputCapture("%42", "changed prompt"),
+            ],
+        ), patch("omo_manager.omo_tmux_send.revalidate_error_transition", return_value=["• Working", "  gpt-5.5"]), patch(
+            "omo_manager.omo_tmux_send.tail_pane_id", return_value=["› approved prompt", "  gpt-5.5"]
+        ), patch("omo_manager.omo_tmux_send.time.monotonic", side_effect=[0.0, 0.0, 0.25]), patch(
+            "omo_manager.omo_tmux_send.send_enter"
+        ) as enter:
+            with self.assertRaisesRegex(RuntimeError, "exactly match"):
+                submit_existing_to_codex("cfg:1.0", authorization, options())
+
+        enter.assert_called_once_with("%42")
 
     def test_submit_existing_rejects_normalized_difference_before_enter(self) -> None:
         authorization = ExistingInputAuthorization(text_sha256("approved prompt"), "approved prompt")

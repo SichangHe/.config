@@ -30,7 +30,6 @@ try:
         file_search_overlay_input_text,
         has_codex_model_footer,
         has_plan_prompt,
-        has_queued_message_footer,
         inspect,
         SELECTED_MODEL_CAPACITY_RE,
         status,
@@ -49,7 +48,6 @@ except ModuleNotFoundError:
         file_search_overlay_input_text,
         has_codex_model_footer,
         has_plan_prompt,
-        has_queued_message_footer,
         inspect,
         SELECTED_MODEL_CAPACITY_RE,
         status,
@@ -62,6 +60,8 @@ except ModuleNotFoundError:
 CODEX_PLACEHOLDER_INPUT_TEXTS = CODEX_EMPTY_INPUT_TEXTS | CODEX_RUNNING_EMPTY_INPUT_TEXTS
 COLLAPSED_PASTE_RE = re.compile(r"\[Pasted Content [0-9]+ chars\]", re.IGNORECASE)
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
+EXACT_CODEX_MODEL_FOOTER_RE = re.compile(r"  gpt-\S+(?: .*)?\Z")
+EXACT_CODEX_QUEUE_FOOTER_RE = re.compile(r"  tab to queue message +[0-9]+(?:\.[0-9]+)?% context left\Z")
 AGENT_MESSAGE_CLOSE = "</agent_message>"
 AGENT_MESSAGE_TAG_RE = re.compile(r"<\s*/?\s*agent_message\b[^>]*>", re.IGNORECASE)
 AGENT_MESSAGE_SOURCE_RE = re.compile(r"^[A-Za-z0-9_.-]+:[0-9]+(?:\.[0-9]+)?$")
@@ -677,13 +677,11 @@ def exact_existing_input_text(lines: list[str]) -> str:
         end -= 1
     visible = lines[:end]
     normalized = [line.rstrip() for line in visible]
-    if not (has_codex_model_footer(normalized) or has_queued_message_footer(normalized)):
+    if not normalized or not (EXACT_CODEX_MODEL_FOOTER_RE.fullmatch(normalized[-1]) or EXACT_CODEX_QUEUE_FOOTER_RE.fullmatch(normalized[-1])):
         raise RuntimeError("target input is not in a complete Codex view")
     if has_plan_prompt(normalized) or file_search_overlay_input_text(normalized):
         raise RuntimeError("target existing input is in an unsupported Codex overlay")
     body_end = end - 1
-    if body_end and lines[body_end - 1] == "":
-        body_end -= 1
     if body_end and not lines[body_end - 1].strip():
         raise RuntimeError("target existing input has an ambiguous trailing blank line")
     input_start = -1
@@ -693,6 +691,13 @@ def exact_existing_input_text(lines: list[str]) -> str:
             break
     if input_start < 0:
         raise RuntimeError("target has no complete existing input")
+    boundary = 0
+    for idx in range(input_start - 1, -1, -1):
+        if lines[idx].startswith(("• ", "│", "└", "├", "─")):
+            boundary = idx + 1
+            break
+    if any(line.lstrip().startswith("›") for line in lines[boundary:input_start]):
+        raise RuntimeError("target existing input has ambiguous prompt markers")
     input_lines = lines[input_start:body_end]
     if any(line.lstrip().startswith(("• ", "│", "└", "├", "─")) for line in input_lines[1:]):
         raise RuntimeError("target existing input is partial")
@@ -723,7 +728,7 @@ def capture_complete_existing_input(target: str) -> ExistingInputCapture:
         raise RuntimeError("target input capture failed") from exc
     if result.returncode != 0:
         raise RuntimeError("target input capture failed")
-    return ExistingInputCapture(pane_id, exact_existing_input_text((result.stdout or "").splitlines()))
+    return ExistingInputCapture(pane_id, exact_existing_input_text((result.stdout or "").split("\n")))
 
 
 def require_authorized_existing_input(

@@ -17,7 +17,7 @@ omo_tmux_send.py --target cfg:1.0 --submit-existing-file "$prompt_file"
 omo_tmux_send.py --target cfg:1.0 --submit-existing-sha256 "$prompt_sha256"
 ```
 
-This recovery is synchronous and target-scoped: it resolves one canonical pane ID, captures it with joined, trailing-space-preserving output, then compares the complete visible input exactly before Enter and before each retry. Post-submit verification stays on that pinned pane ID. It permits one Codex layout spacer immediately before the model footer, but rejects additional ambiguous trailing-blank input, human-owned `h*` targets, collapsed or partial input, overlays, whitespace-normalized differences, changed input, and mismatched file or digest authorization.
+This recovery is synchronous and target-scoped: it resolves one canonical pane ID, captures it with joined, trailing-space-preserving output, then compares the complete visible input exactly before Enter and before each retry. Unicode line separators remain distinct from LF. Post-submit verification stays on that pinned pane ID. The capture has no marker that distinguishes a layout spacer immediately before a recognized footer from an input-ending LF, so the helper rejects any whitespace-only row there, including one empty row. It accepts exact input whose final row directly precedes a strictly anchored model or `tab to queue message` footer. Footer-like prompt substrings and ambiguous prompt markers are rejected, as are human-owned `h*` targets, collapsed or partial input, overlays, whitespace-normalized differences, changed input, and mismatched file or digest authorization.
 
 Use direct file-based helpers for manager-authored files:
 
