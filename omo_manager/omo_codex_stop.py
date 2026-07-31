@@ -14,8 +14,10 @@ from pathlib import Path
 
 try:
     from omo_manager.omo_codex_status import current_block, status, tail
+    from omo_manager.omo_task_lock import task_file_lock
 except ModuleNotFoundError:
     from omo_codex_status import current_block, status, tail
+    from omo_task_lock import task_file_lock  # pyright: ignore[reportImplicitRelativeImport]
 
 SHELL_COMMANDS = {"bash", "dash", "fish", "sh", "zsh"}
 EXIT_INTERRUPT_DELAY_S = 0.75
@@ -342,12 +344,13 @@ def moved_todo_text(root: Path, task_file: str, text: str) -> str:
 
 def move_todo_to_previous(root: Path, task_file: str) -> None:
     todo = root / "TODO.md"
-    if not todo.exists():
-        return
-    text = todo.read_text(encoding="utf-8")
-    updated = moved_todo_text(root, task_file, text)
-    if updated != text:
-        _ = todo.write_text(updated, encoding="utf-8")
+    with task_file_lock(todo):
+        if not todo.exists():
+            return
+        text = todo.read_text(encoding="utf-8")
+        updated = moved_todo_text(root, task_file, text)
+        if updated != text:
+            _ = todo.write_text(updated, encoding="utf-8")
 
 
 def wait_shell(target: str, deadline_s: float) -> None:

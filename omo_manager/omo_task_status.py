@@ -7,6 +7,7 @@ import os
 import shlex
 import sys
 import tempfile
+from contextlib import ExitStack
 from dataclasses import dataclass
 from dataclasses import replace
 from pathlib import Path
@@ -47,6 +48,7 @@ DONE_REMINDER = "Status set to done. Remember to email the human."
 BOOKKEEPING_FAILED_PREFIX = "done_close_bookkeeping_failed"
 CLOSE_FAILED_PREFIX = "done_close_failed"
 DONE_CLOSE_IN_PROGRESS = "done_close_in_progress: manager is closing the agent before marking done"
+TODO_SECTIONS = ("current", "human pending", "low priority", "previous")
 
 
 @dataclass(frozen=True)
@@ -330,23 +332,28 @@ def same_file_state(left: os.stat_result, right: os.stat_result) -> bool:
 
 def replace_if_unchanged(path: Path, text: str, before: os.stat_result) -> None:
     """Replace `path` atomically after checking it did not change since read."""
-    tmp_path: Path | None = None
     with task_file_lock(path):
-        try:
-            with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False) as handle:
-                _ = handle.write(text)
-                handle.flush()
-                os.fsync(handle.fileno())
-                tmp_path = Path(handle.name)
-            tmp_path.chmod(before.st_mode & 0o7777)
-            after = path.stat()
-            if not same_file_state(before, after):
-                raise TaskFrontmatterError("task file changed while status update was being prepared; retry after rereading it.")
-            os.replace(tmp_path, path)
-            tmp_path = None
-        finally:
-            if tmp_path is not None:
-                tmp_path.unlink(missing_ok=True)
+        replace_if_unchanged_locked(path, text, before)
+
+
+def replace_if_unchanged_locked(path: Path, text: str, before: os.stat_result) -> None:
+    """Replace `path` after an outer `task_file_lock` has serialized its writer."""
+    tmp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False) as handle:
+            _ = handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+            tmp_path = Path(handle.name)
+        tmp_path.chmod(before.st_mode & 0o7777)
+        after = path.stat()
+        if not same_file_state(before, after):
+            raise TaskFrontmatterError("task file changed while status update was being prepared; retry after rereading it.")
+        os.replace(tmp_path, path)
+        tmp_path = None
+    finally:
+        if tmp_path is not None:
+            tmp_path.unlink(missing_ok=True)
 
 
 def current_target_task_paths(root: Path, target: str) -> tuple[Path, ...]:
@@ -441,6 +448,77 @@ def task_is_in_todo_section(root: Path, path: Path, section: str) -> bool:
         if candidate == path:
             return True
     return False
+
+
+def todo_row_task_path(root: Path, line: str) -> Path | None:
+    """Return the root-contained task path named by one simple TODO row."""
+    stripped = line.strip()
+    if not stripped:
+        return None
+    token = stripped.split(maxsplit=1)[0]
+    candidate = Path(token).expanduser()
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    try:
+        path = candidate.resolve(strict=False)
+    except OSError:
+        return None
+    return path if path == root or root in path.parents else None
+
+
+def reconcile_running_todo_text(root: Path, path: Path, text: str) -> str:
+    """Move the sole TODO row for a running task into `current`, or fail closed."""
+    lines = text.splitlines(keepends=True)
+    section = ""
+    rows: list[tuple[int, str]] = []
+    current_headers: list[int] = []
+    for idx, line in enumerate(lines):
+        name = line.strip()
+        if name.endswith(":") and name[:-1] in TODO_SECTIONS:
+            section = name[:-1]
+            if section == "current":
+                current_headers.append(idx)
+            continue
+        if section in TODO_SECTIONS and todo_row_task_path(root, line) == path:
+            rows.append((idx, section))
+    if len(rows) != 1:
+        raise TaskFrontmatterError(f"expected exactly one TODO row for `{relative_task_ref(root, path)}`, found {len(rows)}.")
+    if len(current_headers) != 1:
+        raise TaskFrontmatterError(f"expected exactly one `current:` section while reconciling `{relative_task_ref(root, path)}`.")
+    source_idx, source_section = rows[0]
+    if source_section == "current":
+        return text
+    if source_section != "previous":
+        raise TaskFrontmatterError(f"expected `{relative_task_ref(root, path)}` to be in `previous:`, found `{source_section}:`.")
+    moved = lines.pop(source_idx)
+    current_idx = next(idx for idx, line in enumerate(lines) if line.strip() == "current:")
+    insert_at = current_idx + 1
+    while insert_at < len(lines) and not lines[insert_at].strip():
+        insert_at += 1
+    if not moved.endswith(("\n", "\r")) and insert_at < len(lines):
+        raise TaskFrontmatterError(f"cannot move unterminated TODO row for `{relative_task_ref(root, path)}`.")
+    lines.insert(insert_at, moved)
+    return "".join(lines)
+
+
+def reconcile_running_index(root: Path, path: Path, text: str, before: os.stat_result) -> None:
+    """Move an already-running task's sole historical TODO row into `current`."""
+    todo = root / "TODO.md"
+    if not todo.is_file():
+        raise TaskFrontmatterError("TODO.md is not a regular file.")
+    with ExitStack() as locks:
+        for locked_path in sorted({path, todo}, key=lambda candidate: str(candidate)):
+            locks.enter_context(task_file_lock(locked_path))
+        current_before = path.stat()
+        current_text = path.read_text(encoding="utf-8")
+        current_metadata = parse_task_metadata(current_text, root)
+        if not same_file_state(before, current_before) or current_text != text or current_metadata is None or current_metadata.status != "running":
+            raise TaskFrontmatterError("task changed while running index reconciliation was being prepared; retry after rereading it.")
+        todo_before = todo.stat()
+        todo_text = todo.read_text(encoding="utf-8")
+        updated_todo = reconcile_running_todo_text(root, path, todo_text)
+        if updated_todo != todo_text:
+            replace_if_unchanged_locked(todo, updated_todo, todo_before)
 
 
 def done_close_failed_reason(exc: Exception) -> str:
@@ -606,7 +684,11 @@ def run(args: Args) -> int:
                     raise
                 before = path.stat()
             if close_args is None:
-                replace_if_unchanged(path, updated, before)
+                updated_metadata = parse_task_metadata(updated, args.root)
+                if initial_metadata is not None and initial_metadata.status == "running" and updated_metadata is not None and updated_metadata.status == "running":
+                    reconcile_running_index(args.root, path, text, before)
+                else:
+                    replace_if_unchanged(path, updated, before)
             else:
                 try:
                     record_close(close_args, session_id)

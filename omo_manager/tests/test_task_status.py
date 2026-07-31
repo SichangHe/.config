@@ -14,6 +14,7 @@ from omo_manager.omo_agent_status import TaskFrontmatterError, parse_task_metada
 from omo_manager.omo_task_status import DONE_REMINDER
 from omo_manager.omo_task_status import StopArgs
 from omo_manager.omo_task_status import parse_args
+from omo_manager.omo_task_status import reconcile_running_index
 from omo_manager.omo_task_status import replace_if_unchanged
 from omo_manager.omo_task_status import run
 from omo_manager.omo_task_status import stop_done_agent
@@ -279,6 +280,107 @@ class TaskStatusTests(unittest.TestCase):
 
         self.assertIn("status: running\nrunat:", updated)
         self.assertNotIn("blocked_on:", updated)
+
+    def test_cli_running_moves_the_single_previous_row_without_task_or_pane_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            original_task = task_frontmatter(runat="vl_root_consolidate:1", managerat="vl_stage1_mgr:0", pending_items=("keep the queue",)) + "all task content stays\n"
+            path.write_text(original_task, encoding="utf-8")
+            todo = root / "TODO.md"
+            todo.write_text(
+                "preamble stays\ncurrent:\n\ncurrent.md wl:9 unchanged\n\nhuman pending:\nwaiting.md wl:4 unchanged\n\nprevious:\nold.md wl:2 unchanged\n  task.md vl_root_consolidate:1 keep this row exactly\nlater.md wl:3 unchanged\n",
+                encoding="utf-8",
+            )
+            expected = "preamble stays\ncurrent:\n\n  task.md vl_root_consolidate:1 keep this row exactly\ncurrent.md wl:9 unchanged\n\nhuman pending:\nwaiting.md wl:4 unchanged\n\nprevious:\nold.md wl:2 unchanged\nlater.md wl:3 unchanged\n"
+
+            with patch("omo_manager.omo_task_status.stop_done_agent") as stop_done_agent, patch("omo_manager.omo_task_status.stop") as stop_agent, redirect_stdout(io.StringIO()):
+                self.assertEqual(0, run(StatusArgs(root, Path("task.md"), "running", "")))
+
+            self.assertEqual(original_task, path.read_text(encoding="utf-8"))
+            self.assertEqual(expected, todo.read_text(encoding="utf-8"))
+            self.assertEqual(1, todo.read_text(encoding="utf-8").count("task.md vl_root_consolidate:1 keep this row exactly"))
+            stop_done_agent.assert_not_called()
+            stop_agent.assert_not_called()
+
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(0, run(StatusArgs(root, Path("task.md"), "running", "")))
+
+            self.assertEqual(original_task, path.read_text(encoding="utf-8"))
+            self.assertEqual(expected, todo.read_text(encoding="utf-8"))
+
+    def test_cli_running_fails_closed_for_invalid_todo_placement(self) -> None:
+        cases = {
+            "absent TODO": None,
+            "missing": "current:\nother.md wl:2\n\nprevious:\nold.md wl:1\n",
+            "duplicate": "current:\ntask.md wl:2\n\nprevious:\ntask.md wl:2\n",
+            "human pending": "current:\nother.md wl:2\n\nhuman pending:\ntask.md wl:2\n",
+            "low priority": "current:\nother.md wl:2\n\nlow priority:\ntask.md wl:2\n",
+            "duplicate current": "current:\ntask.md wl:2\n\ncurrent:\nother.md wl:3\n",
+        }
+        for name, todo_text in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                path = root / "task.md"
+                original_task = task_frontmatter() + "body\n"
+                path.write_text(original_task, encoding="utf-8")
+                todo = root / "TODO.md"
+                if todo_text is not None:
+                    todo.write_text(todo_text, encoding="utf-8")
+                stderr = io.StringIO()
+
+                with patch("omo_manager.omo_task_status.stop_done_agent") as stop_done_agent, redirect_stderr(stderr):
+                    self.assertEqual(2, run(StatusArgs(root, Path("task.md"), "running", "")))
+
+                self.assertEqual(original_task, path.read_text(encoding="utf-8"))
+                self.assertEqual(todo_text is not None, todo.exists())
+                if todo_text is not None:
+                    self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+                stop_done_agent.assert_not_called()
+
+    def test_cli_running_transition_does_not_reconcile_todo_placement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            path.write_text(task_frontmatter(status="blocked", blocked_on="waiting") + "body\n", encoding="utf-8")
+            todo = root / "TODO.md"
+            todo_text = "current:\nother.md wl:2\n\nprevious:\ntask.md wl:2\n"
+            todo.write_text(todo_text, encoding="utf-8")
+
+            with patch("omo_manager.omo_task_status.stop_done_agent") as stop_done_agent, redirect_stdout(io.StringIO()):
+                self.assertEqual(0, run(StatusArgs(root, Path("task.md"), "running", "")))
+
+            self.assertIn("status: running", path.read_text(encoding="utf-8"))
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+            stop_done_agent.assert_not_called()
+
+    def test_running_index_reconciliation_rechecks_the_task_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            original_task = task_frontmatter() + "body\n"
+            path.write_text(original_task, encoding="utf-8")
+            before = path.stat()
+            todo = root / "TODO.md"
+            todo_text = "current:\n\nprevious:\ntask.md wl:2\n"
+            todo.write_text(todo_text, encoding="utf-8")
+            path.write_text(task_frontmatter(status="blocked", blocked_on="waiting") + "body\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(TaskFrontmatterError, "task changed while running index reconciliation"):
+                reconcile_running_index(root, path, original_task, before)
+
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+
+    def test_running_index_reconciliation_deduplicates_a_todo_task_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            todo = root / "TODO.md"
+            todo.write_text(task_frontmatter() + "current:\n\nprevious:\nTODO.md wl:2\n", encoding="utf-8")
+            text = todo.read_text(encoding="utf-8")
+
+            reconcile_running_index(root, todo, text, todo.stat())
+
+            self.assertIn("current:\n\nTODO.md wl:2\n", todo.read_text(encoding="utf-8"))
 
     def test_long_running_is_a_normal_status_transition(self) -> None:
         text = task_frontmatter() + "body\n"

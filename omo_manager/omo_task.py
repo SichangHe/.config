@@ -1353,32 +1353,33 @@ def refreshed_todo_entry(existing: str, ref: str, tmux_target: str) -> str:
 
 def link_todo(args: Args, tmux_target: str) -> None:
     todo = args.root / "TODO.md"
-    line = todo_line(args, tmux_target)
-    lines = todo.read_text(encoding="utf-8").splitlines() if todo.exists() else ["current:", ""]
-    ref = task_ref(args.root, args.task_file)
-    aliases = {args.task_file, ref, str(task_path(args.root, args.task_file))}
-    for idx, existing in enumerate(lines):
-        stripped = existing.strip()
-        if not stripped:
-            continue
-        token = stripped.split(maxsplit=1)[0]
-        if token not in aliases:
-            continue
-        updated = refreshed_todo_entry(existing, ref, tmux_target)
-        if existing != updated:
-            lines[idx] = updated
-            _ = todo.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        return
-    try:
-        current_idx = next(idx for idx, existing in enumerate(lines) if existing.strip() == "current:")
-    except StopIteration:
-        lines.extend(["", "current:", ""])
-        current_idx = len(lines) - 2
-    insert_at = current_idx + 1
-    while insert_at < len(lines) and not lines[insert_at].strip():
-        insert_at += 1
-    lines.insert(insert_at, line)
-    _ = todo.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    with task_file_lock(todo):
+        line = todo_line(args, tmux_target)
+        lines = todo.read_text(encoding="utf-8").splitlines() if todo.exists() else ["current:", ""]
+        ref = task_ref(args.root, args.task_file)
+        aliases = {args.task_file, ref, str(task_path(args.root, args.task_file))}
+        for idx, existing in enumerate(lines):
+            stripped = existing.strip()
+            if not stripped:
+                continue
+            token = stripped.split(maxsplit=1)[0]
+            if token not in aliases:
+                continue
+            updated = refreshed_todo_entry(existing, ref, tmux_target)
+            if existing != updated:
+                lines[idx] = updated
+                _ = todo.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            return
+        try:
+            current_idx = next(idx for idx, existing in enumerate(lines) if existing.strip() == "current:")
+        except StopIteration:
+            lines.extend(["", "current:", ""])
+            current_idx = len(lines) - 2
+        insert_at = current_idx + 1
+        while insert_at < len(lines) and not lines[insert_at].strip():
+            insert_at += 1
+        lines.insert(insert_at, line)
+        _ = todo.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def dry_run(args: Args) -> None:
