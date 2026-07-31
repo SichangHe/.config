@@ -1,0 +1,4 @@
+interface:
+  display_name: "Software System Design Values"
+  short_description: "Apply prioritized values to software system design"
+  default_prompt: "Use this skill to design or review a software system according to its prioritized design values."
