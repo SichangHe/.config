@@ -682,6 +682,8 @@ def exact_existing_input_text(lines: list[str]) -> str:
     if has_plan_prompt(normalized) or file_search_overlay_input_text(normalized):
         raise RuntimeError("target existing input is in an unsupported Codex overlay")
     body_end = end - 1
+    if body_end and lines[body_end - 1] == "":
+        body_end -= 1
     if body_end and not lines[body_end - 1].strip():
         raise RuntimeError("target existing input has an ambiguous trailing blank line")
     input_start = -1
