@@ -98,7 +98,7 @@
   - agent-problem prompts start with a direct helper instruction and do not need human acknowledgement
   - immediately before an asynchronous agent-problem paste, reruns the same problem scan without auto-unsticking and skips delivery unless every routed raw problem row is still present; a resumed manager or any changed pane/dependency state therefore invalidates stale captured output
   - every manager problem notice has a stable 16-character `problem-id` and gives the exact `amh_problem.py claim ID --action 'ONE CONCRETE NEXT ACTION'` command
-  - a matching manager claim suppresses only the unchanged problem for 10 minutes; the manager cannot mark it resolved, and an independent watcher scan removes its claim only after the problem disappears
+  - a matching manager claim suppresses only the unchanged problem for 10 minutes; an active lease cannot be replaced, while expiry or recipient reassignment lets the current recipient claim it; the manager cannot mark it resolved, and an independent watcher scan removes its claim only after the problem disappears
   - an unchanged problem whose claim expires is delivered again immediately with the previous claimant and action, bypassing the ordinary 30-minute unchanged-problem interval
   - email pending refs remain `origin=human source=email action=ack-human`
   - the shared agent-problem pass reminds each ready active agent at its own `runat` when its pending queue is nonempty

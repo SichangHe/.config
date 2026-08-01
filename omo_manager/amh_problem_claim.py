@@ -255,7 +255,8 @@ def claim_problem(path: Path, problem_id: str, manager_target: str, action: str,
             raise ValueError("problem ID is not currently issued by the watcher")
         if canonical_target(issue.manager_target) != canonical_target(manager_target):
             raise ValueError(f"problem is issued to {issue.manager_target}, not the current manager pane")
-        if problem_id in state.claims:
+        existing = state.claims.get(problem_id)
+        if existing is not None and canonical_target(existing.manager_target) == canonical_target(manager_target) and existing.expires_at_s > claimed_at_s:
             raise ValueError("this unchanged problem was already claimed; wait for the watcher to resolve it or report it again")
         state.claims[problem_id] = claim
     return claim

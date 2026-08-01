@@ -35,13 +35,35 @@ class ProblemClaimTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "one line without command separators"):
                 claim_problem(path, "0123456789abcdef", "wl:1", "inspect; then restart", 100.0)
 
-    def test_unchanged_problem_cannot_reset_its_claim_lease(self) -> None:
+    def test_unchanged_problem_cannot_reset_active_claim_lease(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "claims.json"
             sync_problem_issues(path, {"0123456789abcdef": ("wl:1", ("error: row",))}, 90.0)
             claim_problem(path, "0123456789abcdef", "wl:1", "inspect", 100.0)
             with self.assertRaisesRegex(ValueError, "already claimed"):
-                claim_problem(path, "0123456789abcdef", "wl:1", "try again", 800.0)
+                claim_problem(path, "0123456789abcdef", "wl:1", "try again", 699.0)
+
+    def test_expired_claim_can_be_reclaimed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "claims.json"
+            problem_id = "0123456789abcdef"
+            sync_problem_issues(path, {problem_id: ("wl:1", ("error: row",))}, 90.0)
+            claim_problem(path, problem_id, "wl:1", "inspect", 100.0)
+            renewed = claim_problem(path, problem_id, "wl:1", "inspect again", 700.0)
+            self.assertEqual("inspect again", renewed.action)
+            self.assertEqual(1300.0, renewed.expires_at_s)
+            self.assertEqual(renewed, read_claims(path)[problem_id])
+
+    def test_reassigned_problem_can_be_claimed_by_new_recipient(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "claims.json"
+            problem_id = "0123456789abcdef"
+            sync_problem_issues(path, {problem_id: ("wl:1", ("error: row",))}, 90.0)
+            claim_problem(path, problem_id, "wl:1", "inspect", 100.0)
+            sync_problem_issues(path, {problem_id: ("wl:2", ("error: row",))}, 200.0)
+            reassigned = claim_problem(path, problem_id, "wl:2", "take over", 200.0)
+            self.assertEqual("wl:2", reassigned.manager_target)
+            self.assertEqual(reassigned, read_claims(path)[problem_id])
 
     def test_only_matching_unexpired_manager_claim_is_active(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
