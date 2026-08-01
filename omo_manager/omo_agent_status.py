@@ -494,6 +494,15 @@ def is_recorded_human_wait(state: TaskState) -> bool:
     return HUMAN_WAIT_RE.search(state.reason) is not None
 
 
+def is_explicit_human_pending_wait(root: Path, task: TaskLine, state: TaskState) -> bool:
+    """Return whether the task is deliberately closed pending a human decision."""
+
+    if task.section != "todo:human pending" or state.reason.strip().lower() != "human":
+        return False
+    task_path = resolve_task_path(root, task.task_file)
+    return task_path is not None and has_closed_codex_evidence(task_path, state.target)
+
+
 def canonical_target(target: str) -> str:
     return target[:-2] if target.endswith(".0") else target
 
@@ -989,6 +998,8 @@ def add_blocked_idle_vl_row(root: Path, task: TaskLine, role: str, rows: list[St
         if idle_status == "running":
             return
         if is_recorded_human_wait(state) and idle_status == "ready":
+            return
+        if is_explicit_human_pending_wait(root, task, state) and idle_status == "not_codex" and " output=" not in classified.evidence:
             return
         quiet_dependency = blocked_dependencies_are_active(root, task, state) and idle_status == "ready"
         quiet_resumable = blocked_resumable_dependencies_are_active(root, task, state) and idle_status == "not_codex" and " output=" not in classified.evidence and not target_resolves_exactly(target)
