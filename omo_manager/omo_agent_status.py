@@ -858,7 +858,7 @@ def pending_task_item_rows(root: Path, manager_target: str = "") -> list[StatusR
     return rows
 
 
-def load_task_state(root: Path, manager_target: str = "") -> tuple[dict[str, TaskLine], set[str], set[str]]:
+def load_task_state(root: Path, manager_target: str = "", *, include_pending_delivery: bool = False) -> tuple[dict[str, TaskLine], set[str], set[str]]:
     todo_tasks = parse_task_lines(root / "TODO.md")
     current: dict[str, TaskLine] = {}
     done: set[str] = set()
@@ -870,7 +870,7 @@ def load_task_state(root: Path, manager_target: str = "") -> tuple[dict[str, Tas
         state = scan_task_state(state_path, root) if state_path is not None else None
         if state is None:
             continue
-        if task_has_pending_marker(state_path):
+        if task_has_pending_marker(state_path) and not (include_pending_delivery and state.status in {"running", "long_running"}):
             continue
         if not task_owned_by_manager(root, task, manager_target, state_path):
             continue
@@ -1392,7 +1392,7 @@ def main(argv: list[str]) -> int:
     try:
         args = parse_args(argv)
         task_args = replace(args, manager_target="")
-        current, done, _human_pending = load_task_state(args.root)
+        current, done, _human_pending = load_task_state(args.root, include_pending_delivery=args.problems_only)
         records = session_records(args.registry)
         tasks = list(current.values())
         if args.problems_only:
@@ -1402,8 +1402,16 @@ def main(argv: list[str]) -> int:
         auto_unstick_disabled_reason = "malformed_task_present" if malformed_rows else "no_auto_unstick" if args.problems_only and not args.auto_unstick else "not_problems_only"
         unstick_by_target: dict[str, str] = {}
         rows = [classify_task(task, choose_session(task, records), auto_unstick, unstick_by_target, args.manager_target, auto_unstick_disabled_reason) for task in tasks]
+        pending_delivery_tasks = {
+            task.task_file
+            for task in tasks
+            if task_has_pending_marker(resolve_task_path(args.root, task.task_file))
+        }
+        rows = [row for row in rows if row.task_file not in pending_delivery_tasks or row.status == "stuck_input"]
+        stuck_pending_delivery_tasks = {row.task_file for row in rows if row.task_file in pending_delivery_tasks}
+        inspected_tasks = [task for task in tasks if task.task_file not in pending_delivery_tasks or task.task_file in stuck_pending_delivery_tasks]
         rows.extend(malformed_rows)
-        inspected_targets = {display_target(task, choose_session(task, records)) for task in tasks}
+        inspected_targets = {display_target(task, choose_session(task, records)) for task in inspected_tasks}
         if args.problems_only:
             manager_row = manager_problem_row(replace(args, auto_unstick=auto_unstick), inspected_targets, unstick_by_target)
             if args.manager_target:
@@ -1425,7 +1433,6 @@ def main(argv: list[str]) -> int:
             inspected_targets.update(row.target for row in generic_blocked_idle_rows if row.target)
             all_active_targets = active_task_targets(args.root, include_pending_delivery=True)
             inspected_targets.update(active_task_targets(args.root))
-            inspected_tasks = [*tasks]
             inspected_targets.update(display_target(task, choose_session(task, records)) for task in inspected_tasks)
             unmanaged_rows = registry_unmanaged_problem_rows(
                 task_args,

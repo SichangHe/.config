@@ -2912,10 +2912,11 @@ resolved_task_items: []
                 _ = (root / "active.md").write_text(f"{task_frontmatter('running', runat=active_target)}(pending)\nrecover delivery\n", encoding="utf-8")
                 _ = (root / "completed.md").write_text(task_frontmatter("done", runat="wl:3"), encoding="utf-8")
                 out = StringIO()
-                with patch("omo_manager.omo_agent_status.inspect", side_effect=AssertionError("reused target must not be inspected as completed")), redirect_stdout(out):
+                with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["active pending delivery"])) as inspect, redirect_stdout(out):
                     self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--no-auto-unstick"]))
 
                 self.assertEqual("", out.getvalue())
+                self.assertEqual([active_target], [call.args[0].target for call in inspect.call_args_list])
 
     def test_problems_only_pending_active_target_keeps_completed_registry_bookkeeping_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2926,12 +2927,13 @@ resolved_task_items: []
             _ = (root / "active.md").write_text(f"{task_frontmatter('running', runat='wl:3')}(pending)\nrecover delivery\n", encoding="utf-8")
             _ = (root / "completed.md").write_text(task_frontmatter("done", runat="wl:3"), encoding="utf-8")
             out = StringIO()
-            with patch("omo_manager.omo_agent_status.inspect", side_effect=AssertionError("reused target must not be inspected as completed")), redirect_stdout(out):
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["active pending delivery"])) as inspect, redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--no-auto-unstick"]))
 
             text = out.getvalue()
             self.assertIn("done-stale: task=completed.md", text)
             self.assertNotIn("ready: task=completed.md", text)
+            self.assertEqual(["wl:3"], [call.args[0].target for call in inspect.call_args_list])
 
     def test_problems_only_reused_registry_target_keeps_only_stale_bookkeeping(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3233,6 +3235,23 @@ resolved_task_items: []
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["ready"])), patch("omo_manager.omo_agent_status.tmux_list_panes", return_value=[]), redirect_stdout(out):
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             self.assertEqual("", out.getvalue())
+
+    def test_problems_only_submits_visible_input_for_pending_delivery_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[{"task_file":"pending.md","tmux_target":"hwl:3.0","started_at_s":1}]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\npending.md hwl 3\n", encoding="utf-8")
+            _ = (root / "pending.md").write_text(f"{task_frontmatter('long_running', runat='hwl:3')}(pending)\n", encoding="utf-8")
+            report = Report("stuck_input", ["› Immediately record every pending task"], "Immediately record every pending task", True)
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=report), patch(
+                "omo_manager.omo_agent_status.submit_stuck_input_if_present", return_value="sent_enter"
+            ) as unstick, patch("omo_manager.omo_agent_status.tmux_list_panes", return_value=[]), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            unstick.assert_called_once()
+            self.assertIn("stuck_input: task=pending.md", out.getvalue())
+            self.assertIn("unstick=sent_enter", out.getvalue())
 
     def test_problems_only_ignores_done_pending_task_marker_for_stale_registry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
