@@ -19,7 +19,9 @@ if __package__ in {None, ""}:
 from omo_manager.omo_codex_status import Args as StatusArgs
 from omo_manager.omo_codex_status import COMPACTING_RE
 from omo_manager.omo_codex_status import Report
+from omo_manager.omo_codex_status import dismiss_plan_prompt_if_present
 from omo_manager.omo_codex_status import exact_pane_id
+from omo_manager.omo_codex_status import has_active_plan_prompt
 from omo_manager.omo_codex_status import has_selected_model_capacity_warning
 from omo_manager.omo_codex_status import ignorable_codex_apps_transport_lines
 from omo_manager.omo_codex_status import inspect
@@ -1106,9 +1108,14 @@ def classify_target(task_file: str, target: str, persistent_role: bool = False, 
         elif auto_unstick:
             unstick_key = canonical_target(target)
             if unstick_by_target is not None and unstick_key in unstick_by_target:
-                unstick = "already_sent" if unstick_by_target[unstick_key] == "sent_enter" else unstick_by_target[unstick_key]
+                unstick = "already_sent" if unstick_by_target[unstick_key] in {"sent_enter", "sent_escape"} else unstick_by_target[unstick_key]
             else:
-                unstick = submit_stuck_input_if_present(target, report)
+                if has_active_plan_prompt(report.lines):
+                    recovery = dismiss_plan_prompt_if_present(target, report)
+                    evidence += f" recovery={recovery.before}->{recovery.after}"
+                    unstick = recovery.action
+                else:
+                    unstick = submit_stuck_input_if_present(target, report)
                 if unstick_by_target is not None:
                     unstick_by_target[unstick_key] = unstick
         else:
@@ -1370,12 +1377,12 @@ def format_problem_summary(rows: list[StatusRow], completed_stale: set[str] | di
         lines.append("manager-action: manager_compaction>0 reread MANAGER.md after compaction unless the compaction summary already included it")
     for row in sorted(problem_rows, key=lambda item: (item.status, item.task_file)):
         lines.append(f"{row.status}: task={row.task_file} evidence={row.evidence}")
-    unstuck: dict[str, str] = {}
+    unstuck: dict[str, tuple[str, str]] = {}
     for row in problem_rows:
-        if row.unstick == "sent_enter" and row.target:
-            unstuck.setdefault(row.target, row.task_file)
-    for target, task_file in sorted(unstuck.items()):
-        lines.append(f"unstuck: target={target} task={task_file} action=sent_enter")
+        if row.unstick in {"sent_enter", "sent_escape"} and row.target:
+            unstuck.setdefault(row.target, (row.task_file, row.unstick))
+    for target, (task_file, action) in sorted(unstuck.items()):
+        lines.append(f"unstuck: target={target} task={task_file} action={action}")
     for task_file, evidence in sorted(completed_stale_evidence_map.items()):
         lines.append(f"done-stale: task={task_file} evidence={evidence}")
     return "\n".join(lines)

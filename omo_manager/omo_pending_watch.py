@@ -4241,7 +4241,7 @@ def remember_enter_attempt(seen: dict[str, float], args: Args, target: str, now_
 def suppress_enter_attempt_row(args: Args, seen: dict[str, float], line: str, now_wall_s: float) -> bool:
     if problem_line_unstick(line) == "already_sent":
         return True
-    if problem_line_unstick(line) != "sent_enter":
+    if problem_line_unstick(line) not in {"sent_enter", "sent_escape"}:
         return False
     target = problem_line_target(line)
     if not target:
@@ -4570,7 +4570,7 @@ def manager_human_email_problem_line(line: str, manager_target: str = "") -> boo
 
 def manager_self_unstuck_line(line: str, manager_target: str = "") -> bool:
     del manager_target
-    if re.match(r"^unstuck: target=\S+ task=manager action=sent_enter$", line):
+    if re.match(r"^unstuck: target=\S+ task=manager action=(?:sent_enter|sent_escape)$", line):
         return True
     return False
 

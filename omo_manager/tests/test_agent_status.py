@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from omo_manager.omo_agent_status import Args, TaskFrontmatterError, classify_task, format_problem_summary, format_summary, load_local_env, load_task_state, main, parse_task_lines, parse_task_metadata, persistent_blocked_task_lines, registry_prune, report_output_evidence, session_records
 from omo_manager.omo_agent_status import SessionRecord, StatusRow, TaskLine
-from omo_manager.omo_codex_status import Args as CodexStatusArgs, Report
+from omo_manager.omo_codex_status import Args as CodexStatusArgs, PlanPromptRecovery, Report
 
 
 def task_frontmatter(status: str, runat: str = "cfg:1", managerat: str = "mgr:1", *, is_manager: bool = False, pending_items: tuple[str, ...] = (), blocked_on: str = "") -> str:
@@ -926,6 +926,25 @@ resolved_task_items: []
             unstick.assert_called_once_with("cfg:1.0", report)
             self.assertIn("stuck_input: task=active.md", out.getvalue())
             self.assertIn("unstick=sent_enter", out.getvalue())
+
+    def test_problems_only_dismisses_plan_prompt_with_audit_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[{"task_file":"active.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
+            _ = (root / "active.md").write_text(task_frontmatter("running", runat="cfg:1"), encoding="utf-8")
+            modal = ['› Continue task', '', '  Create a plan?  shift + tab use Plan mode   esc dismiss']
+            report = Report("stuck_input", modal, "Continue task", True)
+            out = StringIO()
+            recovery = PlanPromptRecovery("sent_escape", "plan_prompt", "stuck_input")
+            with patch("omo_manager.omo_agent_status.inspect", return_value=report), patch("omo_manager.omo_agent_status.dismiss_plan_prompt_if_present", return_value=recovery) as dismiss, patch("omo_manager.omo_agent_status.submit_stuck_input_if_present") as submit, redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            dismiss.assert_called_once_with("cfg:1.0", report)
+            submit.assert_not_called()
+            text = out.getvalue()
+            self.assertIn("recovery=plan_prompt->stuck_input unstick=sent_escape", text)
+            self.assertIn("unstuck: target=cfg:1.0 task=active.md action=sent_escape", text)
 
     def test_problems_only_unsticks_each_target_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

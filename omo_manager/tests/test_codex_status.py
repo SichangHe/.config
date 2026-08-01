@@ -2,7 +2,7 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from omo_manager.omo_codex_status import Args, Report, can_submit_stuck_input, current_block, current_input_text, exact_pane_id, final_assistant_output, has_compacting_indicator, has_resume_paused_goal_prompt, has_terminal_enter_prompt_after_codex_footer, has_waiting_subagent_prompt, inspect, interrupt_waiting_subagent_if_present, last_output, report_from_lines, status, submit_stuck_input_if_present, tail, tail_pane_id, visible_error_lines
+from omo_manager.omo_codex_status import Args, PlanPromptRecovery, Report, can_submit_stuck_input, current_block, current_input_text, dismiss_plan_prompt_if_present, exact_pane_id, final_assistant_output, has_compacting_indicator, has_resume_paused_goal_prompt, has_terminal_enter_prompt_after_codex_footer, has_waiting_subagent_prompt, inspect, interrupt_waiting_subagent_if_present, last_output, report_from_lines, status, submit_stuck_input_if_present, tail, tail_pane_id, visible_error_lines
 from omo_manager.omo_tmux_send import error_signature, exact_capacity_error
 
 
@@ -449,6 +449,61 @@ class CodexStatusTests(unittest.TestCase):
         self.assertEqual('Summarize recent commits', report.input_text)
         self.assertFalse(report.can_submit_input)
         self.assertEqual('placeholder_input', report.input_blocker)
+
+    def test_dismiss_plan_prompt_sends_one_escape_with_before_after_evidence(self) -> None:
+        modal = ['› Continue task', '', '  Create a plan?  shift + tab use Plan mode   esc dismiss']
+        after = ['› Continue task', '  gpt-5.5']
+        report = report_from_lines(modal)
+        with patch('omo_manager.omo_codex_status.exact_pane_id', return_value='%7'), patch('omo_manager.omo_codex_status.tail_pane_id', side_effect=[modal, after]), patch('omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)) as run:
+            recovery = dismiss_plan_prompt_if_present('cfg:1.0', report)
+        self.assertEqual(PlanPromptRecovery('sent_escape', 'plan_prompt', 'stuck_input'), recovery)
+        run.assert_called_once_with(['tmux', 'send-keys', '-t', '%7', 'Escape'], capture_output=True, text=True, timeout=5, check=False)
+
+    def test_dismiss_plan_prompt_fails_closed_for_human_target(self) -> None:
+        modal = ['› Continue task', '', '  Create a plan?  shift + tab use Plan mode   esc dismiss']
+        with patch('omo_manager.omo_codex_status.exact_pane_id') as resolve, patch('omo_manager.omo_codex_status.subprocess.run') as run:
+            recovery = dismiss_plan_prompt_if_present('human:1.0', report_from_lines(modal))
+        self.assertEqual(PlanPromptRecovery('not_safe:human_target', 'plan_prompt', 'not_checked'), recovery)
+        resolve.assert_not_called()
+        run.assert_not_called()
+
+    def test_dismiss_plan_prompt_fails_closed_for_stale_evidence(self) -> None:
+        modal = ['› Continue task', '', '  Create a plan?  shift + tab use Plan mode   esc dismiss']
+        latest = ['› Continue task', '  gpt-5.5']
+        with patch('omo_manager.omo_codex_status.exact_pane_id', return_value='%7'), patch('omo_manager.omo_codex_status.tail_pane_id', return_value=latest), patch('omo_manager.omo_codex_status.subprocess.run') as run:
+            recovery = dismiss_plan_prompt_if_present('cfg:1.0', report_from_lines(modal))
+        self.assertEqual(PlanPromptRecovery('not_safe:stale_evidence', 'plan_prompt', 'stuck_input'), recovery)
+        run.assert_not_called()
+
+    def test_dismiss_plan_prompt_fails_closed_for_other_modal(self) -> None:
+        other = ['Resume the paused goal?', '› 1. Resume goal', '  2. Leave paused', 'Press enter to confirm or esc to go back']
+        with patch('omo_manager.omo_codex_status.exact_pane_id') as resolve, patch('omo_manager.omo_codex_status.subprocess.run') as run:
+            recovery = dismiss_plan_prompt_if_present('cfg:1.0', Report('stuck_input', other))
+        self.assertEqual(PlanPromptRecovery('not_safe:not_plan_prompt', 'stuck_input', 'not_checked'), recovery)
+        resolve.assert_not_called()
+        run.assert_not_called()
+
+    def test_dismiss_plan_prompt_fails_closed_for_historical_signature(self) -> None:
+        historical = [
+            '• The screen said:',
+            '  Create a plan?  shift + tab use Plan mode   esc dismiss',
+            '› Continue task',
+            '  gpt-5.5',
+        ]
+        report = report_from_lines(historical)
+        self.assertEqual('stuck_input', report.status)
+        with patch('omo_manager.omo_codex_status.exact_pane_id') as resolve, patch('omo_manager.omo_codex_status.subprocess.run') as run:
+            recovery = dismiss_plan_prompt_if_present('cfg:1.0', report)
+        self.assertEqual(PlanPromptRecovery('not_safe:not_plan_prompt', 'stuck_input', 'not_checked'), recovery)
+        resolve.assert_not_called()
+        run.assert_not_called()
+
+    def test_dismiss_plan_prompt_fails_closed_for_ambiguous_pane(self) -> None:
+        modal = ['› Continue task', '', '  Create a plan?  shift + tab use Plan mode   esc dismiss']
+        with patch('omo_manager.omo_codex_status.exact_pane_id', return_value=''), patch('omo_manager.omo_codex_status.subprocess.run') as run:
+            recovery = dismiss_plan_prompt_if_present('cfg:1.0', report_from_lines(modal))
+        self.assertEqual(PlanPromptRecovery('not_safe:ambiguous_pane', 'plan_prompt', 'not_checked'), recovery)
+        run.assert_not_called()
 
     def test_status_ready_with_idle_queued_placeholder_footer(self) -> None:
         lines = [

@@ -33,7 +33,7 @@ COMPACTING_RE = re.compile(r"^• Compacting\b", re.IGNORECASE)
 BACKGROUND_RUNNING_RE = re.compile(r"^• .*?\b(?:Waiting for background terminal|[1-9][0-9]* background terminals? running)\b")
 QUEUE_MESSAGE_FOOTER_RE = re.compile(r"\btab to queue message\b")
 TERMINAL_ENTER_PROMPT_RE = re.compile(r"^\s*\[?press enter(?:/return)?(?: to continue)?(?:\.\.\.)?\]?\s*$", re.IGNORECASE)
-PLAN_PROMPT_RE = re.compile(r"\bCreate a plan\?\s+shift\s+\+\s+tab\s+use Plan mode\s+esc dismiss\s*$")
+PLAN_PROMPT_RE = re.compile(r"^\s*Create a plan\?\s+shift\s+\+\s+tab\s+use Plan mode\s+esc dismiss\s*$")
 RESUME_PAUSED_GOAL_RE = re.compile(r"^\s*Resume (?:the )?paused goal\?\s*$", re.IGNORECASE)
 PAUSED_GOAL_RE = re.compile(r"^\s*Goal:\s+\S", re.IGNORECASE)
 RESUME_GOAL_CHOICE_RE = re.compile(r"^\s*(?P<selected>›\s*)?1\.\s+Resume goal\b", re.IGNORECASE)
@@ -81,6 +81,13 @@ class Report:
     input_text: str = ""
     can_submit_input: bool = False
     input_blocker: str = ""
+
+
+@dataclass(frozen=True)
+class PlanPromptRecovery:
+    action: str
+    before: str
+    after: str
 
 
 class ParsedArgs(argparse.Namespace):
@@ -151,6 +158,22 @@ def has_terminal_enter_prompt_after_codex_footer(lines: list[str]) -> bool:
 
 def has_plan_prompt(lines: list[str]) -> bool:
     return any(PLAN_PROMPT_RE.search(line) is not None for line in lines[-10:])
+
+
+def has_active_plan_prompt(lines: list[str]) -> bool:
+    """Match only the terminal `Create a plan? ... esc dismiss` modal."""
+
+    visible = [line.rstrip() for line in lines if line.strip()]
+    matches = [index for index, line in enumerate(visible) if PLAN_PROMPT_RE.search(line) is not None]
+    return matches == [len(visible) - 1]
+
+
+def plan_prompt_classification(lines: list[str]) -> str:
+    if not lines:
+        return "capture_failed"
+    if has_active_plan_prompt(lines) and report_from_lines(lines).status == "stuck_input":
+        return "plan_prompt"
+    return report_from_lines(lines).status
 
 
 def resume_paused_goal_selection(lines: list[str]) -> str:
@@ -548,6 +571,43 @@ def interrupt_waiting_subagent_if_present(target: str, report: Report, n_lines: 
     except (OSError, subprocess.SubprocessError):
         return "failed"
     return "sent_escape" if result.returncode == 0 else "failed"
+
+
+def dismiss_plan_prompt_if_present(target: str, report: Report, n_lines: int = COMPACTION_WAIT_LINES) -> PlanPromptRecovery:
+    """Send one Escape after exact, fresh verification of the plan modal."""
+
+    before = "plan_prompt" if report.status == "stuck_input" and has_active_plan_prompt(report.lines) else report.status
+    match = TMUX_TARGET_RE.fullmatch(target)
+    if match is None:
+        return PlanPromptRecovery("not_safe:ambiguous_target", before, "not_checked")
+    if match.group(1).startswith("h"):
+        return PlanPromptRecovery("not_safe:human_target", before, "not_checked")
+    if before != "plan_prompt":
+        return PlanPromptRecovery("not_safe:not_plan_prompt", before, "not_checked")
+    try:
+        pane_id = exact_pane_id(target)
+    except (OSError, subprocess.SubprocessError):
+        return PlanPromptRecovery("not_safe:ambiguous_pane", before, "not_checked")
+    if not pane_id:
+        return PlanPromptRecovery("not_safe:ambiguous_pane", before, "not_checked")
+    try:
+        fresh_lines = tail_pane_id(pane_id, n_lines)
+    except (OSError, subprocess.SubprocessError):
+        return PlanPromptRecovery("not_safe:capture_failed", before, "capture_failed")
+    fresh = plan_prompt_classification(fresh_lines)
+    if fresh != "plan_prompt":
+        return PlanPromptRecovery("not_safe:stale_evidence", before, fresh)
+    try:
+        result = subprocess.run(["tmux", "send-keys", "-t", pane_id, "Escape"], capture_output=True, text=True, timeout=5, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return PlanPromptRecovery("failed", fresh, "not_checked")
+    if result.returncode != 0:
+        return PlanPromptRecovery("failed", fresh, "not_checked")
+    try:
+        after = plan_prompt_classification(tail_pane_id(pane_id, n_lines))
+    except (OSError, subprocess.SubprocessError):
+        after = "capture_failed"
+    return PlanPromptRecovery("sent_escape", fresh, after)
 
 
 def status(lines: list[str], block: Block, *, detect_waiting_subagent: bool = False) -> str:

@@ -7931,6 +7931,22 @@ class PendingMarkerTests(unittest.TestCase):
         self.assertNotIn("manager agent problem: running task marker needs attention.", text)
         self.assertNotIn("unstuck:", text)
 
+    def test_agent_problem_check_suppresses_sent_escape_with_recovery_memory(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, True, manager_target="wl:1.0", agent_problem_repeat_s=300.0)
+        line = "stuck_input: task=active.md evidence=target=cfg:1 recovery=plan_prompt->stuck_input unstick=sent_escape owner_target=wl:1"
+        seen: dict[str, float] = {}
+        self.assertTrue(watcher.suppress_enter_attempt_row(args, seen, line, 1000.0))
+        self.assertTrue(watcher.suppress_enter_attempt_row(args, seen, line, 1001.0))
+        self.assertFalse(watcher.suppress_enter_attempt_row(args, seen, line, 1002.0))
+        self.assertEqual(3, watcher.enter_attempt_count(seen, args, "cfg:1", 1002.0))
+
+    def test_manager_sent_escape_recovery_line_is_self_suppressed(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        self.assertTrue(watcher.manager_self_unstuck_line("unstuck: target=wl:1 task=manager action=sent_escape", "wl:1"))
+
     def test_markdown_inotify_watcher_reports_new_file(self) -> None:
         from omo_manager.omo_pending_watch import MarkdownChangeWatcher
 
