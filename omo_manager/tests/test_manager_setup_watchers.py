@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import re
+import shutil
 import signal
 import subprocess
 import tempfile
@@ -12,6 +14,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 SETUP = ROOT / "omo_manager" / "omo_manager_setup_watchers.sh"
 TEST_MANAGER_TARGET = "omo-watcher-test:1"
+TMUX = shutil.which("tmux")
 
 
 class WatcherSetupTests(unittest.TestCase):
@@ -25,6 +28,7 @@ class WatcherSetupTests(unittest.TestCase):
         health_timeout_s: str = "1",
         email_grace_s: str = "0",
         extra_env: dict[str, str] | None = None,
+        timeout_s: float = 20,
     ) -> subprocess.CompletedProcess[str]:
         home = tmp / "home"
         root = tmp / "work_logs"
@@ -72,6 +76,7 @@ esac
             **os.environ,
             "EMAIL_ME_FAKE_SEND_LOG": str(tmp / "email-send.log"),
             "HOME": str(home),
+            "TMUX": "",
             "OMO_AGENT_GMAIL_ADDRESS": "",
             "OMO_AGENT_GMAIL_APP_PASSWORD": "",
             "OMO_AGENT_TMUX_TARGET": "omo-watcher-test:0",
@@ -90,7 +95,34 @@ esac
             "FAKE_UV_SLEEP": "5",
         }
         env.update(extra_env or {})
-        return subprocess.run([str(setup)], env=env, text=True, capture_output=True, timeout=20, check=False)
+        return subprocess.run([str(setup)], env=env, text=True, capture_output=True, timeout=timeout_s, check=False)
+
+    def start_tmux_server(self, tmp: Path) -> tuple[Path, int]:
+        socket = tmp / "tmux.sock"
+        subprocess.run(
+            [TMUX, "-S", str(socket), "new-session", "-d", "-s", "watcher-test"],
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        result = subprocess.run(
+            [TMUX, "-S", str(socket), "display-message", "-p", "#{pid}"],
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        return socket, int(result.stdout.strip())
+
+    def process_parent_id(self, pid: int) -> int:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        return int(stat.rsplit(") ", 1)[1].split()[1])
+
+    def process_has_ancestor(self, pid: int, ancestor: int) -> bool:
+        while pid not in (0, 1):
+            pid = self.process_parent_id(pid)
+            if pid == ancestor:
+                return True
+        return False
 
     def pid_from_file(self, pid_file: Path) -> int | None:
         try:
@@ -178,6 +210,343 @@ esac
                 assert pending_pid is not None
                 self.assertEqual(pending_pid, os.getsid(pending_pid))
                 self.assertIn("omo_pending_watch.py", (tmp / "fake-uv.log").read_text(encoding="utf-8"))
+            finally:
+                self.stop_supervisors(tmp / "state")
+
+    @unittest.skipUnless(TMUX, "tmux required")
+    def test_tmux_invocation_hands_setup_to_persistent_server(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            socket, server_pid = self.start_tmux_server(tmp)
+            tmux_log = tmp / "tmux-wrapper.log"
+            tmux_wrapper = tmp / "home" / ".config" / "bin" / "tmux"
+            tmux_wrapper.parent.mkdir(parents=True)
+            tmux_wrapper.write_text(
+                """#!/usr/bin/env bash
+printf '%s\\n' "$*" >>"${FAKE_TMUX_LOG:?}"
+exec "${REAL_TMUX:?}" "$@"
+""",
+                encoding="utf-8",
+            )
+            tmux_wrapper.chmod(0o755)
+            try:
+                result = self.run_setup(
+                    tmp,
+                    timeout_s=40,
+                    extra_env={
+                        "TMUX": f"{socket},{server_pid},0",
+                        "FAKE_TMUX_LOG": str(tmux_log),
+                        "REAL_TMUX": TMUX or "",
+                    },
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertIn("watchers ready", result.stdout)
+                self.assertTrue(
+                    any(line.startswith("run-shell -b ") for line in tmux_log.read_text(encoding="utf-8").splitlines())
+                )
+                pending_pid = self.pid_from_file(tmp / "state" / "pending-supervisor.pid")
+                self.assertIsNotNone(pending_pid)
+                assert pending_pid is not None
+                time.sleep(1)
+                self.assertTrue(self.process_active(pending_pid))
+                self.assertTrue(
+                    self.process_parent_id(pending_pid) == 1
+                    or self.process_has_ancestor(pending_pid, server_pid)
+                )
+            finally:
+                self.stop_supervisors(tmp / "state")
+                subprocess.run([TMUX, "-S", str(socket), "kill-server"], capture_output=True, check=False)
+
+    @unittest.skipUnless(TMUX, "tmux required")
+    def test_tmux_invocation_returns_setup_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            socket, server_pid = self.start_tmux_server(tmp)
+            try:
+                result = self.run_setup(
+                    tmp,
+                    health_timeout_s="invalid",
+                    extra_env={"TMUX": f"{socket},{server_pid},0"},
+                )
+                self.assertEqual(2, result.returncode, result.stdout + result.stderr)
+                self.assertIn("OMO_MANAGER_WATCHER_HEALTH_TIMEOUT_S must be a non-negative integer", result.stderr)
+            finally:
+                subprocess.run([TMUX, "-S", str(socket), "kill-server"], capture_output=True, check=False)
+
+    def test_tmux_handoff_times_out_when_bridge_never_reports_status(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            bin_dir = tmp / "home" / ".config" / "bin"
+            bin_dir.mkdir(parents=True)
+            fake_tmux = bin_dir / "tmux"
+            fake_tmux.write_text(
+                """#!/usr/bin/env bash
+case "$1" in
+  display-message) printf '12345\\n' ;;
+  run-shell) : ;;
+  *) exit 2 ;;
+esac
+""",
+                encoding="utf-8",
+            )
+            fake_tmux.chmod(0o755)
+            started = time.monotonic()
+            result = self.run_setup(
+                tmp,
+                extra_env={
+                    "TMUX": "/tmp/fake-tmux,12345,0",
+                    "OMO_MANAGER_TMUX_HANDOFF_TIMEOUT_S": "1",
+                },
+            )
+            elapsed = time.monotonic() - started
+            self.assertEqual(1, result.returncode)
+            self.assertIn("timed out waiting for tmux watcher setup after 1s", result.stderr)
+            self.assertLess(elapsed, 5)
+            match = re.search(r"handoff state=queued path=(\S+)", result.stderr)
+            self.assertIsNotNone(match, result.stderr)
+            assert match is not None
+            handoff = Path(match.group(1))
+            try:
+                self.assertTrue(handoff.is_dir())
+                self.assertFalse((handoff / "environment").exists())
+            finally:
+                shutil.rmtree(handoff, ignore_errors=True)
+
+    def test_tmux_timeout_preserves_handoff_until_bridge_publishes_status(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            bin_dir = tmp / "home" / ".config" / "bin"
+            bin_dir.mkdir(parents=True)
+            fake_tmux = bin_dir / "tmux"
+            fake_tmux.write_text(
+                """#!/usr/bin/env bash
+case "$1" in
+  display-message) printf '12345\\n' ;;
+  run-shell) (sleep 2; bash -c "$3") </dev/null >/dev/null 2>&1 & ;;
+  *) exit 2 ;;
+esac
+""",
+                encoding="utf-8",
+            )
+            fake_tmux.chmod(0o755)
+            result = self.run_setup(
+                tmp,
+                health_timeout_s="invalid",
+                extra_env={
+                    "TMUX": "/tmp/fake-tmux,12345,0",
+                    "OMO_MANAGER_TMUX_HANDOFF_TIMEOUT_S": "1",
+                },
+            )
+            self.assertEqual(1, result.returncode)
+            match = re.search(r"handoff state=(?:queued|running) path=(\S+)", result.stderr)
+            self.assertIsNotNone(match, result.stderr)
+            assert match is not None
+            handoff = Path(match.group(1))
+            try:
+                self.assertTrue(handoff.is_dir())
+                self.assertIn((handoff / "state").read_text(encoding="utf-8").strip(), {"queued", "running"})
+                self.wait_for_file(handoff / "status")
+                self.assertEqual("failed", (handoff / "state").read_text(encoding="utf-8").strip())
+                self.assertEqual("125", (handoff / "status").read_text(encoding="utf-8").strip())
+                self.assertFalse((handoff / "environment").exists())
+            finally:
+                shutil.rmtree(handoff, ignore_errors=True)
+
+    def test_tmux_timeout_does_not_cancel_bridge_that_loaded_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            local_env = tmp / "local.env"
+            local_env.write_text("sleep 2\n", encoding="utf-8")
+            bin_dir = tmp / "home" / ".config" / "bin"
+            bin_dir.mkdir(parents=True)
+            fake_tmux = bin_dir / "tmux"
+            fake_tmux.write_text(
+                """#!/usr/bin/env bash
+case "$1" in
+  display-message) printf '12345\\n' ;;
+  run-shell) bash -c "$3" </dev/null >/dev/null 2>&1 & ;;
+  *) exit 2 ;;
+esac
+""",
+                encoding="utf-8",
+            )
+            fake_tmux.chmod(0o755)
+            result = self.run_setup(
+                tmp,
+                health_timeout_s="invalid",
+                extra_env={
+                    "TMUX": "/tmp/fake-tmux,12345,0",
+                    "OMO_MANAGER_LOCAL_ENV": str(local_env),
+                    "OMO_MANAGER_TMUX_HANDOFF_TIMEOUT_S": "1",
+                },
+            )
+            self.assertEqual(1, result.returncode)
+            match = re.search(r"handoff state=running path=(\S+)", result.stderr)
+            self.assertIsNotNone(match, result.stderr)
+            assert match is not None
+            handoff = Path(match.group(1))
+            try:
+                self.assertFalse((handoff / "environment").exists())
+                self.wait_for_file(handoff / "status")
+                self.assertEqual("complete", (handoff / "state").read_text(encoding="utf-8").strip())
+                self.assertEqual("2", (handoff / "status").read_text(encoding="utf-8").strip())
+            finally:
+                shutil.rmtree(handoff, ignore_errors=True)
+
+    def test_invalid_tmux_timeout_cleans_temporary_handoff(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            bridge_tmp = tmp / "bridge-tmp"
+            bridge_tmp.mkdir()
+            bin_dir = tmp / "home" / ".config" / "bin"
+            bin_dir.mkdir(parents=True)
+            fake_tmux = bin_dir / "tmux"
+            fake_tmux.write_text(
+                """#!/usr/bin/env bash
+case "$1" in
+  display-message) printf '12345\\n' ;;
+  *) exit 2 ;;
+esac
+""",
+                encoding="utf-8",
+            )
+            fake_tmux.chmod(0o755)
+            result = self.run_setup(
+                tmp,
+                extra_env={
+                    "TMUX": "/tmp/fake-tmux,12345,0",
+                    "TMPDIR": str(bridge_tmp),
+                    "OMO_MANAGER_TMUX_HANDOFF_TIMEOUT_S": "invalid",
+                },
+            )
+            self.assertEqual(2, result.returncode)
+            self.assertIn("OMO_MANAGER_TMUX_HANDOFF_TIMEOUT_S must be a positive integer", result.stderr)
+            self.assertEqual([], list(bridge_tmp.iterdir()))
+
+    def test_tmux_timeout_accepts_leading_zero_decimal_digits(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            bin_dir = tmp / "home" / ".config" / "bin"
+            bin_dir.mkdir(parents=True)
+            fake_tmux = bin_dir / "tmux"
+            fake_tmux.write_text(
+                """#!/usr/bin/env bash
+case "$1" in
+  display-message) printf '12345\\n' ;;
+  run-shell) bash -c "$3" || : ;;
+  *) exit 2 ;;
+esac
+""",
+                encoding="utf-8",
+            )
+            fake_tmux.chmod(0o755)
+            for timeout in ("08", "09"):
+                with self.subTest(timeout=timeout):
+                    result = self.run_setup(
+                        tmp,
+                        health_timeout_s="invalid",
+                        extra_env={
+                            "TMUX": "/tmp/fake-tmux,12345,0",
+                            "OMO_MANAGER_TMUX_HANDOFF_TIMEOUT_S": timeout,
+                        },
+                    )
+                    self.assertEqual(2, result.returncode, result.stdout + result.stderr)
+                    self.assertIn(
+                        "OMO_MANAGER_WATCHER_HEALTH_TIMEOUT_S must be a non-negative integer",
+                        result.stderr,
+                    )
+
+    def test_tmux_timeout_rejects_leading_zero_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            bin_dir = tmp / "home" / ".config" / "bin"
+            bin_dir.mkdir(parents=True)
+            fake_tmux = bin_dir / "tmux"
+            fake_tmux.write_text(
+                """#!/usr/bin/env bash
+case "$1" in
+  display-message) printf '12345\\n' ;;
+  *) exit 2 ;;
+esac
+""",
+                encoding="utf-8",
+            )
+            fake_tmux.chmod(0o755)
+            result = self.run_setup(
+                tmp,
+                extra_env={
+                    "TMUX": "/tmp/fake-tmux,12345,0",
+                    "OMO_MANAGER_TMUX_HANDOFF_TIMEOUT_S": "00",
+                },
+            )
+            self.assertEqual(2, result.returncode)
+            self.assertIn("OMO_MANAGER_TMUX_HANDOFF_TIMEOUT_S must be a positive integer", result.stderr)
+
+    def test_tmux_timeout_treats_010_as_ten_seconds(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            bin_dir = tmp / "home" / ".config" / "bin"
+            bin_dir.mkdir(parents=True)
+            fake_tmux = bin_dir / "tmux"
+            fake_tmux.write_text(
+                """#!/usr/bin/env bash
+case "$1" in
+  display-message) printf '12345\\n' ;;
+  run-shell) (sleep 9; bash -c "$3") </dev/null >/dev/null 2>&1 & ;;
+  *) exit 2 ;;
+esac
+""",
+                encoding="utf-8",
+            )
+            fake_tmux.chmod(0o755)
+            result = self.run_setup(
+                tmp,
+                health_timeout_s="invalid",
+                extra_env={
+                    "TMUX": "/tmp/fake-tmux,12345,0",
+                    "OMO_MANAGER_TMUX_HANDOFF_TIMEOUT_S": "010",
+                },
+            )
+            self.assertEqual(2, result.returncode, result.stdout + result.stderr)
+            self.assertNotIn("timed out waiting for tmux watcher setup", result.stderr)
+
+    def test_tmux_handoff_keeps_environment_secrets_out_of_arguments(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            bin_dir = tmp / "home" / ".config" / "bin"
+            bin_dir.mkdir(parents=True)
+            tmux_log = tmp / "fake-tmux.log"
+            fake_tmux = bin_dir / "tmux"
+            fake_tmux.write_text(
+                """#!/usr/bin/env bash
+printf '%s\\0' "$@" >>"${FAKE_TMUX_LOG:?}"
+printf '\\n' >>"${FAKE_TMUX_LOG:?}"
+case "$1" in
+  display-message) printf '12345\\n' ;;
+  run-shell) bash -c "$3" || : ;;
+  wait-for) : ;;
+  *) exit 2 ;;
+esac
+""",
+                encoding="utf-8",
+            )
+            fake_tmux.chmod(0o755)
+            secret = "tmux-argv-secret-value"
+            try:
+                result = self.run_setup(
+                    tmp,
+                    extra_env={
+                        "TMUX": "/tmp/fake-tmux,12345,0",
+                        "FAKE_TMUX_LOG": str(tmux_log),
+                        "OMO_AGENT_GMAIL_APP_PASSWORD": secret,
+                        "OMO_MANAGER_TMUX_REENTRY": "0",
+                    },
+                )
+                self.assertEqual(2, result.returncode, result.stdout + result.stderr)
+                self.assertIn("split email setup requires", result.stderr)
+                arguments = tmux_log.read_bytes().replace(b"\0", b" ")
+                self.assertNotIn(secret.encode(), arguments)
+                self.assertEqual(1, arguments.count(b"run-shell"))
             finally:
                 self.stop_supervisors(tmp / "state")
 

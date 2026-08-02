@@ -16,6 +16,69 @@ EOF
     exit 0
     ;;
 esac
+if [ -n "${TMUX:-}" ] \
+  && [ "${OMO_MANAGER_TMUX_REENTRY:-0}" != 1 ] \
+  && command -v tmux >/dev/null 2>&1 \
+  && tmux display-message -p '#{pid}' >/dev/null 2>&1; then
+  umask 077
+  bridge_dir="$(mktemp -d "${TMPDIR:-/tmp}/omo-manager-watchers.XXXXXX")"
+  bridge_cleanup=1
+  trap '[ "$bridge_cleanup" -eq 0 ] || rm -rf -- "$bridge_dir"' EXIT
+  bridge_env="$bridge_dir/environment"
+  bridge_stdout="$bridge_dir/stdout"
+  bridge_stderr="$bridge_dir/stderr"
+  bridge_status="$bridge_dir/status"
+  bridge_state="$bridge_dir/state"
+  bridge_timeout_raw="${OMO_MANAGER_TMUX_HANDOFF_TIMEOUT_S:-60}"
+  case "$bridge_timeout_raw" in
+    ''|*[!0-9]*)
+      echo "OMO_MANAGER_TMUX_HANDOFF_TIMEOUT_S must be a positive integer" >&2
+      exit 2
+      ;;
+  esac
+  bridge_timeout_s=$((10#$bridge_timeout_raw))
+  if [ "$bridge_timeout_s" -eq 0 ]; then
+    echo "OMO_MANAGER_TMUX_HANDOFF_TIMEOUT_S must be a positive integer" >&2
+    exit 2
+  fi
+  export -p >"$bridge_env"
+  printf 'export OMO_MANAGER_TMUX_REENTRY=1\n' >>"$bridge_env"
+  printf 'queued\n' >"$bridge_state"
+
+  printf -v bridge_invocation '%q ' "$helper_path" "$@"
+  printf -v bridge_payload \
+    'set +e; if source %q; then rm -f %q; printf "running\\n" >%q.tmp; mv -f %q.tmp %q; %s>%q 2>%q; status=$?; final_state=complete; else status=125; final_state=failed; printf "tmux watcher setup handoff environment unavailable\\n" >%q; fi; printf "%%s\\n" "$final_state" >%q.tmp; mv -f %q.tmp %q; printf "%%s\\n" "$status" >%q.tmp; mv -f %q.tmp %q; exit "$status"' \
+    "$bridge_env" "$bridge_env" "$bridge_state" "$bridge_state" "$bridge_state" \
+    "$bridge_invocation" "$bridge_stdout" "$bridge_stderr" "$bridge_stderr" \
+    "$bridge_state" "$bridge_state" "$bridge_state" \
+    "$bridge_status" "$bridge_status" "$bridge_status"
+  printf -v bridge_command 'exec bash -c %q' "$bridge_payload"
+  if ! tmux run-shell -b "$bridge_command"; then
+    echo "failed to queue watcher setup through tmux" >&2
+    exit 1
+  fi
+  bridge_deadline=$((SECONDS + bridge_timeout_s))
+  while [ ! -s "$bridge_status" ] && [ "$SECONDS" -lt "$bridge_deadline" ]; do
+    sleep 0.1
+  done
+  cat "$bridge_stdout" 2>/dev/null || true
+  cat "$bridge_stderr" >&2 2>/dev/null || true
+  if [ ! -s "$bridge_status" ]; then
+    rm -f "$bridge_env"
+    bridge_cleanup=0
+    bridge_current_state="$(sed -n '1p' "$bridge_state" 2>/dev/null || true)"
+    echo "timed out waiting for tmux watcher setup after ${bridge_timeout_s}s; handoff state=${bridge_current_state:-unknown} path=$bridge_dir" >&2
+    exit 1
+  fi
+  bridge_result="$(sed -n '1p' "$bridge_status" 2>/dev/null || true)"
+  case "$bridge_result" in
+    ''|*[!0-9]*)
+      echo "tmux watcher setup did not report its status" >&2
+      exit 1
+      ;;
+  esac
+  exit "$bridge_result"
+fi
 env_manager_url="${OMO_MANAGER_URL+x}${OMO_MANAGER_URL-}"
 env_manager_target="${OMO_MANAGER_TMUX_TARGET+x}${OMO_MANAGER_TMUX_TARGET-}"
 env_root="${OMO_WORK_LOGS_ROOT+x}${OMO_WORK_LOGS_ROOT-}"
