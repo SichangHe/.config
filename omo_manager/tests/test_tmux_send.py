@@ -11,43 +11,44 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from omo_manager.omo_codex_status import Report
-from omo_manager.omo_tmux_send import Args
-from omo_manager.omo_tmux_send import CodexSendOptions
-from omo_manager.omo_tmux_send import ExistingInputAuthorization
-from omo_manager.omo_tmux_send import ExistingInputCapture
-from omo_manager.omo_tmux_send import async_job_from_query
-from omo_manager.omo_tmux_send import capture_complete_existing_input
-from omo_manager.omo_tmux_send import clear_existing_input_before_send
-from omo_manager.omo_tmux_send import exact_existing_input_text
-from omo_manager.omo_tmux_send import exact_capacity_error
-from omo_manager.omo_tmux_send import existing_input_authorization
-from omo_manager.omo_tmux_send import launch_async
-from omo_manager.omo_tmux_send import main
-from omo_manager.omo_tmux_send import message_probes
-from omo_manager.omo_tmux_send import notify_async_result
-from omo_manager.omo_tmux_send import parse_args
-from omo_manager.omo_tmux_send import query_async_result
-from omo_manager.omo_tmux_send import read_message
-from omo_manager.omo_tmux_send import require_no_existing_input
-from omo_manager.omo_tmux_send import require_sendable_codex_target
-from omo_manager.omo_tmux_send import run_async_worker
-from omo_manager.omo_tmux_send import run_capacity_resume
-from omo_manager.omo_tmux_send import run_control_to_codex
-from omo_manager.omo_tmux_send import run_tmux
-from omo_manager.omo_tmux_send import send_message_file_to_codex
-from omo_manager.omo_tmux_send import send_capacity_resume
-from omo_manager.omo_tmux_send import send_system_to_codex
-from omo_manager.omo_tmux_send import send_to_codex
-from omo_manager.omo_tmux_send import submit_existing_to_codex
-from omo_manager.omo_tmux_send import text_sha256
-from omo_manager.omo_tmux_send import verify_submit
-from omo_manager.omo_tmux_send import verify_capacity_resume
-from omo_manager.omo_tmux_send import wait_capacity_resume_paste
-from omo_manager.omo_tmux_send import wait_paste_visible
-from omo_manager.omo_tmux_send import worker_argv
-from omo_manager.omo_tmux_send import wrap_agent_message
-from omo_manager.omo_tmux_send import write_private_temp
-
+from omo_manager.omo_tmux_send import (
+    Args,
+    CodexSendOptions,
+    ExistingInputAuthorization,
+    ExistingInputCapture,
+    async_job_from_query,
+    capture_complete_existing_input,
+    clear_existing_input_before_send,
+    exact_capacity_error,
+    exact_existing_input_text,
+    existing_input_authorization,
+    launch_async,
+    main,
+    message_probes,
+    notify_async_result,
+    parse_args,
+    query_async_result,
+    read_message,
+    require_no_existing_input,
+    require_sendable_codex_target,
+    run_async_worker,
+    run_capacity_resume,
+    run_control_to_codex,
+    run_tmux,
+    send_capacity_resume,
+    send_message_file_to_codex,
+    send_system_to_codex,
+    send_to_codex,
+    submit_existing_to_codex,
+    text_sha256,
+    verify_capacity_resume,
+    verify_submit,
+    wait_capacity_resume_paste,
+    wait_paste_visible,
+    worker_argv,
+    wrap_agent_message,
+    write_private_temp,
+)
 
 SELECTED_MODEL_CAPACITY_SCREEN = [
     "⚠ Selected model is at capacity. Please try a different model.",
@@ -101,7 +102,7 @@ class TmuxSendTests(unittest.TestCase):
         capacity = ["Selected model is at capacity. Please try a different model.", "› Use /skills to list available skills", "  gpt-5.5"]
         pasted = ["Selected model is at capacity. Please try a different model.", "› resume", "  gpt-5.5"]
         running = ["• Working", "  gpt-5.5"]
-        tails = iter((capacity, capacity, pasted, running))
+        tails = iter((pasted, running))
 
         def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
             nonlocal loaded_text
@@ -110,13 +111,17 @@ class TmuxSendTests(unittest.TestCase):
                 loaded_text = Path(command[-1]).read_text(encoding="utf-8")
             return subprocess.CompletedProcess(command, 0)
 
-        with patch("omo_manager.omo_tmux_send.tail", side_effect=lambda *_: next(tails)), patch("omo_manager.omo_tmux_send.require_no_existing_input"), patch(
+        with patch("omo_manager.omo_tmux_send.exact_tail", side_effect=[(True, capacity), (True, capacity)]), patch("omo_manager.omo_tmux_send.tail", side_effect=lambda *_: next(tails)), patch("omo_manager.omo_tmux_send.require_no_existing_input"), patch(
             "omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run
         ):
             self.assertTrue(run_capacity_resume("cfg:1.0", options()))
 
         self.assertEqual("resume", loaded_text)
         self.assertTrue(any(command[:2] == ["tmux", "paste-buffer"] for command in calls))
+
+    def test_run_capacity_resume_reports_missing_target(self) -> None:
+        with patch("omo_manager.omo_tmux_send.exact_tail", return_value=(False, [])), self.assertRaisesRegex(RuntimeError, "target does not exist"):
+            run_capacity_resume("cfg:404", options())
 
     def test_verify_capacity_resume_accepts_running_and_reports_persistent_capacity(self) -> None:
         running = ["• Working", "  gpt-5.5"]
@@ -349,16 +354,20 @@ class TmuxSendTests(unittest.TestCase):
             ["› Continue task", "  gpt-5.5"],
         )
         for lines in cases:
-            with self.subTest(lines=lines), patch("omo_manager.omo_tmux_send.tail", return_value=lines):
+            with self.subTest(lines=lines), patch("omo_manager.omo_tmux_send.exact_tail", return_value=(True, lines)):
                 require_sendable_codex_target("cfg:1.0")
 
     def test_require_sendable_codex_target_rejects_not_codex_and_allows_error(self) -> None:
-        with patch("omo_manager.omo_tmux_send.tail", return_value=["fish prompt"]):
+        with patch("omo_manager.omo_tmux_send.exact_tail", return_value=(True, ["fish prompt"])):
             with self.assertRaisesRegex(RuntimeError, "not a Codex pane"):
                 require_sendable_codex_target("vl:20.0")
         lines = ["────", "■ Error: 429 Too Many Requests", "› Use /skills", "  gpt-5.5"]
-        with patch("omo_manager.omo_tmux_send.tail", return_value=lines):
+        with patch("omo_manager.omo_tmux_send.exact_tail", return_value=(True, lines)):
             self.assertEqual(("■ Error: 429 Too Many Requests",), require_sendable_codex_target("cfg:1.0"))
+
+    def test_require_sendable_codex_target_reports_missing_target(self) -> None:
+        with patch("omo_manager.omo_tmux_send.exact_tail", return_value=(False, [])), self.assertRaisesRegex(RuntimeError, "target does not exist"):
+            require_sendable_codex_target("cfg:404")
 
     def test_run_tmux_recovers_from_selected_model_capacity_error(self) -> None:
         pasted = [
@@ -378,7 +387,7 @@ class TmuxSendTests(unittest.TestCase):
             )
         )
 
-        with patch("omo_manager.omo_tmux_send.tail", side_effect=lambda *_: next(tails)), patch(
+        with patch("omo_manager.omo_tmux_send.exact_tail", return_value=(True, SELECTED_MODEL_CAPACITY_SCREEN)), patch("omo_manager.omo_tmux_send.tail", side_effect=lambda *_: next(tails)), patch(
             "omo_manager.omo_tmux_send.clear_existing_input_before_send", return_value=""
         ), patch("omo_manager.omo_tmux_send.require_no_existing_input"), patch(
             "omo_manager.omo_tmux_send.verify_placeholder_paste", return_value=True

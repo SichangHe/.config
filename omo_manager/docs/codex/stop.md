@@ -4,7 +4,9 @@ Normal manager task closure goes through `omo_task_status.py TASK.md done`, whic
 
 Before closing an idle task-backed worker, it asks for concise process feedback and waits up to `--feedback-wait-s`, default `180`; use `--no-feedback` for trivial, already-reviewed, or urgent closes. The feedback prompt asks whether the worker had partial-compaction access, whether it used it, why or why not, and what should change in the PCODX instructions/tools/triggers.
 
-It exits Codex with repeated Ctrl-C inputs and short delays until the pane reaches a shell or the bounded retry loop is exhausted. After Codex reaches a shell, it kills the single-pane tmux window or only the target pane in a multi-pane window.
+It exits Codex with repeated Ctrl-C inputs and short delays until the pane reaches a shell or the bounded retry loop is exhausted. After Codex reaches a shell, normal closure kills the single-pane tmux window or only the target pane in a multi-pane window.
+
+For selected-model-capacity recovery or another deliberate live restart, run `omo_codex_start.py --task-file TASK.md --target SESSION:WINDOW[.PANE] --model MODEL --reasoning-effort EFFORT --restart-running` from another pane. It captures the live Codex session id before atomically replacing the process with `tmux respawn-pane -k`; the exact tmux pane and window stay in place. Do not call the stop helper first. Use `omo_task_status.py TASK.md done` for normal closure. Both helpers refuse `h*` human-owned session targets.
 
 When invoked by the task-status helper, the task-file close note uses `MM-DD HH:MM TZ`, target, optional `session_id`, no year, and no resume command; task file frontmatter remains authoritative. The lower-level stop helper without a task file only prints the captured ID. It refuses to stop the current pane unless `--allow-self` is passed.
 

@@ -483,7 +483,7 @@ def blocked_closed_manager_dependency_is_active(root: Path, task: TaskLine, stat
 
 def quiet_closed_manager_not_codex(root: Path, task: TaskLine, row: StatusRow) -> bool:
     """Return whether a closed manager's empty exact target is intentionally quiet."""
-    if row.status != "not_codex" or " output=" in row.evidence:
+    if row.status not in {"missing", "not_codex"} or " output=" in row.evidence:
         return False
     task_path = resolve_task_path(root, task.task_file)
     state = scan_task_state(task_path, root) if task_path is not None else None
@@ -1001,19 +1001,19 @@ def add_blocked_idle_vl_row(root: Path, task: TaskLine, role: str, rows: list[St
             return
         if is_recorded_human_wait(state) and idle_status == "ready":
             return
-        if is_explicit_human_pending_wait(root, task, state) and idle_status == "not_codex" and " output=" not in classified.evidence:
+        if is_explicit_human_pending_wait(root, task, state) and idle_status in {"missing", "not_codex"} and " output=" not in classified.evidence:
             return
         quiet_dependency = blocked_dependencies_are_active(root, task, state) and idle_status == "ready"
-        quiet_resumable = blocked_resumable_dependencies_are_active(root, task, state) and idle_status == "not_codex" and " output=" not in classified.evidence and not target_resolves_exactly(target)
+        quiet_resumable = blocked_resumable_dependencies_are_active(root, task, state) and idle_status in {"missing", "not_codex"} and " output=" not in classified.evidence and not target_resolves_exactly(target)
         quiet_closed_manager = (
             blocked_closed_manager_dependency_is_active(root, task, state)
-            and idle_status == "not_codex"
+            and idle_status in {"missing", "not_codex"}
             and " output=" not in classified.evidence
         )
     reason = state.reason or "blocked with no reason in latest status line"
     evidence = classified.evidence if classified is not None else f"target={target} role={role} task_status=blocked"
     evidence += f" idle_status={idle_status} reason={reason}"
-    status = "ready" if quiet_dependency or quiet_resumable or quiet_closed_manager else idle_status if idle_status in {"error", "not_codex", "stuck_input"} else "blocked_idle"
+    status = "ready" if quiet_dependency or quiet_resumable or quiet_closed_manager else idle_status if idle_status in {"error", "missing", "not_codex", "stuck_input"} else "blocked_idle"
     rows.append(StatusRow(task.task_file, status, evidence, state.persistent_role, state.status, target, classified.unstick if classified is not None else ""))
     seen.add(seen_key)
 
@@ -1080,7 +1080,7 @@ def classify_target(task_file: str, target: str, persistent_role: bool = False, 
 
     `target` is the only address `inspect` can use. When it is empty, the task
     may still exist in TODO or a task file, but there is no pane to inspect as a
-    Codex session. That is reported as `not_codex` with `target=` evidence so
+    Codex session. That is reported as `missing` with `target=` evidence so
     callers can surface the broken/missing routing instead of silently dropping
     the task.
 
@@ -1089,7 +1089,7 @@ def classify_target(task_file: str, target: str, persistent_role: bool = False, 
     safe to submit.
     """
     if not target:
-        return StatusRow(task_file, "not_codex", "target=", persistent_role, task_status)
+        return StatusRow(task_file, "missing", "target=", persistent_role, task_status)
     report = recover_capacity_error(report or inspect(StatusArgs(target, 80)))
     evidence = f"target={target}"
     unstick = ""
@@ -1275,7 +1275,7 @@ def unmanaged_problem_row(row: StatusRow, report_not_codex: bool, report_ready_r
         return row
     if row.status in {"error", "stuck_input"}:
         return row
-    if row.status == "not_codex" and report_not_codex:
+    if row.status in {"missing", "not_codex"} and report_not_codex:
         return row
     return None
 
@@ -1296,7 +1296,7 @@ def manager_problem_row(args: Args, skip_targets: set[str], unstick_by_target: d
         return None
     disabled_reason = "no_auto_unstick" if not args.auto_unstick else "not_problems_only"
     row = classify_target("manager", args.manager_target, auto_unstick=args.auto_unstick, role="manager", unstick_by_target=unstick_by_target, auto_unstick_disabled_reason=disabled_reason, report=report)
-    return row if row.status in {"error", "not_codex", "stuck_input"} else None
+    return row if row.status in {"error", "missing", "not_codex", "stuck_input"} else None
 
 def registry_prune(args: Args, completed: set[str]) -> int:
     if not completed or not args.registry.exists():
@@ -1325,18 +1325,18 @@ def registry_prune(args: Args, completed: set[str]) -> int:
 
 def format_summary(rows: list[StatusRow], completed_stale_count: int, pruned_count: int) -> str:
     rows = [row for row in rows if not is_quiet_blocked_active_row(row)]
-    counts: dict[str, int] = {"not_codex": 0, "running": 0, "blocked_idle": 0, "error": 0, "ready": 0, "stuck_input": 0, "human_request": 0, "malformed_task": 0}
+    counts: dict[str, int] = {"missing": 0, "not_codex": 0, "running": 0, "blocked_idle": 0, "error": 0, "ready": 0, "stuck_input": 0, "human_request": 0, "malformed_task": 0}
     for row in rows:
         counts[row.status] = counts.get(row.status, 0) + 1
     lines = [
-        f"agent-status: not_codex={counts['not_codex']} running={counts['running']} blocked_idle={counts['blocked_idle']} error={counts['error']} ready={counts['ready']} stuck_input={counts['stuck_input']} human_request={counts['human_request']} malformed_task={counts['malformed_task']} done-registry-stale={completed_stale_count} pruned={pruned_count}",
+        f"agent-status: not_codex={counts['not_codex']} running={counts['running']} blocked_idle={counts['blocked_idle']} error={counts['error']} ready={counts['ready']} stuck_input={counts['stuck_input']} human_request={counts['human_request']} malformed_task={counts['malformed_task']} missing={counts['missing']} done-registry-stale={completed_stale_count} pruned={pruned_count}",
     ]
     for row in sorted(rows, key=lambda item: (item.status != "error", item.status, item.task_file)):
         lines.append(f"{row.status}: task={row.task_file} evidence={row.evidence}")
     return "\n".join(lines)
 
 
-PROBLEM_STATUSES = {"blocked_idle", "error", "human_request", "malformed_task", "manager_compaction", "manager_waiting_subagent", "not_codex", "ready", "stuck_input", "untracked_agent"}
+PROBLEM_STATUSES = {"blocked_idle", "error", "human_request", "malformed_task", "manager_compaction", "manager_waiting_subagent", "missing", "not_codex", "ready", "stuck_input", "untracked_agent"}
 
 
 def is_quiet_blocked_active_row(row: StatusRow) -> bool:
@@ -1362,10 +1362,10 @@ def format_problem_summary(rows: list[StatusRow], completed_stale: set[str] | di
     problem_rows = [row for row in rows if row.status in PROBLEM_STATUSES and not is_quiet_blocked_active_row(row)]
     if not problem_rows and not completed_stale_evidence_map:
         return ""
-    counts: dict[str, int] = {"not_codex": 0, "blocked_idle": 0, "error": 0, "human_request": 0, "malformed_task": 0, "manager_compaction": 0, "manager_waiting_subagent": 0, "ready": 0, "stuck_input": 0, "untracked_agent": 0}
+    counts: dict[str, int] = {"missing": 0, "not_codex": 0, "blocked_idle": 0, "error": 0, "human_request": 0, "malformed_task": 0, "manager_compaction": 0, "manager_waiting_subagent": 0, "ready": 0, "stuck_input": 0, "untracked_agent": 0}
     for row in problem_rows:
         counts[row.status] = counts.get(row.status, 0) + 1
-    parts = [f"{status}={counts[status]}" for status in ("not_codex", "blocked_idle", "error", "human_request", "malformed_task", "manager_compaction", "manager_waiting_subagent", "ready", "stuck_input", "untracked_agent") if counts[status]]
+    parts = [f"{status}={counts[status]}" for status in ("missing", "not_codex", "blocked_idle", "error", "human_request", "malformed_task", "manager_compaction", "manager_waiting_subagent", "ready", "stuck_input", "untracked_agent") if counts[status]]
     if completed_stale_evidence_map:
         parts.append(f"done-registry-stale={len(completed_stale_evidence_map)}")
     lines = [f"agent-problems: {' '.join(parts)}"]

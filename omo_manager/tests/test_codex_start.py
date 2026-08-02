@@ -7,8 +7,22 @@ from pathlib import Path
 from unittest.mock import patch
 
 import yaml
-
-from omo_manager.omo_codex_start import Args, Pane, StartError, current_todo_entries, launch_command, post_marker_lines, prompt_text, require_same_shell, resolve_pane, start, validate_task
+from omo_manager.omo_codex_start import (
+    Args,
+    Pane,
+    StartError,
+    current_todo_entries,
+    launch_command,
+    parse_args,
+    post_marker_lines,
+    prompt_text,
+    require_same_shell,
+    resolve_pane,
+    respawn_codex,
+    start,
+    validate_task,
+)
+from omo_manager.omo_codex_status import Report
 
 
 class CodexStartTests(unittest.TestCase):
@@ -56,6 +70,16 @@ class CodexStartTests(unittest.TestCase):
                 result = subprocess.CompletedProcess([], 0, f"{resolved}\t%18\t@18\tzsh\t/tmp\n", "")
                 with patch("omo_manager.omo_codex_start.run", return_value=result), self.assertRaisesRegex(StartError, "does not exist exactly"):
                     resolve_pane(requested)
+
+    def test_resolve_pane_reports_empty_tmux_expansion_as_missing_target(self) -> None:
+        result = subprocess.CompletedProcess([], 0, ":.\t\t\t\t\n", "")
+        with patch("omo_manager.omo_codex_start.run", return_value=result), self.assertRaisesRegex(StartError, "target does not exist: wl:18"):
+            resolve_pane("wl:18")
+
+    def test_resolve_pane_rejects_near_empty_tmux_expansion(self) -> None:
+        result = subprocess.CompletedProcess([], 0, ":.\t\t\t\t\n\n", "")
+        with patch("omo_manager.omo_codex_start.run", return_value=result), self.assertRaisesRegex(StartError, "invalid identity"):
+            resolve_pane("wl:18")
 
     def test_validate_task_requires_active_exact_todo_and_same_pane(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
@@ -108,6 +132,120 @@ class CodexStartTests(unittest.TestCase):
         prompt_path = Path("/tmp/prompt with spaces.txt")
         command = launch_command(self.args(root, session_id="", prompt_file=prompt_path), pane, prompt_path, "[marker]")
         self.assertIn('"$(cat -- \'/tmp/prompt with spaces.txt\')"', command)
+
+    def test_restart_running_needs_no_session_or_shell_confirmation(self) -> None:
+        args = parse_args(
+            [
+                "--task-file",
+                "worker.md",
+                "--target",
+                "cfg:2",
+                "--model",
+                "gpt-5.6-terra",
+                "--reasoning-effort",
+                "max",
+                "--restart-running",
+            ]
+        )
+        self.assertTrue(args.restart_running)
+        self.assertEqual("", args.session_id)
+
+    def test_restart_running_rejects_caller_supplied_session(self) -> None:
+        with self.assertRaises(SystemExit):
+            parse_args(
+                [
+                    "--task-file",
+                    "worker.md",
+                    "--target",
+                    "cfg:2",
+                    "--model",
+                    "gpt-5.6-terra",
+                    "--reasoning-effort",
+                    "max",
+                    "--restart-running",
+                    "--session-id",
+                    "019f670b-6a2f-7463-b9be-9aa6ff0cec43",
+                ]
+            )
+
+    def test_restart_command_execs_resumed_session(self) -> None:
+        root = Path("/tmp/work logs")
+        pane = Pane("cfg:2.0", "%2", "@2", "bun", root)
+        command = launch_command(self.args(root, restart_running=True), pane, None, "[marker]", replace_process=True)
+        self.assertIn("&& exec bunx", command)
+        self.assertIn("resume 019f670b-6a2f-7463-b9be-9aa6ff0cec43", command)
+
+    def test_respawn_replaces_process_and_preserves_pane_identity(self) -> None:
+        pane = Pane("cfg:2.0", "%2", "@2", "bun", Path("/tmp/work logs"))
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        with patch("omo_manager.omo_codex_start.run", return_value=completed) as run, patch("omo_manager.omo_codex_start.verify_same_pane") as verify:
+            respawn_codex(pane, "exec codex resume session")
+        run.assert_called_once_with(["tmux", "respawn-pane", "-k", "-t", "%2", "-c", "/tmp/work logs", "exec codex resume session"])
+        verify.assert_called_once_with(pane)
+
+    def test_restart_captures_session_before_atomic_respawn(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root)
+            pane = Pane("cfg:2.0", "%2", "@2", "bun", root)
+            args = self.args(root, session_id="", restart_running=True)
+            with (
+                patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                patch("omo_manager.omo_codex_start.inspect", return_value=Report("running", ["working"])),
+                patch("omo_manager.omo_codex_start.query_status_session_id", return_value=("019f670b-6a2f-7463-b9be-9aa6ff0cec43", "")) as capture,
+                patch("omo_manager.omo_codex_start.respawn_codex") as respawn,
+                patch("omo_manager.omo_codex_start.wait_started", return_value="running"),
+            ):
+                self.assertEqual("running", start(args))
+            capture.assert_called_once_with("%2", 240, 10.0)
+            command = respawn.call_args.args[1]
+            self.assertIn("resume 019f670b-6a2f-7463-b9be-9aa6ff0cec43", command)
+
+    def test_restart_does_not_replace_process_when_session_capture_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root)
+            pane = Pane("cfg:2.0", "%2", "@2", "bun", root)
+            with (
+                patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                patch("omo_manager.omo_codex_start.inspect", return_value=Report("running", ["working"])),
+                patch("omo_manager.omo_codex_start.query_status_session_id", return_value=("", "")),
+                patch("omo_manager.omo_codex_start.respawn_codex") as respawn,
+                self.assertRaisesRegex(StartError, "pane was not replaced"),
+            ):
+                start(self.args(root, session_id="", restart_running=True))
+            respawn.assert_not_called()
+
+    def test_restart_rejects_non_codex_process_before_session_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root)
+            pane = Pane("cfg:2.0", "%2", "@2", "python", root)
+            with (
+                patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                patch("omo_manager.omo_codex_start.inspect", return_value=Report("not_codex", ["python output"])),
+                patch("omo_manager.omo_codex_start.query_status_session_id") as capture,
+                patch("omo_manager.omo_codex_start.respawn_codex") as respawn,
+                self.assertRaisesRegex(StartError, "not a supported live Codex pane"),
+            ):
+                start(self.args(root, session_id="", restart_running=True))
+            capture.assert_not_called()
+            respawn.assert_not_called()
+
+    def test_restart_rejects_process_transition_after_session_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root)
+            pane = Pane("cfg:2.0", "%2", "@2", "bun", root)
+            with (
+                patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                patch("omo_manager.omo_codex_start.inspect", side_effect=[Report("running", ["working"]), Report("not_codex", ["shell"])]),
+                patch("omo_manager.omo_codex_start.query_status_session_id", return_value=("019f670b-6a2f-7463-b9be-9aa6ff0cec43", "")),
+                patch("omo_manager.omo_codex_start.respawn_codex") as respawn,
+                self.assertRaisesRegex(StartError, "not a supported live Codex pane"),
+            ):
+                start(self.args(root, session_id="", restart_running=True))
+            respawn.assert_not_called()
 
     def test_validate_task_rejects_non_codex_tool(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:

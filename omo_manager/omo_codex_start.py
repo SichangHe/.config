@@ -16,22 +16,29 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 try:
-    from omo_manager.omo_codex_status import current_block, status as classify_status, tail
-    from omo_manager.omo_task_metadata import TARGET_RE, TASK_FRONTMATTER_STATUSES, parse_task_metadata
+    from omo_manager.omo_codex_status import Args as StatusArgs
+    from omo_manager.omo_codex_status import current_block, inspect, tail
+    from omo_manager.omo_codex_status import status as classify_status
+    from omo_manager.omo_codex_stop import query_status_session_id
     from omo_manager.omo_task_lock import task_file_lock, task_target_lock
+    from omo_manager.omo_task_metadata import TARGET_RE, TASK_FRONTMATTER_STATUSES, parse_task_metadata
 except ModuleNotFoundError:
-    from omo_codex_status import current_block, status as classify_status, tail
-    from omo_task_metadata import TARGET_RE, TASK_FRONTMATTER_STATUSES, parse_task_metadata
+    from omo_codex_status import Args as StatusArgs
+    from omo_codex_status import current_block, inspect, tail
+    from omo_codex_status import status as classify_status
+    from omo_codex_stop import query_status_session_id
     from omo_task_lock import task_file_lock, task_target_lock
+    from omo_task_metadata import TARGET_RE, TASK_FRONTMATTER_STATUSES, parse_task_metadata
 
 HELPER_DIR = Path(__file__).resolve().parent
 WORKER_DEFAULTS = HELPER_DIR / "WORKER_DEFAULTS.md"
 SHELL_COMMANDS = {"bash", "dash", "fish", "sh", "zsh"}
 SUCCESS_STATUSES = {"ready", "running"}
+RESTARTABLE_STATUSES = {"error", "ready", "running", "stuck_input", "waiting_subagent"}
 EFFORTS = ("low", "medium", "high", "xhigh", "max", "ultra")
 MODEL_RE = re.compile(r"^[A-Za-z0-9._:/-]+$")
 UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$")
@@ -53,6 +60,7 @@ class Args:
     startup_timeout_s: float
     confirm_empty_shell: bool
     dry_run: bool
+    restart_running: bool = False
 
 
 @dataclass(frozen=True)
@@ -79,17 +87,20 @@ def parse_args(argv: list[str]) -> Args:
         action="store_true",
         help="Confirm the target shell has no input to preserve; the helper sends Ctrl-C before launch.",
     )
+    _ = parser.add_argument("--restart-running", action="store_true", help="Capture the current Codex session and atomically respawn it in this exact pane.")
     _ = parser.add_argument("--dry-run", action="store_true")
     parsed = parser.parse_args(argv)
     if MODEL_RE.fullmatch(parsed.model) is None:
         parser.error("--model contains unsupported characters.")
     if parsed.session_id and UUID_RE.fullmatch(parsed.session_id) is None:
         parser.error("--session-id must be a Codex UUID.")
-    if bool(parsed.session_id) == bool(parsed.prompt_file):
+    if parsed.restart_running and (parsed.prompt_file or parsed.session_id):
+        parser.error("--restart-running captures the live session and does not accept --prompt-file or --session-id.")
+    if not parsed.restart_running and bool(parsed.session_id) == bool(parsed.prompt_file):
         parser.error("provide exactly one of --session-id or --prompt-file.")
     if not math.isfinite(parsed.startup_timeout_s) or parsed.startup_timeout_s <= 0:
         parser.error("--startup-timeout-s must be finite and positive.")
-    if not parsed.confirm_empty_shell:
+    if not parsed.restart_running and not parsed.confirm_empty_shell:
         parser.error("--confirm-empty-shell is required because tmux cannot inspect a shell's input buffer.")
     return Args(
         root=parsed.root.expanduser().resolve(),
@@ -102,6 +113,7 @@ def parse_args(argv: list[str]) -> Args:
         startup_timeout_s=parsed.startup_timeout_s,
         confirm_empty_shell=parsed.confirm_empty_shell,
         dry_run=parsed.dry_run,
+        restart_running=parsed.restart_running,
     )
 
 
@@ -132,6 +144,8 @@ def resolve_pane(target: str) -> Pane:
         ]
     )
     if result.returncode != 0:
+        raise StartError(f"tmux target does not exist: {target}")
+    if result.stdout == ":.\t\t\t\t\n":
         raise StartError(f"tmux target does not exist: {target}")
     fields = result.stdout.rstrip("\n").split("\t")
     if len(fields) != 5 or not fields[1].startswith("%") or not fields[2].startswith("@"):
@@ -198,7 +212,7 @@ def prompt_text(args: Args, is_manager: bool) -> str:
     return "\n\n".join(source.read_text(encoding="utf-8").rstrip() for source in sources) + "\n"
 
 
-def launch_command(args: Args, pane: Pane, prompt_path: Path | None, marker: str) -> str:
+def launch_command(args: Args, pane: Pane, prompt_path: Path | None, marker: str, *, replace_process: bool = False) -> str:
     codex = [
         "bunx",
         "@openai/codex",
@@ -215,7 +229,8 @@ def launch_command(args: Args, pane: Pane, prompt_path: Path | None, marker: str
         rendered += f' "$(cat -- {shlex.quote(str(prompt_path))})"'
     exports = f"export OMO_AGENT_TMUX_TARGET={shlex.quote(pane.target)}"
     announce = f"printf '%s\\n' {shlex.quote(marker)}"
-    return f"{exports}; cd {shlex.quote(str(pane.workdir))} && {announce} && {rendered}"
+    execution = f"exec {rendered}" if replace_process else rendered
+    return f"{exports}; cd {shlex.quote(str(pane.workdir))} && {announce} && {execution}"
 
 
 def verify_same_pane(expected: Pane) -> None:
@@ -250,6 +265,21 @@ def send_shell_command(pane: Pane, command: str) -> None:
         raise StartError(f"failed to submit launch command: {submitted.stderr.strip()}")
 
 
+def respawn_codex(pane: Pane, command: str) -> None:
+    result = run(["tmux", "respawn-pane", "-k", "-t", pane.pane_id, "-c", str(pane.workdir), command])
+    if result.returncode != 0:
+        raise StartError(f"failed to respawn Codex in {pane.target}: {result.stderr.strip()}")
+    verify_same_pane(pane)
+
+
+def require_restartable_codex(pane: Pane) -> None:
+    verify_same_pane(pane)
+    report = inspect(StatusArgs(pane.target, 80))
+    verify_same_pane(pane)
+    if report.status not in RESTARTABLE_STATUSES:
+        raise StartError(f"target {pane.target} is not a supported live Codex pane: {report.status}")
+
+
 def post_marker_lines(pane: Pane, marker: str) -> list[str] | None:
     lines = tail(pane.target, 200)
     for index in range(len(lines) - 1, -1, -1):
@@ -276,14 +306,29 @@ def start(args: Args) -> str:
     pane = resolve_pane(args.target)
     if pane.target.partition(":")[0].startswith("h"):
         raise StartError("omo_codex_start cannot modify a human-owned `h*` tmux session; use the human-authorized task launcher.")
-    require_same_shell(pane)
     if os.environ.get("TMUX_PANE") == pane.pane_id:
         raise StartError("run this helper from a different pane than the empty target.")
+    if not args.restart_running:
+        require_same_shell(pane)
     path = task_path(args.root, args.task_file)
     with task_target_lock(args.root, pane.target), task_file_lock(path):
-        require_same_shell(pane)
+        verify_same_pane(pane)
+        if not args.restart_running:
+            require_same_shell(pane)
         is_manager = validate_task(args, pane)
-        text = prompt_text(args, is_manager)
+        if args.restart_running:
+            require_restartable_codex(pane)
+        effective_args = args
+        if args.restart_running and not args.session_id:
+            if args.dry_run:
+                effective_args = replace(args, session_id="00000000-0000-4000-8000-000000000000")
+            else:
+                session_id, _ = query_status_session_id(pane.pane_id, 240, min(10.0, args.startup_timeout_s))
+                if not session_id:
+                    raise StartError("could not capture the current Codex session id; the pane was not replaced.")
+                require_restartable_codex(pane)
+                effective_args = replace(args, session_id=session_id)
+        text = prompt_text(effective_args, is_manager)
         prompt_path: Path | None = None
         try:
             if text:
@@ -293,14 +338,17 @@ def start(args: Args) -> str:
                 prompt_path.chmod(0o600)
                 prompt_path.write_text(text, encoding="utf-8")
             marker = f"[omo-codex-start:{os.getpid()}:{time.time_ns()}]"
-            command = launch_command(args, pane, prompt_path, marker)
+            command = launch_command(effective_args, pane, prompt_path, marker, replace_process=args.restart_running)
             if args.dry_run:
                 print(f"target: {pane.target}")
-                print(f"mode: {'resume' if args.session_id else 'fresh'}")
+                print(f"mode: {'restart-running' if args.restart_running else 'resume' if args.session_id else 'fresh'}")
                 print(f"command: {command}")
                 return "dry-run"
-            require_same_shell(pane)
-            send_shell_command(pane, command)
+            if args.restart_running:
+                respawn_codex(pane, command)
+            else:
+                require_same_shell(pane)
+                send_shell_command(pane, command)
             return wait_started(pane, marker, args.startup_timeout_s)
         finally:
             if prompt_path is not None:

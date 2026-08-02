@@ -1,6 +1,6 @@
 # codex status and stuck handling
 
-`omo_codex_status.py` reads an exact numeric tmux pane and reports `not_codex`, `running`, `error`, `ready`, or `stuck_input` plus the current response tail. A target without a pane suffix means pane `.0`. Before capture or input, the helper verifies tmux resolved the requested session, window, and pane and then uses the immutable pane id, so a missing target such as `wl:1.0` cannot prefix-resolve to `wl:18.0`.
+`omo_codex_status.py` reads an exact numeric tmux pane and reports `missing`, `not_codex`, `running`, `error`, `ready`, or `stuck_input` plus the current response tail. `missing` means the requested tmux pane does not exist; `not_codex` means the pane exists but is not showing a supported Codex state. A target without a pane suffix means pane `.0`. Before capture or input, the helper verifies tmux resolved the requested session, window, and pane and then uses the immutable pane id, so a missing target such as `wl:1.0` cannot prefix-resolve to `wl:18.0`.
 
 It detects the Codex TUI by `  gpt-` on the last visible line, or by a final `tab to queue message` footer paired with visible Codex running output, and extracts output between the last separator and `- Worked for ... -`.
 

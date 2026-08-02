@@ -67,6 +67,18 @@ class CodexStatusTests(unittest.TestCase):
     def test_status_requires_codex_marker_in_last_line(self) -> None:
         self.assertEqual('not_codex', status(['shell'], current_block(['shell'])))
 
+    def test_inspect_distinguishes_missing_target_from_non_codex_process(self) -> None:
+        with patch('omo_manager.omo_codex_status.exact_tail', return_value=(False, [])):
+            report = inspect(Args('cfg:404', 80))
+        self.assertEqual('missing', report.status)
+
+    def test_inspect_reports_missing_when_target_disappears_after_capture(self) -> None:
+        with patch('omo_manager.omo_codex_status.exact_pane_id', side_effect=['%1', '']), patch(
+            'omo_manager.omo_codex_status.tail_pane_id', return_value=['────', 'done', '  gpt-5.6-terra']
+        ):
+            report = inspect(Args('cfg:404', 80))
+        self.assertEqual('missing', report.status)
+
     def test_paused_goal_resume_snapshot_is_submit_safe_stuck_input(self) -> None:
         lines = [
             '• The vlexp:6 delivery actually succeeded despite the stale verification error: the manager is live Codex and responded to the',
@@ -926,7 +938,7 @@ class CodexStatusTests(unittest.TestCase):
         self.assertEqual('running', report_from_lines(lines).status)
 
     def test_inspect_reads_tmux_tail(self) -> None:
-        with patch('omo_manager.omo_codex_status.tail', return_value=['────', 'done', '─ Worked for 1s ─', '  gpt-5.5']):
+        with patch('omo_manager.omo_codex_status.exact_tail', return_value=(True, ['────', 'done', '─ Worked for 1s ─', '  gpt-5.5'])):
             report = inspect(Args('cfg:1', 20))
         self.assertEqual('ready', report.status)
         self.assertEqual(['done'], report.lines)

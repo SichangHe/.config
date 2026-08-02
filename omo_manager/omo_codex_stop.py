@@ -8,15 +8,17 @@ import re
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 
 try:
-    from omo_manager.omo_codex_status import current_block, status, tail
+    from omo_manager.omo_codex_status import Args as StatusArgs
+    from omo_manager.omo_codex_status import current_block, exact_pane_id, inspect, status, tail, tail_pane_id
     from omo_manager.omo_task_lock import task_file_lock
 except ModuleNotFoundError:
-    from omo_codex_status import current_block, status, tail
+    from omo_codex_status import Args as StatusArgs
+    from omo_codex_status import current_block, exact_pane_id, inspect, status, tail, tail_pane_id
     from omo_task_lock import task_file_lock  # pyright: ignore[reportImplicitRelativeImport]
 
 SHELL_COMMANDS = {"bash", "dash", "fish", "sh", "zsh"}
@@ -25,6 +27,7 @@ EXIT_INTERRUPT_ATTEMPTS = 4
 DEFAULT_ROOT = Path(os.environ.get("OMO_WORK_LOGS_ROOT", Path.home() / "work_logs"))
 DEFAULT_RESUME_TOOL = "pcodx"
 RESUME_TOOLS = {"codex", "pcodx"}
+STOPPABLE_CODEX_STATUSES = {"error", "ready", "running", "stuck_input", "waiting_subagent"}
 UUID_RE = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 RESUME_RE = re.compile(rf"(?i)\bcodex\s+resume\s+(?:--[\w-]+\s+)*({UUID_RE})\b")
 EXIT_RESUME_RE = re.compile(
@@ -63,8 +66,9 @@ def parse_args(argv: list[str]) -> Args:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""This is the lower-level stop helper used by
-`omo_task_status.py TASK.md done`. Use it directly only for a non-task pane or
-recovery; normal task closure goes through `omo_task_status.py`.""",
+`omo_task_status.py TASK.md done`. Use it directly only for a non-task pane;
+normal task closure goes through `omo_task_status.py`. Restart a running task
+in place with `omo_codex_start.py --restart-running`.""",
     )
     _ = parser.add_argument("--target", required=True, help="tmux pane/window target, e.g. `cfg:2.0`.")
     _ = parser.add_argument("--wait-s", type=float, default=10.0)
@@ -102,12 +106,30 @@ def tmux(args: list[str], check: bool = False) -> subprocess.CompletedProcess[st
 
 
 def pane_id(target: str) -> str:
-    out = tmux(["display-message", "-p", "-t", target, "#{pane_id}"])
+    if re.fullmatch(r"%[0-9]+", target):
+        out = tmux(["display-message", "-p", "-t", target, "#{pane_id}"])
+        resolved = out.stdout.strip() if out.returncode == 0 else ""
+        return resolved if resolved == target else ""
+    return exact_pane_id(target)
+
+
+def pane_target(target: str) -> str:
+    out = tmux(["display-message", "-p", "-t", target, "#{session_name}:#{window_index}.#{pane_index}"])
     return out.stdout.strip() if out.returncode == 0 else ""
 
 
 def current_pane_id() -> str:
-    out = tmux(["display-message", "-p", "#{pane_id}"])
+    """Return this process's pane, never an attached client's selected pane."""
+
+    return os.environ.get("TMUX_PANE", "").strip()
+
+
+def is_human_owned_target(target: str) -> bool:
+    return target.partition(":")[0].startswith("h")
+
+
+def target_session_name(target: str) -> str:
+    out = tmux(["display-message", "-p", "-t", target, "#{session_name}"])
     return out.stdout.strip() if out.returncode == 0 else ""
 
 
@@ -353,11 +375,12 @@ def move_todo_to_previous(root: Path, task_file: str) -> None:
             _ = todo.write_text(updated, encoding="utf-8")
 
 
-def wait_shell(target: str, deadline_s: float) -> None:
+def wait_shell(target: str, deadline_s: float) -> bool:
     while time.monotonic() < deadline_s:
         if current_command(target) in SHELL_COMMANDS:
-            return
+            return True
         time.sleep(0.25)
+    return current_command(target) in SHELL_COMMANDS
 
 
 def paste_text(target: str, text: str) -> None:
@@ -410,7 +433,7 @@ def close_tmux_target(target: str) -> None:
 
 
 def codex_status(target: str) -> str:
-    lines = tail(target, 80)
+    lines = tail_pane_id(target, 80) if re.fullmatch(r"%[0-9]+", target) else tail(target, 80)
     return status(lines, current_block(lines))
 
 
@@ -453,6 +476,8 @@ def maybe_request_feedback(args: Args) -> None:
 
 
 def stop(args: Args) -> str:
+    if is_human_owned_target(args.target):
+        raise RuntimeError(f"refusing to stop human-owned target: {args.target}")
     target_pane = pane_id(args.target)
     if not target_pane:
         raise RuntimeError(f"tmux target not found: {args.target}")
@@ -460,15 +485,25 @@ def stop(args: Args) -> str:
         raise RuntimeError(f"refusing to stop the current pane: {args.target}")
     if args.task_file:
         _ = task_path(args.root, args.task_file)
-    if args.dry_run:
-        print(f"would send Ctrl-C to {args.target}")
+    if is_human_owned_target(target_session_name(target_pane)):
+        raise RuntimeError(f"refusing to stop human-owned target: {args.target}")
+    numeric_target = pane_target(target_pane)
+    report = inspect(StatusArgs(numeric_target, 80)) if numeric_target else None
+    if report is None or report.status not in STOPPABLE_CODEX_STATUSES:
+        actual = report.status if report is not None else "missing"
+        raise RuntimeError(f"target is not a supported live Codex pane: {args.target} status={actual}")
+    resolved_args = replace(args, target=target_pane)
+    if resolved_args.dry_run:
+        print(f"would send Ctrl-C to {resolved_args.target}")
         return ""
-    maybe_request_feedback(args)
-    session_id, before_close = query_status_session_id(args.target, args.lines, args.wait_s)
-    send_exit_keys(args.target)
-    wait_shell(args.target, time.monotonic() + args.wait_s)
-    after = capture(args.target, args.lines)
-    close_tmux_target(args.target)
+    maybe_request_feedback(resolved_args)
+    session_id, before_close = query_status_session_id(resolved_args.target, resolved_args.lines, resolved_args.wait_s)
+    if pane_id(resolved_args.target) != target_pane:
+        raise RuntimeError(f"tmux target disappeared before interrupt: {args.target}")
+    send_exit_keys(resolved_args.target)
+    _ = wait_shell(resolved_args.target, time.monotonic() + resolved_args.wait_s)
+    after = capture(resolved_args.target, resolved_args.lines)
+    close_tmux_target(resolved_args.target)
     return session_id or extract_exit_resume_id(before_close, after)
 
 

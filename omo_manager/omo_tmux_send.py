@@ -23,37 +23,43 @@ try:
     from omo_manager.omo_codex_status import (
         CODEX_EMPTY_INPUT_TEXTS,
         CODEX_RUNNING_EMPTY_INPUT_TEXTS,
-        Args as StatusArgs,
+        SELECTED_MODEL_CAPACITY_RE,
         current_block,
         current_input_text,
         exact_pane_id,
+        exact_tail,
         file_search_overlay_input_text,
         has_codex_model_footer,
         has_plan_prompt,
         inspect,
-        SELECTED_MODEL_CAPACITY_RE,
         status,
         tail,
         tail_pane_id,
         visible_error_lines,
     )
+    from omo_manager.omo_codex_status import (
+        Args as StatusArgs,
+    )
 except ModuleNotFoundError:
     from omo_codex_status import (
         CODEX_EMPTY_INPUT_TEXTS,
         CODEX_RUNNING_EMPTY_INPUT_TEXTS,
-        Args as StatusArgs,
+        SELECTED_MODEL_CAPACITY_RE,
         current_block,
         current_input_text,
         exact_pane_id,
+        exact_tail,
         file_search_overlay_input_text,
         has_codex_model_footer,
         has_plan_prompt,
         inspect,
-        SELECTED_MODEL_CAPACITY_RE,
         status,
         tail,
         tail_pane_id,
         visible_error_lines,
+    )
+    from omo_codex_status import (
+        Args as StatusArgs,
     )
 
 
@@ -495,12 +501,16 @@ def revalidate_error_transition(
     phase: str,
 ) -> list[str]:
     lines = tail(target, n_lines)
+    if not lines and not exact_pane_id(target):
+        raise RuntimeError(f"target does not exist {phase}: {target}")
     validate_error_transition(lines, preexisting_error, target, phase)
     return lines
 
 
 def require_codex_target(target: str, n_lines: int = 80) -> str:
-    lines = tail(target, n_lines)
+    exists, lines = exact_tail(target, n_lines)
+    if not exists:
+        raise RuntimeError(f"target does not exist: {target}")
     current_status = status(lines, current_block(lines))
     if current_status == "not_codex":
         raise RuntimeError(f"target is not a Codex pane: {target}")
@@ -508,7 +518,9 @@ def require_codex_target(target: str, n_lines: int = 80) -> str:
 
 
 def require_sendable_codex_target(target: str, n_lines: int = 80) -> tuple[str, ...] | None:
-    lines = tail(target, n_lines)
+    exists, lines = exact_tail(target, n_lines)
+    if not exists:
+        raise RuntimeError(f"target does not exist: {target}")
     current_status = status(lines, current_block(lines))
     if current_status == "not_codex":
         raise RuntimeError(f"target is not a Codex pane: {target}")
@@ -888,12 +900,18 @@ def run_capacity_resume(target: str, options: CodexSendOptions, *, before_paste:
         if options.dry_run:
             print(f"would send capacity resume to {target} from {temp_path}")
             return True
-        if not exact_capacity_error(tail(target, n_lines)):
+        exists, lines = exact_tail(target, n_lines)
+        if not exists:
+            raise RuntimeError(f"target does not exist: {target}")
+        if not exact_capacity_error(lines):
             raise RuntimeError(f"target does not have only the selected-model-capacity error: {target}")
         _ = subprocess.run(["tmux", "load-buffer", "-b", buffer_name, str(temp_path)], timeout=5, check=True)
         if before_paste is not None:
             before_paste()
-        if not exact_capacity_error(tail(target, n_lines)):
+        exists, lines = exact_tail(target, n_lines)
+        if not exists:
+            raise RuntimeError(f"target does not exist before paste: {target}")
+        if not exact_capacity_error(lines):
             raise RuntimeError(f"selected-model-capacity error changed before paste: {target}")
         require_no_existing_input(target)
         _ = subprocess.run(["tmux", "paste-buffer", "-b", buffer_name, "-t", target], timeout=5, check=True)

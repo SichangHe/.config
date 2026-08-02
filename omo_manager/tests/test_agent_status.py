@@ -681,7 +681,7 @@ resolved_task_items: []
             _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
             _ = (root / "active.md").write_text(task_frontmatter("running", runat="cfg:1"), encoding="utf-8")
             out = StringIO()
-            with patch("omo_manager.omo_codex_status.tail", return_value=pane), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present") as unstick, redirect_stdout(out):
+            with patch("omo_manager.omo_codex_status.exact_tail", return_value=(True, pane)), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present") as unstick, redirect_stdout(out):
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             unstick.assert_not_called()
             self.assertEqual("", out.getvalue())
@@ -695,7 +695,7 @@ resolved_task_items: []
             _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
             _ = (root / "active.md").write_text(task_frontmatter("running", runat="cfg:1"), encoding="utf-8")
             out = StringIO()
-            with patch("omo_manager.omo_codex_status.tail", return_value=pane), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present") as unstick, redirect_stdout(out):
+            with patch("omo_manager.omo_codex_status.exact_tail", return_value=(True, pane)), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present") as unstick, redirect_stdout(out):
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             unstick.assert_not_called()
             self.assertEqual("", out.getvalue())
@@ -709,7 +709,7 @@ resolved_task_items: []
             _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
             _ = (root / "active.md").write_text(task_frontmatter("running", runat="cfg:1"), encoding="utf-8")
             out = StringIO()
-            with patch("omo_manager.omo_codex_status.tail", return_value=pane), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present") as unstick, redirect_stdout(out):
+            with patch("omo_manager.omo_codex_status.exact_tail", return_value=(True, pane)), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present") as unstick, redirect_stdout(out):
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             unstick.assert_not_called()
             self.assertEqual("", out.getvalue())
@@ -731,7 +731,7 @@ resolved_task_items: []
             _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
             _ = (root / "active.md").write_text(task_frontmatter("running", runat="cfg:1"), encoding="utf-8")
             out = StringIO()
-            with patch("omo_manager.omo_codex_status.tail", return_value=pane), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present") as unstick, redirect_stdout(out):
+            with patch("omo_manager.omo_codex_status.exact_tail", return_value=(True, pane)), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present") as unstick, redirect_stdout(out):
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             unstick.assert_not_called()
             self.assertEqual("", out.getvalue())
@@ -745,7 +745,7 @@ resolved_task_items: []
             _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
             _ = (root / "active.md").write_text(task_frontmatter("running", runat="cfg:1"), encoding="utf-8")
             out = StringIO()
-            with patch("omo_manager.omo_codex_status.tail", return_value=pane), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present") as unstick, redirect_stdout(out):
+            with patch("omo_manager.omo_codex_status.exact_tail", return_value=(True, pane)), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present") as unstick, redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             unstick.assert_not_called()
             text = out.getvalue()
@@ -772,7 +772,7 @@ resolved_task_items: []
             _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
             _ = (root / "active.md").write_text(task_frontmatter("running", runat="cfg:1"), encoding="utf-8")
             out = StringIO()
-            with patch("omo_manager.omo_codex_status.tail", return_value=pane), redirect_stdout(out):
+            with patch("omo_manager.omo_codex_status.exact_tail", return_value=(True, pane)), redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             self.assertIn("ready: task=active.md", out.getvalue())
             self.assertNotIn("error: task=active.md", out.getvalue())
@@ -795,7 +795,7 @@ resolved_task_items: []
             _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
             _ = (root / "active.md").write_text(task_frontmatter("running", runat="cfg:1"), encoding="utf-8")
             out = StringIO()
-            with patch("omo_manager.omo_codex_status.tail", return_value=pane), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present") as unstick, redirect_stdout(out):
+            with patch("omo_manager.omo_codex_status.exact_tail", return_value=(True, pane)), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present") as unstick, redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
 
             unstick.assert_not_called()
@@ -814,7 +814,7 @@ resolved_task_items: []
             _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
             _ = (root / "active.md").write_text(task_frontmatter("running", runat="cfg:1"), encoding="utf-8")
             out = StringIO()
-            with patch("omo_manager.omo_codex_status.tail", return_value=pane), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present") as unstick, redirect_stdout(out):
+            with patch("omo_manager.omo_codex_status.exact_tail", return_value=(True, pane)), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present") as unstick, redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             unstick.assert_not_called()
             text = out.getvalue()
@@ -830,7 +830,7 @@ resolved_task_items: []
             _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
             _ = (root / "active.md").write_text(task_frontmatter("running", runat="cfg:1"), encoding="utf-8")
             out = StringIO()
-            with patch("omo_manager.omo_codex_status.tail", return_value=pane), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present") as unstick, redirect_stdout(out):
+            with patch("omo_manager.omo_codex_status.exact_tail", return_value=(True, pane)), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present") as unstick, redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             unstick.assert_not_called()
             text = out.getvalue()
@@ -846,7 +846,7 @@ resolved_task_items: []
             _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
             _ = (root / "active.md").write_text(task_frontmatter("running", runat="cfg:1"), encoding="utf-8")
             out = StringIO()
-            with patch("omo_manager.omo_codex_status.tail", return_value=pane), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present"), redirect_stdout(out):
+            with patch("omo_manager.omo_codex_status.exact_tail", return_value=(True, pane)), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present"), redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             text = out.getvalue()
             self.assertIn("output=■ Error: 429 Too Many Requests", text)
@@ -861,7 +861,7 @@ resolved_task_items: []
             _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
             _ = (root / "active.md").write_text(task_frontmatter("running", runat="cfg:1"), encoding="utf-8")
             out = StringIO()
-            with patch("omo_manager.omo_codex_status.tail", return_value=pane), redirect_stdout(out):
+            with patch("omo_manager.omo_codex_status.exact_tail", return_value=(True, pane)), redirect_stdout(out):
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             self.assertEqual("", out.getvalue())
 
@@ -874,7 +874,7 @@ resolved_task_items: []
             _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
             _ = (root / "active.md").write_text(task_frontmatter("running", runat="cfg:1"), encoding="utf-8")
             out = StringIO()
-            with patch("omo_manager.omo_codex_status.tail", return_value=pane), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present", return_value="sent_enter") as unstick, redirect_stdout(out):
+            with patch("omo_manager.omo_codex_status.exact_tail", return_value=(True, pane)), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present", return_value="sent_enter") as unstick, redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             unstick.assert_not_called()
             self.assertIn("ready: task=active.md", out.getvalue())
@@ -889,7 +889,7 @@ resolved_task_items: []
             _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
             _ = (root / "active.md").write_text(task_frontmatter("running", runat="cfg:1"), encoding="utf-8")
             out = StringIO()
-            with patch("omo_manager.omo_codex_status.tail", return_value=pane), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present", return_value="sent_enter") as unstick, redirect_stdout(out):
+            with patch("omo_manager.omo_codex_status.exact_tail", return_value=(True, pane)), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present", return_value="sent_enter") as unstick, redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             unstick.assert_not_called()
             self.assertIn("ready: task=active.md", out.getvalue())
@@ -904,7 +904,7 @@ resolved_task_items: []
             _ = (root / "TODO.md").write_text("current:\nactive.md cfg 1\n", encoding="utf-8")
             _ = (root / "active.md").write_text(task_frontmatter("running", runat="cfg:1"), encoding="utf-8")
             out = StringIO()
-            with patch("omo_manager.omo_codex_status.tail", return_value=pane), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present", return_value="sent_enter") as unstick, redirect_stdout(out):
+            with patch("omo_manager.omo_codex_status.exact_tail", return_value=(True, pane)), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present", return_value="sent_enter") as unstick, redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             unstick.assert_called_once()
             text = out.getvalue()
@@ -1192,7 +1192,7 @@ resolved_task_items: []
             with patch("omo_manager.omo_codex_status.exact_pane_id", return_value=""), redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "wl:1.0"]))
 
-            self.assertIn("not_codex: task=manager evidence=target=wl:1.0 role=manager", out.getvalue())
+            self.assertIn("missing: task=manager evidence=target=wl:1.0 role=manager", out.getvalue())
 
     def test_problems_only_reports_ready_running_persistent_role_marker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1533,6 +1533,26 @@ resolved_task_items: []
             with patch("omo_manager.omo_agent_status.inspect", side_effect=fake_inspect), redirect_stdout(out):
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
 
+            self.assertEqual("", out.getvalue())
+
+    def test_problems_only_suppresses_missing_closed_manager_with_live_dependency(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nworker.md cfg:1\ndependency.md cfg:2\n", encoding="utf-8")
+            _ = (root / "worker.md").write_text(
+                task_frontmatter("blocked", runat="cfg:1", is_manager=True, blocked_on="dependency.md replacement custody pending")
+                + "(manager closed Codex agent 07-29 17:20 PDT; tmux target `cfg:1`; session_id: `old`.)\n",
+                encoding="utf-8",
+            )
+            _ = (root / "dependency.md").write_text(task_frontmatter("running", runat="cfg:2", managerat="cfg:1"), encoding="utf-8")
+
+            def fake_inspect(args: object, **_: object) -> Report:
+                return Report("running", ["working"]) if getattr(args, "target") == "cfg:2" else Report("missing", [])
+
+            with patch("omo_manager.omo_agent_status.inspect", side_effect=fake_inspect), redirect_stdout(StringIO()) as out:
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             self.assertEqual("", out.getvalue())
 
     def test_problems_only_suppresses_long_running_closed_manager_with_live_dependency(self) -> None:
@@ -1911,7 +1931,7 @@ resolved_task_items: []
             _ = registry.write_text('{"sessions":[{"task_file":"role.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\nrole.md cfg 1\n", encoding="utf-8")
             _ = (root / "role.md").write_text(task_frontmatter("blocked", runat="cfg:1", blocked_on="persistent VL supervisor role waiting for follow-up"), encoding="utf-8")
-            with patch("omo_manager.omo_codex_status.tail", return_value=pane), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present") as unstick:
+            with patch("omo_manager.omo_codex_status.exact_tail", return_value=(True, pane)), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present") as unstick:
                 for _ in range(2):
                     out = StringIO()
                     with redirect_stdout(out):
@@ -2961,6 +2981,7 @@ resolved_task_items: []
             ("running", "", Report("ready", ["idle"]), "ready"),
             ("blocked", "dependency unavailable", Report("ready", ["idle"]), "blocked_idle"),
             ("running", "", Report("error", ["fatal"]), "error"),
+            ("running", "", Report("missing", []), "missing"),
             ("running", "", Report("stuck_input", ["› retry report delivery"], "retry report delivery", True), "stuck_input"),
         )
         for status, blocked_on, report, expected in cases:

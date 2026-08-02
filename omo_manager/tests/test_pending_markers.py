@@ -6398,6 +6398,16 @@ class PendingMarkerTests(unittest.TestCase):
         self.assertIn("terminal failed sender result and fresh `not_codex` or unchanged fatal-error evidence", text)
         self.assertIn("visible input alone is insufficient", text)
 
+    def test_agent_problem_report_preserves_missing_target_state(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        text = watcher.format_agent_problem_report(
+            ["missing: task=task.md evidence=target=cfg:404 role=worker owner_target=cfg:1"]
+        )
+
+        self.assertIn("1 tmux targets do not exist", text)
+        self.assertIn("task.md cfg:404", text)
+
     def test_completed_sender_result_is_retained_until_watcher_drain(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 

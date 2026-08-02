@@ -3842,14 +3842,14 @@ def status_command(args: Args, problems_only: bool = False) -> list[str]:
 
 
 def agent_problem_count_line(lines: list[str]) -> str:
-    counts = {"malformed_task": 0, "not_codex": 0, "blocked_idle": 0, "error": 0, "manager_compaction": 0, "manager_waiting_subagent": 0, "ready": 0, "stuck_input": 0, "untracked_agent": 0, "done-registry-stale": 0}
+    counts = {"malformed_task": 0, "missing": 0, "not_codex": 0, "blocked_idle": 0, "error": 0, "manager_compaction": 0, "manager_waiting_subagent": 0, "ready": 0, "stuck_input": 0, "untracked_agent": 0, "done-registry-stale": 0}
     for line in lines:
-        problem_match = re.match(r"^(malformed_task|not_codex|blocked_idle|error|manager_compaction|manager_waiting_subagent|ready|stuck_input|untracked_agent): ", line)
+        problem_match = re.match(r"^(malformed_task|missing|not_codex|blocked_idle|error|manager_compaction|manager_waiting_subagent|ready|stuck_input|untracked_agent): ", line)
         if problem_match is not None:
             counts[problem_match.group(1)] += 1
         elif line.startswith("done-stale: "):
             counts["done-registry-stale"] += 1
-    parts = [f"{status}={counts[status]}" for status in ("malformed_task", "not_codex", "blocked_idle", "error", "manager_compaction", "manager_waiting_subagent", "ready", "stuck_input", "untracked_agent") if counts[status]]
+    parts = [f"{status}={counts[status]}" for status in ("malformed_task", "missing", "not_codex", "blocked_idle", "error", "manager_compaction", "manager_waiting_subagent", "ready", "stuck_input", "untracked_agent") if counts[status]]
     if counts["done-registry-stale"]:
         parts.append(f"done-registry-stale={counts['done-registry-stale']}")
     return f"agent-problems: {' '.join(parts)}" if parts else ""
@@ -3861,12 +3861,12 @@ def count_line_value(count_line: str, name: str) -> int:
 
 
 def agent_status_count_line(lines: list[str], count_line: str) -> str:
-    counts = {"malformed_task": 0, "not_codex": 0, "running": 0, "blocked_idle": 0, "error": 0, "ready": 0, "stuck_input": 0, "human_request": 0}
+    counts = {"malformed_task": 0, "missing": 0, "not_codex": 0, "running": 0, "blocked_idle": 0, "error": 0, "ready": 0, "stuck_input": 0, "human_request": 0}
     for line in lines:
-        match = re.match(r"^(malformed_task|not_codex|running|blocked_idle|error|ready|stuck_input|human_request): ", line)
+        match = re.match(r"^(malformed_task|missing|not_codex|running|blocked_idle|error|ready|stuck_input|human_request): ", line)
         if match is not None:
             counts[match.group(1)] += 1
-    parts = [f"{status}={counts[status]}" for status in ("malformed_task", "not_codex", "running", "blocked_idle", "error", "ready", "stuck_input", "human_request")]
+    parts = [f"{status}={counts[status]}" for status in ("malformed_task", "missing", "not_codex", "running", "blocked_idle", "error", "ready", "stuck_input", "human_request")]
     return f"agent-status: {' '.join(parts)} done-registry-stale={count_line_value(count_line, 'done-registry-stale')} pruned={count_line_value(count_line, 'pruned')}"
 
 
@@ -3884,12 +3884,12 @@ def problem_line_target(line: str) -> str:
 
 
 def problem_line_task(line: str) -> str:
-    match = re.match(r"^(?:malformed_task|not_codex|blocked_idle|error|human_request|manager_compaction|manager_waiting_subagent|ready|stuck_input|untracked_agent|done-stale): task=(\S+)", line)
+    match = re.match(r"^(?:malformed_task|missing|not_codex|blocked_idle|error|human_request|manager_compaction|manager_waiting_subagent|ready|stuck_input|untracked_agent|done-stale): task=(\S+)", line)
     return match.group(1) if match is not None else ""
 
 
 def problem_line_status(line: str) -> str:
-    match = re.match(r"^(malformed_task|not_codex|blocked_idle|error|human_request|manager_compaction|manager_waiting_subagent|ready|stuck_input|untracked_agent|done-stale): ", line)
+    match = re.match(r"^(malformed_task|missing|not_codex|blocked_idle|error|human_request|manager_compaction|manager_waiting_subagent|ready|stuck_input|untracked_agent|done-stale): ", line)
     return match.group(1) if match is not None else ""
 
 
@@ -4342,7 +4342,7 @@ def problem_row_line(row: ProblemRow) -> str:
         return f"{label} {tagged_text('input', row.input_text)}"
     if row.status == "untracked_agent":
         return f"{label} {tagged_text('output', row.output)}"
-    if row.status in {"not_codex", "error", "ready", "manager_compaction", "manager_waiting_subagent"}:
+    if row.status in {"missing", "not_codex", "error", "ready", "manager_compaction", "manager_waiting_subagent"}:
         return f"{label} {tagged_text('output', row.output)}"
     if row.status == "blocked_idle":
         reason = row.reason or row.output
@@ -4359,6 +4359,7 @@ def problem_section(status: str, rows: list[ProblemRow]) -> list[str]:
         return []
     headings = {
         "malformed_task": f"{len(rows)} active tasks have malformed metadata; repair their task frontmatter before relying on lifecycle status:",
+        "missing": f"{len(rows)} tmux targets do not exist; correct stale routing or relaunch the tracked agents:",
         "not_codex": f"{len(rows)} not codex; check if agent failed to launch:",
         "blocked_idle": f"{len(rows)} blocked agents are ready; if they are not actually blocked, correct their status, otherwise make sure whatever is blocking them is being resolved:",
         "error": f"{len(rows)} have visible errors; inspect the pane, fix the error, or restart them:",
@@ -4378,7 +4379,7 @@ def format_agent_problem_report(lines: list[str]) -> str:
     rows = [row for line in lines if (row := parse_problem_row(line)) is not None and row.status != "human_request"]
     if not rows:
         return ""
-    order = ("malformed_task", "not_codex", "untracked_agent", "blocked_idle", "error", "manager_compaction", "manager_waiting_subagent", "ready", "stuck_input", "done-stale")
+    order = ("malformed_task", "missing", "not_codex", "untracked_agent", "blocked_idle", "error", "manager_compaction", "manager_waiting_subagent", "ready", "stuck_input", "done-stale")
     parts = [AGENT_PROBLEM_HEADER, DELIVERY_RECOVERY_POLICY]
     for status in order:
         parts.extend(problem_section(status, [row for row in rows if row.status == status]))
@@ -4511,8 +4512,8 @@ def evidence_target(line: str) -> str:
     return match.group(1) if match is not None else ""
 
 
-MANAGER_SELF_PROBLEM_STATUSES = {"blocked_idle", "error", "manager_compaction", "manager_waiting_subagent", "not_codex", "ready", "stuck_input"}
-MANAGER_HUMAN_EMAIL_PROBLEM_STATUSES = {"error", "manager_waiting_subagent", "not_codex", "stuck_input"}
+MANAGER_SELF_PROBLEM_STATUSES = {"blocked_idle", "error", "manager_compaction", "manager_waiting_subagent", "missing", "not_codex", "ready", "stuck_input"}
+MANAGER_HUMAN_EMAIL_PROBLEM_STATUSES = {"error", "manager_waiting_subagent", "missing", "not_codex", "stuck_input"}
 
 
 def problem_line_matches_manager_target(line: str, manager_target: str = "") -> bool:
@@ -4537,7 +4538,7 @@ def any_manager_self_problem_line(line: str) -> bool:
 
 
 def manager_self_status_line(line: str, manager_target: str = "") -> bool:
-    if re.match(r"^(?:not_codex|running|blocked_idle|error|ready|stuck_input|human_request): task=\S+ evidence=target=", line) is None:
+    if re.match(r"^(?:missing|not_codex|running|blocked_idle|error|ready|stuck_input|human_request): task=\S+ evidence=target=", line) is None:
         return False
     target = evidence_target(line)
     return bool(target and same_tmux_target(target, manager_target))

@@ -142,6 +142,16 @@ def tail(target: str, n_lines: int) -> list[str]:
     return tail_pane_id(pane_id, n_lines) if pane_id else []
 
 
+def exact_tail(target: str, n_lines: int) -> tuple[bool, list[str]]:
+    """Capture one exact pane and reject disappearance or target rebinding."""
+
+    pane_id = exact_pane_id(target)
+    if not pane_id:
+        return False, []
+    lines = tail_pane_id(pane_id, n_lines)
+    return (True, lines) if exact_pane_id(target) == pane_id else (False, [])
+
+
 def has_codex_model_footer(lines: list[str]) -> bool:
     return bool(lines and CODEX_RE.search(lines[-1]) is not None)
 
@@ -667,7 +677,10 @@ def report_from_lines(lines: list[str], *, detect_waiting_subagent: bool = False
 
 
 def inspect(args: Args, *, detect_waiting_subagent: bool = False) -> Report:
-    return report_from_lines(tail(args.target, args.n_lines), detect_waiting_subagent=detect_waiting_subagent)
+    exists, lines = exact_tail(args.target, args.n_lines)
+    if not exists:
+        return Report("missing", [])
+    return report_from_lines(lines, detect_waiting_subagent=detect_waiting_subagent)
 
 
 def wait_while_compacting(target: str, n_lines: int = COMPACTION_WAIT_LINES, timeout_s: float = DEFAULT_COMPACTION_WAIT_TIMEOUT_S, interval_s: float = COMPACTION_WAIT_INTERVAL_S) -> Report:

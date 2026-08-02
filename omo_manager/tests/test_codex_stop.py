@@ -1,15 +1,19 @@
 import contextlib
 import io
+import os
 import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+from omo_manager.omo_codex_status import Report
 from omo_manager.omo_codex_stop import (
     Args,
     close_note,
     close_tmux_target,
+    codex_status,
+    current_pane_id,
     extract_exit_resume_id,
     extract_new_status_session_id,
     extract_resume_id,
@@ -17,6 +21,8 @@ from omo_manager.omo_codex_stop import (
     feedback_prompt,
     main,
     maybe_request_feedback,
+    pane_id,
+    parse_args,
     post_interrupt_output,
     query_status_session_id,
     record_close,
@@ -27,6 +33,39 @@ from omo_manager.omo_codex_stop import (
 
 
 class CodexStopTests(unittest.TestCase):
+    def setUp(self) -> None:
+        session = patch("omo_manager.omo_codex_stop.target_session_name", return_value="cfg")
+        session.start()
+        self.addCleanup(session.stop)
+        target = patch("omo_manager.omo_codex_stop.pane_target", return_value="cfg:1.0")
+        target.start()
+        self.addCleanup(target.stop)
+        inspect = patch("omo_manager.omo_codex_stop.inspect", return_value=Report("ready", ["idle"]))
+        inspect.start()
+        self.addCleanup(inspect.stop)
+
+    def test_current_pane_id_uses_calling_process_environment(self) -> None:
+        with patch.dict(os.environ, {"TMUX_PANE": "%caller"}, clear=True), patch("omo_manager.omo_codex_stop.tmux") as tmux:
+            self.assertEqual("%caller", current_pane_id())
+        tmux.assert_not_called()
+
+    def test_codex_status_captures_pinned_pane_id(self) -> None:
+        lines = ["› Use /skills to list available skills", "  gpt-5.6-terra"]
+        with patch("omo_manager.omo_codex_stop.tail_pane_id", return_value=lines) as capture, patch("omo_manager.omo_codex_stop.tail") as symbolic:
+            self.assertEqual("ready", codex_status("%42"))
+        capture.assert_called_once_with("%42", 80)
+        symbolic.assert_not_called()
+
+    def test_pane_id_rejects_missing_exact_target_without_tmux_prefix_fallback(self) -> None:
+        with patch("omo_manager.omo_codex_stop.exact_pane_id", return_value="") as exact, patch("omo_manager.omo_codex_stop.tmux") as tmux:
+            self.assertEqual("", pane_id("wl:1.0"))
+        exact.assert_called_once_with("wl:1.0")
+        tmux.assert_not_called()
+
+    def test_obsolete_preserve_pane_flag_is_rejected(self) -> None:
+        with self.assertRaises(SystemExit):
+            parse_args(["--target", "cfg:1.0", "--preserve-pane"])
+
     def test_extract_resume_id_from_resume_command(self) -> None:
         text = "To resume, run codex resume 11111111-2222-3333-4444-555555555555\n"
         self.assertEqual("11111111-2222-3333-4444-555555555555", extract_resume_id(text))
@@ -326,6 +365,50 @@ class CodexStopTests(unittest.TestCase):
                     stop(Args("cfg:1.0", 0.0, 10, False, False, Path(tmp), "missing.md"))
         tmux.assert_not_called()
 
+    def test_stop_rejects_human_owned_target_before_inspection(self) -> None:
+        with patch("omo_manager.omo_codex_stop.pane_id") as pane_id:
+            with self.assertRaisesRegex(RuntimeError, "human-owned"):
+                stop(Args("human:1.0", 0.0, 10, False, False))
+        pane_id.assert_not_called()
+
+    def test_stop_rejects_non_codex_process_before_status_probe_or_interrupt(self) -> None:
+        with (
+            patch("omo_manager.omo_codex_stop.pane_id", return_value="%1"),
+            patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%2"),
+            patch("omo_manager.omo_codex_stop.inspect", return_value=Report("not_codex", ["shell"])),
+            patch("omo_manager.omo_codex_stop.query_status_session_id") as query,
+            patch("omo_manager.omo_codex_stop.send_exit_keys") as interrupt,
+            self.assertRaisesRegex(RuntimeError, "not a supported live Codex pane"),
+        ):
+            stop(Args("cfg:1.0", 0.0, 10, False, False))
+        query.assert_not_called()
+        interrupt.assert_not_called()
+
+    def test_stop_rejects_human_owned_target_resolved_from_pane_id(self) -> None:
+        with (
+            patch("omo_manager.omo_codex_stop.pane_id", return_value="%42"),
+            patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%caller"),
+            patch("omo_manager.omo_codex_stop.target_session_name", return_value="hwork"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "human-owned"):
+                stop(Args("%42", 0.0, 10, False, False))
+
+    def test_stop_uses_resolved_pane_after_optional_pane_target(self) -> None:
+        session_id = "019e9ed9-6262-71c0-b4b3-72ffd4182e98"
+        with (
+            patch("omo_manager.omo_codex_stop.pane_id", return_value="%42"),
+            patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%caller"),
+            patch("omo_manager.omo_codex_stop.query_status_session_id", return_value=(session_id, "")) as query,
+            patch("omo_manager.omo_codex_stop.send_exit_keys") as interrupt,
+            patch("omo_manager.omo_codex_stop.wait_shell", return_value=True),
+            patch("omo_manager.omo_codex_stop.capture", return_value=""),
+            patch("omo_manager.omo_codex_stop.close_tmux_target") as close,
+        ):
+            self.assertEqual(session_id, stop(Args("cfg:1", 0.0, 10, False, False)))
+        query.assert_called_once_with("%42", 10, 0.0)
+        interrupt.assert_called_once_with("%42")
+        close.assert_called_once_with("%42")
+
     def test_stop_ignores_resume_id_from_pre_interrupt_transcript(self) -> None:
         visible_transcript = "codex resume 11111111-2222-3333-4444-555555555555\n"
         with (
@@ -367,6 +450,31 @@ class CodexStopTests(unittest.TestCase):
             patch("omo_manager.omo_codex_stop.close_tmux_target"),
         ):
             self.assertEqual("019e9ed9-6262-71c0-b4b3-72ffd4182e98", stop(Args("cfg:1.0", 0.0, 10, False, False)))
+
+    def test_stop_does_not_interrupt_stale_resolved_pane(self) -> None:
+        with (
+            patch("omo_manager.omo_codex_stop.pane_id", side_effect=["%1", ""]),
+            patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%2"),
+            patch("omo_manager.omo_codex_stop.query_status_session_id", return_value=("", "")),
+            patch("omo_manager.omo_codex_stop.send_exit_keys") as interrupt,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "disappeared before interrupt"):
+                stop(Args("cfg:1.0", 0.0, 10, False, False))
+        interrupt.assert_not_called()
+
+    def test_stop_closes_pane_without_recovery_flag(self) -> None:
+        session_id = "019e9ed9-6262-71c0-b4b3-72ffd4182e98"
+        with (
+            patch("omo_manager.omo_codex_stop.pane_id", return_value="%1"),
+            patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%2"),
+            patch("omo_manager.omo_codex_stop.query_status_session_id", return_value=(session_id, "")),
+            patch("omo_manager.omo_codex_stop.send_exit_keys"),
+            patch("omo_manager.omo_codex_stop.wait_shell"),
+            patch("omo_manager.omo_codex_stop.capture", return_value=""),
+            patch("omo_manager.omo_codex_stop.close_tmux_target") as close,
+        ):
+            self.assertEqual(session_id, stop(Args("cfg:1.0", 0.0, 10, False, False)))
+        close.assert_called_once_with("%1")
 
     def test_maybe_request_feedback_prompts_ready_task_worker(self) -> None:
         with (
