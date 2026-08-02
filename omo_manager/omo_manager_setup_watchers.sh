@@ -168,6 +168,19 @@ cmdline_has_arg_pair() {
   return 1
 }
 
+cmdline_has_option_value() {
+  local pid="$1" option="$2" arg expect=0
+  [ -r "/proc/$pid/cmdline" ] || return 1
+  while IFS= read -r -d '' arg; do
+    if [ "$expect" -eq 1 ]; then
+      [ -n "$arg" ] && return 0
+      expect=0
+    fi
+    [ "$arg" = "$option" ] && expect=1
+  done <"/proc/$pid/cmdline"
+  return 1
+}
+
 cmdline_has_resolved_path_arg_pair() {
   local pid="$1" option="$2" value="$3" arg expect=0
   [ -r "/proc/$pid/cmdline" ] || return 1
@@ -332,21 +345,26 @@ pidfile_value() {
 }
 
 owned_supervisor_process() {
-  local pid="$1" start="$2" token="$3" name="$4" script_path="$5" root_arg="$6" state_arg="${7:-}" loop_marker="${8:-}" current_start
+  local pid="$1" start="$2" token="$3" name="$4" script_path="$5" root_arg="$6" state_arg="${7:-}" loop_marker="${8:-}" allow_prior_root="${9:-0}" current_start
   process_alive "$pid" || return 1
   current_start="$(process_start_ticks "$pid")" || return 1
   [ "$current_start" = "$start" ] || return 1
   cmdline_has_fragment "$pid" "$loop_marker" || return 1
   cmdline_has_arg "$pid" "$name-watch-supervisor" || return 1
+  cmdline_has_resolved_path_arg "$pid" "$state_dir/.$name-supervisor.$token.pid" || return 1
   cmdline_has_arg "$pid" "$token" || return 1
   cmdline_has_resolved_path_arg "$pid" "$script_path" || return 1
-  cmdline_has_resolved_path_arg_pair "$pid" --root "$root_arg" || return 1
+  if [ "$allow_prior_root" -eq 1 ]; then
+    cmdline_has_option_value "$pid" --root || return 1
+  else
+    cmdline_has_resolved_path_arg_pair "$pid" --root "$root_arg" || return 1
+  fi
   [ -z "$state_arg" ] || cmdline_has_arg_pair "$pid" --state-dir "$state_arg"
 }
 
 stop_owned_supervisor() {
-  local name="$1" pid="$2" start="$3" token="$4" script_path="$5" root_arg="$6" state_arg="${7:-}" loop_marker="${8:-}"
-  if owned_supervisor_process "$pid" "$start" "$token" "$name" "$script_path" "$root_arg" "$state_arg" "$loop_marker"; then
+  local name="$1" pid="$2" start="$3" token="$4" script_path="$5" root_arg="$6" state_arg="${7:-}" loop_marker="${8:-}" allow_prior_root="${9:-0}"
+  if owned_supervisor_process "$pid" "$start" "$token" "$name" "$script_path" "$root_arg" "$state_arg" "$loop_marker" "$allow_prior_root"; then
     stop_process_tree "$pid"
     return 0
   fi
@@ -362,7 +380,7 @@ stop_pidfile_supervisor() {
   pid="$(pidfile_value "$file" pid)"
   start="$(pidfile_value "$file" start)"
   token="$(pidfile_value "$file" token)"
-  if process_alive "$pid" && ! stop_owned_supervisor "$name" "$pid" "$start" "$token" "$script_path" "$root_arg" "$state_arg" "$loop_marker"; then
+  if process_alive "$pid" && ! stop_owned_supervisor "$name" "$pid" "$start" "$token" "$script_path" "$root_arg" "$state_arg" "$loop_marker" 1; then
     echo "stale $name watcher pidfile points at unowned pid $pid; ignoring" >&2
   fi
   rm -f "$file"

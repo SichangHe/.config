@@ -630,6 +630,102 @@ while :; do sleep 30; done
                     current.wait(timeout=2)
                 self.stop_supervisors(state)
 
+    def test_setup_replaces_authenticated_pidfile_supervisors_after_root_change(self) -> None:
+        for name, script_name in (
+            ("pending", "omo_pending_watch.py"),
+            ("email", "email_idle_watcher.py"),
+        ):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as raw_tmp:
+                tmp = Path(raw_tmp)
+                old_root = tmp / "old-work-logs"
+                state = tmp / "state"
+                old_root.mkdir()
+                state.mkdir()
+                token = f"old-{name}-token"
+                launch_pid_file = state / f".{name}-supervisor.{token}.pid"
+                child_pid_file = tmp / f"old-{name}-child.pid"
+                args = [
+                    "bash",
+                    "-c",
+                    f'sleep 30 & printf \'%s\\n\' "$!" >"{child_pid_file}"; wait # {name} watcher exited status',
+                    f"{name}-watch-supervisor",
+                    str(launch_pid_file),
+                    token,
+                    "uv",
+                    "run",
+                    "--project",
+                    str(ROOT / "omo_manager"),
+                    str(ROOT / "omo_manager" / script_name),
+                    "--root",
+                    str(old_root),
+                ]
+                if name == "email":
+                    args.extend(("--mail-dir", str(old_root / "manager_mail"), "--state-dir", str(state)))
+                current = subprocess.Popen(args, start_new_session=True)
+                child_pid: int | None = None
+                try:
+                    self.wait_for_file(child_pid_file)
+                    child_pid = int(child_pid_file.read_text(encoding="utf-8").strip())
+                    (state / f"{name}-supervisor.pid").write_text(
+                        f"pid={current.pid}\nstart={self.process_start_ticks(current.pid)}\ntoken={token}\n",
+                        encoding="utf-8",
+                    )
+                    result = self.run_setup(tmp)
+                    self.assertEqual(0, result.returncode, result.stderr)
+                    current.wait(timeout=2)
+                    self.assertFalse(self.process_active(child_pid))
+                    self.assertNotIn(f"stale {name} watcher pidfile points at unowned", result.stderr)
+                finally:
+                    if current.poll() is None:
+                        self.terminate_tree(current.pid)
+                        current.wait(timeout=2)
+                    if child_pid is not None and self.process_active(child_pid):
+                        os.kill(child_pid, signal.SIGKILL)
+                    self.stop_supervisors(state)
+
+    def test_setup_does_not_kill_pidfile_supervisor_from_another_state_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            old_root = tmp / "old-work-logs"
+            state = tmp / "state"
+            other_state = tmp / "other-state"
+            old_root.mkdir()
+            state.mkdir()
+            other_state.mkdir()
+            token = "other-state-token"
+            current = subprocess.Popen(
+                [
+                    "bash",
+                    "-c",
+                    "while :; do sleep 30; done # pending watcher exited status",
+                    "pending-watch-supervisor",
+                    str(other_state / f".pending-supervisor.{token}.pid"),
+                    token,
+                    "uv",
+                    "run",
+                    "--project",
+                    str(ROOT / "omo_manager"),
+                    str(ROOT / "omo_manager" / "omo_pending_watch.py"),
+                    "--root",
+                    str(old_root),
+                ],
+                start_new_session=True,
+            )
+            (state / "pending-supervisor.pid").write_text(
+                f"pid={current.pid}\nstart={self.process_start_ticks(current.pid)}\ntoken={token}\n",
+                encoding="utf-8",
+            )
+            try:
+                result = self.run_setup(tmp)
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertIsNone(current.poll())
+                self.assertIn("stale pending watcher pidfile points at unowned", result.stderr)
+            finally:
+                if current.poll() is None:
+                    self.terminate_tree(current.pid)
+                    current.wait(timeout=2)
+                self.stop_supervisors(state)
+
     def test_setup_does_not_kill_legacy_supervisor_started_through_symlink_path(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
