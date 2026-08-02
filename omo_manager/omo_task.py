@@ -21,12 +21,14 @@ try:
     from omo_manager.omo_codex_status import current_block, exact_pane_id, status, tail
     from omo_manager.omo_agent_status import DEFAULT_ROOT, TaskFrontmatterError, parse_task_metadata
     from omo_manager.omo_blocking import V2_VERSION, generated_id, load_yaml_mapping, render_task, split_task_text, v2_enabled
+    from omo_manager.omo_manager_rotate import RotationError, is_codex_launch_argv, process_is_under, read_processes
     from omo_manager.omo_task_metadata import TASK_FRONTMATTER_V1, TASK_FRONTMATTER_V2, first_version, frontmatter_text
     from omo_manager.omo_task_lock import task_file_lock, task_target_lock
 except ModuleNotFoundError:
     from omo_codex_status import current_block, exact_pane_id, status, tail
     from omo_agent_status import DEFAULT_ROOT, TaskFrontmatterError, parse_task_metadata
     from omo_blocking import V2_VERSION, generated_id, load_yaml_mapping, render_task, split_task_text, v2_enabled
+    from omo_manager_rotate import RotationError, is_codex_launch_argv, process_is_under, read_processes
     from omo_task_metadata import TASK_FRONTMATTER_V1, TASK_FRONTMATTER_V2, first_version, frontmatter_text
     from omo_task_lock import task_file_lock, task_target_lock
 
@@ -1085,7 +1087,24 @@ def require_same_launch_pane(target: str, pane_id: str) -> None:
         raise RuntimeError(f"tmux target {target} no longer identifies launched pane {pane_id}.")
 
 
-def send_launch_enter(target: str, pane_id: str = "") -> None:
+def has_live_codex_launch(pane_id: str) -> bool:
+    try:
+        result = tmux(["display-message", "-p", "-t", pane_id, "#{pane_pid}"])
+        pane_pid = int(result.stdout.strip()) if result.returncode == 0 else 0
+        processes = read_processes()
+    except (OSError, RotationError, subprocess.SubprocessError, ValueError):
+        return False
+    launches = [
+        process
+        for process in processes.values()
+        if process.state != "Z" and process_is_under(process.pid, pane_pid, processes) and is_codex_launch_argv(process.argv)
+    ]
+    return pane_pid > 1 and len(launches) == 1
+
+
+def send_launch_enter(target: str, pane_id: str = "", *, require_codex_launch: bool = False) -> None:
+    if require_codex_launch and (not pane_id or not has_live_codex_launch(pane_id)):
+        raise RuntimeError(f"tmux pane {pane_id or target} does not contain the launched Codex process.")
     delivery_target = target
     if pane_id:
         require_same_launch_pane(target, pane_id)
@@ -1115,8 +1134,9 @@ def wait_command_started(
     last_command = ""
     last_status = "unknown"
     saw_non_shell = False
+    saw_unattributed_trust_prompt = False
     trust_confirmed = False
-    trust_allowed = bool(pane_id and marker_is_fresh(launch_marker, baseline_lines))
+    trust_allowed = bool(pane_id and not is_human_tmux_session(target) and marker_is_fresh(launch_marker, baseline_lines))
     baseline_has_trust_prompt = baseline_lines is not None and has_codex_trust_prompt(current_block(list(baseline_lines)).lines)
     inspection_target = pane_id or target
     while time.monotonic() < deadline_s:
@@ -1134,8 +1154,11 @@ def wait_command_started(
             ):
                 last_status = "directory trust confirmation still visible"
                 if not trust_confirmed:
-                    send_launch_enter(target, pane_id)
+                    send_launch_enter(target, pane_id, require_codex_launch=True)
                     trust_confirmed = True
+            elif active_status == "not_codex" and has_codex_trust_prompt(block.lines):
+                last_status = "unattributed directory trust confirmation visible"
+                saw_unattributed_trust_prompt = True
             elif trust_confirmed:
                 last_status = active_status
                 if last_status != "not_codex":
@@ -1153,8 +1176,11 @@ def wait_command_started(
             if trust_attributed and active_status == "not_codex" and has_codex_trust_prompt(block.lines):
                 last_status = "directory trust confirmation still visible"
                 if not trust_confirmed:
-                    send_launch_enter(target, pane_id)
+                    send_launch_enter(target, pane_id, require_codex_launch=True)
                     trust_confirmed = True
+            elif active_status == "not_codex" and has_codex_trust_prompt(block.lines):
+                last_status = "unattributed directory trust confirmation visible"
+                saw_unattributed_trust_prompt = True
             else:
                 last_status = active_status
                 if last_status != "not_codex":
@@ -1165,6 +1191,8 @@ def wait_command_started(
         time.sleep(0.05)
     if trust_confirmed and last_status == "directory trust confirmation still visible":
         raise RuntimeError(f"Codex directory trust confirmation did not advance after {timeout_s:g}s.")
+    if saw_unattributed_trust_prompt:
+        raise RuntimeError(f"Codex launch not verified after {timeout_s:g}s: {last_status}")
     if saw_non_shell:
         return CODEX_LAUNCH_STARTED
     raise RuntimeError(f"Codex launch not verified after {timeout_s:g}s: pane command={last_command or 'unknown'}, status={last_status}")

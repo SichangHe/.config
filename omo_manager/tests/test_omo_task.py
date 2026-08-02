@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from omo_manager.omo_agent_status import parse_task_metadata
+from omo_manager.omo_manager_rotate import ProcessInfo
 from omo_manager.omo_task import (
     CODEX_LAUNCH_STARTED,
     CODEX_LAUNCH_UPDATED,
@@ -22,6 +23,7 @@ from omo_manager.omo_task import (
     codex_cmd,
     effective_tool,
     ensure_task_file,
+    has_live_codex_launch,
     refreshed_todo_entry,
     is_vl_agent,
     launched_frontmatter_text,
@@ -72,7 +74,7 @@ CAPTURED_TRUST_POPUP = """> You are in /ssd1/sichangheagent/vlnfix1
   2. No, quit
 
   Press enter to continue
-""".splitlines()
+""".splitlines() + [""] * 54
 
 
 class OmoTaskTests(unittest.TestCase):
@@ -2295,6 +2297,18 @@ class OmoTaskTests(unittest.TestCase):
             wait_command_started('cfg:7')
             sleep.assert_not_called()
 
+    def test_has_live_codex_launch_requires_exact_package_argv(self) -> None:
+        pane = ProcessInfo(100, 1, "S", ("zsh",))
+        for argv, expected in (
+            (("/usr/bin/bunx", "@openai/codex", "--model", "gpt-5.6-sol"), True),
+            (("/usr/bin/bunx", "unrelated-package"), False),
+        ):
+            with self.subTest(argv=argv):
+                processes = {100: pane, 101: ProcessInfo(101, 100, "S", argv)}
+                result = subprocess.CompletedProcess([], 0, "100\n", "")
+                with patch("omo_manager.omo_task.tmux", return_value=result), patch("omo_manager.omo_task.read_processes", return_value=processes):
+                    self.assertEqual(expected, has_live_codex_launch("%7"))
+
     def test_wait_command_started_updates_codex_runtime(self) -> None:
         launch_marker = "[omo-task-launch:test]"
         update_prompt = [
@@ -2333,6 +2347,7 @@ class OmoTaskTests(unittest.TestCase):
             patch("omo_manager.omo_task.subprocess.run", side_effect=capture),
             patch("omo_manager.omo_task.exact_pane_id", return_value="%7"),
             patch("omo_manager.omo_task.current_command", return_value="bunx"),
+            patch("omo_manager.omo_task.has_live_codex_launch", return_value=True),
             patch("omo_manager.omo_task.tmux") as tmux,
             patch("omo_manager.omo_task.time.sleep"),
         ):
@@ -2348,6 +2363,7 @@ class OmoTaskTests(unittest.TestCase):
             patch("omo_manager.omo_task.capture_pane", side_effect=[CAPTURED_TRUST_POPUP, ready]),
             patch("omo_manager.omo_task.exact_pane_id", return_value="%7"),
             patch("omo_manager.omo_task.current_command", return_value="bunx"),
+            patch("omo_manager.omo_task.has_live_codex_launch", return_value=True),
             patch("omo_manager.omo_task.tmux") as tmux,
             patch("omo_manager.omo_task.time.sleep"),
         ):
@@ -2377,13 +2393,13 @@ class OmoTaskTests(unittest.TestCase):
             patch("omo_manager.omo_task.time.monotonic", side_effect=[0, 0, 6]),
             patch("omo_manager.omo_task.time.sleep"),
         ):
-            result = wait_command_started(
-                "cfg:7",
-                launch_marker=launch_marker,
-                pane_id="%7",
-                baseline_lines=tuple(CAPTURED_TRUST_POPUP),
-            )
-        self.assertEqual(CODEX_LAUNCH_STARTED, result)
+            with self.assertRaisesRegex(RuntimeError, "unattributed directory trust confirmation"):
+                wait_command_started(
+                    "cfg:7",
+                    launch_marker=launch_marker,
+                    pane_id="%7",
+                    baseline_lines=tuple(CAPTURED_TRUST_POPUP),
+                )
         tmux.assert_not_called()
 
     def test_wait_command_started_rejects_markerless_trust_text_from_python(self) -> None:
@@ -2395,8 +2411,33 @@ class OmoTaskTests(unittest.TestCase):
             patch("omo_manager.omo_task.time.monotonic", side_effect=[0, 0, 6]),
             patch("omo_manager.omo_task.time.sleep"),
         ):
-            result = wait_command_started("cfg:7", launch_marker=launch_marker, pane_id="%7", baseline_lines=("shell",))
-        self.assertEqual(CODEX_LAUNCH_STARTED, result)
+            with self.assertRaisesRegex(RuntimeError, "unattributed directory trust confirmation"):
+                wait_command_started("cfg:7", launch_marker=launch_marker, pane_id="%7", baseline_lines=("shell",))
+        tmux.assert_not_called()
+
+    def test_wait_command_started_rejects_markerless_trust_text_from_other_bunx_process(self) -> None:
+        launch_marker = "[omo:0123456789abcdef0123456789abcdef]"
+        with (
+            patch("omo_manager.omo_task.capture_pane", return_value=CAPTURED_TRUST_POPUP),
+            patch("omo_manager.omo_task.current_command", return_value="bunx"),
+            patch("omo_manager.omo_task.has_live_codex_launch", return_value=False),
+            patch("omo_manager.omo_task.tmux") as tmux,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "does not contain the launched Codex process"):
+                wait_command_started("cfg:7", launch_marker=launch_marker, pane_id="%7", baseline_lines=("shell",))
+        tmux.assert_not_called()
+
+    def test_wait_command_started_rejects_trust_popup_in_human_owned_session(self) -> None:
+        launch_marker = "[omo:0123456789abcdef0123456789abcdef]"
+        with (
+            patch("omo_manager.omo_task.capture_pane", return_value=CAPTURED_TRUST_POPUP),
+            patch("omo_manager.omo_task.current_command", return_value="bunx"),
+            patch("omo_manager.omo_task.tmux") as tmux,
+            patch("omo_manager.omo_task.time.monotonic", side_effect=[0, 0, 6]),
+            patch("omo_manager.omo_task.time.sleep"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "unattributed directory trust confirmation"):
+                wait_command_started("hcfg:7", launch_marker=launch_marker, pane_id="%7", baseline_lines=("shell",))
         tmux.assert_not_called()
 
     def test_wait_command_started_rejects_changed_pane_before_trust_enter(self) -> None:
@@ -2405,6 +2446,7 @@ class OmoTaskTests(unittest.TestCase):
             patch("omo_manager.omo_task.capture_pane", return_value=trust_screen(launch_marker)),
             patch("omo_manager.omo_task.exact_pane_id", return_value="%8"),
             patch("omo_manager.omo_task.current_command", return_value="bunx"),
+            patch("omo_manager.omo_task.has_live_codex_launch", return_value=True),
             patch("omo_manager.omo_task.tmux") as tmux,
         ):
             with self.assertRaisesRegex(RuntimeError, "no longer identifies launched pane"):
@@ -2424,6 +2466,7 @@ class OmoTaskTests(unittest.TestCase):
             patch("omo_manager.omo_task.capture_pane", side_effect=[trust_prompt, ready]),
             patch("omo_manager.omo_task.exact_pane_id", return_value="%7"),
             patch("omo_manager.omo_task.current_command", return_value="bunx"),
+            patch("omo_manager.omo_task.has_live_codex_launch", return_value=True),
             patch("omo_manager.omo_task.tmux") as tmux,
             patch("omo_manager.omo_task.time.sleep"),
         ):
@@ -2444,7 +2487,7 @@ class OmoTaskTests(unittest.TestCase):
                 wait_command_started("cfg:7", launch_marker=launch_marker, pane_id="%7", baseline_lines=("shell",))
         tmux.assert_not_called()
 
-    def test_wait_command_started_rejects_unframed_ordinary_output(self) -> None:
+    def test_wait_command_started_does_not_confirm_unframed_ordinary_output(self) -> None:
         launch_marker = "[omo:0123456789abcdef0123456789abcdef]"
         unframed = [
             launch_marker,
@@ -2455,37 +2498,37 @@ class OmoTaskTests(unittest.TestCase):
         ]
         with (
             patch("omo_manager.omo_task.capture_pane", return_value=unframed),
-            patch("omo_manager.omo_task.current_command", return_value="bash"),
+            patch("omo_manager.omo_task.current_command", return_value="bunx"),
             patch("omo_manager.omo_task.tmux") as tmux,
-            patch("omo_manager.omo_task.time.monotonic", side_effect=[0, 6]),
+            patch("omo_manager.omo_task.time.monotonic", side_effect=[0, 0, 6]),
             patch("omo_manager.omo_task.time.sleep"),
         ):
-            with self.assertRaisesRegex(RuntimeError, "Codex launch not verified"):
-                wait_command_started("cfg:7", launch_marker=launch_marker, pane_id="%7", baseline_lines=("shell",))
+            result = wait_command_started("cfg:7", launch_marker=launch_marker, pane_id="%7", baseline_lines=("shell",))
+        self.assertEqual(CODEX_LAUNCH_STARTED, result)
         tmux.assert_not_called()
 
-    def test_wait_command_started_rejects_ordinary_output_prepended_to_frame(self) -> None:
+    def test_wait_command_started_does_not_confirm_ordinary_output_prepended_to_frame(self) -> None:
         launch_marker = "[omo:0123456789abcdef0123456789abcdef]"
         framed = trust_screen(launch_marker)
         framed.insert(1, "ordinary output")
         with (
             patch("omo_manager.omo_task.capture_pane", return_value=framed),
-            patch("omo_manager.omo_task.current_command", return_value="bash"),
+            patch("omo_manager.omo_task.current_command", return_value="bunx"),
             patch("omo_manager.omo_task.tmux") as tmux,
-            patch("omo_manager.omo_task.time.monotonic", side_effect=[0, 6]),
+            patch("omo_manager.omo_task.time.monotonic", side_effect=[0, 0, 6]),
             patch("omo_manager.omo_task.time.sleep"),
         ):
-            with self.assertRaisesRegex(RuntimeError, "Codex launch not verified"):
-                wait_command_started("cfg:7", launch_marker=launch_marker, pane_id="%7", baseline_lines=("shell",))
+            result = wait_command_started("cfg:7", launch_marker=launch_marker, pane_id="%7", baseline_lines=("shell",))
+        self.assertEqual(CODEX_LAUNCH_STARTED, result)
         tmux.assert_not_called()
 
     def test_wait_command_started_rejects_marker_retained_in_baseline(self) -> None:
         launch_marker = "[omo:0123456789abcdef0123456789abcdef]"
         with (
             patch("omo_manager.omo_task.capture_pane", return_value=trust_screen(launch_marker)),
-            patch("omo_manager.omo_task.current_command", return_value="bash"),
+            patch("omo_manager.omo_task.current_command", return_value="bunx"),
             patch("omo_manager.omo_task.tmux") as tmux,
-            patch("omo_manager.omo_task.time.monotonic", side_effect=[0, 6]),
+            patch("omo_manager.omo_task.time.monotonic", side_effect=[0, 0, 6]),
             patch("omo_manager.omo_task.time.sleep"),
         ):
             with self.assertRaisesRegex(RuntimeError, "Codex launch not verified"):
@@ -2499,6 +2542,7 @@ class OmoTaskTests(unittest.TestCase):
             patch("omo_manager.omo_task.capture_pane", return_value=trust_prompt),
             patch("omo_manager.omo_task.exact_pane_id", return_value="%7"),
             patch("omo_manager.omo_task.current_command", return_value="bunx"),
+            patch("omo_manager.omo_task.has_live_codex_launch", return_value=True),
             patch("omo_manager.omo_task.tmux") as tmux,
             patch("omo_manager.omo_task.time.monotonic", side_effect=[0, 1, 6]),
             patch("omo_manager.omo_task.time.sleep"),
