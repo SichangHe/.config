@@ -44,6 +44,7 @@ TMUX_TARGET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?$")
 TMUX_SESSION_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 TMUX_SESSION_ID_RE = re.compile(r"^\$\d+$")
 SHELL_COMMANDS = {"bash", "dash", "fish", "sh", "zsh"}
+CODEX_LAUNCH_PANE_COMMANDS = {"bunx"}
 BULLET_MARKERS = ("- ", "* ")
 PENDING_TASK_ITEMS_MARKER = "(above are pending task items)"
 TASK_METADATA_PREFIXES = ("managerat:",)
@@ -1116,19 +1117,40 @@ def wait_command_started(
     saw_non_shell = False
     trust_confirmed = False
     trust_allowed = bool(pane_id and marker_is_fresh(launch_marker, baseline_lines))
+    baseline_has_trust_prompt = baseline_lines is not None and has_codex_trust_prompt(current_block(list(baseline_lines)).lines)
     inspection_target = pane_id or target
     while time.monotonic() < deadline_s:
         captured = capture_pane(pane_id, 200, require=True) if pane_id else tail(target, 200)
         lines = lines_after_launch_marker(captured, launch_marker)
         if lines is None:
-            last_status = "launch marker not visible"
+            block = current_block(captured)
+            active_status = status(captured, block)
+            active_command = current_command(inspection_target)
+            trust_attributed = trust_allowed and not baseline_has_trust_prompt and active_command in CODEX_LAUNCH_PANE_COMMANDS
+            if (
+                trust_attributed
+                and active_status == "not_codex"
+                and has_codex_trust_prompt(block.lines)
+            ):
+                last_status = "directory trust confirmation still visible"
+                if not trust_confirmed:
+                    send_launch_enter(target, pane_id)
+                    trust_confirmed = True
+            elif trust_confirmed:
+                last_status = active_status
+                if last_status != "not_codex":
+                    return CODEX_LAUNCH_STARTED
+            else:
+                last_status = "launch marker not visible"
         else:
             if has_codex_update_prompt(lines):
                 send_launch_enter(target, pane_id)
                 return wait_codex_update_finished(target, launch_marker, pane_id=pane_id)
             block = current_block(lines)
             active_status = status(lines, block)
-            if trust_allowed and active_status == "not_codex" and has_codex_trust_prompt(block.lines):
+            active_command = current_command(inspection_target)
+            trust_attributed = trust_allowed and not baseline_has_trust_prompt and active_command in CODEX_LAUNCH_PANE_COMMANDS
+            if trust_attributed and active_status == "not_codex" and has_codex_trust_prompt(block.lines):
                 last_status = "directory trust confirmation still visible"
                 if not trust_confirmed:
                     send_launch_enter(target, pane_id)
@@ -1137,7 +1159,7 @@ def wait_command_started(
                 last_status = active_status
                 if last_status != "not_codex":
                     return CODEX_LAUNCH_STARTED
-        last_command = current_command(inspection_target)
+        last_command = active_command
         if last_command and last_command not in SHELL_COMMANDS:
             saw_non_shell = True
         time.sleep(0.05)
