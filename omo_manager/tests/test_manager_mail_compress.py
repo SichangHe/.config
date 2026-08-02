@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from email.message import Message
 from pathlib import Path
 from unittest.mock import patch
@@ -14,6 +16,7 @@ from omo_manager.omo_manager_mail_compress import (
     MailRecord,
     accepted_manager_headers,
     cmd_export,
+    cmd_identity_preflight,
     cmd_mark_seen,
     cmd_trash_superseded,
     ensure_empty_private_dir,
@@ -35,10 +38,16 @@ from omo_manager.omo_manager_mail_compress import (
 
 class FakeClient:
     def __init__(
-        self, uid_results: dict[tuple[str, ...], tuple[str, list[bytes | tuple[bytes, bytes]]] | list[tuple[str, list[bytes | tuple[bytes, bytes]]]]], mailboxes: list[bytes] | None = None
+        self,
+        uid_results: dict[tuple[str, ...], tuple[str, list[bytes | tuple[bytes, bytes]]] | list[tuple[str, list[bytes | tuple[bytes, bytes]]]]],
+        mailboxes: list[bytes] | None = None,
+        capabilities: list[bytes] | None = None,
+        uidvalidity: str = "9",
     ) -> None:
         self.uid_results = uid_results
         self.mailboxes = mailboxes if mailboxes is not None else [b'(\\HasNoChildren) "/" "[Gmail]/Trash"']
+        self.capabilities = capabilities if capabilities is not None else [b"IMAP4rev1 X-GM-EXT-1"]
+        self.uidvalidity = uidvalidity
         self.uid_calls: list[tuple[str, ...]] = []
         self.select_calls: list[tuple[str, bool]] = []
         self.logged_out = False
@@ -53,9 +62,15 @@ class FakeClient:
     def list(self) -> tuple[str, list[bytes]]:
         return ("OK", self.mailboxes)
 
+    def capability(self) -> tuple[str, list[bytes]]:
+        return "OK", self.capabilities
+
     def select(self, mailbox: str, readonly: bool = False) -> tuple[str, list[bytes]]:
         self.select_calls.append((mailbox, readonly))
         return "OK", [b""]
+
+    def response(self, _name: str) -> tuple[str, list[bytes]]:
+        return "UIDVALIDITY", [self.uidvalidity.encode()]
 
     def logout(self) -> None:
         self.logged_out = True
@@ -95,8 +110,8 @@ class ManagerMailCompressTests(unittest.TestCase):
         parent.mkdir()
         thread_digest = thread_context_digest(context_records or [record])
         (parent / "manifest.tsv").write_text(
-            "uid\tsource_mailbox\tdate\tgmail_msgid\tgmail_thrid\tmsgid_sha256\traw_sha256\tflags\tlabels\tthread_context_sha256\tbody_bytes\tsubject\n"
-            f"{record.uid}\tINBOX\t{record.date}\t{record.gmail_msgid}\t{record.gmail_thrid}\t{record.msgid_sha256}\t{record.raw_sha256}\t{record.flags}\t{record.labels}\t{thread_digest}\t{record.body_bytes}\t{record.subject}\n",
+            "uid\tsource_mailbox\tuidvalidity\tdate\tgmail_msgid\tgmail_thrid\tmsgid_sha256\traw_sha256\tflags\tlabels\tthread_context_sha256\tbody_bytes\tsubject\n"
+            f"{record.uid}\tINBOX\t9\t{record.date}\t{record.gmail_msgid}\t{record.gmail_thrid}\t{record.msgid_sha256}\t{record.raw_sha256}\t{record.flags}\t{record.labels}\t{thread_digest}\t{record.body_bytes}\t{record.subject}\n",
             encoding="utf-8",
         )
         (parent / "mailboxes.tsv").write_text("role\tmailbox\nINBOX\tINBOX\n\\All\t[Gmail]/All Mail\n\\Sent\t[Gmail]/Sent Mail\n", encoding="utf-8")
@@ -283,6 +298,48 @@ class ManagerMailCompressTests(unittest.TestCase):
         client = FakeClient({("fetch", "7", GMAIL_METADATA_FETCH): self.gmail_metadata("7", flags=r"\Flagged", labels=r"\Inbox \Important")})
         self.assertEqual(("100", "200", r"\Flagged", r"\Inbox \Important"), fetch_gmail_metadata(client, "7"))
 
+    def test_fetch_gmail_metadata_ignores_identity_text_inside_labels(self) -> None:
+        client = FakeClient(
+            {
+                ("fetch", "7", GMAIL_METADATA_FETCH): (
+                    "OK",
+                    [b'7 (FLAGS () X-GM-LABELS ("x X-GM-MSGID 100 X-GM-THRID 200 y"))'],
+                )
+            }
+        )
+        self.assertEqual(("", ""), fetch_gmail_metadata(client, "7")[:2])
+
+    def test_identity_preflight_uses_existing_imap_authentication(self) -> None:
+        raw = self.raw_message("[worker:0] complete")
+        client = FakeClient(
+            {
+                ("search", None, "UNSEEN", "FROM", '"agent@example.test"'): ("OK", [b"7"]),
+                ("fetch", "7", HEADER_FETCH): ("OK", [(b"header", raw)]),
+                ("fetch", "7", FULL_FETCH): ("OK", [(b"message", raw)]),
+                ("fetch", "7", GMAIL_METADATA_FETCH): self.gmail_metadata("7"),
+                ("search", None, "X-GM-THRID", "200"): ("OK", [b"70"]),
+                ("fetch", "70", FULL_FETCH): ("OK", [(b"message", raw)]),
+                ("fetch", "70", GMAIL_METADATA_FETCH): self.gmail_metadata("70"),
+            },
+            self.gmail_mailboxes(),
+        )
+
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+
+        output = io.StringIO()
+        with (
+            patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {"user": "human@example.test"})),
+            patch("omo_manager.omo_manager_mail_compress.configured_agent_mail", return_value=Settings()),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(0, cmd_identity_preflight(Args()))
+        self.assertIn("gmail_imap_extension=1", output.getvalue())
+        self.assertIn("unique_identity_count=1", output.getvalue())
+        self.assertIn("complete_thread_count=1", output.getvalue())
+        self.assertIn("gate=pass", output.getvalue())
+
     def test_export_writes_gmail_context_and_special_mailboxes(self) -> None:
         raw = self.raw_message("[worker:0] complete")
         other_raw = b"From: Other <other@example.test>\r\nTo: Human <human@example.test>\r\nSubject: [worker:0] complete\r\nMessage-ID: <two@example.test>\r\n\r\nother context\r\n"
@@ -416,7 +473,11 @@ class ManagerMailCompressTests(unittest.TestCase):
                 ("fetch", "7", GMAIL_METADATA_FETCH): self.gmail_metadata("7"),
                 ("search", None, "X-GM-THRID", "200"): ("OK", [b"70"]),
                 ("fetch", "70", FULL_FETCH): ("OK", [(b"message", raw)]),
-                ("fetch", "70", GMAIL_METADATA_FETCH): self.gmail_metadata("70"),
+                ("fetch", "70", GMAIL_METADATA_FETCH): [
+                    self.gmail_metadata("70"),
+                    self.gmail_metadata("70"),
+                    self.gmail_metadata("70", labels=r"\Trash"),
+                ],
                 ("MOVE", "7", '"[Gmail]/Trash"'): ("OK", [b""]),
             },
             self.gmail_mailboxes(),

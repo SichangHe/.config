@@ -11,7 +11,7 @@ import imaplib
 import os
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from email import policy
 from email.message import Message
 from email.parser import BytesParser
@@ -45,10 +45,33 @@ class MailRecord:
     flags: str = ""
     labels: str = ""
     raw_sha256: str = ""
+    source_uidvalidity: str = ""
 
     @property
     def body_bytes(self) -> int:
         return len(self.body.encode())
+
+
+@dataclass(frozen=True)
+class GmailMetadata:
+    gmail_msgid: str
+    gmail_thrid: str
+    flags: str
+    labels: str
+
+
+@dataclass(frozen=True)
+class PostMoveVerification:
+    same_mailbox: bool = False
+    verified_message_count: int = 0
+    verified_thread_count: int = 0
+    changed_thread_count: int = 0
+    protected_count: int = 0
+    imap_failure_count: int = 0
+
+    @property
+    def complete(self) -> bool:
+        return self.same_mailbox and not (self.changed_thread_count or self.protected_count or self.imap_failure_count)
 
 
 def parse_uid_text(text: str) -> list[str]:
@@ -72,8 +95,16 @@ def parse_uids(raw: str, uid_file: Path | None) -> list[str]:
 
 
 def msgid_digest(msg: Message) -> str:
-    msgid = str(msg.get("Message-ID", ""))
+    msgid = rfc_message_id(msg)
     return hashlib.sha256(msgid.encode()).hexdigest()[:12] if msgid else "no-msgid"
+
+
+def rfc_message_id(msg: Message) -> str:
+    values = msg.get_all("Message-ID", [])
+    if len(values) != 1:
+        return ""
+    value = " ".join(str(values[0]).split())
+    return value if re.fullmatch(r"<[^<>\s]+>", value) else ""
 
 
 def record_from_msg(
@@ -134,7 +165,7 @@ def manager_unread_uids(client: imaplib.IMAP4_SSL, self_email: str) -> list[str]
     criteria = ["UNSEEN", "FROM", f'"{self_email}"']
     subject_tokens = ("",) if settings is not None else LEGACY_MANAGER_SUBJECT_TOKENS
     for token in subject_tokens:
-        typ, data = client.uid("search", None, *(criteria + (["SUBJECT", f'"{token}"'] if token else [])))
+        typ, data = client.uid("search", None, *(criteria + (["SUBJECT", f'"{token}"'] if token else [])))  # pyright: ignore[reportArgumentType]
         if typ != "OK":
             raise RuntimeError(f"IMAP search failed: {typ}")
         for uid in [raw.decode() for raw in data[0].split()] if data and data[0] else []:
@@ -147,7 +178,7 @@ def manager_unread_uids(client: imaplib.IMAP4_SSL, self_email: str) -> list[str]
 def unread_subset(client: imaplib.IMAP4_SSL, uids: list[str]) -> list[str]:
     if not uids:
         return []
-    typ, data = client.uid("search", None, "UNSEEN", "UID", ",".join(uids))
+    typ, data = client.uid("search", None, "UNSEEN", "UID", ",".join(uids))  # pyright: ignore[reportArgumentType]
     if typ != "OK":
         raise RuntimeError(f"IMAP unread UID search failed: {typ}")
     return [raw.decode() for raw in data[0].split()] if data and data[0] else []
@@ -156,7 +187,7 @@ def unread_subset(client: imaplib.IMAP4_SSL, uids: list[str]) -> list[str]:
 def inbox_subset(client: imaplib.IMAP4_SSL, uids: list[str]) -> list[str]:
     if not uids:
         return []
-    typ, data = client.uid("search", None, "UID", ",".join(uids))
+    typ, data = client.uid("search", None, "UID", ",".join(uids))  # pyright: ignore[reportArgumentType]
     if typ != "OK":
         raise RuntimeError(f"IMAP UID search failed: {typ}")
     return [raw.decode() for raw in data[0].split()] if data and data[0] else []
@@ -184,62 +215,117 @@ def fetch_msg(client: imaplib.IMAP4_SSL, uid: str, fetch_expr: str) -> tuple[Mes
     return BytesParser(policy=policy.default).parsebytes(payload), hashlib.sha256(payload).hexdigest()
 
 
-def imap_response_text(data: list[bytes | tuple[bytes, bytes]]) -> str:
-    chunks: list[bytes] = []
+def imap_response_text(data: list[object]) -> str:
+    chunks: list[str] = []
     for item in data:
         if isinstance(item, bytes):
+            chunks.append(item.decode("utf-8", errors="replace"))
+        elif isinstance(item, str):
             chunks.append(item)
         elif isinstance(item, tuple):
-            chunks.extend(part for part in item if isinstance(part, bytes))
-    return b" ".join(chunks).decode("utf-8", errors="replace")
+            for part in item:
+                if isinstance(part, bytes):
+                    chunks.append(part.decode("utf-8", errors="replace"))
+                elif isinstance(part, str):
+                    chunks.append(part)
+    return " ".join(chunks)
 
 
-def imap_parenthesized_value(text: str, key: str) -> str:
-    match = re.search(rf"(?:^|[\s(]){re.escape(key)}\s+\(", text)
-    if match is None:
-        return ""
-    index = match.end()
-    start = index
-    depth = 1
-    quoted = False
-    escaped = False
+def imap_fetch_attributes(text: str) -> dict[str, str]:
+    """Return top-level FETCH attributes without treating nested labels as fields."""
+    outer = text.find("(")
+    if outer < 0:
+        return {}
+    attributes: dict[str, str] = {}
+    index = outer + 1
     while index < len(text):
-        char = text[index]
-        if quoted:
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == '"':
-                quoted = False
-        elif char == '"':
-            quoted = True
-        elif char == "(":
-            depth += 1
-        elif char == ")":
-            depth -= 1
-            if depth == 0:
-                return " ".join(text[start:index].split())
-        index += 1
-    return ""
+        while index < len(text) and text[index].isspace():
+            index += 1
+        if index >= len(text) or text[index] == ")":
+            return attributes
+        key_start = index
+        while index < len(text) and not text[index].isspace() and text[index] not in "()":
+            index += 1
+        key = text[key_start:index]
+        while index < len(text) and text[index].isspace():
+            index += 1
+        if not key or index >= len(text):
+            return attributes
+        value_start = index
+        if text[index] == "(":
+            depth = 0
+            quoted = False
+            escaped = False
+            while index < len(text):
+                char = text[index]
+                if quoted:
+                    if escaped:
+                        escaped = False
+                    elif char == "\\":
+                        escaped = True
+                    elif char == '"':
+                        quoted = False
+                elif char == '"':
+                    quoted = True
+                elif char == "(":
+                    depth += 1
+                elif char == ")":
+                    depth -= 1
+                    if depth == 0:
+                        index += 1
+                        break
+                index += 1
+            if depth != 0:
+                return attributes
+        elif text[index] == '"':
+            index += 1
+            escaped = False
+            while index < len(text):
+                char = text[index]
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    index += 1
+                    break
+                index += 1
+        else:
+            while index < len(text) and not text[index].isspace() and text[index] != ")":
+                index += 1
+        attributes[key.upper()] = text[value_start:index]
+    return attributes
 
 
-def imap_numeric_value(text: str, key: str) -> str:
-    match = re.search(rf"(?:^|\s){re.escape(key)}\s+([0-9]+)(?=\s|\))", text)
-    return match.group(1) if match is not None else ""
+def imap_list_value(value: str) -> str:
+    return " ".join(value[1:-1].split()) if value.startswith("(") and value.endswith(")") else ""
+
+
+def fetch_gmail_metadata_detail(client: imaplib.IMAP4_SSL, uid: str) -> GmailMetadata:
+    typ, data = client.uid("fetch", uid, GMAIL_METADATA_FETCH)
+    if typ != "OK":
+        raise RuntimeError(f"IMAP Gmail metadata fetch failed: typ={typ}")
+    attributes = imap_fetch_attributes(imap_response_text(data))
+    gmail_msgid = attributes.get("X-GM-MSGID", "")
+    gmail_thrid = attributes.get("X-GM-THRID", "")
+    return GmailMetadata(
+        gmail_msgid if gmail_msgid.isdecimal() else "",
+        gmail_thrid if gmail_thrid.isdecimal() else "",
+        imap_list_value(attributes.get("FLAGS", "")),
+        imap_list_value(attributes.get("X-GM-LABELS", "")),
+    )
 
 
 def fetch_gmail_metadata(client: imaplib.IMAP4_SSL, uid: str) -> tuple[str, str, str, str]:
-    typ, data = client.uid("fetch", uid, GMAIL_METADATA_FETCH)
+    metadata = fetch_gmail_metadata_detail(client, uid)
+    return metadata.gmail_msgid, metadata.gmail_thrid, metadata.flags, metadata.labels
+
+
+def gmail_extension_advertised(client: imaplib.IMAP4_SSL) -> bool:
+    typ, data = client.capability()
     if typ != "OK":
-        raise RuntimeError(f"IMAP Gmail metadata fetch failed: uid={uid} typ={typ}")
-    response = imap_response_text(data)
-    return (
-        imap_numeric_value(response, "X-GM-MSGID"),
-        imap_numeric_value(response, "X-GM-THRID"),
-        imap_parenthesized_value(response, "FLAGS"),
-        imap_parenthesized_value(response, "X-GM-LABELS"),
-    )
+        raise RuntimeError(f"IMAP capability query failed: {typ}")
+    return "X-GM-EXT-1" in imap_response_text(data).upper().split()
 
 
 def fetch_record(client: imaplib.IMAP4_SSL, uid: str, with_body: bool, with_metadata: bool) -> MailRecord:
@@ -292,6 +378,14 @@ def open_mailbox(readonly: bool) -> tuple[imaplib.IMAP4_SSL, dict[str, str]]:
     return client, config
 
 
+def selected_uidvalidity(client: imaplib.IMAP4_SSL) -> str:
+    _name, data = client.response("UIDVALIDITY")
+    values = [value.decode() for value in data or [] if isinstance(value, bytes)]
+    if len(values) != 1 or not values[0].isdecimal():
+        raise RuntimeError("selected mailbox omitted UIDVALIDITY")
+    return values[0]
+
+
 def select_mailbox(client: imaplib.IMAP4_SSL, mailbox: str, readonly: bool) -> None:
     typ, _data = client.select(imap_quoted(mailbox), readonly=readonly)
     if typ != "OK":
@@ -331,7 +425,7 @@ def special_use_mailboxes(client: imaplib.IMAP4_SSL) -> dict[str, str]:
 def gmail_thread_uids(client: imaplib.IMAP4_SSL, gmail_thrid: str) -> list[str]:
     if not gmail_thrid.isdecimal():
         raise RuntimeError("Gmail thread identity was missing or malformed")
-    typ, data = client.uid("search", None, "X-GM-THRID", gmail_thrid)  # type: ignore[arg-type]
+    typ, data = client.uid("search", None, "X-GM-THRID", gmail_thrid)  # pyright: ignore[reportArgumentType]
     if typ != "OK":
         raise RuntimeError(f"IMAP Gmail thread search failed: {typ}")
     return [raw.decode() for raw in data[0].split()] if data and data[0] else []
@@ -341,6 +435,35 @@ def require_gmail_identities(records: list[MailRecord]) -> None:
     missing = [record.uid for record in records if not record.gmail_msgid or not record.gmail_thrid or not record.raw_sha256]
     if missing:
         raise RuntimeError(f"Gmail identity metadata missing for {len(missing)} source messages")
+
+
+def fetch_imap_thread_contexts(
+    client: imaplib.IMAP4_SSL,
+    records: list[MailRecord],
+) -> tuple[dict[str, str], dict[str, list[MailRecord]]]:
+    """Fetch complete Gmail thread context through the configured IMAP session."""
+    require_gmail_identities(records)
+    if len({record.gmail_msgid for record in records}) != len(records):
+        raise RuntimeError("configured IMAP mailbox returned duplicate Gmail message identities")
+    special_use = special_use_mailboxes(client)
+    all_mailbox = special_use.get(r"\All", "")
+    if not all_mailbox:
+        raise RuntimeError("Gmail All Mail special-use mailbox was not discovered")
+    if not special_use.get(r"\Sent"):
+        raise RuntimeError("Gmail Sent special-use mailbox was not discovered")
+    source_ids_by_thread: dict[str, set[str]] = {}
+    for record in records:
+        source_ids_by_thread.setdefault(record.gmail_thrid, set()).add(record.gmail_msgid)
+    select_mailbox(client, all_mailbox, readonly=True)
+    records_by_thread: dict[str, list[MailRecord]] = {}
+    for gmail_thrid, source_ids in sorted(source_ids_by_thread.items()):
+        context_records = fetch_records(client, gmail_thread_uids(client, gmail_thrid), with_body=True, with_metadata=True)
+        require_gmail_identities(context_records)
+        context_ids = [record.gmail_msgid for record in context_records]
+        if not context_records or len(context_ids) != len(set(context_ids)) or any(record.gmail_thrid != gmail_thrid for record in context_records) or not source_ids.issubset(context_ids):
+            raise RuntimeError("Gmail thread context was incomplete or changed during discovery")
+        records_by_thread[gmail_thrid] = context_records
+    return special_use, records_by_thread
 
 
 def thread_context_digest(records: list[MailRecord]) -> str:
@@ -412,6 +535,47 @@ def print_records(records: list[MailRecord]) -> None:
         print(f"{record.uid}\t{record.date}\t{record.msgid_sha256}\t{record.subject}")
 
 
+def cmd_identity_preflight(_args: argparse.Namespace) -> int:
+    """Print aggregate IMAP Gmail identity evidence without identifiers."""
+    client, config = open_mailbox(readonly=True)
+    try:
+        sender_email, recipient_email = mail_boundary(config)
+        headers, skipped = accepted_manager_headers(client, manager_unread_uids(client, sender_email), sender_email, recipient_email)
+        uidvalidity = ""
+        source_records: list[MailRecord] = []
+        records_by_thread: dict[str, list[MailRecord]] = {}
+        gmail_extension = 0
+        imap_failure = 0
+        try:
+            gmail_extension = int(gmail_extension_advertised(client))
+            if not gmail_extension:
+                raise RuntimeError("configured IMAP mailbox does not advertise Gmail identity support")
+            uidvalidity = selected_uidvalidity(client)
+            source_records = [replace(record, source_uidvalidity=uidvalidity) for record in fetch_records(client, [header.uid for header in headers], with_body=True, with_metadata=True)]
+            require_gmail_identities(source_records)
+            if len({record.gmail_msgid for record in source_records}) != len(source_records):
+                raise RuntimeError("configured IMAP mailbox returned duplicate Gmail message identities")
+            _special_use, records_by_thread = fetch_imap_thread_contexts(client, source_records)
+        except (imaplib.IMAP4.error, RuntimeError):
+            imap_failure = 1
+        expected_threads = len({record.gmail_thrid for record in source_records})
+        gate = "pass" if uidvalidity and gmail_extension and not imap_failure and len(source_records) == len(headers) and len(records_by_thread) == expected_threads else "block"
+        print(
+            "identity_preflight"
+            f" accepted={len(headers)}"
+            f" skipped_boundary_mismatch={len(skipped)}"
+            f" source_uidvalidity_present={int(bool(uidvalidity))}"
+            f" gmail_imap_extension={gmail_extension}"
+            f" imap_evidence_failure_count={imap_failure}"
+            f" unique_identity_count={len(source_records) if not imap_failure else 0}"
+            f" complete_thread_count={len(records_by_thread)}"
+            f" gate={gate}"
+        )
+    finally:
+        client.logout()
+    return 0 if gate == "pass" else 1
+
+
 def cmd_snapshot(_args: argparse.Namespace) -> int:
     client, config = open_mailbox(readonly=True)
     try:
@@ -451,6 +615,7 @@ def export_body(record: MailRecord, include_addresses: bool = False) -> str:
         f"Message-ID-SHA256: {record.msgid_sha256}\n"
         f"Gmail-Message-ID: {record.gmail_msgid}\n"
         f"Gmail-Thread-ID: {record.gmail_thrid}\n"
+        f"Source-UIDVALIDITY: {record.source_uidvalidity}\n"
         f"Flags: {record.flags}\n"
         f"Labels: {record.labels}\n"
         f"Raw-SHA256: {record.raw_sha256}\n\n"
@@ -465,6 +630,7 @@ def export_manifest(records: list[MailRecord], thread_digests: dict[str, str]) -
         fieldnames=(
             "uid",
             "source_mailbox",
+            "uidvalidity",
             "date",
             "gmail_msgid",
             "gmail_thrid",
@@ -485,6 +651,7 @@ def export_manifest(records: list[MailRecord], thread_digests: dict[str, str]) -
             {
                 "uid": record.uid,
                 "source_mailbox": "INBOX",
+                "uidvalidity": record.source_uidvalidity,
                 "date": tsv_value(record.date),
                 "gmail_msgid": record.gmail_msgid,
                 "gmail_thrid": record.gmail_thrid,
@@ -517,6 +684,7 @@ def export_source_map(out_dir: Path, requested: list[str]) -> dict[str, dict[str
         {
             "uid",
             "source_mailbox",
+            "uidvalidity",
             "gmail_msgid",
             "gmail_thrid",
             "msgid_sha256",
@@ -527,7 +695,8 @@ def export_source_map(out_dir: Path, requested: list[str]) -> dict[str, dict[str
         },
     )
     source_map = {row["uid"]: row for row in rows if row["uid"]}
-    if len(source_map) != len(rows) or any(uid not in source_map for uid in requested):
+    gmail_identities = [(row["gmail_thrid"], row["gmail_msgid"]) for row in rows]
+    if len(source_map) != len(rows) or len(set(gmail_identities)) != len(rows) or any(uid not in source_map for uid in requested):
         raise RuntimeError("requested sources were absent or ambiguous in the private source map")
     return {uid: source_map[uid] for uid in requested}
 
@@ -543,6 +712,7 @@ def export_mailboxes(out_dir: Path) -> dict[str, str]:
 def record_matches_source_map(record: MailRecord, source: dict[str, str]) -> bool:
     return (
         source["source_mailbox"] == "INBOX"
+        and record.source_uidvalidity == source["uidvalidity"]
         and record.gmail_msgid == source["gmail_msgid"]
         and record.gmail_thrid == source["gmail_thrid"]
         and record.msgid_sha256 == source["msgid_sha256"]
@@ -553,9 +723,9 @@ def record_matches_source_map(record: MailRecord, source: dict[str, str]) -> boo
 
 
 def record_has_protected_intent(record: MailRecord) -> bool:
-    flags = record.flags.casefold().split()
-    labels = record.labels.casefold()
-    return r"\flagged" in flags or any(token in labels for token in (r"\flagged", r"\starred", r"\important", "read later", "saved"))
+    flags = {flag.casefold().lstrip("\\") for flag in record.flags.split()}
+    labels = record.labels.casefold().replace("\\", "")
+    return "flagged" in flags or any(token in labels for token in ("flagged", "starred", "important", "read later", "saved"))
 
 
 def revalidate_thread_contexts(
@@ -571,20 +741,17 @@ def revalidate_thread_contexts(
     select_mailbox(client, all_mailbox, readonly=True)
     try:
         for gmail_thrid, source_ids in source_ids_by_thread.items():
-            records = fetch_records(client, gmail_thread_uids(client, gmail_thrid), with_body=True, with_metadata=True)
-            require_gmail_identities(records)
+            context_records = fetch_records(client, gmail_thread_uids(client, gmail_thrid), with_body=True, with_metadata=True)
+            require_gmail_identities(context_records)
+            context_ids = [record.gmail_msgid for record in context_records]
             if (
-                not records
-                or any(record.gmail_thrid != gmail_thrid for record in records)
-                or {record.gmail_msgid for record in records} != source_ids
-                or any(not is_manager_record(record, sender_email, recipient_email) or record_has_protected_intent(record) for record in records)
+                len(context_ids) != len(set(context_ids))
+                or set(context_ids) != source_ids
+                or any(record.gmail_thrid != gmail_thrid or not is_manager_record(record, sender_email, recipient_email) or record_has_protected_intent(record) for record in context_records)
             ):
                 return False
             expected_digests = {source["thread_context_sha256"] for source in source_map.values() if source["gmail_thrid"] == gmail_thrid}
-            if len(expected_digests) != 1:
-                return False
-            expected = expected_digests.pop()
-            if thread_context_digest(records) != expected:
+            if len(expected_digests) != 1 or thread_context_digest(context_records) != expected_digests.pop():
                 return False
         return True
     finally:
@@ -598,30 +765,12 @@ def cmd_export(args: argparse.Namespace) -> int:
     try:
         sender_email, recipient_email = mail_boundary(config)
         header_records, skipped = accepted_manager_headers(client, manager_unread_uids(client, sender_email), sender_email, recipient_email)
-        records = fetch_records(client, [record.uid for record in header_records], with_body=True, with_metadata=True)
-        require_gmail_identities(records)
-        special_use = special_use_mailboxes(client)
+        uidvalidity = selected_uidvalidity(client)
+        source_records = [replace(record, source_uidvalidity=uidvalidity) for record in fetch_records(client, [record.uid for record in header_records], with_body=True, with_metadata=True)]
+        special_use, records_by_thread = fetch_imap_thread_contexts(client, source_records)
         all_mailbox = special_use.get(r"\All", "")
         sent_mailbox = special_use.get(r"\Sent", "")
-        if not all_mailbox:
-            raise RuntimeError("Gmail All Mail special-use mailbox was not discovered")
-        if not sent_mailbox:
-            raise RuntimeError("Gmail Sent special-use mailbox was not discovered")
-        records_by_thread: dict[str, list[MailRecord]] = {}
-        source_ids_by_thread: dict[str, set[str]] = {}
-        for record in records:
-            source_ids_by_thread.setdefault(record.gmail_thrid, set()).add(record.gmail_msgid)
-        select_mailbox(client, all_mailbox, readonly=True)
-        for gmail_thrid in sorted({record.gmail_thrid for record in records}):
-            context_records = fetch_records(client, gmail_thread_uids(client, gmail_thrid), with_body=True, with_metadata=True)
-            require_gmail_identities(context_records)
-            if (
-                not context_records
-                or any(record.gmail_thrid != gmail_thrid for record in context_records)
-                or not source_ids_by_thread[gmail_thrid].issubset({record.gmail_msgid for record in context_records})
-            ):
-                raise RuntimeError("Gmail thread context was incomplete or changed during export")
-            records_by_thread[gmail_thrid] = context_records
+        records = source_records
     finally:
         client.logout()
     thread_digests = write_thread_context(out_dir, records_by_thread, sender_email, recipient_email)
@@ -640,6 +789,65 @@ def cmd_mark_seen(args: argparse.Namespace) -> int:
     return 2
 
 
+def verify_post_move_imap(
+    client: imaplib.IMAP4_SSL,
+    source_map: dict[str, dict[str, str]],
+    sender_email: str,
+    recipient_email: str,
+) -> PostMoveVerification:
+    """Verify moved complete threads through the same configured IMAP session."""
+    sources_by_thread: dict[str, dict[str, dict[str, str]]] = {}
+    for source in source_map.values():
+        sources_by_thread.setdefault(source["gmail_thrid"], {})[source["gmail_msgid"]] = source
+    select_mailbox(client, TRASH_MAILBOX, readonly=True)
+    verified_messages = 0
+    verified_threads = 0
+    changed_threads = 0
+    protected = 0
+    failures = 0
+    for gmail_thrid, sources_by_id in sources_by_thread.items():
+        try:
+            records = fetch_records(client, gmail_thread_uids(client, gmail_thrid), with_body=True, with_metadata=True)
+            require_gmail_identities(records)
+        except (imaplib.IMAP4.error, RuntimeError):
+            failures += 1
+            continue
+        protected_in_thread = sum(record_has_protected_intent(record) for record in records)
+        protected += protected_in_thread
+        records_by_id = {record.gmail_msgid: record for record in records}
+        if len(records_by_id) != len(records) or set(records_by_id) != set(sources_by_id) or protected_in_thread:
+            changed_threads += 1
+            continue
+        thread_verified = 0
+        for gmail_msgid, source in sources_by_id.items():
+            record = records_by_id[gmail_msgid]
+            labels = record.labels.casefold().replace('"', "")
+            if (
+                record.gmail_thrid != gmail_thrid
+                or record.msgid_sha256 != source["msgid_sha256"]
+                or record.raw_sha256 != source["raw_sha256"]
+                or tsv_value(record.flags) != source["flags"]
+                or r"\trash" not in labels
+                or r"\inbox" in labels
+                or not is_manager_record(record, sender_email, recipient_email)
+            ):
+                break
+            thread_verified += 1
+        else:
+            verified_messages += thread_verified
+            verified_threads += 1
+            continue
+        changed_threads += 1
+    return PostMoveVerification(
+        same_mailbox=True,
+        verified_message_count=verified_messages,
+        verified_thread_count=verified_threads,
+        changed_thread_count=changed_threads,
+        protected_count=protected,
+        imap_failure_count=failures,
+    )
+
+
 def cmd_trash_superseded(args: argparse.Namespace) -> int:
     if not args.yes:
         print("refusing to move superseded mail to Trash without --yes", file=sys.stderr)
@@ -652,6 +860,10 @@ def cmd_trash_superseded(args: argparse.Namespace) -> int:
         source_dir = args.uid_file.parent
         source_map = export_source_map(source_dir, requested)
         expected_mailboxes = export_mailboxes(source_dir)
+        expected_uidvalidities = {source["uidvalidity"] for source in source_map.values()}
+        if len(expected_uidvalidities) != 1 or not next(iter(expected_uidvalidities)).isdecimal():
+            raise RuntimeError("private source map has ambiguous UIDVALIDITY")
+        expected_uidvalidity = next(iter(expected_uidvalidities))
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
@@ -661,6 +873,9 @@ def cmd_trash_superseded(args: argparse.Namespace) -> int:
     client, config = open_mailbox(readonly=False)
     try:
         sender_email, recipient_email = mail_boundary(config)
+        if selected_uidvalidity(client) != expected_uidvalidity:
+            print("refusing because INBOX UIDVALIDITY changed", file=sys.stderr)
+            return 1
         if not mailbox_exists(client, TRASH_MAILBOX):
             print(f"refusing because mailbox is missing: {TRASH_MAILBOX}", file=sys.stderr)
             return 1
@@ -672,7 +887,8 @@ def cmd_trash_superseded(args: argparse.Namespace) -> int:
         if set(still_in_inbox) != set(requested):
             print("refusing because a planned source left INBOX", file=sys.stderr)
             return 1
-        records = fetch_records(client, still_in_inbox, with_body=True, with_metadata=True)
+        records = [replace(record, source_uidvalidity=expected_uidvalidity) for record in fetch_records(client, still_in_inbox, with_body=True, with_metadata=True)]
+        require_gmail_identities(records)
         if any(not is_manager_record(record, sender_email, recipient_email) for record in records):
             print("refusing boundary mismatch", file=sys.stderr)
             return 1
@@ -689,7 +905,8 @@ def cmd_trash_superseded(args: argparse.Namespace) -> int:
         if set(still_in_inbox) != set(requested):
             print("refusing because a planned source changed during revalidation", file=sys.stderr)
             return 1
-        final_records = fetch_records(client, still_in_inbox, with_body=True, with_metadata=True)
+        final_records = [replace(record, source_uidvalidity=expected_uidvalidity) for record in fetch_records(client, still_in_inbox, with_body=True, with_metadata=True)]
+        require_gmail_identities(final_records)
         if any(not is_manager_record(record, sender_email, recipient_email) or not record_matches_source_map(record, source_map[record.uid]) for record in final_records):
             print("refusing because a planned source changed immediately before move", file=sys.stderr)
             return 1
@@ -706,10 +923,20 @@ def cmd_trash_superseded(args: argparse.Namespace) -> int:
                 print(f"IMAP MOVE failed: {typ}", file=sys.stderr)
                 return 1
         remaining = inbox_subset(client, requested)
+        post_move = verify_post_move_imap(client, source_map, sender_email, recipient_email)
     finally:
         client.logout()
-    print(f"trash_superseded: requested={len(requested)} moved={len(still_in_inbox)} already_not_in_inbox={len(requested) - len(still_in_inbox)} verify_remaining={len(remaining)}")
-    if remaining:
+    print(
+        f"trash_superseded: requested={len(requested)} moved={len(still_in_inbox)}"
+        f" already_not_in_inbox={len(requested) - len(still_in_inbox)} verify_remaining={len(remaining)}"
+        f" verify_trash_count={post_move.verified_message_count}"
+        f" verify_thread_count={post_move.verified_thread_count}"
+        f" verify_changed_thread_count={post_move.changed_thread_count}"
+        f" verify_protected_count={post_move.protected_count}"
+        f" verify_imap_failure_count={post_move.imap_failure_count}"
+        f" same_mailbox_after_move={int(post_move.same_mailbox)} permanent_deleted=0"
+    )
+    if remaining or post_move.verified_message_count != len(requested) or not post_move.complete:
         print(f"remaining_inbox_count={len(remaining)}")
         return 1
     return 0
@@ -718,6 +945,8 @@ def cmd_trash_superseded(args: argparse.Namespace) -> int:
 def parser() -> argparse.ArgumentParser:
     arg_parser = argparse.ArgumentParser(description=__doc__)
     sub = arg_parser.add_subparsers(dest="cmd", required=True)
+    identity_preflight = sub.add_parser("identity-preflight", help="Read-only aggregate Gmail identity preflight for unread manager mail.")
+    identity_preflight.set_defaults(func=cmd_identity_preflight)
     snapshot = sub.add_parser("snapshot", help="Print unread manager mail headers and UIDs.")
     snapshot.set_defaults(func=cmd_snapshot)
     export = sub.add_parser("export", help="Export unread manager mail bodies into a private local directory.")

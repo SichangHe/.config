@@ -10,12 +10,19 @@ Helper:
 Workflow:
 
 - inspect current instructions and source task, then run `omo_manager_mail_compress.py snapshot`
+- run `omo_manager_mail_compress.py identity-preflight` before export; it uses the same configured human-mail IMAP authentication as `snapshot`, reports only aggregate Gmail identity and complete-thread evidence, exits nonzero on `gate=block`, and retains every source without mutation
+- use `OMO_HUMAN_EMAIL_CONFIG_PATH` as the default authentication path for compression; this workflow requires no separate Gmail REST API, OAuth token, browser profile, sign-in, or application-default credential
+- require the configured IMAP session to expose unique `X-GM-MSGID` and `X-GM-THRID` values for every selected source and complete thread membership through the discovered `\All` mailbox; missing, duplicate, conflicting, or incomplete evidence blocks the gate
 - create a fresh private export directory, for example `mktemp -d /tmp/manager-mail-compress.XXXXXX`, then run `export --out-dir PRIVATE_DIR`
+- export reruns the same configured-mailbox, identity, and complete-thread gates and records IMAP Gmail message/thread IDs, flags, labels, a full-message digest, and source UIDVALIDITY in the private map
 - make a private UID map from `manifest.tsv`, `uids.txt`, and `UID.txt`; tie every proposed source UID to one replacement summary or an explicit retained reason
-- group only fully replaceable topics; retain an unread report and any flagged, saved, read-later, full-read, or uncertain memo or report
+- maintain one private task-wide original-Gmail-thread ledger across rolling frozen batches; send at most one replacement per original thread and retain any changed or previously handled thread whole
+- group only fully replaceable original Gmail threads; retain an unread report and any flagged, saved, read-later, full-read, out-of-scope, incomplete, or uncertain memo or report
 - send replacement summaries with `email_me.py --manager-human --sender-tmux-target OWNER_TARGET --subject-file SUBJECT --message-file BODY`, and record their delivery before listing superseded UIDs
 - write `superseded-uids.txt` with only fully replaced source UIDs, then run `trash-superseded --uid-file PRIVATE_DIR/superseded-uids.txt --yes`
-- recheck final live state: every selected source left `INBOX`, retained sources remain, `verify_remaining=0`, and any external drift is separately recorded; keep recovery and paired receipts
+- immediately before every IMAP move, rerun configured-mailbox authentication, source identity, complete-thread membership/content/label checks, source UIDVALIDITY/content/flag checks, and protected-intent checks; retain and replan only an affected thread on drift
+- recheck final live state after every batch through the same IMAP connection: refetch every member of each moved thread from Trash, require membership and content to remain exact, require each source to have `\Trash` and not `\Inbox`, reject any new protected intent, verify every selected source left `INBOX`, verify retained complete threads remain unchanged and replacements exist, reconcile counts with `verify_remaining=0`, and separately record any external drift; keep ordered recovery and paired intent/outcome receipts
+- continue with later frozen batches until a final live scan has no eligible source absent from the task-wide ledger; ordinary later arrivals belong to later batches
 - report only topics, counts, UID boundary, replacement identities, skipped boundaries, and verification; delete the private export directory when raw copies are no longer needed
 
 Safety:
