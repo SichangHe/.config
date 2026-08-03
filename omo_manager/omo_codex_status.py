@@ -325,10 +325,6 @@ def has_running_indicator(lines: list[str]) -> bool:
     return has_compacting_indicator(lines) or any(BUSY_RE.search(line) is not None or BACKGROUND_RUNNING_RE.search(line) is not None for line in lines[-20:])
 
 
-def has_visible_running_indicator(lines: list[str]) -> bool:
-    return has_compacting_indicator(lines) or any(BUSY_RE.search(line) is not None or BACKGROUND_RUNNING_RE.search(line) is not None for line in lines)
-
-
 def has_compacting_indicator(lines: list[str]) -> bool:
     if not has_codex_model_footer(lines):
         return False
@@ -368,11 +364,11 @@ def has_waiting_subagent_prompt(lines: list[str]) -> bool:
 
 
 def has_queued_running_input(lines: list[str]) -> bool:
-    return has_queued_message_footer(lines) and has_visible_running_indicator(lines)
+    return has_queued_message_footer(lines) and current_input_follows_running_indicator(lines)
 
 
 def has_idle_queued_input(lines: list[str], input_text: str) -> bool:
-    return has_queued_message_footer(lines) and bool(input_text) and not has_visible_running_indicator(lines)
+    return has_queued_message_footer(lines) and bool(input_text) and not current_input_follows_running_indicator(lines)
 
 
 def latest_output_before_input(lines: list[str]) -> list[str]:

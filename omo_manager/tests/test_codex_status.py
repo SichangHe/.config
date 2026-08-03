@@ -399,6 +399,32 @@ class CodexStatusTests(unittest.TestCase):
         self.assertEqual('[Pasted Content 1024 chars][Pasted Content 1024 chars] #2[Pasted Content 1024 chars] #3', report.input_text)
         self.assertTrue(report.can_submit_input)
 
+    def test_status_stuck_input_ignores_working_indicator_from_completed_turn(self) -> None:
+        lines = [
+            '• Working (19m 47s • esc to interrupt)',
+            '• Finished the previous request.',
+            '─ Worked for 19m 48s ─',
+            '',
+            '› Continue with the queued request',
+            '  tab to queue message                                                                                    26% context left',
+        ]
+        report = report_from_lines(lines)
+        self.assertEqual('stuck_input', report.status)
+        self.assertTrue(report.can_submit_input)
+
+    def test_status_running_with_current_background_terminal_and_queued_footer(self) -> None:
+        lines = [
+            '• Finished the previous request.',
+            '─ Worked for 1m 2s ─',
+            '• Waiting for background terminal · 1 background terminal running · /ps to view · /stop to close',
+            '',
+            '› Continue after the terminal finishes',
+            '  tab to queue message                                                                                    26% context left',
+        ]
+        report = report_from_lines(lines)
+        self.assertEqual('running', report.status)
+        self.assertFalse(report.can_submit_input)
+
     def test_status_stuck_input_for_plan_prompt_without_model_footer(self) -> None:
         lines = [
             '› [Pasted Content 1024 chars][Pasted Content 1024 chars]',
