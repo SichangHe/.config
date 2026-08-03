@@ -99,6 +99,8 @@ class Args:
     async_result_dir: Path | None = None
     submit_existing_file: Path | None = None
     submit_existing_sha256: str = ""
+    cancel_existing_file: Path | None = None
+    cancel_existing_sha256: str = ""
 
 
 @dataclass(frozen=True)
@@ -118,6 +120,8 @@ class ParsedArgs(argparse.Namespace):
     message_file: Path | None = None
     submit_existing_file: Path | None = None
     submit_existing_sha256: str = ""
+    cancel_existing_file: Path | None = None
+    cancel_existing_sha256: str = ""
     enter_count: int = 1
     enter_delay_s: float = 0.15
     submit_verify_timeout_s: float = DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S
@@ -138,9 +142,11 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--message-file", type=Path, help="Read prompt text from this file.")
     _ = parser.add_argument("--submit-existing-file", type=Path, help="Submit existing input only if it exactly matches this UTF-8 file.")
     _ = parser.add_argument("--submit-existing-sha256", metavar="SHA256", help="Submit existing input only if its exact UTF-8 text has this lowercase SHA-256 digest.")
+    _ = parser.add_argument("--cancel-existing-file", type=Path, help="Cancel existing input only if it exactly matches this UTF-8 file.")
+    _ = parser.add_argument("--cancel-existing-sha256", metavar="SHA256", help="Cancel existing input only if its exact UTF-8 text has this lowercase SHA-256 digest.")
     _ = parser.add_argument("--enter-count", type=int, default=1, help="Number of Enter keys to send after paste; default: 1.")
     _ = parser.add_argument("--enter-delay-s", type=float, default=0.15, help="Delay between repeated Enter keys; default: 0.15.")
-    _ = parser.add_argument("--submit-verify-timeout-s", type=float, default=DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S, help="After Enter, wait up to this many seconds to verify Codex starts running.")
+    _ = parser.add_argument("--submit-verify-timeout-s", type=float, default=DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S, help="Wait up to this many seconds to verify submission or cancellation.")
     _ = parser.add_argument("--enter", action="store_true", help=argparse.SUPPRESS)
     _ = parser.add_argument("--ready-timeout-s", type=float, help=argparse.SUPPRESS)
     _ = parser.add_argument("--dry-run", action="store_true", help="Validate inputs and print planned tmux actions without touching tmux.")
@@ -183,16 +189,24 @@ def parse_args(argv: list[str]) -> Args:
     if not parsed.target:
         parser.error("--target is required.")
     submit_existing = parsed.submit_existing_file is not None or bool(parsed.submit_existing_sha256)
-    if parsed.message_file is not None and submit_existing:
-        parser.error("--message-file cannot be used with submit-existing recovery.")
+    cancel_existing = parsed.cancel_existing_file is not None or bool(parsed.cancel_existing_sha256)
+    existing_recovery = submit_existing or cancel_existing
+    if parsed.message_file is not None and existing_recovery:
+        parser.error("--message-file cannot be used with existing-input recovery.")
+    if submit_existing and cancel_existing:
+        parser.error("choose either submit-existing or cancel-existing recovery.")
     if parsed.submit_existing_file is not None and parsed.submit_existing_sha256:
         parser.error("choose either --submit-existing-file or --submit-existing-sha256.")
+    if parsed.cancel_existing_file is not None and parsed.cancel_existing_sha256:
+        parser.error("choose either --cancel-existing-file or --cancel-existing-sha256.")
     if parsed.submit_existing_sha256 and SHA256_RE.fullmatch(parsed.submit_existing_sha256) is None:
         parser.error("--submit-existing-sha256 must be a lowercase 64-character SHA-256 digest.")
-    if submit_existing and (parsed.async_mode or parsed.async_worker):
-        parser.error("--async cannot be used with submit-existing recovery.")
-    if parsed.message_file is None and not submit_existing:
-        parser.error("--message-file is required unless submit-existing recovery is requested.")
+    if parsed.cancel_existing_sha256 and SHA256_RE.fullmatch(parsed.cancel_existing_sha256) is None:
+        parser.error("--cancel-existing-sha256 must be a lowercase 64-character SHA-256 digest.")
+    if existing_recovery and (parsed.async_mode or parsed.async_worker):
+        parser.error("--async cannot be used with existing-input recovery.")
+    if parsed.message_file is None and not existing_recovery:
+        parser.error("--message-file is required unless existing-input recovery is requested.")
     return Args(
         parsed.target,
         parsed.message_file,
@@ -206,6 +220,8 @@ def parse_args(argv: list[str]) -> Args:
         parsed.async_result_dir,
         parsed.submit_existing_file,
         parsed.submit_existing_sha256,
+        parsed.cancel_existing_file,
+        parsed.cancel_existing_sha256,
     )
 
 
@@ -239,7 +255,14 @@ def existing_input_authorization(args: Args) -> ExistingInputAuthorization:
         return ExistingInputAuthorization(text_sha256(text), text)
     if SHA256_RE.fullmatch(args.submit_existing_sha256) is not None:
         return ExistingInputAuthorization(args.submit_existing_sha256)
-    raise RuntimeError("submit-existing authorization is required")
+    if args.cancel_existing_file is not None:
+        text = read_exact_message_file(args.cancel_existing_file)
+        if not text:
+            raise RuntimeError("cancel-existing authorization file is empty")
+        return ExistingInputAuthorization(text_sha256(text), text)
+    if SHA256_RE.fullmatch(args.cancel_existing_sha256) is not None:
+        return ExistingInputAuthorization(args.cancel_existing_sha256)
+    raise RuntimeError("existing-input authorization is required")
 
 
 def validate_options(options: CodexSendOptions) -> None:
@@ -552,6 +575,10 @@ def send_enter(target: str) -> None:
     _ = subprocess.run(["tmux", "send-keys", "-t", target, "Enter"], timeout=5, check=True)
 
 
+def send_cancel_input(target: str) -> None:
+    _ = subprocess.run(["tmux", "send-keys", "-t", target, "C-c"], timeout=5, check=True)
+
+
 def wait_paste_visible(
     target: str,
     message: str,
@@ -683,7 +710,7 @@ def verify_submit(
         time.sleep(min(0.25, max(0.05, min(deadline_s, next_enter_s) - now_s)))
 
 
-def exact_existing_input_text(lines: list[str]) -> str:
+def exact_complete_input_text(lines: list[str]) -> str:
     end = len(lines)
     while end and not lines[end - 1].strip():
         end -= 1
@@ -719,15 +746,21 @@ def exact_existing_input_text(lines: list[str]) -> str:
     if not first_text.startswith(" "):
         raise RuntimeError("target existing input has an unknown prompt prefix")
     text = "\n".join([first_text[1:], *input_lines[1:]])
-    if not is_real_input_text(text) or has_collapsed_paste_text(text):
+    if not text or has_collapsed_paste_text(text):
         raise RuntimeError("target existing input is incomplete")
     return text
 
 
-def capture_complete_existing_input(target: str) -> ExistingInputCapture:
-    pane_id = exact_pane_id(target)
-    if not pane_id:
-        raise RuntimeError(f"target cannot be resolved as an exact tmux pane: {target}")
+def exact_existing_input_text(lines: list[str]) -> str:
+    text = exact_complete_input_text(lines)
+    if not is_real_input_text(text):
+        raise RuntimeError("target existing input is incomplete")
+    return text
+
+
+def capture_complete_input_lines(pane_id: str) -> list[str]:
+    if re.fullmatch(r"%[0-9]+", pane_id) is None:
+        raise RuntimeError("target input capture requires an exact tmux pane id")
     try:
         result = subprocess.run(
             ["tmux", "capture-pane", "-p", "-J", "-N", "-t", pane_id, "-S", f"-{EXISTING_INPUT_CAPTURE_LINES}"],
@@ -740,7 +773,21 @@ def capture_complete_existing_input(target: str) -> ExistingInputCapture:
         raise RuntimeError("target input capture failed") from exc
     if result.returncode != 0:
         raise RuntimeError("target input capture failed")
-    return ExistingInputCapture(pane_id, exact_existing_input_text((result.stdout or "").split("\n")))
+    return (result.stdout or "").split("\n")
+
+
+def capture_complete_existing_input(target: str) -> ExistingInputCapture:
+    pane_id = exact_pane_id(target)
+    if not pane_id:
+        raise RuntimeError(f"target cannot be resolved as an exact tmux pane: {target}")
+    return ExistingInputCapture(pane_id, exact_existing_input_text(capture_complete_input_lines(pane_id)))
+
+
+def require_authorized_existing_input_text(text: str, authorization: ExistingInputAuthorization) -> None:
+    if authorization.text is not None and text != authorization.text:
+        raise RuntimeError("target existing input does not exactly match the authorized file")
+    if text_sha256(text) != authorization.sha256:
+        raise RuntimeError("target existing input does not match the authorized content digest")
 
 
 def require_authorized_existing_input(
@@ -751,10 +798,7 @@ def require_authorized_existing_input(
     capture = capture_complete_existing_input(target)
     if expected_pane_id is not None and capture.pane_id != expected_pane_id:
         raise RuntimeError("target pane changed before submit-existing")
-    if authorization.text is not None and capture.text != authorization.text:
-        raise RuntimeError("target existing input does not exactly match the authorized file")
-    if text_sha256(capture.text) != authorization.sha256:
-        raise RuntimeError("target existing input does not match the authorized content digest")
+    require_authorized_existing_input_text(capture.text, authorization)
     return capture
 
 
@@ -811,6 +855,59 @@ def submit_existing_to_codex(target: str, authorization: ExistingInputAuthorizat
     capture = require_authorized_existing_input(target, authorization, initial_capture.pane_id)
     send_enter(capture.pane_id)
     verify_authorized_existing_submit(target, authorization, selected, capture.pane_id, preexisting_error)
+
+
+def verify_authorized_existing_cancel(
+    target: str,
+    authorization: ExistingInputAuthorization,
+    options: CodexSendOptions,
+    pane_id: str,
+    preexisting_error: tuple[str, ...] | None,
+) -> None:
+    deadline_s = time.monotonic() + options.submit_verify_timeout_s
+    while True:
+        if exact_pane_id(target) != pane_id:
+            raise RuntimeError("target pane changed after cancel-existing")
+        lines = capture_complete_input_lines(pane_id)
+        if exact_pane_id(target) != pane_id:
+            raise RuntimeError("target pane changed after cancel-existing")
+        validate_error_transition(lines, preexisting_error, target, "after cancel-existing")
+        current_status = status(lines, current_block(lines))
+        input_text = exact_complete_input_text(lines)
+        if input_text in CODEX_PLACEHOLDER_INPUT_TEXTS:
+            if current_status not in {"ready", "running", "waiting_subagent", "error"}:
+                raise RuntimeError(f"target is not in a supported Codex state after cancel-existing: {target} status={current_status}")
+            return
+        require_authorized_existing_input_text(input_text, authorization)
+        now_s = time.monotonic()
+        if now_s >= deadline_s:
+            raise RuntimeError(f"Codex cancel-existing not verified after {options.submit_verify_timeout_s:g}s: authorized input still visible")
+        time.sleep(min(0.25, max(0.05, deadline_s - now_s)))
+
+
+def cancel_existing_codex_input(target: str, authorization: ExistingInputAuthorization, options: CodexSendOptions | None = None) -> None:
+    selected = options or CodexSendOptions(DEFAULT_TMUX_ENTER_COUNT, 0.15, False)
+    validate_options(selected)
+    if selected.submit_verify_timeout_s <= 0:
+        raise RuntimeError("cancel-existing requires a positive verification timeout")
+    if target.partition(":")[0].startswith("h"):
+        raise RuntimeError("cancel-existing refuses human-owned targets")
+    if selected.dry_run:
+        _ = print(f"would verify exact existing input at {target}")
+        _ = print(f"would send one Ctrl+C to {target}")
+        _ = print(f"would verify existing input is gone at {target}")
+        return
+    preexisting_error = require_sendable_codex_target(target, EXISTING_INPUT_CAPTURE_LINES)
+    initial_capture = require_authorized_existing_input(target, authorization)
+    lines = tail_pane_id(initial_capture.pane_id, EXISTING_INPUT_CAPTURE_LINES)
+    validate_error_transition(lines, preexisting_error, target, "before cancel-existing")
+    if has_plan_prompt(lines):
+        raise RuntimeError("Codex cancel-existing blocked by unsafe Plan prompt")
+    capture = require_authorized_existing_input(target, authorization, initial_capture.pane_id)
+    if exact_pane_id(target) != capture.pane_id:
+        raise RuntimeError("target pane changed before cancel-existing")
+    send_cancel_input(capture.pane_id)
+    verify_authorized_existing_cancel(target, authorization, selected, capture.pane_id, preexisting_error)
 
 
 def clear_existing_input_before_send(target: str, _options: CodexSendOptions) -> str:
@@ -1088,6 +1185,9 @@ def main(argv: list[str]) -> int:
             return query_async_result(args.async_result)
         if args.submit_existing_file is not None or args.submit_existing_sha256:
             submit_existing_to_codex(args.target, existing_input_authorization(args), args.options)
+            return 0
+        if args.cancel_existing_file is not None or args.cancel_existing_sha256:
+            cancel_existing_codex_input(args.target, existing_input_authorization(args), args.options)
             return 0
         if args.async_mode:
             message = read_message(args)

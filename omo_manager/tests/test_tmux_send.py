@@ -17,6 +17,7 @@ from omo_manager.omo_tmux_send import (
     ExistingInputAuthorization,
     ExistingInputCapture,
     async_job_from_query,
+    cancel_existing_codex_input,
     capture_complete_existing_input,
     clear_existing_input_before_send,
     exact_capacity_error,
@@ -183,6 +184,22 @@ class TmuxSendTests(unittest.TestCase):
             ["--target", "cfg:1.0", "--message-file", "prompt.md", "--submit-existing-file", "existing.md"],
             ["--target", "cfg:1.0", "--submit-existing-file", "existing.md", "--submit-existing-sha256", "a" * 64],
             ["--target", "cfg:1.0", "--submit-existing-sha256", "A" * 64],
+        ):
+            with self.subTest(argv=argv), patch("sys.stderr", new_callable=StringIO):
+                with self.assertRaises(SystemExit):
+                    parse_args(argv)
+
+    def test_parse_cancel_existing_requires_one_exact_authorization(self) -> None:
+        from_file = parse_args(["--target", "cfg:1.0", "--cancel-existing-file", "prompt.md"])
+        from_digest = parse_args(["--target", "cfg:1.0", "--cancel-existing-sha256", "a" * 64])
+
+        self.assertEqual(Path("prompt.md"), from_file.cancel_existing_file)
+        self.assertEqual("a" * 64, from_digest.cancel_existing_sha256)
+        for argv in (
+            ["--target", "cfg:1.0", "--message-file", "prompt.md", "--cancel-existing-file", "existing.md"],
+            ["--target", "cfg:1.0", "--cancel-existing-file", "existing.md", "--cancel-existing-sha256", "a" * 64],
+            ["--target", "cfg:1.0", "--submit-existing-sha256", "a" * 64, "--cancel-existing-sha256", "a" * 64],
+            ["--target", "cfg:1.0", "--cancel-existing-sha256", "A" * 64],
         ):
             with self.subTest(argv=argv), patch("sys.stderr", new_callable=StringIO):
                 with self.assertRaises(SystemExit):
@@ -660,6 +677,17 @@ class TmuxSendTests(unittest.TestCase):
         self.assertEqual("approved prompt", authorization.text)
         self.assertEqual(text_sha256("approved prompt"), authorization.sha256)
 
+    def test_main_cancel_existing_file_uses_file_authorization(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            prompt = Path(tmp) / "prompt.txt"
+            _ = prompt.write_text("stale duplicate", encoding="utf-8")
+            with patch("omo_manager.omo_tmux_send.cancel_existing_codex_input") as cancel:
+                self.assertEqual(0, main(["--target", "cfg:1.0", "--cancel-existing-file", str(prompt)]))
+
+        authorization = cancel.call_args.args[1]
+        self.assertEqual("stale duplicate", authorization.text)
+        self.assertEqual(text_sha256("stale duplicate"), authorization.sha256)
+
     def test_exact_existing_input_text_preserves_whitespace(self) -> None:
         lines = ["• Working", "›  leading ", " continuation  ", "  gpt-5.5"]
 
@@ -902,6 +930,137 @@ class TmuxSendTests(unittest.TestCase):
 
         sendable.assert_not_called()
         capture.assert_not_called()
+
+    def test_cancel_existing_clears_exact_authorized_input(self) -> None:
+        authorization = ExistingInputAuthorization(text_sha256("stale duplicate"), "stale duplicate")
+        with patch("omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None), patch(
+            "omo_manager.omo_tmux_send.capture_complete_existing_input",
+            side_effect=[ExistingInputCapture("%42", "stale duplicate"), ExistingInputCapture("%42", "stale duplicate")],
+        ), patch("omo_manager.omo_tmux_send.tail_pane_id", return_value=["› stale duplicate", "  gpt-5.5"]), patch(
+            "omo_manager.omo_tmux_send.capture_complete_input_lines", return_value=["› Use /skills to list available skills", "  gpt-5.5"]
+        ), patch("omo_manager.omo_tmux_send.exact_pane_id", return_value="%42"), patch(
+            "omo_manager.omo_tmux_send.send_cancel_input"
+        ) as cancel, patch("omo_manager.omo_tmux_send.send_enter") as enter:
+            cancel_existing_codex_input("cfg:1.0", authorization, options())
+
+        cancel.assert_called_once_with("%42")
+        enter.assert_not_called()
+
+    def test_cancel_existing_rejects_mismatched_input(self) -> None:
+        authorization = ExistingInputAuthorization(text_sha256("stale duplicate"), "stale duplicate")
+        with patch("omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None), patch(
+            "omo_manager.omo_tmux_send.capture_complete_existing_input", return_value=ExistingInputCapture("%42", "different input")
+        ), patch("omo_manager.omo_tmux_send.send_cancel_input") as cancel:
+            with self.assertRaisesRegex(RuntimeError, "exactly match"):
+                cancel_existing_codex_input("cfg:1.0", authorization, options())
+
+        cancel.assert_not_called()
+
+    def test_cancel_existing_rejects_replaced_target_before_ctrl_c(self) -> None:
+        authorization = ExistingInputAuthorization(text_sha256("stale duplicate"), "stale duplicate")
+        with patch("omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None), patch(
+            "omo_manager.omo_tmux_send.capture_complete_existing_input",
+            side_effect=[ExistingInputCapture("%42", "stale duplicate"), ExistingInputCapture("%43", "stale duplicate")],
+        ), patch("omo_manager.omo_tmux_send.tail_pane_id", return_value=["› stale duplicate", "  gpt-5.5"]), patch(
+            "omo_manager.omo_tmux_send.send_cancel_input"
+        ) as cancel:
+            with self.assertRaisesRegex(RuntimeError, "pane changed"):
+                cancel_existing_codex_input("cfg:1.0", authorization, options())
+
+        cancel.assert_not_called()
+
+    def test_cancel_existing_rechecks_target_after_final_input_capture(self) -> None:
+        authorization = ExistingInputAuthorization(text_sha256("stale duplicate"), "stale duplicate")
+        with patch("omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None), patch(
+            "omo_manager.omo_tmux_send.capture_complete_existing_input",
+            side_effect=[ExistingInputCapture("%42", "stale duplicate"), ExistingInputCapture("%42", "stale duplicate")],
+        ), patch("omo_manager.omo_tmux_send.tail_pane_id", return_value=["› stale duplicate", "  gpt-5.5"]), patch(
+            "omo_manager.omo_tmux_send.exact_pane_id", return_value="%43"
+        ), patch("omo_manager.omo_tmux_send.send_cancel_input") as cancel:
+            with self.assertRaisesRegex(RuntimeError, "pane changed before"):
+                cancel_existing_codex_input("cfg:1.0", authorization, options())
+
+        cancel.assert_not_called()
+
+    def test_cancel_existing_rechecks_target_after_verification_capture(self) -> None:
+        authorization = ExistingInputAuthorization(text_sha256("stale duplicate"), "stale duplicate")
+        with patch("omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None), patch(
+            "omo_manager.omo_tmux_send.capture_complete_existing_input",
+            side_effect=[ExistingInputCapture("%42", "stale duplicate"), ExistingInputCapture("%42", "stale duplicate")],
+        ), patch("omo_manager.omo_tmux_send.tail_pane_id", return_value=["› stale duplicate", "  gpt-5.5"]), patch(
+            "omo_manager.omo_tmux_send.capture_complete_input_lines", return_value=["› Use /skills to list available skills", "  gpt-5.5"]
+        ), patch("omo_manager.omo_tmux_send.exact_pane_id", side_effect=["%42", "%42", "%43"]), patch(
+            "omo_manager.omo_tmux_send.send_cancel_input"
+        ) as cancel:
+            with self.assertRaisesRegex(RuntimeError, "pane changed after"):
+                cancel_existing_codex_input("cfg:1.0", authorization, options())
+
+        cancel.assert_called_once_with("%42")
+
+    def test_cancel_existing_refuses_human_owned_target_without_inspection(self) -> None:
+        authorization = ExistingInputAuthorization(text_sha256("stale duplicate"))
+        with patch("omo_manager.omo_tmux_send.require_sendable_codex_target") as sendable, patch(
+            "omo_manager.omo_tmux_send.capture_complete_existing_input"
+        ) as capture, patch("omo_manager.omo_tmux_send.send_cancel_input") as cancel:
+            with self.assertRaisesRegex(RuntimeError, "human-owned"):
+                cancel_existing_codex_input("hteam:1.0", authorization, options())
+
+        sendable.assert_not_called()
+        capture.assert_not_called()
+        cancel.assert_not_called()
+
+    def test_cancel_existing_sends_one_ctrl_c_and_never_enter_while_verifying(self) -> None:
+        authorization = ExistingInputAuthorization(text_sha256("stale duplicate"), "stale duplicate")
+        with patch("omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None), patch(
+            "omo_manager.omo_tmux_send.capture_complete_existing_input",
+            side_effect=[ExistingInputCapture("%42", "stale duplicate")] * 3,
+        ), patch("omo_manager.omo_tmux_send.tail_pane_id", return_value=["› stale duplicate", "  gpt-5.5"]), patch(
+            "omo_manager.omo_tmux_send.capture_complete_input_lines",
+            side_effect=[
+                ["› stale duplicate", "  gpt-5.5"],
+                ["› Use /skills to list available skills", "  gpt-5.5"],
+            ],
+        ), patch("omo_manager.omo_tmux_send.exact_pane_id", return_value="%42"), patch(
+            "omo_manager.omo_tmux_send.time.monotonic", side_effect=[0.0, 0.0, 0.1]
+        ), patch("omo_manager.omo_tmux_send.time.sleep"), patch(
+            "omo_manager.omo_tmux_send.send_cancel_input"
+        ) as cancel, patch("omo_manager.omo_tmux_send.send_enter") as enter:
+            cancel_existing_codex_input("cfg:1.0", authorization, options())
+
+        cancel.assert_called_once_with("%42")
+        enter.assert_not_called()
+
+    def test_cancel_existing_rejects_ambiguous_empty_input_after_ctrl_c(self) -> None:
+        authorization = ExistingInputAuthorization(text_sha256("stale duplicate"), "stale duplicate")
+        with patch("omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None), patch(
+            "omo_manager.omo_tmux_send.capture_complete_existing_input",
+            side_effect=[ExistingInputCapture("%42", "stale duplicate"), ExistingInputCapture("%42", "stale duplicate")],
+        ), patch("omo_manager.omo_tmux_send.tail_pane_id", return_value=["› stale duplicate", "  gpt-5.5"]), patch(
+            "omo_manager.omo_tmux_send.capture_complete_input_lines",
+            return_value=["› remaining input", "• ambiguous continuation", "  gpt-5.5"],
+        ), patch("omo_manager.omo_tmux_send.exact_pane_id", return_value="%42"), patch(
+            "omo_manager.omo_tmux_send.send_cancel_input"
+        ) as cancel:
+            with self.assertRaisesRegex(RuntimeError, "partial"):
+                cancel_existing_codex_input("cfg:1.0", authorization, options())
+
+        cancel.assert_called_once_with("%42")
+
+    def test_cancel_existing_rejects_whitespace_changed_placeholder_after_ctrl_c(self) -> None:
+        authorization = ExistingInputAuthorization(text_sha256("stale duplicate"), "stale duplicate")
+        with patch("omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None), patch(
+            "omo_manager.omo_tmux_send.capture_complete_existing_input",
+            side_effect=[ExistingInputCapture("%42", "stale duplicate"), ExistingInputCapture("%42", "stale duplicate")],
+        ), patch("omo_manager.omo_tmux_send.tail_pane_id", return_value=["› stale duplicate", "  gpt-5.5"]), patch(
+            "omo_manager.omo_tmux_send.capture_complete_input_lines",
+            return_value=["› Use /skills to list available skills ", "  gpt-5.5"],
+        ), patch("omo_manager.omo_tmux_send.exact_pane_id", return_value="%42"), patch(
+            "omo_manager.omo_tmux_send.send_cancel_input"
+        ) as cancel:
+            with self.assertRaisesRegex(RuntimeError, "exactly match"):
+                cancel_existing_codex_input("cfg:1.0", authorization, options())
+
+        cancel.assert_called_once_with("%42")
 
     def test_run_tmux_stops_before_paste_when_existing_input_is_present(self) -> None:
         calls: list[list[str]] = []

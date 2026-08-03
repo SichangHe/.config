@@ -19,6 +19,15 @@ omo_tmux_send.py --target cfg:1.0 --submit-existing-sha256 "$prompt_sha256"
 
 This recovery is synchronous and target-scoped: it resolves one canonical pane ID, captures it with joined, trailing-space-preserving output, then compares the complete visible input exactly before Enter and before each retry. Unicode line separators remain distinct from LF. Post-submit verification stays on that pinned pane ID. The capture has no marker that distinguishes a layout spacer immediately before a recognized footer from an input-ending LF, so the helper rejects any whitespace-only row there, including one empty row. It accepts exact input whose final row directly precedes a strictly anchored model or `tab to queue message` footer. Footer-like prompt substrings and ambiguous prompt markers are rejected, as are human-owned `h*` targets, collapsed or partial input, overlays, whitespace-normalized differences, changed input, and mismatched file or digest authorization.
 
+For a manager-authorized blocked repair that must discard stale duplicate input without submitting it or resuming work, use the corresponding cancellation interface:
+
+```sh
+omo_tmux_send.py --target cfg:1.0 --cancel-existing-file "$prompt_file"
+omo_tmux_send.py --target cfg:1.0 --cancel-existing-sha256 "$prompt_sha256"
+```
+
+Cancellation applies the same exact-text and pinned-pane checks immediately before sending one `Ctrl+C`. It then requires the same live Codex pane to show no real input. It never sends Enter, retries `Ctrl+C`, submits the stale input, stops Codex, or performs normal dispatch. Target rebinding, changed input, unsupported state, overlays, human-owned `h*` targets, and unverifiable clearing fail the command.
+
 Use direct file-based helpers for manager-authored files:
 
 ```sh
