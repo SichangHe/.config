@@ -131,6 +131,8 @@
   - rerun watcher status after the result; an older problem snapshot is not current evidence
   - visible input alone never justifies stopping a live agent
   - a recovery stop requires both a terminal failed sender result and fresh watcher `not_codex` or unchanged fatal-error evidence after non-destructive recovery
+  - watcher events and helper receipts live in private, canonical directories, carry pane/status/digest bindings, use short TTLs, and are consumed once; the issuance sidecar also binds the exact receipt path, inode, and content digest
+  - these filesystem controls prevent accidental, copied, stale, or replayed evidence, but cannot provide cryptographic provenance against a malicious process running as the same Unix user; a separate trusted issuer would be required for that threat model
 
 - scoped maintenance
   - all manager-owned worker rows are handled by the same owner-routed problem scan

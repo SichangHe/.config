@@ -23,6 +23,7 @@ import tempfile
 import time
 import traceback
 import unicodedata
+import uuid
 from collections import Counter
 from contextlib import contextmanager
 from concurrent.futures import Future
@@ -30,6 +31,7 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import wait as wait_futures
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
 from queue import Empty
 from queue import SimpleQueue
@@ -59,6 +61,8 @@ from omo_manager.omo_blocking_actor import BlockingActor
 from omo_manager.omo_blocking_actor import request as blocking_request
 from omo_manager.omo_codex_status import Args as CodexStatusArgs
 from omo_manager.omo_codex_status import inspect as inspect_codex
+from omo_manager.omo_codex_status import exact_tail as exact_codex_tail
+from omo_manager.omo_codex_status import report_from_lines as report_codex_lines
 from omo_manager.amh_problem_claim import ProblemClaim
 from omo_manager.amh_problem_claim import locked_claims
 from omo_manager.amh_problem_claim import issue_problem
@@ -113,6 +117,11 @@ DEFAULT_AGENT_PROBLEM_INTERVAL_S = float(os.environ.get("OMO_MANAGER_AGENT_PROBL
 DEFAULT_AGENT_PROBLEM_REPEAT_S = float(os.environ.get("OMO_MANAGER_AGENT_PROBLEM_REPEAT_S", "1800"))
 PENDING_DELIVERY_FAILURE_RETRY_S = 600.0
 ASYNC_DELIVERY_STARTED = 202
+RECOVERY_EVENT_DIRNAME = ".omo-codex-recovery-events"
+RECOVERY_RECEIPT_DIRNAME = ".omo-codex-recovery-receipts"
+RECOVERY_EVENT_VERSION = "omo-pending-watch-delivery-event-v1"
+RECOVERY_EVENT_MAX_AGE_S = 300.0
+RECOVERY_DELIVERY_ID_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
 CAPACITY_ERROR_TEXT = "Selected model is at capacity. Please try a different model."
 CAPACITY_RESUME_MAX_ATTEMPTS = 3
 BLOCKED_IDLE_BACKOFF_INITIAL_S = 600.0
@@ -398,6 +407,143 @@ class DeliveryResult:
     error: str = ""
 
 
+def record_terminal_delivery_failure(root: Path | None, target: str, delivery_id: str, error: str) -> Path | None:
+    """Persist one watcher-owned failed-delivery event after fresh pane capture."""
+
+    if root is None or RECOVERY_DELIVERY_ID_RE.fullmatch(delivery_id) is None or is_human_tmux_target(target):
+        return None
+    identity_format = "#{session_name}:#{window_index}.#{pane_index}\t#{pane_id}\t#{window_id}"
+
+    def current_identity() -> tuple[str, str, str] | None:
+        try:
+            identity = subprocess.run(
+                ["tmux", "display-message", "-p", "-t", target, identity_format],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if identity.returncode != 0:
+            return None
+        fields = identity.stdout.strip().split("\t")
+        if len(fields) != 3 or not fields[0] or not fields[1].startswith("%") or not fields[2].startswith("@"):
+            return None
+        return fields[0], fields[1], fields[2]
+
+    before = current_identity()
+    if before is None:
+        return None
+    canonical_target, pane_id, window_id = before
+    try:
+        captured, captured_lines = exact_codex_tail(canonical_target, 80)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if not captured:
+        return None
+    report = report_codex_lines(captured_lines)
+    if report.status != "not_codex" or not report.lines:
+        return None
+    if current_identity() != before:
+        return None
+    event_dir = root.resolve() / RECOVERY_EVENT_DIRNAME
+    try:
+        # Create only the final dedicated directory, then open it with
+        # O_NOFOLLOW.  A pre-existing symlink (or non-private directory) is
+        # refused; never chmod a path that could resolve outside --root.
+        event_dir.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            os.mkdir(event_dir, 0o700)
+        except FileExistsError:
+            pass
+        directory_fd = os.open(
+            event_dir,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        directory_stat = os.fstat(directory_fd)
+        if (
+            not stat.S_ISDIR(directory_stat.st_mode)
+            or directory_stat.st_uid != os.getuid()
+            or stat.S_IMODE(directory_stat.st_mode) != 0o700
+        ):
+            os.close(directory_fd)
+            return None
+    except OSError:
+        return None
+    event_path = event_dir / f"{delivery_id}.event"
+    event_name = event_path.name
+    used_name = f"{delivery_id}.used"
+    try:
+        def entry_exists(name: str) -> bool:
+            try:
+                os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                return False
+            return True
+
+        if entry_exists(event_name) or entry_exists(used_name):
+            return None
+        observed_at = datetime.now(timezone.utc).isoformat()
+        event_fields = {
+            "version": RECOVERY_EVENT_VERSION,
+            "producer": "omo_pending_watch",
+            "event_id": delivery_id,
+            "delivery_id": delivery_id,
+            "target": canonical_target,
+            "pane_id": pane_id,
+            "window_id": window_id,
+            "status": "not_codex",
+            "delivery": "failed",
+            "source": "omo_pending_watch",
+            "observed_at": observed_at,
+            "receipt_file": f"{RECOVERY_RECEIPT_DIRNAME}/{delivery_id}.receipt",
+            "receipt_nonce": secrets.token_hex(32),
+            "tail_sha256": hashlib.sha256("\n".join(captured_lines).encode("utf-8")).hexdigest(),
+            "error_sha256": hashlib.sha256((error or "terminal delivery failure").encode("utf-8")).hexdigest(),
+        }
+        event_text = ";".join(f"{key}={value}" for key, value in event_fields.items()) + "\n"
+        fd = -1
+        temporary_name = ""
+        for _ in range(5):
+            candidate = f".delivery-event-{os.getpid()}-{secrets.token_hex(8)}"
+            try:
+                fd = os.open(
+                    candidate,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                    dir_fd=directory_fd,
+                )
+                temporary_name = candidate
+                break
+            except FileExistsError:
+                continue
+        if fd < 0 or not temporary_name:
+            return None
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                fd = -1
+                stream.write(event_text)
+            try:
+                os.link(temporary_name, event_name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd, follow_symlinks=False)
+            except FileExistsError:
+                return None
+            return event_path
+        finally:
+            if fd >= 0:
+                os.close(fd)
+            if temporary_name:
+                try:
+                    os.unlink(temporary_name, dir_fd=directory_fd)
+                except FileNotFoundError:
+                    pass
+    except OSError:
+        return None
+    finally:
+        os.close(directory_fd)
+
+
 @dataclass(frozen=True)
 class PendingGuard:
     root: Path
@@ -649,12 +795,16 @@ def log_send_result(
     success_event: DeliverySuccessEvent | None = None,
     failure_fallback: DeliveryFailureFallback | None = None,
     problem_guard: AgentProblemGuard | None = None,
+    root: Path | None = None,
+    target: str = "",
+    delivery_id: str = "",
 ) -> None:
     """Log delivery failure or queue success-side effects for the main loop."""
 
     try:
         _ = future.result()
     except Exception as exc:
+        _ = record_terminal_delivery_failure(root, target, delivery_id, str(exc))
         if problem_guard is not None and not agent_problem_guard_current(problem_guard):
             print("omo_pending_watch: async delivery result is stale after watcher-state refresh", file=sys.stderr)
             queue_delivery_failure_event(success_event)
@@ -777,11 +927,13 @@ def submit_send(
     problem_guard: AgentProblemGuard | None = None,
     success_event: DeliverySuccessEvent | None = None,
     failure_fallback: DeliveryFailureFallback | None = None,
+    root: Path | None = None,
+    delivery_id: str = "",
 ) -> Future[None]:
     """Submit verified tmux delivery without forking a helper process."""
 
     future = send_executor().submit(run_verified_send, target, message, options, pending_guard, problem_guard)
-    retain_send_result(future, lambda completed: log_send_result(completed, success_event, failure_fallback, problem_guard))
+    retain_send_result(future, lambda completed: log_send_result(completed, success_event, failure_fallback, problem_guard, root, target, delivery_id))
     return future
 
 
@@ -794,6 +946,8 @@ def send_to_codex(
     problem_guard: AgentProblemGuard | None = None,
     success_event: DeliverySuccessEvent | None = None,
     failure_fallback: DeliveryFailureFallback | None = None,
+    root: Path | None = None,
+    delivery_id: str = "",
 ) -> Future[None] | None:
     """Validate a target synchronously, then deliver through a background thread."""
 
@@ -803,7 +957,7 @@ def send_to_codex(
         return None
     require_sendable_codex_target(target, inspect_lines_for_message(message))
     if all(value is None for value in (pending_guard, problem_guard, success_event, failure_fallback)):
-        return submit_send(target, message, selected)
+        return submit_send(target, message, selected, root=root, delivery_id=delivery_id)
     return submit_send(
         target,
         message,
@@ -812,6 +966,8 @@ def send_to_codex(
         problem_guard=problem_guard,
         success_event=success_event,
         failure_fallback=failure_fallback,
+        root=root,
+        delivery_id=delivery_id,
     )
 
 
@@ -3149,7 +3305,7 @@ def push_manager_text(args: Args, text: str, success_event: DeliverySuccessEvent
     if not args.manager_target:
         print("omo_pending_watch: OMO_MANAGER_TMUX_TARGET is required outside --dry-run", file=sys.stderr)
         return 1
-    return try_send_delivery_text("manager delivery", text, args.manager_target, success_event=success_event).status
+    return try_send_delivery_text("manager delivery", text, args.manager_target, root=args.root, success_event=success_event).status
 
 
 def push_manager_text_to_target(
@@ -3174,6 +3330,7 @@ def push_manager_text_to_target(
         "manager delivery",
         text,
         scoped_args.manager_target,
+        root=scoped_args.root,
         success_event=success_event,
         failure_fallback_target=fallback_target,
         failure_pending_guard=PendingGuard(args.root, marker.file, marker.line, marker.digest, marker.block_text) if marker is not None else None,
@@ -3193,7 +3350,7 @@ def push_manager_text_to_target(
         "manager delivery",
         with_failed_target_escalation(text, scoped_args.manager_target, result),
         fallback_target,
-        root=args.root if marker is not None else None,
+        root=scoped_args.root,
         pending_file=marker.file if marker is not None else None,
         pending_line=marker.line if marker is not None else 0,
         pending_digest=marker.digest if marker is not None else "",
@@ -3216,6 +3373,42 @@ def send_delivery_text(
     submit_verify_timeout_s: float = DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S,
 ) -> int:
     return try_send_delivery_text(name, text, target, root=root, pending_file=pending_file, pending_line=pending_line, pending_digest=pending_digest, pending_text=pending_text, submit_verify_timeout_s=submit_verify_timeout_s).status
+
+
+def submit_delivery_send(
+    target: str,
+    text: str,
+    options: CodexSendOptions,
+    *,
+    pending_guard: PendingGuard | None,
+    problem_guard: AgentProblemGuard | None,
+    success_event: DeliverySuccessEvent | None,
+    failure_fallback: DeliveryFailureFallback | None,
+    root: Path | None,
+    delivery_id: str,
+) -> Future[None] | None:
+    """Submit a delivery while keeping older test/integration send shims compatible."""
+
+    kwargs = {
+        "pending_guard": pending_guard,
+        "success_event": success_event,
+        "failure_fallback": failure_fallback,
+        "root": root,
+        "delivery_id": delivery_id,
+    }
+    if problem_guard is not None:
+        kwargs["problem_guard"] = problem_guard
+    try:
+        return send_to_codex(target, text, options, **kwargs)  # type: ignore[arg-type]
+    except TypeError as error:
+        # A few embedders still provide the pre-recovery send shim.  Retry only
+        # the signature mismatch; real sender TypeErrors must propagate.
+        detail = str(error)
+        if "unexpected keyword argument 'root'" not in detail and "unexpected keyword argument 'delivery_id'" not in detail:
+            raise
+        kwargs.pop("root", None)
+        kwargs.pop("delivery_id", None)
+        return send_to_codex(target, text, options, **kwargs)  # type: ignore[arg-type]
 
 
 def try_send_delivery_text(
@@ -3242,6 +3435,7 @@ def try_send_delivery_text(
         print(f"omo_pending_watch: {name} skipped; pending marker cleared before tmux paste", file=sys.stderr)
         return DeliveryResult(1, "pending marker cleared before tmux paste")
     pending_guard = PendingGuard(root, pending_file, pending_line, pending_digest, pending_text) if root is not None and pending_file is not None else None
+    delivery_id = str(uuid.uuid4()) if root is not None else ""
     options = CodexSendOptions(
         DEFAULT_TMUX_ENTER_COUNT,
         0.15,
@@ -3264,30 +3458,24 @@ def try_send_delivery_text(
         else None
     )
     try:
-        if problem_guard is None:
-            async_job = send_to_codex(
-                target,
-                text,
-                options,
-                pending_guard=pending_guard,
-                success_event=success_event,
-                failure_fallback=failure_fallback,
-            )
-        else:
-            async_job = send_to_codex(
-                target,
-                text,
-                options,
-                pending_guard=pending_guard,
-                problem_guard=problem_guard,
-                success_event=success_event,
-                failure_fallback=failure_fallback,
-            )
+        async_job = submit_delivery_send(
+            target,
+            text,
+            options,
+            pending_guard=pending_guard,
+            problem_guard=problem_guard,
+            success_event=success_event,
+            failure_fallback=failure_fallback,
+            root=root,
+            delivery_id=delivery_id,
+        )
     except subprocess.CalledProcessError as exc:
         print(f"omo_pending_watch: {name} failed: {exc}", file=sys.stderr)
+        _ = record_terminal_delivery_failure(root, target, delivery_id, str(exc))
         return DeliveryResult(exc.returncode or 1, str(exc))
     except Exception as exc:
         print(f"omo_pending_watch: {name} failed: {exc}", file=sys.stderr)
+        _ = record_terminal_delivery_failure(root, target, delivery_id, str(exc))
         return DeliveryResult(1, str(exc))
     return DeliveryResult(ASYNC_DELIVERY_STARTED if async_job is not None else 0)
 
@@ -3347,6 +3535,7 @@ def push_agent_pending_item_reminders(
                 "agent pending-item reminder",
                 reminder_text,
                 target,
+                root=args.root,
                 success_event=event,
             ).status
         changed = delivery_accepted(status) or changed
@@ -4058,7 +4247,7 @@ def route_capacity_main_manager_alert(args: Args, row: ProblemRow, text: str) ->
         if args.dry_run:
             print(f"manager problem route due: target={route_target}\n{text}", flush=True)
             return True
-        if delivery_accepted(try_send_delivery_text("capacity manager recovery alert", text, route_target).status):
+        if delivery_accepted(try_send_delivery_text("capacity manager recovery alert", text, route_target, root=args.root).status):
             return True
     return email_human_manager_problem(args, text)
 
@@ -4792,7 +4981,7 @@ def route_or_email_manager_problem(args: Args, seen: dict[str, float], output: s
             print(f"manager problem route due: target={target}\n{text}", flush=True)
             remember_seen(seen, key, now_wall_s)
             return True
-        result = try_send_delivery_text("manager problem routing", text, target, success_event=event, problem_guard=guard)
+        result = try_send_delivery_text("manager problem routing", text, target, root=args.root, success_event=event, problem_guard=guard)
         if delivery_accepted(result.status):
             reserve_async_marker(seen, attempt_key, now_wall_s, result.status)
             remember_seen(seen, agent_problem_target_attempt_key(target), now_wall_s)
