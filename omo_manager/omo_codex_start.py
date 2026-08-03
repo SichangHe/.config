@@ -3,7 +3,7 @@
 # requires-python = ">=3.13"
 # dependencies = ["pyyaml"]
 # ///
-"""Start or resume tracked Codex work in an existing shell-only tmux pane."""
+"""Start, resume, or recover tracked Codex work in an existing tmux pane."""
 
 from __future__ import annotations
 
@@ -18,21 +18,24 @@ import tempfile
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 try:
     from omo_manager.omo_codex_status import Args as StatusArgs
     from omo_manager.omo_codex_status import current_block, inspect, tail
     from omo_manager.omo_codex_status import status as classify_status
     from omo_manager.omo_codex_stop import query_status_session_id
+    from omo_manager.omo_task import capture_pane, has_codex_trust_prompt, has_live_codex_launch
     from omo_manager.omo_task_lock import task_file_lock, task_target_lock
     from omo_manager.omo_task_metadata import TARGET_RE, TASK_FRONTMATTER_STATUSES, parse_task_metadata
 except ModuleNotFoundError:
-    from omo_codex_status import Args as StatusArgs
-    from omo_codex_status import current_block, inspect, tail
-    from omo_codex_status import status as classify_status
-    from omo_codex_stop import query_status_session_id
-    from omo_task_lock import task_file_lock, task_target_lock
-    from omo_task_metadata import TARGET_RE, TASK_FRONTMATTER_STATUSES, parse_task_metadata
+    from omo_codex_status import Args as StatusArgs  # pyright: ignore[reportImplicitRelativeImport]
+    from omo_codex_status import current_block, inspect, tail  # pyright: ignore[reportImplicitRelativeImport]
+    from omo_codex_status import status as classify_status  # pyright: ignore[reportImplicitRelativeImport]
+    from omo_codex_stop import query_status_session_id  # pyright: ignore[reportImplicitRelativeImport]
+    from omo_task import capture_pane, has_codex_trust_prompt, has_live_codex_launch  # pyright: ignore[reportImplicitRelativeImport]
+    from omo_task_lock import task_file_lock, task_target_lock  # pyright: ignore[reportImplicitRelativeImport]
+    from omo_task_metadata import TARGET_RE, TASK_FRONTMATTER_STATUSES, parse_task_metadata  # pyright: ignore[reportImplicitRelativeImport]
 
 HELPER_DIR = Path(__file__).resolve().parent
 WORKER_DEFAULTS = HELPER_DIR / "WORKER_DEFAULTS.md"
@@ -61,6 +64,23 @@ class Args:
     confirm_empty_shell: bool
     dry_run: bool
     restart_running: bool = False
+    confirm_directory_trust: bool = False
+
+
+class ParsedArgs(argparse.Namespace):
+    if TYPE_CHECKING:
+        root: Path = Path()
+        task_file: str = ""
+        target: str = ""
+        model: str = ""
+        reasoning_effort: str = ""
+        session_id: str = ""
+        prompt_file: Path | None = None
+        startup_timeout_s: float = 45.0
+        confirm_empty_shell: bool = False
+        restart_running: bool = False
+        confirm_directory_trust: bool = False
+        dry_run: bool = False
 
 
 @dataclass(frozen=True)
@@ -77,8 +97,8 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--root", type=Path, default=Path(os.environ.get("OMO_WORK_LOGS_ROOT", Path.home() / "work_logs")))
     _ = parser.add_argument("--task-file", required=True, help="Active tracked task whose `runat` names the target pane.")
     _ = parser.add_argument("--target", required=True, help="Exact existing shell pane: SESSION:WINDOW[.PANE].")
-    _ = parser.add_argument("--model", required=True)
-    _ = parser.add_argument("--reasoning-effort", required=True, choices=EFFORTS)
+    _ = parser.add_argument("--model", default="")
+    _ = parser.add_argument("--reasoning-effort", default="", choices=EFFORTS)
     _ = parser.add_argument("--session-id", default="", help="Existing Codex session to resume without a new prompt.")
     _ = parser.add_argument("--prompt-file", type=Path, help="Task-local prompt for a fresh Codex session.")
     _ = parser.add_argument("--startup-timeout-s", type=float, default=45.0)
@@ -88,19 +108,36 @@ def parse_args(argv: list[str]) -> Args:
         help="Confirm the target shell has no input to preserve; the helper sends Ctrl-C before launch.",
     )
     _ = parser.add_argument("--restart-running", action="store_true", help="Capture the current Codex session and atomically respawn it in this exact pane.")
+    _ = parser.add_argument("--confirm-directory-trust", action="store_true", help="Confirm the exact trust prompt in an existing tracked Codex pane.")
     _ = parser.add_argument("--dry-run", action="store_true")
-    parsed = parser.parse_args(argv)
-    if MODEL_RE.fullmatch(parsed.model) is None:
+    parsed = parser.parse_args(argv, namespace=ParsedArgs())
+    recovery_conflicts = (
+        "--model",
+        "--reasoning-effort",
+        "--session-id",
+        "--prompt-file",
+        "--confirm-empty-shell",
+        "--restart-running",
+    )
+    supplied_recovery_conflict = next(
+        (option for option in recovery_conflicts if any(token == option or token.startswith(f"{option}=") for token in argv)),
+        "",
+    )
+    if parsed.confirm_directory_trust and supplied_recovery_conflict:
+        parser.error(f"--confirm-directory-trust does not accept {supplied_recovery_conflict}.")
+    if not parsed.confirm_directory_trust and (not parsed.model or not parsed.reasoning_effort):
+        parser.error("--model and --reasoning-effort are required unless --confirm-directory-trust is used.")
+    if parsed.model and MODEL_RE.fullmatch(parsed.model) is None:
         parser.error("--model contains unsupported characters.")
     if parsed.session_id and UUID_RE.fullmatch(parsed.session_id) is None:
         parser.error("--session-id must be a Codex UUID.")
     if parsed.restart_running and (parsed.prompt_file or parsed.session_id):
         parser.error("--restart-running captures the live session and does not accept --prompt-file or --session-id.")
-    if not parsed.restart_running and bool(parsed.session_id) == bool(parsed.prompt_file):
+    if not parsed.confirm_directory_trust and not parsed.restart_running and bool(parsed.session_id) == bool(parsed.prompt_file):
         parser.error("provide exactly one of --session-id or --prompt-file.")
     if not math.isfinite(parsed.startup_timeout_s) or parsed.startup_timeout_s <= 0:
         parser.error("--startup-timeout-s must be finite and positive.")
-    if not parsed.restart_running and not parsed.confirm_empty_shell:
+    if not parsed.confirm_directory_trust and not parsed.restart_running and not parsed.confirm_empty_shell:
         parser.error("--confirm-empty-shell is required because tmux cannot inspect a shell's input buffer.")
     return Args(
         root=parsed.root.expanduser().resolve(),
@@ -114,6 +151,7 @@ def parse_args(argv: list[str]) -> Args:
         confirm_empty_shell=parsed.confirm_empty_shell,
         dry_run=parsed.dry_run,
         restart_running=parsed.restart_running,
+        confirm_directory_trust=parsed.confirm_directory_trust,
     )
 
 
@@ -302,17 +340,62 @@ def wait_started(pane: Pane, marker: str, timeout_s: float) -> str:
     raise StartError("timed out waiting for Codex to become running or ready.")
 
 
+def require_directory_trust_recovery(args: Args, pane: Pane) -> None:
+    """Validate one locked snapshot of the tracked trust prompt and process."""
+
+    verify_same_pane(pane)
+    _ = validate_task(args, pane)
+    verify_same_pane(pane)
+    lines = capture_pane(pane.pane_id, 200)
+    verify_same_pane(pane)
+    if not has_codex_trust_prompt(lines):
+        raise StartError(f"target {pane.target} does not show the exact Codex directory-trust prompt.")
+    if not has_live_codex_launch(pane.pane_id):
+        raise StartError(f"target {pane.target} does not contain exactly one live Codex launch process.")
+    verify_same_pane(pane)
+
+
+def send_directory_trust_enter(pane: Pane) -> None:
+    submitted = run(["tmux", "send-keys", "-t", pane.pane_id, "Enter"])
+    if submitted.returncode != 0:
+        raise StartError(f"failed to confirm directory trust: {submitted.stderr.strip()}")
+
+
+def wait_directory_trust_recovery(pane: Pane, timeout_s: float) -> str:
+    deadline_s = time.monotonic() + timeout_s
+    while time.monotonic() < deadline_s:
+        verify_same_pane(pane)
+        lines = capture_pane(pane.pane_id, 200)
+        verify_same_pane(pane)
+        classification = classify_status(lines, current_block(lines))
+        if classification in SUCCESS_STATUSES:
+            return classification
+        if classification == "error":
+            raise StartError("Codex directory-trust recovery reached an error state.")
+        time.sleep(0.25)
+    raise StartError("timed out waiting for Codex directory-trust recovery to become running or ready.")
+
+
 def start(args: Args) -> str:
     pane = resolve_pane(args.target)
     if pane.target.partition(":")[0].startswith("h"):
         raise StartError("omo_codex_start cannot modify a human-owned `h*` tmux session; use the human-authorized task launcher.")
     if os.environ.get("TMUX_PANE") == pane.pane_id:
-        raise StartError("run this helper from a different pane than the empty target.")
-    if not args.restart_running:
+        raise StartError("run this helper from a different pane than the target.")
+    if not args.restart_running and not args.confirm_directory_trust:
         require_same_shell(pane)
     path = task_path(args.root, args.task_file)
     with task_target_lock(args.root, pane.target), task_file_lock(path):
         verify_same_pane(pane)
+        if args.confirm_directory_trust:
+            require_directory_trust_recovery(args, pane)
+            if args.dry_run:
+                print(f"target: {pane.target}")
+                print("mode: confirm-directory-trust")
+                return "dry-run"
+            require_directory_trust_recovery(args, pane)
+            send_directory_trust_enter(pane)
+            return wait_directory_trust_recovery(pane, args.startup_timeout_s)
         if not args.restart_running:
             require_same_shell(pane)
         is_manager = validate_task(args, pane)

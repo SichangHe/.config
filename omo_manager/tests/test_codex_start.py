@@ -3,15 +3,18 @@ from __future__ import annotations
 import subprocess
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
 import yaml
+from omo_manager.omo_manager_rotate import ProcessInfo
 from omo_manager.omo_codex_start import (
     Args,
     Pane,
     StartError,
     current_todo_entries,
+    has_live_codex_launch,
     launch_command,
     parse_args,
     post_marker_lines,
@@ -21,26 +24,53 @@ from omo_manager.omo_codex_start import (
     respawn_codex,
     start,
     validate_task,
+    verify_same_pane,
+    wait_directory_trust_recovery,
 )
 from omo_manager.omo_codex_status import Report
 
 
 class CodexStartTests(unittest.TestCase):
     def args(self, root: Path, **changes: object) -> Args:
-        values: dict[str, object] = {
-            "root": root,
-            "task_file": "worker.md",
-            "target": "cfg:2",
-            "model": "gpt-5.6-terra",
-            "reasoning_effort": "max",
-            "session_id": "019f670b-6a2f-7463-b9be-9aa6ff0cec43",
-            "prompt_file": None,
-            "startup_timeout_s": 45.0,
-            "confirm_empty_shell": True,
-            "dry_run": False,
-        }
-        values.update(changes)
-        return Args(**values)  # type: ignore[arg-type]
+        base = Args(
+            root=root,
+            task_file="worker.md",
+            target="cfg:2",
+            model="gpt-5.6-terra",
+            reasoning_effort="max",
+            session_id="019f670b-6a2f-7463-b9be-9aa6ff0cec43",
+            prompt_file=None,
+            startup_timeout_s=45.0,
+            confirm_empty_shell=True,
+            dry_run=False,
+        )
+        return replace(base, **changes)
+
+    def recovery_args(self, root: Path, **changes: object) -> Args:
+        return self.args(
+            root,
+            model="",
+            reasoning_effort="",
+            session_id="",
+            confirm_empty_shell=False,
+            confirm_directory_trust=True,
+            **changes,
+        )
+
+    def trust_prompt(self) -> list[str]:
+        return [
+            "> You are in /workspace/project",
+            "",
+            "  Do you trust the contents of this directory? Working with untrusted",
+            "  contents comes with higher risk of prompt injection. Trusting the",
+            "  directory allows project-local config, hooks, and exec policies to",
+            "  load.",
+            "",
+            "› 1. Yes, continue",
+            "  2. No, quit",
+            "",
+            "  Press enter to continue",
+        ]
 
     def write_task(self, root: Path, *, runat: str = "cfg:2", status: str = "blocked", manager: bool = False) -> None:
         fields = {
@@ -168,6 +198,47 @@ class CodexStartTests(unittest.TestCase):
                 ]
             )
 
+    def test_directory_trust_recovery_accepts_only_its_exact_argument_set(self) -> None:
+        args = parse_args(
+            [
+                "--root",
+                "/tmp/work-logs",
+                "--task-file",
+                "worker.md",
+                "--target",
+                "cfg:2.0",
+                "--confirm-directory-trust",
+                "--startup-timeout-s",
+                "3",
+                "--dry-run",
+            ]
+        )
+        self.assertTrue(args.confirm_directory_trust)
+        self.assertEqual("", args.model)
+        self.assertEqual("", args.reasoning_effort)
+        self.assertEqual(3.0, args.startup_timeout_s)
+        self.assertTrue(args.dry_run)
+
+        conflicts = (
+            ("--model", "gpt-5.6-terra"),
+            ("--reasoning-effort", "max"),
+            ("--session-id", "019f670b-6a2f-7463-b9be-9aa6ff0cec43"),
+            ("--prompt-file", "/tmp/prompt"),
+            ("--confirm-empty-shell",),
+            ("--restart-running",),
+        )
+        base = ["--task-file", "worker.md", "--target", "cfg:2", "--confirm-directory-trust"]
+        for conflict in conflicts:
+            with self.subTest(conflict=conflict), self.assertRaises(SystemExit):
+                parse_args([*base, *conflict])
+        with self.assertRaises(SystemExit):
+            parse_args(["--task-file", "worker.md", "--target", "cfg:2"])
+
+    def test_parse_args_preserves_environment_root_default(self) -> None:
+        with patch.dict("os.environ", {"OMO_WORK_LOGS_ROOT": "/tmp/environment-work-logs"}, clear=True):
+            args = parse_args(["--task-file", "worker.md", "--target", "cfg:2", "--confirm-directory-trust"])
+        self.assertEqual(Path("/tmp/environment-work-logs"), args.root)
+
     def test_restart_command_execs_resumed_session(self) -> None:
         root = Path("/tmp/work logs")
         pane = Pane("cfg:2.0", "%2", "@2", "bun", root)
@@ -280,6 +351,263 @@ class CodexStartTests(unittest.TestCase):
                 start(self.args(root, target="hcfg:2"))
 
             require_shell.assert_not_called()
+
+    def test_directory_trust_recovery_sends_one_enter_to_pinned_pane(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root)
+            pane = Pane("cfg:2.0", "%2", "@2", "bunx", root)
+            completed = subprocess.CompletedProcess([], 0, "", "")
+            with (
+                patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                patch(
+                    "omo_manager.omo_codex_start.capture_pane",
+                    side_effect=[self.trust_prompt(), self.trust_prompt(), ["ready"]],
+                ) as capture,
+                patch("omo_manager.omo_codex_start.has_live_codex_launch", return_value=True) as process,
+                patch("omo_manager.omo_codex_start.classify_status", return_value="ready"),
+                patch("omo_manager.omo_codex_start.run", return_value=completed) as run,
+            ):
+                self.assertEqual("ready", start(self.recovery_args(root)))
+            self.assertEqual(3, capture.call_count)
+            self.assertEqual(2, process.call_count)
+            run.assert_called_once_with(["tmux", "send-keys", "-t", "%2", "Enter"])
+
+    def test_directory_trust_dry_run_checks_without_input_or_wait(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root)
+            pane = Pane("cfg:2.0", "%2", "@2", "bunx", root)
+            with (
+                patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                patch("omo_manager.omo_codex_start.capture_pane", return_value=self.trust_prompt()) as capture,
+                patch("omo_manager.omo_codex_start.has_live_codex_launch", return_value=True) as process,
+                patch("omo_manager.omo_codex_start.classify_status") as classify,
+                patch("omo_manager.omo_codex_start.run") as run,
+                patch("builtins.print") as output,
+            ):
+                self.assertEqual("dry-run", start(self.recovery_args(root, dry_run=True)))
+            capture.assert_called_once_with("%2", 200)
+            process.assert_called_once_with("%2")
+            classify.assert_not_called()
+            run.assert_not_called()
+            output.assert_any_call("target: cfg:2.0")
+            output.assert_any_call("mode: confirm-directory-trust")
+
+    def test_directory_trust_recovery_rejects_human_and_caller_panes_before_capture(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            cases = (
+                (Pane("hcfg:2.0", "%2", "@2", "bunx", root), {}, "human-owned"),
+                (Pane("cfg:2.0", "%2", "@2", "bunx", root), {"TMUX_PANE": "%2"}, "different pane"),
+            )
+            for pane, environment, message in cases:
+                with (
+                    self.subTest(message=message),
+                    patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                    patch.dict("os.environ", environment, clear=True),
+                    patch("omo_manager.omo_codex_start.capture_pane") as capture,
+                    patch("omo_manager.omo_codex_start.run") as run,
+                    self.assertRaisesRegex(StartError, message),
+                ):
+                    start(self.recovery_args(root, target=pane.target))
+                capture.assert_not_called()
+                run.assert_not_called()
+
+    def test_directory_trust_recovery_rejects_task_runat_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root, runat="cfg:3")
+            target = Pane("cfg:2.0", "%2", "@2", "bunx", root)
+            other = Pane("cfg:3.0", "%3", "@3", "bunx", root)
+
+            def resolve(name: str) -> Pane:
+                return other if name == "cfg:3" else target
+
+            with (
+                patch("omo_manager.omo_codex_start.resolve_pane", side_effect=resolve),
+                patch("omo_manager.omo_codex_start.capture_pane") as capture,
+                patch("omo_manager.omo_codex_start.run") as run,
+                self.assertRaisesRegex(StartError, "does not identify target"),
+            ):
+                start(self.recovery_args(root))
+            capture.assert_not_called()
+            run.assert_not_called()
+
+    def test_directory_trust_recovery_rejects_unsafe_or_stale_frames(self) -> None:
+        prompt = self.trust_prompt()
+        cases = {
+            "partial": prompt[:3],
+            "reordered": [*prompt[:7], prompt[8], prompt[7], *prompt[9:]],
+            "changed choice": [*prompt[:7], "› 2. No, quit", *prompt[8:]],
+            "stale scrollback": [*prompt, "", "ordinary shell output"],
+            "ordinary non-Codex": ["$ echo Press enter to continue"],
+        }
+        for name, lines in cases.items():
+            with tempfile.TemporaryDirectory() as raw_root:
+                root = Path(raw_root)
+                self.write_task(root)
+                pane = Pane("cfg:2.0", "%2", "@2", "bunx", root)
+                with (
+                    self.subTest(name=name),
+                    patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                    patch("omo_manager.omo_codex_start.capture_pane", return_value=lines),
+                    patch("omo_manager.omo_codex_start.has_live_codex_launch") as process,
+                    patch("omo_manager.omo_codex_start.run") as run,
+                    self.assertRaisesRegex(StartError, "exact Codex directory-trust prompt"),
+                ):
+                    start(self.recovery_args(root))
+                process.assert_not_called()
+                run.assert_not_called()
+
+    def test_directory_trust_recovery_rechecks_prompt_before_input(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root)
+            pane = Pane("cfg:2.0", "%2", "@2", "bunx", root)
+            changed = [*self.trust_prompt(), "", "new output"]
+            with (
+                patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                patch("omo_manager.omo_codex_start.capture_pane", side_effect=[self.trust_prompt(), changed]),
+                patch("omo_manager.omo_codex_start.has_live_codex_launch", return_value=True) as process,
+                patch("omo_manager.omo_codex_start.run") as run,
+                self.assertRaisesRegex(StartError, "exact Codex directory-trust prompt"),
+            ):
+                start(self.recovery_args(root))
+            process.assert_called_once_with("%2")
+            run.assert_not_called()
+
+    def test_directory_trust_recovery_requires_one_live_expected_process(self) -> None:
+        pane_process = ProcessInfo(100, 1, "S", ("zsh",))
+        launch_argv = ("/usr/bin/bunx", "@openai/codex", "--model", "gpt-5.6-sol")
+        cases = {
+            "missing": {100: pane_process},
+            "wrong argv": {100: pane_process, 101: ProcessInfo(101, 100, "S", ("/usr/bin/bunx", "other-package"))},
+            "dead": {100: pane_process, 101: ProcessInfo(101, 100, "Z", launch_argv)},
+            "multiple": {
+                100: pane_process,
+                101: ProcessInfo(101, 100, "S", launch_argv),
+                102: ProcessInfo(102, 100, "S", launch_argv),
+            },
+        }
+        pane_pid = subprocess.CompletedProcess([], 0, "100\n", "")
+        for process_state, processes in cases.items():
+            with (
+                self.subTest(process_state=process_state),
+                patch("omo_manager.omo_task.tmux", return_value=pane_pid),
+                patch("omo_manager.omo_task.read_processes", return_value=processes),
+            ):
+                self.assertFalse(has_live_codex_launch("%2"))
+
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root)
+            pane = Pane("cfg:2.0", "%2", "@2", "python", root)
+            with (
+                patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                patch("omo_manager.omo_codex_start.capture_pane", return_value=self.trust_prompt()),
+                patch("omo_manager.omo_codex_start.has_live_codex_launch", return_value=False),
+                patch("omo_manager.omo_codex_start.run") as run,
+                self.assertRaisesRegex(StartError, "exactly one live Codex launch process"),
+            ):
+                start(self.recovery_args(root))
+            run.assert_not_called()
+
+    def test_directory_trust_recovery_rechecks_identity_after_final_process_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root)
+            pane = Pane("cfg:2.0", "%2", "@2", "bunx", root)
+            moved = Pane("cfg:2.0", "%2", "@3", "bunx", root)
+            process_calls = 0
+            pane_moved = False
+
+            def process(_: str) -> bool:
+                nonlocal pane_moved, process_calls
+                process_calls += 1
+                pane_moved = process_calls == 2
+                return True
+
+            def resolve(_: str) -> Pane:
+                return moved if pane_moved else pane
+
+            with (
+                patch("omo_manager.omo_codex_start.resolve_pane", side_effect=resolve),
+                patch("omo_manager.omo_codex_start.capture_pane", return_value=self.trust_prompt()),
+                patch("omo_manager.omo_codex_start.has_live_codex_launch", side_effect=process),
+                patch("omo_manager.omo_codex_start.run") as run,
+                self.assertRaisesRegex(StartError, "pane or window identity changed"),
+            ):
+                start(self.recovery_args(root))
+            self.assertEqual(2, process_calls)
+            run.assert_not_called()
+
+    def test_verify_same_pane_rejects_pane_or_window_replacement(self) -> None:
+        expected = Pane("cfg:2.0", "%2", "@2", "bunx", Path("/tmp"))
+        replacements = (
+            Pane("cfg:2.0", "%3", "@2", "bunx", Path("/tmp")),
+            Pane("cfg:2.0", "%2", "@3", "bunx", Path("/tmp")),
+        )
+        for replacement in replacements:
+            with (
+                self.subTest(replacement=replacement),
+                patch("omo_manager.omo_codex_start.resolve_pane", return_value=replacement),
+                self.assertRaisesRegex(StartError, "pane or window identity changed"),
+            ):
+                verify_same_pane(expected)
+
+    def test_directory_trust_wait_accepts_only_ready_or_running(self) -> None:
+        pane = Pane("cfg:2.0", "%2", "@2", "bunx", Path("/tmp"))
+        for success in ("ready", "running"):
+            with (
+                self.subTest(success=success),
+                patch("omo_manager.omo_codex_start.verify_same_pane"),
+                patch("omo_manager.omo_codex_start.capture_pane", return_value=["screen"]),
+                patch("omo_manager.omo_codex_start.classify_status", return_value=success),
+            ):
+                self.assertEqual(success, wait_directory_trust_recovery(pane, 1.0))
+
+        for failure in ("not_codex", "stuck_input", "waiting_subagent", "missing", "unknown"):
+            with (
+                self.subTest(failure=failure),
+                patch("omo_manager.omo_codex_start.verify_same_pane"),
+                patch("omo_manager.omo_codex_start.capture_pane", return_value=["screen"]),
+                patch("omo_manager.omo_codex_start.classify_status", return_value=failure),
+                patch("omo_manager.omo_codex_start.time.monotonic", side_effect=[0.0, 0.0, 2.0]),
+                patch("omo_manager.omo_codex_start.time.sleep"),
+                self.assertRaisesRegex(StartError, "timed out"),
+            ):
+                wait_directory_trust_recovery(pane, 1.0)
+
+        with (
+            patch("omo_manager.omo_codex_start.verify_same_pane"),
+            patch("omo_manager.omo_codex_start.capture_pane", return_value=["screen"]),
+            patch("omo_manager.omo_codex_start.classify_status", return_value="error"),
+            self.assertRaisesRegex(StartError, "error state"),
+        ):
+            wait_directory_trust_recovery(pane, 1.0)
+
+    def test_directory_trust_timeout_does_not_send_a_second_key(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root)
+            pane = Pane("cfg:2.0", "%2", "@2", "bunx", root)
+            completed = subprocess.CompletedProcess([], 0, "", "")
+            with (
+                patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                patch(
+                    "omo_manager.omo_codex_start.capture_pane",
+                    side_effect=[self.trust_prompt(), self.trust_prompt(), ["still waiting"]],
+                ),
+                patch("omo_manager.omo_codex_start.has_live_codex_launch", return_value=True),
+                patch("omo_manager.omo_codex_start.classify_status", return_value="not_codex"),
+                patch("omo_manager.omo_codex_start.time.monotonic", side_effect=[0.0, 0.0, 2.0]),
+                patch("omo_manager.omo_codex_start.time.sleep"),
+                patch("omo_manager.omo_codex_start.run", return_value=completed) as run,
+                self.assertRaisesRegex(StartError, "timed out"),
+            ):
+                start(self.recovery_args(root, startup_timeout_s=1.0))
+            run.assert_called_once_with(["tmux", "send-keys", "-t", "%2", "Enter"])
 
 
 if __name__ == "__main__":
