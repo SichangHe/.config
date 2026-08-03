@@ -72,6 +72,13 @@ class CodexStartTests(unittest.TestCase):
             "  Press enter to continue",
         ]
 
+    def live_marked_trust_prompt(self) -> list[str]:
+        return [
+            "[omo:4fa924252c3940288976a0c7f3d2a91f]",
+            "> You are in /ssd1/sichangheagent/vltlsprep3",
+            *self.trust_prompt()[1:],
+        ]
+
     def write_task(self, root: Path, *, runat: str = "cfg:2", status: str = "blocked", manager: bool = False) -> None:
         fields = {
             "version": "v1.0.0",
@@ -394,6 +401,20 @@ class CodexStartTests(unittest.TestCase):
             output.assert_any_call("target: cfg:2.0")
             output.assert_any_call("mode: confirm-directory-trust")
 
+    def test_directory_trust_dry_run_accepts_real_adjacent_launch_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root, status="running")
+            pane = Pane("vltlsprep3:0.0", "%2", "@2", "bunx", root)
+            with (
+                patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                patch("omo_manager.omo_codex_start.capture_pane", return_value=self.live_marked_trust_prompt()),
+                patch("omo_manager.omo_codex_start.has_live_codex_launch", return_value=True),
+                patch("omo_manager.omo_codex_start.run") as run,
+            ):
+                self.assertEqual("dry-run", start(self.recovery_args(root, target="vltlsprep3:0", dry_run=True)))
+            run.assert_not_called()
+
     def test_directory_trust_recovery_rejects_human_and_caller_panes_before_capture(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root)
@@ -436,12 +457,21 @@ class CodexStartTests(unittest.TestCase):
 
     def test_directory_trust_recovery_rejects_unsafe_or_stale_frames(self) -> None:
         prompt = self.trust_prompt()
+        marker = "[omo:4fa924252c3940288976a0c7f3d2a91f]"
         cases = {
             "partial": prompt[:3],
             "reordered": [*prompt[:7], prompt[8], prompt[7], *prompt[9:]],
             "changed choice": [*prompt[:7], "› 2. No, quit", *prompt[8:]],
             "stale scrollback": [*prompt, "", "ordinary shell output"],
             "ordinary non-Codex": ["$ echo Press enter to continue"],
+            "malformed marker": ["[omo:not-a-launch-marker]", *prompt],
+            "indented marker": [f"  {marker}", *prompt],
+            "trailing-space marker": [f"{marker} ", *prompt],
+            "separated marker": [marker, "", *prompt],
+            "nonadjacent marker": [marker, "unexpected output", *prompt],
+            "stale prompt before marker": [*prompt, marker],
+            "stale marked prompt before newer marker": [marker, *prompt, marker],
+            "multiple prompts": [marker, *prompt, "", marker, *prompt],
         }
         for name, lines in cases.items():
             with tempfile.TemporaryDirectory() as raw_root:
@@ -459,6 +489,19 @@ class CodexStartTests(unittest.TestCase):
                     start(self.recovery_args(root))
                 process.assert_not_called()
                 run.assert_not_called()
+
+    def test_directory_trust_recovery_rejects_long_running_task(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root, status="long_running")
+            pane = Pane("cfg:2.0", "%2", "@2", "bunx", root)
+            with (
+                patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                patch("omo_manager.omo_codex_start.capture_pane") as capture,
+                self.assertRaisesRegex(StartError, "not active for this operation: long_running"),
+            ):
+                start(self.recovery_args(root))
+            capture.assert_not_called()
 
     def test_directory_trust_recovery_rechecks_prompt_before_input(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:

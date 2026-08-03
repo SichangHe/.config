@@ -45,6 +45,9 @@ RESTARTABLE_STATUSES = {"error", "ready", "running", "stuck_input", "waiting_sub
 EFFORTS = ("low", "medium", "high", "xhigh", "max", "ultra")
 MODEL_RE = re.compile(r"^[A-Za-z0-9._:/-]+$")
 UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$")
+CODEX_LAUNCH_MARKER_RE = re.compile(r"^\[omo:[0-9a-f]{32}\]$")
+ACTIVE_TASK_STATUSES = frozenset(TASK_FRONTMATTER_STATUSES - {"done"})
+DIRECTORY_TRUST_RECOVERY_STATUSES = frozenset({"blocked", "running"})
 
 
 class StartError(RuntimeError):
@@ -217,15 +220,15 @@ def current_todo_entries(text: str) -> set[str]:
     return entries
 
 
-def validate_task(args: Args, pane: Pane) -> bool:
+def validate_task(args: Args, pane: Pane, *, allowed_statuses: frozenset[str] = ACTIVE_TASK_STATUSES) -> bool:
     path = task_path(args.root, args.task_file)
     if not path.is_file():
         raise StartError(f"task file does not exist: {path}")
     metadata = parse_task_metadata(path.read_text(encoding="utf-8"), args.root)
     if metadata is None:
         raise StartError("task file requires valid frontmatter.")
-    if metadata.status not in TASK_FRONTMATTER_STATUSES - {"done"}:
-        raise StartError(f"task status is not active: {metadata.status}")
+    if metadata.status not in allowed_statuses:
+        raise StartError(f"task status is not active for this operation: {metadata.status}")
     if metadata.tool != "codex":
         raise StartError(f"same-pane start supports only `tool: codex`, got {metadata.tool!r}.")
     if resolve_pane(metadata.runat).pane_id != pane.pane_id:
@@ -340,15 +343,44 @@ def wait_started(pane: Pane, marker: str, timeout_s: float) -> str:
     raise StartError("timed out waiting for Codex to become running or ready.")
 
 
+def directory_trust_prompt_frame(lines: list[str]) -> list[str] | None:
+    """Return the sole exact bottom prompt, optionally adjacent to its launch marker."""
+
+    segments: list[tuple[bool, list[str]]] = []
+    segment_start = 0
+    follows_marker = False
+    has_marker = False
+    for index, line in enumerate(lines):
+        if CODEX_LAUNCH_MARKER_RE.fullmatch(line) is not None:
+            has_marker = True
+            segments.append((follows_marker, lines[segment_start:index]))
+            segment_start = index + 1
+            follows_marker = True
+    segments.append((follows_marker, lines[segment_start:]))
+
+    frames: list[tuple[int, list[str]]] = []
+    for segment_index, (follows_marker, segment) in enumerate(segments):
+        if has_marker and not follows_marker:
+            continue
+        starts = [index for index, line in enumerate(segment) if line.strip() and has_codex_trust_prompt(segment[index:])]
+        if len(starts) != 1:
+            continue
+        start = starts[0]
+        if any(line.strip() for line in segment[:start]) or (follows_marker and start != 0):
+            continue
+        frames.append((segment_index, segment[start:]))
+    return frames[0][1] if len(frames) == 1 and frames[0][0] == len(segments) - 1 else None
+
+
 def require_directory_trust_recovery(args: Args, pane: Pane) -> None:
     """Validate one locked snapshot of the tracked trust prompt and process."""
 
     verify_same_pane(pane)
-    _ = validate_task(args, pane)
+    _ = validate_task(args, pane, allowed_statuses=DIRECTORY_TRUST_RECOVERY_STATUSES)
     verify_same_pane(pane)
     lines = capture_pane(pane.pane_id, 200)
     verify_same_pane(pane)
-    if not has_codex_trust_prompt(lines):
+    if directory_trust_prompt_frame(lines) is None:
         raise StartError(f"target {pane.target} does not show the exact Codex directory-trust prompt.")
     if not has_live_codex_launch(pane.pane_id):
         raise StartError(f"target {pane.target} does not contain exactly one live Codex launch process.")
