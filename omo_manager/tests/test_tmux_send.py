@@ -717,6 +717,17 @@ class TmuxSendTests(unittest.TestCase):
                 with self.subTest(footer=footer, blank_lines=blank_lines), self.assertRaisesRegex(RuntimeError, "ambiguous trailing blank"):
                     exact_existing_input_text(lines)
 
+    def test_cancel_existing_input_text_removes_only_codex_footer_spacer(self) -> None:
+        footer = "  gpt-5.5"
+        cases = (
+            (["› approved prompt", "", footer], "approved prompt"),
+            (["› approved prompt", "", "", footer], "approved prompt\n"),
+            (["› approved prompt", " ", "", footer], "approved prompt\n "),
+        )
+        for lines, expected in cases:
+            with self.subTest(lines=lines):
+                self.assertEqual(expected, exact_existing_input_text(lines, allow_codex_footer_spacer=True))
+
     def test_submit_existing_accepts_exact_input_before_footer(self) -> None:
         authorization = ExistingInputAuthorization(text_sha256("approved prompt"), "approved prompt")
         for footer in ("  gpt-5.5", "  tab to queue message                                                                                    28% context left"):
@@ -945,6 +956,64 @@ class TmuxSendTests(unittest.TestCase):
 
         cancel.assert_called_once_with("%42")
         enter.assert_not_called()
+
+    def test_cancel_existing_clears_exact_input_with_codex_footer_spacer(self) -> None:
+        authorization = ExistingInputAuthorization(text_sha256("stale duplicate"), "stale duplicate")
+        with patch("omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None), patch(
+            "omo_manager.omo_tmux_send.capture_complete_input_lines",
+            side_effect=[
+                ["› stale duplicate", "", "  gpt-5.5"],
+                ["› stale duplicate", "", "  gpt-5.5"],
+                ["› Use /skills to list available skills", "", "  gpt-5.5"],
+            ],
+        ), patch("omo_manager.omo_tmux_send.tail_pane_id", return_value=["› stale duplicate", "  gpt-5.5"]), patch(
+            "omo_manager.omo_tmux_send.exact_pane_id", return_value="%42"
+        ), patch("omo_manager.omo_tmux_send.send_cancel_input") as cancel, patch(
+            "omo_manager.omo_tmux_send.send_enter"
+        ) as enter:
+            cancel_existing_codex_input("cfg:1.0", authorization, options())
+
+        cancel.assert_called_once_with("%42")
+        enter.assert_not_called()
+
+    def test_cancel_existing_requires_exact_trailing_newline_authorization(self) -> None:
+        screen = ["› stale duplicate", "", "", "  gpt-5.5"]
+        wrong = ExistingInputAuthorization(text_sha256("stale duplicate"), "stale duplicate")
+        exact = ExistingInputAuthorization(text_sha256("stale duplicate\n"), "stale duplicate\n")
+        with patch("omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None), patch(
+            "omo_manager.omo_tmux_send.capture_complete_input_lines", return_value=screen
+        ), patch("omo_manager.omo_tmux_send.exact_pane_id", return_value="%42"), patch(
+            "omo_manager.omo_tmux_send.send_cancel_input"
+        ) as cancel:
+            with self.assertRaisesRegex(RuntimeError, "exactly match"):
+                cancel_existing_codex_input("cfg:1.0", wrong, options())
+
+        cancel.assert_not_called()
+        with patch("omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None), patch(
+            "omo_manager.omo_tmux_send.capture_complete_input_lines",
+            side_effect=[screen, screen, ["› Use /skills to list available skills", "", "  gpt-5.5"]],
+        ), patch("omo_manager.omo_tmux_send.tail_pane_id", return_value=["› stale duplicate", "  gpt-5.5"]), patch(
+            "omo_manager.omo_tmux_send.exact_pane_id", return_value="%42"
+        ), patch("omo_manager.omo_tmux_send.send_cancel_input") as cancel, patch(
+            "omo_manager.omo_tmux_send.send_enter"
+        ) as enter:
+            cancel_existing_codex_input("cfg:1.0", exact, options())
+
+        cancel.assert_called_once_with("%42")
+        enter.assert_not_called()
+
+    def test_cancel_existing_rejects_overlay_with_codex_footer_spacer(self) -> None:
+        authorization = ExistingInputAuthorization(text_sha256("stale duplicate"), "stale duplicate")
+        screen = ["Create a plan? shift + tab use Plan mode esc dismiss", "› stale duplicate", "", "  gpt-5.5"]
+        with patch("omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None), patch(
+            "omo_manager.omo_tmux_send.capture_complete_input_lines", return_value=screen
+        ), patch("omo_manager.omo_tmux_send.exact_pane_id", return_value="%42"), patch(
+            "omo_manager.omo_tmux_send.send_cancel_input"
+        ) as cancel:
+            with self.assertRaisesRegex(RuntimeError, "unsupported Codex overlay"):
+                cancel_existing_codex_input("cfg:1.0", authorization, options())
+
+        cancel.assert_not_called()
 
     def test_cancel_existing_rejects_mismatched_input(self) -> None:
         authorization = ExistingInputAuthorization(text_sha256("stale duplicate"), "stale duplicate")

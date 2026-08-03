@@ -26,7 +26,7 @@ omo_tmux_send.py --target cfg:1.0 --cancel-existing-file "$prompt_file"
 omo_tmux_send.py --target cfg:1.0 --cancel-existing-sha256 "$prompt_sha256"
 ```
 
-Cancellation applies the same exact-text and pinned-pane checks immediately before sending one `Ctrl+C`. It then requires the same live Codex pane to show no real input. It never sends Enter, retries `Ctrl+C`, submits the stale input, stops Codex, or performs normal dispatch. Target rebinding, changed input, unsupported state, overlays, human-owned `h*` targets, and unverifiable clearing fail the command.
+Cancellation applies the same exact-text and pinned-pane checks immediately before sending one `Ctrl+C`. For this action only, it removes exactly one whitespace-only row immediately above a recognized footer because Codex renders that row as the composer's fixed bottom inset. Any preceding blank or whitespace-only rows remain input, including trailing newlines or spaces, and must match the authorized file or digest exactly. Submit-existing retains the stricter ambiguous-row rejection. Cancellation then requires the same live Codex pane to show no real input. It never sends Enter, retries `Ctrl+C`, submits the stale input, stops Codex, or performs normal dispatch. Target rebinding, changed input, unsupported state, overlays, human-owned `h*` targets, and unverifiable clearing fail the command.
 
 Use direct file-based helpers for manager-authored files:
 

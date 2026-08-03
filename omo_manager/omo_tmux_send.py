@@ -710,7 +710,7 @@ def verify_submit(
         time.sleep(min(0.25, max(0.05, min(deadline_s, next_enter_s) - now_s)))
 
 
-def exact_complete_input_text(lines: list[str]) -> str:
+def exact_complete_input_text(lines: list[str], *, allow_codex_footer_spacer: bool = False) -> str:
     end = len(lines)
     while end and not lines[end - 1].strip():
         end -= 1
@@ -722,7 +722,9 @@ def exact_complete_input_text(lines: list[str]) -> str:
         raise RuntimeError("target existing input is in an unsupported Codex overlay")
     body_end = end - 1
     if body_end and not lines[body_end - 1].strip():
-        raise RuntimeError("target existing input has an ambiguous trailing blank line")
+        if not allow_codex_footer_spacer:
+            raise RuntimeError("target existing input has an ambiguous trailing blank line")
+        body_end -= 1
     input_start = -1
     for idx in range(body_end - 1, -1, -1):
         if lines[idx].lstrip().startswith("›"):
@@ -751,8 +753,8 @@ def exact_complete_input_text(lines: list[str]) -> str:
     return text
 
 
-def exact_existing_input_text(lines: list[str]) -> str:
-    text = exact_complete_input_text(lines)
+def exact_existing_input_text(lines: list[str], *, allow_codex_footer_spacer: bool = False) -> str:
+    text = exact_complete_input_text(lines, allow_codex_footer_spacer=allow_codex_footer_spacer)
     if not is_real_input_text(text):
         raise RuntimeError("target existing input is incomplete")
     return text
@@ -776,11 +778,14 @@ def capture_complete_input_lines(pane_id: str) -> list[str]:
     return (result.stdout or "").split("\n")
 
 
-def capture_complete_existing_input(target: str) -> ExistingInputCapture:
+def capture_complete_existing_input(target: str, *, allow_codex_footer_spacer: bool = False) -> ExistingInputCapture:
     pane_id = exact_pane_id(target)
     if not pane_id:
         raise RuntimeError(f"target cannot be resolved as an exact tmux pane: {target}")
-    return ExistingInputCapture(pane_id, exact_existing_input_text(capture_complete_input_lines(pane_id)))
+    return ExistingInputCapture(
+        pane_id,
+        exact_existing_input_text(capture_complete_input_lines(pane_id), allow_codex_footer_spacer=allow_codex_footer_spacer),
+    )
 
 
 def require_authorized_existing_input_text(text: str, authorization: ExistingInputAuthorization) -> None:
@@ -794,8 +799,10 @@ def require_authorized_existing_input(
     target: str,
     authorization: ExistingInputAuthorization,
     expected_pane_id: str | None = None,
+    *,
+    allow_codex_footer_spacer: bool = False,
 ) -> ExistingInputCapture:
-    capture = capture_complete_existing_input(target)
+    capture = capture_complete_existing_input(target, allow_codex_footer_spacer=allow_codex_footer_spacer)
     if expected_pane_id is not None and capture.pane_id != expected_pane_id:
         raise RuntimeError("target pane changed before submit-existing")
     require_authorized_existing_input_text(capture.text, authorization)
@@ -873,7 +880,7 @@ def verify_authorized_existing_cancel(
             raise RuntimeError("target pane changed after cancel-existing")
         validate_error_transition(lines, preexisting_error, target, "after cancel-existing")
         current_status = status(lines, current_block(lines))
-        input_text = exact_complete_input_text(lines)
+        input_text = exact_complete_input_text(lines, allow_codex_footer_spacer=True)
         if input_text in CODEX_PLACEHOLDER_INPUT_TEXTS:
             if current_status not in {"ready", "running", "waiting_subagent", "error"}:
                 raise RuntimeError(f"target is not in a supported Codex state after cancel-existing: {target} status={current_status}")
@@ -898,12 +905,12 @@ def cancel_existing_codex_input(target: str, authorization: ExistingInputAuthori
         _ = print(f"would verify existing input is gone at {target}")
         return
     preexisting_error = require_sendable_codex_target(target, EXISTING_INPUT_CAPTURE_LINES)
-    initial_capture = require_authorized_existing_input(target, authorization)
+    initial_capture = require_authorized_existing_input(target, authorization, allow_codex_footer_spacer=True)
     lines = tail_pane_id(initial_capture.pane_id, EXISTING_INPUT_CAPTURE_LINES)
     validate_error_transition(lines, preexisting_error, target, "before cancel-existing")
     if has_plan_prompt(lines):
         raise RuntimeError("Codex cancel-existing blocked by unsafe Plan prompt")
-    capture = require_authorized_existing_input(target, authorization, initial_capture.pane_id)
+    capture = require_authorized_existing_input(target, authorization, initial_capture.pane_id, allow_codex_footer_spacer=True)
     if exact_pane_id(target) != capture.pane_id:
         raise RuntimeError("target pane changed before cancel-existing")
     send_cancel_input(capture.pane_id)
