@@ -5339,6 +5339,65 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertIn("<snippet file=\"docs/request.md:1-2\">", text)
             self.assertIn("line one\nline two", text)
 
+    def test_bare_helper_commands_are_not_source_attachments(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "root"
+            root.mkdir()
+            path = root / "task.md"
+            path.write_text(
+                "(pending)\nrun omo_pending.py list, then submit through omo_report.sh\n",
+                encoding="utf-8",
+            )
+            args = Args(
+                root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=True
+            )
+            out = StringIO()
+            with redirect_stdout(out):
+                self.assertTrue(watcher.scan_once(args, {}, [path]))
+            text = out.getvalue()
+            self.assertNotIn("<source-error", text)
+            self.assertNotIn("<snippet file=\"omo_pending.py", text)
+            self.assertNotIn("<snippet file=\"omo_report.sh", text)
+
+    def test_bare_local_helper_file_is_still_attached(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "root"
+            root.mkdir()
+            helper = root / "request.py"
+            helper.write_text("request body\n", encoding="utf-8")
+            path = root / "task.md"
+            path.write_text("(pending)\nsee request.py\n", encoding="utf-8")
+            args = Args(
+                root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=True
+            )
+            out = StringIO()
+            with redirect_stdout(out):
+                self.assertTrue(watcher.scan_once(args, {}, [path]))
+            self.assertIn("<snippet file=\"request.py:1-1\">", out.getvalue())
+
+    def test_nested_task_resolves_bare_helper_from_work_log_root(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "root"
+            nested = root / "nested"
+            nested.mkdir(parents=True)
+            helper = root / "request.py"
+            helper.write_text("request body\n", encoding="utf-8")
+            path = nested / "task.md"
+            path.write_text("(pending)\nsee request.py\n", encoding="utf-8")
+            args = Args(
+                root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=True
+            )
+            out = StringIO()
+            with redirect_stdout(out):
+                self.assertTrue(watcher.scan_once(args, {}, [path]))
+            self.assertIn("<snippet file=\"request.py:1-1\">", out.getvalue())
+
     def test_relative_referenced_file_cannot_escape_root(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 

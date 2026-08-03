@@ -1293,15 +1293,25 @@ def marker_direct_target(args: Args, marker: Marker) -> str:
     return metadata.runat if metadata is not None else ""
 
 
-def pending_source_paths(marker: Marker) -> list[str]:
+def pending_source_paths(root: Path, marker: Marker) -> list[str]:
     sources: list[str] = []
     if marker.delegate_source:
         sources.append(marker.delegate_source)
     for match in FILE_REF_RE.finditer(unquoted_pending_content(marker.block_text)):
         source = match.group(1)
+        if not attachment_reference(root, source):
+            continue
         if source not in sources:
             sources.append(source)
     return sources
+
+
+def attachment_reference(root: Path, source: str) -> bool:
+    """Ignore bare helper command names unless they name a work-log file."""
+
+    if "/" in source or not source.endswith((".py", ".sh")):
+        return True
+    return (root / source).is_file()
 
 
 def marker_attachments(args: Args, marker: Marker) -> list[SourceAttachment]:
@@ -1309,7 +1319,7 @@ def marker_attachments(args: Args, marker: Marker) -> list[SourceAttachment]:
         match = AGENT_POINTER_WITH_TARGET_RE.fullmatch(adjacent_source_metadata(marker.block_text.splitlines()))
         if match is not None:
             return [source_attachment(args.root, match.group(2))]
-    return [source_attachment(args.root, source) for source in pending_source_paths(marker)]
+    return [source_attachment(args.root, source) for source in pending_source_paths(args.root, marker)]
 
 
 def marker_has_authenticated_agent_report(marker: Marker, attachments: Sequence[SourceAttachment]) -> bool:
