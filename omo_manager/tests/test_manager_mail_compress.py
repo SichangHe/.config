@@ -29,6 +29,7 @@ from omo_manager.omo_manager_mail_compress import (
     manager_unread_uids,
     parse_uid_text,
     record_from_msg,
+    record_has_protected_intent,
     revalidate_thread_contexts,
     special_use_mailboxes,
     thread_context_digest,
@@ -77,10 +78,11 @@ class FakeClient:
 
 
 class Args:
-    def __init__(self, uids: str = "", uid_file: Path | None = None, yes: bool = False) -> None:
+    def __init__(self, uids: str = "", uid_file: Path | None = None, yes: bool = False, ignore_important_label: bool = False) -> None:
         self.uids = uids
         self.uid_file = uid_file
         self.yes = yes
+        self.ignore_important_label = ignore_important_label
 
 
 class ExportArgs:
@@ -536,6 +538,60 @@ class ManagerMailCompressTests(unittest.TestCase):
                 self.assertEqual(1, cmd_trash_superseded(Args(uid_file=uid_file, yes=True)))
         self.assertNotIn(("MOVE", "7", '"[Gmail]/Trash"'), client.uid_calls)
 
+    def test_important_override_preserves_other_protected_intent(self) -> None:
+        important = MailRecord("7", "date", "from", "to", "subject", "msgid", "body", "100", "200", "", r"\Inbox \Important", "raw")
+        flagged = MailRecord("7", "date", "from", "to", "subject", "msgid", "body", "100", "200", r"\Flagged", r"\Inbox \Important", "raw")
+
+        self.assertTrue(record_has_protected_intent(important))
+        self.assertFalse(record_has_protected_intent(important, ignore_important_label=True))
+        self.assertTrue(record_has_protected_intent(flagged, ignore_important_label=True))
+
+    def test_trash_superseded_allows_important_only_with_override(self) -> None:
+        raw = self.raw_message("[worker:0] complete")
+        record = MailRecord(
+            "7",
+            "date",
+            "Agent <agent@example.test>",
+            "Human <human@example.test>",
+            "[worker:0] complete",
+            hashlib.sha256(b"<one@example.test>").hexdigest()[:12],
+            "body\n",
+            "100",
+            "200",
+            "",
+            r"\Inbox \Important",
+            hashlib.sha256(raw).hexdigest(),
+        )
+        client = FakeClient(
+            {
+                ("search", None, "UID", "7"): [("OK", [b"7"]), ("OK", [b"7"]), ("OK", [b"7"]), ("OK", [b""])],
+                ("fetch", "7", FULL_FETCH): ("OK", [(b"message", raw)]),
+                ("fetch", "7", GMAIL_METADATA_FETCH): self.gmail_metadata("7", labels=r"\Inbox \Important"),
+                ("search", None, "X-GM-THRID", "200"): ("OK", [b"70"]),
+                ("fetch", "70", FULL_FETCH): ("OK", [(b"message", raw)]),
+                ("fetch", "70", GMAIL_METADATA_FETCH): [
+                    self.gmail_metadata("70", labels=r"\Inbox \Important"),
+                    self.gmail_metadata("70", labels=r"\Inbox \Important"),
+                    self.gmail_metadata("70", labels=r"\Important"),
+                ],
+                ("MOVE", "7", '"[Gmail]/Trash"'): ("OK", [b""]),
+            },
+            self.gmail_mailboxes(),
+        )
+
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            uid_file = self.write_source_map(Path(tmp) / "export", record)
+            with (
+                patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {"user": "human@example.test"})),
+                patch("omo_manager.omo_manager_mail_compress.configured_agent_mail", return_value=Settings()),
+            ):
+                self.assertEqual(0, cmd_trash_superseded(Args(uid_file=uid_file, yes=True, ignore_important_label=True)))
+        self.assertIn(("MOVE", "7", '"[Gmail]/Trash"'), client.uid_calls)
+
     def test_trash_superseded_refuses_changed_thread_context(self) -> None:
         raw = self.raw_message("[worker:0] complete")
         record = MailRecord(
@@ -613,7 +669,7 @@ class ManagerMailCompressTests(unittest.TestCase):
                 patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {"user": "human@example.test"})),
                 patch("omo_manager.omo_manager_mail_compress.configured_agent_mail", return_value=Settings()),
             ):
-                self.assertEqual(1, cmd_trash_superseded(Args(uid_file=uid_file, yes=True)))
+                self.assertEqual(1, cmd_trash_superseded(Args(uid_file=uid_file, yes=True, ignore_important_label=True)))
         self.assertNotIn(("MOVE", "7", '"[Gmail]/Trash"'), client.uid_calls)
 
     def test_trash_superseded_retains_thread_with_other_context_member(self) -> None:

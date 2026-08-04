@@ -722,10 +722,11 @@ def record_matches_source_map(record: MailRecord, source: dict[str, str]) -> boo
     )
 
 
-def record_has_protected_intent(record: MailRecord) -> bool:
+def record_has_protected_intent(record: MailRecord, *, ignore_important_label: bool = False) -> bool:
     flags = {flag.casefold().lstrip("\\") for flag in record.flags.split()}
     labels = record.labels.casefold().replace("\\", "")
-    return "flagged" in flags or any(token in labels for token in ("flagged", "starred", "important", "read later", "saved"))
+    protected_labels = ("flagged", "starred", "read later", "saved")
+    return "flagged" in flags or any(token in labels for token in protected_labels) or (not ignore_important_label and "important" in labels)
 
 
 def revalidate_thread_contexts(
@@ -734,6 +735,8 @@ def revalidate_thread_contexts(
     source_map: dict[str, dict[str, str]],
     sender_email: str,
     recipient_email: str,
+    *,
+    ignore_important_label: bool = False,
 ) -> bool:
     source_ids_by_thread: dict[str, set[str]] = {}
     for source in source_map.values():
@@ -747,7 +750,12 @@ def revalidate_thread_contexts(
             if (
                 len(context_ids) != len(set(context_ids))
                 or set(context_ids) != source_ids
-                or any(record.gmail_thrid != gmail_thrid or not is_manager_record(record, sender_email, recipient_email) or record_has_protected_intent(record) for record in context_records)
+                or any(
+                    record.gmail_thrid != gmail_thrid
+                    or not is_manager_record(record, sender_email, recipient_email)
+                    or record_has_protected_intent(record, ignore_important_label=ignore_important_label)
+                    for record in context_records
+                )
             ):
                 return False
             expected_digests = {source["thread_context_sha256"] for source in source_map.values() if source["gmail_thrid"] == gmail_thrid}
@@ -794,8 +802,14 @@ def verify_post_move_imap(
     source_map: dict[str, dict[str, str]],
     sender_email: str,
     recipient_email: str,
+    *,
+    ignore_important_label: bool = False,
 ) -> PostMoveVerification:
-    """Verify moved complete threads through the same configured IMAP session."""
+    """Verify moved complete threads through the same configured IMAP session.
+
+    Exact lookup from the selected Trash mailbox proves Trash membership because
+    Gmail may omit its ``\\Trash`` system label from ``X-GM-LABELS``.
+    """
     sources_by_thread: dict[str, dict[str, dict[str, str]]] = {}
     for source in source_map.values():
         sources_by_thread.setdefault(source["gmail_thrid"], {})[source["gmail_msgid"]] = source
@@ -812,7 +826,7 @@ def verify_post_move_imap(
         except (imaplib.IMAP4.error, RuntimeError):
             failures += 1
             continue
-        protected_in_thread = sum(record_has_protected_intent(record) for record in records)
+        protected_in_thread = sum(record_has_protected_intent(record, ignore_important_label=ignore_important_label) for record in records)
         protected += protected_in_thread
         records_by_id = {record.gmail_msgid: record for record in records}
         if len(records_by_id) != len(records) or set(records_by_id) != set(sources_by_id) or protected_in_thread:
@@ -827,7 +841,6 @@ def verify_post_move_imap(
                 or record.msgid_sha256 != source["msgid_sha256"]
                 or record.raw_sha256 != source["raw_sha256"]
                 or tsv_value(record.flags) != source["flags"]
-                or r"\trash" not in labels
                 or r"\inbox" in labels
                 or not is_manager_record(record, sender_email, recipient_email)
             ):
@@ -892,13 +905,20 @@ def cmd_trash_superseded(args: argparse.Namespace) -> int:
         if any(not is_manager_record(record, sender_email, recipient_email) for record in records):
             print("refusing boundary mismatch", file=sys.stderr)
             return 1
-        if any(record_has_protected_intent(record) for record in records):
-            print("refusing protected flagged, saved, or read-later source", file=sys.stderr)
+        if any(record_has_protected_intent(record, ignore_important_label=args.ignore_important_label) for record in records):
+            print("refusing protected flagged, starred, saved, read-later, or non-overridden Important source", file=sys.stderr)
             return 1
         if any(not record_matches_source_map(record, source_map[record.uid]) for record in records):
             print("refusing because source identity, flags, labels, or content changed", file=sys.stderr)
             return 1
-        if not revalidate_thread_contexts(client, expected_mailboxes[r"\All"], source_map, sender_email, recipient_email):
+        if not revalidate_thread_contexts(
+            client,
+            expected_mailboxes[r"\All"],
+            source_map,
+            sender_email,
+            recipient_email,
+            ignore_important_label=args.ignore_important_label,
+        ):
             print("refusing because complete Gmail thread context changed", file=sys.stderr)
             return 1
         still_in_inbox = inbox_subset(client, requested)
@@ -910,7 +930,14 @@ def cmd_trash_superseded(args: argparse.Namespace) -> int:
         if any(not is_manager_record(record, sender_email, recipient_email) or not record_matches_source_map(record, source_map[record.uid]) for record in final_records):
             print("refusing because a planned source changed immediately before move", file=sys.stderr)
             return 1
-        if not revalidate_thread_contexts(client, expected_mailboxes[r"\All"], source_map, sender_email, recipient_email):
+        if not revalidate_thread_contexts(
+            client,
+            expected_mailboxes[r"\All"],
+            source_map,
+            sender_email,
+            recipient_email,
+            ignore_important_label=args.ignore_important_label,
+        ):
             print("refusing because complete Gmail thread context changed immediately before move", file=sys.stderr)
             return 1
         still_in_inbox = inbox_subset(client, requested)
@@ -923,7 +950,13 @@ def cmd_trash_superseded(args: argparse.Namespace) -> int:
                 print(f"IMAP MOVE failed: {typ}", file=sys.stderr)
                 return 1
         remaining = inbox_subset(client, requested)
-        post_move = verify_post_move_imap(client, source_map, sender_email, recipient_email)
+        post_move = verify_post_move_imap(
+            client,
+            source_map,
+            sender_email,
+            recipient_email,
+            ignore_important_label=args.ignore_important_label,
+        )
     finally:
         client.logout()
     print(
@@ -961,6 +994,11 @@ def parser() -> argparse.ArgumentParser:
     trash.add_argument("--uids", default="", help="Comma or whitespace separated UID list.")
     trash.add_argument("--uid-file", type=Path)
     trash.add_argument("--yes", action="store_true")
+    trash.add_argument(
+        "--ignore-important-label",
+        action="store_true",
+        help="Treat Gmail Important alone as non-protected only when authoritative human text explicitly requires it.",
+    )
     trash.set_defaults(func=cmd_trash_superseded)
     return arg_parser
 
