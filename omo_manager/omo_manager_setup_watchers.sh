@@ -95,6 +95,16 @@ if [ -f "$local_env" ]; then
   # shellcheck disable=SC1090
   source "$local_env"
 fi
+configured_root="${OMO_WORK_LOGS_ROOT:-}"
+inherited_root="${env_root#x}"
+if [ -n "$inherited_root" ] && [ -n "$configured_root" ] && [ "$inherited_root" != "$configured_root" ]; then
+  inherited_root_resolved="$(readlink -f -- "$inherited_root" 2>/dev/null || true)"
+  configured_root_resolved="$(readlink -f -- "$configured_root" 2>/dev/null || true)"
+  if [ -z "$inherited_root_resolved" ] || [ "$inherited_root_resolved" != "$configured_root_resolved" ]; then
+    echo "OMO_WORK_LOGS_ROOT conflicts with $local_env; refusing to replace configured watchers" >&2
+    exit 2
+  fi
+fi
 [ -n "${env_manager_url#x}" ] && OMO_MANAGER_URL="${env_manager_url#x}"
 [ -n "${env_manager_target#x}" ] && OMO_MANAGER_TMUX_TARGET="${env_manager_target#x}"
 [ -n "${env_root#x}" ] && OMO_WORK_LOGS_ROOT="${env_root#x}"

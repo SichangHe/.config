@@ -633,6 +633,120 @@ esac
             finally:
                 self.stop_supervisors(tmp / "state")
 
+    def test_setup_rejects_inherited_root_that_conflicts_with_local_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            local_root = tmp / "configured-work-logs"
+            inherited_root = tmp / "stale-work-logs"
+            local_root.mkdir()
+            inherited_root.mkdir()
+            local_env = tmp / "local.env"
+            local_env.write_text(f'OMO_WORK_LOGS_ROOT="{local_root}"\n', encoding="utf-8")
+            state = tmp / "state"
+            email: subprocess.Popen[bytes] | None = None
+            try:
+                started = self.run_setup(
+                    tmp,
+                    extra_env={
+                        "OMO_MANAGER_LOCAL_ENV": str(local_env),
+                        "OMO_WORK_LOGS_ROOT": str(local_root),
+                    },
+                )
+                self.assertEqual(0, started.returncode, started.stderr)
+                pidfile = state / "pending-supervisor.pid"
+                before = pidfile.read_text(encoding="utf-8")
+                pid = int(before.splitlines()[0].removeprefix("pid="))
+                email_token = "retained-email"
+                email_launch_pidfile = state / f".email-supervisor.{email_token}.pid"
+                email = subprocess.Popen(
+                    [
+                        "bash",
+                        "-c",
+                        "while :; do read -t 30 || true; done # email watcher exited status",
+                        "email-watch-supervisor",
+                        str(email_launch_pidfile),
+                        email_token,
+                        "uv",
+                        "run",
+                        "--project",
+                        str(ROOT / "omo_manager"),
+                        str(ROOT / "omo_manager" / "email_idle_watcher.py"),
+                        "--root",
+                        str(local_root),
+                        "--mail-dir",
+                        str(local_root / "manager_mail"),
+                        "--state-dir",
+                        str(state),
+                    ],
+                    start_new_session=True,
+                )
+                email_pidfile = state / "email-supervisor.pid"
+                email_pidfile.write_text(
+                    f"pid={email.pid}\nstart={self.process_start_ticks(email.pid)}\ntoken={email_token}\n",
+                    encoding="utf-8",
+                )
+                email_before = email_pidfile.read_text(encoding="utf-8")
+
+                result = self.run_setup(
+                    tmp,
+                    extra_env={
+                        "OMO_MANAGER_LOCAL_ENV": str(local_env),
+                        "OMO_WORK_LOGS_ROOT": str(inherited_root),
+                    },
+                )
+                self.assertEqual(2, result.returncode)
+                self.assertIn("refusing to replace configured watchers", result.stderr)
+                self.assertEqual(before, pidfile.read_text(encoding="utf-8"))
+                self.assertEqual(email_before, email_pidfile.read_text(encoding="utf-8"))
+                self.assertTrue(self.process_active(pid))
+                self.assertTrue(self.process_active(email.pid))
+            finally:
+                self.stop_supervisors(state)
+                if email is not None:
+                    email.wait(timeout=2)
+
+    def test_setup_uses_inherited_root_when_local_configuration_omits_it(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            inherited_root = tmp / "inherited-work-logs"
+            inherited_root.mkdir()
+            local_env = tmp / "local.env"
+            local_env.write_text(f'OMO_MANAGER_TMUX_TARGET="{TEST_MANAGER_TARGET}"\n', encoding="utf-8")
+            try:
+                result = self.run_setup(
+                    tmp,
+                    extra_env={
+                        "OMO_MANAGER_LOCAL_ENV": str(local_env),
+                        "OMO_WORK_LOGS_ROOT": str(inherited_root),
+                    },
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertIn(f"--root {inherited_root}", (tmp / "fake-uv.log").read_text(encoding="utf-8"))
+            finally:
+                self.stop_supervisors(tmp / "state")
+
+    def test_setup_accepts_inherited_alias_of_locally_configured_root(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            local_root = tmp / "configured-work-logs"
+            root_alias = tmp / "work-logs-alias"
+            local_root.mkdir()
+            root_alias.symlink_to(local_root)
+            local_env = tmp / "local.env"
+            local_env.write_text(f'OMO_WORK_LOGS_ROOT="{local_root}"\n', encoding="utf-8")
+            try:
+                result = self.run_setup(
+                    tmp,
+                    extra_env={
+                        "OMO_MANAGER_LOCAL_ENV": str(local_env),
+                        "OMO_WORK_LOGS_ROOT": str(root_alias),
+                    },
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertIn(f"--root {root_alias}", (tmp / "fake-uv.log").read_text(encoding="utf-8"))
+            finally:
+                self.stop_supervisors(tmp / "state")
+
     def test_setup_rejects_partial_split_email_configuration(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
