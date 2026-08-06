@@ -50,6 +50,7 @@ RESTARTABLE_STATUSES = {"error", "ready", "running", "stuck_input", "waiting_sub
 EFFORTS = ("low", "medium", "high", "xhigh", "max", "ultra")
 MODEL_RE = re.compile(r"^[A-Za-z0-9._:/-]+$")
 UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$")
+RESUME_ARG_RE = re.compile(r"resume(?P<session>[0-9a-fA-F-]{36})")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 # Delivery IDs are persisted as filenames.  Keep them opaque but basename-safe
 # so a malformed CLI value can never escape the dedicated event directory.
@@ -61,6 +62,15 @@ RECOVERY_RECEIPT_VERSION = "omo-codex-recovery-receipt-v1"
 RECOVERY_ISSUANCE_VERSION = "omo-codex-recovery-issuance-v1"
 DELIVERY_EVENT_DIRNAME = RECOVERY_EVENT_DIRNAME
 DELIVERY_EVENT_VERSION = "omo-pending-watch-delivery-event-v1"
+CODEX_LAUNCH_COMMAND = "bunx"
+UPDATE_AVAILABLE_RE = re.compile(r"^✨\s*Update available! [0-9]+\.[0-9]+\.[0-9]+ -> [0-9]+\.[0-9]+\.[0-9]+$")
+UPDATE_PROMPT_SUFFIX = (
+    "Release notes: https://github.com/openai/codex/releases/latest",
+    "› 1. Update now (runs `bun install -g @openai/codex`)",
+    "2. Skip",
+    "3. Skip until next version",
+    "Press enter to continue",
+)
 
 
 class StartError(RuntimeError):
@@ -85,6 +95,7 @@ class Args:
     record_recovery_evidence: bool = False
     recovery_output: Path | None = None
     failed_delivery_id: str = ""
+    recover_update_prompt: bool = False
 
 
 @dataclass(frozen=True)
@@ -113,6 +124,11 @@ def parse_args(argv: list[str]) -> Args:
     )
     _ = parser.add_argument("--restart-running", action="store_true", help="Capture the current Codex session and atomically respawn it in this exact pane.")
     _ = parser.add_argument(
+        "--recover-update-prompt",
+        action="store_true",
+        help="Select Skip only in Codex's exact startup update menu for the supplied resumed session.",
+    )
+    _ = parser.add_argument(
         "--recover-non-codex",
         action="store_true",
         help="Explicitly replace a verified non-Codex process after a failed delivery; requires --prompt-file and --recovery-evidence.",
@@ -134,8 +150,9 @@ def parse_args(argv: list[str]) -> Args:
         parser.error("--model contains unsupported characters.")
     if parsed.session_id and UUID_RE.fullmatch(parsed.session_id) is None:
         parser.error("--session-id must be a Codex UUID.")
-    if sum(bool(value) for value in (parsed.restart_running, parsed.recover_non_codex, parsed.record_recovery_evidence)) > 1:
-        parser.error("--restart-running, --recover-non-codex, and --record-recovery-evidence are mutually exclusive.")
+    modes = (parsed.restart_running, parsed.recover_non_codex, parsed.record_recovery_evidence, parsed.recover_update_prompt)
+    if sum(bool(value) for value in modes) > 1:
+        parser.error("--restart-running, --recover-non-codex, --record-recovery-evidence, and --recover-update-prompt are mutually exclusive.")
     if parsed.restart_running and (parsed.prompt_file or parsed.session_id):
         parser.error("--restart-running captures the live session and does not accept --prompt-file or --session-id.")
     if parsed.recover_non_codex and parsed.session_id:
@@ -150,17 +167,19 @@ def parse_args(argv: list[str]) -> Args:
         parser.error("--record-recovery-evidence requires --recovery-output.")
     if parsed.record_recovery_evidence and not parsed.failed_delivery_id:
         parser.error("--record-recovery-evidence requires --failed-delivery-id.")
+    if parsed.recover_update_prompt and (not parsed.session_id or parsed.prompt_file):
+        parser.error("--recover-update-prompt requires --session-id and does not accept --prompt-file.")
     if parsed.failed_delivery_id and not parsed.record_recovery_evidence:
         parser.error("--failed-delivery-id is only valid with --record-recovery-evidence.")
     if parsed.recovery_output and not parsed.record_recovery_evidence:
         parser.error("--recovery-output is only valid with --record-recovery-evidence.")
-    if not parsed.restart_running and not parsed.recover_non_codex and not parsed.record_recovery_evidence and bool(parsed.session_id) == bool(parsed.prompt_file):
+    if not any(modes) and bool(parsed.session_id) == bool(parsed.prompt_file):
         parser.error("provide exactly one of --session-id or --prompt-file.")
     if parsed.recovery_evidence and not parsed.recover_non_codex:
         parser.error("--recovery-evidence is only valid with --recover-non-codex.")
     if not math.isfinite(parsed.startup_timeout_s) or parsed.startup_timeout_s <= 0:
         parser.error("--startup-timeout-s must be finite and positive.")
-    if not parsed.restart_running and not parsed.recover_non_codex and not parsed.record_recovery_evidence and not parsed.confirm_empty_shell:
+    if not any(modes) and not parsed.confirm_empty_shell:
         parser.error("--confirm-empty-shell is required because tmux cannot inspect a shell's input buffer.")
     if parsed.failed_delivery_id and DELIVERY_ID_RE.fullmatch(parsed.failed_delivery_id) is None:
         parser.error("--failed-delivery-id contains unsupported characters.")
@@ -181,6 +200,7 @@ def parse_args(argv: list[str]) -> Args:
         record_recovery_evidence=parsed.record_recovery_evidence,
         recovery_output=parsed.recovery_output.expanduser().resolve() if parsed.recovery_output else None,
         failed_delivery_id=parsed.failed_delivery_id or "",
+        recover_update_prompt=parsed.recover_update_prompt,
     )
 
 
@@ -281,13 +301,15 @@ def prompt_text(args: Args, is_manager: bool) -> str:
 
 def launch_command(args: Args, pane: Pane, prompt_path: Path | None, marker: str, *, replace_process: bool = False) -> str:
     codex = [
-        "bunx",
+        CODEX_LAUNCH_COMMAND,
         "@openai/codex",
         "--dangerously-bypass-approvals-and-sandbox",
         "--model",
         args.model,
         "--config",
         f'model_reasoning_effort="{args.reasoning_effort}"',
+        "--config",
+        "check_for_update_on_startup=false",
     ]
     if args.session_id:
         codex.extend(("resume", args.session_id))
@@ -677,7 +699,14 @@ def require_recovery_target(pane: Pane, evidence: str, root: Path | None = None)
         or fields["window_id"] != current.window_id
     ):
         raise StartError("recovery evidence receipt must bind this pane and window.")
-    if fields["version"] != RECOVERY_RECEIPT_VERSION or fields["producer"] != "omo_codex_start" or fields["status"] != "not_codex" or fields["delivery"] != "failed" or fields["fresh"] != "true" or fields["source"] != "omo_pending_watch":
+    if (
+        fields["version"] != RECOVERY_RECEIPT_VERSION
+        or fields["producer"] != "omo_codex_start"
+        or fields["status"] != "not_codex"
+        or fields["delivery"] != "failed"
+        or fields["fresh"] != "true"
+        or fields["source"] != "omo_pending_watch"
+    ):
         raise StartError("recovery evidence receipt must prove a fresh not_codex result after failed delivery.")
     if DELIVERY_ID_RE.fullmatch(fields["delivery_id"]) is None or DELIVERY_ID_RE.fullmatch(fields["event_id"]) is None:
         raise StartError("recovery evidence receipt has an invalid event identity.")
@@ -732,10 +761,7 @@ def require_recovery_target(pane: Pane, evidence: str, root: Path | None = None)
         receipt_stat = receipt_path.stat()
     except OSError as error:
         raise StartError("recovery evidence receipt disappeared before validation.") from error
-    if (
-        str(receipt_stat.st_ino) != issuance_fields["receipt_inode"]
-        or hashlib.sha256(receipt_text.encode("utf-8")).hexdigest() != issuance_fields["receipt_sha256"]
-    ):
+    if str(receipt_stat.st_ino) != issuance_fields["receipt_inode"] or hashlib.sha256(receipt_text.encode("utf-8")).hexdigest() != issuance_fields["receipt_sha256"]:
         raise StartError("recovery evidence receipt does not match its immutable issuance record.")
     try:
         observed_at = datetime.fromisoformat(fields["observed_at"])
@@ -770,11 +796,85 @@ def post_marker_lines(pane: Pane, marker: str) -> list[str] | None:
     return None
 
 
-def wait_started(pane: Pane, marker: str, timeout_s: float) -> str:
+def codex_update_prompt_start(lines: list[str]) -> int | None:
+    visible = [(index, line.strip()) for index, line in enumerate(lines) if line.strip()]
+    n_prompt_lines = len(UPDATE_PROMPT_SUFFIX) + 1
+    if len(visible) < n_prompt_lines:
+        return None
+    prompt = visible[-n_prompt_lines:]
+    if UPDATE_AVAILABLE_RE.fullmatch(prompt[0][1]) is None or tuple(line for _, line in prompt[1:]) != UPDATE_PROMPT_SUFFIX:
+        return None
+    return prompt[0][0]
+
+
+def is_codex_update_prompt(lines: list[str]) -> bool:
+    """Recognize only Codex's active startup update-choice menu."""
+
+    return codex_update_prompt_start(lines) is not None
+
+
+def require_update_prompt(pane: Pane, session_id: str = "") -> None:
+    current = resolve_pane(pane.target)
+    if current.pane_id != pane.pane_id or current.window_id != pane.window_id:
+        raise StartError("tmux pane or window identity changed before update-prompt recovery.")
+    if current.command != CODEX_LAUNCH_COMMAND:
+        raise StartError(f"target {current.target} is running {current.command or 'unknown'}, not the Codex launcher.")
+    captured, lines = exact_tail(current.target, 80)
+    if not captured:
+        raise StartError(f"target {current.target} update-prompt capture failed; no input was sent.")
+    verify_same_pane(pane)
+    prompt_start = codex_update_prompt_start(lines)
+    if prompt_start is None:
+        raise StartError(f"target {current.target} does not show the exact Codex startup update menu; no input was sent.")
+    if session_id:
+        compact_launches = "".join("".join(lines[:prompt_start]).split())
+        _, launcher, latest_launch = compact_launches.rpartition("@openai/codex")
+        resumed_sessions = [match.group("session") for match in RESUME_ARG_RE.finditer(latest_launch)]
+        if not launcher or not resumed_sessions or resumed_sessions[-1] != session_id:
+            raise StartError(f"target {current.target} update menu is not bound to the latest resumed session {session_id}; no input was sent.")
+
+
+def skip_codex_update_prompt(pane: Pane, session_id: str = "") -> None:
+    """Select documented option `2. Skip` after exact state and identity checks."""
+
+    require_update_prompt(pane, session_id)
+    condition = "#{&&:#{==:#{window_id},%s},#{==:#{session_name}:#{window_index}.#{pane_index},%s},#{==:#{pane_current_command},%s}}" % (
+        pane.window_id,
+        pane.target,
+        CODEX_LAUNCH_COMMAND,
+    )
+    send = f"send-keys -t {pane.pane_id} 2 Enter"
+    result = run(["tmux", "if-shell", "-F", "-t", pane.pane_id, condition, send, "run-shell 'exit 1'"])
+    if result.returncode != 0:
+        detail = result.stderr.strip() or "pane/window/process identity changed before update-prompt recovery"
+        raise StartError(f"failed to skip Codex update in {pane.target}: {detail}")
+    verify_same_pane(pane)
+
+
+def wait_update_recovery(pane: Pane, timeout_s: float) -> str:
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         verify_same_pane(pane)
+        report = inspect(StatusArgs(pane.target, 80))
+        if report.status in SUCCESS_STATUSES:
+            return report.status
+        if report.status == "error":
+            raise StartError("Codex update-prompt recovery reached an error state.")
+        time.sleep(0.25)
+    raise StartError("timed out waiting for Codex after skipping its startup update.")
+
+
+def wait_started(pane: Pane, marker: str, timeout_s: float) -> str:
+    deadline = time.monotonic() + timeout_s
+    update_skipped = False
+    while time.monotonic() < deadline:
+        verify_same_pane(pane)
         lines = post_marker_lines(pane, marker)
+        if lines is not None and not update_skipped and is_codex_update_prompt(lines):
+            skip_codex_update_prompt(pane)
+            update_skipped = True
+            time.sleep(0.25)
+            continue
         classification = "not_codex" if lines is None else classify_status(lines, current_block(lines))
         if classification in SUCCESS_STATUSES:
             return classification
@@ -785,8 +885,9 @@ def wait_started(pane: Pane, marker: str, timeout_s: float) -> str:
 
 
 def start(args: Args) -> str:
-    if sum(bool(value) for value in (args.restart_running, args.recover_non_codex, args.record_recovery_evidence)) > 1:
-        raise StartError("--restart-running, --recover-non-codex, and --record-recovery-evidence are mutually exclusive.")
+    modes = (args.restart_running, args.recover_non_codex, args.record_recovery_evidence, args.recover_update_prompt)
+    if sum(bool(value) for value in modes) > 1:
+        raise StartError("--restart-running, --recover-non-codex, --record-recovery-evidence, and --recover-update-prompt are mutually exclusive.")
     if args.recover_non_codex:
         if args.session_id:
             raise StartError("--recover-non-codex launches a fresh session and does not accept --session-id.")
@@ -801,17 +902,19 @@ def start(args: Args) -> str:
             raise StartError("--record-recovery-evidence requires --recovery-output.")
         if not args.failed_delivery_id:
             raise StartError("--record-recovery-evidence requires --failed-delivery-id.")
+    if args.recover_update_prompt and (not args.session_id or args.prompt_file is not None):
+        raise StartError("--recover-update-prompt requires --session-id and does not accept --prompt-file.")
     pane = resolve_pane(args.target)
     if pane.target.partition(":")[0].startswith("h"):
         raise StartError("omo_codex_start cannot modify a human-owned `h*` tmux session; use the human-authorized task launcher.")
     if os.environ.get("TMUX_PANE") == pane.pane_id:
         raise StartError("run this helper from a different pane than the empty target.")
-    if not args.restart_running and not args.recover_non_codex and not args.record_recovery_evidence:
+    if not any(modes):
         require_same_shell(pane)
     path = task_path(args.root, args.task_file)
     with task_target_lock(args.root, pane.target), task_file_lock(path):
         verify_same_pane(pane)
-        if not args.restart_running and not args.recover_non_codex and not args.record_recovery_evidence:
+        if not any(modes):
             require_same_shell(pane)
         is_manager = validate_task(args, pane)
         if args.restart_running:
@@ -826,6 +929,15 @@ def start(args: Args) -> str:
                 return "dry-run"
             record_recovery_evidence(args.root, pane, args.recovery_output, args.failed_delivery_id)
             return "recovery-evidence-recorded"
+        if args.recover_update_prompt:
+            if args.dry_run:
+                require_update_prompt(pane, args.session_id)
+                print(f"target: {pane.target}")
+                print("mode: recover-update-prompt")
+                print(f"session: {args.session_id}")
+                return "dry-run"
+            skip_codex_update_prompt(pane, args.session_id)
+            return wait_update_recovery(pane, args.startup_timeout_s)
         effective_args = args
         if args.restart_running and not args.session_id:
             if args.dry_run:

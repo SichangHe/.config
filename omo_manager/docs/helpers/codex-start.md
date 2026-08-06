@@ -27,6 +27,22 @@ omo_codex_start.py \
   --session-id SESSION_UUID
 ```
 
+All launches set Codex's supported `check_for_update_on_startup=false` configuration, so the startup update menu cannot block manager delivery.
+
+Recover a resumed session that was launched before this safeguard and is paused at Codex's startup update menu:
+
+```bash
+omo_codex_start.py \
+  --task-file TASK.md \
+  --target SESSION:WINDOW \
+  --model gpt-5.6-terra \
+  --reasoning-effort max \
+  --session-id SESSION_UUID \
+  --recover-update-prompt
+```
+
+This mode recognizes only the exact Codex menu ending in `2. Skip` and `Press enter to continue`, requires the latest captured Codex launch before that menu to resume the supplied session id, and atomically rechecks the target, pane, window, and `bunx` process before sending `2` and Enter. It never respawns the pane or sends input after a mismatch. Like every lower-level start mode, it categorically rejects `h*` sessions.
+
 Start a fresh session with task-local instructions:
 
 ```bash

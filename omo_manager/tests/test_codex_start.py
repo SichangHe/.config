@@ -18,6 +18,7 @@ from omo_manager.omo_codex_start import (
     StartError,
     current_todo_entries,
     consume_recovery_receipt,
+    is_codex_update_prompt,
     launch_command,
     parse_args,
     post_marker_lines,
@@ -28,6 +29,7 @@ from omo_manager.omo_codex_start import (
     require_same_shell,
     resolve_pane,
     respawn_codex,
+    skip_codex_update_prompt,
     start,
     validate_task,
 )
@@ -36,6 +38,8 @@ from omo_manager.omo_pending_watch import record_terminal_delivery_failure
 
 
 class CodexStartTests(unittest.TestCase):
+    SESSION_ID = "019f670b-6a2f-7463-b9be-9aa6ff0cec43"
+
     def args(self, root: Path, **changes: object) -> Args:
         values: dict[str, object] = {
             "root": root,
@@ -51,6 +55,17 @@ class CodexStartTests(unittest.TestCase):
         }
         values.update(changes)
         return Args(**values)  # type: ignore[arg-type]
+
+    def update_prompt_lines(self, session_id: str = SESSION_ID) -> list[str]:
+        return [
+            f"exec bunx @openai/codex resume {session_id}",
+            "✨\u200aUpdate available! 0.146.0 -> 0.146.1",
+            "Release notes: https://github.com/openai/codex/releases/latest",
+            "› 1. Update now (runs `bun install -g @openai/codex`)",
+            "  2. Skip",
+            "  3. Skip until next version",
+            "Press enter to continue",
+        ]
 
     def write_task(self, root: Path, *, runat: str = "cfg:2", status: str = "blocked", manager: bool = False) -> None:
         fields = {
@@ -169,9 +184,105 @@ class CodexStartTests(unittest.TestCase):
         self.assertIn("OMO_AGENT_TMUX_TARGET=cfg:2.0", command)
         self.assertIn("--model gpt-5.6-terra", command)
         self.assertIn("model_reasoning_effort=", command)
+        self.assertIn("check_for_update_on_startup=false", command)
         self.assertIn("resume 019f670b-6a2f-7463-b9be-9aa6ff0cec43", command)
         self.assertIn("cd '/tmp/work logs'", command)
         self.assertIn("printf '%s\\n' '[marker]'", command)
+
+    def test_exact_codex_update_prompt_recognition(self) -> None:
+        lines = self.update_prompt_lines()
+        self.assertTrue(is_codex_update_prompt(lines))
+        for index, replacement in ((4, "2. Update later"), (6, "Press any key to continue")):
+            mismatched = [*lines]
+            mismatched[index] = replacement
+            with self.subTest(index=index):
+                self.assertFalse(is_codex_update_prompt(mismatched))
+
+    def test_update_prompt_mismatch_refuses_input(self) -> None:
+        pane = Pane("cfg:2.0", "%2", "@2", "bunx", Path("/tmp"))
+        lines = [*self.update_prompt_lines()[:-1], "Press any key to continue"]
+        with (
+            patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+            patch("omo_manager.omo_codex_start.exact_tail", return_value=(True, lines)),
+            patch("omo_manager.omo_codex_start.run") as run,
+            self.assertRaisesRegex(StartError, "does not show the exact Codex startup update menu"),
+        ):
+            skip_codex_update_prompt(pane, self.SESSION_ID)
+        run.assert_not_called()
+
+    def test_update_prompt_session_mismatch_refuses_input(self) -> None:
+        pane = Pane("cfg:2.0", "%2", "@2", "bunx", Path("/tmp"))
+        other_session = "019f670b-6a2f-7463-b9be-aaaaaaaaaaaa"
+        cases = (
+            self.update_prompt_lines(other_session),
+            [f"exec bunx @openai/codex resume {self.SESSION_ID}", *self.update_prompt_lines(other_session)],
+        )
+        for lines in cases:
+            with (
+                self.subTest(stale_expected=len(lines) > len(self.update_prompt_lines())),
+                patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                patch("omo_manager.omo_codex_start.exact_tail", return_value=(True, lines)),
+                patch("omo_manager.omo_codex_start.run") as run,
+                self.assertRaisesRegex(StartError, "not bound to the latest resumed session"),
+            ):
+                skip_codex_update_prompt(pane, self.SESSION_ID)
+            run.assert_not_called()
+
+    def test_update_prompt_pane_change_refuses_input(self) -> None:
+        pane = Pane("cfg:2.0", "%2", "@2", "bunx", Path("/tmp"))
+        changed = Pane("cfg:2.0", "%9", "@9", "bunx", Path("/tmp"))
+        with (
+            patch("omo_manager.omo_codex_start.resolve_pane", side_effect=[pane, changed]),
+            patch("omo_manager.omo_codex_start.exact_tail", return_value=(True, self.update_prompt_lines())),
+            patch("omo_manager.omo_codex_start.run") as run,
+            self.assertRaisesRegex(StartError, "identity changed"),
+        ):
+            skip_codex_update_prompt(pane, self.SESSION_ID)
+        run.assert_not_called()
+
+    def test_update_prompt_atomic_process_mismatch_refuses_input(self) -> None:
+        pane = Pane("cfg:2.0", "%2", "@2", "bunx", Path("/tmp"))
+        failed = subprocess.CompletedProcess([], 1, "", "process changed")
+        with (
+            patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+            patch("omo_manager.omo_codex_start.exact_tail", return_value=(True, self.update_prompt_lines())),
+            patch("omo_manager.omo_codex_start.run", return_value=failed) as run,
+            self.assertRaisesRegex(StartError, "failed to skip Codex update.*process changed"),
+        ):
+            skip_codex_update_prompt(pane, self.SESSION_ID)
+        run.assert_called_once()
+
+    def test_update_prompt_recovery_continues_same_resumed_session(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root)
+            pane = Pane("cfg:2.0", "%2", "@2", "bunx", root)
+            completed = subprocess.CompletedProcess([], 0, "", "")
+            with (
+                patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                patch("omo_manager.omo_codex_start.exact_tail", return_value=(True, self.update_prompt_lines())),
+                patch("omo_manager.omo_codex_start.run", return_value=completed) as run,
+                patch("omo_manager.omo_codex_start.wait_update_recovery", return_value="running") as wait,
+                patch("omo_manager.omo_codex_start.respawn_codex") as respawn,
+                patch("omo_manager.omo_codex_start.send_shell_command") as launch,
+            ):
+                result = start(self.args(root, confirm_empty_shell=False, recover_update_prompt=True))
+            self.assertEqual("running", result)
+            run.assert_called_once_with(
+                [
+                    "tmux",
+                    "if-shell",
+                    "-F",
+                    "-t",
+                    "%2",
+                    "#{&&:#{==:#{window_id},@2},#{==:#{session_name}:#{window_index}.#{pane_index},cfg:2.0},#{==:#{pane_current_command},bunx}}",
+                    "send-keys -t %2 2 Enter",
+                    "run-shell 'exit 1'",
+                ]
+            )
+            wait.assert_called_once_with(pane, 45.0)
+            respawn.assert_not_called()
+            launch.assert_not_called()
 
     def test_fresh_manager_prompt_includes_defaults_manager_and_task(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
@@ -188,7 +299,7 @@ class CodexStartTests(unittest.TestCase):
         pane = Pane("cfg:2.0", "%2", "@2", "zsh", root)
         prompt_path = Path("/tmp/prompt with spaces.txt")
         command = launch_command(self.args(root, session_id="", prompt_file=prompt_path), pane, prompt_path, "[marker]")
-        self.assertIn('"$(cat -- \'/tmp/prompt with spaces.txt\')"', command)
+        self.assertIn("\"$(cat -- '/tmp/prompt with spaces.txt')\"", command)
 
     def test_restart_running_needs_no_session_or_shell_confirmation(self) -> None:
         args = parse_args(
@@ -206,6 +317,24 @@ class CodexStartTests(unittest.TestCase):
         )
         self.assertTrue(args.restart_running)
         self.assertEqual("", args.session_id)
+
+    def test_update_prompt_recovery_requires_session_without_shell_confirmation(self) -> None:
+        common = [
+            "--task-file",
+            "worker.md",
+            "--target",
+            "cfg:2",
+            "--model",
+            "gpt-5.6-terra",
+            "--reasoning-effort",
+            "max",
+            "--recover-update-prompt",
+        ]
+        with self.assertRaises(SystemExit):
+            parse_args(common)
+        args = parse_args([*common, "--session-id", self.SESSION_ID])
+        self.assertTrue(args.recover_update_prompt)
+        self.assertFalse(args.confirm_empty_shell)
 
     def test_restart_running_rejects_caller_supplied_session(self) -> None:
         with self.assertRaises(SystemExit):
@@ -287,9 +416,7 @@ class CodexStartTests(unittest.TestCase):
             root = Path(raw_root)
             pane = Pane("cfg:2.0", "%2", "@2", "bunx", root)
             receipt = self.write_recovery_receipt(root, pane, ["delivery failed"])
-            with patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane), patch(
-                "omo_manager.omo_codex_start.exact_tail", return_value=(True, ["delivery failed"])
-            ):
+            with patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane), patch("omo_manager.omo_codex_start.exact_tail", return_value=(True, ["delivery failed"])):
                 require_recovery_target(pane, str(receipt), root)
                 consume_recovery_receipt(root, str(receipt))
                 with self.assertRaisesRegex(StartError, "already consumed"):
@@ -301,9 +428,7 @@ class CodexStartTests(unittest.TestCase):
             target = "cfg:2.0"
             event_id = "watcher-event-1"
             identity = subprocess.CompletedProcess([], 0, f"{target}\t%2\t@2\n", "")
-            with patch("omo_manager.omo_pending_watch.subprocess.run", return_value=identity), patch(
-                "omo_manager.omo_pending_watch.exact_codex_tail", return_value=(True, ["delivery failed"])
-            ):
+            with patch("omo_manager.omo_pending_watch.subprocess.run", return_value=identity), patch("omo_manager.omo_pending_watch.exact_codex_tail", return_value=(True, ["delivery failed"])):
                 event = record_terminal_delivery_failure(root, target, event_id, "sender failed")
                 duplicate = record_terminal_delivery_failure(root, target, event_id, "sender failed again")
             self.assertIsNotNone(event)
@@ -321,13 +446,14 @@ class CodexStartTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root)
             identity = subprocess.CompletedProcess([], 0, "cfg:2.0\t%2\t@2\n", "")
-            with patch("omo_manager.omo_pending_watch.subprocess.run", return_value=identity), patch(
-                "omo_manager.omo_pending_watch.exact_codex_tail", return_value=(False, [])
-            ):
+            with patch("omo_manager.omo_pending_watch.subprocess.run", return_value=identity), patch("omo_manager.omo_pending_watch.exact_codex_tail", return_value=(False, [])):
                 self.assertIsNone(record_terminal_delivery_failure(root, "cfg:2.0", "capture-failed", "sender failed"))
-            with patch("omo_manager.omo_pending_watch.subprocess.run", return_value=identity), patch(
-                "omo_manager.omo_pending_watch.exact_codex_tail",
-                return_value=(True, ["• Working (1s • esc to interrupt)", "  gpt-5.6"]),
+            with (
+                patch("omo_manager.omo_pending_watch.subprocess.run", return_value=identity),
+                patch(
+                    "omo_manager.omo_pending_watch.exact_codex_tail",
+                    return_value=(True, ["• Working (1s • esc to interrupt)", "  gpt-5.6"]),
+                ),
             ):
                 self.assertIsNone(record_terminal_delivery_failure(root, "cfg:2.0", "codex-running", "sender failed"))
             self.assertFalse((root / RECOVERY_EVENT_DIRNAME).exists())
@@ -431,9 +557,7 @@ class CodexStartTests(unittest.TestCase):
             event_dir = root / RECOVERY_EVENT_DIRNAME
             os.symlink(outside, event_dir)
             identity = subprocess.CompletedProcess([], 0, "cfg:2.0\t%2\t@2\n", "")
-            with patch("omo_manager.omo_pending_watch.subprocess.run", return_value=identity), patch(
-                "omo_manager.omo_pending_watch.exact_codex_tail", return_value=(True, ["delivery failed"])
-            ):
+            with patch("omo_manager.omo_pending_watch.subprocess.run", return_value=identity), patch("omo_manager.omo_pending_watch.exact_codex_tail", return_value=(True, ["delivery failed"])):
                 self.assertIsNone(record_terminal_delivery_failure(root, "cfg:2.0", "symlinked-event-dir", "sender failed"))
             self.assertEqual(0o755, outside.stat().st_mode & 0o777)
             self.assertFalse(any(outside.iterdir()))
@@ -444,9 +568,7 @@ class CodexStartTests(unittest.TestCase):
             pane = Pane("cfg:2.0", "%2", "@2", "bunx", root)
             running_lines = ["• Working (1s • esc to interrupt)", "  gpt-5.6"]
             receipt = self.write_recovery_receipt(root, pane, ["delivery failed"], digest_lines=running_lines)
-            with patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane), patch(
-                "omo_manager.omo_codex_start.exact_tail", return_value=(True, running_lines)
-            ):
+            with patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane), patch("omo_manager.omo_codex_start.exact_tail", return_value=(True, running_lines)):
                 with self.assertRaisesRegex(StartError, "fresh not_codex"):
                     require_recovery_target(pane, str(receipt))
             shell = Pane("cfg:2.0", "%2", "@2", "zsh", root)
@@ -454,14 +576,10 @@ class CodexStartTests(unittest.TestCase):
                 with self.assertRaisesRegex(StartError, "not a verified non-Codex"):
                     require_recovery_target(shell, str(receipt))
             capture.assert_not_called()
-            with patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane), patch(
-                "omo_manager.omo_codex_start.exact_tail", return_value=(True, [])
-            ):
+            with patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane), patch("omo_manager.omo_codex_start.exact_tail", return_value=(True, [])):
                 with self.assertRaisesRegex(StartError, "empty status capture"):
                     require_recovery_target(pane, str(receipt))
-            with patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane), patch(
-                "omo_manager.omo_codex_start.exact_tail", return_value=(False, [])
-            ):
+            with patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane), patch("omo_manager.omo_codex_start.exact_tail", return_value=(False, [])):
                 with self.assertRaisesRegex(StartError, "capture failed"):
                     require_recovery_target(pane, str(receipt))
             stale = self.write_recovery_receipt(root, pane, ["delivery failed"], observed_at=datetime.now(timezone.utc).replace(year=2020))
@@ -470,9 +588,7 @@ class CodexStartTests(unittest.TestCase):
                     require_recovery_target(pane, str(stale))
             capture.assert_not_called()
             mismatched_digest = self.write_recovery_receipt(root, pane, ["delivery failed"], digest_lines=["different output"])
-            with patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane), patch(
-                "omo_manager.omo_codex_start.exact_tail", return_value=(True, ["delivery failed"])
-            ):
+            with patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane), patch("omo_manager.omo_codex_start.exact_tail", return_value=(True, ["delivery failed"])):
                 with self.assertRaisesRegex(StartError, "status capture changed"):
                     require_recovery_target(pane, str(mismatched_digest))
             changed = Pane("cfg:2.0", "%9", "@9", "bunx", root)
@@ -658,9 +774,11 @@ class CodexStartTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root)
             pane = Pane("hcfg:2.0", "%2", "@2", "zsh", root)
-            with patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane), patch(
-                "omo_manager.omo_codex_start.require_same_shell"
-            ) as require_shell, self.assertRaisesRegex(StartError, "human-owned"):
+            with (
+                patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                patch("omo_manager.omo_codex_start.require_same_shell") as require_shell,
+                self.assertRaisesRegex(StartError, "human-owned"),
+            ):
                 start(self.args(root, target="hcfg:2"))
 
             require_shell.assert_not_called()
