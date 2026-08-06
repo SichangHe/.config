@@ -15,7 +15,7 @@ import sys
 import time
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -144,7 +144,7 @@ class Plan:
 
 def parse_args(argv: list[str] | None = None) -> Arguments:
     parser = argparse.ArgumentParser(description=__doc__)
-    _ = parser.add_argument("--mode", required=True, choices=("describe", "submit"))
+    _ = parser.add_argument("--mode", required=True, choices=("describe", "submit", "verify-consumed"))
     _ = parser.add_argument("--helper", required=True, type=Path)
     _ = parser.add_argument("--root", required=True, type=Path)
     _ = parser.add_argument("--task", required=True, type=Path)
@@ -571,7 +571,13 @@ def manager_transaction_state(payload: bytes, binding: OwnerPrefixBinding, point
     return "active" if payload == owner + suffix else "invalid"
 
 
-def bind_owner_prefix(manager: Path, envelope: Path, pointer: str) -> OwnerPrefixBinding:
+def bind_owner_prefix(
+    manager: Path,
+    envelope: Path,
+    pointer: str,
+    *,
+    allow_stale_consumed: bool = False,
+) -> OwnerPrefixBinding:
     current = manager_bytes(manager)
     if validate_optional_regular(envelope, "private envelope", exact_mode=0o600):
         try:
@@ -587,7 +593,7 @@ def bind_owner_prefix(manager: Path, envelope: Path, pointer: str) -> OwnerPrefi
         )
     if binding.manager_path_sha256 != hashlib.sha256(str(manager).encode()).hexdigest():
         raise ReceiptError("private envelope owner route is inconsistent")
-    if manager_transaction_state(current, binding, pointer) == "invalid":
+    if manager_transaction_state(current, binding, pointer) == "invalid" and not allow_stale_consumed:
         raise ReceiptError("manager bytes differ from the bound report transaction")
     return binding
 
@@ -735,7 +741,12 @@ def _build_plan_from_message(
     envelope_directory = Path("/tmp") / f"omo-agent-messages-{os.getuid()}"
     envelope_final = envelope_directory / f"{safe_part(args.agent)}_{safe_part(status)}_{report_key}.md"
     pointer = f"(from agent {producer_target} {envelope_final})"
-    owner_prefix = bind_owner_prefix(manager, envelope_final, pointer)
+    owner_prefix = bind_owner_prefix(
+        manager,
+        envelope_final,
+        pointer,
+        allow_stale_consumed=args.mode == "verify-consumed",
+    )
     binding = {
         "helper": helper,
         "input": input_info,
@@ -1769,6 +1780,7 @@ def verify_manager_acknowledgment_authority(
     source_path: Path,
     source_digest: str,
     token_digest: str,
+    require_live: bool = True,
 ) -> dict[str, object] | None:
     if (
         role != "bounded-watcher-lease"
@@ -1788,7 +1800,7 @@ def verify_manager_acknowledgment_authority(
     task_lock_dependency = dependencies.get("omo_task_lock") if isinstance(dependencies, dict) else None
     if not isinstance(task_lock_dependency, dict) or task_lock_dependency.get("sha256") != source_digest:
         return None
-    if not watcher_report_authority_is_live(
+    if require_live and not watcher_report_authority_is_live(
         pid=pid,
         start_ticks=start_ticks,
         lock_path=plan.acknowledgment_authority_lock,
@@ -1813,7 +1825,7 @@ def verify_manager_acknowledgment_authority(
     }
 
 
-def read_manager_acknowledgment(plan: Plan) -> dict[str, object] | None:
+def read_manager_acknowledgment(plan: Plan, *, require_live_authority: bool = True) -> dict[str, object] | None:
     if not validate_optional_regular(
         plan.acknowledgment_state,
         "manager acknowledgment state",
@@ -1896,6 +1908,7 @@ def read_manager_acknowledgment(plan: Plan) -> dict[str, object] | None:
             source_path=Path(authority_source_path),
             source_digest=authority_source_digest,
             token_digest=authority_token_digest,
+            require_live=require_live_authority,
         )
         if authority is None:
             continue
@@ -2066,7 +2079,12 @@ def preflight_transaction_set(
     return {**transaction, "sha256": hashlib.sha256(canonical_json(transaction).rstrip(b"\n")).hexdigest()}
 
 
-def validate_committed_route_evidence(plan: Plan, value: object) -> tuple[dict[str, object], ...]:
+def validate_committed_route_evidence(
+    plan: Plan,
+    value: object,
+    *,
+    require_current: bool = True,
+) -> tuple[dict[str, object], ...]:
     if not isinstance(value, list) or not value:
         raise ReceiptError("transaction commitment route evidence is malformed")
     committed: dict[Path, dict[str, object]] = {}
@@ -2099,7 +2117,7 @@ def validate_committed_route_evidence(plan: Plan, value: object) -> tuple[dict[s
     for path, frozen in committed.items():
         observed = current[path]
         if path != plan.manager:
-            if observed != frozen:
+            if require_current and observed != frozen:
                 raise ReceiptError("transaction commitment route evidence changed")
             continue
 
@@ -2114,6 +2132,9 @@ def validate_committed_route_evidence(plan: Plan, value: object) -> tuple[dict[s
             frozen_owner_states.append({"exists": False, "path": str(plan.manager)})
         if frozen not in frozen_owner_states:
             raise ReceiptError("transaction commitment manager route evidence is inconsistent")
+
+        if not require_current:
+            continue
 
         manager_payload = manager_bytes(plan.manager)
         if manager_transaction_state(manager_payload, plan.owner_prefix, plan.pointer) == "invalid":
@@ -2176,6 +2197,7 @@ def validate_transaction_commitment_bytes(
     *,
     expected_preflight: dict[str, object] | None = None,
     require_current_allocation_identity: bool,
+    require_current_route_evidence: bool = True,
 ) -> dict[str, object]:
     try:
         parsed = json.loads(payload)
@@ -2202,7 +2224,11 @@ def validate_transaction_commitment_bytes(
     if expected_preflight is None and realized_allocation_file != str(plan.message_path):
         raise ReceiptError("pending report transaction is already bound to a different allocation")
     committed_routing_sources = preflight.get("routing_sources") if isinstance(preflight, dict) else None
-    routing_sources = validate_committed_route_evidence(plan, committed_routing_sources)
+    routing_sources = validate_committed_route_evidence(
+        plan,
+        committed_routing_sources,
+        require_current=require_current_route_evidence,
+    )
     if (
         not isinstance(realized_allocation_file, str)
         or not Path(realized_allocation_file).is_absolute()
@@ -2296,6 +2322,7 @@ def read_transaction_commitment(
     *,
     expected_preflight: dict[str, object] | None = None,
     require_current_allocation_identity: bool,
+    require_current_route_evidence: bool = True,
 ) -> dict[str, object] | None:
     if not validate_optional_regular(
         plan.transaction_commitment_final,
@@ -2313,6 +2340,7 @@ def read_transaction_commitment(
         payload,
         expected_preflight=expected_preflight,
         require_current_allocation_identity=require_current_allocation_identity,
+        require_current_route_evidence=require_current_route_evidence,
     )
 
 
@@ -2581,6 +2609,116 @@ def description(plan: Plan) -> dict[str, object]:
         ],
         "transaction": public_preflight_binding(plan, recorded_preflight if isinstance(recorded_preflight, dict) else None),
     }
+
+
+def plan_for_historical_commitment(plan: Plan) -> Plan:
+    if plan.transaction_commitment_final.exists():
+        return plan
+    matches: list[tuple[str, tuple[dict[str, object], ...]]] = []
+    for candidate in sorted(plan.receipt_directory.glob("*.commitment")):
+        if not validate_optional_regular(candidate, "historical transaction commitment", exact_mode=0o600):
+            continue
+        payload = regular_file_bytes(candidate, maximum=MAX_RECEIPT_BYTES, field="historical transaction commitment")
+        try:
+            parsed = json.loads(payload)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(parsed, dict) or canonical_json(parsed) != payload:
+            continue
+        replay_id = candidate.name.removesuffix(".commitment")
+        without_id = dict(parsed)
+        commitment_id = without_id.pop("commitment_id", None)
+        preflight = parsed.get("preflight")
+        allocation = parsed.get("allocation")
+        preflight_allocation = preflight.get("allocation") if isinstance(preflight, dict) else None
+        records = preflight.get("records") if isinstance(preflight, dict) else None
+        owner_prefix = preflight.get("owner_prefix") if isinstance(preflight, dict) else None
+        routing_sources = preflight.get("routing_sources") if isinstance(preflight, dict) else None
+        if (
+            HASH_RE.fullmatch(replay_id) is None
+            or set(parsed) != {"allocation", "commitment", "commitment_id", "preflight", "replay_id", "schema"}
+            or parsed.get("schema") != TRANSACTION_COMMITMENT_SCHEMA
+            or parsed.get("replay_id") != replay_id
+            or not isinstance(commitment_id, str)
+            or commitment_id != bound_receipt_id(without_id)
+            or not isinstance(allocation, dict)
+            or allocation.get("file") != str(plan.message_path)
+            or not isinstance(preflight_allocation, dict)
+            or preflight_allocation.get("file") != str(plan.message_path)
+            or preflight_allocation.get("file_sha256") != plan.input_info["sha256"]
+            or preflight_allocation.get("file_size_bytes") != plan.input_info["size_bytes"]
+            or not isinstance(records, dict)
+            or records.get("private_envelope") != str(plan.envelope_final)
+            or records.get("manager") != str(plan.manager)
+            or records.get("producer") != str(plan.task)
+            or owner_prefix != owner_prefix_record(plan.owner_prefix)
+            or not isinstance(routing_sources, list)
+            or not all(isinstance(item, dict) for item in routing_sources)
+        ):
+            continue
+        validated_routing_sources = validate_committed_route_evidence(
+            plan,
+            routing_sources,
+            require_current=False,
+        )
+        matches.append((replay_id, validated_routing_sources))
+    if not matches:
+        return plan
+    if len(matches) != 1:
+        raise ReceiptError("multiple historical commitments match the exact report draft")
+    replay_id, routing_sources = matches[0]
+    route_locks = tuple(
+        sorted(
+            ((Path(str(item["path"])), task_file_lock_path(Path(str(item["path"])))) for item in routing_sources),
+            key=lambda pair: str(pair[0]),
+        )
+    )
+    return replace(
+        plan,
+        route_evidence=routing_sources,
+        route_locks=route_locks,
+        replay_id=replay_id,
+        manager_temporary=plan.manager.parent / f".{plan.manager.name}.omo-report-{replay_id}.tmp",
+        envelope_temporary=plan.envelope_directory / f".{plan.envelope_final.name}.{replay_id}.tmp",
+        transaction_commitment_temporary=plan.receipt_directory / f".{replay_id}.commitment.tmp",
+        transaction_commitment_final=plan.receipt_directory / f"{replay_id}.commitment",
+        receipt_temporary=plan.receipt_directory / f".{replay_id}.tmp",
+        receipt_final=plan.receipt_directory / f"{replay_id}.json",
+        receipt_publication_temporary=plan.receipt_directory / f".{replay_id}.publication.tmp",
+        receipt_publication_final=plan.receipt_directory / f"{replay_id}.publication.json",
+    )
+
+
+def consumed_closure_attestation(plan: Plan) -> dict[str, object]:
+    validate_helper_snapshot(plan)
+    plan = plan_for_historical_commitment(plan)
+    validate_private_layout(plan)
+    require_absent(plan.receipt_final, "durable receipt")
+    require_absent(plan.receipt_publication_final, "receipt publication record")
+    _ = require_valid_envelope(plan)
+    commitment = read_transaction_commitment(
+        plan,
+        require_current_allocation_identity=True,
+        require_current_route_evidence=False,
+    )
+    if commitment is None:
+        raise ReceiptError("consumed report has no immutable transaction commitment")
+    acknowledgment = read_manager_acknowledgment(plan, require_live_authority=False)
+    if acknowledgment is None:
+        raise ReceiptError("consumed report has no exact watcher transition")
+    if plan.pointer.encode() in manager_bytes(plan.manager):
+        raise ReceiptError("consumed report pointer is still active")
+    record: dict[str, object] = {
+        "accepted": False,
+        "consumed_at_unix_s": acknowledgment["recorded_at_unix_s"],
+        "input": plan.input_info,
+        "reason": "manager watcher consumed report; acceptance receipt unavailable",
+        "replay_id": plan.replay_id,
+        "schema": "omo-report-consumed-closure/v1",
+        "status": plan.status,
+        "terminal": True,
+    }
+    return {**record, "attestation_id": bound_receipt_id(record)}
 
 
 def utc_now() -> str:
@@ -3090,6 +3228,8 @@ def run(argv: list[str] | None = None) -> bytes:
         try:
             if plan.mode == "describe":
                 return canonical_json(description(plan))
+            if plan.mode == "verify-consumed":
+                return canonical_json(consumed_closure_attestation(plan))
             try:
                 result = submit(plan)
             except ReceiptError as exc:

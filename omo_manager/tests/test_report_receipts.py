@@ -30,10 +30,18 @@ class ReportFixture:
         day = datetime.now().astimezone().strftime("%Y-%m-%d")
         return self.root / f"work_manager_{day}.md"
 
-    def command(self, *, describe: bool = False, status: str = "done") -> list[str]:
+    def command(
+        self,
+        *,
+        describe: bool = False,
+        verify_consumed: bool = False,
+        status: str = "done",
+    ) -> list[str]:
         command = [str(REPORT)]
         if describe:
             command.append("--describe")
+        if verify_consumed:
+            command.append("--verify-consumed")
         return command + ["--status", status, "--message-file", str(self.message), "--agent", "receipt-worker"]
 
 
@@ -107,9 +115,15 @@ def active_manager_fixture(tmp_path: Path, *, body: bytes = b"unused active-rout
     return case, manager, owner
 
 
-def run_report(case: ReportFixture, *, describe: bool = False, status: str = "done") -> subprocess.CompletedProcess[str]:
+def run_report(
+    case: ReportFixture,
+    *,
+    describe: bool = False,
+    verify_consumed: bool = False,
+    status: str = "done",
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        case.command(describe=describe, status=status),
+        case.command(describe=describe, verify_consumed=verify_consumed, status=status),
         cwd=case.root.parent,
         env=case.env,
         text=True,
@@ -141,9 +155,15 @@ def run_report_from(
     message: Path,
     *,
     describe: bool = False,
+    verify_consumed: bool = False,
+    status: str = "done",
     report: Path = REPORT,
 ) -> subprocess.CompletedProcess[str]:
-    command = replace(case, message=message).command(describe=describe)
+    command = replace(case, message=message).command(
+        describe=describe,
+        verify_consumed=verify_consumed,
+        status=status,
+    )
     command[0] = str(report)
     return subprocess.run(
         command,
@@ -1138,6 +1158,87 @@ class ReportReceiptTests(unittest.TestCase):
             for public in (described.stdout, retry_description.stdout, pending.stdout, retry.stdout, accepted.stdout):
                 self.assertNotIn(body.decode().strip(), public)
                 self.assertNotIn(str(draft_a), public)
+
+    def test_consumed_closure_attests_exact_historical_transition_without_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            case, manager, owner = active_manager_fixture(tmp_path)
+            body = f"historically consumed report closure {tmp}\n".encode()
+            draft = allocate_report_draft(case, body)
+            self.addCleanup(draft.unlink, missing_ok=True)
+            report = copy_report_helper(tmp_path)
+            described = run_report_from(case, draft, describe=True, status="progressing", report=report)
+            self.assertEqual(0, described.returncode, described.stderr)
+            description = json.loads(described.stdout)
+            premature = run_report_from(case, draft, verify_consumed=True, status="progressing", report=report)
+            self.assertNotEqual(0, premature.returncode)
+            self.assertEqual(owner, manager.read_bytes())
+            case.env["OMO_REPORT_ACK_TIMEOUT_S"] = "0"
+            pending = run_report_from(case, draft, status="progressing", report=report)
+            self.assertEqual(0, pending.returncode, pending.stderr)
+            self.assertFalse(json.loads(pending.stdout)["accepted"])
+
+            watched = run_manager_watcher_once(case, manager)
+            self.assertEqual(0, watched.returncode, watched.stderr)
+            self.assertEqual(owner, manager.read_bytes())
+            manager.write_bytes(owner + b"\nnew manager-owned work after consumption\n")
+            (case.root / "TODO.md").write_text(
+                "current:\nworker.md cfg:7\nmanager.md vl:2\nnew-worker.md cfg:8\n",
+                encoding="utf-8",
+            )
+            manager_after = manager.read_bytes()
+            commitment_path = transaction_commitment_path(description)
+            commitment_bytes = commitment_path.read_bytes()
+            malformed = json.loads(commitment_bytes)
+            malformed["preflight"]["routing_sources"] = [{}]
+            unsigned_commitment = {key: value for key, value in malformed.items() if key != "commitment_id"}
+            malformed["commitment_id"] = hashlib.sha256(
+                json.dumps(
+                    unsigned_commitment,
+                    ensure_ascii=True,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest()
+            commitment_path.write_bytes(
+                (json.dumps(malformed, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n").encode()
+            )
+            rejected = run_report_from(case, draft, verify_consumed=True, status="progressing", report=report)
+            self.assertNotEqual(0, rejected.returncode)
+            self.assertEqual(manager_after, manager.read_bytes())
+            self.assertFalse(Path(str(description["files"]["private_receipt"])).exists())
+            self.assertFalse(Path(str(description["files"]["receipt_publication"])).exists())
+            commitment_path.write_bytes(commitment_bytes)
+            with (report.parent / "omo_report_receipt.py").open("a", encoding="utf-8") as stream:
+                stream.write("\n# upgraded after historical watcher consumption\n")
+            with report.open("a", encoding="utf-8") as stream:
+                stream.write("\n# upgraded after historical watcher consumption\n")
+
+            verified = run_report_from(case, draft, verify_consumed=True, status="progressing", report=report)
+
+            self.assertEqual(0, verified.returncode, verified.stderr)
+            attestation = json.loads(verified.stdout)
+            self.assertEqual("omo-report-consumed-closure/v1", attestation["schema"])
+            self.assertFalse(attestation["accepted"])
+            self.assertTrue(attestation["terminal"])
+            self.assertEqual("in-progress", attestation["status"])
+            self.assertEqual(description["input"], attestation["input"])
+            self.assertEqual(description["receipt"]["replay_id"], attestation["replay_id"])
+            unsigned = {key: value for key, value in attestation.items() if key != "attestation_id"}
+            self.assertEqual(
+                hashlib.sha256(
+                    json.dumps(unsigned, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()
+                ).hexdigest(),
+                attestation["attestation_id"],
+            )
+            files = description["files"]
+            self.assertFalse(Path(str(files["private_receipt"])).exists())
+            self.assertFalse(Path(str(files["receipt_publication"])).exists())
+            self.assertEqual(manager_after, manager.read_bytes())
+            acknowledgment_state, acknowledgment_key = acknowledgment_coordinates(description)
+            self.assertEqual(1, acknowledgment_state.read_text(encoding="utf-8").count(acknowledgment_key))
+            self.assertNotIn(body.decode().strip(), verified.stdout + verified.stderr)
+            self.assertNotIn(str(draft), verified.stdout + verified.stderr)
 
     def test_active_manager_concurrent_same_draft_retries_are_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

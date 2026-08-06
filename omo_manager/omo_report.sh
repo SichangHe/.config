@@ -92,11 +92,13 @@ status=""
 message_file=""
 alloc_message_file=0
 describe=0
+verify_consumed=0
 agent="${OMO_AGENT_NAME:-agent}"
 usage() {
   printf '%s\n' \
     "Usage: omo_report.sh --status STATUS --message-file FILE [--agent NAME]" \
     "       omo_report.sh --describe --status STATUS --message-file FILE [--agent NAME]" \
+    "       omo_report.sh --verify-consumed --status STATUS --message-file FILE [--agent NAME]" \
     "       omo_report.sh --alloc-message-file" \
     "" \
     "Allocate a private task-specific draft first, write the report through an editor or other non-shell text channel, then submit it with --status blocked|in-progress|done and --message-file." \
@@ -118,12 +120,15 @@ while [ "$#" -gt 0 ]; do
       ;;
     --alloc-message-file) alloc_message_file=1; shift ;;
     --describe) describe=1; shift ;;
+    --verify-consumed) verify_consumed=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
 if [ "$alloc_message_file" -eq 1 ] && [ -n "$message_file" ]; then echo "--alloc-message-file cannot be combined with --message-file" >&2; exit 2; fi
 if [ "$alloc_message_file" -eq 1 ] && [ "$describe" -eq 1 ]; then echo "--alloc-message-file cannot be combined with --describe" >&2; exit 2; fi
+if [ "$alloc_message_file" -eq 1 ] && [ "$verify_consumed" -eq 1 ]; then echo "--alloc-message-file cannot be combined with --verify-consumed" >&2; exit 2; fi
+if [ "$describe" -eq 1 ] && [ "$verify_consumed" -eq 1 ]; then echo "--describe cannot be combined with --verify-consumed" >&2; exit 2; fi
 if [ "$alloc_message_file" -eq 0 ] && { [ -z "$status" ] || [ -z "$message_file" ]; }; then usage >&2; exit 2; fi
 root_real=$(python3 -I -S -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve())' "$root")
 task_root_real="$root_real"
@@ -601,6 +606,7 @@ pending_digest_path="$(dirname "$helper_path")/omo_pending_digest.py"
 task_lock_path="$(dirname "$helper_path")/omo_task_lock.py"
 mode="submit"
 if [ "$describe" -eq 1 ]; then mode="describe"; fi
+if [ "$verify_consumed" -eq 1 ]; then mode="verify-consumed"; fi
 exec env OMO_REPORT_RECEIVER_BOOTSTRAP=1 PYTHONDONTWRITEBYTECODE=1 python3 -I -S - "$receiver_path" "$pending_digest_path" "$task_lock_path" "$helper_path" \
   --mode "$mode" \
   --helper "$helper_path" \
