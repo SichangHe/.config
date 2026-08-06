@@ -14,6 +14,7 @@ from omo_manager.omo_agent_status import TaskFrontmatterError, parse_task_metada
 from omo_manager.omo_task_status import DONE_REMINDER
 from omo_manager.omo_task_status import StopArgs
 from omo_manager.omo_task_status import parse_args
+from omo_manager.omo_task_status import reconcile_blocked_index
 from omo_manager.omo_task_status import reconcile_running_index
 from omo_manager.omo_task_status import replace_if_unchanged
 from omo_manager.omo_task_status import run
@@ -21,7 +22,7 @@ from omo_manager.omo_task_status import stop_done_agent
 from omo_manager.omo_task_status import update_frontmatter_status
 from omo_manager.omo_task_status import Args as StatusArgs
 from omo_manager.omo_task_metadata import frontmatter_parts
-from omo_manager.omo_blocking import load_yaml_mapping, render_task, split_task_text, sync_generated_blocker
+from omo_manager.omo_blocking import ENABLE_FILE, load_yaml_mapping, render_task, split_task_text, sync_generated_blocker
 from omo_manager.tests.test_task_metadata_v2 import v2_task
 
 
@@ -326,6 +327,75 @@ class TaskStatusTests(unittest.TestCase):
             stop_done_agent.assert_not_called()
             stop_agent.assert_not_called()
 
+    def test_cli_blocked_moves_live_rednote_path_only_row_without_task_or_pane_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "rednote-recovery.md"
+            original_task = task_frontmatter(status="blocked", blocked_on="human", runat="social:4", managerat="social-manager:1", pending_items=("human RedNote sign-in and read-only verification",)) + "all task content stays\n"
+            path.write_text(original_task, encoding="utf-8")
+            todo = root / "TODO.md"
+            todo.write_text("current:\nrednote-recovery.md\nother.md wl:9\n\nhuman pending:\nwaiting.md wl:4\n\nprevious:\nold.md wl:2\n", encoding="utf-8")
+
+            with patch("omo_manager.omo_task_status.stop_done_agent") as stop_done_agent, patch("omo_manager.omo_task_status.stop") as stop_agent, redirect_stdout(io.StringIO()):
+                self.assertEqual(0, run(StatusArgs(root, Path("rednote-recovery.md"), "blocked", "human")))
+
+            self.assertEqual(original_task, path.read_text(encoding="utf-8"))
+            self.assertEqual("current:\nother.md wl:9\n\nhuman pending:\nrednote-recovery.md\nwaiting.md wl:4\n\nprevious:\nold.md wl:2\n", todo.read_text(encoding="utf-8"))
+            stop_done_agent.assert_not_called()
+            stop_agent.assert_not_called()
+
+    def test_cli_blocked_fails_closed_for_invalid_todo_placement(self) -> None:
+        cases = {
+            "absent TODO": None,
+            "missing": "current:\nother.md wl:2\n\nhuman pending:\nwaiting.md wl:3\n",
+            "duplicate": "current:\ntask.md wl:2\n\nhuman pending:\ntask.md wl:2\n",
+            "ambiguous row": "current:\ntask.md wl:2 task.md wl:2\n\nhuman pending:\n",
+            "mismatched target": "current:\ntask.md wl:3\n\nhuman pending:\n",
+            "target before task": "current:\nwl:2 task.md\n\nhuman pending:\n",
+            "description before task": "current:\nnotes task.md\n\nhuman pending:\n",
+            "malformed task suffix": "current:\ntask.mdx\n\nhuman pending:\n",
+            "blocked annotation": "current:\ntask.md wl:2 (blocked: human)\n\nhuman pending:\n",
+            "done annotation": "current:\ntask.md wl:2 (done)\n\nhuman pending:\n",
+            "duplicate under unknown heading": "current:\ntask.md wl:2\n\nhuman pending:\n\nblocked:\ntask.md wl:2\n",
+            "previous": "current:\nother.md wl:2\n\nhuman pending:\n\nprevious:\ntask.md wl:2\n",
+            "low priority": "current:\nother.md wl:2\n\nhuman pending:\n\nlow priority:\ntask.md wl:2\n",
+            "duplicate destination": "current:\ntask.md wl:2\n\nhuman pending:\n\nhuman pending:\n",
+        }
+        for name, todo_text in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                path = root / "task.md"
+                original_task = task_frontmatter(status="blocked", blocked_on="human") + "body\n"
+                path.write_text(original_task, encoding="utf-8")
+                todo = root / "TODO.md"
+                if todo_text is not None:
+                    todo.write_text(todo_text, encoding="utf-8")
+
+                with patch("omo_manager.omo_task_status.stop_done_agent") as stop_done_agent, redirect_stderr(io.StringIO()):
+                    self.assertEqual(2, run(StatusArgs(root, Path("task.md"), "blocked", "human")))
+
+                self.assertEqual(original_task, path.read_text(encoding="utf-8"))
+                self.assertEqual(todo_text is not None, todo.exists())
+                if todo_text is not None:
+                    self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+                stop_done_agent.assert_not_called()
+
+    def test_cli_blocked_reconciliation_rejects_mismatched_authoritative_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            original_task = task_frontmatter(status="blocked", blocked_on="human") + "body\n"
+            path.write_text(original_task, encoding="utf-8")
+            todo = root / "TODO.md"
+            todo_text = "current:\ntask.md wl:2\n\nhuman pending:\n"
+            todo.write_text(todo_text, encoding="utf-8")
+
+            with redirect_stderr(io.StringIO()):
+                self.assertEqual(2, run(StatusArgs(root, Path("task.md"), "blocked", "different human reason")))
+
+            self.assertEqual(original_task, path.read_text(encoding="utf-8"))
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+
     def test_cli_running_fails_closed_for_invalid_todo_placement(self) -> None:
         cases = {
             "absent TODO": None,
@@ -409,6 +479,23 @@ class TaskStatusTests(unittest.TestCase):
 
             self.assertIn("current:\n\nTODO.md wl:2\n", todo.read_text(encoding="utf-8"))
 
+    def test_blocked_index_reconciliation_rechecks_the_task_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            original_task = task_frontmatter(status="blocked", blocked_on="human") + "body\n"
+            path.write_text(original_task, encoding="utf-8")
+            before = path.stat()
+            todo = root / "TODO.md"
+            todo_text = "current:\ntask.md wl:2\n\nhuman pending:\n"
+            todo.write_text(todo_text, encoding="utf-8")
+            path.write_text(task_frontmatter(status="blocked", blocked_on="different") + "body\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(TaskFrontmatterError, "task changed or no longer matches"):
+                reconcile_blocked_index(root, path, original_task, before, "human")
+
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+
     def test_long_running_is_a_normal_status_transition(self) -> None:
         text = task_frontmatter() + "body\n"
 
@@ -445,6 +532,23 @@ class TaskStatusTests(unittest.TestCase):
         assert resumed is not None
         self.assertEqual("long_running", resumed.status)
         self.assertEqual("persistent contact", resumed.blocked_on)
+
+    def test_cli_v2_dependency_blocked_long_running_remains_a_normal_transition(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            path.write_text(v2_task(), encoding="utf-8")
+            (root / ENABLE_FILE).write_text("version: v2.0.0\nenabled: true\n", encoding="utf-8")
+
+            with patch("omo_manager.omo_task_status.blocking_request", return_value={"ok": True}):
+                self.assertEqual(0, run(StatusArgs(root, Path("task.md"), "long_running", "persistent contact")))
+
+            metadata = parse_task_metadata(path.read_text(encoding="utf-8"), root)
+            self.assertIsNotNone(metadata)
+            assert metadata is not None
+            self.assertEqual("blocked", metadata.status)
+            self.assertEqual("long_running", metadata.resume_status)
+            self.assertIn("persistent contact", metadata.blocked_on)
 
     def test_pending_marker_blocks_status_change(self) -> None:
         text = task_frontmatter() + "(pending)\nplease route\n"
@@ -1050,7 +1154,7 @@ class TaskStatusTests(unittest.TestCase):
         self.assertEqual("session-1", args.session_id)
 
     def test_parse_finish_replaced_done_requires_all_explicit_evidence(self) -> None:
-        with self.assertRaises(SystemExit):
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
             parse_args(["--root", "/tmp/work", "--finish-replaced-done", "task.md"])
 
         args = parse_args(
