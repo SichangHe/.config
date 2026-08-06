@@ -105,6 +105,7 @@ class Pane:
     window_id: str
     command: str
     workdir: Path
+    pane_pid: int = 0
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -227,15 +228,15 @@ def resolve_pane(target: str) -> Pane:
             "-p",
             "-t",
             target,
-            "#{session_name}:#{window_index}.#{pane_index}\t#{pane_id}\t#{window_id}\t#{pane_current_command}\t#{pane_current_path}",
+            "#{session_name}:#{window_index}.#{pane_index}\t#{pane_id}\t#{window_id}\t#{pane_current_command}\t#{pane_current_path}\t#{pane_pid}",
         ]
     )
     if result.returncode != 0:
         raise StartError(f"tmux target does not exist: {target}")
-    if result.stdout == ":.\t\t\t\t\n":
+    if result.stdout == ":.\t\t\t\t\t\n":
         raise StartError(f"tmux target does not exist: {target}")
     fields = result.stdout.rstrip("\n").split("\t")
-    if len(fields) != 5 or not fields[1].startswith("%") or not fields[2].startswith("@"):
+    if len(fields) != 6 or not fields[1].startswith("%") or not fields[2].startswith("@") or not fields[5].isdigit() or int(fields[5]) <= 0:
         raise StartError(f"tmux returned invalid identity for target: {target}")
     resolved_identity = target_identity(fields[0])
     if resolved_identity is None:
@@ -244,7 +245,7 @@ def resolve_pane(target: str) -> Pane:
     resolved_session, resolved_window, resolved_pane = resolved_identity
     if (requested_session, requested_window) != (resolved_session, resolved_window) or (requested_pane is not None and requested_pane != resolved_pane):
         raise StartError(f"tmux target does not exist exactly as requested: {target}")
-    return Pane(fields[0], fields[1], fields[2], fields[3], Path(fields[4]))
+    return Pane(fields[0], fields[1], fields[2], fields[3], Path(fields[4]), int(fields[5]))
 
 
 def task_path(root: Path, task_file: str) -> Path:
@@ -813,16 +814,25 @@ def is_codex_update_prompt(lines: list[str]) -> bool:
     return codex_update_prompt_start(lines) is not None
 
 
-def require_update_prompt(pane: Pane, session_id: str = "") -> None:
+def require_update_process(pane: Pane) -> Pane:
+    if pane.target.partition(":")[0].startswith("h"):
+        raise StartError("update-prompt recovery cannot modify a human-owned `h*` tmux session.")
     current = resolve_pane(pane.target)
     if current.pane_id != pane.pane_id or current.window_id != pane.window_id:
         raise StartError("tmux pane or window identity changed before update-prompt recovery.")
+    if current.pane_pid != pane.pane_pid:
+        raise StartError("tmux pane process identity changed before update-prompt recovery.")
     if current.command != CODEX_LAUNCH_COMMAND:
         raise StartError(f"target {current.target} is running {current.command or 'unknown'}, not the Codex launcher.")
+    return current
+
+
+def require_update_prompt(pane: Pane, session_id: str = "") -> None:
+    current = require_update_process(pane)
     captured, lines = exact_tail(current.target, 80)
     if not captured:
         raise StartError(f"target {current.target} update-prompt capture failed; no input was sent.")
-    verify_same_pane(pane)
+    require_update_process(pane)
     prompt_start = codex_update_prompt_start(lines)
     if prompt_start is None:
         raise StartError(f"target {current.target} does not show the exact Codex startup update menu; no input was sent.")
@@ -838,9 +848,10 @@ def skip_codex_update_prompt(pane: Pane, session_id: str = "") -> None:
     """Select documented option `2. Skip` after exact state and identity checks."""
 
     require_update_prompt(pane, session_id)
-    condition = "#{&&:#{==:#{window_id},%s},#{==:#{session_name}:#{window_index}.#{pane_index},%s},#{==:#{pane_current_command},%s}}" % (
+    condition = "#{&&:#{==:#{window_id},%s},#{==:#{session_name}:#{window_index}.#{pane_index},%s},#{==:#{pane_pid},%s},#{==:#{pane_current_command},%s}}" % (
         pane.window_id,
         pane.target,
+        pane.pane_pid,
         CODEX_LAUNCH_COMMAND,
     )
     send = f"send-keys -t {pane.pane_id} 2 Enter"
@@ -848,7 +859,7 @@ def skip_codex_update_prompt(pane: Pane, session_id: str = "") -> None:
     if result.returncode != 0:
         detail = result.stderr.strip() or "pane/window/process identity changed before update-prompt recovery"
         raise StartError(f"failed to skip Codex update in {pane.target}: {detail}")
-    verify_same_pane(pane)
+    require_update_process(pane)
 
 
 def wait_update_recovery(pane: Pane, timeout_s: float) -> str:

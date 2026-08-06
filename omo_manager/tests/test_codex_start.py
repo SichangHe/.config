@@ -27,6 +27,7 @@ from omo_manager.omo_codex_start import (
     recovery_issuance_path,
     require_recovery_target,
     require_same_shell,
+    require_update_prompt,
     resolve_pane,
     respawn_codex,
     skip_codex_update_prompt,
@@ -130,26 +131,26 @@ class CodexStartTests(unittest.TestCase):
         return receipt
 
     def test_resolve_pane_accepts_exact_window_and_pane_targets(self) -> None:
-        result = subprocess.CompletedProcess([], 0, "wl:18.0\t%18\t@18\tzsh\t/tmp\n", "")
+        result = subprocess.CompletedProcess([], 0, "wl:18.0\t%18\t@18\tzsh\t/tmp\t4242\n", "")
         for target in ("wl:18", "wl:18.0"):
             with self.subTest(target=target), patch("omo_manager.omo_codex_start.run", return_value=result):
-                self.assertEqual(Pane("wl:18.0", "%18", "@18", "zsh", Path("/tmp")), resolve_pane(target))
+                self.assertEqual(Pane("wl:18.0", "%18", "@18", "zsh", Path("/tmp"), 4242), resolve_pane(target))
 
     def test_resolve_pane_rejects_ambiguous_identity_fallbacks(self) -> None:
         mismatches = (("wl:18", "wl:1.0"), ("wl:18", "other:18.0"), ("wl:18.1", "wl:18.0"))
         for requested, resolved in mismatches:
             with self.subTest(requested=requested, resolved=resolved):
-                result = subprocess.CompletedProcess([], 0, f"{resolved}\t%18\t@18\tzsh\t/tmp\n", "")
+                result = subprocess.CompletedProcess([], 0, f"{resolved}\t%18\t@18\tzsh\t/tmp\t4242\n", "")
                 with patch("omo_manager.omo_codex_start.run", return_value=result), self.assertRaisesRegex(StartError, "does not exist exactly"):
                     resolve_pane(requested)
 
     def test_resolve_pane_reports_empty_tmux_expansion_as_missing_target(self) -> None:
-        result = subprocess.CompletedProcess([], 0, ":.\t\t\t\t\n", "")
+        result = subprocess.CompletedProcess([], 0, ":.\t\t\t\t\t\n", "")
         with patch("omo_manager.omo_codex_start.run", return_value=result), self.assertRaisesRegex(StartError, "target does not exist: wl:18"):
             resolve_pane("wl:18")
 
     def test_resolve_pane_rejects_near_empty_tmux_expansion(self) -> None:
-        result = subprocess.CompletedProcess([], 0, ":.\t\t\t\t\n\n", "")
+        result = subprocess.CompletedProcess([], 0, ":.\t\t\t\t\t\n\n", "")
         with patch("omo_manager.omo_codex_start.run", return_value=result), self.assertRaisesRegex(StartError, "invalid identity"):
             resolve_pane("wl:18")
 
@@ -199,7 +200,7 @@ class CodexStartTests(unittest.TestCase):
                 self.assertFalse(is_codex_update_prompt(mismatched))
 
     def test_update_prompt_mismatch_refuses_input(self) -> None:
-        pane = Pane("cfg:2.0", "%2", "@2", "bunx", Path("/tmp"))
+        pane = Pane("cfg:2.0", "%2", "@2", "bunx", Path("/tmp"), 4242)
         lines = [*self.update_prompt_lines()[:-1], "Press any key to continue"]
         with (
             patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
@@ -211,7 +212,7 @@ class CodexStartTests(unittest.TestCase):
         run.assert_not_called()
 
     def test_update_prompt_session_mismatch_refuses_input(self) -> None:
-        pane = Pane("cfg:2.0", "%2", "@2", "bunx", Path("/tmp"))
+        pane = Pane("cfg:2.0", "%2", "@2", "bunx", Path("/tmp"), 4242)
         other_session = "019f670b-6a2f-7463-b9be-aaaaaaaaaaaa"
         cases = (
             self.update_prompt_lines(other_session),
@@ -229,8 +230,8 @@ class CodexStartTests(unittest.TestCase):
             run.assert_not_called()
 
     def test_update_prompt_pane_change_refuses_input(self) -> None:
-        pane = Pane("cfg:2.0", "%2", "@2", "bunx", Path("/tmp"))
-        changed = Pane("cfg:2.0", "%9", "@9", "bunx", Path("/tmp"))
+        pane = Pane("cfg:2.0", "%2", "@2", "bunx", Path("/tmp"), 4242)
+        changed = Pane("cfg:2.0", "%9", "@9", "bunx", Path("/tmp"), 4242)
         with (
             patch("omo_manager.omo_codex_start.resolve_pane", side_effect=[pane, changed]),
             patch("omo_manager.omo_codex_start.exact_tail", return_value=(True, self.update_prompt_lines())),
@@ -241,7 +242,7 @@ class CodexStartTests(unittest.TestCase):
         run.assert_not_called()
 
     def test_update_prompt_atomic_process_mismatch_refuses_input(self) -> None:
-        pane = Pane("cfg:2.0", "%2", "@2", "bunx", Path("/tmp"))
+        pane = Pane("cfg:2.0", "%2", "@2", "bunx", Path("/tmp"), 4242)
         failed = subprocess.CompletedProcess([], 1, "", "process changed")
         with (
             patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
@@ -252,11 +253,38 @@ class CodexStartTests(unittest.TestCase):
             skip_codex_update_prompt(pane, self.SESSION_ID)
         run.assert_called_once()
 
+    def test_update_prompt_same_command_different_pid_refuses_input(self) -> None:
+        pane = Pane("cfg:2.0", "%2", "@2", "bunx", Path("/tmp"), 4242)
+        replaced = Pane("cfg:2.0", "%2", "@2", "bunx", Path("/tmp"), 5252)
+        with (
+            patch("omo_manager.omo_codex_start.resolve_pane", side_effect=[pane, replaced]),
+            patch("omo_manager.omo_codex_start.exact_tail", return_value=(True, self.update_prompt_lines())),
+            patch("omo_manager.omo_codex_start.run") as run,
+            self.assertRaisesRegex(StartError, "process identity changed"),
+        ):
+            skip_codex_update_prompt(pane, self.SESSION_ID)
+        run.assert_not_called()
+
+    def test_update_prompt_lower_level_helpers_reject_human_target_without_probe(self) -> None:
+        pane = Pane("hcfg:2.0", "%2", "@2", "bunx", Path("/tmp"), 4242)
+        for helper in (require_update_prompt, skip_codex_update_prompt):
+            with (
+                self.subTest(helper=helper.__name__),
+                patch("omo_manager.omo_codex_start.resolve_pane") as resolve,
+                patch("omo_manager.omo_codex_start.exact_tail") as capture,
+                patch("omo_manager.omo_codex_start.run") as run,
+                self.assertRaisesRegex(StartError, "human-owned"),
+            ):
+                helper(pane, self.SESSION_ID)
+            resolve.assert_not_called()
+            capture.assert_not_called()
+            run.assert_not_called()
+
     def test_update_prompt_recovery_continues_same_resumed_session(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root)
             self.write_task(root)
-            pane = Pane("cfg:2.0", "%2", "@2", "bunx", root)
+            pane = Pane("cfg:2.0", "%2", "@2", "bunx", root, 4242)
             completed = subprocess.CompletedProcess([], 0, "", "")
             with (
                 patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
@@ -275,7 +303,7 @@ class CodexStartTests(unittest.TestCase):
                     "-F",
                     "-t",
                     "%2",
-                    "#{&&:#{==:#{window_id},@2},#{==:#{session_name}:#{window_index}.#{pane_index},cfg:2.0},#{==:#{pane_current_command},bunx}}",
+                    "#{&&:#{==:#{window_id},@2},#{==:#{session_name}:#{window_index}.#{pane_index},cfg:2.0},#{==:#{pane_pid},4242},#{==:#{pane_current_command},bunx}}",
                     "send-keys -t %2 2 Enter",
                     "run-shell 'exit 1'",
                 ]

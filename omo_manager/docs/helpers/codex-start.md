@@ -41,7 +41,7 @@ omo_codex_start.py \
   --recover-update-prompt
 ```
 
-This mode recognizes only the exact Codex menu ending in `2. Skip` and `Press enter to continue`, requires the latest captured Codex launch before that menu to resume the supplied session id, and atomically rechecks the target, pane, window, and `bunx` process before sending `2` and Enter. It never respawns the pane or sends input after a mismatch. Like every lower-level start mode, it categorically rejects `h*` sessions.
+This mode recognizes only the exact Codex menu ending in `2. Skip` and `Press enter to continue`, requires the latest captured Codex launch before that menu to resume the supplied session id, and atomically rechecks the target, pane, window, captured pane process id, and `bunx` command before sending `2` and Enter. It never respawns the pane or sends input after a mismatch. Both the CLI and the lower-level update-prompt helpers categorically reject `h*` sessions.
 
 Start a fresh session with task-local instructions:
 

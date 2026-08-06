@@ -18,6 +18,7 @@ from omo_manager.omo_task_status import reconcile_blocked_index
 from omo_manager.omo_task_status import reconcile_done_index
 from omo_manager.omo_task_status import reconcile_running_index
 from omo_manager.omo_task_status import replace_if_unchanged
+from omo_manager.omo_task_status import replace_if_unchanged_locked
 from omo_manager.omo_task_status import run
 from omo_manager.omo_task_status import stop_done_agent
 from omo_manager.omo_task_status import update_frontmatter_status
@@ -311,11 +312,11 @@ class TaskStatusTests(unittest.TestCase):
             self.assertEqual(original_task, path.read_text(encoding="utf-8"))
             self.assertEqual(expected, todo.read_text(encoding="utf-8"))
 
-    def test_cli_running_moves_the_single_human_pending_row_without_task_or_pane_mutation(self) -> None:
+    def test_cli_running_transition_moves_single_human_pending_row_and_preserves_task_content(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             path = root / "task.md"
-            original_task = task_frontmatter(runat="pb:14", managerat="pbsocialcli:0", pending_items=("keep the queue",)) + "all task content stays\n"
+            original_task = task_frontmatter(status="blocked", blocked_on="human", runat="pb:14", managerat="pbsocialcli:0", pending_items=("keep the queue",)) + "all task content stays\n"
             path.write_text(original_task, encoding="utf-8")
             todo = root / "TODO.md"
             todo.write_text("current:\nother.md wl:9\n\nhuman pending:\ntask.md\n\nprevious:\nold.md wl:2\n", encoding="utf-8")
@@ -323,10 +324,56 @@ class TaskStatusTests(unittest.TestCase):
             with patch("omo_manager.omo_task_status.stop_done_agent") as stop_done_agent, patch("omo_manager.omo_task_status.stop") as stop_agent, redirect_stdout(io.StringIO()):
                 self.assertEqual(0, run(StatusArgs(root, Path("task.md"), "running", "")))
 
-            self.assertEqual(original_task, path.read_text(encoding="utf-8"))
+            updated_task = path.read_text(encoding="utf-8")
+            self.assertIn("status: running\nrunat: pb:14", updated_task)
+            self.assertNotIn("blocked_on:", updated_task)
+            self.assertIn("pending_task_items:\n  - keep the queue", updated_task)
+            self.assertTrue(updated_task.endswith("all task content stays\n"))
             self.assertEqual("current:\ntask.md\nother.md wl:9\n\nhuman pending:\n\nprevious:\nold.md wl:2\n", todo.read_text(encoding="utf-8"))
             stop_done_agent.assert_not_called()
             stop_agent.assert_not_called()
+
+    def test_cli_running_transition_refuses_duplicate_or_mismatched_human_pending_row(self) -> None:
+        cases = {
+            "duplicate": "current:\ntask.md wl:2\n\nhuman pending:\ntask.md wl:2\n",
+            "mismatched target": "current:\nother.md wl:3\n\nhuman pending:\ntask.md wl:3\n",
+        }
+        for name, todo_text in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                path = root / "task.md"
+                original_task = task_frontmatter(status="blocked", blocked_on="human") + "body\n"
+                path.write_text(original_task, encoding="utf-8")
+                todo = root / "TODO.md"
+                todo.write_text(todo_text, encoding="utf-8")
+
+                with patch("omo_manager.omo_task_status.stop_done_agent") as stop_done_agent, redirect_stderr(io.StringIO()):
+                    self.assertEqual(2, run(StatusArgs(root, Path("task.md"), "running", "")))
+
+                self.assertEqual(original_task, path.read_text(encoding="utf-8"))
+                self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+                stop_done_agent.assert_not_called()
+
+    def test_cli_running_transition_rolls_back_todo_when_task_replace_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            original_task = task_frontmatter(status="blocked", blocked_on="human") + "body\n"
+            path.write_text(original_task, encoding="utf-8")
+            todo = root / "TODO.md"
+            todo_text = "current:\nother.md wl:3\n\nhuman pending:\ntask.md wl:2\n"
+            todo.write_text(todo_text, encoding="utf-8")
+
+            def fail_task_replace(target: Path, text: str, before: os.stat_result) -> None:
+                if target == path:
+                    raise OSError("task replace failed")
+                replace_if_unchanged_locked(target, text, before)
+
+            with patch("omo_manager.omo_task_status.replace_if_unchanged_locked", side_effect=fail_task_replace), redirect_stderr(io.StringIO()):
+                self.assertEqual(2, run(StatusArgs(root, Path("task.md"), "running", "")))
+
+            self.assertEqual(original_task, path.read_text(encoding="utf-8"))
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
 
     def test_cli_blocked_moves_live_rednote_path_only_row_without_task_or_pane_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -620,7 +667,7 @@ class TaskStatusTests(unittest.TestCase):
                     self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
                 stop_done_agent.assert_not_called()
 
-    def test_cli_running_transition_does_not_reconcile_todo_placement(self) -> None:
+    def test_cli_running_transition_moves_previous_row_to_current(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             path = root / "task.md"
@@ -633,7 +680,7 @@ class TaskStatusTests(unittest.TestCase):
                 self.assertEqual(0, run(StatusArgs(root, Path("task.md"), "running", "")))
 
             self.assertIn("status: running", path.read_text(encoding="utf-8"))
-            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+            self.assertEqual("current:\ntask.md wl:2\nother.md wl:2\n\nprevious:\n", todo.read_text(encoding="utf-8"))
             stop_done_agent.assert_not_called()
 
     def test_running_index_reconciliation_rechecks_the_task_state(self) -> None:
@@ -1362,12 +1409,14 @@ class TaskStatusTests(unittest.TestCase):
 
     def test_cli_running_has_no_done_reminder(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "task.md"
+            root = Path(tmp)
+            path = root / "task.md"
             path.write_text(task_frontmatter(status="blocked", blocked_on="waiting") + "body\n", encoding="utf-8")
+            (root / "TODO.md").write_text("current:\n\nhuman pending:\ntask.md wl:2\n", encoding="utf-8")
             stdout = io.StringIO()
 
             with redirect_stdout(stdout):
-                exit_code = run(StatusArgs(Path(tmp), Path("task.md"), "running", ""))
+                exit_code = run(StatusArgs(root, Path("task.md"), "running", ""))
 
             self.assertEqual(0, exit_code)
             self.assertEqual("", stdout.getvalue())

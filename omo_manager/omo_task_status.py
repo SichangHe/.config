@@ -555,6 +555,42 @@ def reconcile_running_index(root: Path, path: Path, text: str, before: os.stat_r
             replace_if_unchanged_locked(todo, updated_todo, todo_before)
 
 
+def transition_running_index(root: Path, path: Path, text: str, updated: str, before: os.stat_result) -> None:
+    """Move one inactive TODO row before committing the task's `running` status."""
+
+    todo = root / "TODO.md"
+    if not todo.is_file():
+        raise TaskFrontmatterError("TODO.md is not a regular file.")
+    metadata = parse_task_metadata(text, root)
+    updated_metadata = parse_task_metadata(updated, root)
+    if metadata is None or updated_metadata is None or metadata.status == "running" or updated_metadata.status != "running" or metadata.runat != updated_metadata.runat:
+        raise TaskFrontmatterError("running transition requires one unchanged non-running task and run target.")
+    with task_target_lock(root, metadata.runat):
+        with ExitStack() as locks:
+            for locked_path in sorted({path, todo}, key=lambda candidate: str(candidate)):
+                locks.enter_context(task_file_lock(locked_path))
+            current_before = path.stat()
+            current_text = path.read_text(encoding="utf-8")
+            if not same_file_state(before, current_before) or current_text != text:
+                raise TaskFrontmatterError("task changed while running transition was being prepared; retry after rereading it.")
+            todo_before = todo.stat()
+            todo_text = todo.read_text(encoding="utf-8")
+            updated_todo = reconcile_running_todo_text(root, path, todo_text, metadata.runat)
+            if updated_todo == todo_text:
+                replace_if_unchanged_locked(path, updated, current_before)
+                return
+            replace_if_unchanged_locked(todo, updated_todo, todo_before)
+            moved_todo_before = todo.stat()
+            try:
+                replace_if_unchanged_locked(path, updated, current_before)
+            except Exception as exc:
+                try:
+                    replace_if_unchanged_locked(todo, todo_text, moved_todo_before)
+                except Exception as rollback_exc:
+                    raise TaskFrontmatterError(f"running task update failed and TODO rollback also failed: {rollback_exc}") from exc
+                raise
+
+
 def reconcile_blocked_index(root: Path, path: Path, text: str, before: os.stat_result, blocked_on: str) -> None:
     """Move an unchanged blocked task's sole current TODO row into `human pending`."""
     todo = root / "TODO.md"
@@ -782,8 +818,11 @@ def run(args: Args) -> int:
                 updated_metadata = parse_task_metadata(updated, args.root)
                 if args.status == "blocked" and initial_metadata is not None and initial_metadata.status == "blocked" and updated_metadata is not None and updated_metadata.status == "blocked":
                     reconcile_blocked_index(args.root, path, text, before, args.blocked_on)
-                elif initial_metadata is not None and initial_metadata.status == "running" and updated_metadata is not None and updated_metadata.status == "running":
-                    reconcile_running_index(args.root, path, text, before)
+                elif args.status == "running" and updated_metadata is not None and updated_metadata.status == "running":
+                    if initial_metadata is not None and initial_metadata.status == "running":
+                        reconcile_running_index(args.root, path, text, before)
+                    else:
+                        transition_running_index(args.root, path, text, updated, before)
                 else:
                     replace_if_unchanged(path, updated, before)
             elif close_args is not None:
