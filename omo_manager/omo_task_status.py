@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shlex
 import sys
 import tempfile
@@ -19,6 +20,7 @@ from omo_manager.omo_agent_status import TASK_FRONTMATTER_STATUSES
 from omo_manager.omo_agent_status import TaskMetadata
 from omo_manager.omo_agent_status import TaskFrontmatterError
 from omo_manager.omo_agent_status import DEFAULT_ROOT
+from omo_manager.omo_agent_status import TASK_RE
 from omo_manager.omo_agent_status import same_tmux_target
 from omo_manager.omo_blocking import BlockingError
 from omo_manager.omo_blocking import load_yaml_mapping
@@ -41,6 +43,7 @@ from omo_manager.omo_codex_status import exact_pane_id
 from omo_manager.omo_task_lock import task_target_lock
 from omo_manager.omo_task_lock import task_file_lock
 from omo_manager.omo_task_metadata import frontmatter_parts
+from omo_manager.omo_task_metadata import TARGET_RE
 from omo_manager.omo_blocking_actor import request as blocking_request
 
 PENDING_MARKER = "(pending)"
@@ -49,6 +52,7 @@ BOOKKEEPING_FAILED_PREFIX = "done_close_bookkeeping_failed"
 CLOSE_FAILED_PREFIX = "done_close_failed"
 DONE_CLOSE_IN_PROGRESS = "done_close_in_progress: manager is closing the agent before marking done"
 TODO_SECTIONS = ("current", "human pending", "low priority", "previous")
+TODO_ROW_RE = re.compile(r"\s*`?([A-Za-z0-9_./-]+\.md)`?(?:\s+(.*?))?\s*")
 
 
 @dataclass(frozen=True)
@@ -450,23 +454,37 @@ def task_is_in_todo_section(root: Path, path: Path, section: str) -> bool:
     return False
 
 
-def todo_row_task_path(root: Path, line: str) -> Path | None:
-    """Return the root-contained task path named by one simple TODO row."""
-    stripped = line.strip()
-    if not stripped:
-        return None
-    token = stripped.split(maxsplit=1)[0]
-    candidate = Path(token).expanduser()
-    if not candidate.is_absolute():
-        candidate = root / candidate
-    try:
-        path = candidate.resolve(strict=False)
-    except OSError:
-        return None
-    return path if path == root or root in path.parents else None
+def todo_row_task_paths(root: Path, line: str) -> tuple[Path, ...]:
+    """Return root-contained task paths referenced by one TODO row."""
+    paths: list[Path] = []
+    for match in TASK_RE.finditer(line):
+        candidate = Path(match.group(1)).expanduser()
+        if not candidate.is_absolute():
+            candidate = root / candidate
+        try:
+            path = candidate.resolve(strict=False)
+        except OSError:
+            continue
+        if path == root or root in path.parents:
+            paths.append(path)
+    return tuple(paths)
 
 
-def reconcile_running_todo_text(root: Path, path: Path, text: str) -> str:
+def validate_running_todo_row(root: Path, path: Path, line: str, runat: str) -> None:
+    """Require one unqualified task reference and an optional matching pane."""
+    stripped = line.rstrip("\r\n")
+    match = TODO_ROW_RE.fullmatch(stripped)
+    if match is None or len(list(TASK_RE.finditer(stripped))) != 1 or todo_row_task_paths(root, stripped) != (path,):
+        raise TaskFrontmatterError(f"expected one unambiguous TODO entry for `{relative_task_ref(root, path)}`.")
+    suffix = match.group(2) or ""
+    targets = TARGET_RE.findall(suffix)
+    if len(targets) > 1 or (targets and not same_tmux_target(targets[0], runat)):
+        raise TaskFrontmatterError(f"TODO entry for `{relative_task_ref(root, path)}` does not match its authoritative `runat`.")
+    if re.search(r"\((?:blocked|done)(?::[^)]*)?\)", suffix, re.IGNORECASE) is not None:
+        raise TaskFrontmatterError(f"TODO entry for running task `{relative_task_ref(root, path)}` has a terminal lifecycle annotation.")
+
+
+def reconcile_running_todo_text(root: Path, path: Path, text: str, runat: str) -> str:
     """Move the sole TODO row for a running task into `current`, or fail closed."""
     lines = text.splitlines(keepends=True)
     section = ""
@@ -474,22 +492,23 @@ def reconcile_running_todo_text(root: Path, path: Path, text: str) -> str:
     current_headers: list[int] = []
     for idx, line in enumerate(lines):
         name = line.strip()
-        if name.endswith(":") and name[:-1] in TODO_SECTIONS:
+        if name.endswith(":"):
             section = name[:-1]
             if section == "current":
                 current_headers.append(idx)
             continue
-        if section in TODO_SECTIONS and todo_row_task_path(root, line) == path:
+        if section in TODO_SECTIONS and path in todo_row_task_paths(root, line):
             rows.append((idx, section))
     if len(rows) != 1:
         raise TaskFrontmatterError(f"expected exactly one TODO row for `{relative_task_ref(root, path)}`, found {len(rows)}.")
     if len(current_headers) != 1:
         raise TaskFrontmatterError(f"expected exactly one `current:` section while reconciling `{relative_task_ref(root, path)}`.")
     source_idx, source_section = rows[0]
+    validate_running_todo_row(root, path, lines[source_idx], runat)
     if source_section == "current":
         return text
-    if source_section != "previous":
-        raise TaskFrontmatterError(f"expected `{relative_task_ref(root, path)}` to be in `previous:`, found `{source_section}:`.")
+    if source_section not in {"human pending", "previous"}:
+        raise TaskFrontmatterError(f"expected `{relative_task_ref(root, path)}` to be in `human pending:` or `previous:`, found `{source_section}:`.")
     moved = lines.pop(source_idx)
     current_idx = next(idx for idx, line in enumerate(lines) if line.strip() == "current:")
     insert_at = current_idx + 1
@@ -502,7 +521,7 @@ def reconcile_running_todo_text(root: Path, path: Path, text: str) -> str:
 
 
 def reconcile_running_index(root: Path, path: Path, text: str, before: os.stat_result) -> None:
-    """Move an already-running task's sole historical TODO row into `current`."""
+    """Move an already-running task's sole inactive TODO row into `current`."""
     todo = root / "TODO.md"
     if not todo.is_file():
         raise TaskFrontmatterError("TODO.md is not a regular file.")
@@ -516,7 +535,7 @@ def reconcile_running_index(root: Path, path: Path, text: str, before: os.stat_r
             raise TaskFrontmatterError("task changed while running index reconciliation was being prepared; retry after rereading it.")
         todo_before = todo.stat()
         todo_text = todo.read_text(encoding="utf-8")
-        updated_todo = reconcile_running_todo_text(root, path, todo_text)
+        updated_todo = reconcile_running_todo_text(root, path, todo_text, current_metadata.runat)
         if updated_todo != todo_text:
             replace_if_unchanged_locked(todo, updated_todo, todo_before)
 

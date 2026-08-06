@@ -309,12 +309,39 @@ class TaskStatusTests(unittest.TestCase):
             self.assertEqual(original_task, path.read_text(encoding="utf-8"))
             self.assertEqual(expected, todo.read_text(encoding="utf-8"))
 
+    def test_cli_running_moves_the_single_human_pending_row_without_task_or_pane_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            original_task = task_frontmatter(runat="pb:14", managerat="pbsocialcli:0", pending_items=("keep the queue",)) + "all task content stays\n"
+            path.write_text(original_task, encoding="utf-8")
+            todo = root / "TODO.md"
+            todo.write_text("current:\nother.md wl:9\n\nhuman pending:\ntask.md\n\nprevious:\nold.md wl:2\n", encoding="utf-8")
+
+            with patch("omo_manager.omo_task_status.stop_done_agent") as stop_done_agent, patch("omo_manager.omo_task_status.stop") as stop_agent, redirect_stdout(io.StringIO()):
+                self.assertEqual(0, run(StatusArgs(root, Path("task.md"), "running", "")))
+
+            self.assertEqual(original_task, path.read_text(encoding="utf-8"))
+            self.assertEqual("current:\ntask.md\nother.md wl:9\n\nhuman pending:\n\nprevious:\nold.md wl:2\n", todo.read_text(encoding="utf-8"))
+            stop_done_agent.assert_not_called()
+            stop_agent.assert_not_called()
+
     def test_cli_running_fails_closed_for_invalid_todo_placement(self) -> None:
         cases = {
             "absent TODO": None,
             "missing": "current:\nother.md wl:2\n\nprevious:\nold.md wl:1\n",
             "duplicate": "current:\ntask.md wl:2\n\nprevious:\ntask.md wl:2\n",
-            "human pending": "current:\nother.md wl:2\n\nhuman pending:\ntask.md wl:2\n",
+            "ambiguous row": "current:\nother.md wl:2\n\nhuman pending:\ntask.md wl:2 task.md wl:2\n",
+            "mismatched target": "current:\nother.md wl:2\n\nhuman pending:\ntask.md wl:3\n",
+            "target before task": "current:\nother.md wl:2\n\nhuman pending:\nwl:3 task.md\n",
+            "description before task": "current:\nother.md wl:2\n\nhuman pending:\nnotes task.md\n",
+            "malformed task suffix": "current:\nother.md wl:2\n\nhuman pending:\ntask.mdx\n",
+            "blocked annotation": "current:\nother.md wl:2\n\nhuman pending:\ntask.md wl:2 (blocked: human)\n",
+            "done annotation": "current:\nother.md wl:2\n\nhuman pending:\ntask.md wl:2 (done)\n",
+            "uppercase done annotation": "current:\nother.md wl:2\n\nhuman pending:\ntask.md (DONE)\n",
+            "blocked section": "current:\nother.md wl:2\n\nblocked:\ntask.md wl:2\n",
+            "done section": "current:\nother.md wl:2\n\ndone:\ntask.md wl:2\n",
+            "unknown nested section": "current:\nother.md wl:2\n\nhuman pending:\nnotes:\ntask.md wl:2\n",
             "low priority": "current:\nother.md wl:2\n\nlow priority:\ntask.md wl:2\n",
             "duplicate current": "current:\ntask.md wl:2\n\ncurrent:\nother.md wl:3\n",
         }
