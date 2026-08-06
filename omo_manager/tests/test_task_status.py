@@ -15,6 +15,7 @@ from omo_manager.omo_task_status import DONE_REMINDER
 from omo_manager.omo_task_status import StopArgs
 from omo_manager.omo_task_status import parse_args
 from omo_manager.omo_task_status import reconcile_blocked_index
+from omo_manager.omo_task_status import reconcile_done_index
 from omo_manager.omo_task_status import reconcile_running_index
 from omo_manager.omo_task_status import replace_if_unchanged
 from omo_manager.omo_task_status import run
@@ -395,6 +396,190 @@ class TaskStatusTests(unittest.TestCase):
 
             self.assertEqual(original_task, path.read_text(encoding="utf-8"))
             self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+
+    def test_cli_done_reissue_moves_live_rednote_row_without_task_or_pane_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "pb_social_followup.md"
+            original_task = (
+                task_frontmatter(status="done", runat="pb:2", managerat="wl:6")
+                + "(Completed RedNote recovery: bounded live public search succeeded.)\n\n"
+                + "(manager closed Codex agent 08-06 11:47 PDT; tmux target `pb:2`; session_id: `session-1`.)\n"
+            )
+            path.write_text(original_task, encoding="utf-8")
+            todo = root / "TODO.md"
+            todo_text = "current:\npb_spectrum_news.md\n\nhuman pending:\npb_social_followup.md pb:2\nwaiting.md wl:4\n\nprevious:\nold.md wl:2\n"
+            todo.write_text(todo_text, encoding="utf-8")
+            expected = "current:\npb_spectrum_news.md\n\nhuman pending:\nwaiting.md wl:4\n\nprevious:\npb_social_followup.md pb:2\nold.md wl:2\n"
+
+            with (
+                patch("omo_manager.omo_task_status.exact_pane_id", return_value=""),
+                patch("omo_manager.omo_task_status.stop_done_agent") as stop_done_agent,
+                patch("omo_manager.omo_task_status.stop") as stop_agent,
+                patch("omo_manager.omo_task_status.record_close") as record_close_call,
+                redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(0, run(StatusArgs(root, Path("pb_social_followup.md"), "done", "")))
+
+            self.assertEqual(original_task, path.read_text(encoding="utf-8"))
+            self.assertEqual(expected, todo.read_text(encoding="utf-8"))
+            stop_done_agent.assert_not_called()
+            stop_agent.assert_not_called()
+            record_close_call.assert_not_called()
+
+    def test_cli_done_reissue_fails_closed_for_invalid_todo_or_task_state(self) -> None:
+        cases = {
+            "absent TODO": None,
+            "missing": "current:\nother.md wl:2\n\nhuman pending:\n\nprevious:\n",
+            "duplicate": "current:\ntask.md wl:2\n\nhuman pending:\ntask.md wl:2\n\nprevious:\n",
+            "ambiguous row": "current:\nother.md wl:3\n\nhuman pending:\ntask.md wl:2 task.md wl:2\n\nprevious:\n",
+            "mismatched target": "current:\nother.md wl:3\n\nhuman pending:\ntask.md wl:3\n\nprevious:\n",
+            "target before task": "current:\nother.md wl:3\n\nhuman pending:\nwl:2 task.md\n\nprevious:\n",
+            "description before task": "current:\nother.md wl:3\n\nhuman pending:\nnotes task.md wl:2\n\nprevious:\n",
+            "malformed task suffix": "current:\nother.md wl:3\n\nhuman pending:\ntask.mdx wl:2\n\nprevious:\n",
+            "blocked annotation": "current:\nother.md wl:3\n\nhuman pending:\ntask.md wl:2 (blocked: stale)\n\nprevious:\n",
+            "done annotation": "current:\nother.md wl:3\n\nhuman pending:\ntask.md wl:2 (done)\n\nprevious:\n",
+            "wrong section": "current:\nother.md wl:3\n\nhuman pending:\n\nlow priority:\ntask.md wl:2\n\nprevious:\n",
+            "already previous": "current:\nother.md wl:3\n\nhuman pending:\n\nprevious:\ntask.md wl:2\n",
+            "duplicate destination": "current:\nother.md wl:3\n\nhuman pending:\ntask.md wl:2\n\nprevious:\n\nprevious:\n",
+            "mixed-case duplicate destination": "current:\nother.md wl:3\n\nhuman pending:\ntask.md wl:2\n\nprevious:\n\nPrevious:\n",
+        }
+        for name, todo_text in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                path = root / "task.md"
+                original_task = task_frontmatter(status="done") + "close history stays\n"
+                path.write_text(original_task, encoding="utf-8")
+                todo = root / "TODO.md"
+                if todo_text is not None:
+                    todo.write_text(todo_text, encoding="utf-8")
+
+                with (
+                    patch("omo_manager.omo_task_status.exact_pane_id", return_value=""),
+                    patch("omo_manager.omo_task_status.stop_done_agent") as stop_done_agent,
+                    patch("omo_manager.omo_task_status.stop") as stop_agent,
+                    redirect_stderr(io.StringIO()),
+                ):
+                    self.assertEqual(2, run(StatusArgs(root, Path("task.md"), "done", "")))
+
+                self.assertEqual(original_task, path.read_text(encoding="utf-8"))
+                self.assertEqual(todo_text is not None, todo.exists())
+                if todo_text is not None:
+                    self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+                stop_done_agent.assert_not_called()
+                stop_agent.assert_not_called()
+
+        for name, original_task in {
+            "nonempty queue": task_frontmatter(status="done", pending_items=("still open",)) + "history\n",
+            "live pending marker": task_frontmatter(status="done") + "(pending)\nnew request\n",
+            "noncanonical bytes": (task_frontmatter(status="done") + "history\n").replace("status: done\n", "status: done  \n"),
+        }.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                path = root / "task.md"
+                path.write_text(original_task, encoding="utf-8")
+                todo = root / "TODO.md"
+                todo_text = "current:\n\nhuman pending:\ntask.md wl:2\n\nprevious:\n"
+                todo.write_text(todo_text, encoding="utf-8")
+
+                with (
+                    patch("omo_manager.omo_task_status.exact_pane_id", return_value=""),
+                    patch("omo_manager.omo_task_status.stop_done_agent") as stop_done_agent,
+                    redirect_stderr(io.StringIO()),
+                ):
+                    self.assertEqual(2, run(StatusArgs(root, Path("task.md"), "done", "")))
+
+                self.assertEqual(original_task, path.read_text(encoding="utf-8"))
+                self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+                stop_done_agent.assert_not_called()
+
+    def test_cli_done_reissue_rejects_active_pane_or_current_owner(self) -> None:
+        for name, pane, owner_runat in (("active pane", "%2", ""), ("active current owner", "", "wl:2"), ("conflicting current TODO owner", "", "wl:3")):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                path = root / "task.md"
+                original_task = task_frontmatter(status="done") + "history\n"
+                path.write_text(original_task, encoding="utf-8")
+                owner_row = "owner.md wl:2\n" if owner_runat else ""
+                if owner_runat:
+                    (root / "owner.md").write_text(task_frontmatter(runat=owner_runat) + "active\n", encoding="utf-8")
+                todo = root / "TODO.md"
+                todo_text = f"current:\n{owner_row}\nhuman pending:\ntask.md wl:2\n\nprevious:\n"
+                todo.write_text(todo_text, encoding="utf-8")
+
+                with (
+                    patch("omo_manager.omo_task_status.exact_pane_id", return_value=pane),
+                    patch("omo_manager.omo_task_status.stop_done_agent") as stop_done_agent,
+                    redirect_stderr(io.StringIO()),
+                ):
+                    self.assertEqual(2, run(StatusArgs(root, Path("task.md"), "done", "")))
+
+                self.assertEqual(original_task, path.read_text(encoding="utf-8"))
+                self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+                stop_done_agent.assert_not_called()
+
+    def test_done_index_reconciliation_rechecks_task_and_todo_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            original_task = task_frontmatter(status="done") + "history\n"
+            path.write_text(original_task, encoding="utf-8")
+            before = path.stat()
+            todo = root / "TODO.md"
+            todo_text = "current:\n\nhuman pending:\ntask.md wl:2\n\nprevious:\n"
+            todo.write_text(todo_text, encoding="utf-8")
+            changed_task = original_task + "concurrent note\n"
+            path.write_text(changed_task, encoding="utf-8")
+
+            with patch("omo_manager.omo_task_status.exact_pane_id", return_value=""), self.assertRaisesRegex(TaskFrontmatterError, "task changed"):
+                reconcile_done_index(root, path, original_task, before)
+
+            self.assertEqual(changed_task, path.read_text(encoding="utf-8"))
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            original_task = task_frontmatter(status="done") + "history\n"
+            path.write_text(original_task, encoding="utf-8")
+            todo = root / "TODO.md"
+            todo_text = "current:\n\nhuman pending:\ntask.md wl:2\n\nprevious:\n"
+            concurrent_todo = todo_text + "concurrent row\n"
+            todo.write_text(todo_text, encoding="utf-8")
+
+            def race_todo(*args: object) -> str:
+                todo.write_text(concurrent_todo, encoding="utf-8")
+                return "current:\n\nhuman pending:\n\nprevious:\ntask.md wl:2\n"
+
+            with (
+                patch("omo_manager.omo_task_status.exact_pane_id", return_value=""),
+                patch("omo_manager.omo_task_status.reconcile_done_todo_text", side_effect=race_todo),
+                redirect_stderr(io.StringIO()),
+            ):
+                self.assertEqual(2, run(StatusArgs(root, Path("task.md"), "done", "")))
+
+            self.assertEqual(original_task, path.read_text(encoding="utf-8"))
+            self.assertEqual(concurrent_todo, todo.read_text(encoding="utf-8"))
+
+    def test_cli_running_to_done_keeps_normal_close_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            path.write_text(task_frontmatter() + "body\n", encoding="utf-8")
+            (root / "TODO.md").write_text("current:\ntask.md wl:2\n\nprevious:\n", encoding="utf-8")
+            close_args = StopArgs("wl:2", 10.0, 2000, False, False, root, "task.md", True, 0.0)
+
+            with (
+                patch("omo_manager.omo_task_status.stop_done_agent", return_value=(close_args, "session-1")) as stop_done_agent,
+                patch("omo_manager.omo_task_status.record_close"),
+                patch("omo_manager.omo_task_status.reconcile_done_index") as reconcile_done,
+                redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(0, run(StatusArgs(root, Path("task.md"), "done", "")))
+
+            stop_done_agent.assert_called_once()
+            reconcile_done.assert_not_called()
+            self.assertIn("status: done", path.read_text(encoding="utf-8"))
 
     def test_cli_running_fails_closed_for_invalid_todo_placement(self) -> None:
         cases = {

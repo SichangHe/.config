@@ -383,7 +383,7 @@ def current_target_task_paths(root: Path, target: str) -> tuple[Path, ...]:
         if metadata is None:
             if (task.target and same_tmux_target(task.target, target)) or raw_runat_claim:
                 matches.add(candidate)
-        elif metadata.status != "done" and same_tmux_target(metadata.runat, target):
+        elif metadata.status != "done" and ((task.target and same_tmux_target(task.target, target)) or same_tmux_target(metadata.runat, target)):
             matches.add(candidate)
     return tuple(sorted(matches))
 
@@ -492,7 +492,7 @@ def reconcile_todo_text(root: Path, path: Path, text: str, runat: str, destinati
     for idx, line in enumerate(lines):
         name = line.strip()
         if name.endswith(":"):
-            section = name[:-1]
+            section = name[:-1].casefold()
             if section == destination:
                 destination_headers.append(idx)
             continue
@@ -504,13 +504,13 @@ def reconcile_todo_text(root: Path, path: Path, text: str, runat: str, destinati
         raise TaskFrontmatterError(f"expected exactly one `{destination}:` section while reconciling `{relative_task_ref(root, path)}`.")
     source_idx, source_section = rows[0]
     validate_reconciled_todo_row(root, path, lines[source_idx], runat)
-    if source_section == destination:
-        return text
     if source_section not in allowed_sections:
         expected = " or ".join(f"`{candidate}:`" for candidate in allowed_sections)
         raise TaskFrontmatterError(f"expected `{relative_task_ref(root, path)}` to be in {expected}, found `{source_section}:`.")
+    if source_section == destination:
+        return text
     moved = lines.pop(source_idx)
-    destination_idx = next(idx for idx, line in enumerate(lines) if line.strip() == f"{destination}:")
+    destination_idx = next(idx for idx, line in enumerate(lines) if line.strip().casefold() == f"{destination}:")
     insert_at = destination_idx + 1
     while insert_at < len(lines) and not lines[insert_at].strip():
         insert_at += 1
@@ -528,6 +528,11 @@ def reconcile_running_todo_text(root: Path, path: Path, text: str, runat: str) -
 def reconcile_blocked_todo_text(root: Path, path: Path, text: str, runat: str) -> str:
     """Move the sole TODO row for a blocked task into `human pending`, or fail closed."""
     return reconcile_todo_text(root, path, text, runat, "human pending", ("current", "human pending"))
+
+
+def reconcile_done_todo_text(root: Path, path: Path, text: str, runat: str) -> str:
+    """Move the sole TODO row for a done task into `previous`, or fail closed."""
+    return reconcile_todo_text(root, path, text, runat, "previous", ("current", "human pending"))
 
 
 def reconcile_running_index(root: Path, path: Path, text: str, before: os.stat_result) -> None:
@@ -568,6 +573,44 @@ def reconcile_blocked_index(root: Path, path: Path, text: str, before: os.stat_r
         updated_todo = reconcile_blocked_todo_text(root, path, todo_text, current_metadata.runat)
         if updated_todo != todo_text:
             replace_if_unchanged_locked(todo, updated_todo, todo_before)
+
+
+def reconcile_done_index(root: Path, path: Path, text: str, before: os.stat_result) -> None:
+    """Move an unchanged, already-done task's sole stale TODO row into `previous`."""
+    todo = root / "TODO.md"
+    if not todo.is_file():
+        raise TaskFrontmatterError("TODO.md is not a regular file.")
+    metadata = parse_task_metadata(text, root)
+    if metadata is None or metadata.status != "done":
+        raise TaskFrontmatterError("done index reconciliation requires an already-done task.")
+    with task_target_lock(root, metadata.runat):
+        with ExitStack() as locks:
+            for locked_path in sorted({path, todo}, key=lambda candidate: str(candidate)):
+                locks.enter_context(task_file_lock(locked_path))
+            current_before = path.stat()
+            current_text = path.read_text(encoding="utf-8")
+            current_metadata = parse_task_metadata(current_text, root)
+            if (
+                not same_file_state(before, current_before)
+                or current_text != text
+                or current_metadata is None
+                or current_metadata.status != "done"
+                or update_frontmatter_status(current_text, "done", "", root) != current_text
+            ):
+                raise TaskFrontmatterError("task changed or no longer matches done index reconciliation; retry after rereading it.")
+            owners = current_target_task_paths(root, current_metadata.runat)
+            if owners:
+                refs = ", ".join(relative_task_ref(root, owner) for owner in owners)
+                raise TaskFrontmatterError(f"done task target still has active current ownership: {refs}.")
+            if exact_pane_id(current_metadata.runat):
+                raise TaskFrontmatterError("done task pane is still active; use normal lifecycle recovery instead of index-only reconciliation.")
+            todo_before = todo.stat()
+            todo_text = todo.read_text(encoding="utf-8")
+            updated_todo = reconcile_done_todo_text(root, path, todo_text, current_metadata.runat)
+            if exact_pane_id(current_metadata.runat):
+                raise TaskFrontmatterError("done task pane became active while index reconciliation was being prepared; retry.")
+            if updated_todo != todo_text:
+                replace_if_unchanged_locked(todo, updated_todo, todo_before)
 
 
 def done_close_failed_reason(exc: Exception) -> str:
@@ -716,10 +759,13 @@ def run(args: Args) -> int:
             metadata = parse_task_metadata(text, args.root)
             if metadata is not None and args.status == "done":
                 ensure_manager_has_no_active_children(args.root, path, metadata)
-            target = metadata.runat if metadata is not None and args.status == "done" else ""
             updated = update_frontmatter_status(text, args.status, args.blocked_on, args.root)
+            already_done = metadata is not None and metadata.status == "done" and args.status == "done"
+            target = metadata.runat if metadata is not None and args.status == "done" and not already_done else ""
             close_args: StopArgs | None = None
-            if target:
+            if already_done:
+                reconcile_done_index(args.root, path, text, before)
+            elif target:
                 in_progress = update_frontmatter_status(text, "blocked", DONE_CLOSE_IN_PROGRESS, args.root)
                 replace_if_unchanged(path, in_progress, before)
                 try:
@@ -732,7 +778,7 @@ def run(args: Args) -> int:
                     replace_if_unchanged(path, rollback, rollback_before)
                     raise
                 before = path.stat()
-            if close_args is None:
+            if close_args is None and not already_done:
                 updated_metadata = parse_task_metadata(updated, args.root)
                 if args.status == "blocked" and initial_metadata is not None and initial_metadata.status == "blocked" and updated_metadata is not None and updated_metadata.status == "blocked":
                     reconcile_blocked_index(args.root, path, text, before, args.blocked_on)
@@ -740,7 +786,7 @@ def run(args: Args) -> int:
                     reconcile_running_index(args.root, path, text, before)
                 else:
                     replace_if_unchanged(path, updated, before)
-            else:
+            elif close_args is not None:
                 try:
                     record_close(close_args, session_id)
                 except Exception as exc:
