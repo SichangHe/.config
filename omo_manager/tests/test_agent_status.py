@@ -2185,6 +2185,67 @@ resolved_task_items: []
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "wl:17"]))
             self.assertIn("not_codex: task=worker.md", out.getvalue())
 
+    def test_problems_only_skips_intentionally_stopped_human_blocked_worker(self) -> None:
+        blockers = (
+            "human coordination: pause the external cleanup process repeatedly removing wl:31",
+            "waiting for a person's approval of the archive",
+            "waiting on the human to approve the archive",
+        )
+        for absent_status in ("missing", "not_codex"):
+            for blocker in blockers:
+                with self.subTest(absent_status=absent_status, blocker=blocker), tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    registry = root / "sessions.json"
+                    _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+                    _ = (root / "TODO.md").write_text("current:\narchive_old_todos.md wl:31\n", encoding="utf-8")
+                    _ = (root / "archive_old_todos.md").write_text(
+                        task_frontmatter(
+                            "blocked",
+                            runat="wl:31",
+                            managerat="opsmail0802:0",
+                            blocked_on=blocker,
+                            pending_items=("Complete the monthly archive after human coordination.",),
+                        )
+                        + "(manager closed Codex agent after worker completion; tmux target `wl:31`.)\n",
+                        encoding="utf-8",
+                    )
+                    out = StringIO()
+                    with patch("omo_manager.omo_agent_status.inspect", return_value=Report(absent_status, [])), patch("omo_manager.omo_agent_status.target_resolves_exactly", return_value=False), redirect_stdout(out):
+                        self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+                    self.assertEqual("", out.getvalue())
+
+    def test_problems_only_retains_incomplete_or_live_required_stopped_worker_evidence(self) -> None:
+        cases = {
+            "no_open_queue": ("blocked", "human coordination with the archive owner", (), True, False, Report("missing", [])),
+            "no_closure_record": ("blocked", "human coordination with the archive owner", ("Finish archive.",), False, False, Report("missing", [])),
+            "exact_human": ("blocked", "human", ("Finish archive.",), True, False, Report("missing", [])),
+            "bare_human_coordination": ("blocked", "human coordination", ("Finish archive.",), True, False, Report("missing", [])),
+            "bare_human_approval": ("blocked", "human approval", ("Finish archive.",), True, False, Report("missing", [])),
+            "punctuated_human_approval": ("blocked", "human approval.", ("Finish archive.",), True, False, Report("missing", [])),
+            "punctuated_wait": ("blocked", "waiting on human approval.", ("Finish archive.",), True, False, Report("missing", [])),
+            "punctuated_truncated_action": ("blocked", "waiting on human to.", ("Finish archive.",), True, False, Report("missing", [])),
+            "malformed_blocker": ("blocked", "human-readable output unavailable", ("Finish archive.",), True, False, Report("missing", [])),
+            "visible_not_codex": ("blocked", "human coordination with the archive owner", ("Finish archive.",), True, False, Report("not_codex", ["shell prompt"])),
+            "target_still_exists": ("blocked", "human coordination with the archive owner", ("Finish archive.",), True, True, Report("not_codex", [])),
+            "running": ("running", "", ("Finish archive.",), True, False, Report("missing", [])),
+            "unblocked_long_running": ("long_running", "persistent role", ("Finish archive.",), True, False, Report("missing", [])),
+        }
+        for name, (status, blocker, pending_items, closed, target_exists, report) in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                registry = root / "sessions.json"
+                _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+                _ = (root / "TODO.md").write_text("current:\nworker.md cfg:1\n", encoding="utf-8")
+                closure = "(manager closed Codex agent after worker completion; tmux target `cfg:1`.)\n" if closed else ""
+                _ = (root / "worker.md").write_text(
+                    task_frontmatter(status, runat="cfg:1", blocked_on=blocker, pending_items=pending_items) + closure,
+                    encoding="utf-8",
+                )
+                out = StringIO()
+                with patch("omo_manager.omo_agent_status.inspect", return_value=report), patch("omo_manager.omo_agent_status.target_resolves_exactly", return_value=target_exists), redirect_stdout(out):
+                    self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+                self.assertIn(f"{report.status}: task=worker.md", out.getvalue())
+
     def test_problems_only_skips_ready_hvl_concrete_human_review_wait(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

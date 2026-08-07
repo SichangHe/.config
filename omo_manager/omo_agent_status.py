@@ -126,9 +126,15 @@ HUMAN_WAIT_RE = re.compile(
     |
     \bhuman\s+discussion\b
     |
+    \bhuman\s+coordination(?:\s+with\s+\S|:\s*\S)
+    |
     \bhuman\s+(?:approval|authorization|decision)\b
     """,
     re.IGNORECASE | re.VERBOSE,
+)
+VAGUE_STOPPED_HUMAN_WAIT_RE = re.compile(
+    r"\A(?:human|human\s+(?:approval|authorization|decision|discussion)|human[- ]pending|direct\s+human\s+discussion|waiting\s+(?:on|for)\s+(?:(?:a|the)\s+)?(?:human|person)(?:'s)?(?:\s+(?:action|answers?|approval|authorization|choice|confirmation|decision|discussion|feedback|follow-?up|guidance|input|repl(?:y|ies)|responses?|reviews?)|\s+to)?)\Z",
+    re.IGNORECASE,
 )
 MANAGER_MD_REREAD_RE = re.compile(r"\b(?:re-?read|read)\b[^.\n?!;]{0,80}\bMANAGER\.md\b|\bMANAGER\.md\b[^.\n?!;]{0,80}\b(?:re-?read|read)\b", re.IGNORECASE)
 MANAGER_MD_REREAD_NEGATIVE_RE = re.compile(
@@ -503,6 +509,23 @@ def is_explicit_human_pending_wait(root: Path, task: TaskLine, state: TaskState)
         return False
     task_path = resolve_task_path(root, task.task_file)
     return task_path is not None and has_closed_codex_evidence(task_path, state.target)
+
+
+def is_intentionally_stopped_human_blocked_worker(root: Path, task: TaskLine, state: TaskState) -> bool:
+    """Return whether an active worker is deliberately stopped on a human blocker."""
+
+    if (
+        task.section not in {"todo:current", "todo:human pending", "todo:low priority"}
+        or state.status != "blocked"
+        or state.is_manager
+        or target_session(state.target).startswith("h")
+        or not is_recorded_human_wait(state)
+        or VAGUE_STOPPED_HUMAN_WAIT_RE.fullmatch(state.reason.rstrip(" \t.,;:!?")) is not None
+        or target_resolves_exactly(state.target)
+    ):
+        return False
+    task_path = resolve_task_path(root, task.task_file)
+    return task_path is not None and bool(pending_task_items(task_path, root)) and has_closed_codex_evidence(task_path, state.target)
 
 
 def canonical_target(target: str) -> str:
@@ -1002,6 +1025,8 @@ def add_blocked_idle_vl_row(root: Path, task: TaskLine, role: str, rows: list[St
         if is_recorded_human_wait(state) and idle_status == "ready":
             return
         if is_explicit_human_pending_wait(root, task, state) and idle_status in {"missing", "not_codex"} and " output=" not in classified.evidence:
+            return
+        if is_intentionally_stopped_human_blocked_worker(root, task, state) and idle_status in {"missing", "not_codex"} and " output=" not in classified.evidence:
             return
         quiet_dependency = blocked_dependencies_are_active(root, task, state) and idle_status == "ready"
         quiet_resumable = blocked_resumable_dependencies_are_active(root, task, state) and idle_status in {"missing", "not_codex"} and " output=" not in classified.evidence and not target_resolves_exactly(target)
