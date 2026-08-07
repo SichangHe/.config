@@ -1235,6 +1235,130 @@ class TaskStatusTests(unittest.TestCase):
             self.assertIn("Closed wl:2; session_id: session-1.", stdout.getvalue())
             self.assertIn(DONE_REMINDER, stdout.getvalue())
 
+    def test_cli_recover_exited_shell_done_closes_and_finishes_exact_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pane = "%42"
+            session_id = "11111111-2222-3333-4444-555555555555"
+            path = root / "task.md"
+            blocker = f"done_close_failed: target is not a supported live Codex pane: {pane} status=not_codex"
+            path.write_text(task_frontmatter(status="blocked", blocked_on=blocker, runat="cfg:1") + "body\n", encoding="utf-8")
+            todo = root / "TODO.md"
+            todo.write_text("current:\ntask.md cfg:1\n\nprevious:\nother.md\n", encoding="utf-8")
+            args = StatusArgs(
+                root,
+                Path("task.md"),
+                "done",
+                "",
+                session_id=session_id,
+                recover_exited_shell_done=True,
+                pane_id=pane,
+                terminal_evidence="accepted-report-token",
+            )
+
+            with (
+                patch("omo_manager.omo_task_status.exact_pane_id", return_value=pane),
+                patch("omo_manager.omo_task_status.close_exited_codex_shell") as close,
+                redirect_stdout(io.StringIO()),
+            ):
+                exit_code = run(args)
+
+            self.assertEqual(0, exit_code)
+            close.assert_called_once_with("cfg:1", pane, session_id, "accepted-report-token")
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("status: done\nrunat: cfg:1", text)
+            self.assertIn(f"session_id: `{session_id}`", text)
+            self.assertEqual("current:\n\nprevious:\ntask.md cfg:1\nother.md\n", todo.read_text(encoding="utf-8"))
+
+    def test_cli_recover_exited_shell_done_rejects_unsafe_task_or_index(self) -> None:
+        pane = "%42"
+        session_id = "11111111-2222-3333-4444-555555555555"
+        blocker = f"done_close_failed: target is not a supported live Codex pane: {pane} status=not_codex"
+        cases = (
+            (task_frontmatter(status="blocked", blocked_on=blocker, runat="cfg:1", is_manager=True), "task.md cfg:1", None),
+            (task_frontmatter(status="blocked", blocked_on=blocker, runat="cfg:1", pending_items=("open",)), "task.md cfg:1", None),
+            (task_frontmatter(status="blocked", blocked_on="done_close_failed: another failure", runat="cfg:1"), "task.md cfg:1", None),
+            (task_frontmatter(status="blocked", blocked_on=blocker, runat="cfg:1"), "task.md (done)", None),
+            (task_frontmatter(status="blocked", blocked_on=blocker, runat="cfg:1"), "task.md cfg:1", task_frontmatter(status="running", runat="cfg:1")),
+        )
+        for task_text, todo_row, reused_text in cases:
+            with self.subTest(todo_row=todo_row, reused=bool(reused_text)), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                path = root / "task.md"
+                original = task_text + "body\n"
+                path.write_text(original, encoding="utf-8")
+                todo = root / "TODO.md"
+                todo_original = f"current:\n{todo_row}\n\nprevious:\n"
+                todo.write_text(todo_original, encoding="utf-8")
+                if reused_text is not None:
+                    (root / "reused.md").write_text(reused_text + "body\n", encoding="utf-8")
+                args = StatusArgs(
+                    root,
+                    Path("task.md"),
+                    "done",
+                    "",
+                    session_id=session_id,
+                    recover_exited_shell_done=True,
+                    pane_id=pane,
+                    terminal_evidence="accepted-report-token",
+                )
+                with patch("omo_manager.omo_task_status.close_exited_codex_shell") as close, redirect_stderr(io.StringIO()):
+                    self.assertEqual(2, run(args))
+                close.assert_not_called()
+                self.assertEqual(original, path.read_text(encoding="utf-8"))
+                self.assertEqual(todo_original, todo.read_text(encoding="utf-8"))
+
+    def test_cli_recover_exited_shell_done_rejects_human_pending_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pane = "%42"
+            session_id = "11111111-2222-3333-4444-555555555555"
+            blocker = f"done_close_failed: target is not a supported live Codex pane: {pane} status=not_codex"
+            path = root / "task.md"
+            original = task_frontmatter(status="blocked", blocked_on=blocker, runat="cfg:1") + "body\n"
+            path.write_text(original, encoding="utf-8")
+            todo = root / "TODO.md"
+            todo_original = "current:\n\nhuman pending:\ntask.md cfg:1\n\nprevious:\n"
+            todo.write_text(todo_original, encoding="utf-8")
+            args = StatusArgs(
+                root,
+                Path("task.md"),
+                "done",
+                "",
+                session_id=session_id,
+                recover_exited_shell_done=True,
+                pane_id=pane,
+                terminal_evidence="accepted-report-token",
+            )
+
+            with patch("omo_manager.omo_task_status.close_exited_codex_shell") as close, redirect_stderr(io.StringIO()):
+                self.assertEqual(2, run(args))
+
+            close.assert_not_called()
+            self.assertEqual(original, path.read_text(encoding="utf-8"))
+            self.assertEqual(todo_original, todo.read_text(encoding="utf-8"))
+
+    def test_parse_recover_exited_shell_done_requires_explicit_evidence(self) -> None:
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            parse_args(["--recover-exited-shell-done", "task.md"])
+
+        args = parse_args(
+            [
+                "--root",
+                "/tmp/work",
+                "--recover-exited-shell-done",
+                "--pane-id",
+                "%42",
+                "--session-id",
+                "11111111-2222-3333-4444-555555555555",
+                "--terminal-evidence",
+                "accepted-report-token",
+                "task.md",
+            ]
+        )
+        self.assertTrue(args.recover_exited_shell_done)
+        self.assertEqual("%42", args.pane_id)
+
     def test_cli_finish_closed_done_failure_stays_blocked_retryable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "task.md"

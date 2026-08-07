@@ -11,6 +11,7 @@ from omo_manager.omo_codex_status import Report
 from omo_manager.omo_codex_stop import (
     Args,
     close_note,
+    close_exited_codex_shell,
     close_tmux_target,
     codex_status,
     current_pane_id,
@@ -48,6 +49,75 @@ class CodexStopTests(unittest.TestCase):
         with patch.dict(os.environ, {"TMUX_PANE": "%caller"}, clear=True), patch("omo_manager.omo_codex_stop.tmux") as tmux:
             self.assertEqual("%caller", current_pane_id())
         tmux.assert_not_called()
+
+    def test_close_exited_codex_shell_closes_only_unchanged_proven_shell(self) -> None:
+        session_id = "11111111-2222-3333-4444-555555555555"
+        transcript = f'{{"accepted":true,"receipt":"specific-token"}}\nConversation interrupted\nTo continue this session, run codex resume {session_id}\n$ '
+        with (
+            patch("omo_manager.omo_codex_stop.pane_id", side_effect=["%42", "%42", "%42", "%42", ""]),
+            patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%99"),
+            patch("omo_manager.omo_codex_stop.current_command", return_value="zsh"),
+            patch("omo_manager.omo_codex_stop.inspect", return_value=Report("not_codex", ["$ "])),
+            patch("omo_manager.omo_codex_stop.capture", return_value=transcript),
+            patch("omo_manager.omo_codex_stop.close_tmux_target") as close,
+        ):
+            close_exited_codex_shell("cfg:1", "%42", session_id, "specific-token")
+
+        close.assert_called_once_with("%42")
+
+    def test_close_exited_codex_shell_rejects_ambiguous_or_changed_state(self) -> None:
+        session_id = "11111111-2222-3333-4444-555555555555"
+        transcript = f'{{"accepted":true,"receipt":"accepted-report-token"}}\nConversation interrupted\nTo continue this session, run codex resume {session_id}\n$ '
+        cases = (
+            (Report("ready", ["idle"]), "zsh", (transcript, transcript), session_id, "accepted-report-token", "exited non-Codex shell"),
+            (Report("not_codex", ["shell"]), "bunx", (transcript, transcript), session_id, "accepted-report-token", "exited non-Codex shell"),
+            (Report("not_codex", ["shell"]), "zsh", (transcript, transcript), "99999999-2222-3333-4444-555555555555", "accepted-report-token", "does not match"),
+            (Report("not_codex", ["shell"]), "zsh", (transcript, transcript), session_id, "missing-report-token", "evidence is absent"),
+            (Report("not_codex", ["shell"]), "zsh", (transcript, transcript + "changed"), session_id, "accepted-report-token", "changed during recovery"),
+            (
+                Report("not_codex", ["shell"]),
+                "zsh",
+                (transcript + "\nran unrelated command\n$ ", transcript + "\nran unrelated command\n$ "),
+                session_id,
+                "accepted-report-token",
+                "shell activity",
+            ),
+            (
+                Report("not_codex", ["shell"]),
+                "zsh",
+                (
+                    transcript + f"\n$ # To continue this session, run codex resume {session_id}\n$ ",
+                    transcript + f"\n$ # To continue this session, run codex resume {session_id}\n$ ",
+                ),
+                session_id,
+                "accepted-report-token",
+                "does not match",
+            ),
+            (
+                Report("not_codex", ["shell"]),
+                "zsh",
+                (
+                    f'{{"accepted":true,"receipt":"accepted-report-token"}}\nConversation interrupted\nTo continue this session, run codex resume 99999999-2222-3333-4444-555555555555\n$ codex\nConversation interrupted\nTo continue this session, run codex resume {session_id}\n$ ',
+                )
+                * 2,
+                session_id,
+                "accepted-report-token",
+                "evidence is absent",
+            ),
+        )
+        for report, command, captures, supplied_session, evidence, error in cases:
+            with self.subTest(error=error):
+                with (
+                    patch("omo_manager.omo_codex_stop.pane_id", return_value="%42"),
+                    patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%99"),
+                    patch("omo_manager.omo_codex_stop.current_command", return_value=command),
+                    patch("omo_manager.omo_codex_stop.inspect", return_value=report),
+                    patch("omo_manager.omo_codex_stop.capture", side_effect=captures),
+                    patch("omo_manager.omo_codex_stop.close_tmux_target") as close,
+                    self.assertRaisesRegex(RuntimeError, error),
+                ):
+                    close_exited_codex_shell("cfg:1", "%42", supplied_session, evidence)
+                close.assert_not_called()
 
     def test_codex_status_captures_pinned_pane_id(self) -> None:
         lines = ["› Use /skills to list available skills", "  gpt-5.6-terra"]

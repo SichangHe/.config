@@ -32,6 +32,7 @@ from omo_manager.omo_blocking import v2_enabled
 from omo_manager.omo_codex_stop import Args as StopArgs
 from omo_manager.omo_codex_stop import capture
 from omo_manager.omo_codex_stop import close_note
+from omo_manager.omo_codex_stop import close_exited_codex_shell
 from omo_manager.omo_codex_stop import has_close_note
 from omo_manager.omo_codex_stop import moved_todo_text
 from omo_manager.omo_codex_stop import pane_id
@@ -66,6 +67,9 @@ class Args:
     replacement_task: Path | None = None
     stopped_evidence: str = ""
     replacement_pane_evidence: str = ""
+    recover_exited_shell_done: bool = False
+    pane_id: str = ""
+    terminal_evidence: str = ""
 
 
 class ParsedArgs(argparse.Namespace):
@@ -79,6 +83,9 @@ class ParsedArgs(argparse.Namespace):
     replacement_task: Path | None = None
     stopped_evidence: str = ""
     replacement_pane_evidence: str = ""
+    recover_exited_shell_done: bool = False
+    pane_id: str = ""
+    terminal_evidence: str = ""
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -93,21 +100,43 @@ shutdown.""",
     _ = parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     _ = parser.add_argument("--finish-closed-done", action="store_true", help="Finish done bookkeeping after the agent was already closed by a failed prior run.")
     _ = parser.add_argument("--finish-replaced-done", action="store_true", help="Finish a stopped stale record without signaling its pane after proving an explicit live replacement.")
+    _ = parser.add_argument("--recover-exited-shell-done", action="store_true", help="Close and finish one blocked worker whose completed Codex session exited to an unchanged shell.")
     _ = parser.add_argument("--session-id", default="", help="Session id captured by the prior close, if available.")
     _ = parser.add_argument("--replacement-task", type=Path, help="Active replacement task file; required with --finish-replaced-done.")
     _ = parser.add_argument("--stopped-evidence", default="", help="Exact evidence from a prior verified pending-item removal; required with --finish-replaced-done.")
     _ = parser.add_argument("--replacement-pane-evidence", default="", help="Exact text currently visible in the replacement pane; required with --finish-replaced-done.")
+    _ = parser.add_argument("--pane-id", default="", help="Exact numeric pane id captured by the failed close; required with --recover-exited-shell-done.")
+    _ = parser.add_argument("--terminal-evidence", default="", help="Specific accepted terminal-report token visible before Codex exited; required with --recover-exited-shell-done.")
     _ = parser.add_argument("task_file", type=Path)
     _ = parser.add_argument("status", nargs="?", choices=sorted(TASK_FRONTMATTER_STATUSES))
     _ = parser.add_argument("--blocked-on", default="", help="Required when setting status to `blocked`; optional for `long_running`; removed for other statuses.")
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
-    if parsed.finish_closed_done and parsed.finish_replaced_done:
-        parser.error("--finish-closed-done and --finish-replaced-done are mutually exclusive.")
+    if sum((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done)) > 1:
+        parser.error("finish and recovery modes are mutually exclusive.")
+    if parsed.recover_exited_shell_done:
+        if parsed.status not in {None, "", "done"}:
+            parser.error("--recover-exited-shell-done only supports status `done`.")
+        if not parsed.session_id.strip() or not parsed.pane_id.strip() or not parsed.terminal_evidence.strip():
+            parser.error("--recover-exited-shell-done requires --session-id, --pane-id, and --terminal-evidence.")
+        if parsed.replacement_task is not None or parsed.stopped_evidence or parsed.replacement_pane_evidence:
+            parser.error("replacement evidence is only valid with --finish-replaced-done.")
+        return Args(
+            parsed.root.resolve(),
+            parsed.task_file,
+            "done",
+            parsed.blocked_on.strip(),
+            session_id=parsed.session_id.strip(),
+            recover_exited_shell_done=True,
+            pane_id=parsed.pane_id.strip(),
+            terminal_evidence=parsed.terminal_evidence.strip(),
+        )
     if parsed.finish_replaced_done:
         if parsed.status not in {None, "", "done"}:
             parser.error("--finish-replaced-done only supports status `done`.")
         if parsed.session_id:
             parser.error("--session-id is only valid with --finish-closed-done.")
+        if parsed.pane_id or parsed.terminal_evidence:
+            parser.error("pane and terminal evidence are only valid with --recover-exited-shell-done.")
         if parsed.replacement_task is None or not parsed.stopped_evidence.strip() or not parsed.replacement_pane_evidence.strip():
             parser.error("--finish-replaced-done requires --replacement-task, --stopped-evidence, and --replacement-pane-evidence.")
         return Args(
@@ -123,13 +152,17 @@ shutdown.""",
     if parsed.finish_closed_done:
         if parsed.status not in {None, "", "done"}:
             parser.error("--finish-closed-done only supports status `done`.")
+        if parsed.pane_id or parsed.terminal_evidence:
+            parser.error("pane and terminal evidence are only valid with --recover-exited-shell-done.")
         return Args(parsed.root.resolve(), parsed.task_file, "done", parsed.blocked_on.strip(), True, parsed.session_id.strip())
     if not parsed.status:
-        parser.error("status is required unless --finish-closed-done is used.")
+        parser.error("status is required unless a finish or recovery mode is used.")
     if parsed.session_id:
         parser.error("--session-id is only valid with --finish-closed-done.")
     if parsed.replacement_task is not None or parsed.stopped_evidence or parsed.replacement_pane_evidence:
         parser.error("replacement evidence is only valid with --finish-replaced-done.")
+    if parsed.pane_id or parsed.terminal_evidence:
+        parser.error("pane and terminal evidence are only valid with --recover-exited-shell-done.")
     return Args(parsed.root.resolve(), parsed.task_file, parsed.status, parsed.blocked_on.strip())
 
 
@@ -386,6 +419,32 @@ def current_target_task_paths(root: Path, target: str) -> tuple[Path, ...]:
         elif metadata.status != "done" and ((task.target and same_tmux_target(task.target, target)) or same_tmux_target(metadata.runat, target)):
             matches.add(candidate)
     return tuple(sorted(matches))
+
+
+def authoritative_active_target_task_paths(root: Path, target: str) -> tuple[Path, ...]:
+    """Return every valid active task whose frontmatter owns `target`."""
+
+    matches: list[Path] = []
+    for candidate in sorted(root.rglob("*.md")):
+        try:
+            text = candidate.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise TaskFrontmatterError(f"cannot verify target ownership because `{relative_task_ref(root, candidate)}` could not be read: {exc}") from exc
+        raw_claim = any(
+            key.strip() == "runat" and sep and same_tmux_target(value.strip(), target)
+            for key, sep, value in (line.partition(":") for line in text.splitlines())
+        )
+        try:
+            metadata = parse_task_metadata(text, root)
+        except TaskFrontmatterError as exc:
+            if raw_claim:
+                raise TaskFrontmatterError(
+                    f"cannot verify target ownership because `{relative_task_ref(root, candidate)}` has invalid task frontmatter: {exc}"
+                ) from exc
+            continue
+        if metadata is not None and metadata.status != "done" and same_tmux_target(metadata.runat, target):
+            matches.append(candidate.resolve())
+    return tuple(matches)
 
 
 def worker_self_close_allowed(root: Path, path: Path, metadata: TaskMetadata) -> bool:
@@ -764,6 +823,69 @@ def finish_closed_done(args: Args, path: Path, text: str, before: os.stat_result
     return metadata.runat, close_session_id
 
 
+def recover_exited_shell_done(args: Args, path: Path, text: str, before: os.stat_result) -> tuple[str, str]:
+    """Close one proven exited worker shell and finish its done bookkeeping."""
+
+    todo = args.root / "TODO.md"
+    if not todo.is_file():
+        raise TaskFrontmatterError("TODO.md is not a regular file.")
+    initial_metadata = parse_task_metadata(text, args.root)
+    if initial_metadata is None:
+        raise TaskFrontmatterError("task file has no frontmatter.")
+    with task_target_lock(args.root, initial_metadata.runat):
+        with ExitStack() as locks:
+            for locked_path in sorted({path, todo}, key=lambda candidate: str(candidate)):
+                locks.enter_context(task_file_lock(locked_path))
+            current_before = path.stat()
+            current_text = path.read_text(encoding="utf-8")
+            metadata = parse_task_metadata(current_text, args.root)
+            if not same_file_state(before, current_before) or current_text != text or metadata is None:
+                raise TaskFrontmatterError("task changed while exited-shell recovery was being prepared; retry after rereading it.")
+            if metadata.is_manager:
+                raise TaskFrontmatterError("--recover-exited-shell-done supports non-manager tasks only.")
+            if metadata.status != "blocked" or metadata.blocked_on != (
+                f"{CLOSE_FAILED_PREFIX}: target is not a supported live Codex pane: {args.pane_id} status=not_codex"
+            ):
+                raise TaskFrontmatterError("task does not have the exact exited-shell done-close failure for the supplied pane id.")
+            _ = update_frontmatter_status(current_text, "done", "", args.root)
+            owners = authoritative_active_target_task_paths(args.root, metadata.runat)
+            if owners != (path,):
+                refs = ", ".join(relative_task_ref(args.root, owner) for owner in owners) or "none"
+                raise TaskFrontmatterError(f"task is not the sole authoritative active owner of `{metadata.runat}`: {refs}.")
+            todo_before = todo.stat()
+            todo_text = todo.read_text(encoding="utf-8")
+            updated_todo = reconcile_todo_text(args.root, path, todo_text, metadata.runat, "previous", ("current",))
+            if exact_pane_id(metadata.runat) != args.pane_id:
+                raise TaskFrontmatterError("task target no longer resolves to the supplied exact pane id.")
+            close_exited_codex_shell(metadata.runat, args.pane_id, args.session_id, args.terminal_evidence)
+            closed_text = current_text.rstrip("\n") + close_note(metadata.runat, args.session_id)
+            done_text = update_frontmatter_status(closed_text, "done", "", args.root)
+            moved_todo_before: os.stat_result | None = None
+            try:
+                if updated_todo != todo_text:
+                    replace_if_unchanged_locked(todo, updated_todo, todo_before)
+                    moved_todo_before = todo.stat()
+                replace_if_unchanged_locked(path, done_text, current_before)
+            except Exception as exc:
+                rollback_error: Exception | None = None
+                if moved_todo_before is not None:
+                    try:
+                        replace_if_unchanged_locked(todo, todo_text, moved_todo_before)
+                    except Exception as caught:
+                        rollback_error = caught
+                if rollback_error is not None:
+                    raise TaskFrontmatterError(f"exited shell closed but TODO rollback failed: {rollback_error}") from exc
+                retry_before = path.stat()
+                retry_text = path.read_text(encoding="utf-8")
+                if retry_text != current_text:
+                    raise TaskFrontmatterError("exited shell closed but task changed before retry bookkeeping could be recorded.") from exc
+                retry_with_note = retry_text.rstrip("\n") + close_note(metadata.runat, args.session_id)
+                retry_blocked = update_frontmatter_status(retry_with_note, "blocked", done_bookkeeping_failed_reason(exc), args.root)
+                replace_if_unchanged_locked(path, retry_blocked, retry_before)
+                raise TaskFrontmatterError(f"exited shell closed; done bookkeeping failed and was recorded for retry: {exc}") from exc
+    return metadata.runat, args.session_id
+
+
 def finish_replaced_done(args: Args, path: Path, text: str, before: os.stat_result) -> str:
     updated = replacement_task_text(args, path, text, before)
     finish_done_transaction(args.root, path, updated, before)
@@ -789,6 +911,8 @@ def run(args: Args) -> int:
         if args.finish_replaced_done:
             target = finish_replaced_done(args, path, text, before)
             preserved_replacement = True
+        elif args.recover_exited_shell_done:
+            target, session_id = recover_exited_shell_done(args, path, text, before)
         elif args.finish_closed_done:
             target, session_id = finish_closed_done(args, path, text, before)
         else:
