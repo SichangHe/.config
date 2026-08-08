@@ -18,6 +18,7 @@ CODEX_RE = re.compile(r"  gpt-")
 CODEX_FOOTER_RE = re.compile(r"^  gpt-")
 ERROR_RE = re.compile(r"\b(failed|panic|traceback|exception)\b|\berror\b(?!\s*=\s*\d)", re.IGNORECASE)
 SELECTED_MODEL_CAPACITY_RE = re.compile(r"^\s*(?:⚠\ufe0f?\s*)?Selected model is at capacity\. Please try a different model\.\s*$")
+CONTENT_HIDDEN_RE = re.compile(r"^\s*ⓘ\s+This content can(?:not|['’]t) be shown[.!?]?\s*$", re.IGNORECASE)
 UNRELATED_FATAL_LINE_RE = re.compile(r"^\s*(?:(?:[A-Za-z][\w-]*\s+)?failed\b|error\b|exception\b|fatal\b|panic\b|traceback\b)", re.I)
 WAKE_EXECUTION_BUDGET_REFUSAL_RE = re.compile(
     r"^\s*(?:•\s*)?I (?:can(?:not|[’']t)|am unable to) safely (?:complete|handle|execute) (?:(?:another|the|this|a) )?wake prompt (?:in|within) the remaining execution (?:budget|time)(?: available)?[.!]?\s*$",
@@ -451,7 +452,7 @@ def visible_error_lines(lines: list[str], include_unmarked: bool = True) -> list
         if index in ignorable_transport:
             continue
         marked = VISIBLE_ERROR_MARKER_RE.search(line) is not None
-        if SELECTED_MODEL_CAPACITY_RE.search(line) is not None or WAKE_EXECUTION_BUDGET_REFUSAL_RE.search(line) is not None or (ERROR_RE.search(line) is not None and (include_unmarked or marked)):
+        if CONTENT_HIDDEN_RE.search(line) is not None or SELECTED_MODEL_CAPACITY_RE.search(line) is not None or WAKE_EXECUTION_BUDGET_REFUSAL_RE.search(line) is not None or (ERROR_RE.search(line) is not None and (include_unmarked or marked)):
             found.append(line.strip())
     return found
 
@@ -619,6 +620,19 @@ def dismiss_plan_prompt_if_present(target: str, report: Report, n_lines: int = C
 def status(lines: list[str], block: Block, *, detect_waiting_subagent: bool = False) -> str:
     if not lines:
         return "not_codex"
+    content_hidden = any(CONTENT_HIDDEN_RE.search(line) is not None for line in latest_output_before_input(lines))
+    codex_ui = any(
+        (
+            has_codex_model_footer(lines),
+            has_file_search_overlay(lines),
+            has_resume_paused_goal_prompt(lines),
+            has_terminal_enter_prompt_after_codex_footer(lines),
+            has_plan_prompt(lines),
+            has_queued_message_footer(lines),
+        )
+    )
+    if content_hidden and codex_ui:
+        return "error"
     if has_file_search_overlay(lines):
         return "stuck_input"
     if has_resume_paused_goal_prompt(lines):

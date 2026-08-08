@@ -816,6 +816,37 @@ class CodexStatusTests(unittest.TestCase):
         warning = ['────', '⚠ Selected model is at capacity. Please try a different model.', '› Explain this codebase', '  gpt-5.5']
         self.assertEqual(['⚠ Selected model is at capacity. Please try a different model.'], visible_error_lines(current_block(warning).lines))
 
+    def test_status_error_when_codex_hides_current_content(self) -> None:
+        for notice in ("ⓘ This content can't be shown", "ⓘ This content can’t be shown.", "ⓘ This content can't be shown?"):
+            with self.subTest(notice=notice):
+                lines = [notice, '', '› Summarize recent commits', '  gpt-5.6-sol']
+                self.assertEqual('error', status(lines, current_block(lines)))
+                self.assertEqual([notice], visible_error_lines(current_block(lines).lines))
+
+    def test_content_hidden_error_overrides_file_search_overlay(self) -> None:
+        lines = [
+            "ⓘ This content can't be shown",
+            '› Continue with @filename',
+            '',
+            '  no matches',
+            '  enter insert · esc close · ←/→ switch search modes                 [All Results] Filesystem Only Plugins',
+        ]
+        self.assertEqual('error', status(lines, current_block(lines)))
+
+    def test_content_hidden_text_in_current_input_is_not_an_error(self) -> None:
+        lines = ["› Explain why ⓘ This content can't be shown appeared", '  gpt-5.6-sol']
+        self.assertEqual([], visible_error_lines(current_block(lines).lines))
+        self.assertEqual('stuck_input', status(lines, current_block(lines)))
+
+    def test_content_hidden_text_without_codex_ui_is_not_codex(self) -> None:
+        lines = ["ⓘ This content can't be shown"]
+        self.assertEqual('not_codex', status(lines, current_block(lines)))
+
+    def test_other_information_notice_is_not_an_error(self) -> None:
+        lines = ['ⓘ This content is available in the transcript.', '', '› Summarize recent commits', '  gpt-5.6-sol']
+        self.assertEqual([], visible_error_lines(current_block(lines).lines))
+        self.assertEqual('ready', status(lines, current_block(lines)))
+
     def test_status_keeps_abbreviated_codex_apps_failures_visible(self) -> None:
         for error in (
             '■ codex_apps startup failed: HTTP 401; no available accounts',
