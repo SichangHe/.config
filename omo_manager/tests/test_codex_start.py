@@ -25,6 +25,7 @@ from omo_manager.omo_codex_start import (
     prompt_text,
     record_recovery_evidence,
     recovery_issuance_path,
+    require_human_restart_authority,
     require_recovery_target,
     require_same_shell,
     require_update_prompt,
@@ -68,13 +69,21 @@ class CodexStartTests(unittest.TestCase):
             "Press enter to continue",
         ]
 
-    def write_task(self, root: Path, *, runat: str = "cfg:2", status: str = "blocked", manager: bool = False) -> None:
+    def write_task(
+        self,
+        root: Path,
+        *,
+        runat: str = "cfg:2",
+        status: str = "blocked",
+        manager: bool = False,
+        tool: str = "codex",
+    ) -> None:
         fields = {
             "version": "v1.0.0",
             "status": status,
             "blocked_on": "model capacity" if status == "blocked" else None,
             "runat": runat,
-            "tool": "codex",
+            "tool": tool,
             "managerat": "cfg:1",
             "is_manager": manager,
             "pending_task_items": [],
@@ -160,7 +169,7 @@ class CodexStartTests(unittest.TestCase):
             self.write_task(root)
             pane = Pane("cfg:2.0", "%2", "@2", "zsh", root)
             with patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane):
-                self.assertFalse(validate_task(self.args(root), pane))
+                self.assertEqual((False, "codex"), validate_task(self.args(root), pane))
             (root / "TODO.md").write_text("current:\n", encoding="utf-8")
             with patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane):
                 with self.assertRaisesRegex(StartError, "TODO `current`"):
@@ -775,15 +784,56 @@ class CodexStartTests(unittest.TestCase):
                 start(self.args(root, session_id="", restart_running=True))
             respawn.assert_not_called()
 
-    def test_validate_task_rejects_non_codex_tool(self) -> None:
+    def test_validate_task_accepts_pcodx_tool(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root)
-            self.write_task(root)
-            path = root / "worker.md"
-            path.write_text(path.read_text(encoding="utf-8").replace("tool: codex", "tool: pcodx"), encoding="utf-8")
+            self.write_task(root, tool="pcodx")
             pane = Pane("cfg:2.0", "%2", "@2", "zsh", root)
-            with self.assertRaisesRegex(StartError, "only `tool: codex`"):
-                validate_task(self.args(root), pane)
+            with patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane):
+                self.assertEqual((False, "pcodx"), validate_task(self.args(root), pane))
+
+    def test_pcodx_restart_command_preserves_model_without_nested_codex_package(self) -> None:
+        root = Path("/tmp/work logs")
+        pane = Pane("hwl:3.0", "%3", "@3", "bunx", root)
+        state = {
+            "PCODX_POC_ROOT": "/tmp/pcodx-poc",
+            "PCODX_RUN_DIR": "/tmp/pcodx-run",
+            "PCODX_LEDGER_PATH": "/tmp/pcodx-run/ledger.json",
+            "PCODX_SESSION_ID": "pcodx-3",
+        }
+        command = launch_command(self.args(root), pane, None, "[marker]", replace_process=True, tool="pcodx", pcodx_env=state)
+        self.assertIn("/omo_manager/pcodx --dangerously-bypass-approvals-and-sandbox", command)
+        self.assertNotIn("pcodx @openai/codex", command)
+        self.assertNotIn("check_for_update_on_startup", command)
+        self.assertIn("PCODX_LEDGER_PATH=/tmp/pcodx-run/ledger.json", command)
+        self.assertIn("--model gpt-5.6-terra", command)
+
+    def test_pcodx_command_requires_complete_live_state_binding(self) -> None:
+        root = Path("/tmp/work logs")
+        pane = Pane("hwl:3.0", "%3", "@3", "bunx", root)
+        with self.assertRaisesRegex(StartError, "exact live state binding"):
+            launch_command(self.args(root), pane, None, "[marker]", tool="pcodx")
+
+    def test_human_restart_authority_requires_exact_source_and_target(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            mail = root / "manager_mail"
+            mail.mkdir()
+            source = mail / "restart.txt"
+            source.write_text("Subject: restart\n\nRestart hwl:3 in the same pane\n", encoding="utf-8")
+            pane = Pane("hwl:3.0", "%3", "@3", "bunx", root)
+            authorized = self.args(
+                root,
+                target="hwl:3",
+                session_id="",
+                restart_running=True,
+                human_email_file=Path("manager_mail/restart.txt"),
+                human_email_lines=(3, 3),
+            )
+            require_human_restart_authority(authorized, pane)
+            source.write_text("Subject: restart\n\nRestart hwl:4 in the same pane\n", encoding="utf-8")
+            with self.assertRaisesRegex(StartError, "exact direct restart request"):
+                require_human_restart_authority(authorized, pane)
 
     def test_post_marker_capture_uses_numeric_target_not_pane_id(self) -> None:
         pane = Pane("cfg:2.0", "%2", "@2", "zsh", Path("/tmp"))

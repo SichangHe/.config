@@ -26,6 +26,7 @@ import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Mapping
 
 try:
     from omo_manager.omo_codex_status import Args as StatusArgs
@@ -52,6 +53,8 @@ MODEL_RE = re.compile(r"^[A-Za-z0-9._:/-]+$")
 UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$")
 RESUME_ARG_RE = re.compile(r"resume(?P<session>[0-9a-fA-F-]{36})")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+PCODX_SESSION_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
+PCODX_ENV_KEYS = ("PCODX_POC_ROOT", "PCODX_RUN_DIR", "PCODX_LEDGER_PATH", "PCODX_SESSION_ID")
 # Delivery IDs are persisted as filenames.  Keep them opaque but basename-safe
 # so a malformed CLI value can never escape the dedicated event directory.
 DELIVERY_ID_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
@@ -63,6 +66,7 @@ RECOVERY_ISSUANCE_VERSION = "omo-codex-recovery-issuance-v1"
 DELIVERY_EVENT_DIRNAME = RECOVERY_EVENT_DIRNAME
 DELIVERY_EVENT_VERSION = "omo-pending-watch-delivery-event-v1"
 CODEX_LAUNCH_COMMAND = "bunx"
+PCODX_LAUNCH_COMMAND = str(HELPER_DIR / "pcodx")
 UPDATE_AVAILABLE_RE = re.compile(r"^✨\s*Update available! [0-9]+\.[0-9]+\.[0-9]+ -> [0-9]+\.[0-9]+\.[0-9]+$")
 UPDATE_PROMPT_SUFFIX = (
     "Release notes: https://github.com/openai/codex/releases/latest",
@@ -96,6 +100,8 @@ class Args:
     recovery_output: Path | None = None
     failed_delivery_id: str = ""
     recover_update_prompt: bool = False
+    human_email_file: Path | None = None
+    human_email_lines: tuple[int, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -145,6 +151,8 @@ def parse_args(argv: list[str]) -> Args:
     )
     _ = parser.add_argument("--recovery-output", type=Path, help="Watcher-issued receipt path (root/.omo-codex-recovery-receipts/<delivery-id>.receipt).")
     _ = parser.add_argument("--failed-delivery-id", help="Watcher delivery/problem event id for --record-recovery-evidence.")
+    _ = parser.add_argument("--human-email-file", type=Path, help="Authoritative human email under ROOT/manager_mail for an h* same-pane restart.")
+    _ = parser.add_argument("--human-email-lines", help="Inclusive source line range START-END for --human-email-file.")
     _ = parser.add_argument("--dry-run", action="store_true")
     parsed = parser.parse_args(argv)
     if MODEL_RE.fullmatch(parsed.model) is None:
@@ -174,6 +182,16 @@ def parse_args(argv: list[str]) -> Args:
         parser.error("--failed-delivery-id is only valid with --record-recovery-evidence.")
     if parsed.recovery_output and not parsed.record_recovery_evidence:
         parser.error("--recovery-output is only valid with --record-recovery-evidence.")
+    if (parsed.human_email_file is None) != (parsed.human_email_lines is None):
+        parser.error("--human-email-file and --human-email-lines must be supplied together.")
+    human_email_lines: tuple[int, int] | None = None
+    if parsed.human_email_lines is not None:
+        match = re.fullmatch(r"([1-9]\d*)-([1-9]\d*)", parsed.human_email_lines)
+        if match is None or int(match.group(1)) > int(match.group(2)):
+            parser.error("--human-email-lines must be an inclusive START-END range.")
+        human_email_lines = int(match.group(1)), int(match.group(2))
+    if parsed.human_email_file is not None and not parsed.restart_running:
+        parser.error("human email authority is only valid with --restart-running.")
     if not any(modes) and bool(parsed.session_id) == bool(parsed.prompt_file):
         parser.error("provide exactly one of --session-id or --prompt-file.")
     if parsed.recovery_evidence and not parsed.recover_non_codex:
@@ -202,6 +220,8 @@ def parse_args(argv: list[str]) -> Args:
         recovery_output=parsed.recovery_output.expanduser().resolve() if parsed.recovery_output else None,
         failed_delivery_id=parsed.failed_delivery_id or "",
         recover_update_prompt=parsed.recover_update_prompt,
+        human_email_file=parsed.human_email_file.expanduser() if parsed.human_email_file else None,
+        human_email_lines=human_email_lines,
     )
 
 
@@ -267,7 +287,7 @@ def current_todo_entries(text: str) -> set[str]:
     return entries
 
 
-def validate_task(args: Args, pane: Pane) -> bool:
+def validate_task(args: Args, pane: Pane) -> tuple[bool, str]:
     path = task_path(args.root, args.task_file)
     if not path.is_file():
         raise StartError(f"task file does not exist: {path}")
@@ -276,15 +296,110 @@ def validate_task(args: Args, pane: Pane) -> bool:
         raise StartError("task file requires valid frontmatter.")
     if metadata.status not in TASK_FRONTMATTER_STATUSES - {"done"}:
         raise StartError(f"task status is not active: {metadata.status}")
-    if metadata.tool != "codex":
-        raise StartError(f"same-pane start supports only `tool: codex`, got {metadata.tool!r}.")
+    if metadata.tool not in {"codex", "pcodx"}:
+        raise StartError(f"same-pane start supports only `tool: codex` or `tool: pcodx`, got {metadata.tool!r}.")
     if resolve_pane(metadata.runat).pane_id != pane.pane_id:
         raise StartError(f"task `runat` {metadata.runat} does not identify target {pane.target}.")
     todo = args.root / "TODO.md"
     expected = f"{path.name} {metadata.runat}"
     if not todo.is_file() or expected not in current_todo_entries(todo.read_text(encoding="utf-8")):
         raise StartError(f"TODO `current` does not contain exact task entry: {expected}")
-    return metadata.is_manager
+    return metadata.is_manager, metadata.tool
+
+
+def human_restart_excerpt(args: Args) -> str:
+    """Read a bounded authoritative email excerpt for an h* same-pane restart."""
+
+    if args.human_email_file is None or args.human_email_lines is None:
+        raise StartError("human-owned pane restart requires --human-email-file and --human-email-lines.")
+    candidate = args.human_email_file
+    if not candidate.is_absolute():
+        candidate = args.root / candidate
+    path = candidate.resolve(strict=False)
+    mail_root = (args.root / "manager_mail").resolve()
+    if not path.is_relative_to(mail_root) or not path.is_file():
+        raise StartError("human restart authority must be a readable email source under ROOT/manager_mail.")
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as error:
+        raise StartError(f"human restart authority is not readable: {error}") from error
+    start_line, end_line = args.human_email_lines
+    if end_line > len(lines):
+        raise StartError("human restart authority line range exceeds its source email.")
+    return "\n".join(lines[start_line - 1 : end_line])
+
+
+def require_human_restart_authority(args: Args, pane: Pane) -> None:
+    """Allow an h* respawn only for an exact direct human restart request."""
+
+    if not pane.target.partition(":")[0].startswith("h"):
+        return
+    if not args.restart_running:
+        raise StartError("human-owned panes support only email-authorized --restart-running recovery.")
+    exact_targets = {pane.target}
+    if pane.target.endswith(".0"):
+        exact_targets.add(pane.target[:-2])
+    request = re.compile(
+        rf"^\s*(?:please\s+)?restart\s+[`'\"]?(?:{'|'.join(re.escape(target) for target in sorted(exact_targets))})(?:\s+in\s+the\s+same\s+pane)?\s*[.!]?\s*$",
+        flags=re.IGNORECASE,
+    )
+    if not any(request.fullmatch(line) for line in human_restart_excerpt(args).splitlines()):
+        raise StartError("human restart authority must contain one exact direct restart request naming this pane.")
+
+
+def descendant_pids(root_pid: int) -> set[int]:
+    """Return the current descendant process IDs without trusting process text."""
+
+    result = run(["ps", "-eo", "pid=,ppid="])
+    if result.returncode != 0:
+        raise StartError("could not inspect the live process tree for PCODX recovery.")
+    children: dict[int, set[int]] = {}
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) != 2 or not all(part.isdigit() for part in parts):
+            continue
+        pid, parent = map(int, parts)
+        children.setdefault(parent, set()).add(pid)
+    descendants: set[int] = set()
+    frontier = [root_pid]
+    while frontier:
+        parent = frontier.pop()
+        for child in children.get(parent, set()):
+            if child not in descendants:
+                descendants.add(child)
+                frontier.append(child)
+    return descendants
+
+
+def pcodx_state(pane: Pane) -> dict[str, str]:
+    """Capture the one live PCODX state binding required for a same-pane resume."""
+
+    candidates: set[tuple[tuple[str, str], ...]] = set()
+    for pid in descendant_pids(pane.pane_pid):
+        try:
+            values = dict(
+                field.split("=", 1)
+                for field in Path(f"/proc/{pid}/environ").read_bytes().decode("utf-8").split("\0")
+                if "=" in field
+            )
+        except (OSError, UnicodeDecodeError):
+            continue
+        if values.get("PCODX_MODE") == "1" and all(values.get(key) for key in PCODX_ENV_KEYS):
+            candidates.add(tuple((key, values[key]) for key in PCODX_ENV_KEYS))
+    if len(candidates) != 1:
+        raise StartError("could not capture one unambiguous live PCODX state binding; the pane was not replaced.")
+    state = dict(next(iter(candidates)))
+    run_dir = Path(state["PCODX_RUN_DIR"])
+    ledger = Path(state["PCODX_LEDGER_PATH"])
+    if (
+        not Path(state["PCODX_POC_ROOT"]).is_dir()
+        or not run_dir.is_absolute()
+        or not ledger.is_absolute()
+        or not ledger.is_relative_to(run_dir)
+        or PCODX_SESSION_RE.fullmatch(state["PCODX_SESSION_ID"]) is None
+    ):
+        raise StartError("live PCODX state binding is invalid; the pane was not replaced.")
+    return state
 
 
 def prompt_text(args: Args, is_manager: bool) -> str:
@@ -300,27 +415,37 @@ def prompt_text(args: Args, is_manager: bool) -> str:
     return "\n\n".join(source.read_text(encoding="utf-8").rstrip() for source in sources) + "\n"
 
 
-def launch_command(args: Args, pane: Pane, prompt_path: Path | None, marker: str, *, replace_process: bool = False) -> str:
-    codex = [
-        CODEX_LAUNCH_COMMAND,
-        "@openai/codex",
-        "--dangerously-bypass-approvals-and-sandbox",
-        "--model",
-        args.model,
-        "--config",
-        f'model_reasoning_effort="{args.reasoning_effort}"',
-        "--config",
-        "check_for_update_on_startup=false",
-    ]
+def launch_command(
+    args: Args,
+    pane: Pane,
+    prompt_path: Path | None,
+    marker: str,
+    *,
+    replace_process: bool = False,
+    tool: str = "codex",
+    pcodx_env: Mapping[str, str] | None = None,
+) -> str:
+    executable = CODEX_LAUNCH_COMMAND if tool == "codex" else PCODX_LAUNCH_COMMAND
+    codex = [executable]
+    if tool == "codex":
+        codex.append("@openai/codex")
+    codex.extend(("--dangerously-bypass-approvals-and-sandbox", "--model", args.model, "--config", f'model_reasoning_effort="{args.reasoning_effort}"'))
+    if tool == "codex":
+        codex.extend(("--config", "check_for_update_on_startup=false"))
+    if tool == "pcodx":
+        if pcodx_env is None or tuple(pcodx_env) != PCODX_ENV_KEYS or any(not pcodx_env[key] for key in PCODX_ENV_KEYS):
+            raise StartError("PCODX launch requires an exact live state binding.")
     if args.session_id:
         codex.extend(("resume", args.session_id))
     rendered = shlex.join(codex)
     if prompt_path is not None:
         rendered += f' "$(cat -- {shlex.quote(str(prompt_path))})"'
-    exports = f"export OMO_AGENT_TMUX_TARGET={shlex.quote(pane.target)}"
+    exports = [f"export OMO_AGENT_TMUX_TARGET={shlex.quote(pane.target)}"]
+    if pcodx_env is not None:
+        exports.extend(f"export {key}={shlex.quote(pcodx_env[key])}" for key in PCODX_ENV_KEYS)
     announce = f"printf '%s\\n' {shlex.quote(marker)}"
     execution = f"exec {rendered}" if replace_process else rendered
-    return f"{exports}; cd {shlex.quote(str(pane.workdir))} && {announce} && {execution}"
+    return f"{'; '.join(exports)}; cd {shlex.quote(str(pane.workdir))} && {announce} && {execution}"
 
 
 def verify_same_pane(expected: Pane) -> None:
@@ -916,8 +1041,7 @@ def start(args: Args) -> str:
     if args.recover_update_prompt and (not args.session_id or args.prompt_file is not None):
         raise StartError("--recover-update-prompt requires --session-id and does not accept --prompt-file.")
     pane = resolve_pane(args.target)
-    if pane.target.partition(":")[0].startswith("h"):
-        raise StartError("omo_codex_start cannot modify a human-owned `h*` tmux session; use the human-authorized task launcher.")
+    require_human_restart_authority(args, pane)
     if os.environ.get("TMUX_PANE") == pane.pane_id:
         raise StartError("run this helper from a different pane than the empty target.")
     if not any(modes):
@@ -927,7 +1051,7 @@ def start(args: Args) -> str:
         verify_same_pane(pane)
         if not any(modes):
             require_same_shell(pane)
-        is_manager = validate_task(args, pane)
+        is_manager, task_tool = validate_task(args, pane)
         if args.restart_running:
             require_restartable_codex(pane)
         if args.recover_non_codex:
@@ -950,6 +1074,9 @@ def start(args: Args) -> str:
             skip_codex_update_prompt(pane, args.session_id)
             return wait_update_recovery(pane, args.startup_timeout_s)
         effective_args = args
+        live_pcodx_state: dict[str, str] | None = None
+        if args.restart_running and task_tool == "pcodx":
+            live_pcodx_state = pcodx_state(pane)
         if args.restart_running and not args.session_id:
             if args.dry_run:
                 effective_args = replace(args, session_id="00000000-0000-4000-8000-000000000000")
@@ -958,6 +1085,8 @@ def start(args: Args) -> str:
                 if not session_id:
                     raise StartError("could not capture the current Codex session id; the pane was not replaced.")
                 require_restartable_codex(pane)
+                if task_tool == "pcodx" and pcodx_state(pane) != live_pcodx_state:
+                    raise StartError("live PCODX state changed during session capture; the pane was not replaced.")
                 effective_args = replace(args, session_id=session_id)
         text = prompt_text(effective_args, is_manager)
         prompt_path: Path | None = None
@@ -975,6 +1104,8 @@ def start(args: Args) -> str:
                 prompt_path,
                 marker,
                 replace_process=args.restart_running or args.recover_non_codex,
+                tool=task_tool,
+                pcodx_env=live_pcodx_state,
             )
             if args.dry_run:
                 print(f"target: {pane.target}")
