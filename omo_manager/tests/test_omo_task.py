@@ -1053,6 +1053,7 @@ class OmoTaskTests(unittest.TestCase):
             self.assertEqual("", result.stderr)
             self.assertEqual(0, result.returncode)
             sent = captured.read_text(encoding="utf-8")
+            self.assertIn("check_for_update_on_startup=false", sent)
             self.assertIn('model_reasoning_effort="max"', sent)
             self.assertIn("model_reasoning_effort='ultra'", sent)
             self.assertIn("prompt\n", sent)

@@ -74,6 +74,7 @@ PCODX_SESSION_ID_TOML=$(PCODX_SESSION_ID="$PCODX_SESSION_ID" python3 -c 'import 
 
 exec bunx @openai/codex \
   --dangerously-bypass-approvals-and-sandbox \
+  --config 'check_for_update_on_startup=false' \
   --config "developer_instructions=$PCODX_DEVELOPER_INSTRUCTIONS_TOML" \
   --config 'mcp_servers.pcodx_partial_compact.command="bun"' \
   --config "mcp_servers.pcodx_partial_compact.args=[\"run\",\"$PCODX_POC_ROOT/src/mcp-server.ts\"]" \

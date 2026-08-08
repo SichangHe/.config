@@ -5,13 +5,17 @@ import os
 import subprocess
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import call, patch
+from unittest.mock import patch
 
 import yaml
 from omo_manager.omo_codex_start import (
     Args,
+    HUMAN_RESTART_AUTHORITY_FILE,
+    HUMAN_RESTART_AUTHORITY_LINES,
+    HUMAN_RESTART_TASK_FILE,
     Pane,
     RECOVERY_EVENT_DIRNAME,
     RECOVERY_RECEIPT_DIRNAME,
@@ -77,6 +81,8 @@ class CodexStartTests(unittest.TestCase):
         status: str = "blocked",
         manager: bool = False,
         tool: str = "codex",
+        pending: list[str] | None = None,
+        task_file: str = "worker.md",
     ) -> None:
         fields = {
             "version": "v1.0.0",
@@ -86,11 +92,25 @@ class CodexStartTests(unittest.TestCase):
             "tool": tool,
             "managerat": "cfg:1",
             "is_manager": manager,
-            "pending_task_items": [],
+            "pending_task_items": pending if pending is not None else [],
         }
-        text = "---\n" + yaml.safe_dump({key: value for key, value in fields.items() if value is not None}, sort_keys=False) + "---\n\nGoal.\n"
-        (root / "worker.md").write_text(text, encoding="utf-8")
-        (root / "TODO.md").write_text(f"current:\n\nworker.md {runat}\n", encoding="utf-8")
+        frontmatter = yaml.safe_dump({key: value for key, value in fields.items() if value is not None}, sort_keys=False)
+        frontmatter = frontmatter.replace("pending_task_items:\n- ", "pending_task_items:\n  - ")
+        text = "---\n" + frontmatter + "---\n\nGoal.\n"
+        (root / task_file).write_text(text, encoding="utf-8")
+        (root / "TODO.md").write_text(f"current:\n\n{task_file} {runat}\n", encoding="utf-8")
+
+    def write_human_restart_authority(self, root: Path) -> Path:
+        mail = root / "manager_mail"
+        mail.mkdir(mode=0o700)
+        mail.chmod(0o700)
+        source = root / HUMAN_RESTART_AUTHORITY_FILE
+        source.write_bytes(
+            b"Subject: Re: human_task_planner.md: hwl:3 restart needs an email-native authorization\n\n"
+            b"Why have you not restarted hwl:3? Do it now\r\n"
+        )
+        source.chmod(0o600)
+        return source
 
     def write_recovery_receipt(self, root: Path, pane: Pane, lines: list[str], *, observed_at: datetime | None = None, digest_lines: list[str] | None = None) -> Path:
         event_number = len(list((root / RECOVERY_EVENT_DIRNAME).glob("*.event"))) + 1
@@ -169,7 +189,10 @@ class CodexStartTests(unittest.TestCase):
             self.write_task(root)
             pane = Pane("cfg:2.0", "%2", "@2", "zsh", root)
             with patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane):
-                self.assertEqual((False, "codex"), validate_task(self.args(root), pane))
+                binding = validate_task(self.args(root), pane)
+            self.assertFalse(binding.is_manager)
+            self.assertEqual("codex", binding.tool)
+            self.assertEqual((), binding.pending_task_items)
             (root / "TODO.md").write_text("current:\n", encoding="utf-8")
             with patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane):
                 with self.assertRaisesRegex(StartError, "TODO `current`"):
@@ -642,9 +665,13 @@ class CodexStartTests(unittest.TestCase):
         self.assertIn("resume 019f670b-6a2f-7463-b9be-9aa6ff0cec43", command)
 
     def test_respawn_replaces_process_and_preserves_pane_identity(self) -> None:
-        pane = Pane("cfg:2.0", "%2", "@2", "bun", Path("/tmp/work logs"))
+        pane = Pane("cfg:2.0", "%2", "@2", "bun", Path("/tmp/work logs"), 4242)
         completed = subprocess.CompletedProcess([], 0, "", "")
-        with patch("omo_manager.omo_codex_start.run", return_value=completed) as run, patch("omo_manager.omo_codex_start.verify_same_pane") as verify:
+        with (
+            patch("omo_manager.omo_codex_start.run", return_value=completed) as run,
+            patch("omo_manager.omo_codex_start.verify_same_process") as verify_process,
+            patch("omo_manager.omo_codex_start.verify_same_pane") as verify_pane,
+        ):
             respawn_codex(pane, "exec codex resume session")
         run.assert_called_once_with(
             [
@@ -653,21 +680,27 @@ class CodexStartTests(unittest.TestCase):
                 "-F",
                 "-t",
                 "%2",
-                "#{&&:#{==:#{pane_id},%2},#{==:#{window_id},@2},#{==:#{session_name}:#{window_index}.#{pane_index},cfg:2.0}}",
+                "#{&&:#{==:#{pane_id},%2},#{==:#{window_id},@2},#{==:#{session_name}:#{window_index}.#{pane_index},cfg:2.0},#{==:#{pane_pid},4242},#{==:#{pane_current_command},bun}}",
                 "respawn-pane -k -t %2 -c '/tmp/work logs' 'exec codex resume session'",
                 "run-shell 'exit 1'",
             ]
         )
-        self.assertEqual([call(pane), call(pane)], verify.call_args_list)
+        verify_process.assert_called_once_with(pane)
+        verify_pane.assert_called_once_with(pane)
 
     def test_respawn_refuses_atomic_identity_guard_failure_without_post_check(self) -> None:
         pane = Pane("cfg:2.0", "%2", "@2", "bun", Path("/tmp/work logs"))
         failed = subprocess.CompletedProcess([], 1, "", "moved")
-        with patch("omo_manager.omo_codex_start.run", return_value=failed) as run, patch("omo_manager.omo_codex_start.verify_same_pane") as verify:
+        with (
+            patch("omo_manager.omo_codex_start.run", return_value=failed) as run,
+            patch("omo_manager.omo_codex_start.verify_same_process") as verify_process,
+            patch("omo_manager.omo_codex_start.verify_same_pane") as verify_pane,
+        ):
             with self.assertRaisesRegex(StartError, "failed to respawn Codex"):
                 respawn_codex(pane, "exec codex resume session")
         run.assert_called_once()
-        verify.assert_called_once_with(pane)
+        verify_process.assert_called_once_with(pane)
+        verify_pane.assert_not_called()
 
     def test_restart_captures_session_before_atomic_respawn(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
@@ -681,9 +714,11 @@ class CodexStartTests(unittest.TestCase):
                 patch("omo_manager.omo_codex_start.query_status_session_id", return_value=("019f670b-6a2f-7463-b9be-9aa6ff0cec43", "")) as capture,
                 patch("omo_manager.omo_codex_start.respawn_codex") as respawn,
                 patch("omo_manager.omo_codex_start.wait_started", return_value="running"),
+                patch("omo_manager.omo_codex_start.verify_restart_continuity") as continuity,
             ):
                 self.assertEqual("running", start(args))
             capture.assert_called_once_with("%2", 240, 10.0)
+            continuity.assert_called_once()
             command = respawn.call_args.args[1]
             self.assertIn("resume 019f670b-6a2f-7463-b9be-9aa6ff0cec43", command)
 
@@ -790,7 +825,19 @@ class CodexStartTests(unittest.TestCase):
             self.write_task(root, tool="pcodx")
             pane = Pane("cfg:2.0", "%2", "@2", "zsh", root)
             with patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane):
-                self.assertEqual((False, "pcodx"), validate_task(self.args(root), pane))
+                binding = validate_task(self.args(root, session_id="", restart_running=True), pane)
+            self.assertEqual("pcodx", binding.tool)
+
+    def test_validate_task_rejects_pcodx_outside_live_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root, tool="pcodx")
+            pane = Pane("cfg:2.0", "%2", "@2", "zsh", root)
+            with (
+                patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                self.assertRaisesRegex(StartError, "limited to --restart-running"),
+            ):
+                validate_task(self.args(root), pane)
 
     def test_pcodx_restart_command_preserves_model_without_nested_codex_package(self) -> None:
         root = Path("/tmp/work logs")
@@ -814,26 +861,263 @@ class CodexStartTests(unittest.TestCase):
         with self.assertRaisesRegex(StartError, "exact live state binding"):
             launch_command(self.args(root), pane, None, "[marker]", tool="pcodx")
 
-    def test_human_restart_authority_requires_exact_source_and_target(self) -> None:
+    def test_human_restart_authority_accepts_only_assigned_source_and_lines(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root)
-            mail = root / "manager_mail"
-            mail.mkdir()
-            source = mail / "restart.txt"
-            source.write_text("Subject: restart\n\nRestart hwl:3 in the same pane\n", encoding="utf-8")
-            pane = Pane("hwl:3.0", "%3", "@3", "bunx", root)
+            source = self.write_human_restart_authority(root)
+            pane = Pane("hwl:3.0", "%3", "@3", "bun", root, 4242)
             authorized = self.args(
                 root,
+                task_file=HUMAN_RESTART_TASK_FILE,
                 target="hwl:3",
                 session_id="",
                 restart_running=True,
-                human_email_file=Path("manager_mail/restart.txt"),
-                human_email_lines=(3, 3),
+                human_email_file=HUMAN_RESTART_AUTHORITY_FILE,
+                human_email_lines=HUMAN_RESTART_AUTHORITY_LINES,
             )
-            require_human_restart_authority(authorized, pane)
-            source.write_text("Subject: restart\n\nRestart hwl:4 in the same pane\n", encoding="utf-8")
-            with self.assertRaisesRegex(StartError, "exact direct restart request"):
-                require_human_restart_authority(authorized, pane)
+            with patch("omo_manager.omo_codex_start.HUMAN_RESTART_ROOT", root):
+                authority = require_human_restart_authority(authorized, pane)
+            self.assertIsNotNone(authority)
+            assert authority is not None
+            self.assertEqual(source, authority.source_path)
+            self.assertEqual("restart", authority.action)
+            self.assertEqual("hwl:3.0", authority.target)
+            self.assertEqual(("%3", "@3", 4242), (authority.pane_id, authority.window_id, authority.pane_pid))
+            with (
+                patch("omo_manager.omo_codex_start.HUMAN_RESTART_ROOT", root),
+                self.assertRaisesRegex(StartError, "exact approved source lines"),
+            ):
+                require_human_restart_authority(replace(authorized, human_email_lines=(3, 3)), pane)
+
+    def test_human_restart_authority_rejects_byte_identical_fake_root_and_other_task(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_human_restart_authority(root)
+            pane = Pane("hwl:3.0", "%3", "@3", "bun", root, 4242)
+            args = self.args(
+                root,
+                task_file=HUMAN_RESTART_TASK_FILE,
+                target="hwl:3",
+                session_id="",
+                restart_running=True,
+                human_email_file=HUMAN_RESTART_AUTHORITY_FILE,
+                human_email_lines=HUMAN_RESTART_AUTHORITY_LINES,
+            )
+            with self.assertRaisesRegex(StartError, "exact approved work-log root"):
+                require_human_restart_authority(args, pane)
+            with (
+                patch("omo_manager.omo_codex_start.HUMAN_RESTART_ROOT", root),
+                self.assertRaisesRegex(StartError, "exact approved human_task_planner.md task"),
+            ):
+                require_human_restart_authority(replace(args, task_file="other.md"), pane)
+
+    def test_human_restart_authority_rejects_other_h_target_and_paraphrase(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            source = self.write_human_restart_authority(root)
+            args = self.args(
+                root,
+                task_file=HUMAN_RESTART_TASK_FILE,
+                target="hwl:3",
+                session_id="",
+                restart_running=True,
+                human_email_file=HUMAN_RESTART_AUTHORITY_FILE,
+                human_email_lines=HUMAN_RESTART_AUTHORITY_LINES,
+            )
+            other = Pane("hwl:4.0", "%4", "@4", "bun", root, 4242)
+            with self.assertRaisesRegex(StartError, "only to the exact approved hwl:3"):
+                require_human_restart_authority(replace(args, target="hwl:4"), other)
+            source.write_text("Subject: restart\n\nPlease reboot hwl:3 where it is.\n", encoding="utf-8")
+            source.chmod(0o600)
+            with (
+                patch("omo_manager.omo_codex_start.HUMAN_RESTART_ROOT", root),
+                self.assertRaisesRegex(StartError, "content does not match"),
+            ):
+                require_human_restart_authority(args, Pane("hwl:3.0", "%3", "@3", "bun", root, 4242))
+
+    def test_exact_hwl_restart_preserves_pane_session_task_and_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(
+                root,
+                runat="hwl:3",
+                status="long_running",
+                manager=True,
+                tool="pcodx",
+                pending=["keep exact queue"],
+                task_file=HUMAN_RESTART_TASK_FILE,
+            )
+            self.write_human_restart_authority(root)
+            before_task = (root / HUMAN_RESTART_TASK_FILE).read_bytes()
+            initial = Pane("hwl:3.0", "%3", "@3", "bun", root, 4242)
+            resumed = replace(initial, pane_pid=5252)
+            pcodx = {
+                "PCODX_POC_ROOT": "/tmp/pcodx-poc",
+                "PCODX_RUN_DIR": "/tmp/pcodx-run",
+                "PCODX_LEDGER_PATH": "/tmp/pcodx-run/ledger.json",
+                "PCODX_SESSION_ID": "pcodx-3",
+            }
+            restarted = False
+
+            def resolve(_target: str) -> Pane:
+                return resumed if restarted else initial
+
+            def respawn(_pane: Pane, _command: str) -> None:
+                nonlocal restarted
+                restarted = True
+
+            args = self.args(
+                root,
+                task_file=HUMAN_RESTART_TASK_FILE,
+                target="hwl:3",
+                session_id="",
+                restart_running=True,
+                human_email_file=HUMAN_RESTART_AUTHORITY_FILE,
+                human_email_lines=HUMAN_RESTART_AUTHORITY_LINES,
+            )
+            with (
+                patch("omo_manager.omo_codex_start.resolve_pane", side_effect=resolve),
+                patch("omo_manager.omo_codex_start.HUMAN_RESTART_ROOT", root),
+                patch("omo_manager.omo_codex_start.inspect", return_value=Report("running", ["working"])),
+                patch("omo_manager.omo_codex_start.pcodx_state", return_value=pcodx),
+                patch("omo_manager.omo_codex_start.query_status_session_id", return_value=(self.SESSION_ID, "")) as sessions,
+                patch("omo_manager.omo_codex_start.respawn_codex", side_effect=respawn) as replace_process,
+                patch("omo_manager.omo_codex_start.wait_started", return_value="ready"),
+            ):
+                self.assertEqual("ready", start(args))
+            self.assertTrue(restarted)
+            self.assertEqual(2, sessions.call_count)
+            replace_process.assert_called_once()
+            self.assertIn(f"resume {self.SESSION_ID}", replace_process.call_args.args[1])
+            self.assertEqual(before_task, (root / HUMAN_RESTART_TASK_FILE).read_bytes())
+
+    def test_exact_hwl_restart_rejects_missing_original_session(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root, runat="hwl:3", tool="pcodx", task_file=HUMAN_RESTART_TASK_FILE)
+            self.write_human_restart_authority(root)
+            pane = Pane("hwl:3.0", "%3", "@3", "bun", root, 4242)
+            pcodx = {
+                "PCODX_POC_ROOT": "/tmp/pcodx-poc",
+                "PCODX_RUN_DIR": "/tmp/pcodx-run",
+                "PCODX_LEDGER_PATH": "/tmp/pcodx-run/ledger.json",
+                "PCODX_SESSION_ID": "pcodx-3",
+            }
+            args = self.args(
+                root,
+                task_file=HUMAN_RESTART_TASK_FILE,
+                target="hwl:3",
+                session_id="",
+                restart_running=True,
+                human_email_file=HUMAN_RESTART_AUTHORITY_FILE,
+                human_email_lines=HUMAN_RESTART_AUTHORITY_LINES,
+            )
+            with (
+                patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                patch("omo_manager.omo_codex_start.HUMAN_RESTART_ROOT", root),
+                patch("omo_manager.omo_codex_start.inspect", return_value=Report("running", ["working"])),
+                patch("omo_manager.omo_codex_start.pcodx_state", return_value=pcodx),
+                patch("omo_manager.omo_codex_start.query_status_session_id", return_value=("", "")),
+                patch("omo_manager.omo_codex_start.respawn_codex") as respawn,
+                self.assertRaisesRegex(StartError, "could not capture the current Codex session"),
+            ):
+                start(args)
+            respawn.assert_not_called()
+
+    def test_exact_hwl_restart_rejects_changed_pane_before_respawn(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root, runat="hwl:3", tool="pcodx", task_file=HUMAN_RESTART_TASK_FILE)
+            self.write_human_restart_authority(root)
+            initial = Pane("hwl:3.0", "%3", "@3", "bun", root, 4242)
+            changed = Pane("hwl:3.0", "%9", "@9", "bun", root, 5252)
+            pcodx = {
+                "PCODX_POC_ROOT": "/tmp/pcodx-poc",
+                "PCODX_RUN_DIR": "/tmp/pcodx-run",
+                "PCODX_LEDGER_PATH": "/tmp/pcodx-run/ledger.json",
+                "PCODX_SESSION_ID": "pcodx-3",
+            }
+            pane_changed = False
+
+            def resolve(_target: str) -> Pane:
+                return changed if pane_changed else initial
+
+            def capture(_target: str, _lines: int, _wait_s: float) -> tuple[str, str]:
+                nonlocal pane_changed
+                pane_changed = True
+                return self.SESSION_ID, ""
+
+            args = self.args(
+                root,
+                task_file=HUMAN_RESTART_TASK_FILE,
+                target="hwl:3",
+                session_id="",
+                restart_running=True,
+                human_email_file=HUMAN_RESTART_AUTHORITY_FILE,
+                human_email_lines=HUMAN_RESTART_AUTHORITY_LINES,
+            )
+            with (
+                patch("omo_manager.omo_codex_start.resolve_pane", side_effect=resolve),
+                patch("omo_manager.omo_codex_start.HUMAN_RESTART_ROOT", root),
+                patch("omo_manager.omo_codex_start.inspect", return_value=Report("running", ["working"])),
+                patch("omo_manager.omo_codex_start.pcodx_state", return_value=pcodx),
+                patch("omo_manager.omo_codex_start.query_status_session_id", side_effect=capture),
+                patch("omo_manager.omo_codex_start.respawn_codex") as respawn,
+                self.assertRaisesRegex(StartError, "pane or window identity changed"),
+            ):
+                start(args)
+            respawn.assert_not_called()
+
+    def test_exact_hwl_restart_rejects_stale_source_and_queue_drift(self) -> None:
+        for drift in ("source", "queue"):
+            with self.subTest(drift=drift), tempfile.TemporaryDirectory() as raw_root:
+                root = Path(raw_root)
+                self.write_task(
+                    root,
+                    runat="hwl:3",
+                    tool="pcodx",
+                    pending=["preserve me"],
+                    task_file=HUMAN_RESTART_TASK_FILE,
+                )
+                source = self.write_human_restart_authority(root)
+                pane = Pane("hwl:3.0", "%3", "@3", "bun", root, 4242)
+                pcodx = {
+                    "PCODX_POC_ROOT": "/tmp/pcodx-poc",
+                    "PCODX_RUN_DIR": "/tmp/pcodx-run",
+                    "PCODX_LEDGER_PATH": "/tmp/pcodx-run/ledger.json",
+                    "PCODX_SESSION_ID": "pcodx-3",
+                }
+
+                def capture(_target: str, _lines: int, _wait_s: float) -> tuple[str, str]:
+                    if drift == "source":
+                        source_stat = source.stat()
+                        os.utime(source, ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns + 1))
+                    else:
+                        task = root / HUMAN_RESTART_TASK_FILE
+                        task.write_text(task.read_text(encoding="utf-8").replace("- preserve me", "- queue drift"), encoding="utf-8")
+                    return self.SESSION_ID, ""
+
+                args = self.args(
+                    root,
+                    task_file=HUMAN_RESTART_TASK_FILE,
+                    target="hwl:3",
+                    session_id="",
+                    restart_running=True,
+                    human_email_file=HUMAN_RESTART_AUTHORITY_FILE,
+                    human_email_lines=HUMAN_RESTART_AUTHORITY_LINES,
+                )
+                error = "stale or mismatched" if drift == "source" else "task or pending queue changed"
+                with (
+                    patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                    patch("omo_manager.omo_codex_start.HUMAN_RESTART_ROOT", root),
+                    patch("omo_manager.omo_codex_start.inspect", return_value=Report("running", ["working"])),
+                    patch("omo_manager.omo_codex_start.pcodx_state", return_value=pcodx),
+                    patch("omo_manager.omo_codex_start.query_status_session_id", side_effect=capture),
+                    patch("omo_manager.omo_codex_start.respawn_codex") as respawn,
+                    self.assertRaisesRegex(StartError, error),
+                ):
+                    start(args)
+                respawn.assert_not_called()
 
     def test_post_marker_capture_uses_numeric_target_not_pane_id(self) -> None:
         pane = Pane("cfg:2.0", "%2", "@2", "zsh", Path("/tmp"))

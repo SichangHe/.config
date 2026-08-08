@@ -23,10 +23,10 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Mapping
 
 try:
     from omo_manager.omo_codex_status import Args as StatusArgs
@@ -55,6 +55,17 @@ RESUME_ARG_RE = re.compile(r"resume(?P<session>[0-9a-fA-F-]{36})")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 PCODX_SESSION_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
 PCODX_ENV_KEYS = ("PCODX_POC_ROOT", "PCODX_RUN_DIR", "PCODX_LEDGER_PATH", "PCODX_SESSION_ID")
+HUMAN_RESTART_ROOT = Path("/shagent/work_logs")
+HUMAN_RESTART_TASK_FILE = "human_task_planner.md"
+HUMAN_RESTART_AUTHORITY_FILE = Path("manager_mail/85c5dff58359-298.txt")
+HUMAN_RESTART_AUTHORITY_LINES = (1, 3)
+HUMAN_RESTART_AUTHORITY_SHA256 = "fc0ff6477ae67dc694738d6d6b3146e6a72555a08b2c367360fb3899e2e30a09"
+HUMAN_RESTART_AUTHORITY_TEXT = """Subject: Re: human_task_planner.md: hwl:3 restart needs an email-native authorization
+
+Why have you not restarted hwl:3? Do it now"""
+HUMAN_RESTART_TARGET = "hwl:3.0"
+HUMAN_RESTART_ACTION = "restart"
+HUMAN_RESTART_SOURCE_MAX_BYTES = 1_000_000
 # Delivery IDs are persisted as filenames.  Keep them opaque but basename-safe
 # so a malformed CLI value can never escape the dedicated event directory.
 DELIVERY_ID_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
@@ -112,6 +123,32 @@ class Pane:
     command: str
     workdir: Path
     pane_pid: int = 0
+
+
+@dataclass(frozen=True)
+class TaskBinding:
+    is_manager: bool
+    tool: str
+    status: str
+    runat: str
+    pending_task_items: tuple[str, ...]
+    task_sha256: str
+
+
+@dataclass(frozen=True)
+class HumanRestartAuthority:
+    source_path: Path
+    source_lines: tuple[int, int]
+    source_dev: int
+    source_inode: int
+    source_size: int
+    source_mtime_ns: int
+    source_sha256: str
+    action: str
+    target: str
+    pane_id: str
+    window_id: str
+    pane_pid: int
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -287,64 +324,157 @@ def current_todo_entries(text: str) -> set[str]:
     return entries
 
 
-def validate_task(args: Args, pane: Pane) -> tuple[bool, str]:
+def validate_task(args: Args, pane: Pane) -> TaskBinding:
     path = task_path(args.root, args.task_file)
     if not path.is_file():
         raise StartError(f"task file does not exist: {path}")
-    metadata = parse_task_metadata(path.read_text(encoding="utf-8"), args.root)
+    task_bytes = path.read_bytes()
+    metadata = parse_task_metadata(task_bytes.decode("utf-8"), args.root)
     if metadata is None:
         raise StartError("task file requires valid frontmatter.")
     if metadata.status not in TASK_FRONTMATTER_STATUSES - {"done"}:
         raise StartError(f"task status is not active: {metadata.status}")
     if metadata.tool not in {"codex", "pcodx"}:
         raise StartError(f"same-pane start supports only `tool: codex` or `tool: pcodx`, got {metadata.tool!r}.")
+    if metadata.tool == "pcodx" and not args.restart_running:
+        raise StartError("same-pane PCODX support is limited to --restart-running with a live state binding.")
     if resolve_pane(metadata.runat).pane_id != pane.pane_id:
         raise StartError(f"task `runat` {metadata.runat} does not identify target {pane.target}.")
     todo = args.root / "TODO.md"
     expected = f"{path.name} {metadata.runat}"
     if not todo.is_file() or expected not in current_todo_entries(todo.read_text(encoding="utf-8")):
         raise StartError(f"TODO `current` does not contain exact task entry: {expected}")
-    return metadata.is_manager, metadata.tool
+    return TaskBinding(
+        metadata.is_manager,
+        metadata.tool,
+        metadata.status,
+        metadata.runat,
+        metadata.pending_task_items,
+        hashlib.sha256(task_bytes).hexdigest(),
+    )
 
 
-def human_restart_excerpt(args: Args) -> str:
-    """Read a bounded authoritative email excerpt for an h* same-pane restart."""
+def human_restart_source(args: Args) -> tuple[Path, os.stat_result, str]:
+    """Read the one byte-exact private email authorized for `hwl:3`."""
 
     if args.human_email_file is None or args.human_email_lines is None:
         raise StartError("human-owned pane restart requires --human-email-file and --human-email-lines.")
+    try:
+        approved_root = HUMAN_RESTART_ROOT.resolve(strict=True)
+    except OSError as error:
+        raise StartError(f"approved human restart root is unavailable: {error}") from error
+    if args.root.resolve(strict=False) != approved_root:
+        raise StartError("human restart authority is bound to the exact approved work-log root.")
+    if args.human_email_lines != HUMAN_RESTART_AUTHORITY_LINES:
+        raise StartError("human restart authority does not select the exact approved source lines.")
     candidate = args.human_email_file
     if not candidate.is_absolute():
         candidate = args.root / candidate
-    path = candidate.resolve(strict=False)
-    mail_root = (args.root / "manager_mail").resolve()
-    if not path.is_relative_to(mail_root) or not path.is_file():
-        raise StartError("human restart authority must be a readable email source under ROOT/manager_mail.")
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        path = candidate.resolve(strict=True)
+        approved_path = (approved_root / HUMAN_RESTART_AUTHORITY_FILE).resolve(strict=True)
+        mail_root = (approved_root / "manager_mail").resolve(strict=True)
+        mail_root_stat = mail_root.stat()
+    except OSError as error:
+        raise StartError(f"human restart authority source is unavailable: {error}") from error
+    if path != approved_path:
+        raise StartError("human restart authority does not name the exact approved email file.")
+    if (
+        path.parent != mail_root
+        or not stat.S_ISDIR(mail_root_stat.st_mode)
+        or mail_root_stat.st_uid != os.getuid()
+        or stat.S_IMODE(mail_root_stat.st_mode) & 0o077
+    ):
+        raise StartError("human restart authority source directory is not owner-private.")
+    try:
+        with path.open("rb") as source:
+            before = os.fstat(source.fileno())
+            data = source.read(HUMAN_RESTART_SOURCE_MAX_BYTES + 1)
+            after = os.fstat(source.fileno())
+        current = path.stat()
     except OSError as error:
         raise StartError(f"human restart authority is not readable: {error}") from error
+    before_identity = before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns
+    after_identity = after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns
+    current_identity = current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns
+    if before_identity != after_identity or after_identity != current_identity:
+        raise StartError("human restart authority source changed while it was read.")
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_uid != os.getuid()
+        or stat.S_IMODE(before.st_mode) & 0o077
+        or len(data) > HUMAN_RESTART_SOURCE_MAX_BYTES
+    ):
+        raise StartError("human restart authority source is not one bounded owner-private regular file.")
+    digest = hashlib.sha256(data).hexdigest()
+    if digest != HUMAN_RESTART_AUTHORITY_SHA256:
+        raise StartError("human restart authority source content does not match the exact approved email.")
+    try:
+        lines = data.decode("utf-8").splitlines()
+    except UnicodeDecodeError as error:
+        raise StartError("human restart authority is not valid UTF-8.") from error
     start_line, end_line = args.human_email_lines
     if end_line > len(lines):
         raise StartError("human restart authority line range exceeds its source email.")
-    return "\n".join(lines[start_line - 1 : end_line])
+    excerpt = "\n".join(lines[start_line - 1 : end_line])
+    if excerpt != HUMAN_RESTART_AUTHORITY_TEXT:
+        raise StartError("human restart authority excerpt does not match the exact approved request.")
+    return path, before, digest
 
 
-def require_human_restart_authority(args: Args, pane: Pane) -> None:
-    """Allow an h* respawn only for an exact direct human restart request."""
+def require_human_restart_authority(args: Args, pane: Pane) -> HumanRestartAuthority | None:
+    """Bind the sole approved human-owned respawn to its exact live inputs."""
 
     if not pane.target.partition(":")[0].startswith("h"):
-        return
+        return None
     if not args.restart_running:
         raise StartError("human-owned panes support only email-authorized --restart-running recovery.")
-    exact_targets = {pane.target}
-    if pane.target.endswith(".0"):
-        exact_targets.add(pane.target[:-2])
-    request = re.compile(
-        rf"^\s*(?:please\s+)?restart\s+[`'\"]?(?:{'|'.join(re.escape(target) for target in sorted(exact_targets))})(?:\s+in\s+the\s+same\s+pane)?\s*[.!]?\s*$",
-        flags=re.IGNORECASE,
+    if pane.target != HUMAN_RESTART_TARGET:
+        raise StartError("human restart authority applies only to the exact approved hwl:3 pane.")
+    if args.task_file != HUMAN_RESTART_TASK_FILE:
+        raise StartError("human restart authority applies only to the exact approved human_task_planner.md task.")
+    path, source, digest = human_restart_source(args)
+    return HumanRestartAuthority(
+        path,
+        HUMAN_RESTART_AUTHORITY_LINES,
+        source.st_dev,
+        source.st_ino,
+        source.st_size,
+        source.st_mtime_ns,
+        digest,
+        HUMAN_RESTART_ACTION,
+        pane.target,
+        pane.pane_id,
+        pane.window_id,
+        pane.pane_pid,
     )
-    if not any(request.fullmatch(line) for line in human_restart_excerpt(args).splitlines()):
-        raise StartError("human restart authority must contain one exact direct restart request naming this pane.")
+
+
+def verify_human_restart_authority(args: Args, pane: Pane, expected: HumanRestartAuthority | None) -> None:
+    """Recheck source and pane/process custody immediately before respawn."""
+
+    if expected is None:
+        return
+    current = resolve_pane(pane.target)
+    if (current.pane_id, current.window_id, current.pane_pid) != (expected.pane_id, expected.window_id, expected.pane_pid):
+        raise StartError("human restart authority is stale because the approved pane identity changed.")
+    try:
+        actual = require_human_restart_authority(args, current)
+    except StartError as error:
+        raise StartError(f"human restart authority became stale or mismatched: {error}") from error
+    if actual != expected:
+        raise StartError("human restart authority became stale or mismatched before respawn.")
+
+
+def verify_task_binding(args: Args, pane: Pane, expected: TaskBinding) -> None:
+    """Reject task content or pending-queue drift before or after restart."""
+
+    try:
+        actual = validate_task(args, pane)
+    except (OSError, UnicodeError, StartError, ValueError) as error:
+        raise StartError(f"task or pending queue no longer has its captured binding: {error}") from error
+    if actual != expected:
+        raise StartError("task or pending queue changed after restart preparation.")
 
 
 def descendant_pids(root_pid: int) -> set[int]:
@@ -394,8 +524,10 @@ def pcodx_state(pane: Pane) -> dict[str, str]:
     if (
         not Path(state["PCODX_POC_ROOT"]).is_dir()
         or not run_dir.is_absolute()
+        or not run_dir.is_dir()
         or not ledger.is_absolute()
         or not ledger.is_relative_to(run_dir)
+        or (ledger.exists() and not ledger.is_file())
         or PCODX_SESSION_RE.fullmatch(state["PCODX_SESSION_ID"]) is None
     ):
         raise StartError("live PCODX state binding is invalid; the pane was not replaced.")
@@ -454,6 +586,14 @@ def verify_same_pane(expected: Pane) -> None:
         raise StartError("tmux pane or window identity changed during launch.")
 
 
+def verify_same_process(expected: Pane) -> None:
+    current = resolve_pane(expected.target)
+    if current.pane_id != expected.pane_id or current.window_id != expected.window_id:
+        raise StartError("tmux pane or window identity changed before process replacement.")
+    if current.pane_pid != expected.pane_pid or current.command != expected.command:
+        raise StartError("tmux pane process identity changed before process replacement.")
+
+
 def require_same_shell(expected: Pane) -> None:
     current = resolve_pane(expected.target)
     if current.pane_id != expected.pane_id or current.window_id != expected.window_id:
@@ -485,11 +625,13 @@ def respawn_codex(pane: Pane, command: str) -> None:
     # target identity in the server command queue immediately before the
     # destructive operation.  A moved/rebound pane takes the failure branch
     # and is left untouched.
-    verify_same_pane(pane)
-    condition = "#{&&:#{==:#{pane_id},%s},#{==:#{window_id},%s},#{==:#{session_name}:#{window_index}.#{pane_index},%s}}" % (
+    verify_same_process(pane)
+    condition = "#{&&:#{==:#{pane_id},%s},#{==:#{window_id},%s},#{==:#{session_name}:#{window_index}.#{pane_index},%s},#{==:#{pane_pid},%s},#{==:#{pane_current_command},%s}}" % (
         pane.pane_id,
         pane.window_id,
         pane.target,
+        pane.pane_pid,
+        pane.command,
     )
     respawn_command = "respawn-pane -k -t %s -c %s %s" % (pane.pane_id, shlex.quote(str(pane.workdir)), shlex.quote(command))
     result = run(["tmux", "if-shell", "-F", "-t", pane.pane_id, condition, respawn_command, "run-shell 'exit 1'"])
@@ -500,9 +642,9 @@ def respawn_codex(pane: Pane, command: str) -> None:
 
 
 def require_restartable_codex(pane: Pane) -> None:
-    verify_same_pane(pane)
+    verify_same_process(pane)
     report = inspect(StatusArgs(pane.target, 80))
-    verify_same_pane(pane)
+    verify_same_process(pane)
     if report.status not in RESTARTABLE_STATUSES:
         raise StartError(f"target {pane.target} is not a supported live Codex pane: {report.status}")
 
@@ -1020,6 +1162,28 @@ def wait_started(pane: Pane, marker: str, timeout_s: float) -> str:
     raise StartError("timed out waiting for Codex to become running or ready.")
 
 
+def verify_restart_continuity(
+    args: Args,
+    original: Pane,
+    session_id: str,
+    task: TaskBinding,
+    pcodx: Mapping[str, str] | None,
+) -> None:
+    """Prove same-pane, resumed-session, task, queue, and PCODX continuity."""
+
+    current = resolve_pane(original.target)
+    if current.pane_id != original.pane_id or current.window_id != original.window_id:
+        raise StartError("tmux pane or window identity changed after restart.")
+    if current.pane_pid == original.pane_pid:
+        raise StartError("Codex pane process identity did not change during restart.")
+    verify_task_binding(args, current, task)
+    if pcodx is not None and pcodx_state(current) != dict(pcodx):
+        raise StartError("live PCODX state did not retain its original session custody after restart.")
+    resumed_session, _ = query_status_session_id(current.pane_id, 240, min(10.0, args.startup_timeout_s))
+    if resumed_session != session_id:
+        raise StartError("restarted Codex did not prove continuity with the captured original session.")
+
+
 def start(args: Args) -> str:
     modes = (args.restart_running, args.recover_non_codex, args.record_recovery_evidence, args.recover_update_prompt)
     if sum(bool(value) for value in modes) > 1:
@@ -1041,7 +1205,7 @@ def start(args: Args) -> str:
     if args.recover_update_prompt and (not args.session_id or args.prompt_file is not None):
         raise StartError("--recover-update-prompt requires --session-id and does not accept --prompt-file.")
     pane = resolve_pane(args.target)
-    require_human_restart_authority(args, pane)
+    human_restart_authority = require_human_restart_authority(args, pane)
     if os.environ.get("TMUX_PANE") == pane.pane_id:
         raise StartError("run this helper from a different pane than the empty target.")
     if not any(modes):
@@ -1051,7 +1215,7 @@ def start(args: Args) -> str:
         verify_same_pane(pane)
         if not any(modes):
             require_same_shell(pane)
-        is_manager, task_tool = validate_task(args, pane)
+        task_binding = validate_task(args, pane)
         if args.restart_running:
             require_restartable_codex(pane)
         if args.recover_non_codex:
@@ -1075,7 +1239,7 @@ def start(args: Args) -> str:
             return wait_update_recovery(pane, args.startup_timeout_s)
         effective_args = args
         live_pcodx_state: dict[str, str] | None = None
-        if args.restart_running and task_tool == "pcodx":
+        if args.restart_running and task_binding.tool == "pcodx":
             live_pcodx_state = pcodx_state(pane)
         if args.restart_running and not args.session_id:
             if args.dry_run:
@@ -1085,10 +1249,10 @@ def start(args: Args) -> str:
                 if not session_id:
                     raise StartError("could not capture the current Codex session id; the pane was not replaced.")
                 require_restartable_codex(pane)
-                if task_tool == "pcodx" and pcodx_state(pane) != live_pcodx_state:
+                if task_binding.tool == "pcodx" and pcodx_state(pane) != live_pcodx_state:
                     raise StartError("live PCODX state changed during session capture; the pane was not replaced.")
                 effective_args = replace(args, session_id=session_id)
-        text = prompt_text(effective_args, is_manager)
+        text = prompt_text(effective_args, task_binding.is_manager)
         prompt_path: Path | None = None
         try:
             if text:
@@ -1104,7 +1268,7 @@ def start(args: Args) -> str:
                 prompt_path,
                 marker,
                 replace_process=args.restart_running or args.recover_non_codex,
-                tool=task_tool,
+                tool=task_binding.tool,
                 pcodx_env=live_pcodx_state,
             )
             if args.dry_run:
@@ -1117,11 +1281,19 @@ def start(args: Args) -> str:
                 if args.recover_non_codex:
                     require_recovery_target(pane, args.recovery_evidence, args.root)
                     consume_recovery_receipt(args.root, args.recovery_evidence)
+                if args.restart_running:
+                    verify_task_binding(args, pane, task_binding)
+                    if task_binding.tool == "pcodx" and pcodx_state(pane) != live_pcodx_state:
+                        raise StartError("live PCODX state changed before respawn; the pane was not replaced.")
+                    verify_human_restart_authority(args, pane, human_restart_authority)
                 respawn_codex(pane, command)
             else:
                 require_same_shell(pane)
                 send_shell_command(pane, command)
-            return wait_started(pane, marker, args.startup_timeout_s)
+            result = wait_started(pane, marker, args.startup_timeout_s)
+            if args.restart_running:
+                verify_restart_continuity(effective_args, pane, effective_args.session_id, task_binding, live_pcodx_state)
+            return result
         finally:
             if prompt_path is not None:
                 prompt_path.unlink(missing_ok=True)
