@@ -1004,37 +1004,50 @@ def run_capacity_resume(target: str, options: CodexSendOptions, *, before_paste:
         if options.dry_run:
             print(f"would send capacity resume to {target} from {temp_path}")
             return True
+        pane_id = exact_pane_id(target)
+        if not pane_id:
+            raise RuntimeError(f"target does not exist: {target}")
         exists, lines = exact_tail(target, n_lines)
         if not exists:
             raise RuntimeError(f"target does not exist: {target}")
         if not exact_capacity_error(lines):
             raise RuntimeError(f"target does not have only the selected-model-capacity error: {target}")
+        if exact_pane_id(target) != pane_id:
+            raise RuntimeError(f"capacity resume target pane changed before buffer load: {target}")
         _ = subprocess.run(["tmux", "load-buffer", "-b", buffer_name, str(temp_path)], timeout=5, check=True)
         if before_paste is not None:
             before_paste()
+        if exact_pane_id(target) != pane_id:
+            raise RuntimeError(f"capacity resume target pane changed before paste: {target}")
         exists, lines = exact_tail(target, n_lines)
         if not exists:
-            raise RuntimeError(f"target does not exist before paste: {target}")
+            raise RuntimeError(f"target pane does not exist before paste: {target}")
         if not exact_capacity_error(lines):
             raise RuntimeError(f"selected-model-capacity error changed before paste: {target}")
         require_no_existing_input(target)
-        _ = subprocess.run(["tmux", "paste-buffer", "-b", buffer_name, "-t", target], timeout=5, check=True)
-        wait_capacity_resume_paste(target, options)
+        if exact_pane_id(target) != pane_id:
+            raise RuntimeError(f"capacity resume target pane changed before paste: {target}")
+        _ = subprocess.run(["tmux", "paste-buffer", "-b", buffer_name, "-t", pane_id], timeout=5, check=True)
+        wait_capacity_resume_paste(target, options, pane_id)
         for idx in range(options.enter_count):
             if idx:
                 time.sleep(options.enter_delay_s)
-            send_enter(target)
-        return verify_capacity_resume(target, options)
+            if exact_pane_id(target) != pane_id:
+                raise RuntimeError(f"capacity resume target pane changed before submit: {target}")
+            send_enter(pane_id)
+        return verify_capacity_resume(target, options, pane_id)
     finally:
         temp_path.unlink(missing_ok=True)
         if not options.dry_run:
             _ = subprocess.run(["tmux", "delete-buffer", "-b", buffer_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=False)
 
 
-def wait_capacity_resume_paste(target: str, options: CodexSendOptions) -> None:
+def wait_capacity_resume_paste(target: str, options: CodexSendOptions, expected_pane_id: str | None = None) -> None:
     deadline_s = time.monotonic() + options.submit_verify_timeout_s
     while True:
-        lines = tail(target, 80)
+        exists, lines = exact_tail(target, 80)
+        if not exists or (expected_pane_id is not None and exact_pane_id(target) != expected_pane_id):
+            raise RuntimeError(f"capacity resume target pane changed before submit: {target}")
         if has_plan_prompt(lines):
             raise RuntimeError(f"plan prompt appeared before capacity resume submit: {target}")
         if not only_exact_capacity_warning(lines):
@@ -1047,10 +1060,12 @@ def wait_capacity_resume_paste(target: str, options: CodexSendOptions) -> None:
         time.sleep(min(0.25, max(0.05, deadline_s - now_s)))
 
 
-def verify_capacity_resume(target: str, options: CodexSendOptions) -> bool:
+def verify_capacity_resume(target: str, options: CodexSendOptions, expected_pane_id: str | None = None) -> bool:
     deadline_s = time.monotonic() + options.submit_verify_timeout_s
     while True:
-        lines = tail(target, 80)
+        exists, lines = exact_tail(target, 80)
+        if not exists or (expected_pane_id is not None and exact_pane_id(target) != expected_pane_id):
+            raise RuntimeError(f"capacity resume target pane changed during verification: {target}")
         current_status = status(lines, current_block(lines))
         if current_status in {"running", "waiting_subagent"} and not is_real_input_text(current_input_text(lines)):
             return True

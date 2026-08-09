@@ -103,8 +103,6 @@ class TmuxSendTests(unittest.TestCase):
         capacity = ["Selected model is at capacity. Please try a different model.", "› Use /skills to list available skills", "  gpt-5.5"]
         pasted = ["Selected model is at capacity. Please try a different model.", "› resume", "  gpt-5.5"]
         running = ["• Working", "  gpt-5.5"]
-        tails = iter((pasted, running))
-
         def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
             nonlocal loaded_text
             calls.append(command)
@@ -112,7 +110,7 @@ class TmuxSendTests(unittest.TestCase):
                 loaded_text = Path(command[-1]).read_text(encoding="utf-8")
             return subprocess.CompletedProcess(command, 0)
 
-        with patch("omo_manager.omo_tmux_send.exact_tail", side_effect=[(True, capacity), (True, capacity)]), patch("omo_manager.omo_tmux_send.tail", side_effect=lambda *_: next(tails)), patch("omo_manager.omo_tmux_send.require_no_existing_input"), patch(
+        with patch("omo_manager.omo_tmux_send.exact_pane_id", return_value="%42"), patch("omo_manager.omo_tmux_send.exact_tail", side_effect=[(True, capacity), (True, capacity), (True, pasted), (True, running)]), patch("omo_manager.omo_tmux_send.require_no_existing_input"), patch(
             "omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run
         ):
             self.assertTrue(run_capacity_resume("cfg:1.0", options()))
@@ -121,15 +119,33 @@ class TmuxSendTests(unittest.TestCase):
         self.assertTrue(any(command[:2] == ["tmux", "paste-buffer"] for command in calls))
 
     def test_run_capacity_resume_reports_missing_target(self) -> None:
-        with patch("omo_manager.omo_tmux_send.exact_tail", return_value=(False, [])), self.assertRaisesRegex(RuntimeError, "target does not exist"):
+        with patch("omo_manager.omo_tmux_send.exact_pane_id", return_value=""), self.assertRaisesRegex(RuntimeError, "target does not exist"):
             run_capacity_resume("cfg:404", options())
+
+    def test_run_capacity_resume_refuses_target_pane_drift_before_paste(self) -> None:
+        capacity = ["Selected model is at capacity. Please try a different model.", "› Use /skills to list available skills", "  gpt-5.5"]
+        calls: list[list[str]] = []
+
+        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch("omo_manager.omo_tmux_send.exact_pane_id", side_effect=["%42", "%43"]), patch(
+            "omo_manager.omo_tmux_send.exact_tail", return_value=(True, capacity)
+        ), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run), self.assertRaisesRegex(
+            RuntimeError, "target pane changed before"
+        ):
+            run_capacity_resume("hwl:4", options())
+
+        self.assertFalse(any(command[:2] == ["tmux", "paste-buffer"] for command in calls))
+        self.assertFalse(any(command[:2] == ["tmux", "send-keys"] for command in calls))
 
     def test_verify_capacity_resume_accepts_running_and_reports_persistent_capacity(self) -> None:
         running = ["• Working", "  gpt-5.5"]
         capacity = ["Selected model is at capacity. Please try a different model.", "› Use /skills to list available skills", "  gpt-5.5"]
-        with patch("omo_manager.omo_tmux_send.tail", return_value=running):
+        with patch("omo_manager.omo_tmux_send.exact_tail", return_value=(True, running)):
             self.assertTrue(verify_capacity_resume("cfg:1.0", options()))
-        with patch("omo_manager.omo_tmux_send.tail", return_value=capacity), patch(
+        with patch("omo_manager.omo_tmux_send.exact_tail", return_value=(True, capacity)), patch(
             "omo_manager.omo_tmux_send.time.monotonic", side_effect=[0.0, 2.0]
         ):
             self.assertFalse(verify_capacity_resume("cfg:1.0", options()))
@@ -141,7 +157,7 @@ class TmuxSendTests(unittest.TestCase):
             "› resume",
             "  gpt-5.5",
         ]
-        with patch("omo_manager.omo_tmux_send.tail", return_value=capacity_plan):
+        with patch("omo_manager.omo_tmux_send.exact_tail", return_value=(True, capacity_plan)):
             with self.assertRaisesRegex(RuntimeError, "plan prompt appeared"):
                 wait_capacity_resume_paste("cfg:1.0", options())
 

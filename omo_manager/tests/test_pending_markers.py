@@ -9434,11 +9434,26 @@ printf 'header\\n(pending)\\nchanged\\n' > {task}
         self.assertIn("Retry literal `resume` in this same pane", alert_text)
         self.assertIn("Do not launch a replacement pane", alert_text)
 
-    def test_capacity_human_owned_target_is_reported_without_automatic_resume(self) -> None:
+    def test_capacity_human_owned_hwl_4_exact_error_uses_bounded_resume(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
         args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1")
-        line = "error: task=contact.md evidence=target=hcfg:2 output=Selected model is at capacity. Please try a different model. owner_target=wl:1"
+        line = "error: task=contact.md evidence=target=hwl:4 output=Selected model is at capacity. Please try a different model. owner_target=wl:1"
+        output = f"agent-problems: error=1\n{line}"
+
+        with patch.object(watcher, "submit_capacity_resume", return_value=True) as submit:
+            filtered, changed = watcher.handle_capacity_problems(args, {}, output, 1000.0)
+
+        self.assertTrue(changed)
+        self.assertEqual("", filtered)
+        submit.assert_called_once()
+        self.assertEqual("hwl:4", submit.call_args.args[1].target)
+
+    def test_non_capacity_human_owned_hwl_4_is_not_mutated(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1")
+        line = "error: task=contact.md evidence=target=hwl:4 output=authentication failed owner_target=wl:1"
         output = f"agent-problems: error=1\n{line}"
 
         with patch.object(watcher, "submit_capacity_resume") as submit:
@@ -9447,6 +9462,45 @@ printf 'header\\n(pending)\\nchanged\\n' > {task}
         self.assertFalse(changed)
         self.assertIn(line, filtered)
         submit.assert_not_called()
+
+    def test_unrelated_watcher_delivery_refuses_human_owned_hwl_4(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with patch.object(watcher, "verified_send_to_codex") as send, self.assertRaisesRegex(
+            watcher.PrePasteRejected, "human-owned"
+        ):
+            watcher.run_verified_send("hwl:4", "unrelated mutation", watcher.CodexSendOptions(1, 0.15, False))
+
+        send.assert_not_called()
+
+    def test_ready_report_reminder_refuses_human_owned_hwl_4(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with patch.object(watcher, "verified_send_to_codex") as send, self.assertRaisesRegex(
+            watcher.PrePasteRejected, "human-owned"
+        ):
+            watcher.run_ready_report_reminder("hwl:4", "fingerprint")
+
+        send.assert_not_called()
+
+    def test_capacity_human_owned_hwl_4_stops_at_resume_budget(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1")
+        line = "error: task=contact.md evidence=target=hwl:4 output=Selected model is at capacity. Please try a different model. owner_target=wl:1"
+        output = f"agent-problems: error=1\n{line}"
+        prefix = watcher.capacity_state_prefix(args, "hwl:4")
+        seen = {f"{prefix}attempt:{attempt}": 999.0 for attempt in range(1, watcher.CAPACITY_RESUME_MAX_ATTEMPTS + 1)}
+
+        with patch.object(watcher, "submit_capacity_resume") as submit, patch.object(
+            watcher, "push_capacity_owner_alert", return_value=True
+        ) as alert:
+            filtered, changed = watcher.handle_capacity_problems(args, seen, output, 1000.0)
+
+        self.assertTrue(changed)
+        self.assertEqual("", filtered)
+        submit.assert_not_called()
+        self.assertEqual(watcher.CAPACITY_RESUME_MAX_ATTEMPTS, alert.call_args.args[3])
 
     def test_capacity_async_main_manager_failure_alert_is_rate_limited(self) -> None:
         from omo_manager import omo_pending_watch as watcher

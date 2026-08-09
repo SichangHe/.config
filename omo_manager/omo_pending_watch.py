@@ -761,6 +761,9 @@ def run_verified_send(
 ) -> None:
     """Verify the pending marker immediately before the tmux paste."""
 
+    if is_human_tmux_target(target):
+        raise PrePasteRejected("watcher delivery refuses human-owned targets")
+
     def before_paste() -> None:
         if pending_guard is not None and not pending_marker_present(
             pending_guard.root,
@@ -3697,6 +3700,9 @@ def ready_report_guard_current(target: str, fingerprint: str) -> bool:
 
 
 def run_ready_report_reminder(target: str, fingerprint: str) -> None:
+    if is_human_tmux_target(target):
+        raise PrePasteRejected("ready-report reminder refuses human-owned targets")
+
     def before_paste() -> None:
         if not ready_report_guard_current(target, fingerprint):
             raise PrePasteRejected("ready turn resolved or changed before tmux paste")
@@ -4395,8 +4401,6 @@ def handle_capacity_problems(args: Args, seen: dict[str, float], output: str, no
         CAPACITY_ADVISORY_PENDING.update((str(args.root), model) for model in capacity_models([row.target for _line, row in capacity_lines]))
         changed = retry_capacity_advisory(args, seen, now_wall_s) or changed
     for line, row in capacity_lines:
-        if is_human_tmux_target(row.target):
-            continue
         prefix = capacity_state_prefix(args, row.target)
         attempts = capacity_attempt_count(args, seen, row.target, now_wall_s)
         if f"{prefix}inflight" in seen:
@@ -4414,7 +4418,7 @@ def handle_capacity_problems(args: Args, seen: dict[str, float], output: str, no
         if now_wall_s < seen.get(f"{prefix}next", 0.0):
             continue
         changed = submit_capacity_resume(args, row, line, attempts + 1, seen, now_wall_s) or changed
-    suppressed_capacity_lines = {line for line, row in capacity_lines if not is_human_tmux_target(row.target)}
+    suppressed_capacity_lines = {line for line, _row in capacity_lines}
     kept = [line for line in lines[1:] if line not in suppressed_capacity_lines and not line.startswith("manager-action: ")]
     return filtered_problem_output(kept) or "", changed
 
