@@ -729,6 +729,115 @@ class TaskStatusTests(unittest.TestCase):
 
             self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
 
+    def test_cli_retires_blocked_human_target_without_tmux_action(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "stale.md"
+            original_task = task_frontmatter(
+                status="blocked",
+                blocked_on="human",
+                pending_items=("first question", "second question"),
+            ) + "closure evidence\nbody\n"
+            path.write_text(original_task, encoding="utf-8")
+            owner = root / "owner.md"
+            owner_text = task_frontmatter(status="long_running", blocked_on="persistent manager role", is_manager=True) + "owner body\n"
+            owner.write_text(owner_text, encoding="utf-8")
+            todo = root / "TODO.md"
+            todo.write_text("current:\nowner.md wl:2\n\nhuman pending:\n`stale.md` wl:2\n", encoding="utf-8")
+
+            with (
+                patch("omo_manager.omo_task_status.exact_pane_id") as exact_pane_id,
+                patch("omo_manager.omo_task_status.stop") as stop,
+                redirect_stdout(io.StringIO()),
+            ):
+                exit_code = run(StatusArgs(root, Path("stale.md"), "", "", stale_target="wl:2", retire_blocked_target=True))
+
+            self.assertEqual(0, exit_code)
+            exact_pane_id.assert_not_called()
+            stop.assert_not_called()
+            self.assertEqual(original_task.replace("runat: wl:2", "runat: retired"), path.read_text(encoding="utf-8"))
+            self.assertEqual(owner_text, owner.read_text(encoding="utf-8"))
+            self.assertEqual("current:\nowner.md wl:2\n\nhuman pending:\n`stale.md` retired\n", todo.read_text(encoding="utf-8"))
+
+    def test_cli_target_retirement_fails_closed_for_invalid_preconditions(self) -> None:
+        cases = {
+            "manager": task_frontmatter(status="blocked", blocked_on="human", is_manager=True),
+            "wrong blocker": task_frontmatter(status="blocked", blocked_on="dependency"),
+            "human target": task_frontmatter(status="blocked", blocked_on="human", runat="hcfg:2"),
+            "empty queue": task_frontmatter(status="blocked", blocked_on="human"),
+        }
+        for name, stale_frontmatter in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                path = root / "stale.md"
+                stale_target = "hcfg:2" if name == "human target" else "wl:2"
+                original_task = stale_frontmatter + "body\n"
+                path.write_text(original_task, encoding="utf-8")
+                (root / "owner.md").write_text(task_frontmatter(runat=stale_target) + "owner\n", encoding="utf-8")
+                todo = root / "TODO.md"
+                original_todo = f"current:\nowner.md {stale_target}\n\nhuman pending:\nstale.md {stale_target}\n"
+                todo.write_text(original_todo, encoding="utf-8")
+
+                with redirect_stderr(io.StringIO()):
+                    exit_code = run(StatusArgs(root, Path("stale.md"), "", "", stale_target=stale_target, retire_blocked_target=True))
+
+                self.assertEqual(2, exit_code)
+                self.assertEqual(original_task, path.read_text(encoding="utf-8"))
+                self.assertEqual(original_todo, todo.read_text(encoding="utf-8"))
+
+    def test_cli_target_retirement_rejects_v2_before_mutation_or_reconciliation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "stale.md"
+            original_task = v2_task().replace(
+                "  - kind: pending_items\n    item_ids: [pi_019f0000-0000-7000-8000-000000000003]\n",
+                "",
+            )
+            path.write_text(original_task, encoding="utf-8")
+            (root / "owner.md").write_text(task_frontmatter() + "owner\n", encoding="utf-8")
+            todo = root / "TODO.md"
+            original_todo = "current:\nowner.md wl:2\n\nhuman pending:\nstale.md wl:2\n"
+            todo.write_text(original_todo, encoding="utf-8")
+            (root / ENABLE_FILE).write_text("version: v2.0.0\nenabled: true\n", encoding="utf-8")
+
+            with patch("omo_manager.omo_task_status.blocking_request") as reconcile, redirect_stderr(io.StringIO()):
+                exit_code = run(StatusArgs(root, Path("stale.md"), "", "", stale_target="wl:2", retire_blocked_target=True))
+
+            self.assertEqual(2, exit_code)
+            reconcile.assert_not_called()
+            self.assertEqual(original_task, path.read_text(encoding="utf-8"))
+            self.assertEqual(original_todo, todo.read_text(encoding="utf-8"))
+
+    def test_cli_target_retirement_rejects_missing_duplicate_or_nonlive_owner(self) -> None:
+        for name, owner_status, duplicate in (
+            ("missing", None, False),
+            ("duplicate", "running", True),
+            ("blocked owner", "blocked", False),
+        ):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                path = root / "stale.md"
+                original_task = task_frontmatter(status="blocked", blocked_on="human") + "body\n"
+                path.write_text(original_task, encoding="utf-8")
+                owner_rows = ""
+                if owner_status is not None:
+                    blocker = "dependency" if owner_status == "blocked" else ""
+                    (root / "owner.md").write_text(task_frontmatter(status=owner_status, blocked_on=blocker) + "owner\n", encoding="utf-8")
+                    owner_rows = "owner.md wl:2\n"
+                if duplicate:
+                    (root / "other.md").write_text(task_frontmatter() + "other\n", encoding="utf-8")
+                    owner_rows += "other.md wl:2\n"
+                todo = root / "TODO.md"
+                original_todo = f"current:\n{owner_rows}\nhuman pending:\nstale.md wl:2\n"
+                todo.write_text(original_todo, encoding="utf-8")
+
+                with redirect_stderr(io.StringIO()):
+                    exit_code = run(StatusArgs(root, Path("stale.md"), "", "", stale_target="wl:2", retire_blocked_target=True))
+
+                self.assertEqual(2, exit_code)
+                self.assertEqual(original_task, path.read_text(encoding="utf-8"))
+                self.assertEqual(original_todo, todo.read_text(encoding="utf-8"))
+
     def test_long_running_is_a_normal_status_transition(self) -> None:
         text = task_frontmatter() + "body\n"
 

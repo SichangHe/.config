@@ -80,6 +80,7 @@ class Args:
     recover_exited_shell_done: bool = False
     pane_id: str = ""
     terminal_evidence: str = ""
+    retire_blocked_target: bool = False
 
 
 class ParsedArgs(argparse.Namespace):
@@ -103,6 +104,7 @@ class ParsedArgs(argparse.Namespace):
     recover_exited_shell_done: bool = False
     pane_id: str = ""
     terminal_evidence: str = ""
+    retire_blocked_target: bool = False
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -118,6 +120,7 @@ shutdown.""",
     _ = parser.add_argument("--finish-closed-done", action="store_true", help="Finish done bookkeeping after the agent was already closed by a failed prior run.")
     _ = parser.add_argument("--finish-replaced-done", action="store_true", help="Finish a stopped stale record without signaling its pane after proving an explicit live replacement.")
     _ = parser.add_argument("--recover-exited-shell-done", action="store_true", help="Close and finish one blocked worker whose completed Codex session exited to an unchanged shell.")
+    _ = parser.add_argument("--retire-blocked-target", action="store_true", help="Atomically retire one blocked human-pending worker target that conflicts with one live lifecycle owner; performs no tmux action.")
     _ = parser.add_argument("--session-id", default="", help="Session id captured by the prior close, if available.")
     _ = parser.add_argument("--replacement-task", type=Path, help="Active replacement task file; required with --finish-replaced-done.")
     _ = parser.add_argument("--stale-target", help="Exact stopped target recorded by the stale task; required with --finish-replaced-done.")
@@ -135,8 +138,23 @@ shutdown.""",
     _ = parser.add_argument("status", nargs="?", choices=sorted(TASK_FRONTMATTER_STATUSES))
     _ = parser.add_argument("--blocked-on", default="", help="Required when setting status to `blocked`; optional for `long_running`; removed for other statuses.")
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
-    if sum((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done)) > 1:
+    if sum((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done, parsed.retire_blocked_target)) > 1:
         parser.error("finish and recovery modes are mutually exclusive.")
+    if parsed.retire_blocked_target:
+        if parsed.status not in {None, ""}:
+            parser.error("--retire-blocked-target does not accept a status.")
+        if not parsed.stale_target.strip():
+            parser.error("--retire-blocked-target requires --stale-target.")
+        if any((parsed.session_id, parsed.replacement_task, parsed.replacement_target, parsed.stale_sha256, parsed.replacement_sha256, parsed.replacement_status, parsed.protected_target, parsed.stopped_evidence, parsed.replacement_pane_evidence, parsed.audit_output, parsed.pane_id, parsed.terminal_evidence, parsed.blocked_on)):
+            parser.error("unrelated lifecycle evidence is not valid with --retire-blocked-target.")
+        return Args(
+            parsed.root.resolve(),
+            parsed.task_file,
+            "",
+            "",
+            stale_target=parsed.stale_target.strip(),
+            retire_blocked_target=True,
+        )
     if parsed.recover_exited_shell_done:
         if parsed.status not in {None, "", "done"}:
             parser.error("--recover-exited-shell-done only supports status `done`.")
@@ -589,6 +607,117 @@ def validate_reconciled_todo_row(root: Path, path: Path, line: str, runat: str) 
         raise TaskFrontmatterError(f"TODO entry for `{relative_task_ref(root, path)}` does not match its authoritative `runat`.")
     if re.search(r"\((?:blocked|done)(?::[^)]*)?\)", suffix, re.IGNORECASE) is not None:
         raise TaskFrontmatterError(f"TODO entry for `{relative_task_ref(root, path)}` has a terminal lifecycle annotation.")
+
+
+def retired_task_text(text: str, stale_target: str, root: Path) -> str:
+    """Replace only the authoritative frontmatter run target with `retired`."""
+    metadata = parse_task_metadata(text, root)
+    if metadata is None or metadata.version == V2_VERSION or metadata.status != "blocked" or metadata.blocked_on != "human" or metadata.is_manager or not metadata.pending_task_items:
+        raise TaskFrontmatterError("target retirement requires one v1 non-manager task blocked on `human` with a nonempty pending queue.")
+    if metadata.runat != stale_target:
+        raise TaskFrontmatterError("blocked task `runat` does not equal --stale-target.")
+    parts = frontmatter_parts(text)
+    if parts is None:
+        raise TaskFrontmatterError("task file has no frontmatter.")
+    lines = text.splitlines(keepends=True)
+    closing = next((idx for idx, line in enumerate(lines[1:], start=1) if line.strip() == "---"), None)
+    if closing is None:
+        raise TaskFrontmatterError("task frontmatter opening marker has no closing marker.")
+    replaced = 0
+    for idx in range(1, closing):
+        line = lines[idx]
+        key, sep, value = line.partition(":")
+        if sep and key.strip() == "runat":
+            if value.strip() != stale_target:
+                raise TaskFrontmatterError("blocked task frontmatter run target drifted.")
+            newline = line[len(line.rstrip("\r\n")) :]
+            lines[idx] = f"runat: retired{newline}"
+            replaced += 1
+    if replaced != 1:
+        raise TaskFrontmatterError(f"expected exactly one frontmatter `runat`, found {replaced}.")
+    updated = "".join(lines)
+    retired = parse_task_metadata(updated, root)
+    if retired is None or retired.runat != "retired":
+        raise TaskFrontmatterError("retired task metadata did not validate.")
+    return updated
+
+
+def retire_todo_text(root: Path, path: Path, text: str, stale_target: str) -> str:
+    """Replace the sole human-pending task row's exact target with `retired`."""
+    lines = text.splitlines(keepends=True)
+    section = ""
+    rows: list[int] = []
+    for idx, line in enumerate(lines):
+        name = line.strip()
+        if name.endswith(":"):
+            section = name[:-1].casefold()
+            continue
+        if path in todo_row_task_paths(root, line):
+            if section != "human pending":
+                raise TaskFrontmatterError(f"expected `{relative_task_ref(root, path)}` in `human pending:`, found `{section}:`.")
+            rows.append(idx)
+    if len(rows) != 1:
+        raise TaskFrontmatterError(f"expected exactly one TODO row for `{relative_task_ref(root, path)}`, found {len(rows)}.")
+    row = lines[rows[0]]
+    validate_reconciled_todo_row(root, path, row, stale_target)
+    match = TODO_ROW_RE.fullmatch(row.rstrip("\r\n"))
+    assert match is not None
+    suffix = match.group(2) or ""
+    targets = TARGET_RE.findall(suffix)
+    if targets != [stale_target]:
+        raise TaskFrontmatterError("target retirement requires the TODO row to name the exact stale target once.")
+    if row.count(stale_target) != 1:
+        raise TaskFrontmatterError("target retirement requires one literal stale target in the TODO row.")
+    lines[rows[0]] = row.replace(stale_target, "retired", 1)
+    return "".join(lines)
+
+
+def retire_blocked_target(args: Args, path: Path, text: str, before: os.stat_result) -> None:
+    """Atomically retire a blocked worker's conflicting target without tmux access."""
+    if TARGET_RE.fullmatch(args.stale_target) is None:
+        raise TaskFrontmatterError("--stale-target must be an exact SESSION:WINDOW[.PANE] target.")
+    if args.stale_target.partition(":")[0].startswith("h"):
+        raise TaskFrontmatterError("target retirement cannot modify a human-owned `h*` target.")
+    updated_task = retired_task_text(text, args.stale_target, args.root)
+    todo = args.root / "TODO.md"
+    if not todo.is_file():
+        raise TaskFrontmatterError("TODO.md is not a regular file.")
+    with task_target_lock(args.root, args.stale_target):
+        owners = authoritative_active_target_task_paths(args.root, args.stale_target)
+        successors = tuple(owner for owner in owners if owner != path)
+        if path not in owners or len(successors) != 1:
+            refs = ", ".join(relative_task_ref(args.root, owner) for owner in owners) or "none"
+            raise TaskFrontmatterError(f"target retirement requires the stale task and exactly one conflicting owner of `{args.stale_target}`: {refs}.")
+        successor_path = successors[0]
+        successor_before = successor_path.stat()
+        successor_text = successor_path.read_text(encoding="utf-8")
+        with ExitStack() as locks:
+            for locked_path in sorted({path, todo, successor_path}, key=lambda candidate: str(candidate)):
+                locks.enter_context(task_file_lock(locked_path))
+            current_before = path.stat()
+            current_text = path.read_text(encoding="utf-8")
+            if not same_file_state(before, current_before) or current_text != text:
+                raise TaskFrontmatterError("blocked task changed while target retirement was being prepared; retry after rereading it.")
+            if not same_file_state(successor_before, successor_path.stat()) or successor_path.read_text(encoding="utf-8") != successor_text:
+                raise TaskFrontmatterError("conflicting target owner changed while retirement was being prepared; retry after rereading it.")
+            successor = parse_task_metadata(successor_text, args.root)
+            if successor is None or successor.status not in {"running", "long_running"}:
+                raise TaskFrontmatterError("conflicting target owner must be running or long_running.")
+            if authoritative_active_target_task_paths(args.root, args.stale_target) != owners:
+                raise TaskFrontmatterError("authoritative target ownership changed while retirement was being prepared; retry.")
+            todo_before = todo.stat()
+            todo_text = todo.read_text(encoding="utf-8")
+            updated_todo = retire_todo_text(args.root, path, todo_text, args.stale_target)
+            replace_if_unchanged_locked(todo, updated_todo, todo_before)
+            moved_todo_before = todo.stat()
+            try:
+                replace_if_unchanged_locked(path, updated_task, current_before)
+            except Exception as exc:
+                try:
+                    replace_if_unchanged_locked(todo, todo_text, moved_todo_before)
+                except Exception as rollback_exc:
+                    raise TaskFrontmatterError(f"blocked target retirement failed and TODO rollback also failed: {rollback_exc}") from exc
+                raise
 
 
 def reconcile_todo_text(root: Path, path: Path, text: str, runat: str, destination: str, allowed_sections: tuple[str, ...]) -> str:
@@ -1099,7 +1228,9 @@ def run(args: Args) -> int:
             raise BlockingError("v2 task writes are disabled until reviewed migration enablement")
         if initial_metadata is not None and initial_metadata.version != V2_VERSION and v2_enabled(args.root):
             raise BlockingError("v1 task writes are disabled after v2 enablement")
-        if args.finish_replaced_done:
+        if args.retire_blocked_target:
+            retire_blocked_target(args, path, text, before)
+        elif args.finish_replaced_done:
             target = finish_replaced_done(args, path, text, before)
             preserved_replacement = True
         elif args.recover_exited_shell_done:
