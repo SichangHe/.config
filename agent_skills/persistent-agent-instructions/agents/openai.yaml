@@ -1,0 +1,4 @@
+interface:
+  display_name: "Persistent Agent Instructions"
+  short_description: "Draft durable agent instructions for review"
+  default_prompt: "Use $persistent-agent-instructions to draft reusable agent instructions for human review."
