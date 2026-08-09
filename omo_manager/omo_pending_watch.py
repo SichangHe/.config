@@ -42,15 +42,16 @@ if __package__ in {None, ""}:
 
 from omo_manager.omo_agent_status import TaskLine
 from omo_manager.omo_agent_status import TaskState
+from omo_manager.omo_agent_status import TASK_RE
 from omo_manager.omo_agent_status import blocked_status_dependency_snapshot
 from omo_manager.omo_agent_status import effective_owner_target
 from omo_manager.omo_agent_status import is_main_manager_task_file
 from omo_manager.omo_agent_status import is_human_tmux_target
-from omo_manager.omo_agent_status import is_recorded_human_wait
 from omo_manager.omo_agent_status import parse_task_lines
 from omo_manager.omo_agent_status import read_task_metadata
 from omo_manager.omo_agent_status import resolve_task_path
 from omo_manager.omo_agent_status import scan_task_state
+from omo_manager.omo_agent_status import task_has_human_tmux_boundary
 from omo_manager.omo_blocking import BlockingError
 from omo_manager.omo_blocking import ENABLE_FILE
 from omo_manager.omo_blocking import WAKE_SOURCE_PREFIX
@@ -90,6 +91,7 @@ from omo_manager.omo_task_lock import watcher_report_authority_is_live
 from omo_manager.omo_task_lock import watcher_report_manager_temporary
 from omo_manager.omo_task_lock import watcher_report_state_maintenance_temporary
 from omo_manager.omo_task_lock import watcher_report_state_temporary
+from omo_manager.omo_task_metadata import TaskMetadata
 
 
 def default_state_dir() -> Path:
@@ -116,7 +118,10 @@ DEFAULT_STATE = default_state_dir() / "pending-watch-consumed-reports.tsv"
 DEFAULT_DIGEST_IDLE_AFTER_S = float(os.environ.get("OMO_MANAGER_DIGEST_IDLE_AFTER_S", "3600"))
 DEFAULT_AGENT_PROBLEM_INTERVAL_S = float(os.environ.get("OMO_MANAGER_AGENT_PROBLEM_INTERVAL_S", "30"))
 DEFAULT_AGENT_PROBLEM_REPEAT_S = float(os.environ.get("OMO_MANAGER_AGENT_PROBLEM_REPEAT_S", "1800"))
+PROBLEM_EPISODE_LEDGER_VERSION = "problem-episode-v1"
+PROBLEM_EPISODE_DELIVERY_STATES = {"pending", "delivered"}
 PENDING_DELIVERY_FAILURE_RETRY_S = 600.0
+PROBLEM_EPISODE_PENDING_TTL_S = PENDING_DELIVERY_FAILURE_RETRY_S
 ASYNC_DELIVERY_STARTED = 202
 RECOVERY_EVENT_DIRNAME = ".omo-codex-recovery-events"
 RECOVERY_RECEIPT_DIRNAME = ".omo-codex-recovery-receipts"
@@ -552,6 +557,70 @@ class PendingGuard:
     pending_line: int
     pending_digest: str
     pending_text: str
+    require_non_human_task: bool = True
+
+
+@dataclass(frozen=True)
+class ProblemEpisodeRecord:
+    root_key: str
+    task_path: str
+    task_version: str
+    task_id: str
+    lifecycle_status: str
+    target: str
+    owner_target: str
+    blocker_fingerprint: str
+    problem_class: str
+    idle_state: str
+    observation_fingerprint: str
+
+    @property
+    def key(self) -> tuple[str, str]:
+        return self.root_key, self.task_path
+
+
+@dataclass(frozen=True)
+class ProblemEpisodeExpectation:
+    line_sha256: str
+    authority_fingerprint: str
+    record: ProblemEpisodeRecord | None
+
+
+@dataclass(frozen=True)
+class ProblemEpisodeReservation:
+    record: ProblemEpisodeRecord
+    token: str
+    reserved_at_s: float
+
+
+@dataclass(frozen=True)
+class ProblemEpisodeLedgerEntry:
+    record: ProblemEpisodeRecord
+    delivery_state: str
+    token: str = ""
+    reserved_at_s: float = 0.0
+
+
+@dataclass(frozen=True)
+class ProblemTaskAuthority:
+    task_file: str
+    task_path: str
+    task_version: str
+    task_id: str
+    lifecycle_status: str
+    target: str
+    owner_target: str
+    reason: str
+    blocker_fingerprint: str
+
+
+@dataclass(frozen=True)
+class ProblemTaskCandidate:
+    task: TaskLine
+    path: Path | None
+    metadata: TaskMetadata | None
+    state: TaskState | None
+    source_sha256: str
 
 
 @dataclass(frozen=True)
@@ -566,6 +635,9 @@ class AgentProblemGuard:
     problem_owner_target: str = ""
     problem_claim_path: Path | None = None
     allow_active_claim: bool = False
+    episode_expectations: tuple[ProblemEpisodeExpectation, ...] = ()
+    episode_ledger_path: Path | None = None
+    episode_reservations: tuple[ProblemEpisodeReservation, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -588,6 +660,8 @@ class DeliverySuccessEvent:
     dependency_guarded_removals: tuple[tuple[str, str], ...] = ()
     failure_dependency_replacements: tuple[tuple[str, str, str], ...] = ()
     failure_dependency_removals: tuple[tuple[str, str], ...] = ()
+    problem_episode_commits: tuple[ProblemEpisodeReservation, ...] = ()
+    problem_episode_rollbacks: tuple[ProblemEpisodeReservation, ...] = ()
     dependency_state: dict[str, str] | None = None
     seen_at_s: float = 0.0
     clear_root: Path | None = None
@@ -725,12 +799,28 @@ def send_executor() -> ThreadPoolExecutor:
 
 
 def agent_problem_evidence_current(guard: AgentProblemGuard) -> bool:
+    if is_human_tmux_target(guard.ready_target) or any(
+        is_human_tmux_target(problem_line_target(line)) or is_human_tmux_target(problem_line_owner_target(line))
+        for line in guard.problem_lines
+    ):
+        return False
+    if guard.episode_reservations and not problem_episode_reservations_current(
+        guard.episode_ledger_path,
+        guard.episode_reservations,
+    ):
+        return False
     if guard.root is not None and guard.dependency_task_file:
         task = TaskLine(guard.dependency_task_file, "dependency-guard", "", "", None)
         task_path = resolve_task_path(guard.root, guard.dependency_task_file)
         state = scan_task_state(task_path, guard.root) if task_path is not None else None
         current = state is not None and blocked_status_dependency_snapshot(guard.root, task, state) == guard.dependency_snapshot
-        return current and (not guard.ready_target or inspect_codex(CodexStatusArgs(guard.ready_target, 80)).status == "ready")
+        evidence_current = current and (
+            not guard.ready_target or inspect_codex(CodexStatusArgs(guard.ready_target, 80)).status == "ready"
+        )
+        return evidence_current and (
+            not guard.episode_reservations
+            or problem_episode_reservations_current(guard.episode_ledger_path, guard.episode_reservations)
+        )
     try:
         result = subprocess.run(guard.command, capture_output=True, text=True, timeout=DEFAULT_AGENT_PROBLEM_TIMEOUT_S, check=False)
     except (OSError, subprocess.SubprocessError):
@@ -743,7 +833,22 @@ def agent_problem_evidence_current(guard: AgentProblemGuard) -> bool:
         return False
     current = Counter(current_lines)
     problem_is_current = bool(expected) and not expected - current
-    return problem_is_current and (not guard.ready_target or inspect_codex(CodexStatusArgs(guard.ready_target, 80)).status == "ready")
+    if problem_is_current and guard.episode_expectations:
+        if guard.root is None:
+            return False
+        current_expectations = Counter(
+            expectation
+            for line in current_lines
+            if (expectation := problem_episode_expectation(guard.root, line)) is not None
+        )
+        problem_is_current = not Counter(guard.episode_expectations) - current_expectations
+    evidence_current = problem_is_current and (
+        not guard.ready_target or inspect_codex(CodexStatusArgs(guard.ready_target, 80)).status == "ready"
+    )
+    return evidence_current and (
+        not guard.episode_reservations
+        or problem_episode_reservations_current(guard.episode_ledger_path, guard.episode_reservations)
+    )
 
 
 def agent_problem_guard_current(guard: AgentProblemGuard) -> bool:
@@ -752,6 +857,18 @@ def agent_problem_guard_current(guard: AgentProblemGuard) -> bool:
     ) is not None:
         return False
     return agent_problem_evidence_current(guard)
+
+
+def pending_delivery_guard_current(guard: PendingGuard) -> bool:
+    """Require both the exact marker and its non-human task boundary."""
+
+    return pending_marker_present(
+        guard.root,
+        guard.pending_file,
+        guard.pending_line,
+        guard.pending_digest,
+        guard.pending_text,
+    ) and (not guard.require_non_human_task or not task_file_has_human_tmux_boundary(guard.root, guard.pending_file))
 
 
 def run_verified_send(
@@ -763,15 +880,14 @@ def run_verified_send(
 ) -> None:
     """Verify the pending marker immediately before the tmux paste."""
 
+    if is_human_tmux_target(target):
+        raise PrePasteRejected("human-owned tmux target rejected before inspection or paste")
+    if pending_guard is not None and not pending_delivery_guard_current(pending_guard):
+        raise PrePasteRejected("pending marker cleared or task routing became human-owned before delivery inspection")
+
     def before_paste() -> None:
-        if pending_guard is not None and not pending_marker_present(
-            pending_guard.root,
-            pending_guard.pending_file,
-            pending_guard.pending_line,
-            pending_guard.pending_digest,
-            pending_guard.pending_text,
-        ):
-            raise PrePasteRejected("pending marker cleared before tmux paste")
+        if pending_guard is not None and not pending_delivery_guard_current(pending_guard):
+            raise PrePasteRejected("pending marker cleared or task routing became human-owned before tmux paste")
         if problem_guard is not None and not agent_problem_evidence_current(problem_guard):
             raise PrePasteRejected("agent problem resolved or changed before tmux paste")
 
@@ -818,14 +934,16 @@ def log_send_result(
             return
         result = DeliveryResult(1, str(exc))
         if failure_fallback is not None:
-            if failure_fallback.pending_guard is not None and not pending_marker_present(
-                failure_fallback.pending_guard.root,
-                failure_fallback.pending_guard.pending_file,
-                failure_fallback.pending_guard.pending_line,
-                failure_fallback.pending_guard.pending_digest,
-                failure_fallback.pending_guard.pending_text,
+            if is_human_tmux_target(failure_fallback.target):
+                queue_delivery_failure_event(success_event)
+                return
+            if failure_fallback.pending_guard is not None and not pending_delivery_guard_current(
+                failure_fallback.pending_guard
             ):
-                print("omo_pending_watch: async fallback skipped; pending marker cleared before fallback paste", file=sys.stderr)
+                print(
+                    "omo_pending_watch: async fallback skipped; pending marker cleared before fallback paste or task routing became human-owned",
+                    file=sys.stderr,
+                )
                 queue_delivery_failure_event(success_event)
                 return
             if failure_fallback.defer_if_busy and inspect_codex(CodexStatusArgs(failure_fallback.target, 80)).status != "ready":
@@ -874,6 +992,7 @@ def queue_delivery_failure_event(success_event: DeliverySuccessEvent | None) -> 
         and not success_event.failure_seen_deadlines_s
         and not success_event.failure_dependency_replacements
         and not success_event.failure_dependency_removals
+        and not success_event.problem_episode_commits
         and (success_event.failure_clear_root is None or success_event.failure_clear_marker is None)
     ):
         return
@@ -891,6 +1010,7 @@ def queue_delivery_failure_event(success_event: DeliverySuccessEvent | None) -> 
             dependency_state=success_event.dependency_state,
             dependency_guarded_replacements=success_event.failure_dependency_replacements,
             dependency_guarded_removals=success_event.failure_dependency_removals,
+            problem_episode_rollbacks=success_event.problem_episode_commits,
             seen_at_s=success_event.seen_at_s,
             clear_root=success_event.failure_clear_root,
             clear_marker=success_event.failure_clear_marker,
@@ -953,6 +1073,8 @@ def send_to_codex(
 ) -> Future[None] | None:
     """Validate a target synchronously, then deliver through a background thread."""
 
+    if is_human_tmux_target(target):
+        raise PrePasteRejected("human-owned tmux target rejected before inspection or paste")
     selected = options or CodexSendOptions(DEFAULT_TMUX_ENTER_COUNT, 0.15, False)
     if selected.dry_run:
         print(message)
@@ -987,7 +1109,15 @@ def drain_delivery_successes(args: Args, seen: dict[str, float], now_wall_s: flo
         seen_at_s = event.seen_at_s or now_wall_s
         durable_ok = True
         clear_ok = True
-        if event.clear_root is not None and event.clear_marker is not None and event.clear_report_key:
+        clear_crossed_human_boundary = (
+            event.clear_root is not None
+            and event.clear_marker is not None
+            and task_file_has_human_tmux_boundary(event.clear_root, event.clear_marker.file)
+        )
+        if clear_crossed_human_boundary:
+            durable_ok = False
+            clear_ok = False
+        elif event.clear_root is not None and event.clear_marker is not None and event.clear_report_key:
             if event.durable_report_state != args.state or event.durable_report_keys != (event.clear_report_key,):
                 durable_ok = False
                 clear_ok = False
@@ -1028,6 +1158,8 @@ def drain_delivery_successes(args: Args, seen: dict[str, float], now_wall_s: flo
             changed = True
         for row, attempts, detail in event.capacity_alerts:
             changed = push_capacity_owner_alert(args, seen, row, attempts, detail, now_wall_s) or changed
+        changed = rollback_problem_episode_reservations(args, event.problem_episode_rollbacks) or changed
+        changed = commit_problem_episode_reservations(args, event.problem_episode_commits) or changed
         if clear_ok:
             for key in event.seen_after_clear_keys:
                 remember_seen(seen, key, seen_at_s)
@@ -2110,6 +2242,8 @@ def agent_problem_target_repeat_active(args: Args, seen: dict[str, float], targe
 def agent_problem_target_is_ready(args: Args, seen: dict[str, float], target: str, now_s: float, *, bypass_repeat: bool = False) -> bool:
     """Allow one problem aggregate per interval, only when its manager is ready."""
 
+    if is_human_tmux_target(target):
+        return False
     if args.dry_run:
         return True
     if not bypass_repeat and agent_problem_target_repeat_active(args, seen, target, now_s):
@@ -2120,6 +2254,8 @@ def agent_problem_target_is_ready(args: Args, seen: dict[str, float], target: st
 def repeated_manager_delivery_is_busy(args: Args, seen: dict[str, float], key: str, target: str, now_s: float) -> bool:
     """Defer a repeated manager delivery until its target is ready."""
 
+    if is_human_tmux_target(target):
+        return True
     if not seen_contains(seen, manager_delivery_attempt_key(key), now_s) or args.dry_run:
         return False
     if inspect_codex(CodexStatusArgs(target, 80)).status == "ready":
@@ -2139,6 +2275,21 @@ def marker_for_manager_target(args: Args, marker: Marker) -> str:
     if metadata is not None:
         return metadata.managerat or args.manager_target
     return args.manager_target
+
+
+def marker_has_human_tmux_boundary(args: Args, marker: Marker) -> bool:
+    """Reject marker work when either authoritative task route is human-owned."""
+
+    return task_file_has_human_tmux_boundary(args.root, marker.file)
+
+
+def task_file_has_human_tmux_boundary(root: Path, task_file: Path) -> bool:
+    """Read one marker task's valid or raw routing without touching its pane."""
+
+    task_file_text = str(task_file)
+    task_path = resolve_task_path(root, task_file_text)
+    task = TaskLine(task_file_text, "pending-marker", "", "", None)
+    return task_has_human_tmux_boundary(root, task, task_path)
 
 
 def blocked_reason_before_pending(lines: list[str], pending_line: int) -> str:
@@ -2692,10 +2843,14 @@ def clear_pending_marker_if_current(
 ) -> bool:
     """Relocate and clear one delivered block under the shared task-file lock."""
 
+    if task_file_has_human_tmux_boundary(root, marker.file):
+        return False
     path = root / marker.file
     tmp_path: Path | None = None
     try:
         with task_file_lock(path):
+            if task_file_has_human_tmux_boundary(root, marker.file):
+                return False
             before = path.stat()
             text = path.read_text(encoding="utf-8")
             lines = text.splitlines()
@@ -2750,6 +2905,8 @@ def clear_consumed_report_marker(
 ) -> bool:
     """Record and clear one watcher-delivered report under the manager-file lock."""
 
+    if task_file_has_human_tmux_boundary(args.root, hint.file):
+        return False
     pointer = adjacent_source_metadata(hint.block_text.splitlines())
     path = args.root / hint.file
     binding = report_owner_binding(pointer, path)
@@ -2759,6 +2916,8 @@ def clear_consumed_report_marker(
     created_temporary = False
     try:
         with task_file_lock(path):
+            if task_file_has_human_tmux_boundary(args.root, hint.file):
+                return False
             before = path.lstat()
             if not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or before.st_size > 64 * 1024 * 1024:
                 return False
@@ -2884,6 +3043,8 @@ def push_marker_delivery(
     failure_success_event: DeliverySuccessEvent | None = None,
     failure_fallback_defer_if_busy: bool = False,
 ) -> DeliveryResult:
+    if is_human_tmux_target(manager_target):
+        return DeliveryResult(1, "human-owned tmux target rejected before inspection or paste")
     if args.dry_run:
         print(text)
         return DeliveryResult(0)
@@ -2916,7 +3077,7 @@ def target_unavailable(result: DeliveryResult) -> bool:
 
 
 def main_manager_fallback_target(args: Args, failed_target: str) -> str:
-    if not args.manager_target or canonical_target(args.manager_target) == canonical_target(failed_target):
+    if not args.manager_target or is_human_tmux_target(args.manager_target) or canonical_target(args.manager_target) == canonical_target(failed_target):
         return ""
     return args.manager_target
 
@@ -3172,7 +3333,11 @@ def push_blocking_wake(args: Args, marker: Marker, now_s: float) -> int:
     """Deliver a durable ready notice without treating it as human input."""
 
     del now_s
+    if marker_has_human_tmux_boundary(args, marker):
+        return 1
     target = marker_direct_target(args, marker)
+    if is_human_tmux_target(target):
+        return 1
     if not target:
         _ = clear_pending_marker_if_current(args.root, marker)
         return 1
@@ -3205,7 +3370,11 @@ def push_blocking_wake(args: Args, marker: Marker, now_s: float) -> int:
 def push_manager_blocking_notice(args: Args, marker: Marker) -> int:
     """Deliver graph-repair decisions to the manager that owns the task."""
 
+    if marker_has_human_tmux_boundary(args, marker):
+        return 1
     target = marker_for_manager_target(args, marker)
+    if is_human_tmux_target(target):
+        return 1
     if not target:
         _ = clear_pending_marker_if_current(args.root, marker)
         return 1
@@ -3233,6 +3402,8 @@ def push_manager_blocking_notice(args: Args, marker: Marker) -> int:
 def push_ref(args: Args, seen: dict[str, float], now_s: float, marker: Marker, attachments: Sequence[SourceAttachment]) -> int:
     """Deliver one pending marker, guarded by its current file position."""
 
+    if marker_has_human_tmux_boundary(args, marker):
+        return 1
     if is_manager_blocking_marker(args, marker):
         return push_manager_blocking_notice(args, marker)
     if is_blocking_wake_marker(args, marker):
@@ -3307,6 +3478,9 @@ def push_ref(args: Args, seen: dict[str, float], now_s: float, marker: Marker, a
 
 
 def push_manager_text(args: Args, text: str, success_event: DeliverySuccessEvent | None = None) -> int:
+    if is_human_tmux_target(args.manager_target):
+        print("omo_pending_watch: rejected human-owned manager delivery target", file=sys.stderr)
+        return 1
     if args.dry_run:
         print(text)
         return 0
@@ -3326,6 +3500,9 @@ def push_manager_text_to_target(
     problem_guard: AgentProblemGuard | None = None,
 ) -> int:
     scoped_args = replace(args, manager_target=manager_target)
+    if is_human_tmux_target(scoped_args.manager_target):
+        print("omo_pending_watch: rejected human-owned manager delivery target", file=sys.stderr)
+        return 1
     if scoped_args.dry_run:
         print(text)
         return 0
@@ -3350,7 +3527,11 @@ def push_manager_text_to_target(
         return result.status
     if not fallback_target:
         return result.status
-    if marker is not None and not pending_marker_present(args.root, marker.file, marker.line, marker.digest, marker.block_text):
+    if is_human_tmux_target(fallback_target):
+        return result.status
+    if marker is not None and not pending_delivery_guard_current(
+        PendingGuard(args.root, marker.file, marker.line, marker.digest, marker.block_text)
+    ):
         return result.status
     if problem_guard is not None and inspect_codex(CodexStatusArgs(fallback_target, 80)).status != "ready":
         return result.status
@@ -3439,10 +3620,15 @@ def try_send_delivery_text(
     failure_problem_guard: AgentProblemGuard | None = None,
     failure_fallback_defer_if_busy: bool = False,
 ) -> DeliveryResult:
-    if root is not None and pending_file is not None and not pending_marker_present(root, pending_file, pending_line, pending_digest, pending_text):
-        print(f"omo_pending_watch: {name} skipped; pending marker cleared before tmux paste", file=sys.stderr)
-        return DeliveryResult(1, "pending marker cleared before tmux paste")
+    if is_human_tmux_target(target):
+        return DeliveryResult(1, "human-owned tmux target rejected before inspection or paste")
     pending_guard = PendingGuard(root, pending_file, pending_line, pending_digest, pending_text) if root is not None and pending_file is not None else None
+    if pending_guard is not None and not pending_delivery_guard_current(pending_guard):
+        print(
+            f"omo_pending_watch: {name} skipped; marker cleared or task routing became human-owned",
+            file=sys.stderr,
+        )
+        return DeliveryResult(1, "pending marker cleared or task routing became human-owned before tmux paste")
     delivery_id = str(uuid.uuid4()) if root is not None else ""
     options = CodexSendOptions(
         DEFAULT_TMUX_ENTER_COUNT,
@@ -3523,6 +3709,8 @@ def push_agent_pending_item_reminders(
 ) -> bool:
     changed = False
     for target, count in agent_pending_item_reminder_counts(args.root).items():
+        if is_human_tmux_target(target):
+            continue
         key = clear_pending_item_reminder_counts(args, seen, target, count)
         last_sent_s = seen_get(seen, key, now_s=now_wall_s)
         if not count or (key in seen and now_wall_s - last_sent_s < args.agent_problem_repeat_s):
@@ -3656,7 +3844,7 @@ def active_ready_report_target_keys(args: Args) -> set[str]:
         seen_files.add(task.task_file)
         task_path = resolve_task_path(args.root, task.task_file)
         state = scan_task_state(task_path, args.root) if task_path is not None else None
-        if state is not None and state.status in {"running", "long_running", "blocked"} and state.target:
+        if state is not None and state.status in {"running", "long_running", "blocked"} and state.target and not is_human_tmux_target(state.target):
             active.add(ready_report_target_key(args, state.target))
     return active
 
@@ -3678,6 +3866,8 @@ def ready_report_key(args: Args, target: str, turn: VisibleTurn) -> str:
 
 
 def ready_report_turn(target: str) -> VisibleTurn | None:
+    if is_human_tmux_target(target):
+        return None
     return latest_visible_turn(codex_tail(target, 2000))
 
 
@@ -3695,6 +3885,8 @@ def ready_report_task_is_agent(args: Args, line: str, target: str) -> bool:
 
 
 def ready_report_guard_current(target: str, fingerprint: str) -> bool:
+    if is_human_tmux_target(target):
+        return False
     turn = ready_report_turn(target)
     return (
         turn is not None
@@ -3705,6 +3897,9 @@ def ready_report_guard_current(target: str, fingerprint: str) -> bool:
 
 
 def run_ready_report_reminder(target: str, fingerprint: str) -> None:
+    if is_human_tmux_target(target):
+        raise PrePasteRejected("human-owned tmux target rejected before inspection or paste")
+
     def before_paste() -> None:
         if not ready_report_guard_current(target, fingerprint):
             raise PrePasteRejected("ready turn resolved or changed before tmux paste")
@@ -3778,7 +3973,7 @@ def handle_ready_report_reminders(
             continue
         target = problem_line_target(line)
         canonical = canonical_target(target)
-        if not target or canonical in seen_targets or not ready_report_task_is_agent(args, line, target):
+        if not target or is_human_tmux_target(target) or canonical in seen_targets or not ready_report_task_is_agent(args, line, target):
             continue
         seen_targets.add(canonical)
         if canonical in (busy_targets or set()):
@@ -3810,6 +4005,8 @@ def manager_direct_report_targets(root: Path) -> dict[str, tuple[str, ...]]:
             or metadata.status not in {"running", "long_running", "blocked"}
             or not metadata.managerat
             or metadata.runat == "retired"
+            or is_human_tmux_target(metadata.runat)
+            or is_human_tmux_target(metadata.managerat)
             or same_tmux_target(metadata.managerat, metadata.runat)
         ):
             continue
@@ -3838,6 +4035,8 @@ def push_manager_direct_report_reminders(
 ) -> bool:
     changed = False
     for manager_target, reports in manager_direct_report_targets(args.root).items():
+        if is_human_tmux_target(manager_target):
+            continue
         key = manager_direct_report_key(args, manager_target, reports)
         retry_key = manager_direct_report_retry_key(key)
         prefix = key.rsplit(":", 1)[0] + ":"
@@ -3913,6 +4112,8 @@ def agent_pending_item_reminder_counts(root: Path) -> dict[str, int]:
             metadata is None
             or metadata.status not in {"running", "long_running"}
             or metadata.runat == "retired"
+            or is_human_tmux_target(metadata.runat)
+            or is_human_tmux_target(metadata.managerat)
             or (metadata.status == "long_running" and metadata.blocked_on)
         ):
             continue
@@ -4041,10 +4242,10 @@ def update_idle_status_check(args: Args, last_check_s: float, now_s: float, stat
 
 def status_command(args: Args, problems_only: bool = False) -> list[str]:
     command = [str(args.status_script), "--root", str(args.root)]
-    if args.manager_target:
+    if args.manager_target and not is_human_tmux_target(args.manager_target):
         command.extend(["--manager-target", args.manager_target])
     if problems_only:
-        command.append("--problems-only")
+        command.extend(("--problems-only", "--no-auto-unstick"))
     return command
 
 
@@ -4078,7 +4279,7 @@ def agent_status_count_line(lines: list[str], count_line: str) -> str:
 
 
 def problem_line_owner_target(line: str) -> str:
-    match = re.search(r"\bowner_target=([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\b", line)
+    match = re.search(r"\bowner_target=(\S+)", line)
     return match.group(1) if match is not None else ""
 
 
@@ -4163,6 +4364,8 @@ def clear_resolved_capacity_state(args: Args, seen: dict[str, float], active_tar
 
 
 def capacity_model_for_target(target: str) -> str:
+    if is_human_tmux_target(target):
+        return "unknown"
     for line in reversed(codex_tail(target, 80)):
         match = re.match(r"^\s+(gpt-[^\s·]+)", line)
         if match is not None:
@@ -4230,6 +4433,9 @@ def retry_capacity_advisory(args: Args, seen: dict[str, float], now_wall_s: floa
 
 
 def run_capacity_resume(target: str, options: CodexSendOptions, guard: AgentProblemGuard) -> bool:
+    if is_human_tmux_target(target):
+        raise PrePasteRejected("human-owned tmux target rejected before inspection or paste")
+
     def before_paste() -> None:
         if not agent_problem_guard_current(guard):
             raise RuntimeError("selected-model-capacity problem resolved or changed before tmux paste")
@@ -4262,7 +4468,7 @@ def route_capacity_main_manager_alert(args: Args, row: ProblemRow, text: str) ->
 
 def push_capacity_owner_alert(args: Args, seen: dict[str, float], row: ProblemRow, attempts: int, detail: str, now_wall_s: float) -> bool:
     target = row.owner_target or args.manager_target
-    if not target:
+    if not target or is_human_tmux_target(row.target) or is_human_tmux_target(target):
         return False
     text = capacity_alert_text(row, attempts, detail)
     digest = hashlib.sha256(f"{target}\n{text}".encode()).hexdigest()[:16]
@@ -4351,7 +4557,7 @@ def submit_capacity_resume(
     )
     owner_target = row.owner_target or args.manager_target
     options = CodexSendOptions(1, 0.15, False, DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S, False)
-    guard = AgentProblemGuard(tuple([*status_command(args, True), "--no-auto-unstick"]), (line,), root=args.root)
+    guard = AgentProblemGuard(tuple(status_command(args, True)), (line,), root=args.root)
     fallback = (
         DeliveryFailureFallback(row.target, owner_target, alert, options, retry_event)
         if owner_target and not same_tmux_target(row.target, owner_target)
@@ -4396,15 +4602,14 @@ def handle_capacity_problems(args: Args, seen: dict[str, float], output: str, no
     lines = output.splitlines()
     if not lines or not lines[0].startswith("agent-problems:"):
         return output, False
-    capacity_lines = [(line, row) for line in lines[1:] if (row := capacity_problem_row(line)) is not None]
+    all_capacity_lines = [(line, row) for line in lines[1:] if (row := capacity_problem_row(line)) is not None]
+    capacity_lines = [(line, row) for line, row in all_capacity_lines if not is_human_tmux_target(row.target)]
     active_targets = {canonical_target(row.target) for _line, row in capacity_lines}
     changed = clear_resolved_capacity_state(args, seen, active_targets)
     if args.dry_run and capacity_lines:
         CAPACITY_ADVISORY_PENDING.update((str(args.root), model) for model in capacity_models([row.target for _line, row in capacity_lines]))
         changed = retry_capacity_advisory(args, seen, now_wall_s) or changed
     for line, row in capacity_lines:
-        if is_human_tmux_target(row.target):
-            continue
         prefix = capacity_state_prefix(args, row.target)
         attempts = capacity_attempt_count(args, seen, row.target, now_wall_s)
         if f"{prefix}inflight" in seen:
@@ -4422,7 +4627,7 @@ def handle_capacity_problems(args: Args, seen: dict[str, float], output: str, no
         if now_wall_s < seen.get(f"{prefix}next", 0.0):
             continue
         changed = submit_capacity_resume(args, row, line, attempts + 1, seen, now_wall_s) or changed
-    suppressed_capacity_lines = {line for line, row in capacity_lines if not is_human_tmux_target(row.target)}
+    suppressed_capacity_lines = {line for line, _row in all_capacity_lines}
     kept = [line for line in lines[1:] if line not in suppressed_capacity_lines and not line.startswith("manager-action: ")]
     return filtered_problem_output(kept) or "", changed
 
@@ -4617,6 +4822,8 @@ def agent_problem_output_by_owner(
             continue
         if line.startswith("unstuck: "):
             continue
+        if is_human_tmux_target(problem_line_target(line)) or is_human_tmux_target(problem_line_owner_target(line)):
+            continue
         if suppress_enter_attempt_row(args, seen, line, now_wall_s):
             continue
         line_owner = "" if problem_line_status(line) == "malformed_task" else problem_line_owner_target(line)
@@ -4679,9 +4886,11 @@ def authoritative_problem_groups(args: Args, output: str) -> dict[str, tuple[str
         row = parse_problem_row(line)
         if row is None or row.status == "human_request":
             continue
+        if is_human_tmux_target(row.target) or is_human_tmux_target(row.owner_target):
+            continue
         owner = "" if row.status == "malformed_task" else row.owner_target
         target = owner or args.manager_target
-        if target:
+        if target and not is_human_tmux_target(target):
             groups.setdefault(target, []).append(line)
     return {target: tuple(lines) for target, lines in groups.items()}
 
@@ -4704,7 +4913,7 @@ def canonical_target(target: str) -> str:
 
 
 def target_session(target: str) -> str:
-    return target.split(":", 1)[0] if ":" in target else ""
+    return target.split(":", 1)[0] if target else ""
 
 
 def target_window(target: str) -> str:
@@ -4849,143 +5058,446 @@ def filter_manager_self_problem_output(output: str, manager_target: str = "") ->
     return filtered_problem_output(kept, suppress_message="omo_pending_watch: suppressed manager self-problem report")
 
 
-def blocked_report_snapshot(kind: str, task_file: str, state: TaskState, owner_target: str, blocker_fingerprint: str = "") -> str:
-    identity = "\0".join((task_file, state.status, state.target, owner_target, state.reason, blocker_fingerprint))
-    return f"{kind}:{hashlib.sha256(identity.encode('utf-8')).hexdigest()}"
+def filter_human_owned_problem_output(output: str) -> str | None:
+    """Remove every row addressed to or describing a human-owned tmux pane."""
 
-
-def authoritative_task_states(root: Path) -> dict[str, tuple[TaskLine, TaskState, str] | None]:
-    states: dict[str, tuple[TaskLine, TaskState, str] | None] = {}
-    for task in parse_task_lines(root / "TODO.md"):
-        if task.task_file == "TODO.md" or task.section not in MANAGER_TASK_STATE_LIVE_SECTIONS:
-            continue
-        if task.task_file in states:
-            states[task.task_file] = None
-            continue
-        task_path = resolve_task_path(root, task.task_file)
-        state = scan_task_state(task_path, root) if task_path is not None else None
-        states[task.task_file] = None if state is None else (task, state, effective_owner_target(root, task, task_path))
-    return states
-
-
-def authoritative_problem_line_matches(root: Path, line: str) -> bool:
-    task_file = problem_line_task(line)
-    authoritative = authoritative_task_states(root).get(task_file)
-    if not task_file or authoritative is None:
-        return False
-    _task, state, owner_target = authoritative
-    return (
-        problem_line_value(line, "task_status") == state.status
-        and problem_line_target(line) == state.target
-        and problem_line_owner_target(line) == owner_target
-        and problem_line_value(line, "reason") == state.reason
-    )
-
-
-def line_matches_blocked_report_snapshot(root: Path, line: str, snapshot: str) -> bool:
-    status = problem_line_status(line)
-    if status not in SNAPSHOT_SUPPRESSED_BLOCKED_STATUSES or not authoritative_problem_line_matches(root, line):
-        return False
-    if status == "blocked_idle":
-        return snapshot.startswith(("dependency:", "human:"))
-    return snapshot.startswith("human:")
-
-
-def unchanged_dependency_blocked_idle_line(root: Path, line: str, current: dict[str, tuple[TaskLine, str, str]], snapshots: dict[str, str]) -> bool:
-    """Return true only for a repeated blocked row with a stable task snapshot."""
-
-    if problem_line_status(line) not in SNAPSHOT_SUPPRESSED_BLOCKED_STATUSES or problem_line_value(line, "task_status") != "blocked":
-        return False
-    task_file = problem_line_task(line)
-    if not task_file:
-        return False
-    current_snapshot = current.get(task_file)
-    return current_snapshot is not None and line_matches_blocked_report_snapshot(root, line, current_snapshot[1]) and snapshots.get(task_file) == current_snapshot[1]
-
-
-def filter_unchanged_dependency_blocked_idle_output(args: Args, output: str, snapshots: dict[str, str]) -> str | None:
     lines = output.splitlines()
     if not lines or not lines[0].startswith("agent-problems:"):
         return output
-    current = blocked_report_snapshot_state(args.root)
-    if not current:
-        return output
+    kept = [
+        line
+        for line in lines[1:]
+        if not is_human_tmux_target(problem_line_target(line))
+        and not is_human_tmux_target(problem_line_owner_target(line))
+        and not line.startswith("manager-action: ")
+    ]
+    return filtered_problem_output(kept)
+
+
+def problem_episode_ledger_path(args: Args) -> Path:
+    return args.state.with_name(f"{args.state.name}.problem-episodes")
+
+
+def problem_episode_root_key(root: Path) -> str:
+    return hashlib.sha256(str(root.resolve(strict=False)).encode("utf-8")).hexdigest()
+
+
+def problem_episode_fields(record: ProblemEpisodeRecord) -> tuple[str, ...]:
+    return (
+        record.root_key,
+        record.task_path,
+        record.task_version,
+        record.task_id,
+        record.lifecycle_status,
+        record.target,
+        record.owner_target,
+        record.blocker_fingerprint,
+        record.problem_class,
+        record.idle_state,
+        record.observation_fingerprint,
+    )
+
+
+def valid_problem_episode_field(value: str) -> bool:
+    return "\t" not in value and "\n" not in value and "\r" not in value
+
+
+def read_problem_episode_ledger(path: Path) -> dict[tuple[str, str], ProblemEpisodeLedgerEntry]:
+    try:
+        if path.is_symlink() or not path.is_file():
+            return {}
+        rows = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {}
+    ledger: dict[tuple[str, str], ProblemEpisodeLedgerEntry] = {}
+    for row in rows:
+        fields = row.split("\t")
+        if len(fields) != 15 or fields[0] != PROBLEM_EPISODE_LEDGER_VERSION:
+            return {}
+        record = ProblemEpisodeRecord(*fields[1:12])
+        delivery_state, token, reserved_at_text = fields[12:]
+        try:
+            reserved_at_s = float(reserved_at_text)
+        except ValueError:
+            return {}
+        if (
+            not all(valid_problem_episode_field(value) for value in problem_episode_fields(record))
+            or delivery_state not in PROBLEM_EPISODE_DELIVERY_STATES
+            or (delivery_state == "pending" and (not token or not (reserved_at_s > 0.0)))
+            or (delivery_state == "delivered" and (token or reserved_at_s != 0.0))
+            or record.key in ledger
+        ):
+            return {}
+        ledger[record.key] = ProblemEpisodeLedgerEntry(record, delivery_state, token, reserved_at_s)
+    return ledger
+
+
+def write_problem_episode_ledger(path: Path, ledger: dict[tuple[str, str], ProblemEpisodeLedgerEntry]) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp")
+    try:
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            for entry in sorted(ledger.values(), key=lambda item: item.record.key):
+                fields = (
+                    PROBLEM_EPISODE_LEDGER_VERSION,
+                    *problem_episode_fields(entry.record),
+                    entry.delivery_state,
+                    entry.token,
+                    repr(entry.reserved_at_s),
+                )
+                if not all(valid_problem_episode_field(value) for value in fields):
+                    raise OSError("problem-episode ledger field contains a line separator")
+                _ = handle.write("\t".join(fields) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+@contextmanager
+def locked_problem_episode_ledger_path(path: Path) -> Iterator[dict[tuple[str, str], ProblemEpisodeLedgerEntry]]:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    lock_path = path.with_name(f".{path.name}.lock")
+    lock_fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    with os.fdopen(lock_fd, "w", encoding="utf-8") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        ledger = read_problem_episode_ledger(path)
+        before = ledger.copy()
+        yield ledger
+        if ledger != before:
+            write_problem_episode_ledger(path, ledger)
+
+
+@contextmanager
+def locked_problem_episode_ledger(args: Args) -> Iterator[dict[tuple[str, str], ProblemEpisodeLedgerEntry]]:
+    with locked_problem_episode_ledger_path(problem_episode_ledger_path(args)) as ledger:
+        yield ledger
+
+
+def problem_episode_reservations_current(
+    path: Path | None,
+    reservations: Sequence[ProblemEpisodeReservation],
+) -> bool:
+    """Verify that an async send still owns each exact pending episode lease."""
+
+    if not reservations:
+        return True
+    if path is None:
+        return False
+    try:
+        with locked_problem_episode_ledger_path(path) as ledger:
+            return all(
+                ledger.get(reservation.record.key)
+                == ProblemEpisodeLedgerEntry(
+                    reservation.record,
+                    "pending",
+                    reservation.token,
+                    reservation.reserved_at_s,
+                )
+                for reservation in reservations
+            )
+    except OSError:
+        return False
+
+
+def canonical_problem_task_path(root: Path, task_file: str) -> Path | None:
+    candidate = Path(task_file).expanduser()
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    try:
+        resolved = candidate.resolve(strict=False)
+        root_resolved = root.resolve(strict=False)
+    except OSError:
+        return None
+    return resolved if resolved != root_resolved and root_resolved in resolved.parents else None
+
+
+def problem_task_source_sha256(path: Path | None) -> str:
+    if path is None:
+        return ""
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                digest.update(chunk)
+    except OSError:
+        return ""
+    return digest.hexdigest()
+
+
+def problem_task_candidates(root: Path) -> tuple[ProblemTaskCandidate, ...]:
+    candidates: list[ProblemTaskCandidate] = []
+    for task in parse_task_lines(root / "TODO.md"):
+        if task.task_file == "TODO.md" or task.section not in MANAGER_TASK_STATE_LIVE_SECTIONS:
+            continue
+        path = canonical_problem_task_path(root, task.task_file)
+        metadata = read_task_metadata(path if path is not None and path.is_file() else None, root)
+        state = scan_task_state(path, root) if path is not None and path.is_file() else None
+        candidates.append(ProblemTaskCandidate(task, path, metadata, state, problem_task_source_sha256(path)))
+    return tuple(candidates)
+
+
+def problem_task_candidate_descriptor(candidate: ProblemTaskCandidate) -> str:
+    metadata = candidate.metadata
+    return "\0".join(
+        (
+            candidate.task.task_file,
+            candidate.task.section,
+            candidate.task.target,
+            str(candidate.path or ""),
+            candidate.source_sha256,
+            metadata.version if metadata is not None else "",
+            metadata.task_id if metadata is not None else "",
+            metadata.status if metadata is not None else "",
+            metadata.runat if metadata is not None else "",
+            metadata.managerat if metadata is not None else "",
+            metadata.blocked_on if metadata is not None else "",
+        )
+    )
+
+
+def problem_task_authority(root: Path, task_file: str) -> tuple[ProblemTaskAuthority | None, str]:
+    candidates = problem_task_candidates(root)
+    requested_path = canonical_problem_task_path(root, task_file)
+    raw_matches = [candidate for candidate in candidates if candidate.task.task_file == task_file]
+    path_matches = [candidate for candidate in candidates if requested_path is not None and candidate.path == requested_path]
+    selected = raw_matches[0] if len(raw_matches) == 1 else None
+    metadata = selected.metadata if selected is not None else None
+    target_matches = [
+        candidate
+        for candidate in candidates
+        if metadata is not None
+        and candidate.metadata is not None
+        and canonical_target(candidate.metadata.runat) == canonical_target(metadata.runat)
+    ]
+    task_id_matches = [
+        candidate
+        for candidate in candidates
+        if metadata is not None
+        and metadata.task_id
+        and candidate.metadata is not None
+        and candidate.metadata.task_id == metadata.task_id
+    ]
+    relevant = {problem_task_candidate_descriptor(candidate) for candidate in (*raw_matches, *path_matches, *target_matches, *task_id_matches)}
+    errors: list[str] = []
+    dependency_fingerprint = ""
+    blocker_relevant: set[str] = set()
+    if len(raw_matches) != 1:
+        errors.append("task-reference-count")
+    if requested_path is None or selected is None or selected.path is None or not selected.path.is_file():
+        errors.append("task-path")
+    if len(path_matches) != 1:
+        errors.append("task-path-alias")
+    root_resolved = root.resolve(strict=False)
+    canonical_ref = ""
+    if selected is not None and selected.path is not None:
+        try:
+            canonical_ref = selected.path.relative_to(root_resolved).as_posix()
+        except ValueError:
+            errors.append("task-path-root")
+    if not canonical_ref or task_file != canonical_ref:
+        errors.append("task-path-canonical")
+    if metadata is None or selected is None or selected.state is None:
+        errors.append("task-metadata")
+    else:
+        if not metadata.runat or selected.task.target != metadata.runat:
+            errors.append("task-target-exact")
+        if not metadata.managerat:
+            errors.append("task-owner")
+        if is_human_tmux_target(metadata.runat) or is_human_tmux_target(metadata.managerat):
+            errors.append("human-owned-target")
+        if len(target_matches) != 1:
+            errors.append("task-target-shared")
+        if metadata.version == "v2.0.0" and (not metadata.task_id or len(task_id_matches) != 1):
+            errors.append("task-id")
+        blocker_refs = (
+            tuple(
+                blocker.task
+                for blocker in metadata.blockers
+                if blocker.kind == "task" and getattr(blocker, "task", "")
+            )
+            if metadata.version == "v2.0.0"
+            else tuple(match.group(1) for match in TASK_RE.finditer(selected.state.reason))
+        )
+        for blocker_ref in blocker_refs:
+            blocker_path = canonical_problem_task_path(root, blocker_ref)
+            matches = [
+                candidate
+                for candidate in candidates
+                if candidate.task.task_file == blocker_ref
+                or (blocker_path is not None and candidate.path == blocker_path)
+            ]
+            blocker_relevant.add(f"blocker-ref:{blocker_ref}:{blocker_path or ''}")
+            blocker_relevant.update(problem_task_candidate_descriptor(candidate) for candidate in matches)
+        dependency_fingerprint = blocked_status_dependency_snapshot(root, selected.task, selected.state)
+        if blocker_refs and not dependency_fingerprint:
+            errors.append("blocker-authority")
+    fingerprint_source = "\n".join((*sorted(relevant), *sorted(blocker_relevant), *sorted(set(errors))))
+    fingerprint = hashlib.sha256(fingerprint_source.encode("utf-8")).hexdigest()
+    if errors or selected is None or selected.path is None or metadata is None or selected.state is None:
+        return None, fingerprint
+    blocker_source = "\0".join((selected.state.reason, dependency_fingerprint))
+    blocker_fingerprint = hashlib.sha256(blocker_source.encode("utf-8")).hexdigest()
+    return (
+        ProblemTaskAuthority(
+            canonical_ref,
+            str(selected.path),
+            metadata.version,
+            metadata.task_id,
+            selected.state.status,
+            metadata.runat,
+            metadata.managerat,
+            selected.state.reason,
+            blocker_fingerprint,
+        ),
+        fingerprint,
+    )
+
+
+def problem_line_is_episode(line: str) -> bool:
+    return problem_line_status(line) in SNAPSHOT_SUPPRESSED_BLOCKED_STATUSES and bool(problem_line_task(line))
+
+
+def problem_episode_expectation(root: Path, line: str) -> ProblemEpisodeExpectation | None:
+    if not problem_line_is_episode(line):
+        return None
+    authority, fingerprint = problem_task_authority(root, problem_line_task(line))
+    record: ProblemEpisodeRecord | None = None
+    problem_class = problem_line_status(line)
+    reported_idle_state = problem_line_value(line, "idle_status")
+    idle_state = reported_idle_state or ("missing" if problem_class == "missing" else "")
+    if (
+        authority is not None
+        and problem_line_task(line) == authority.task_file
+        and problem_line_target(line) == authority.target
+        and problem_line_owner_target(line) == authority.owner_target
+        and problem_line_value(line, "task_status") == authority.lifecycle_status
+        and problem_line_value(line, "reason") == authority.reason
+        and idle_state
+        and (problem_class != "missing" or idle_state == "missing")
+        and (problem_class != "blocked_idle" or (bool(reported_idle_state) and idle_state != "missing"))
+    ):
+        record = ProblemEpisodeRecord(
+            problem_episode_root_key(root),
+            authority.task_path,
+            authority.task_version,
+            authority.task_id,
+            authority.lifecycle_status,
+            authority.target,
+            authority.owner_target,
+            authority.blocker_fingerprint,
+            problem_class,
+            idle_state,
+            hashlib.sha256(line.encode("utf-8")).hexdigest(),
+        )
+    return ProblemEpisodeExpectation(hashlib.sha256(line.encode("utf-8")).hexdigest(), fingerprint, record)
+
+
+def reconcile_problem_episode_ledger(
+    args: Args,
+    current_records: Sequence[ProblemEpisodeRecord],
+) -> dict[tuple[str, str], ProblemEpisodeLedgerEntry]:
+    current = {record.key: record for record in current_records}
+    root_key = problem_episode_root_key(args.root)
+    now_s = time.time()
+
+    def should_remove(key: tuple[str, str], entry: ProblemEpisodeLedgerEntry) -> bool:
+        pending_age_s = now_s - entry.reserved_at_s
+        pending_is_live = entry.delivery_state != "pending" or 0.0 <= pending_age_s < PROBLEM_EPISODE_PENDING_TTL_S
+        return key[0] == root_key and (current.get(key) != entry.record or not pending_is_live)
+
+    if args.dry_run:
+        return {
+            key: entry
+            for key, entry in read_problem_episode_ledger(problem_episode_ledger_path(args)).items()
+            if not should_remove(key, entry)
+        }
+    with locked_problem_episode_ledger(args) as ledger:
+        for key, entry in tuple(ledger.items()):
+            if should_remove(key, entry):
+                del ledger[key]
+        return ledger.copy()
+
+
+def reserve_problem_episodes(args: Args, records: Sequence[ProblemEpisodeRecord]) -> tuple[ProblemEpisodeReservation, ...]:
+    if args.dry_run:
+        return ()
+    reservations: list[ProblemEpisodeReservation] = []
+    reserved_at_s = time.time()
+    with locked_problem_episode_ledger(args) as ledger:
+        for record in dict.fromkeys(records):
+            if record.key in ledger:
+                continue
+            token = secrets.token_hex(16)
+            ledger[record.key] = ProblemEpisodeLedgerEntry(record, "pending", token, reserved_at_s)
+            reservations.append(ProblemEpisodeReservation(record, token, reserved_at_s))
+    return tuple(reservations)
+
+
+def commit_problem_episode_reservations(args: Args, reservations: Sequence[ProblemEpisodeReservation]) -> bool:
+    changed = False
+    if not reservations:
+        return changed
+    with locked_problem_episode_ledger(args) as ledger:
+        for reservation in reservations:
+            current = ledger.get(reservation.record.key)
+            if current == ProblemEpisodeLedgerEntry(
+                reservation.record,
+                "pending",
+                reservation.token,
+                reservation.reserved_at_s,
+            ):
+                ledger[reservation.record.key] = ProblemEpisodeLedgerEntry(reservation.record, "delivered")
+                changed = True
+    return changed
+
+
+def rollback_problem_episode_reservations(args: Args, reservations: Sequence[ProblemEpisodeReservation]) -> bool:
+    changed = False
+    if not reservations:
+        return changed
+    with locked_problem_episode_ledger(args) as ledger:
+        for reservation in reservations:
+            if ledger.get(reservation.record.key) == ProblemEpisodeLedgerEntry(
+                reservation.record,
+                "pending",
+                reservation.token,
+                reservation.reserved_at_s,
+            ):
+                del ledger[reservation.record.key]
+                changed = True
+    return changed
+
+
+def filter_unchanged_problem_episodes(args: Args, output: str) -> tuple[str, tuple[str, ...]]:
+    lines = output.splitlines()
+    if not lines or not lines[0].startswith("agent-problems:"):
+        return output, ()
+    expectations = [(line, problem_episode_expectation(args.root, line)) for line in lines[1:] if not line.startswith("manager-action: ")]
+    current_records = [expectation.record for _line, expectation in expectations if expectation is not None and expectation.record is not None]
+    ledger = reconcile_problem_episode_ledger(args, current_records)
     kept: list[str] = []
+    due: list[str] = []
     suppressed = False
-    for line in lines[1:]:
-        if unchanged_dependency_blocked_idle_line(args.root, line, current, snapshots):
-            suppressed = True
-            continue
-        if not line.startswith("manager-action: "):
-            kept.append(line)
+    for line, expectation in expectations:
+        if expectation is not None:
+            entry = ledger.get(expectation.record.key) if expectation.record is not None else None
+            if entry is not None and entry.record == expectation.record:
+                suppressed = True
+                continue
+            due.append(line)
+        kept.append(line)
     if not suppressed:
-        return output
-    return filtered_problem_output(kept, suppress_message="omo_pending_watch: suppressed unchanged blocked dependency report")
-
-
-def prune_dependency_reported_snapshots(root: Path, snapshots: dict[str, str], preserve_task_files: set[str] | None = None) -> None:
-    current = blocked_report_snapshot_state(root)
-    preserved = preserve_task_files or set()
-    for task_file in tuple(snapshots):
-        current_snapshot = current.get(task_file)
-        if task_file not in preserved and (current_snapshot is None or current_snapshot[1] != snapshots[task_file]):
-            snapshots.pop(task_file, None)
-
-
-def dependency_snapshot_replacements_for_problem_lines(root: Path, lines: tuple[str, ...]) -> tuple[tuple[str, str], ...]:
-    current = blocked_report_snapshot_state(root)
-    replacements: list[tuple[str, str]] = []
-    seen_tasks: set[str] = set()
-    for line in lines:
-        if problem_line_status(line) not in SNAPSHOT_SUPPRESSED_BLOCKED_STATUSES or problem_line_value(line, "task_status") != "blocked":
-            continue
-        task_file = problem_line_task(line)
-        if not task_file or task_file in seen_tasks:
-            continue
-        current_snapshot = current.get(task_file)
-        if current_snapshot is None or not line_matches_blocked_report_snapshot(root, line, current_snapshot[1]):
-            continue
-        seen_tasks.add(task_file)
-        replacements.append((task_file, current_snapshot[1]))
-    return tuple(replacements)
-
-
-def dependency_snapshot_removals_for_problem_lines(root: Path, lines: tuple[str, ...], snapshots: dict[str, str]) -> tuple[tuple[str, str], ...]:
-    current = blocked_report_snapshot_state(root)
-    removals: list[tuple[str, str]] = []
-    seen_tasks: set[str] = set()
-    for line in lines:
-        task_file = problem_line_task(line)
-        previous = snapshots.get(task_file)
-        if not task_file or task_file in seen_tasks or previous is None or task_file in current:
-            continue
-        seen_tasks.add(task_file)
-        removals.append((task_file, previous))
-    return tuple(removals)
-
-
-def blocked_report_lines_bypassing_repeat(root: Path, lines: tuple[str, ...], snapshots: dict[str, str]) -> tuple[str, ...]:
-    current = blocked_report_snapshot_state(root)
-    bypassing: list[str] = []
-    for line in lines:
-        if problem_line_status(line) not in SNAPSHOT_SUPPRESSED_BLOCKED_STATUSES:
-            continue
-        task_file = problem_line_task(line)
-        previous = snapshots.get(task_file)
-        current_snapshot = current.get(task_file)
-        if previous is None:
-            if current_snapshot is not None and line_matches_blocked_report_snapshot(root, line, current_snapshot[1]):
-                bypassing.append(line)
-            elif not authoritative_problem_line_matches(root, line):
-                bypassing.append(line)
-            continue
-        if current_snapshot is None or current_snapshot[1] != previous or not authoritative_problem_line_matches(root, line):
-            bypassing.append(line)
-    return tuple(bypassing)
-
-
-def blocked_report_bypasses_target_repeat(root: Path, lines: tuple[str, ...], snapshots: dict[str, str]) -> bool:
-    return bool(blocked_report_lines_bypassing_repeat(root, lines, snapshots))
+        return output, tuple(due)
+    filtered = filtered_problem_output(kept, suppress_message="omo_pending_watch: suppressed exact unchanged problem episode") or ""
+    return filtered, tuple(due)
 
 
 def agent_problem_dispatch_subset(dispatch: AgentProblemDispatch, problem_lines: tuple[str, ...]) -> AgentProblemDispatch:
@@ -5030,7 +5542,14 @@ def active_manager_problem_targets(root: Path, output: str, manager_target: str 
         seen_files.add(task.task_file)
         state_path = resolve_task_path(root, task.task_file)
         state = scan_task_state(state_path, root) if state_path is not None else None
-        if state is None or state.status not in {"running", "long_running"} or not state.is_manager or not state.target:
+        if (
+            state is None
+            or state.status not in {"running", "long_running"}
+            or not state.is_manager
+            or not state.target
+            or is_human_tmux_target(state.target)
+            or is_human_tmux_target(state.manager_target)
+        ):
             continue
         if any(same_tmux_target(state.target, problem_target) for problem_target in problem_targets):
             continue
@@ -5088,7 +5607,7 @@ def route_or_email_manager_problem(args: Args, seen: dict[str, float], output: s
         if not agent_problem_target_is_ready(args, seen, target, now_wall_s):
             continue
         guard = AgentProblemGuard(
-            tuple([*status_command(args, True), "--no-auto-unstick"]),
+            tuple(status_command(args, True)),
             tuple(output.splitlines()[1:]),
             ready_target=target,
         )
@@ -5178,29 +5697,13 @@ def dependency_snapshot_state(root: Path) -> dict[str, tuple[TaskLine, str, str]
         state = scan_task_state(task_path, root) if task_path is not None else None
         if state is None:
             continue
+        owner_target = effective_owner_target(root, task, task_path)
+        if is_human_tmux_target(state.target) or is_human_tmux_target(owner_target):
+            continue
         snapshot = blocked_status_dependency_snapshot(root, task, state)
         if not snapshot:
             continue
-        snapshots[task.task_file] = (task, snapshot, effective_owner_target(root, task, task_path))
-    return snapshots
-
-
-def blocked_report_snapshot_state(root: Path) -> dict[str, tuple[TaskLine, str, str]]:
-    """Return stable snapshots for dependency and recorded-human blocked rows."""
-
-    snapshots: dict[str, tuple[TaskLine, str, str]] = {}
-    for task_file, authoritative in authoritative_task_states(root).items():
-        if authoritative is None:
-            continue
-        task, state, owner_target = authoritative
-        dependency_fingerprint = blocked_status_dependency_snapshot(root, task, state)
-        if dependency_fingerprint:
-            snapshot = blocked_report_snapshot("dependency", task_file, state, owner_target, dependency_fingerprint)
-        elif state.status == "blocked" and is_recorded_human_wait(state):
-            snapshot = blocked_report_snapshot("human", task_file, state, owner_target)
-        else:
-            continue
-        snapshots[task_file] = (task, snapshot, owner_target)
+        snapshots[task.task_file] = (task, snapshot, owner_target)
     return snapshots
 
 
@@ -5275,6 +5778,7 @@ def handle_agent_problem_result(
 ) -> bool:
     """Filter, throttle, and route status-problem output."""
 
+    del dependency_reported_snapshots
     visibility_only = result.returncode == 3 and any(line.startswith("malformed_task: ") for line in result.stdout.splitlines())
     reminder_targets: set[str] = set()
     pending_reminders_changed = False if visibility_only else push_agent_pending_item_reminders(args, seen, now_wall_s, reminder_targets)
@@ -5284,10 +5788,9 @@ def handle_agent_problem_result(
         print("omo_pending_watch: agent problem check timed out", file=sys.stderr)
         return reminders_changed
     dependency_state = dependency_snapshots if dependency_snapshots is not None else {}
-    dependency_reported_state = dependency_reported_snapshots if dependency_reported_snapshots is not None else {}
     dependency_changed = False if visibility_only else maybe_push_dependency_transitions(args, dependency_state, now_wall_s, seen)
     if result.returncode == 0:
-        prune_dependency_reported_snapshots(args.root, dependency_reported_state)
+        _ = reconcile_problem_episode_ledger(args, ())
         sync_problem_issues(problem_claim_path(args), {}, now_wall_s)
         enter_changed = clear_all_enter_attempts(args, seen)
         capacity_changed = clear_resolved_capacity_state(args, seen, set())
@@ -5295,18 +5798,20 @@ def handle_agent_problem_result(
     if result.returncode != 3:
         print(f"omo_pending_watch: agent problem check exited status={result.returncode}: {result.stderr.strip()}", file=sys.stderr)
         return dependency_changed or reminders_changed
-    output = result.stdout.strip()
+    output = filter_human_owned_problem_output(result.stdout.strip()) or ""
     if not output:
+        _ = reconcile_problem_episode_ledger(args, ())
+        sync_problem_issues(problem_claim_path(args), {}, now_wall_s)
         return dependency_changed or reminders_changed
-    active_problem_task_files = {task_file for line in output.splitlines()[1:] if (task_file := problem_line_task(line))}
-    prune_dependency_reported_snapshots(args.root, dependency_reported_state, active_problem_task_files)
-    previous_dependency_reported_state = dict(dependency_reported_state)
     raw_groups = authoritative_problem_groups(args, output)
     active_problems = {
         problem_claim_id(owner_target, problem_lines): (owner_target, problem_lines)
         for owner_target, problem_lines in raw_groups.items()
     }
     sync_problem_issues(problem_claim_path(args), active_problems, now_wall_s)
+    output, episode_due_lines = filter_unchanged_problem_episodes(args, output)
+    if not output:
+        return dependency_changed or reminders_changed
     if result.stderr.strip():
         output = f"{output}\nstderr:\n{result.stderr.strip()}".strip()
     if visibility_only:
@@ -5333,13 +5838,10 @@ def handle_agent_problem_result(
     output = filter_manager_self_problem_output(output, args.manager_target) or ""
     if not output:
         return capacity_changed or manager_problem_sent or compaction_changed or dependency_changed or reminders_changed
-    output = filter_unchanged_dependency_blocked_idle_output(args, output, previous_dependency_reported_state) or ""
-    if not output:
-        return capacity_changed or manager_problem_sent or compaction_changed or dependency_changed or reminders_changed
     changed = capacity_changed or manager_problem_sent or compaction_changed or dependency_changed or reminders_changed
     claim_path = problem_claim_path(args)
     claims = read_claims(claim_path)
-    force_due_lines = blocked_report_lines_bypassing_repeat(args.root, tuple(output.splitlines()[1:]), previous_dependency_reported_state)
+    force_due_lines = tuple(line for line in episode_due_lines if line in output.splitlines())
     for owner_target, dispatch in agent_problem_output_by_owner(args, seen, output, now_wall_s, force_due_lines=force_due_lines).items():
         claim_owner_target = owner_target or args.manager_target
         target = owner_target or args.manager_target
@@ -5347,7 +5849,7 @@ def handle_agent_problem_result(
         key = f"agent-problem:{problem_id}"
         active_claim = active_problem_claim(claims, problem_id, claim_owner_target, now_wall_s)
         claim_context = active_claim
-        bypass_lines = blocked_report_lines_bypassing_repeat(args.root, dispatch.problem_lines, previous_dependency_reported_state)
+        bypass_lines = tuple(line for line in dispatch.problem_lines if line in force_due_lines)
         key_repeat_active = seen_contains(seen, key, now_wall_s) and now_wall_s - seen_get(seen, key, now_s=now_wall_s) < args.agent_problem_repeat_s
         target_repeat_active = bool(target and agent_problem_target_repeat_active(args, seen, target, now_wall_s))
         if bypass_lines and len(bypass_lines) < len(dispatch.problem_lines) and (active_claim is not None or key_repeat_active or target_repeat_active):
@@ -5362,7 +5864,7 @@ def handle_agent_problem_result(
         claim = claims.get(problem_id)
         expired_claim = claim if active_claim is None and claim is not None and canonical_target(claim.manager_target) == canonical_target(claim_owner_target) else None
         attempt_key = agent_problem_attempt_key(key)
-        if seen_contains(seen, attempt_key, now_wall_s):
+        if seen_contains(seen, attempt_key, now_wall_s) and not bypass_repeat:
             continue
         expired_claim_due = expired_claim is not None and seen_get(seen, key, now_s=now_wall_s) < expired_claim.expires_at_s
         if not expired_claim_due and not dispatch.blocked_idle_lines and not bypass_repeat and now_wall_s - seen_get(seen, key, now_s=now_wall_s) < args.agent_problem_repeat_s:
@@ -5370,46 +5872,52 @@ def handle_agent_problem_result(
         text = with_manager_policy_reminder(args, f"{dispatch.text}\n\n{problem_claim_instructions(problem_id, expired_claim, claim_context)}")
         if (not target and not args.dry_run) or not agent_problem_target_is_ready(args, seen, target, now_wall_s, bypass_repeat=bypass_repeat):
             continue
-        issue_problem(claim_path, problem_id, claim_owner_target, dispatch.problem_lines, now_wall_s)
-        dependency_reported_replacements = dependency_snapshot_replacements_for_problem_lines(args.root, dispatch.problem_lines)
-        dependency_reported_removals = dependency_snapshot_removals_for_problem_lines(args.root, dispatch.problem_lines, dependency_reported_state)
-        guarded_dependency_replacements = tuple(
-            (task_file, dependency_reported_state.get(task_file), snapshot) for task_file, snapshot in dependency_reported_replacements
+        episode_expectations = tuple(
+            expectation
+            for line in dispatch.problem_lines
+            if (expectation := problem_episode_expectation(args.root, line)) is not None
         )
+        episode_records = tuple(
+            dict.fromkeys(expectation.record for expectation in episode_expectations if expectation.record is not None)
+        )
+        episode_reservations = reserve_problem_episodes(args, episode_records)
+        if not args.dry_run and len(episode_reservations) != len(episode_records):
+            _ = rollback_problem_episode_reservations(args, episode_reservations)
+            continue
+        if claim_owner_target:
+            issue_problem(claim_path, problem_id, claim_owner_target, dispatch.problem_lines, now_wall_s)
         target_attempt_key = agent_problem_target_attempt_key(target)
         event = DeliverySuccessEvent(
             seen_keys=(key,),
             seen_removals=(attempt_key,),
             failure_seen_delays_s=((attempt_key, PENDING_DELIVERY_FAILURE_RETRY_S),),
             blocked_idle_lines=dispatch.blocked_idle_lines,
-            dependency_guarded_replacements=guarded_dependency_replacements,
-            dependency_guarded_removals=dependency_reported_removals,
-            dependency_state=dependency_reported_state if guarded_dependency_replacements or dependency_reported_removals else None,
+            problem_episode_commits=episode_reservations,
             seen_at_s=now_wall_s,
         )
         guard = AgentProblemGuard(
-            tuple([*status_command(args, True), "--no-auto-unstick"]),
+            tuple(status_command(args, True)),
             dispatch.problem_lines,
+            root=args.root,
             ready_target=target,
-            problem_id=problem_id,
+            problem_id=problem_id if claim_owner_target else "",
             problem_owner_target=claim_owner_target,
-            problem_claim_path=claim_path,
+            problem_claim_path=claim_path if claim_owner_target else None,
             allow_active_claim=active_claim is not None and bypass_repeat,
+            episode_expectations=episode_expectations,
+            episode_ledger_path=problem_episode_ledger_path(args),
+            episode_reservations=episode_reservations,
         )
         status = push_manager_text_to_target(args, text, target, event, problem_guard=guard)
         if not delivery_accepted(status):
+            _ = rollback_problem_episode_reservations(args, episode_reservations)
             continue
         reserve_async_marker(seen, attempt_key, now_wall_s, status)
         remember_seen(seen, target_attempt_key, now_wall_s)
         if status == 0:
             for backoff_owner, line in dispatch.blocked_idle_lines:
                 remember_blocked_idle_report(args, seen, backoff_owner, line, now_wall_s)
-            for task_file, expected_snapshot, snapshot in guarded_dependency_replacements:
-                if dependency_reported_state.get(task_file) == expected_snapshot:
-                    dependency_reported_state[task_file] = snapshot
-            for task_file, expected_snapshot in dependency_reported_removals:
-                if dependency_reported_state.get(task_file) == expected_snapshot:
-                    dependency_reported_state.pop(task_file, None)
+            _ = commit_problem_episode_reservations(args, episode_reservations)
             remember_seen(seen, key, now_wall_s)
         changed = True
     return changed
@@ -5584,7 +6092,6 @@ def markdown_line_count(path: Path) -> int:
 def run(args: Args, actor_controller: BlockingActorController) -> int:
     seen = new_seen_cache()
     dependency_snapshots: dict[str, str] = {}
-    dependency_reported_snapshots: dict[str, str] = {}
     if args.once:
         _ = scan_once(args, seen, markdown_files(args.root), actor_controller)
         _ = wait_for_delivery_successes(args, seen, max(10.0, DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S + 5.0))
@@ -5631,7 +6138,7 @@ def run(args: Args, actor_controller: BlockingActorController) -> int:
         if agent_problem_run is not None:
             result = poll_command(agent_problem_run, now_wall_s)
             if result is not None:
-                _ = handle_agent_problem_result(args, seen, result, now_wall_s, dependency_snapshots, dependency_reported_snapshots)
+                _ = handle_agent_problem_result(args, seen, result, now_wall_s, dependency_snapshots)
                 agent_problem_run = None
         last_idle_status_check_s, idle_status_run = update_idle_status_check(args, last_idle_status_check_s, now_s, idle_status_run)
         if idle_status_run is not None:

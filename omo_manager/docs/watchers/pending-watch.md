@@ -2,7 +2,7 @@
 
 - purpose
   - deliver new Markdown `(pending)` markers with enough context to act immediately
-  - keep transient delivery memory process-local and time-bounded while retaining durable consumed-agent-report receipts
+  - keep ordinary transient delivery memory process-local and time-bounded while retaining separate durable consumed-agent-report receipts, ready-turn reminders, and problem-episode records
   - run agent-problem and digest maintenance without delaying marker scans
 
 - file-change path
@@ -84,7 +84,8 @@
   - `</agent_report>`
 
 - agent-problem routing
-  - runs `omo_agent_status.py --problems-only` every `--agent-problem-interval-s` seconds, default `30` unless `OMO_MANAGER_AGENT_PROBLEM_INTERVAL_S` overrides it
+  - runs `omo_agent_status.py --problems-only --no-auto-unstick` every `--agent-problem-interval-s` seconds, default `30` unless `OMO_MANAGER_AGENT_PROBLEM_INTERVAL_S` overrides it
+  - excludes every task whose exact `runat` or `managerat` session begins with `h` before pane inspection; the watcher also drops synthetic or stale `h*` rows, every delivery sink rejects an `h*` recipient before target validation or paste, and pending-marker sends recheck the task boundary before asynchronous inspection, immediately before paste, and before marker cleanup so a later `h*` routing transition cannot contact a pane or mutate the task
   - scans all task owners; `OMO_MANAGER_TMUX_TARGET` only adds the main-manager self-check
   - delivers each `malformed_task` finding with its strict metadata error to the configured main manager because malformed metadata cannot supply a trusted owner
   - treats any scan containing `malformed_task` as visibility-only: it cannot send input, auto-unstick, interrupt, stop, or replace any pane
@@ -96,7 +97,7 @@
   - detects completed task files whose agents still appear open
   - detects `untracked_agent` panes when a non-`h*` tmux session contains a running, ready, errored, or stuck Codex pane that no task file owns
   - agent-problem prompts start with a direct helper instruction and do not need human acknowledgement
-  - immediately before an asynchronous agent-problem paste, reruns the same problem scan without auto-unsticking and skips delivery unless every routed raw problem row is still present; a resumed manager or any changed pane/dependency state therefore invalidates stale captured output
+  - immediately before an asynchronous agent-problem paste, reruns the same read-only problem scan and revalidates every routed row, each expected authoritative episode record, and ownership of the exact pending ledger reservation token; path aliases, target reuse, v2 task replacement, ownership changes, changed pane/dependency state, clean-to-recurrent state, or A-to-B-to-A replacement invalidate a stale send even when old row text remains
   - every manager problem notice has a stable 16-character `problem-id` and gives the exact `amh_problem.py claim ID --action 'ONE CONCRETE NEXT ACTION'` command
   - a matching manager claim suppresses only an unchanged problem whose authoritative snapshot is verified; a fail-closed first, stale, or ambiguous-state alert can repeat without revoking the active claim, an active lease cannot be replaced, expiry or recipient reassignment lets the current recipient claim it, and an independent watcher scan removes the claim only after the problem disappears
   - an unchanged problem whose claim expires is delivered again immediately with the previous claimant and action, bypassing the ordinary 30-minute unchanged-problem interval
@@ -142,7 +143,10 @@
   - non-blocked panes classified as `stuck_input` are submitted with Enter when the Codex status helper says the visible input is safe
   - first and second successful Enter attempts are remembered and suppressed; the third still-stuck report is sent to the owning manager
   - remembered Enter attempts are cleared when that target is no longer reported as stuck
-  - unchanged dependency and recorded-human-wait `blocked_idle` rows, plus recorded-human-wait `missing` rows for absent exact panes, are suppressed after successful delivery within one watcher process until their authoritative task identity, lifecycle status, exact target, owner, or blocker snapshot changes; the first report and every changed, absent, stale, or ambiguous identity bypass the owner-wide repeat delay but still require a ready recipient, asynchronous delivery completion uses compare-and-swap so a stale completion cannot hide newer state, and a watcher restart re-alerts because this suppression ledger is process-local; other blocked-idle and non-human missing rows retain their existing repeat policy
+  - `blocked_idle` and tracked-task `missing` episodes are suppressed only after a successful delivery of the exact durable record in `<consumed-report-state>.problem-episodes`; each record binds the canonical in-root task path, frontmatter version and v2 `task_id`, lifecycle status, unique exact `runat`, exact owner, blocker fingerprint, observable problem class, idle state, and full problem-row fingerprint
+  - TODO aliases, duplicate canonical paths, duplicate v2 task identities, shared pane targets, stale row fields, missing authority, and `h*` targets are never suppressible; a clean scan removes ended records, so `blocked_idle` to `missing` and missing to healthy to missing alert as distinct or recurrent episodes
+  - async sends reserve a pending record and unique token under the ledger lock; an exact live reservation prevents a concurrent/restarted duplicate, the pre-paste guard must still own that token, only confirmed delivery changes that exact reservation to delivered, and rejection, expiry, or a clean, changed, or newer scan removes it, preventing an orphan, replaced send, or late completion from pasting over or hiding newer state
+  - the episode ledger uses a private cross-process lock plus fsynced atomic replacement; an unchanged delivered episode stays suppressed across watcher restart, while the first episode and every changed, stale, absent, ambiguous, or recurrent episode bypass owner-wide repeat delay and immediately re-alert a ready non-human recipient
   - manager self-problem rows and matching `unstuck:` rows are logged and filtered by the watcher so they are not pasted back into the manager prompt
   - `human_request` status rows are filtered from agent-problem prompts because live `(pending)` blocks are dispatched through the pending-marker path
   - manager compaction reminders say ``Unless you know the exact content of MANAGER.md, read it. Normally, don't ack human``

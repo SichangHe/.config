@@ -2097,7 +2097,7 @@ resolved_task_items: []
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "wl:16"]))
             self.assertEqual("", out.getvalue())
 
-    def test_problems_only_reports_error_for_human_helper_direction_wait(self) -> None:
+    def test_problems_only_skips_error_for_human_helper_direction_wait(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             registry = root / "sessions.json"
@@ -2105,11 +2105,15 @@ resolved_task_items: []
             _ = (root / "TODO.md").write_text("current:\nhelper_audit_agent_9580.md hcfg 1\n", encoding="utf-8")
             _ = (root / "helper_audit_agent_9580.md").write_text(task_frontmatter("blocked", runat="hcfg:1", managerat="wl:16", blocked_on="future human/helper audit direction"), encoding="utf-8")
             out = StringIO()
-            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("error", ["traceback"])), redirect_stdout(out):
-                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "wl:16"]))
-            self.assertIn("error: task=helper_audit_agent_9580.md", out.getvalue())
+            def inspect_nonhuman(args: object, **_: object) -> Report:
+                self.assertEqual("wl:16", getattr(args, "target"))
+                return Report("running", ["working"])
 
-    def test_problems_only_reports_stuck_input_for_human_helper_direction_wait(self) -> None:
+            with patch("omo_manager.omo_agent_status.inspect", side_effect=inspect_nonhuman), redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "wl:16"]))
+            self.assertEqual("", out.getvalue())
+
+    def test_problems_only_skips_stuck_input_for_human_helper_direction_wait(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             registry = root / "sessions.json"
@@ -2122,10 +2126,8 @@ resolved_task_items: []
                 return Report("running", ["working"]) if getattr(args, "target") == "wl:16" else report
 
             with patch("omo_manager.omo_agent_status.inspect", side_effect=fake_inspect), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present", return_value="sent_enter") as unstick, redirect_stdout(out):
-                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "wl:16"]))
-            text = out.getvalue()
-            self.assertIn("stuck_input: task=helper_audit_agent_9580.md", text)
-            self.assertIn("unstick=disabled:blocked_idle_blocked", text)
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "wl:16"]))
+            self.assertEqual("", out.getvalue())
             unstick.assert_not_called()
 
     def test_problems_only_reports_non_audit_human_helper_direction_wait(self) -> None:
@@ -2291,7 +2293,7 @@ resolved_task_items: []
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             self.assertEqual("", out.getvalue())
 
-    def test_problems_only_reports_hvl_human_readable_review_wait(self) -> None:
+    def test_problems_only_skips_hvl_human_readable_review_wait(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             registry = root / "sessions.json"
@@ -2302,9 +2304,10 @@ resolved_task_items: []
                 encoding="utf-8",
             )
             out = StringIO()
-            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(out):
-                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
-            self.assertIn("blocked_idle: task=hvl.md", out.getvalue())
+            with patch("omo_manager.omo_agent_status.inspect") as inspect_target, redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            inspect_target.assert_not_called()
+            self.assertEqual("", out.getvalue())
 
     def test_problems_only_reports_hvl_indirect_review_wait(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2522,7 +2525,7 @@ resolved_task_items: []
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             self.assertEqual("", out.getvalue())
 
-    def test_problems_only_reports_error_for_human_review_wait(self) -> None:
+    def test_problems_only_skips_error_for_human_review_wait(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             registry = root / "sessions.json"
@@ -2533,9 +2536,10 @@ resolved_task_items: []
                 encoding="utf-8",
             )
             out = StringIO()
-            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("error", ["traceback"])), redirect_stdout(out):
-                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
-            self.assertIn("error: task=docs.md", out.getvalue())
+            with patch("omo_manager.omo_agent_status.inspect") as inspect_target, redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            inspect_target.assert_not_called()
+            self.assertEqual("", out.getvalue())
 
     def test_problems_only_reports_error_for_non_hvl_human_wait(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3318,22 +3322,21 @@ resolved_task_items: []
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             self.assertEqual("", out.getvalue())
 
-    def test_problems_only_submits_visible_input_for_pending_delivery_task(self) -> None:
+    def test_problems_only_skips_human_pending_delivery_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[{"task_file":"pending.md","tmux_target":"hwl:3.0","started_at_s":1}]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("current:\npending.md hwl 3\n", encoding="utf-8")
             _ = (root / "pending.md").write_text(f"{task_frontmatter('long_running', runat='hwl:3')}(pending)\n", encoding="utf-8")
-            report = Report("stuck_input", ["› Immediately record every pending task"], "Immediately record every pending task", True)
             out = StringIO()
-            with patch("omo_manager.omo_agent_status.inspect", return_value=report), patch(
+            with patch("omo_manager.omo_agent_status.inspect") as inspect_target, patch(
                 "omo_manager.omo_agent_status.submit_stuck_input_if_present", return_value="sent_enter"
             ) as unstick, patch("omo_manager.omo_agent_status.tmux_list_panes", return_value=[]), redirect_stdout(out):
-                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
-            unstick.assert_called_once()
-            self.assertIn("stuck_input: task=pending.md", out.getvalue())
-            self.assertIn("unstick=sent_enter", out.getvalue())
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            inspect_target.assert_not_called()
+            unstick.assert_not_called()
+            self.assertEqual("", out.getvalue())
 
     def test_problems_only_ignores_done_pending_task_marker_for_stale_registry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

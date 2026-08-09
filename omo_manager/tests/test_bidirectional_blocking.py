@@ -85,6 +85,21 @@ class BidirectionalBlockingTests(unittest.TestCase):
         item = source_item or self.source_item
         add_dependency(self.root, self.owner_path, str(self.owner_item["id"]), self.source_path, str(item["id"]))
 
+    def schedule_async_marker(self, args: object, marker: object) -> tuple[object, object, str, str]:
+        from omo_manager import omo_pending_watch as watcher
+
+        with patch.object(watcher, "require_sendable_codex_target") as inspect, patch.object(
+            watcher,
+            "submit_send",
+            return_value=object(),
+        ) as submit:
+            self.assertEqual(watcher.ASYNC_DELIVERY_STARTED, watcher.push_ref(args, {}, 1.0, marker, ()))
+
+        inspect.assert_called_once()
+        submit.assert_called_once()
+        call = submit.call_args
+        return call.kwargs["pending_guard"], call.kwargs["success_event"], call.args[0], call.args[1]
+
     def test_final_completion_resumes_and_queues_stable_wake(self) -> None:
         self.add_dependency()
         resolve_item(load_task(self.source_path), str(self.source_item["id"]), "completed", "review passed")
@@ -202,6 +217,208 @@ class BidirectionalBlockingTests(unittest.TestCase):
         self.assertEqual("mgr:1", deliver.call_args.args[3])
         self.assertIn("manager decision required", deliver.call_args.args[2])
         self.assertNotIn("<human_instruction>", deliver.call_args.args[2])
+
+    def test_human_owned_runat_ready_notice_is_preserved_without_contact(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        self.add_dependency()
+        resolve_item(load_task(self.source_path), str(self.source_item["id"]), "completed", "review passed")
+        _ = reconcile(self.root)
+        owner = load_task(self.owner_path)
+        owner.metadata["runat"] = "hown:2"
+        self.owner_path.write_text(render_task(owner.metadata, owner.body), encoding="utf-8")
+        (self.root / "TODO.md").write_text("current:\nsource.md src:2\nowner.md hown:2\n", encoding="utf-8")
+        _ = queue_due_notices(self.root)
+        marker = next(
+            candidate
+            for candidate in watcher.find_markers(self.root, [self.owner_path])
+            if "Pending item ready" in candidate.block_text
+        )
+        args = watcher.Args(
+            self.root,
+            "",
+            self.root / "state",
+            1,
+            1,
+            1,
+            Path("/bin/false"),
+            True,
+            False,
+            manager_target="mgr:1",
+        )
+        before = self.owner_path.read_bytes()
+        self.assertTrue(watcher.is_blocking_wake_marker(args, marker))
+
+        with (
+            patch.object(watcher, "push_marker_delivery", side_effect=AssertionError("human marker delivered")) as deliver,
+            patch.object(watcher, "inspect_codex", side_effect=AssertionError("human target inspected")) as inspect,
+            patch.object(watcher, "require_sendable_codex_target", side_effect=AssertionError("human target inspected")) as require,
+            patch.object(watcher, "submit_send", side_effect=AssertionError("human target contacted")) as submit,
+            patch.object(watcher, "clear_pending_marker_if_current", side_effect=AssertionError("human marker mutated")) as clear,
+        ):
+            self.assertEqual(1, watcher.push_ref(args, {}, 1.0, marker, ()))
+
+        self.assertEqual(before, self.owner_path.read_bytes())
+        deliver.assert_not_called()
+        inspect.assert_not_called()
+        require.assert_not_called()
+        submit.assert_not_called()
+        clear.assert_not_called()
+
+    def test_human_owned_manager_cancel_notice_is_preserved_without_contact(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        self.add_dependency()
+        resolve_item(load_task(self.source_path), str(self.source_item["id"]), "cancelled", "source abandoned")
+        _ = reconcile(self.root)
+        owner = load_task(self.owner_path)
+        owner.metadata["managerat"] = "hmgr:1"
+        self.owner_path.write_text(render_task(owner.metadata, owner.body), encoding="utf-8")
+        _ = queue_due_notices(self.root)
+        marker = next(
+            candidate
+            for candidate in watcher.find_markers(self.root, [self.owner_path])
+            if "Blocking dependency was cancelled" in candidate.block_text
+        )
+        args = watcher.Args(
+            self.root,
+            "",
+            self.root / "state",
+            1,
+            1,
+            1,
+            Path("/bin/false"),
+            True,
+            False,
+            manager_target="main:1",
+        )
+        before = self.owner_path.read_bytes()
+        self.assertTrue(watcher.is_manager_blocking_marker(args, marker))
+
+        with (
+            patch.object(watcher, "push_marker_delivery", side_effect=AssertionError("human marker delivered")) as deliver,
+            patch.object(watcher, "inspect_codex", side_effect=AssertionError("human target inspected")) as inspect,
+            patch.object(watcher, "require_sendable_codex_target", side_effect=AssertionError("human target inspected")) as require,
+            patch.object(watcher, "submit_send", side_effect=AssertionError("human target contacted")) as submit,
+            patch.object(watcher, "clear_pending_marker_if_current", side_effect=AssertionError("human marker mutated")) as clear,
+        ):
+            self.assertEqual(1, watcher.push_ref(args, {}, 1.0, marker, ()))
+
+        self.assertEqual(before, self.owner_path.read_bytes())
+        deliver.assert_not_called()
+        inspect.assert_not_called()
+        require.assert_not_called()
+        submit.assert_not_called()
+        clear.assert_not_called()
+
+    def test_async_ready_notice_rejects_runat_transition_before_send_or_clear(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        self.add_dependency()
+        resolve_item(load_task(self.source_path), str(self.source_item["id"]), "completed", "review passed")
+        _ = reconcile(self.root)
+        _ = queue_due_notices(self.root)
+        marker = next(
+            candidate
+            for candidate in watcher.find_markers(self.root, [self.owner_path])
+            if "Pending item ready" in candidate.block_text
+        )
+        args = watcher.Args(
+            self.root,
+            "",
+            self.root / "state",
+            1,
+            1,
+            1,
+            Path("/bin/false"),
+            True,
+            False,
+            manager_target="mgr:1",
+        )
+        guard, event, target, message = self.schedule_async_marker(args, marker)
+
+        owner = load_task(self.owner_path)
+        owner.metadata["runat"] = "hown:2"
+        self.owner_path.write_text(render_task(owner.metadata, owner.body), encoding="utf-8")
+        (self.root / "TODO.md").write_text("current:\nsource.md src:2\nowner.md hown:2\n", encoding="utf-8")
+        before = self.owner_path.read_bytes()
+
+        with (
+            patch.object(watcher, "verified_send_to_codex") as send,
+            patch.object(watcher, "inspect_codex", side_effect=AssertionError("human transition inspected")) as inspect,
+            patch.object(watcher, "require_sendable_codex_target", side_effect=AssertionError("human transition inspected")) as require,
+            patch.object(watcher, "submit_send", side_effect=AssertionError("human transition submitted")) as submit,
+            self.assertRaises(watcher.PrePasteRejected),
+        ):
+            watcher.run_verified_send(target, message, watcher.CodexSendOptions(2, 0.15, False), pending_guard=guard)
+
+        send.assert_not_called()
+        inspect.assert_not_called()
+        require.assert_not_called()
+        submit.assert_not_called()
+        watcher.DELIVERY_SUCCESS_EVENTS.put(event)
+        with patch.object(
+            watcher,
+            "clear_pending_marker_if_current",
+            side_effect=AssertionError("human marker cleared"),
+        ) as clear:
+            _ = watcher.drain_delivery_successes(args, {}, 2.0)
+        clear.assert_not_called()
+        self.assertEqual(before, self.owner_path.read_bytes())
+
+    def test_async_manager_notice_rejects_owner_transition_before_send_or_clear(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        self.add_dependency()
+        resolve_item(load_task(self.source_path), str(self.source_item["id"]), "cancelled", "source abandoned")
+        _ = reconcile(self.root)
+        _ = queue_due_notices(self.root)
+        marker = next(
+            candidate
+            for candidate in watcher.find_markers(self.root, [self.owner_path])
+            if "Blocking dependency was cancelled" in candidate.block_text
+        )
+        args = watcher.Args(
+            self.root,
+            "",
+            self.root / "state",
+            1,
+            1,
+            1,
+            Path("/bin/false"),
+            True,
+            False,
+            manager_target="main:1",
+        )
+        guard, event, target, message = self.schedule_async_marker(args, marker)
+
+        owner = load_task(self.owner_path)
+        owner.metadata["managerat"] = "hmgr:1"
+        self.owner_path.write_text(render_task(owner.metadata, owner.body), encoding="utf-8")
+        before = self.owner_path.read_bytes()
+
+        with (
+            patch.object(watcher, "verified_send_to_codex") as send,
+            patch.object(watcher, "inspect_codex", side_effect=AssertionError("human transition inspected")) as inspect,
+            patch.object(watcher, "require_sendable_codex_target", side_effect=AssertionError("human transition inspected")) as require,
+            patch.object(watcher, "submit_send", side_effect=AssertionError("human transition submitted")) as submit,
+            self.assertRaises(watcher.PrePasteRejected),
+        ):
+            watcher.run_verified_send(target, message, watcher.CodexSendOptions(2, 0.15, False), pending_guard=guard)
+
+        send.assert_not_called()
+        inspect.assert_not_called()
+        require.assert_not_called()
+        submit.assert_not_called()
+        watcher.DELIVERY_SUCCESS_EVENTS.put(event)
+        with patch.object(
+            watcher,
+            "clear_pending_marker_if_current",
+            side_effect=AssertionError("human marker cleared"),
+        ) as clear:
+            _ = watcher.drain_delivery_successes(args, {}, 2.0)
+        clear.assert_not_called()
+        self.assertEqual(before, self.owner_path.read_bytes())
 
     def test_new_dependency_invalidates_old_notice(self) -> None:
         self.add_dependency()

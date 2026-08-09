@@ -534,7 +534,7 @@ def canonical_target(target: str) -> str:
 
 def target_session(target: str) -> str:
     match = TARGET_SESSION_RE.match(target)
-    return match.group(1) if match is not None else ""
+    return match.group(1) if match is not None else target.split(":", 1)[0]
 
 
 def target_resolves_exactly(target: str) -> bool:
@@ -705,12 +705,48 @@ def effective_owner_target(root: Path, task: TaskLine, state_path: Path | None =
     return ""
 
 
+def raw_frontmatter_tmux_targets(path: Path | None) -> tuple[str, ...]:
+    """Recover routing fields conservatively when strict metadata is malformed."""
+
+    if path is None:
+        return ()
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ()
+    if not lines or lines[0].strip() != "---":
+        return ()
+    targets: list[str] = []
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        match = re.match(r"^\s*(?:runat|managerat)\s*:\s*([^\s#]+)", line)
+        if match is not None:
+            targets.append(match.group(1).strip("'\""))
+    return tuple(targets)
+
+
+def task_has_human_tmux_boundary(root: Path, task: TaskLine, state_path: Path | None = None) -> bool:
+    """Return whether a task names a human-owned pane as its agent or owner."""
+
+    selected_path = state_path or resolve_task_path(root, task.task_file)
+    metadata = read_task_metadata(selected_path, root)
+    targets = (
+        (task.target, *raw_frontmatter_tmux_targets(selected_path))
+        if metadata is None
+        else (task.target, metadata.runat, metadata.managerat)
+    )
+    return any(is_human_tmux_target(target) for target in targets if target)
+
+
 def task_owned_by_manager(root: Path, task: TaskLine, manager_target: str, state_path: Path | None = None) -> bool:
     """Return whether `manager_target` should include this task in its view.
 
     Empty owner or empty manager target means there is no routing filter, so the
     task remains visible to preserve the legacy all-manager view.
     """
+    if task_has_human_tmux_boundary(root, task, state_path):
+        return False
     owner = effective_owner_target(root, task, state_path)
     return not owner or not manager_target or same_tmux_target(owner, manager_target)
 
@@ -820,10 +856,14 @@ def malformed_active_task_rows(root: Path) -> list[StatusRow]:
     for task in parse_task_lines(root / "TODO.md"):
         if task.task_file == "TODO.md":
             continue
+        if is_human_tmux_target(task.target):
+            continue
         if task.section not in {"todo:current", "todo:human pending", "todo:low priority"}:
             continue
         state_path = resolve_task_path(root, task.task_file)
         if state_path is None or state_path in seen:
+            continue
+        if task_has_human_tmux_boundary(root, task, state_path):
             continue
         seen.add(state_path)
         try:
@@ -1115,6 +1155,8 @@ def classify_target(task_file: str, target: str, persistent_role: bool = False, 
     """
     if not target:
         return StatusRow(task_file, "missing", "target=", persistent_role, task_status)
+    if is_human_tmux_target(target):
+        return StatusRow(task_file, "running", f"target={target}", persistent_role, task_status, target)
     report = recover_capacity_error(report or inspect(StatusArgs(target, 80)))
     evidence = f"target={target}"
     unstick = ""
@@ -1252,7 +1294,13 @@ def active_task_targets(root: Path, *, include_pending_delivery: bool = False) -
     for task in parse_task_lines(root / "TODO.md"):
         state_path = resolve_task_path(root, task.task_file)
         state = scan_task_state(state_path, root) if state_path is not None else None
-        if state is not None and state.status != "done" and state.target and (include_pending_delivery or not task_has_pending_marker(state_path)):
+        if (
+            state is not None
+            and state.status != "done"
+            and state.target
+            and not task_has_human_tmux_boundary(root, task, state_path)
+            and (include_pending_delivery or not task_has_pending_marker(state_path))
+        ):
             targets.add(state.target)
     return targets
 
@@ -1306,7 +1354,7 @@ def unmanaged_problem_row(row: StatusRow, report_not_codex: bool, report_ready_r
 
 
 def manager_problem_row(args: Args, skip_targets: set[str], unstick_by_target: dict[str, str]) -> StatusRow | None:
-    if not args.manager_target:
+    if not args.manager_target or is_human_tmux_target(args.manager_target):
         return None
     report = recover_capacity_error(inspect(StatusArgs(args.manager_target, 80), detect_waiting_subagent=True))
     evidence = f"target={args.manager_target} role=manager" + report_output_evidence(report)
@@ -1496,7 +1544,13 @@ def main(argv: list[str]) -> int:
             rows.extend(untracked_rows)
             inspected_targets.update(row.target for row in untracked_rows if row.target)
             rows.extend(blocked_idle_vl_task_rows(args.root, ""))
-        completed_stale = {record.task_file for record in records if record.task_file in done}
+        completed_stale = {
+            record.task_file
+            for record in records
+            if record.task_file in done
+            and not is_human_tmux_target(record.target)
+            and not task_has_human_tmux_boundary(args.root, TaskLine(record.task_file, "registry", "", record.target, record.port))
+        }
         pruned_count = registry_prune(args, completed_stale) if args.prune_completed else 0
         if args.problems_only:
             text = format_problem_summary(rows, completed_stale_evidence(args.root, completed_stale))
