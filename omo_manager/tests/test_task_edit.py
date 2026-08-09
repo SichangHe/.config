@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from omo_manager.omo_task_edit import REMOVE_REMINDER
 from omo_manager.omo_task_edit import Args
+from omo_manager.omo_task_edit import normalize_duplicate_frontmatter
 from omo_manager.omo_task_edit import parse_args
 from omo_manager.omo_task_edit import run
 
@@ -36,6 +37,36 @@ def task_frontmatter(*, status: str = "running", pending_items: tuple[str, ...] 
 
 
 class TaskEditTests(unittest.TestCase):
+    def test_normalizes_one_empty_later_frontmatter_without_changing_record_or_body(self) -> None:
+        authoritative = task_frontmatter(pending_items=("keep broad owner item",))
+        duplicate = task_frontmatter()
+        original = authoritative + "first human prompt\n" + duplicate + "second human prompt\n(useful history)\n"
+
+        updated = normalize_duplicate_frontmatter(original, 12)
+
+        self.assertEqual(
+            authoritative + "first human prompt\n---\nsecond human prompt\n(useful history)\n",
+            updated,
+        )
+
+    def test_frontmatter_normalize_rejects_unsafe_target_blocks(self) -> None:
+        authoritative = task_frontmatter(pending_items=("keep broad owner item",))
+        cases = (
+            (authoritative + "body\n" + task_frontmatter(pending_items=("do not lose",)), 12, "has pending items"),
+            (authoritative + "body\n" + task_frontmatter().replace("runat: wl:2", "runat: other:2"), 12, "does not match"),
+            (authoritative + "body\n---\nnot frontmatter\n", 12, "no closing marker"),
+        )
+        for original, line_number, message in cases:
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(ValueError, message):
+                    normalize_duplicate_frontmatter(original, line_number)
+
+    def test_frontmatter_normalize_cli_uses_explicit_later_line(self) -> None:
+        args = parse_args(["frontmatter-normalize", "task.md", "--line", "12"])
+
+        self.assertEqual("frontmatter-normalize", args.command)
+        self.assertEqual(12, args.line)
+
     def test_summary_prints_frontmatter_overview_without_body(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

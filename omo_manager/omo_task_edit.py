@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Safely edit task-file pending items and append task comments."""
+"""Safely edit task-file metadata, pending items, and comments."""
 from __future__ import annotations
 
 import argparse
@@ -187,10 +187,22 @@ def parse_args(argv: list[str]) -> Args:
     _ = dependency_remove.add_argument("--on-item-id", required=True)
     _ = dependency_remove.add_argument("--evidence", required=True)
 
+    normalize_parser = subparsers.add_parser(
+        "frontmatter-normalize",
+        help="Replace one empty later duplicate frontmatter block with a Markdown separator.",
+    )
+    normalize_parser.set_defaults(command="frontmatter-normalize")
+    _ = normalize_parser.add_argument("task_file", type=Path)
+    _ = normalize_parser.add_argument("--line", type=int, required=True, help="One-based line number of the duplicate opening marker.")
+
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     try:
         root = parsed.root.resolve()
         command = canonical_command(parsed.command)
+        if command == "frontmatter-normalize":
+            if parsed.line < 2:
+                parser.error("--line must identify a later frontmatter block.")
+            return Args(root, parsed.task_file, command, line=parsed.line)
         if command == "summary":
             task_files = tuple(parsed.task_file)
             return Args(root, task_files[0], command, task_files=task_files)
@@ -390,6 +402,41 @@ def line_newline(line: str) -> str:
 
 def preferred_newline(text: str) -> str:
     return "\r\n" if "\r\n" in text else "\n"
+
+
+def v1_record_identity(metadata: TaskMetadata) -> tuple[str, str, str, str, str, bool, str]:
+    return (
+        metadata.version,
+        metadata.status,
+        metadata.runat,
+        metadata.tool,
+        metadata.managerat,
+        metadata.is_manager,
+        metadata.blocked_on,
+    )
+
+
+def normalize_duplicate_frontmatter(text: str, line_number: int) -> str:
+    authoritative = require_v1_metadata(text)
+    lines = text.splitlines(keepends=True)
+    start_idx = line_number - 1
+    authoritative_end_idx = frontmatter_closing_idx(lines)
+    if start_idx <= authoritative_end_idx or start_idx >= len(lines) or lines[start_idx].strip() != "---":
+        raise TaskFrontmatterError("--line must identify a later frontmatter opening marker.")
+    end_idx = next((idx for idx in range(start_idx + 1, len(lines)) if lines[idx].strip() == "---"), None)
+    if end_idx is None:
+        raise TaskFrontmatterError("later frontmatter opening marker has no closing marker.")
+    duplicate_text = "".join(lines[start_idx : end_idx + 1])
+    duplicate = require_v1_metadata(duplicate_text)
+    if duplicate.pending_task_items:
+        raise TaskFrontmatterError("later frontmatter has pending items; refusing to discard them.")
+    if v1_record_identity(duplicate) != v1_record_identity(authoritative):
+        raise TaskFrontmatterError("later frontmatter does not match the authoritative record.")
+    lines[start_idx : end_idx + 1] = [lines[start_idx]]
+    updated = "".join(lines)
+    if require_v1_metadata(updated) != authoritative:
+        raise TaskFrontmatterError("normalization changed the authoritative record.")
+    return updated
 
 
 def render_pending_items(text: str, items: tuple[str, ...]) -> str:
@@ -738,6 +785,11 @@ def run(args: Args) -> int:
         if command == "pending-list":
             for item in require_metadata(text, args.root).pending_task_items:
                 print(item)
+            return 0
+        if command == "frontmatter-normalize":
+            updated = normalize_duplicate_frontmatter(text, args.line)
+            write_if_changed(path, text, updated, before)
+            print(f"normalized later frontmatter in {path.name}:{args.line}")
             return 0
         if command == "pending-add":
             updated, count = add_pending_items(text, args.items)
