@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import os
 import subprocess
@@ -17,7 +18,6 @@ from omo_manager.omo_task_status import parse_args
 from omo_manager.omo_task_status import reconcile_blocked_index
 from omo_manager.omo_task_status import reconcile_done_index
 from omo_manager.omo_task_status import reconcile_running_index
-from omo_manager.omo_task_status import replace_if_unchanged
 from omo_manager.omo_task_status import replace_if_unchanged_locked
 from omo_manager.omo_task_status import run
 from omo_manager.omo_task_status import stop_done_agent
@@ -955,198 +955,203 @@ class TaskStatusTests(unittest.TestCase):
             stop_agent.assert_not_called()
             self.assertIn("cannot verify manager child ownership because `child.md` has invalid task frontmatter", stderr.getvalue())
 
-    def test_finish_replaced_done_closes_stale_bookkeeping_and_preserves_live_replacement(self) -> None:
+    def replacement_args(self, root: Path, **changes: object) -> StatusArgs:
+        stale = root / "stale.md"
+        replacement = root / "replacement.md"
+        values: dict[str, object] = {
+            "root": root,
+            "task_file": Path("stale.md"),
+            "status": "done",
+            "blocked_on": "",
+            "finish_replaced_done": True,
+            "replacement_task": replacement,
+            "stale_target": "old:2",
+            "replacement_target": "new:3",
+            "stale_sha256": hashlib.sha256(stale.read_bytes()).hexdigest(),
+            "replacement_sha256": hashlib.sha256(replacement.read_bytes()).hexdigest(),
+            "replacement_status": "long_running",
+            "protected_targets": ("protected:8",),
+            "stopped_evidence": "verified stopped legacy target",
+            "replacement_pane_evidence": "successor is active",
+            "audit_output": root / "replacement.audit",
+        }
+        values.update(changes)
+        return StatusArgs(**values)  # type: ignore[arg-type]
+
+    def write_replacement_tasks(
+        self,
+        root: Path,
+        *,
+        stale_pending: tuple[str, ...] = (),
+        replacement_managerat: str = "owner:1",
+        replacement_is_manager: bool = True,
+    ) -> tuple[Path, Path, str, str]:
+        evidence = "verified stopped legacy target"
+        stale_text = task_frontmatter(status="blocked", blocked_on="replaced", pending_items=stale_pending, runat="old:2", managerat="owner:1", is_manager=True) + f"(verified empty stale task: {evidence})\n"
+        replacement_text = task_frontmatter(status="long_running", pending_items=("finish authoritative work",), runat="new:3", managerat=replacement_managerat, is_manager=replacement_is_manager)
+        stale = root / "stale.md"
+        replacement = root / "replacement.md"
+        stale.write_text(stale_text, encoding="utf-8")
+        replacement.write_text(replacement_text, encoding="utf-8")
+        (root / "TODO.md").write_text("current:\nstale.md old:2\nreplacement.md new:3\n\nprevious:\n", encoding="utf-8")
+        return stale, replacement, stale_text, replacement_text
+
+    def test_finish_replaced_done_accepts_different_live_successor_and_writes_private_audit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            path = root / "stale.md"
-            replacement = root / "replacement.md"
-            evidence = "Old pane was stopped and replaced by the authoritative task."
-            path.write_text(
-                task_frontmatter(status="blocked", blocked_on="wrong bookkeeping root; replaced")
-                + f"(verified removed pending item: {evidence})\n",
-                encoding="utf-8",
-            )
-            replacement.write_text(task_frontmatter(status="blocked", blocked_on="waiting on repair", pending_items=("finish real work",)), encoding="utf-8")
-            replacement_before = replacement.read_bytes()
-            todo = root / "TODO.md"
-            todo.write_text("current:\nstale.md wl:2\nreplacement.md wl:2\n\nprevious:\nold.md wl:1\n", encoding="utf-8")
-            stdout = io.StringIO()
-            args = StatusArgs(root, Path("stale.md"), "done", "", finish_replaced_done=True, replacement_task=replacement, stopped_evidence=evidence, replacement_pane_evidence="authoritative replacement paused")
+            stale, replacement, _stale_text, replacement_text = self.write_replacement_tasks(root)
+            args = self.replacement_args(root)
 
             with (
-                patch("omo_manager.omo_task_status.exact_pane_id", return_value="%2"),
-                patch("omo_manager.omo_task_status.capture", return_value="authoritative replacement paused") as capture_call,
-                patch("omo_manager.omo_task_status.stop_done_agent", side_effect=AssertionError("must not stop reused pane")),
-                patch("omo_manager.omo_task_status.record_close", side_effect=AssertionError("must not append a close note for replacement")),
-                redirect_stdout(stdout),
-            ):
-                exit_code = run(args)
-
-            self.assertEqual(0, exit_code)
-            self.assertIn("status: done\nrunat:", path.read_text(encoding="utf-8"))
-            self.assertEqual(replacement_before, replacement.read_bytes())
-            capture_call.assert_called_once_with("%2", 2000)
-            self.assertIn("current:\nreplacement.md wl:2\n\nprevious:\nstale.md wl:2\nold.md wl:1\n", todo.read_text(encoding="utf-8"))
-            self.assertIn("without signaling reused replacement pane wl:2", stdout.getvalue())
-
-    def test_finish_replaced_done_retires_empty_running_stale_record_without_signaling_replacement(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            path = root / "stale.md"
-            replacement = root / "replacement.md"
-            evidence = "The stale legacy record has no pending work and the replacement owns the reused pane."
-            path.write_text(task_frontmatter() + f"(verified empty stale task: {evidence})\n", encoding="utf-8")
-            replacement.write_text(task_frontmatter(pending_items=("finish real work",)), encoding="utf-8")
-            todo = root / "TODO.md"
-            todo.write_text("current:\nstale.md wl:2\nreplacement.md wl:2\n\nprevious:\n", encoding="utf-8")
-            args = StatusArgs(root, Path("stale.md"), "done", "", finish_replaced_done=True, replacement_task=replacement, stopped_evidence=evidence, replacement_pane_evidence="authoritative replacement")
-
-            with (
-                patch("omo_manager.omo_task_status.exact_pane_id", return_value="%2"),
-                patch("omo_manager.omo_task_status.capture", return_value="authoritative replacement"),
-                patch("omo_manager.omo_task_status.stop_done_agent", side_effect=AssertionError("must not stop reused pane")) as stop_agent,
+                patch("omo_manager.omo_task_status.exact_pane_id", side_effect=lambda target: "" if target == "old:2" else "%3"),
+                patch("omo_manager.omo_task_status.capture", return_value="successor is active") as capture_call,
+                patch("omo_manager.omo_task_status.stop_done_agent", side_effect=AssertionError("must not signal either pane")),
                 redirect_stdout(io.StringIO()),
             ):
                 self.assertEqual(0, run(args))
 
-            stop_agent.assert_not_called()
-            self.assertIn("status: done", path.read_text(encoding="utf-8"))
-            self.assertIn("previous:\nstale.md wl:2", todo.read_text(encoding="utf-8"))
+            self.assertIn("status: done\nrunat: old:2", stale.read_text(encoding="utf-8"))
+            self.assertEqual(replacement_text, replacement.read_text(encoding="utf-8"))
+            self.assertEqual("current:\nreplacement.md new:3\n\nprevious:\nstale.md old:2\n", (root / "TODO.md").read_text(encoding="utf-8"))
+            capture_call.assert_called_once_with("%3", 2000)
+            audit = root / "replacement.audit"
+            self.assertEqual(0o600, audit.stat().st_mode & 0o777)
+            audit_text = audit.read_text(encoding="utf-8")
+            self.assertIn("replacement-pane-id: %3\n", audit_text)
+            self.assertIn(f"stopped-evidence-sha256: {hashlib.sha256(args.stopped_evidence.encode()).hexdigest()}\n", audit_text)
+            self.assertIn(f"replacement-pane-evidence-sha256: {hashlib.sha256(args.replacement_pane_evidence.encode()).hexdigest()}\n", audit_text)
+            self.assertIn("completion: unknown-until-finalized\n", audit_text)
+            self.assertIn("final-result: success\n", audit_text)
 
-    def test_finish_replaced_done_rejects_manager_with_active_children_before_pane_capture(self) -> None:
+    def test_finish_replaced_done_refuses_mismatched_task_target_and_nonempty_stale_queue(self) -> None:
+        for case in ("stale target", "successor target", "queue"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                stale, _replacement, stale_text, _replacement_text = self.write_replacement_tasks(root, stale_pending=("still open",) if case == "queue" else ())
+                args = self.replacement_args(root, stale_target="wrong:2") if case == "stale target" else self.replacement_args(root, replacement_target="wrong:3") if case == "successor target" else self.replacement_args(root)
+                with patch("omo_manager.omo_task_status.capture") as capture_call, redirect_stderr(io.StringIO()):
+                    self.assertEqual(2, run(args))
+                self.assertEqual(stale_text, stale.read_text(encoding="utf-8"))
+                self.assertFalse((root / "replacement.audit").exists())
+                capture_call.assert_not_called()
+
+    def test_finish_replaced_done_refuses_changed_lifecycle_bytes_and_missing_successor_pane(self) -> None:
+        for case in ("bytes", "pane"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                stale, replacement, stale_text, replacement_text = self.write_replacement_tasks(root)
+                args = self.replacement_args(root)
+
+                def capture(_pane: str, _lines: int) -> str:
+                    replacement.write_text(replacement_text + "changed lifecycle bytes\n", encoding="utf-8")
+                    return "successor is active"
+
+                pane = (lambda target: "" if target == "old:2" else "") if case == "pane" else (lambda target: "" if target == "old:2" else "%3")
+                capture_side_effect = capture if case == "bytes" else None
+                with patch("omo_manager.omo_task_status.exact_pane_id", side_effect=pane), patch("omo_manager.omo_task_status.capture", side_effect=capture_side_effect) as capture_call, redirect_stderr(io.StringIO()):
+                    self.assertEqual(2, run(args))
+                self.assertEqual(stale_text, stale.read_text(encoding="utf-8"))
+                self.assertFalse((root / "replacement.audit").exists())
+                if case == "pane":
+                    capture_call.assert_not_called()
+
+    def test_finish_replaced_done_refuses_manager_owner_or_role_mismatch(self) -> None:
+        for case in ("owner", "role"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                stale, _replacement, stale_text, _replacement_text = self.write_replacement_tasks(
+                    root,
+                    replacement_managerat="other:1" if case == "owner" else "owner:1",
+                    replacement_is_manager=case != "role",
+                )
+                args = self.replacement_args(root)
+                with patch("omo_manager.omo_task_status.exact_pane_id", side_effect=lambda target: "" if target == "old:2" else "%3"), patch("omo_manager.omo_task_status.capture") as capture_call, redirect_stderr(io.StringIO()):
+                    self.assertEqual(2, run(args))
+                self.assertEqual(stale_text, stale.read_text(encoding="utf-8"))
+                capture_call.assert_not_called()
+
+    def test_finish_replaced_done_refuses_duplicate_or_invalid_competing_successor_owner(self) -> None:
+        for case in ("duplicate", "invalid"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                stale, _replacement, stale_text, _replacement_text = self.write_replacement_tasks(root)
+                competitor = root / "competitor.md"
+                competitor.write_text(
+                    task_frontmatter(status="running", pending_items=("competing work",), runat="new:3", managerat="owner:1", is_manager=True)
+                    if case == "duplicate"
+                    else task_frontmatter(status="running", pending_items=("competing work",), runat="new:3", managerat="owner:1", is_manager=True).replace("runat: new:3\n", "runat: new:3\nrunat: new:3\n"),
+                    encoding="utf-8",
+                )
+                with (
+                    patch("omo_manager.omo_task_status.exact_pane_id", side_effect=lambda target: "" if target == "old:2" else "%3"),
+                    patch("omo_manager.omo_task_status.capture") as capture_call,
+                    redirect_stderr(io.StringIO()),
+                ):
+                    self.assertEqual(2, run(self.replacement_args(root)))
+                self.assertEqual(stale_text, stale.read_text(encoding="utf-8"))
+                self.assertFalse((root / "replacement.audit").exists())
+                capture_call.assert_not_called()
+
+    def test_finish_replaced_done_refuses_human_or_explicitly_protected_target_before_capture(self) -> None:
+        for case in ("human", "protected"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                stale, _replacement, stale_text, _replacement_text = self.write_replacement_tasks(root)
+                if case == "human":
+                    stale.write_text(stale_text.replace("runat: old:2", "runat: hlegacy:2"), encoding="utf-8")
+                    args = self.replacement_args(
+                        root,
+                        stale_target="hlegacy:2",
+                        stale_sha256=hashlib.sha256(stale.read_bytes()).hexdigest(),
+                    )
+                else:
+                    args = self.replacement_args(root, protected_targets=("new:3.0",))
+                with patch("omo_manager.omo_task_status.exact_pane_id") as pane_call, patch("omo_manager.omo_task_status.capture") as capture_call, redirect_stderr(io.StringIO()):
+                    self.assertEqual(2, run(args))
+                pane_call.assert_not_called()
+                capture_call.assert_not_called()
+                self.assertFalse((root / "replacement.audit").exists())
+
+    def test_finish_replaced_done_leaves_durable_unknown_audit_if_success_finalization_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            path = root / "stale.md"
-            replacement = root / "replacement.md"
-            evidence = "The stale manager has no pending work and the replacement owns the reused pane."
-            original = task_frontmatter(is_manager=True) + f"(verified empty stale task: {evidence})\n"
-            path.write_text(original, encoding="utf-8")
-            replacement.write_text(task_frontmatter(pending_items=("finish real work",)), encoding="utf-8")
-            (root / "child.md").write_text(task_frontmatter(managerat="wl:2", pending_items=("child work",)), encoding="utf-8")
-            (root / "TODO.md").write_text("current:\nstale.md wl:2\nreplacement.md wl:2\n\nprevious:\n", encoding="utf-8")
-            args = StatusArgs(root, Path("stale.md"), "done", "", finish_replaced_done=True, replacement_task=replacement, stopped_evidence=evidence, replacement_pane_evidence="replacement")
+            stale, _replacement, _stale_text, _replacement_text = self.write_replacement_tasks(root)
+            with (
+                patch("omo_manager.omo_task_status.exact_pane_id", side_effect=lambda target: "" if target == "old:2" else "%3"),
+                patch("omo_manager.omo_task_status.capture", return_value="successor is active"),
+                patch("omo_manager.omo_task_status.finish_private_audit", side_effect=TaskFrontmatterError("audit storage failed")),
+                redirect_stderr(io.StringIO()),
+            ):
+                self.assertEqual(2, run(self.replacement_args(root)))
+            self.assertIn("status: done\nrunat: old:2", stale.read_text(encoding="utf-8"))
+            audit_text = (root / "replacement.audit").read_text(encoding="utf-8")
+            self.assertIn("completion: unknown-until-finalized", audit_text)
+            self.assertNotIn("final-result:", audit_text)
 
-            with patch("omo_manager.omo_task_status.exact_pane_id") as pane_call, redirect_stderr(io.StringIO()):
-                self.assertEqual(2, run(args))
-
-            self.assertEqual(original, path.read_text(encoding="utf-8"))
-            pane_call.assert_not_called()
-
-    def test_finish_replaced_done_rejects_replacement_outside_work_log_before_pane_capture(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as replacement_tmp:
+    def test_finish_replaced_done_rolls_back_todo_when_task_replace_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            path = root / "stale.md"
-            replacement = Path(replacement_tmp) / "replacement.md"
-            evidence = "The stale legacy record has no pending work and the replacement owns the reused pane."
-            original = task_frontmatter() + f"(verified empty stale task: {evidence})\n"
-            path.write_text(original, encoding="utf-8")
-            replacement.write_text(task_frontmatter(pending_items=("finish real work",)), encoding="utf-8")
-            args = StatusArgs(root, Path("stale.md"), "done", "", finish_replaced_done=True, replacement_task=replacement, stopped_evidence=evidence, replacement_pane_evidence="replacement")
-
-            with patch("omo_manager.omo_task_status.exact_pane_id") as pane_call, redirect_stderr(io.StringIO()):
-                self.assertEqual(2, run(args))
-
-            self.assertEqual(original, path.read_text(encoding="utf-8"))
-            pane_call.assert_not_called()
-
-    def test_finish_replaced_done_rejects_pending_stale_task_before_pane_inspection(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as replacement_tmp:
-            root = Path(tmp)
-            path = root / "stale.md"
-            replacement = Path(replacement_tmp) / "replacement.md"
-            evidence = "Old pane was stopped."
-            original = task_frontmatter(status="blocked", blocked_on="replaced", pending_items=("still open",)) + f"(verified removed pending item: {evidence})\n"
-            path.write_text(original, encoding="utf-8")
-            replacement.write_text(task_frontmatter(pending_items=("real work",)), encoding="utf-8")
-            args = StatusArgs(root, Path("stale.md"), "done", "", finish_replaced_done=True, replacement_task=replacement, stopped_evidence=evidence, replacement_pane_evidence="replacement")
-
-            with patch("omo_manager.omo_task_status.capture") as capture_call, redirect_stderr(io.StringIO()):
-                exit_code = run(args)
-
-            self.assertEqual(2, exit_code)
-            self.assertEqual(original, path.read_text(encoding="utf-8"))
-            capture_call.assert_not_called()
-
-    def test_finish_replaced_done_rejects_wrong_record_or_pane_evidence(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as replacement_tmp:
-            root = Path(tmp)
-            path = root / "stale.md"
-            replacement = Path(replacement_tmp) / "replacement.md"
-            evidence = "Old pane was stopped."
-            original = task_frontmatter(status="blocked", blocked_on="replaced") + f"(verified removed pending item: {evidence})\n"
-            path.write_text(original, encoding="utf-8")
-            replacement.write_text(task_frontmatter(pending_items=("real work",)), encoding="utf-8")
-            wrong_record = StatusArgs(root, Path("stale.md"), "done", "", finish_replaced_done=True, replacement_task=replacement, stopped_evidence="wrong", replacement_pane_evidence="replacement")
-            wrong_pane = StatusArgs(root, Path("stale.md"), "done", "", finish_replaced_done=True, replacement_task=replacement, stopped_evidence=evidence, replacement_pane_evidence="wrong pane")
-
-            with patch("omo_manager.omo_task_status.capture") as capture_call, redirect_stderr(io.StringIO()):
-                self.assertEqual(2, run(wrong_record))
-            capture_call.assert_not_called()
-            with patch("omo_manager.omo_task_status.capture", return_value="replacement is here"), redirect_stderr(io.StringIO()):
-                self.assertEqual(2, run(wrong_pane))
-            self.assertEqual(original, path.read_text(encoding="utf-8"))
-
-    def test_finish_replaced_done_rejects_ambiguous_nonreplacement(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as replacement_tmp:
-            root = Path(tmp)
-            path = root / "stale.md"
-            replacement = Path(replacement_tmp) / "replacement.md"
-            evidence = "Old pane was stopped."
-            original = task_frontmatter(status="blocked", blocked_on="replaced") + f"(verified removed pending item: {evidence})\n"
-            path.write_text(original, encoding="utf-8")
-            replacement.write_text(task_frontmatter(status="done"), encoding="utf-8")
-            args = StatusArgs(root, Path("stale.md"), "done", "", finish_replaced_done=True, replacement_task=replacement, stopped_evidence=evidence, replacement_pane_evidence="replacement")
-
-            with patch("omo_manager.omo_task_status.capture") as capture_call, redirect_stderr(io.StringIO()):
-                exit_code = run(args)
-
-            self.assertEqual(2, exit_code)
-            self.assertEqual(original, path.read_text(encoding="utf-8"))
-            capture_call.assert_not_called()
-
-    def test_finish_replaced_done_rejects_live_original_status(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as replacement_tmp:
-            root = Path(tmp)
-            path = root / "stale.md"
-            replacement = Path(replacement_tmp) / "replacement.md"
-            evidence = "Old pane was stopped."
-            original = task_frontmatter() + f"(verified removed pending item: {evidence})\n"
-            path.write_text(original, encoding="utf-8")
-            replacement.write_text(task_frontmatter(pending_items=("real work",)), encoding="utf-8")
-            args = StatusArgs(root, Path("stale.md"), "done", "", finish_replaced_done=True, replacement_task=replacement, stopped_evidence=evidence, replacement_pane_evidence="replacement")
-
-            with patch("omo_manager.omo_task_status.capture") as capture_call, redirect_stderr(io.StringIO()):
-                exit_code = run(args)
-
-            self.assertEqual(2, exit_code)
-            self.assertEqual(original, path.read_text(encoding="utf-8"))
-            capture_call.assert_not_called()
-
-    def test_finish_replaced_done_rolls_todo_back_when_task_replace_fails(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as replacement_tmp:
-            root = Path(tmp)
-            path = root / "stale.md"
-            replacement = Path(replacement_tmp) / "replacement.md"
-            evidence = "Old pane was stopped."
-            original = task_frontmatter(status="blocked", blocked_on="replaced") + f"(verified removed pending item: {evidence})\n"
-            path.write_text(original, encoding="utf-8")
-            replacement.write_text(task_frontmatter(pending_items=("real work",)), encoding="utf-8")
+            stale, _replacement, stale_text, _replacement_text = self.write_replacement_tasks(root)
             todo = root / "TODO.md"
-            todo_original = "current:\nstale.md wl:2\n"
-            todo.write_text(todo_original, encoding="utf-8")
-            args = StatusArgs(root, Path("stale.md"), "done", "", finish_replaced_done=True, replacement_task=replacement, stopped_evidence=evidence, replacement_pane_evidence="replacement")
+            todo_text = todo.read_text(encoding="utf-8")
+            args = self.replacement_args(root)
 
             def fail_task_replace(target: Path, text: str, before: object) -> None:
-                if target == path:
+                if target == stale:
                     raise OSError("task write failed")
-                replace_if_unchanged(target, text, before)  # type: ignore[arg-type]
+                replace_if_unchanged_locked(target, text, before)  # type: ignore[arg-type]
 
-            with patch("omo_manager.omo_task_status.capture", return_value="replacement"), patch("omo_manager.omo_task_status.replace_if_unchanged", side_effect=fail_task_replace), redirect_stderr(io.StringIO()):
-                exit_code = run(args)
+            with (
+                patch("omo_manager.omo_task_status.exact_pane_id", side_effect=lambda target: "" if target == "old:2" else "%3"),
+                patch("omo_manager.omo_task_status.capture", return_value="successor is active"),
+                patch("omo_manager.omo_task_status.replace_if_unchanged_locked", side_effect=fail_task_replace),
+                redirect_stderr(io.StringIO()),
+            ):
+                self.assertEqual(2, run(args))
 
-            self.assertEqual(2, exit_code)
-            self.assertEqual(original, path.read_text(encoding="utf-8"))
-            self.assertEqual(todo_original, todo.read_text(encoding="utf-8"))
+            self.assertEqual(stale_text, stale.read_text(encoding="utf-8"))
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+            self.assertIn("final-result: not-completed", (root / "replacement.audit").read_text(encoding="utf-8"))
 
     def test_cli_done_failure_marks_blocked_when_close_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1520,16 +1525,31 @@ class TaskStatusTests(unittest.TestCase):
                 "--finish-replaced-done",
                 "--replacement-task",
                 "/tmp/replacement.md",
+                "--stale-target",
+                "old:2",
+                "--replacement-target",
+                "new:3",
+                "--stale-sha256",
+                "a" * 64,
+                "--replacement-sha256",
+                "b" * 64,
+                "--replacement-status",
+                "long_running",
+                "--protected-target",
+                "protected:8",
                 "--stopped-evidence",
                 "verified stop",
                 "--replacement-pane-evidence",
                 "replacement output",
+                "--audit-output",
+                "/tmp/replacement.audit",
                 "task.md",
             ]
         )
 
         self.assertTrue(args.finish_replaced_done)
         self.assertEqual(Path("/tmp/replacement.md"), args.replacement_task)
+        self.assertEqual(("protected:8",), args.protected_targets)
 
     def test_cli_running_has_no_done_reminder(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -48,6 +48,7 @@ WORKER_DEFAULTS = HELPER_DIR / "WORKER_DEFAULTS.md"
 SHELL_COMMANDS = {"bash", "dash", "fish", "sh", "zsh"}
 SUCCESS_STATUSES = {"ready", "running"}
 RESTARTABLE_STATUSES = {"error", "ready", "running", "stuck_input", "waiting_subagent"}
+ROTATION_TASK_STATUSES = {"blocked", "running"}
 EFFORTS = ("low", "medium", "high", "xhigh", "max", "ultra")
 MODEL_RE = re.compile(r"^[A-Za-z0-9._:/-]+$")
 UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$")
@@ -113,6 +114,13 @@ class Args:
     recover_update_prompt: bool = False
     human_email_file: Path | None = None
     human_email_lines: tuple[int, int] | None = None
+    rotate_worker: bool = False
+    expected_task_sha256: str = ""
+    expected_status: str = ""
+    expected_owner_target: str = ""
+    expected_pending_items: tuple[str, ...] = ()
+    protected_targets: tuple[str, ...] = ()
+    audit_output: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -131,6 +139,7 @@ class TaskBinding:
     tool: str
     status: str
     runat: str
+    managerat: str
     pending_task_items: tuple[str, ...]
     task_sha256: str
 
@@ -167,6 +176,13 @@ def parse_args(argv: list[str]) -> Args:
         help="Confirm the target shell has no input to preserve; the helper sends Ctrl-C before launch.",
     )
     _ = parser.add_argument("--restart-running", action="store_true", help="Capture the current Codex session and atomically respawn it in this exact pane.")
+    _ = parser.add_argument("--rotate-worker", action="store_true", help="Replace one exact live non-manager Codex worker with a fresh context in the same pane.")
+    _ = parser.add_argument("--expected-task-sha256", help="Expected SHA-256 of the tracked task bytes; required with --rotate-worker.")
+    _ = parser.add_argument("--expected-status", choices=sorted(ROTATION_TASK_STATUSES), help="Expected preserved task status; required with --rotate-worker.")
+    _ = parser.add_argument("--expected-owner-target", help="Expected preserved task manager target; required with --rotate-worker.")
+    _ = parser.add_argument("--expected-pending-item", action="append", default=[], help="Exact pending item in order; repeat for the full preserved queue with --rotate-worker.")
+    _ = parser.add_argument("--protected-target", action="append", default=[], help="Target that this rotation must not touch; repeat the authoritative protected set with --rotate-worker.")
+    _ = parser.add_argument("--audit-output", type=Path, help="New owner-private audit file; required with --rotate-worker.")
     _ = parser.add_argument(
         "--recover-update-prompt",
         action="store_true",
@@ -196,11 +212,22 @@ def parse_args(argv: list[str]) -> Args:
         parser.error("--model contains unsupported characters.")
     if parsed.session_id and UUID_RE.fullmatch(parsed.session_id) is None:
         parser.error("--session-id must be a Codex UUID.")
-    modes = (parsed.restart_running, parsed.recover_non_codex, parsed.record_recovery_evidence, parsed.recover_update_prompt)
+    modes = (parsed.restart_running, parsed.rotate_worker, parsed.recover_non_codex, parsed.record_recovery_evidence, parsed.recover_update_prompt)
     if sum(bool(value) for value in modes) > 1:
-        parser.error("--restart-running, --recover-non-codex, --record-recovery-evidence, and --recover-update-prompt are mutually exclusive.")
+        parser.error("--restart-running, --rotate-worker, --recover-non-codex, --record-recovery-evidence, and --recover-update-prompt are mutually exclusive.")
     if parsed.restart_running and (parsed.prompt_file or parsed.session_id):
         parser.error("--restart-running captures the live session and does not accept --prompt-file or --session-id.")
+    if parsed.rotate_worker:
+        if parsed.prompt_file or parsed.session_id:
+            parser.error("--rotate-worker starts from the tracked task and does not accept --prompt-file or --session-id.")
+        if not all((parsed.expected_task_sha256, parsed.expected_status, parsed.expected_owner_target, parsed.expected_pending_item, parsed.protected_target, parsed.audit_output)):
+            parser.error("--rotate-worker requires task digest, status, owner, full nonempty pending queue, protected-target set, and audit output assertions.")
+        if SHA256_RE.fullmatch(parsed.expected_task_sha256) is None:
+            parser.error("--expected-task-sha256 must be a lowercase SHA-256 value.")
+        if any(target_identity(target) is None for target in parsed.protected_target):
+            parser.error("--protected-target values must be exact SESSION:WINDOW[.PANE] targets.")
+    elif any((parsed.expected_task_sha256, parsed.expected_status, parsed.expected_owner_target, parsed.expected_pending_item, parsed.protected_target, parsed.audit_output)):
+        parser.error("rotation assertions are only valid with --rotate-worker.")
     if parsed.recover_non_codex and parsed.session_id:
         parser.error("--recover-non-codex launches a fresh session and does not accept --session-id.")
     if parsed.recover_non_codex and not parsed.prompt_file:
@@ -259,6 +286,13 @@ def parse_args(argv: list[str]) -> Args:
         recover_update_prompt=parsed.recover_update_prompt,
         human_email_file=parsed.human_email_file.expanduser() if parsed.human_email_file else None,
         human_email_lines=human_email_lines,
+        rotate_worker=parsed.rotate_worker,
+        expected_task_sha256=parsed.expected_task_sha256 or "",
+        expected_status=parsed.expected_status or "",
+        expected_owner_target=parsed.expected_owner_target or "",
+        expected_pending_items=tuple(parsed.expected_pending_item),
+        protected_targets=tuple(parsed.protected_target),
+        audit_output=parsed.audit_output.expanduser().resolve(strict=False) if parsed.audit_output else None,
     )
 
 
@@ -272,6 +306,17 @@ def target_identity(target: str) -> tuple[str, int, int | None] | None:
     session, window_and_pane = target.split(":", 1)
     window, separator, pane = window_and_pane.partition(".")
     return session, int(window), int(pane) if separator else None
+
+
+def target_is_fresh_rotation_protected(target: str, protected_targets: tuple[str, ...]) -> bool:
+    identity = target_identity(target)
+    if identity is None:
+        return False
+    for protected in protected_targets:
+        protected_identity = target_identity(protected)
+        if protected_identity is not None and protected_identity[:2] == identity[:2]:
+            return True
+    return False
 
 
 def resolve_pane(target: str) -> Pane:
@@ -338,6 +383,21 @@ def validate_task(args: Args, pane: Pane) -> TaskBinding:
         raise StartError(f"same-pane start supports only `tool: codex` or `tool: pcodx`, got {metadata.tool!r}.")
     if metadata.tool == "pcodx" and not args.restart_running:
         raise StartError("same-pane PCODX support is limited to --restart-running with a live state binding.")
+    if args.rotate_worker:
+        if metadata.is_manager:
+            raise StartError("--rotate-worker supports non-manager worker tasks only.")
+        if metadata.tool != "codex":
+            raise StartError("--rotate-worker supports the ordinary Codex worker boundary only.")
+        if metadata.runat != args.target:
+            raise StartError("task `runat` does not exactly equal --target for worker rotation.")
+        if metadata.status != args.expected_status:
+            raise StartError("task status does not equal --expected-status.")
+        if metadata.managerat != args.expected_owner_target:
+            raise StartError("task owner does not equal --expected-owner-target.")
+        if metadata.pending_task_items != args.expected_pending_items:
+            raise StartError("task pending queue does not equal the ordered --expected-pending-item assertions.")
+        if hashlib.sha256(task_bytes).hexdigest() != args.expected_task_sha256:
+            raise StartError("task bytes do not equal --expected-task-sha256.")
     if resolve_pane(metadata.runat).pane_id != pane.pane_id:
         raise StartError(f"task `runat` {metadata.runat} does not identify target {pane.target}.")
     todo = args.root / "TODO.md"
@@ -349,6 +409,7 @@ def validate_task(args: Args, pane: Pane) -> TaskBinding:
         metadata.tool,
         metadata.status,
         metadata.runat,
+        metadata.managerat,
         metadata.pending_task_items,
         hashlib.sha256(task_bytes).hexdigest(),
     )
@@ -710,6 +771,68 @@ def write_private_recovery_file_exclusive(path: Path, text: str) -> None:
     finally:
         if fd >= 0:
             os.close(fd)
+
+
+def reserve_rotation_audit(path: Path, text: str) -> None:
+    """Reserve one exclusive owner-private audit record before respawning a worker."""
+
+    try:
+        parent = path.parent.stat()
+    except OSError as error:
+        raise StartError(f"rotation audit directory is unavailable: {error}") from error
+    if not stat.S_ISDIR(parent.st_mode) or parent.st_uid != os.getuid() or stat.S_IMODE(parent.st_mode) & 0o077:
+        raise StartError("rotation audit directory must be owner-private.")
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as output:
+            output.write(text)
+            output.flush()
+            os.fsync(output.fileno())
+        directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except OSError as error:
+        raise StartError(f"could not reserve private rotation audit: {error}") from error
+
+
+def finish_rotation_audit(path: Path, prepared: str, result: str, new_session_id: str = "") -> None:
+    """Finalize only the exact owner-private rotation audit reserved by this run."""
+
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    temporary: Path | None = None
+    try:
+        fd = os.open(path, flags)
+        with os.fdopen(fd, "r", encoding="utf-8") as output:
+            current = os.fstat(output.fileno())
+            if not stat.S_ISREG(current.st_mode) or current.st_uid != os.getuid() or stat.S_IMODE(current.st_mode) != 0o600:
+                raise StartError("reserved rotation audit lost its owner-private file binding.")
+            if output.read() != prepared:
+                raise StartError("reserved rotation audit changed before completion.")
+        suffix = f"new-session-id: {new_session_id}\n" if new_session_id else ""
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False) as output:
+            temporary = Path(output.name)
+            os.fchmod(output.fileno(), 0o600)
+            output.write(prepared + suffix + f"final-result: {result}\n")
+            output.flush()
+            os.fsync(output.fileno())
+        latest = path.stat()
+        if (latest.st_dev, latest.st_ino, latest.st_size, latest.st_mtime_ns) != (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns):
+            raise StartError("reserved rotation audit changed before atomic finalization.")
+        os.replace(temporary, path)
+        temporary = None
+        directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except OSError as error:
+        raise StartError(f"could not finalize private rotation audit: {error}") from error
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def recovery_issuance_path(receipt: Path) -> Path:
@@ -1184,10 +1307,36 @@ def verify_restart_continuity(
         raise StartError("restarted Codex did not prove continuity with the captured original session.")
 
 
+def verify_fresh_rotation(args: Args, original: Pane, original_session_id: str, task: TaskBinding) -> str:
+    """Prove same-pane fresh-session startup and unchanged task boundaries."""
+
+    current = resolve_pane(original.target)
+    if current.pane_id != original.pane_id or current.window_id != original.window_id:
+        raise StartError("tmux pane or window identity changed after worker rotation.")
+    if current.pane_pid == original.pane_pid:
+        raise StartError("Codex pane process identity did not change during worker rotation.")
+    verify_task_binding(args, current, task)
+    fresh_session_id, _ = query_status_session_id(current.pane_id, 240, min(10.0, args.startup_timeout_s))
+    if not fresh_session_id:
+        raise StartError("rotated worker did not expose a new Codex session id.")
+    if fresh_session_id == original_session_id:
+        raise StartError("rotated worker resumed the old Codex session instead of starting fresh.")
+    return fresh_session_id
+
+
 def start(args: Args) -> str:
-    modes = (args.restart_running, args.recover_non_codex, args.record_recovery_evidence, args.recover_update_prompt)
+    modes = (args.restart_running, args.rotate_worker, args.recover_non_codex, args.record_recovery_evidence, args.recover_update_prompt)
     if sum(bool(value) for value in modes) > 1:
-        raise StartError("--restart-running, --recover-non-codex, --record-recovery-evidence, and --recover-update-prompt are mutually exclusive.")
+        raise StartError("--restart-running, --rotate-worker, --recover-non-codex, --record-recovery-evidence, and --recover-update-prompt are mutually exclusive.")
+    if args.rotate_worker:
+        if args.session_id or args.prompt_file is not None:
+            raise StartError("--rotate-worker starts fresh from the tracked task and does not accept a session or prompt file.")
+        if not all((args.expected_task_sha256, args.expected_status, args.expected_owner_target, args.expected_pending_items, args.protected_targets, args.audit_output)):
+            raise StartError("--rotate-worker requires all explicit lifecycle, queue, protection, and audit assertions.")
+        if args.target.partition(":")[0].startswith("h"):
+            raise StartError("worker rotation cannot modify a human-owned `h*` tmux session.")
+        if target_is_fresh_rotation_protected(args.target, args.protected_targets):
+            raise StartError("worker rotation target is in the explicit protected-target set.")
     if args.recover_non_codex:
         if args.session_id:
             raise StartError("--recover-non-codex launches a fresh session and does not accept --session-id.")
@@ -1216,7 +1365,7 @@ def start(args: Args) -> str:
         if not any(modes):
             require_same_shell(pane)
         task_binding = validate_task(args, pane)
-        if args.restart_running:
+        if args.restart_running or args.rotate_worker:
             require_restartable_codex(pane)
         if args.recover_non_codex:
             require_recovery_target(pane, args.recovery_evidence, args.root)
@@ -1239,6 +1388,7 @@ def start(args: Args) -> str:
             return wait_update_recovery(pane, args.startup_timeout_s)
         effective_args = args
         live_pcodx_state: dict[str, str] | None = None
+        original_session_id = ""
         if args.restart_running and task_binding.tool == "pcodx":
             live_pcodx_state = pcodx_state(pane)
         if args.restart_running and not args.session_id:
@@ -1252,7 +1402,14 @@ def start(args: Args) -> str:
                 if task_binding.tool == "pcodx" and pcodx_state(pane) != live_pcodx_state:
                     raise StartError("live PCODX state changed during session capture; the pane was not replaced.")
                 effective_args = replace(args, session_id=session_id)
-        text = prompt_text(effective_args, task_binding.is_manager)
+        if args.rotate_worker:
+            original_session_id, _ = query_status_session_id(pane.pane_id, 240, min(10.0, args.startup_timeout_s))
+            if not original_session_id:
+                raise StartError("could not capture the current worker session id; the pane was not replaced.")
+            require_restartable_codex(pane)
+            verify_task_binding(args, pane, task_binding)
+            effective_args = replace(args, prompt_file=path, session_id="")
+        text = prompt_text(effective_args, False if args.rotate_worker else task_binding.is_manager)
         prompt_path: Path | None = None
         try:
             if text:
@@ -1267,17 +1424,17 @@ def start(args: Args) -> str:
                 pane,
                 prompt_path,
                 marker,
-                replace_process=args.restart_running or args.recover_non_codex,
+                replace_process=args.restart_running or args.rotate_worker or args.recover_non_codex,
                 tool=task_binding.tool,
                 pcodx_env=live_pcodx_state,
             )
             if args.dry_run:
                 print(f"target: {pane.target}")
-                mode = "restart-running" if args.restart_running else "recover-non-codex" if args.recover_non_codex else "resume" if args.session_id else "fresh"
+                mode = "restart-running" if args.restart_running else "rotate-worker" if args.rotate_worker else "recover-non-codex" if args.recover_non_codex else "resume" if args.session_id else "fresh"
                 print(f"mode: {mode}")
                 print(f"command: {command}")
                 return "dry-run"
-            if args.restart_running or args.recover_non_codex:
+            if args.restart_running or args.rotate_worker or args.recover_non_codex:
                 if args.recover_non_codex:
                     require_recovery_target(pane, args.recovery_evidence, args.root)
                     consume_recovery_receipt(args.root, args.recovery_evidence)
@@ -1286,6 +1443,47 @@ def start(args: Args) -> str:
                     if task_binding.tool == "pcodx" and pcodx_state(pane) != live_pcodx_state:
                         raise StartError("live PCODX state changed before respawn; the pane was not replaced.")
                     verify_human_restart_authority(args, pane, human_restart_authority)
+                if args.rotate_worker:
+                    verify_task_binding(args, pane, task_binding)
+                    current_session_id, _ = query_status_session_id(pane.pane_id, 240, min(10.0, args.startup_timeout_s))
+                    if current_session_id != original_session_id:
+                        raise StartError("current worker session changed before rotation; the pane was not replaced.")
+                    audit_path = args.audit_output
+                    if audit_path is None:
+                        raise StartError("--rotate-worker requires --audit-output.")
+                    queue_sha256 = hashlib.sha256("\0".join(task_binding.pending_task_items).encode()).hexdigest()
+                    prepared_audit = "\n".join(
+                        (
+                            "operation: rotate-worker",
+                            f"task-file: {args.task_file}",
+                            f"target: {pane.target}",
+                            f"pane-id: {pane.pane_id}",
+                            f"window-id: {pane.window_id}",
+                            f"old-pane-pid: {pane.pane_pid}",
+                            f"old-session-id: {original_session_id}",
+                            f"task-sha256: {task_binding.task_sha256}",
+                            f"status: {task_binding.status}",
+                            f"manager-target: {task_binding.managerat}",
+                            f"pending-items-sha256: {queue_sha256}",
+                            "is-manager: false",
+                            "tool: codex",
+                            "completion: unknown-until-finalized",
+                            "",
+                        )
+                    )
+                    reserve_rotation_audit(audit_path, prepared_audit)
+                    try:
+                        respawn_codex(pane, command)
+                        result = wait_started(pane, marker, args.startup_timeout_s)
+                        new_session_id = verify_fresh_rotation(args, pane, original_session_id, task_binding)
+                    except Exception as rotation_error:
+                        try:
+                            finish_rotation_audit(audit_path, prepared_audit, "failed")
+                        except Exception as audit_error:
+                            rotation_error.add_note(f"private audit finalization also failed; audit remains completion-unknown: {audit_error}")
+                        raise
+                    finish_rotation_audit(audit_path, prepared_audit, "success", new_session_id)
+                    return result
                 respawn_codex(pane, command)
             else:
                 require_same_shell(pane)

@@ -1,6 +1,25 @@
 # Codex same-pane start
 
-`omo_codex_start.py` starts or resumes one tracked Codex task in an existing shell-only tmux pane. It preserves the exact pane and window, requires the task to be active in `TODO.md`, verifies the task `runat` identifies that pane, requires an explicit model and reasoning effort, and waits for Codex to become `running` or `ready`. PCODX is supported only when restarting a live PCODX process whose private run and ledger state can be captured.
+`omo_codex_start.py` starts, resumes, or rotates one tracked Codex task in an existing tmux pane. It preserves the exact pane and window, requires the task to be active in `TODO.md`, verifies the task `runat` identifies that pane, requires an explicit model and reasoning effort, and waits for Codex to become `running` or `ready`. PCODX is supported only when restarting a live PCODX process whose private run and ledger state can be captured.
+
+Rotate one tracked non-manager Codex worker into a fresh context in the same pane:
+
+```bash
+omo_codex_start.py --root ROOT \
+  --task-file TASK.md \
+  --target SESSION:WINDOW \
+  --model MODEL \
+  --reasoning-effort EFFORT \
+  --rotate-worker \
+  --expected-task-sha256 TASK_SHA256 \
+  --expected-status blocked \
+  --expected-owner-target MANAGER_SESSION:WINDOW \
+  --expected-pending-item 'FIRST EXACT ITEM' \
+  --protected-target PROTECTED_SESSION:WINDOW \
+  --audit-output PRIVATE_NEW_AUDIT_FILE
+```
+
+Repeat `--expected-pending-item` in queue order for every item and repeat `--protected-target` for the authoritative protected set. `--expected-status` accepts `blocked` or `running`. The audit parent directory must be owner-private and the file must not exist. Rotation refuses manager tasks, PCODX, `h*` sessions, the caller's pane, any requested target in the explicit protected set, missing or rebound panes, and task/target/status/owner/queue/digest drift. It captures the old session id only as evidence, respawns a fresh command without `resume`, and proves the same pane and window, a new pane process, a different new Codex session id, and unchanged task bytes after startup. The fresh prompt contains `WORKER_DEFAULTS.md` and the tracked task file; it never adds `MANAGER.md`. The private audit records the bound identities and starts with completion explicitly unknown; an atomically finalized record distinguishes success or post-respawn failure, while a finalization fault leaves durable unknown evidence and does not replace the original rotation error.
 
 Restart a running Codex session in the same pane with a different model or effort:
 
@@ -15,7 +34,7 @@ omo_codex_start.py \
 
 The helper captures the current Codex session id before making any destructive change, then atomically replaces the process with `tmux respawn-pane -k`. The server-side guard binds the target, pane, window, process id, and command. The helper rechecks exact task bytes and `pending_task_items` before replacement, then proves the same pane, a new process, the resumed Codex session, and unchanged task/queue after startup. PCODX restarts also preserve and verify `PCODX_POC_ROOT`, run directory, ledger path, and PCODX session id. If any binding or session capture fails before replacement, the running process is untouched.
 
-Human-owned `h*` panes remain prohibited except for one byte-exact authorization: root `/shagent/work_logs`, task `human_task_planner.md`, target `hwl:3`, action `--restart-running`, source `manager_mail/85c5dff58359-298.txt`, and lines `1-3`. Both email options are required. The helper requires the fixed private file content and binds its file identity, digest, selected lines, action, target, and live pane/process identity. It revalidates that authority immediately before replacement. Every other root, task, `h*` target, source, line range, action, paraphrase, changed source, changed pane/process, missing original Codex session, or task/queue drift fails closed.
+Human-owned `h*` panes remain prohibited except for one byte-exact `--restart-running` authorization: root `/shagent/work_logs`, task `human_task_planner.md`, target `hwl:3`, source `manager_mail/85c5dff58359-298.txt`, and lines `1-3`. Worker rotation never accepts this exception. Both email options are required for the restart. The helper requires the fixed private file content and binds its file identity, digest, selected lines, action, target, and live pane/process identity. It revalidates that authority immediately before replacement. Every other root, task, `h*` target, source, line range, action, paraphrase, changed source, changed pane/process, missing original Codex session, or task/queue drift fails closed.
 
 Resume a known Codex session from another pane:
 

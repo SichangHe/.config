@@ -67,7 +67,24 @@ Managers change `status` with `omo_task_status.py TASK.md running|long_running|b
 
 `--recover-exited-shell-done --pane-id PANE --session-id SESSION --terminal-evidence TOKEN TASK.md` is the bounded exception for a completed worker whose normal done close recorded that exact pane as `not_codex` after Codex exited to its original shell. It requires an empty task queue, no live pending marker, the exact close-failure text, a strict current TODO row, sole active frontmatter ownership, a fresh unchanged numeric pane, an accepted terminal report before the final interruption, the matching final resume UUID, and no shell activity after exit. It closes only that pane, records the close note, and moves the task to done/previous under the target and file locks. Managers, active Codex, ambiguous or reused shells, mismatched evidence, ownership conflicts, malformed rows, and concurrent changes are rejected without pane input.
 
-For a stopped stale record whose `runat` is occupied by an active replacement, use `--finish-replaced-done` with an explicit replacement task, the exact evidence recorded by the stale task's verified pending-item removal, and distinctive text currently visible in the replacement pane. A stale record with no pending items may instead use an exact `(verified empty stale task: EVIDENCE)` comment. This path requires matching target, owner, role, active replacement status, and nonempty replacement pending work; it reads but never signals the reused pane. It transactionally moves the stale TODO entry and status, rolling TODO back if the task replacement fails.
+For one stopped, blocked stale record with an empty queue and an authoritative live successor on a different target, use the narrow replacement closure:
+
+```bash
+omo_task_status.py --root ROOT --finish-replaced-done \
+  --replacement-task SUCCESSOR.md \
+  --stale-target STALE_SESSION:WINDOW \
+  --replacement-target SUCCESSOR_SESSION:WINDOW \
+  --stale-sha256 STALE_TASK_SHA256 \
+  --replacement-sha256 SUCCESSOR_TASK_SHA256 \
+  --replacement-status running \
+  --protected-target PROTECTED_SESSION:WINDOW \
+  --stopped-evidence 'EXACT EMPTY-STALE EVIDENCE' \
+  --replacement-pane-evidence 'DISTINCTIVE LIVE SUCCESSOR TEXT' \
+  --audit-output PRIVATE_NEW_AUDIT_FILE \
+  STALE.md
+```
+
+`--replacement-status` also accepts `long_running`. Repeat `--protected-target` for the authoritative protected set. The stale task must contain the exact line `(verified empty stale task: EXACT EMPTY-STALE EVIDENCE)`. Both target values must exactly match their task frontmatter, both digests must match the current task bytes, the stale target must remain absent, and the different successor target must remain live with the supplied pane evidence. The helper rejects `h*` and alias-equivalent protected targets before pane capture. The successor must be current, have a nonempty queue, be the sole authoritative active owner of its target, and preserve the stale record's manager owner, tool, and manager role. The audit parent directory must be owner-private and the audit file must not exist. The helper locks and rechecks both task files and targets, never signals either pane, preserves successor bytes, and rolls `TODO.md` back if stale-task replacement fails. A reserved audit says completion is unknown until its final result is durably appended, so an audit-finalization failure cannot falsely claim that mutation did or did not complete.
 
 `omo_task.py` creates new task files with correct placeholder frontmatter. Ordinary workers start `running`; `--is-manager` tasks start `long_running`. `managerat` is the current tmux window; `runat`, `tool`, and `is_manager` are mandatory; `pending_task_items` is empty. Each agent then manages its own queue with `omo_pending.py`, without receiving the task path.
 

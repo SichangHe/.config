@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
 import shlex
+import stat
 import sys
 import tempfile
 from contextlib import ExitStack
@@ -53,6 +55,7 @@ BOOKKEEPING_FAILED_PREFIX = "done_close_bookkeeping_failed"
 CLOSE_FAILED_PREFIX = "done_close_failed"
 DONE_CLOSE_IN_PROGRESS = "done_close_in_progress: manager is closing the agent before marking done"
 TODO_ROW_RE = re.compile(r"\s*`?([A-Za-z0-9_./-]+\.md)`?(?:\s+(.*?))?\s*")
+SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
 
 @dataclass(frozen=True)
@@ -65,8 +68,15 @@ class Args:
     session_id: str = ""
     finish_replaced_done: bool = False
     replacement_task: Path | None = None
+    stale_target: str = ""
+    replacement_target: str = ""
+    stale_sha256: str = ""
+    replacement_sha256: str = ""
+    replacement_status: str = ""
+    protected_targets: tuple[str, ...] = ()
     stopped_evidence: str = ""
     replacement_pane_evidence: str = ""
+    audit_output: Path | None = None
     recover_exited_shell_done: bool = False
     pane_id: str = ""
     terminal_evidence: str = ""
@@ -81,8 +91,15 @@ class ParsedArgs(argparse.Namespace):
     session_id: str = ""
     finish_replaced_done: bool = False
     replacement_task: Path | None = None
+    stale_target: str = ""
+    replacement_target: str = ""
+    stale_sha256: str = ""
+    replacement_sha256: str = ""
+    replacement_status: str = ""
+    protected_target: list[str] = []
     stopped_evidence: str = ""
     replacement_pane_evidence: str = ""
+    audit_output: Path | None = None
     recover_exited_shell_done: bool = False
     pane_id: str = ""
     terminal_evidence: str = ""
@@ -103,8 +120,15 @@ shutdown.""",
     _ = parser.add_argument("--recover-exited-shell-done", action="store_true", help="Close and finish one blocked worker whose completed Codex session exited to an unchanged shell.")
     _ = parser.add_argument("--session-id", default="", help="Session id captured by the prior close, if available.")
     _ = parser.add_argument("--replacement-task", type=Path, help="Active replacement task file; required with --finish-replaced-done.")
+    _ = parser.add_argument("--stale-target", help="Exact stopped target recorded by the stale task; required with --finish-replaced-done.")
+    _ = parser.add_argument("--replacement-target", help="Exact live target recorded by the successor task; required with --finish-replaced-done.")
+    _ = parser.add_argument("--stale-sha256", help="Expected SHA-256 of the stale task bytes; required with --finish-replaced-done.")
+    _ = parser.add_argument("--replacement-sha256", help="Expected SHA-256 of the successor task bytes; required with --finish-replaced-done.")
+    _ = parser.add_argument("--replacement-status", choices=("running", "long_running"), help="Expected active successor status; required with --finish-replaced-done.")
+    _ = parser.add_argument("--protected-target", action="append", default=[], help="Target that replacement closure must not touch; repeat the authoritative protected set.")
     _ = parser.add_argument("--stopped-evidence", default="", help="Exact evidence from a prior verified pending-item removal; required with --finish-replaced-done.")
     _ = parser.add_argument("--replacement-pane-evidence", default="", help="Exact text currently visible in the replacement pane; required with --finish-replaced-done.")
+    _ = parser.add_argument("--audit-output", type=Path, help="New owner-private audit file; required with --finish-replaced-done.")
     _ = parser.add_argument("--pane-id", default="", help="Exact numeric pane id captured by the failed close; required with --recover-exited-shell-done.")
     _ = parser.add_argument("--terminal-evidence", default="", help="Specific accepted terminal-report token visible before Codex exited; required with --recover-exited-shell-done.")
     _ = parser.add_argument("task_file", type=Path)
@@ -118,7 +142,7 @@ shutdown.""",
             parser.error("--recover-exited-shell-done only supports status `done`.")
         if not parsed.session_id.strip() or not parsed.pane_id.strip() or not parsed.terminal_evidence.strip():
             parser.error("--recover-exited-shell-done requires --session-id, --pane-id, and --terminal-evidence.")
-        if parsed.replacement_task is not None or parsed.stopped_evidence or parsed.replacement_pane_evidence:
+        if any((parsed.replacement_task, parsed.stale_target, parsed.replacement_target, parsed.stale_sha256, parsed.replacement_sha256, parsed.replacement_status, parsed.protected_target, parsed.stopped_evidence, parsed.replacement_pane_evidence, parsed.audit_output)):
             parser.error("replacement evidence is only valid with --finish-replaced-done.")
         return Args(
             parsed.root.resolve(),
@@ -137,8 +161,24 @@ shutdown.""",
             parser.error("--session-id is only valid with --finish-closed-done.")
         if parsed.pane_id or parsed.terminal_evidence:
             parser.error("pane and terminal evidence are only valid with --recover-exited-shell-done.")
-        if parsed.replacement_task is None or not parsed.stopped_evidence.strip() or not parsed.replacement_pane_evidence.strip():
-            parser.error("--finish-replaced-done requires --replacement-task, --stopped-evidence, and --replacement-pane-evidence.")
+        required = (
+            parsed.replacement_task,
+            parsed.stale_target.strip(),
+            parsed.replacement_target.strip(),
+            parsed.stale_sha256.strip(),
+            parsed.replacement_sha256.strip(),
+            parsed.replacement_status.strip(),
+            parsed.protected_target,
+            parsed.stopped_evidence.strip(),
+            parsed.replacement_pane_evidence.strip(),
+            parsed.audit_output,
+        )
+        if not all(required) or parsed.replacement_task is None or parsed.audit_output is None:
+            parser.error("--finish-replaced-done requires explicit stale/successor task, target, digest, status, evidence, and audit output values.")
+        if SHA256_RE.fullmatch(parsed.stale_sha256.strip()) is None or SHA256_RE.fullmatch(parsed.replacement_sha256.strip()) is None:
+            parser.error("replacement task digests must be lowercase SHA-256 values.")
+        if any(TARGET_RE.fullmatch(target) is None for target in parsed.protected_target):
+            parser.error("--protected-target values must be exact SESSION:WINDOW[.PANE] targets.")
         return Args(
             parsed.root.resolve(),
             parsed.task_file,
@@ -146,20 +186,29 @@ shutdown.""",
             parsed.blocked_on.strip(),
             finish_replaced_done=True,
             replacement_task=parsed.replacement_task.expanduser().resolve(strict=False),
+            stale_target=parsed.stale_target.strip(),
+            replacement_target=parsed.replacement_target.strip(),
+            stale_sha256=parsed.stale_sha256.strip(),
+            replacement_sha256=parsed.replacement_sha256.strip(),
+            replacement_status=parsed.replacement_status.strip(),
+            protected_targets=tuple(parsed.protected_target),
             stopped_evidence=parsed.stopped_evidence.strip(),
             replacement_pane_evidence=parsed.replacement_pane_evidence.strip(),
+            audit_output=parsed.audit_output.expanduser().resolve(strict=False),
         )
     if parsed.finish_closed_done:
         if parsed.status not in {None, "", "done"}:
             parser.error("--finish-closed-done only supports status `done`.")
         if parsed.pane_id or parsed.terminal_evidence:
             parser.error("pane and terminal evidence are only valid with --recover-exited-shell-done.")
+        if any((parsed.replacement_task, parsed.stale_target, parsed.replacement_target, parsed.stale_sha256, parsed.replacement_sha256, parsed.replacement_status, parsed.protected_target, parsed.stopped_evidence, parsed.replacement_pane_evidence, parsed.audit_output)):
+            parser.error("replacement evidence is only valid with --finish-replaced-done.")
         return Args(parsed.root.resolve(), parsed.task_file, "done", parsed.blocked_on.strip(), True, parsed.session_id.strip())
     if not parsed.status:
         parser.error("status is required unless a finish or recovery mode is used.")
     if parsed.session_id:
         parser.error("--session-id is only valid with --finish-closed-done.")
-    if parsed.replacement_task is not None or parsed.stopped_evidence or parsed.replacement_pane_evidence:
+    if any((parsed.replacement_task, parsed.stale_target, parsed.replacement_target, parsed.stale_sha256, parsed.replacement_sha256, parsed.replacement_status, parsed.protected_target, parsed.stopped_evidence, parsed.replacement_pane_evidence, parsed.audit_output)):
         parser.error("replacement evidence is only valid with --finish-replaced-done.")
     if parsed.pane_id or parsed.terminal_evidence:
         parser.error("pane and terminal evidence are only valid with --recover-exited-shell-done.")
@@ -720,32 +769,100 @@ def mark_done_bookkeeping_failed(root: Path, path: Path, exc: Exception) -> None
     replace_if_unchanged(path, rollback, rollback_before)
 
 
-def finish_done_transaction(root: Path, path: Path, text: str, before: os.stat_result) -> None:
+def finish_done_transaction(root: Path, path: Path, text: str, before: os.stat_result, *, locked: bool = False) -> None:
     """Atomically replace each bookkeeping file and roll back `TODO.md` if the task replacement fails."""
+    replace_file = replace_if_unchanged_locked if locked else replace_if_unchanged
     todo = root / "TODO.md"
     if not todo.exists():
-        replace_if_unchanged(path, text, before)
+        replace_file(path, text, before)
         return
     todo_before = todo.stat()
     todo_text = todo.read_text(encoding="utf-8")
     task_file = path.relative_to(root).as_posix()
     updated_todo = moved_todo_text(root, task_file, todo_text)
     if updated_todo == todo_text:
-        replace_if_unchanged(path, text, before)
+        replace_file(path, text, before)
         return
-    replace_if_unchanged(todo, updated_todo, todo_before)
+    replace_file(todo, updated_todo, todo_before)
     moved_todo_state = todo.stat()
     try:
-        replace_if_unchanged(path, text, before)
+        replace_file(path, text, before)
     except Exception as exc:
         try:
-            replace_if_unchanged(todo, todo_text, moved_todo_state)
+            replace_file(todo, todo_text, moved_todo_state)
         except Exception as rollback_exc:
             raise TaskFrontmatterError(f"task update failed and TODO rollback also failed: {rollback_exc}") from exc
         raise
 
 
-def replacement_task_text(args: Args, stale_path: Path, stale_text: str, stale_before: os.stat_result) -> str:
+def reserve_private_audit(path: Path, text: str) -> None:
+    """Create one exclusive owner-private audit record before lifecycle mutation."""
+
+    parent = path.parent
+    try:
+        parent_state = parent.stat()
+    except OSError as exc:
+        raise TaskFrontmatterError(f"audit output directory is unavailable: {exc}") from exc
+    if not stat.S_ISDIR(parent_state.st_mode) or parent_state.st_uid != os.getuid() or stat.S_IMODE(parent_state.st_mode) & 0o077:
+        raise TaskFrontmatterError("audit output directory must be owner-private.")
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as output:
+            output.write(text)
+            output.flush()
+            os.fsync(output.fileno())
+        directory_fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except OSError as exc:
+        raise TaskFrontmatterError(f"cannot reserve private audit output: {exc}") from exc
+
+
+def finish_private_audit(path: Path, prepared: str, result: str) -> None:
+    """Finalize only the exact audit file reserved by this operation."""
+
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    temporary: Path | None = None
+    try:
+        fd = os.open(path, flags)
+        with os.fdopen(fd, "r", encoding="utf-8") as output:
+            current = os.fstat(output.fileno())
+            if not stat.S_ISREG(current.st_mode) or current.st_uid != os.getuid() or stat.S_IMODE(current.st_mode) != 0o600:
+                raise TaskFrontmatterError("reserved audit output lost its owner-private file binding.")
+            if output.read() != prepared:
+                raise TaskFrontmatterError("reserved audit output changed before lifecycle completion.")
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False) as output:
+            temporary = Path(output.name)
+            os.fchmod(output.fileno(), 0o600)
+            output.write(prepared + f"final-result: {result}\n")
+            output.flush()
+            os.fsync(output.fileno())
+        latest = path.stat()
+        if (latest.st_dev, latest.st_ino, latest.st_size, latest.st_mtime_ns) != (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns):
+            raise TaskFrontmatterError("reserved audit output changed before atomic finalization.")
+        os.replace(temporary, path)
+        temporary = None
+        directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except OSError as exc:
+        raise TaskFrontmatterError(f"cannot finalize private audit output: {exc}") from exc
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def replacement_task_text(
+    args: Args,
+    stale_path: Path,
+    stale_text: str,
+    stale_before: os.stat_result,
+) -> tuple[str, TaskMetadata, TaskMetadata, str, os.stat_result, str]:
     replacement_path = args.replacement_task
     if replacement_path is None or replacement_path == stale_path:
         raise TaskFrontmatterError("replacement task must be a distinct explicit file.")
@@ -757,42 +874,60 @@ def replacement_task_text(args: Args, stale_path: Path, stale_text: str, stale_b
     if stale is None:
         raise TaskFrontmatterError("task file has no frontmatter.")
     _ = update_frontmatter_status(stale_text, "done", "", args.root)
-    if stale.status not in {"blocked", "running", "long_running"}:
-        raise TaskFrontmatterError("--finish-replaced-done requires a blocked stale task or an empty running stale task.")
+    if stale.status != "blocked" or stale.pending_task_items:
+        raise TaskFrontmatterError("--finish-replaced-done requires one blocked stale task with an empty pending queue.")
+    if TARGET_RE.fullmatch(args.stale_target) is None or TARGET_RE.fullmatch(args.replacement_target) is None:
+        raise TaskFrontmatterError("stale and replacement targets must be exact SESSION:WINDOW[.PANE] identities.")
+    if stale.runat != args.stale_target:
+        raise TaskFrontmatterError("stale task `runat` does not equal --stale-target.")
+    if SHA256_RE.fullmatch(args.stale_sha256) is None or hashlib.sha256(stale_text.encode()).hexdigest() != args.stale_sha256:
+        raise TaskFrontmatterError("stale task bytes do not match --stale-sha256.")
     ensure_manager_has_no_active_children(args.root, stale_path, stale)
-    verified_line = f"(verified removed pending item: {args.stopped_evidence})"
     verified_empty_line = f"(verified empty stale task: {args.stopped_evidence})"
-    if stale.pending_task_items:
-        if stale.status != "blocked" or verified_line not in stale_text.splitlines():
-            raise TaskFrontmatterError("stopped evidence does not match an exact verified pending-item removal in the blocked stale task.")
-    elif verified_empty_line not in stale_text.splitlines() and (stale.status != "blocked" or verified_line not in stale_text.splitlines()):
+    if verified_empty_line not in stale_text.splitlines():
         raise TaskFrontmatterError("empty stale task requires an exact verified empty-stale-task record.")
+    if args.stale_target.partition(":")[0].startswith("h") or args.replacement_target.partition(":")[0].startswith("h"):
+        raise TaskFrontmatterError("replacement closure cannot inspect or modify a human-owned `h*` tmux session.")
+    if any(same_tmux_target(target, protected) for target in (args.stale_target, args.replacement_target) for protected in args.protected_targets):
+        raise TaskFrontmatterError("stale or replacement target is in the explicit protected-target set.")
+    if exact_pane_id(stale.runat):
+        raise TaskFrontmatterError("stale target is still live; replacement closure requires a stopped legacy target.")
     replacement_before = replacement_path.stat()
     replacement_text = replacement_path.read_text(encoding="utf-8")
     replacement = parse_task_metadata(replacement_text, args.root)
     if replacement is None:
         raise TaskFrontmatterError("replacement task file has no frontmatter.")
-    if replacement.status not in {"running", "long_running", "blocked"} or not replacement.pending_task_items:
-        raise TaskFrontmatterError("replacement task must be active with at least one real pending item.")
+    if replacement.status != args.replacement_status or replacement.status not in {"running", "long_running"} or not replacement.pending_task_items:
+        raise TaskFrontmatterError("replacement task status or pending queue does not match the explicit active successor precondition.")
+    if replacement.runat != args.replacement_target:
+        raise TaskFrontmatterError("replacement task `runat` does not equal --replacement-target.")
+    if SHA256_RE.fullmatch(args.replacement_sha256) is None or hashlib.sha256(replacement_text.encode()).hexdigest() != args.replacement_sha256:
+        raise TaskFrontmatterError("replacement task bytes do not match --replacement-sha256.")
     if not task_is_in_todo_section(args.root, replacement_path, "current"):
         raise TaskFrontmatterError("replacement task must be listed in the current TODO section.")
-    if not same_tmux_target(stale.runat, replacement.runat):
-        raise TaskFrontmatterError("replacement task `runat` does not match the stale reused pane.")
+    if same_tmux_target(stale.runat, replacement.runat):
+        raise TaskFrontmatterError("replacement task must use a different target from the stopped stale task.")
     if (stale.managerat, stale.tool, stale.is_manager) != (replacement.managerat, replacement.tool, replacement.is_manager):
         raise TaskFrontmatterError("replacement task ownership or role does not match the stale task.")
-    pane_id = exact_pane_id(stale.runat)
+    owners = authoritative_active_target_task_paths(args.root, replacement.runat)
+    if owners != (replacement_path,):
+        refs = ", ".join(relative_task_ref(args.root, owner) for owner in owners) or "none"
+        raise TaskFrontmatterError(f"replacement task is not the sole authoritative active owner of `{replacement.runat}`: {refs}.")
+    pane_id = exact_pane_id(replacement.runat)
     if not pane_id:
-        raise TaskFrontmatterError("stale reused pane is not an exact live pane target.")
+        raise TaskFrontmatterError("replacement target is not an exact live pane target.")
     pane_text = capture(pane_id, 2000)
     if args.replacement_pane_evidence not in pane_text:
         raise TaskFrontmatterError("replacement pane evidence is missing from the live reused pane.")
-    if exact_pane_id(stale.runat) != pane_id:
-        raise TaskFrontmatterError("stale reused pane changed while replacement evidence was checked; retry.")
-    if not same_file_state(stale_before, stale_path.stat()):
+    if exact_pane_id(replacement.runat) != pane_id:
+        raise TaskFrontmatterError("replacement pane changed while evidence was checked; retry.")
+    if exact_pane_id(stale.runat):
+        raise TaskFrontmatterError("stale target became live while replacement evidence was checked; retry.")
+    if not same_file_state(stale_before, stale_path.stat()) or stale_path.read_text(encoding="utf-8") != stale_text:
         raise TaskFrontmatterError("stale task changed while replacement evidence was being checked; retry.")
-    if not same_file_state(replacement_before, replacement_path.stat()):
+    if not same_file_state(replacement_before, replacement_path.stat()) or replacement_path.read_text(encoding="utf-8") != replacement_text:
         raise TaskFrontmatterError("replacement task changed while evidence was being checked; retry.")
-    return update_frontmatter_status(stale_text, "done", "", args.root)
+    return update_frontmatter_status(stale_text, "done", "", args.root), stale, replacement, replacement_text, replacement_before, pane_id
 
 
 def finish_closed_done(args: Args, path: Path, text: str, before: os.stat_result) -> tuple[str, str]:
@@ -887,12 +1022,58 @@ def recover_exited_shell_done(args: Args, path: Path, text: str, before: os.stat
 
 
 def finish_replaced_done(args: Args, path: Path, text: str, before: os.stat_result) -> str:
-    updated = replacement_task_text(args, path, text, before)
-    finish_done_transaction(args.root, path, updated, before)
-    metadata = parse_task_metadata(text, args.root)
-    if metadata is None:
+    replacement_path = args.replacement_task
+    audit_path = args.audit_output
+    if replacement_path is None or audit_path is None:
+        raise TaskFrontmatterError("replacement task and audit output are required.")
+    initial = parse_task_metadata(text, args.root)
+    if initial is None:
         raise TaskFrontmatterError("task file has no frontmatter.")
-    return metadata.runat
+    targets = sorted({initial.runat, args.replacement_target})
+    todo = args.root / "TODO.md"
+    with ExitStack() as locks:
+        for target in targets:
+            locks.enter_context(task_target_lock(args.root, target))
+        for locked_path in sorted({path, replacement_path, todo}, key=lambda candidate: str(candidate)):
+            locks.enter_context(task_file_lock(locked_path))
+        current_before = path.stat()
+        current_text = path.read_text(encoding="utf-8")
+        if not same_file_state(before, current_before) or current_text != text:
+            raise TaskFrontmatterError("stale task changed before replacement closure acquired its locks; retry.")
+        updated, stale, replacement, replacement_text, replacement_before, replacement_pane_id = replacement_task_text(args, path, current_text, current_before)
+        prepared = "\n".join(
+            (
+                "operation: finish-replaced-done",
+                f"stale-task: {relative_task_ref(args.root, path)}",
+                f"stale-target: {stale.runat}",
+                f"stale-sha256: {args.stale_sha256}",
+                f"replacement-task: {relative_task_ref(args.root, replacement_path)}",
+                f"replacement-target: {replacement.runat}",
+                f"replacement-sha256: {args.replacement_sha256}",
+                f"replacement-status: {replacement.status}",
+                f"replacement-pane-id: {replacement_pane_id}",
+                f"stopped-evidence-sha256: {hashlib.sha256(args.stopped_evidence.encode()).hexdigest()}",
+                f"replacement-pane-evidence-sha256: {hashlib.sha256(args.replacement_pane_evidence.encode()).hexdigest()}",
+                f"manager-target: {stale.managerat}",
+                f"tool: {stale.tool}",
+                f"is-manager: {str(stale.is_manager).lower()}",
+                "completion: unknown-until-finalized",
+                "",
+            )
+        )
+        reserve_private_audit(audit_path, prepared)
+        try:
+            if replacement_path.read_text(encoding="utf-8") != replacement_text or not same_file_state(replacement_before, replacement_path.stat()):
+                raise TaskFrontmatterError("replacement task changed immediately before stale lifecycle mutation; retry.")
+            finish_done_transaction(args.root, path, updated, current_before, locked=True)
+        except Exception as mutation_error:
+            try:
+                finish_private_audit(audit_path, prepared, "not-completed")
+            except Exception as audit_error:
+                mutation_error.add_note(f"private audit finalization also failed; audit remains completion-unknown: {audit_error}")
+            raise
+        finish_private_audit(audit_path, prepared, "success")
+    return stale.runat
 
 
 def run(args: Args) -> int:
@@ -969,7 +1150,7 @@ def run(args: Args) -> int:
         return 2
     if args.status == "done":
         if preserved_replacement:
-            print(f"Finalized stale task without signaling reused replacement pane {target}.")
+            print(f"Finalized stopped stale task {target} without signaling it or the live successor pane.")
         elif target:
             print(done_close_message(target, session_id))
         print(DONE_REMINDER)
