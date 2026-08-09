@@ -307,9 +307,17 @@ class CodexStartTests(unittest.TestCase):
         self.assertIn("--model gpt-5.6-terra", command)
         self.assertIn("model_reasoning_effort=", command)
         self.assertIn("check_for_update_on_startup=false", command)
-        self.assertIn("resume 019f670b-6a2f-7463-b9be-9aa6ff0cec43", command)
+        self.assertIn("--cd '/tmp/work logs' resume 019f670b-6a2f-7463-b9be-9aa6ff0cec43", command)
         self.assertIn("cd '/tmp/work logs'", command)
         self.assertIn("printf '%s\\n' '[marker]'", command)
+
+    def test_fresh_command_does_not_add_resume_cwd_override(self) -> None:
+        root = Path("/tmp/work logs")
+        pane = Pane("cfg:2.0", "%2", "@2", "zsh", root)
+
+        command = launch_command(replace(self.args(root), session_id=""), pane, None, "[marker]")
+
+        self.assertNotIn("--cd", command)
 
     def test_exact_codex_update_prompt_recognition(self) -> None:
         lines = self.update_prompt_lines()
@@ -1935,6 +1943,7 @@ class CodexStartTests(unittest.TestCase):
         self.assertNotIn("check_for_update_on_startup", command)
         self.assertIn("PCODX_LEDGER_PATH=/tmp/pcodx-run/ledger.json", command)
         self.assertIn("--model gpt-5.6-terra", command)
+        self.assertIn("--cd '/tmp/work logs' resume 019f670b-6a2f-7463-b9be-9aa6ff0cec43", command)
 
     def test_pcodx_command_requires_complete_live_state_binding(self) -> None:
         root = Path("/tmp/work logs")

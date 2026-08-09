@@ -734,6 +734,7 @@ def launch_command(
         if pcodx_env is None or tuple(pcodx_env) != PCODX_ENV_KEYS or any(not pcodx_env[key] for key in PCODX_ENV_KEYS):
             raise StartError("PCODX launch requires an exact live state binding.")
     if args.session_id:
+        codex.extend(("--cd", str(pane.workdir)))
         codex.extend(("resume", args.session_id))
     rendered = shlex.join(codex)
     if prompt_path is not None:

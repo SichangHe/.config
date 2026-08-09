@@ -91,6 +91,8 @@ omo_codex_start.py \
   --session-id SESSION_UUID
 ```
 
+Resumed launches pass the resolved target pane working directory through Codex's supported `--cd` option. This makes that already-bound directory explicit and prevents Codex's interactive current-versus-session directory selector from blocking the supported launch path.
+
 All launches set Codex's supported `check_for_update_on_startup=false` configuration, directly for Codex and inside the PCODX wrapper, so the startup update menu cannot block manager delivery.
 
 Recover a resumed session that was launched before this safeguard and is paused at Codex's startup update menu:
