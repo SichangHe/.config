@@ -431,6 +431,38 @@ class ManagerMailCompressTests(unittest.TestCase):
             self.assertIn("To: Human <human@example.test>", (Path(tmp) / "export" / "threads" / "200-101.txt").read_text(encoding="utf-8"))
             self.assertIn(('"[Gmail]/All Mail"', True), client.select_calls)
 
+    def test_export_filters_excluded_subject_when_optional_import_fallback_is_active(self) -> None:
+        raw = self.raw_message("PB news")
+        client = FakeClient(
+            {
+                ("search", None, "ALL"): ("OK", [b"7"]),
+                ("search", None, "UNSEEN", "FROM", '"agent@example.test"'): ("OK", [b"7"]),
+                ("fetch", "7", HEADER_FETCH): ("OK", [(b"header", raw)]),
+            },
+            self.gmail_mailboxes(),
+        )
+
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+
+        def open_readonly(readonly: bool) -> tuple[FakeClient, dict[str, str]]:
+            self.assertTrue(readonly)
+            return client, {"user": "human@example.test"}
+
+        output = io.StringIO()
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch("omo_manager.omo_manager_mail_compress.open_mailbox", side_effect=open_readonly),
+            patch("omo_manager.omo_manager_mail_compress.configured_agent_mail", return_value=Settings()),
+            patch("omo_manager.email_idle_watcher.subject_base", None),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(0, cmd_export(ExportArgs(Path(tmp) / "export")))
+        self.assertIn("exported=0 skipped_boundary_mismatch=1", output.getvalue())
+        self.assertTrue(all(readonly for _mailbox, readonly in client.select_calls))
+        self.assertFalse(any(call[0].casefold() in {"copy", "move", "store", "expunge"} for call in client.uid_calls))
+
     def test_export_batches_bounds_threads_without_splitting_one(self) -> None:
         records = [
             MailRecord("1", "", "", "", "one", "", gmail_msgid="101", gmail_thrid="201"),

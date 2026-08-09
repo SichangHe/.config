@@ -1458,7 +1458,13 @@ def fetch_manager_count_header(client: imaplib.IMAP4_SSL, uid: str) -> Message |
 
 
 def is_mail_cleanup_excluded_subject(subject: str) -> bool:
-    return PB_CLEANUP_EXCLUDED_SUBJECT_RE.match(subject_base(subject)) is not None
+    normalize = subject_base
+    if normalize is None:
+        try:
+            from .omo_email_subject import subject_base as normalize
+        except ImportError:
+            from omo_email_subject import subject_base as normalize
+    return PB_CLEANUP_EXCLUDED_SUBJECT_RE.match(normalize(subject)) is not None
 
 
 def is_manager_mail_header(msg: Message, sender_email: str, recipient_email: str, require_subject_tags: bool) -> bool:
