@@ -1,36 +1,50 @@
 # manager mail compression
 
 Use this only to replace unread manager-sent mail with fewer topic summaries.
-Follow [cleanup.md](cleanup.md)'s source-boundary, task-authority, evidence, recovery, and final-verification safeguards first. A threshold starts this review; it never authorizes compression or Trash by itself. Cleanup's unread-thread retention and `\Seen`-only move rules do not apply to a compression source that its recorded replacement fully supersedes.
+Follow [cleanup.md](cleanup.md)'s task-authority, evidence, recovery, and mutation safeguards. Compression uses the fixed-start source set below instead of rolling cleanup discovery. A threshold starts review; it never authorizes compression or Trash.
 
 Helper:
 
 - `~/.config/omo_manager/omo_manager_mail_compress.py`
 
-Workflow:
+## freeze once
 
-- inspect current instructions and source task, then run `omo_manager_mail_compress.py snapshot`
-- run `omo_manager_mail_compress.py identity-preflight` before export; it uses the same configured human-mail IMAP authentication as `snapshot`, reports only aggregate Gmail identity and complete-thread evidence, exits nonzero on `gate=block`, and retains every source without mutation
-- use `OMO_HUMAN_EMAIL_CONFIG_PATH` as the default authentication path for compression; this workflow requires no separate Gmail REST API, OAuth token, browser profile, sign-in, or application-default credential
-- require the configured IMAP session to expose unique `X-GM-MSGID` and `X-GM-THRID` values for every selected source and complete thread membership through the discovered `\All` mailbox; missing, duplicate, conflicting, or incomplete evidence blocks the gate
-- create a fresh private export directory, for example `mktemp -d /tmp/manager-mail-compress.XXXXXX`, then run `export --out-dir PRIVATE_DIR`
-- export reruns the same configured-mailbox, identity, and complete-thread gates and records IMAP Gmail message/thread IDs, flags, labels, a full-message digest, and source UIDVALIDITY in the private map
-- make a private UID map from `manifest.tsv`, `uids.txt`, and `UID.txt`; tie every proposed source UID to one replacement summary or an explicit retained reason
-- maintain one private task-wide original-Gmail-thread ledger across rolling frozen batches; send at most one replacement per original thread and retain any changed or previously handled thread whole
-- group only fully replaceable original Gmail threads; retain an unread report and any flagged, saved, read-later, full-read, out-of-scope, incomplete, or uncertain memo or report
-- send replacement summaries with `email_me.py --manager-human --sender-tmux-target OWNER_TARGET --subject-file SUBJECT --message-file BODY`, and record their delivery before listing superseded UIDs
-- write `superseded-uids.txt` with only fully replaced source UIDs, then run `trash-superseded --uid-file PRIVATE_DIR/superseded-uids.txt --yes`
-- pass `--ignore-important-label` only when authoritative human text explicitly says Gmail `Important` alone is not a retention reason; this never overrides starred, flagged, saved, read-later, thread-context, unresolved, human-pending, full-read, or uncertain retention
-- immediately before every IMAP move, rerun configured-mailbox authentication, source identity, complete-thread membership/content/label checks, source UIDVALIDITY/content/flag checks, and protected-intent checks; retain and replan only an affected thread on drift
-- recheck final live state after every batch through the same IMAP connection: select Trash and refetch every member of each moved thread there, require membership and content to remain exact and no source to retain `\Inbox` (Gmail may omit its `\Trash` token from `X-GM-LABELS`), reject any new protected intent, verify every selected source left `INBOX`, verify retained complete threads remain unchanged and replacements exist, reconcile counts with `verify_remaining=0`, and separately record any external drift; keep ordered recovery and paired intent/outcome receipts
-- continue with later frozen batches until a final live scan has no eligible source absent from the task-wide ledger; ordinary later arrivals belong to later batches
-- report only topics, counts, UID boundary, replacement identities, skipped boundaries, and verification; delete the private export directory when raw copies are no longer needed
+- create a fresh owner-only directory, then run `export --out-dir PRIVATE_DIR --threads-per-batch N`
+- that export performs the run's only candidate discovery and freezes the accepted UIDs, Gmail message and thread identities, content and thread digests, labels, UIDVALIDITY, and deterministic batches
+- `snapshot` and `identity-preflight` are optional diagnostics before the run; they never define or extend its source set
+- later arrivals are outside the run, never enter a batch, and never trigger another discovery pass
+- missing, duplicate, conflicting, or incomplete Gmail identity or complete-thread evidence blocks export without mutation
+- use `OMO_HUMAN_EMAIL_CONFIG_PATH`; no Gmail REST API, OAuth token, browser profile, or application-default credential is required
 
-Safety:
+## review bounded batches
 
-- keep private bodies in `/tmp` or another owner-only scratch directory; export refuses a non-empty output directory
-- snapshot/export use the human mailbox config and only unread mail within the exact configured sender/recipient boundary; legacy self-addressed cleanup remains limited to historical `[a]` or `[omo_manager]` mail
-- PB news, PB stock watch, and PB urgent threads are excluded from snapshot/export, Trash eligibility, and threshold counts, including unread counts
-- the helper re-parses headers and skips boundary mismatches before exporting bodies; `trash-superseded` rechecks the same boundary in `INBOX`
-- act only on the explicit UID list; move sources only to `[Gmail]/Trash`; never expunge or permanently delete message bodies
-- the helper does not choose topics or summarize bodies; retain when human usefulness is uncertain
+- claim one batch with `claim-batch --source-dir PRIVATE_DIR --batch-id BATCH --owner OWNER`
+- claims are exclusive; reviewers may process different batches in parallel, but no thread may have duplicate ownership or move across batches
+- inspect each thread's exported bodies and complete `\All` context, then locate corresponding task records and record current task-state evidence
+- retain unresolved, pending, useful, protected, out-of-scope, incomplete, or uncertain content
+- Gmail Important alone is never a retention gate; flagged, starred, saved, and read-later intent still requires retention
+- finish one thread before advancing: retain the whole thread, move every irrelevant fixed-start source in it, or move only irrelevant intermediate fixed-start messages
+- record retention with `retain-thread` and nonempty reason and task-evidence files
+- when replacement is required, send and record it before Trash and pass `--replacement-message-id`; otherwise pass `--replacement-not-required`
+- list only the chosen thread's source UIDs and run `trash-superseded` with its source directory, claimed batch, owner, Gmail thread ID, reason file, task-evidence file, replacement decision, and `--yes`
+- the helper writes an immutable intent before mutation, rejects cross-batch or repeated disposition, revalidates source and complete-thread identity/content immediately before `UID MOVE`, and writes an outcome only after immediate Trash verification
+- identity, content, label, UIDVALIDITY, task, or thread drift fails closed for that thread without broadening or rerunning the source set
+
+## finish
+
+- run `verify-run --source-dir PRIVATE_DIR`
+- final verification reconciles `run.tsv`, `manifest.tsv`, `batches.tsv`, exclusive claims, and every per-thread outcome
+- completion requires every fixed-start source to be classified exactly once as retained or verified in Trash
+- an intent without an outcome blocks completion
+- final verification performs no full live candidate scan; later arrivals remain outside the run
+- report only topics, fixed-start counts, retained and trashed counts, replacement identities, drift, and verification status
+
+## safety
+
+- keep exported bodies, task evidence, identities, intents, and outcomes private
+- use only explicit fixed-start UIDs from one claimed thread per mutation
+- move mail only to `[Gmail]/Trash`; never expunge or permanently delete it
+- immediate Trash verification uses frozen Gmail message identities, so unrelated later arrivals do not alter termination
+- preserve source mailbox and label evidence needed for recovery
+- PB news, PB stock watch, and PB urgent mail remains excluded
+- delete private evidence only when recovery is no longer needed

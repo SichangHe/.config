@@ -12,6 +12,7 @@ import os
 import re
 import sys
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from email import policy
 from email.message import Message
 from email.parser import BytesParser
@@ -29,6 +30,7 @@ FULL_FETCH = "(BODY.PEEK[])"
 GMAIL_METADATA_FETCH = "(FLAGS X-GM-MSGID X-GM-THRID X-GM-LABELS)"
 TRASH_MAILBOX = "[Gmail]/Trash"
 CONFIG_PATH = human_config_path()
+DEFAULT_THREADS_PER_BATCH = 10
 
 
 @dataclass(frozen=True)
@@ -161,6 +163,10 @@ def load_config() -> dict[str, str]:
 def manager_unread_uids(client: imaplib.IMAP4_SSL, self_email: str) -> list[str]:
     found: list[str] = []
     seen: set[str] = set()
+    typ, data = client.uid("search", None, "ALL")  # pyright: ignore[reportArgumentType]
+    if typ != "OK":
+        raise RuntimeError(f"IMAP fixed-start search failed: {typ}")
+    frozen = {raw.decode() for raw in data[0].split()} if data and data[0] else set()
     settings = configured_agent_mail()
     criteria = ["UNSEEN", "FROM", f'"{self_email}"']
     subject_tokens = ("",) if settings is not None else LEGACY_MANAGER_SUBJECT_TOKENS
@@ -169,7 +175,7 @@ def manager_unread_uids(client: imaplib.IMAP4_SSL, self_email: str) -> list[str]
         if typ != "OK":
             raise RuntimeError(f"IMAP search failed: {typ}")
         for uid in [raw.decode() for raw in data[0].split()] if data and data[0] else []:
-            if uid not in seen:
+            if uid in frozen and uid not in seen:
                 seen.add(uid)
                 found.append(uid)
     return found
@@ -431,6 +437,15 @@ def gmail_thread_uids(client: imaplib.IMAP4_SSL, gmail_thrid: str) -> list[str]:
     return [raw.decode() for raw in data[0].split()] if data and data[0] else []
 
 
+def gmail_message_uids(client: imaplib.IMAP4_SSL, gmail_msgid: str) -> list[str]:
+    if not gmail_msgid.isdecimal():
+        raise RuntimeError("Gmail message identity was missing or malformed")
+    typ, data = client.uid("search", None, "X-GM-MSGID", gmail_msgid)  # pyright: ignore[reportArgumentType]
+    if typ != "OK":
+        raise RuntimeError(f"IMAP Gmail message search failed: {typ}")
+    return [raw.decode() for raw in data[0].split()] if data and data[0] else []
+
+
 def require_gmail_identities(records: list[MailRecord]) -> None:
     missing = [record.uid for record in records if not record.gmail_msgid or not record.gmail_thrid or not record.raw_sha256]
     if missing:
@@ -598,6 +613,17 @@ def write_private(path: Path, text: str) -> None:
     path.chmod(0o600)
 
 
+def write_private_exclusive(path: Path, text: str) -> None:
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError as exc:
+        raise RuntimeError(f"private evidence already exists: {path.name}") from exc
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(text)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
 def ensure_empty_private_dir(path: Path) -> None:
     if path.exists() and any(path.iterdir()):
         raise RuntimeError(f"export directory must be empty: {path}")
@@ -667,6 +693,33 @@ def export_manifest(records: list[MailRecord], thread_digests: dict[str, str]) -
     return output.getvalue()
 
 
+def export_batches(records: list[MailRecord], threads_per_batch: int) -> str:
+    if threads_per_batch < 1:
+        raise ValueError("threads per batch must be positive")
+    threads = sorted({record.gmail_thrid for record in records})
+    batch_by_thread = {thread: f"batch-{index // threads_per_batch + 1:04d}" for index, thread in enumerate(threads)}
+    output = io.StringIO()
+    writer = csv.DictWriter(
+        output,
+        fieldnames=("batch_id", "gmail_thrid", "uid", "gmail_msgid", "subject", "body_file"),
+        delimiter="\t",
+        lineterminator="\n",
+    )
+    writer.writeheader()
+    for record in sorted(records, key=lambda value: (value.gmail_thrid, value.gmail_msgid)):
+        writer.writerow(
+            {
+                "batch_id": batch_by_thread[record.gmail_thrid],
+                "gmail_thrid": record.gmail_thrid,
+                "uid": record.uid,
+                "gmail_msgid": record.gmail_msgid,
+                "subject": tsv_value(record.subject),
+                "body_file": f"{record.uid}.txt",
+            }
+        )
+    return output.getvalue()
+
+
 def read_tsv(path: Path, required_fields: set[str]) -> list[dict[str, str]]:
     try:
         with path.open(newline="", encoding="utf-8") as handle:
@@ -709,6 +762,243 @@ def export_mailboxes(out_dir: Path) -> dict[str, str]:
     return mailboxes
 
 
+def batch_rows(source_dir: Path) -> list[dict[str, str]]:
+    rows = read_tsv(source_dir / "batches.tsv", {"batch_id", "gmail_thrid", "uid", "gmail_msgid", "subject", "body_file"})
+    uids = [row["uid"] for row in rows]
+    identities = [(row["gmail_thrid"], row["gmail_msgid"]) for row in rows]
+    thread_batches: dict[str, set[str]] = {}
+    for row in rows:
+        thread_batches.setdefault(row["gmail_thrid"], set()).add(row["batch_id"])
+    if (
+        any(not re.fullmatch(r"batch-[0-9]{4}", row["batch_id"]) or not row["gmail_thrid"].isdecimal() or not row["uid"].isdecimal() for row in rows)
+        or len(uids) != len(set(uids))
+        or len(identities) != len(set(identities))
+        or any(len(batches) != 1 for batches in thread_batches.values())
+    ):
+        raise RuntimeError("private batch map is malformed or assigns a source more than once")
+    return rows
+
+
+def validate_owner(owner: str) -> str:
+    if not owner or tsv_value(owner) != owner:
+        raise RuntimeError("batch owner must be one nonempty line")
+    return owner
+
+
+def claim_batch(source_dir: Path, batch_id: str, owner: str) -> None:
+    owner = validate_owner(owner)
+    if batch_id not in {row["batch_id"] for row in batch_rows(source_dir)}:
+        raise RuntimeError(f"unknown batch: {batch_id}")
+    claim_path = source_dir / "claims" / f"{batch_id}.tsv"
+    content = f"batch_id\towner\n{batch_id}\t{owner}\n"
+    try:
+        write_private_exclusive(claim_path, content)
+    except RuntimeError:
+        try:
+            existing = claim_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise RuntimeError(f"could not read batch claim: {batch_id}") from exc
+        if existing != content:
+            raise RuntimeError(f"batch already belongs to another owner: {batch_id}")
+
+
+def require_batch_owner(source_dir: Path, batch_id: str, owner: str) -> list[dict[str, str]]:
+    owner = validate_owner(owner)
+    rows = [row for row in batch_rows(source_dir) if row["batch_id"] == batch_id]
+    if not rows:
+        raise RuntimeError(f"unknown batch: {batch_id}")
+    expected = f"batch_id\towner\n{batch_id}\t{owner}\n"
+    try:
+        actual = (source_dir / "claims" / f"{batch_id}.tsv").read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(f"batch is not claimed: {batch_id}") from exc
+    if actual != expected:
+        raise RuntimeError(f"batch is not owned by {owner}: {batch_id}")
+    return rows
+
+
+def evidence_digest(path: Path, kind: str) -> str:
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise RuntimeError(f"could not read {kind} evidence") from exc
+    if not data.strip():
+        raise RuntimeError(f"{kind} evidence must not be empty")
+    return hashlib.sha256(data).hexdigest()
+
+
+def thread_batch_rows(source_dir: Path, batch_id: str, owner: str, gmail_thrid: str) -> list[dict[str, str]]:
+    if not gmail_thrid.isdecimal():
+        raise RuntimeError("Gmail thread identity must be decimal")
+    rows = [row for row in require_batch_owner(source_dir, batch_id, owner) if row["gmail_thrid"] == gmail_thrid]
+    if not rows:
+        raise RuntimeError("thread is not assigned to the claimed batch")
+    return rows
+
+
+def disposition_text(
+    rows: list[dict[str, str]],
+    batch_id: str,
+    owner: str,
+    moved_uids: set[str],
+    reason_sha256: str,
+    task_evidence_sha256: str,
+    replacement: str,
+) -> str:
+    output = io.StringIO()
+    writer = csv.DictWriter(
+        output,
+        fieldnames=("batch_id", "owner", "gmail_thrid", "uid", "disposition", "reason_sha256", "task_evidence_sha256", "replacement"),
+        delimiter="\t",
+        lineterminator="\n",
+    )
+    writer.writeheader()
+    for row in rows:
+        writer.writerow(
+            {
+                "batch_id": batch_id,
+                "owner": owner,
+                "gmail_thrid": row["gmail_thrid"],
+                "uid": row["uid"],
+                "disposition": "trashed" if row["uid"] in moved_uids else "retained",
+                "reason_sha256": reason_sha256,
+                "task_evidence_sha256": task_evidence_sha256,
+                "replacement": replacement,
+            }
+        )
+    return output.getvalue()
+
+
+def prepare_thread_disposition(
+    source_dir: Path,
+    batch_id: str,
+    owner: str,
+    gmail_thrid: str,
+    moved_uids: set[str],
+    reason_file: Path,
+    task_evidence_file: Path,
+    replacement: str,
+) -> tuple[list[dict[str, str]], str, bool]:
+    rows = thread_batch_rows(source_dir, batch_id, owner, gmail_thrid)
+    thread_uids = {row["uid"] for row in rows}
+    thread_sources = export_source_map(source_dir, sorted(thread_uids))
+    if {source["gmail_thrid"] for source in thread_sources.values()} != {gmail_thrid}:
+        raise RuntimeError("batch thread does not match the fixed-start source map")
+    if not moved_uids.issubset(thread_uids):
+        raise RuntimeError("requested source is outside the claimed thread batch")
+    evidence = disposition_text(
+        rows,
+        batch_id,
+        owner,
+        moved_uids,
+        evidence_digest(reason_file, "reason"),
+        evidence_digest(task_evidence_file, "task"),
+        replacement,
+    )
+    outcome_path = source_dir / "outcomes" / f"{gmail_thrid}.tsv"
+    if outcome_path.exists():
+        raise RuntimeError("thread already has a final disposition")
+    intent_path = source_dir / "intents" / f"{gmail_thrid}.tsv"
+    if not intent_path.exists():
+        write_private_exclusive(intent_path, evidence)
+        return rows, evidence, False
+    try:
+        existing = intent_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError("could not read existing thread intent") from exc
+    if existing == evidence:
+        return rows, evidence, False
+    if moved_uids:
+        raise RuntimeError("thread already has a different mutation intent")
+    return rows, evidence, True
+
+
+def cmd_claim_batch(args: argparse.Namespace) -> int:
+    claim_batch(args.source_dir, args.batch_id, args.owner)
+    print(f"claimed batch={args.batch_id} owner={args.owner}")
+    return 0
+
+
+def cmd_retain_thread(args: argparse.Namespace) -> int:
+    rows, evidence, recovery_needed = prepare_thread_disposition(
+        args.source_dir,
+        args.batch_id,
+        args.owner,
+        args.gmail_thrid,
+        set(),
+        args.reason_file,
+        args.task_evidence_file,
+        "not-required-retained",
+    )
+    if recovery_needed:
+        source_map = export_source_map(args.source_dir, [row["uid"] for row in rows])
+        client, _config = open_mailbox(readonly=True)
+        try:
+            for source in source_map.values():
+                uids = gmail_message_uids(client, source["gmail_msgid"])
+                if len(uids) != 1:
+                    raise RuntimeError("cannot recover intent because a source is absent or ambiguous in INBOX")
+                record = fetch_record(client, uids[0], with_body=True, with_metadata=True)
+                if record.gmail_msgid != source["gmail_msgid"] or record.gmail_thrid != source["gmail_thrid"]:
+                    raise RuntimeError("cannot recover intent because source identity drifted")
+        finally:
+            client.logout()
+        write_private_exclusive(args.source_dir / "recoveries" / f"{args.gmail_thrid}.tsv", evidence)
+    write_private_exclusive(args.source_dir / "outcomes" / f"{args.gmail_thrid}.tsv", evidence)
+    print(f"retained_thread={args.gmail_thrid} source_count={len(rows)}")
+    return 0
+
+
+def cmd_verify_run(args: argparse.Namespace) -> int:
+    run_rows = read_tsv(args.source_dir / "run.tsv", {"fixed_start_utc", "source_count", "thread_count", "threads_per_batch"})
+    if len(run_rows) != 1:
+        raise RuntimeError("fixed-start run evidence must contain exactly one row")
+    manifest = read_tsv(args.source_dir / "manifest.tsv", {"uid", "gmail_thrid", "gmail_msgid"})
+    batches = batch_rows(args.source_dir)
+    manifest_uids = [row["uid"] for row in manifest]
+    batch_uids = [row["uid"] for row in batches]
+    if len(manifest_uids) != len(set(manifest_uids)) or set(manifest_uids) != set(batch_uids):
+        raise RuntimeError("fixed-start manifest and batch map do not match")
+    threads = {row["gmail_thrid"] for row in manifest}
+    run = run_rows[0]
+    if run["source_count"] != str(len(manifest)) or run["thread_count"] != str(len(threads)) or not run["fixed_start_utc"]:
+        raise RuntimeError("fixed-start run counts do not match the immutable manifest")
+    dispositions: list[dict[str, str]] = []
+    for gmail_thrid in sorted(threads):
+        rows = read_tsv(
+            args.source_dir / "outcomes" / f"{gmail_thrid}.tsv",
+            {"batch_id", "owner", "gmail_thrid", "uid", "disposition", "reason_sha256", "task_evidence_sha256", "replacement"},
+        )
+        if any(row["gmail_thrid"] != gmail_thrid or row["disposition"] not in {"retained", "trashed"} for row in rows):
+            raise RuntimeError(f"invalid disposition outcome for thread: {gmail_thrid}")
+        intent = (args.source_dir / "intents" / f"{gmail_thrid}.tsv").read_text(encoding="utf-8")
+        outcome = (args.source_dir / "outcomes" / f"{gmail_thrid}.tsv").read_text(encoding="utf-8")
+        if intent != outcome:
+            try:
+                recovery = (args.source_dir / "recoveries" / f"{gmail_thrid}.tsv").read_text(encoding="utf-8")
+            except OSError as exc:
+                raise RuntimeError(f"changed intent lacks recovery evidence for thread: {gmail_thrid}") from exc
+            if recovery != outcome:
+                raise RuntimeError(f"recovery evidence does not match outcome for thread: {gmail_thrid}")
+        dispositions.extend(rows)
+    disposition_uids = [row["uid"] for row in dispositions]
+    if len(disposition_uids) != len(set(disposition_uids)) or set(disposition_uids) != set(manifest_uids):
+        raise RuntimeError("fixed-start sources are not each classified exactly once")
+    expected_batch = {row["uid"]: (row["batch_id"], row["gmail_thrid"]) for row in batches}
+    for row in dispositions:
+        if expected_batch[row["uid"]] != (row["batch_id"], row["gmail_thrid"]):
+            raise RuntimeError("disposition attempted cross-batch mutation")
+        if not re.fullmatch(r"[0-9a-f]{64}", row["reason_sha256"]) or not re.fullmatch(r"[0-9a-f]{64}", row["task_evidence_sha256"]):
+            raise RuntimeError("disposition lacks bound reason or task evidence")
+        if not row["replacement"]:
+            raise RuntimeError("disposition lacks replacement decision evidence")
+        require_batch_owner(args.source_dir, row["batch_id"], row["owner"])
+    retained = sum(row["disposition"] == "retained" for row in dispositions)
+    trashed = sum(row["disposition"] == "trashed" for row in dispositions)
+    print(f"fixed_start_verified=1 sources={len(manifest)} threads={len(threads)} retained={retained} trashed={trashed} later_arrivals_included=0 live_full_scan=0 permanent_deleted=0")
+    return 0
+
+
 def record_matches_source_map(record: MailRecord, source: dict[str, str]) -> bool:
     return (
         source["source_mailbox"] == "INBOX"
@@ -722,11 +1012,11 @@ def record_matches_source_map(record: MailRecord, source: dict[str, str]) -> boo
     )
 
 
-def record_has_protected_intent(record: MailRecord, *, ignore_important_label: bool = False) -> bool:
+def record_has_protected_intent(record: MailRecord) -> bool:
     flags = {flag.casefold().lstrip("\\") for flag in record.flags.split()}
     labels = record.labels.casefold().replace("\\", "")
     protected_labels = ("flagged", "starred", "read later", "saved")
-    return "flagged" in flags or any(token in labels for token in protected_labels) or (not ignore_important_label and "important" in labels)
+    return "flagged" in flags or any(token in labels for token in protected_labels)
 
 
 def revalidate_thread_contexts(
@@ -735,8 +1025,6 @@ def revalidate_thread_contexts(
     source_map: dict[str, dict[str, str]],
     sender_email: str,
     recipient_email: str,
-    *,
-    ignore_important_label: bool = False,
 ) -> bool:
     source_ids_by_thread: dict[str, set[str]] = {}
     for source in source_map.values():
@@ -749,19 +1037,37 @@ def revalidate_thread_contexts(
             context_ids = [record.gmail_msgid for record in context_records]
             if (
                 len(context_ids) != len(set(context_ids))
-                or set(context_ids) != source_ids
-                or any(
-                    record.gmail_thrid != gmail_thrid
-                    or not is_manager_record(record, sender_email, recipient_email)
-                    or record_has_protected_intent(record, ignore_important_label=ignore_important_label)
-                    for record in context_records
-                )
+                or not source_ids.issubset(context_ids)
+                or any(record.gmail_thrid != gmail_thrid or not is_manager_record(record, sender_email, recipient_email) or record_has_protected_intent(record) for record in context_records)
             ):
                 return False
             expected_digests = {source["thread_context_sha256"] for source in source_map.values() if source["gmail_thrid"] == gmail_thrid}
             if len(expected_digests) != 1 or thread_context_digest(context_records) != expected_digests.pop():
                 return False
         return True
+    finally:
+        select_mailbox(client, "INBOX", readonly=False)
+
+
+def replacement_exists(
+    client: imaplib.IMAP4_SSL,
+    sent_mailbox: str,
+    replacement_id: str,
+    recipient_email: str,
+) -> bool:
+    if not re.fullmatch(r"<[^<>\s]+>", replacement_id):
+        return False
+    select_mailbox(client, sent_mailbox, readonly=True)
+    try:
+        typ, data = client.uid("search", None, "HEADER", "Message-ID", imap_quoted(replacement_id))  # pyright: ignore[reportArgumentType]
+        if typ != "OK":
+            return False
+        uids = [raw.decode() for raw in data[0].split()] if data and data[0] else []
+        if len(uids) != 1:
+            return False
+        msg, _digest = fetch_msg(client, uids[0], HEADER_FETCH)
+        recipients = [address.casefold() for _name, address in getaddresses(msg.get_all("To", [])) if address]
+        return rfc_message_id(msg) == replacement_id and recipient_email.casefold() in recipients
     finally:
         select_mailbox(client, "INBOX", readonly=False)
 
@@ -786,7 +1092,16 @@ def cmd_export(args: argparse.Namespace) -> int:
         write_private(out_dir / f"{record.uid}.txt", export_body(record))
     write_private(out_dir / "mailboxes.tsv", f"role\tmailbox\nINBOX\tINBOX\n\\All\t{tsv_value(all_mailbox)}\n\\Sent\t{tsv_value(sent_mailbox)}\n")
     write_private(out_dir / "manifest.tsv", export_manifest(records, thread_digests))
+    write_private(out_dir / "batches.tsv", export_batches(records, args.threads_per_batch))
+    write_private(
+        out_dir / "run.tsv",
+        f"fixed_start_utc\tsource_count\tthread_count\tthreads_per_batch\n{datetime.now(UTC).isoformat()}\t{len(records)}\t{len(records_by_thread)}\t{args.threads_per_batch}\n",
+    )
     write_private(out_dir / "uids.txt", "\n".join(record.uid for record in records) + ("\n" if records else ""))
+    write_private_dir(out_dir / "claims")
+    write_private_dir(out_dir / "intents")
+    write_private_dir(out_dir / "outcomes")
+    write_private_dir(out_dir / "recoveries")
     suffix = f" skipped_boundary_mismatch={len(skipped)}" if skipped else ""
     print(f"exported={len(records)}{suffix} out_dir={out_dir}")
     return 0
@@ -802,13 +1117,12 @@ def verify_post_move_imap(
     source_map: dict[str, dict[str, str]],
     sender_email: str,
     recipient_email: str,
-    *,
-    ignore_important_label: bool = False,
 ) -> PostMoveVerification:
-    """Verify moved complete threads through the same configured IMAP session.
+    """Verify each moved fixed-start source through the same IMAP session.
 
     Exact lookup from the selected Trash mailbox proves Trash membership because
-    Gmail may omit its ``\\Trash`` system label from ``X-GM-LABELS``.
+    Gmail may omit its ``\\Trash`` system label from ``X-GM-LABELS``. Message-ID
+    lookup excludes arrivals that were not in the frozen source set.
     """
     sources_by_thread: dict[str, dict[str, dict[str, str]]] = {}
     for source in source_map.values():
@@ -820,29 +1134,29 @@ def verify_post_move_imap(
     protected = 0
     failures = 0
     for gmail_thrid, sources_by_id in sources_by_thread.items():
-        try:
-            records = fetch_records(client, gmail_thread_uids(client, gmail_thrid), with_body=True, with_metadata=True)
-            require_gmail_identities(records)
-        except (imaplib.IMAP4.error, RuntimeError):
-            failures += 1
-            continue
-        protected_in_thread = sum(record_has_protected_intent(record, ignore_important_label=ignore_important_label) for record in records)
-        protected += protected_in_thread
-        records_by_id = {record.gmail_msgid: record for record in records}
-        if len(records_by_id) != len(records) or set(records_by_id) != set(sources_by_id) or protected_in_thread:
-            changed_threads += 1
-            continue
         thread_verified = 0
         for gmail_msgid, source in sources_by_id.items():
-            record = records_by_id[gmail_msgid]
+            try:
+                uids = gmail_message_uids(client, gmail_msgid)
+                if len(uids) != 1:
+                    raise RuntimeError("moved source was absent or ambiguous in Trash")
+                record = fetch_record(client, uids[0], with_body=True, with_metadata=True)
+                require_gmail_identities([record])
+            except (imaplib.IMAP4.error, RuntimeError):
+                failures += 1
+                break
             labels = record.labels.casefold().replace('"', "")
+            is_protected = record_has_protected_intent(record)
+            protected += int(is_protected)
             if (
                 record.gmail_thrid != gmail_thrid
+                or record.gmail_msgid != gmail_msgid
                 or record.msgid_sha256 != source["msgid_sha256"]
                 or record.raw_sha256 != source["raw_sha256"]
                 or tsv_value(record.flags) != source["flags"]
                 or r"\inbox" in labels
                 or not is_manager_record(record, sender_email, recipient_email)
+                or is_protected
             ):
                 break
             thread_verified += 1
@@ -870,13 +1184,36 @@ def cmd_trash_superseded(args: argparse.Namespace) -> int:
         return 2
     try:
         requested = parse_uids(args.uids, args.uid_file)
-        source_dir = args.uid_file.parent
+        if not requested:
+            raise RuntimeError("superseded source list must not be empty")
+        source_dir = args.source_dir
+        if args.uid_file.parent.resolve() != source_dir.resolve():
+            raise RuntimeError("superseded UID file must be inside the fixed-start source directory")
         source_map = export_source_map(source_dir, requested)
+        if {source["gmail_thrid"] for source in source_map.values()} != {args.gmail_thrid}:
+            raise RuntimeError("one Trash operation must contain sources from exactly one claimed thread")
         expected_mailboxes = export_mailboxes(source_dir)
         expected_uidvalidities = {source["uidvalidity"] for source in source_map.values()}
         if len(expected_uidvalidities) != 1 or not next(iter(expected_uidvalidities)).isdecimal():
             raise RuntimeError("private source map has ambiguous UIDVALIDITY")
         expected_uidvalidity = next(iter(expected_uidvalidities))
+        if bool(args.replacement_id) == bool(args.replacement_not_required):
+            raise RuntimeError("record exactly one replacement identity or --replacement-not-required")
+        replacement = args.replacement_id if args.replacement_id else "not-required"
+        if tsv_value(replacement) != replacement:
+            raise RuntimeError("replacement identity must be one line")
+        _thread_rows, outcome_evidence, recovery_needed = prepare_thread_disposition(
+            source_dir,
+            args.batch_id,
+            args.owner,
+            args.gmail_thrid,
+            set(requested),
+            args.reason_file,
+            args.task_evidence_file,
+            replacement,
+        )
+        if recovery_needed:
+            raise RuntimeError("Trash disposition cannot replace a different existing intent")
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
@@ -896,7 +1233,24 @@ def cmd_trash_superseded(args: argparse.Namespace) -> int:
         if current_mailboxes.get(r"\All") != expected_mailboxes[r"\All"] or current_mailboxes.get(r"\Sent") != expected_mailboxes[r"\Sent"]:
             print("refusing because special-use mailbox identity changed", file=sys.stderr)
             return 1
+        if args.replacement_id and not replacement_exists(client, expected_mailboxes[r"\Sent"], args.replacement_id, recipient_email):
+            print("refusing because the recorded replacement was not found in Sent", file=sys.stderr)
+            return 1
         still_in_inbox = inbox_subset(client, requested)
+        if not still_in_inbox:
+            post_move = verify_post_move_imap(client, source_map, sender_email, recipient_email)
+            if post_move.verified_message_count != len(requested) or not post_move.complete:
+                print("refusing because an interrupted intent is neither intact in INBOX nor verified in Trash", file=sys.stderr)
+                return 1
+            write_private_exclusive(source_dir / "outcomes" / f"{args.gmail_thrid}.tsv", outcome_evidence)
+            print(
+                f"trash_superseded: requested={len(requested)} moved=0 already_not_in_inbox={len(requested)}"
+                f" verify_remaining=0 verify_trash_count={post_move.verified_message_count}"
+                f" verify_thread_count={post_move.verified_thread_count} verify_changed_thread_count={post_move.changed_thread_count}"
+                f" verify_protected_count={post_move.protected_count} verify_imap_failure_count={post_move.imap_failure_count}"
+                f" same_mailbox_after_move={int(post_move.same_mailbox)} permanent_deleted=0"
+            )
+            return 0
         if set(still_in_inbox) != set(requested):
             print("refusing because a planned source left INBOX", file=sys.stderr)
             return 1
@@ -905,8 +1259,8 @@ def cmd_trash_superseded(args: argparse.Namespace) -> int:
         if any(not is_manager_record(record, sender_email, recipient_email) for record in records):
             print("refusing boundary mismatch", file=sys.stderr)
             return 1
-        if any(record_has_protected_intent(record, ignore_important_label=args.ignore_important_label) for record in records):
-            print("refusing protected flagged, starred, saved, read-later, or non-overridden Important source", file=sys.stderr)
+        if any(record_has_protected_intent(record) for record in records):
+            print("refusing protected flagged, starred, saved, or read-later source", file=sys.stderr)
             return 1
         if any(not record_matches_source_map(record, source_map[record.uid]) for record in records):
             print("refusing because source identity, flags, labels, or content changed", file=sys.stderr)
@@ -917,7 +1271,6 @@ def cmd_trash_superseded(args: argparse.Namespace) -> int:
             source_map,
             sender_email,
             recipient_email,
-            ignore_important_label=args.ignore_important_label,
         ):
             print("refusing because complete Gmail thread context changed", file=sys.stderr)
             return 1
@@ -936,7 +1289,6 @@ def cmd_trash_superseded(args: argparse.Namespace) -> int:
             source_map,
             sender_email,
             recipient_email,
-            ignore_important_label=args.ignore_important_label,
         ):
             print("refusing because complete Gmail thread context changed immediately before move", file=sys.stderr)
             return 1
@@ -955,10 +1307,11 @@ def cmd_trash_superseded(args: argparse.Namespace) -> int:
             source_map,
             sender_email,
             recipient_email,
-            ignore_important_label=args.ignore_important_label,
         )
     finally:
         client.logout()
+    if not remaining and post_move.verified_message_count == len(requested) and post_move.complete:
+        write_private_exclusive(source_dir / "outcomes" / f"{args.gmail_thrid}.tsv", outcome_evidence)
     print(
         f"trash_superseded: requested={len(requested)} moved={len(still_in_inbox)}"
         f" already_not_in_inbox={len(requested) - len(still_in_inbox)} verify_remaining={len(remaining)}"
@@ -984,7 +1337,24 @@ def parser() -> argparse.ArgumentParser:
     snapshot.set_defaults(func=cmd_snapshot)
     export = sub.add_parser("export", help="Export unread manager mail bodies into a private local directory.")
     export.add_argument("--out-dir", type=Path, required=True)
+    export.add_argument("--threads-per-batch", type=int, default=DEFAULT_THREADS_PER_BATCH)
     export.set_defaults(func=cmd_export)
+    claim = sub.add_parser("claim-batch", help="Atomically claim one fixed-start review batch.")
+    claim.add_argument("--source-dir", type=Path, required=True)
+    claim.add_argument("--batch-id", required=True)
+    claim.add_argument("--owner", required=True)
+    claim.set_defaults(func=cmd_claim_batch)
+    retain = sub.add_parser("retain-thread", help="Record one claimed thread as retained without mailbox mutation.")
+    retain.add_argument("--source-dir", type=Path, required=True)
+    retain.add_argument("--batch-id", required=True)
+    retain.add_argument("--owner", required=True)
+    retain.add_argument("--gmail-thread-id", dest="gmail_thrid", required=True)
+    retain.add_argument("--reason-file", type=Path, required=True)
+    retain.add_argument("--task-evidence-file", type=Path, required=True)
+    retain.set_defaults(func=cmd_retain_thread)
+    verify = sub.add_parser("verify-run", help="Reconcile final outcomes against only the immutable fixed-start set.")
+    verify.add_argument("--source-dir", type=Path, required=True)
+    verify.set_defaults(func=cmd_verify_run)
     mark_seen = sub.add_parser("mark-seen", help="Retired; use trash-superseded for manager mail compression.")
     mark_seen.add_argument("--uids", default="", help="Comma or whitespace separated UID list.")
     mark_seen.add_argument("--uid-file", type=Path)
@@ -993,12 +1363,16 @@ def parser() -> argparse.ArgumentParser:
     trash = sub.add_parser("trash-superseded", help="Move an explicit superseded manager UID set from INBOX to Trash after replacement summaries are sent.")
     trash.add_argument("--uids", default="", help="Comma or whitespace separated UID list.")
     trash.add_argument("--uid-file", type=Path)
+    trash.add_argument("--source-dir", type=Path, required=True)
+    trash.add_argument("--batch-id", required=True)
+    trash.add_argument("--owner", required=True)
+    trash.add_argument("--gmail-thread-id", dest="gmail_thrid", required=True)
+    trash.add_argument("--reason-file", type=Path, required=True)
+    trash.add_argument("--task-evidence-file", type=Path, required=True)
     trash.add_argument("--yes", action="store_true")
-    trash.add_argument(
-        "--ignore-important-label",
-        action="store_true",
-        help="Treat Gmail Important alone as non-protected only when authoritative human text explicitly requires it.",
-    )
+    replacement = trash.add_mutually_exclusive_group(required=True)
+    replacement.add_argument("--replacement-message-id", dest="replacement_id", default="")
+    replacement.add_argument("--replacement-not-required", action="store_true")
     trash.set_defaults(func=cmd_trash_superseded)
     return arg_parser
 
