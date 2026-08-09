@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -120,6 +121,11 @@ class VerifyArgs:
 
 
 class ManagerMailCompressTests(unittest.TestCase):
+    def test_direct_executable_starts_with_deployed_python(self) -> None:
+        helper = Path(__file__).parents[1] / "omo_manager_mail_compress.py"
+        result = subprocess.run([helper, "--help"], capture_output=True, text=True, check=False)
+        self.assertEqual(0, result.returncode, result.stderr)
+
     @staticmethod
     def raw_message(subject: str, body: str = "body") -> bytes:
         return (f"From: Agent <agent@example.test>\r\nTo: Human <human@example.test>\r\nSubject: {subject}\r\nMessage-ID: <one@example.test>\r\n\r\n{body}\r\n").encode()

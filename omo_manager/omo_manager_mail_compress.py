@@ -12,7 +12,7 @@ import os
 import re
 import sys
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from email import policy
 from email.message import Message
 from email.parser import BytesParser
@@ -1095,7 +1095,7 @@ def cmd_export(args: argparse.Namespace) -> int:
     write_private(out_dir / "batches.tsv", export_batches(records, args.threads_per_batch))
     write_private(
         out_dir / "run.tsv",
-        f"fixed_start_utc\tsource_count\tthread_count\tthreads_per_batch\n{datetime.now(UTC).isoformat()}\t{len(records)}\t{len(records_by_thread)}\t{args.threads_per_batch}\n",
+        f"fixed_start_utc\tsource_count\tthread_count\tthreads_per_batch\n{datetime.now(timezone.utc).isoformat()}\t{len(records)}\t{len(records_by_thread)}\t{args.threads_per_batch}\n",
     )
     write_private(out_dir / "uids.txt", "\n".join(record.uid for record in records) + ("\n" if records else ""))
     write_private_dir(out_dir / "claims")
