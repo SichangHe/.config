@@ -41,6 +41,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from omo_manager.omo_agent_status import TaskLine
+from omo_manager.omo_agent_status import TaskState
 from omo_manager.omo_agent_status import blocked_status_dependency_snapshot
 from omo_manager.omo_agent_status import effective_owner_target
 from omo_manager.omo_agent_status import is_main_manager_task_file
@@ -564,6 +565,7 @@ class AgentProblemGuard:
     problem_id: str = ""
     problem_owner_target: str = ""
     problem_claim_path: Path | None = None
+    allow_active_claim: bool = False
 
 
 @dataclass(frozen=True)
@@ -745,7 +747,7 @@ def agent_problem_evidence_current(guard: AgentProblemGuard) -> bool:
 
 
 def agent_problem_guard_current(guard: AgentProblemGuard) -> bool:
-    if guard.problem_id and guard.problem_claim_path is not None and active_problem_claim(
+    if not guard.allow_active_claim and guard.problem_id and guard.problem_claim_path is not None and active_problem_claim(
         read_claims(guard.problem_claim_path), guard.problem_id, guard.problem_owner_target, time.time()
     ) is not None:
         return False
@@ -779,7 +781,7 @@ def run_verified_send(
                 issue = read_issues(issue_path(problem_guard.problem_claim_path)).get(problem_guard.problem_id)
                 if issue is None or canonical_target(issue.manager_target) != canonical_target(problem_guard.problem_owner_target):
                     raise PrePasteRejected("agent problem changed before tmux paste")
-                if active_problem_claim(claims, problem_guard.problem_id, problem_guard.problem_owner_target, time.time()) is not None:
+                if not problem_guard.allow_active_claim and active_problem_claim(claims, problem_guard.problem_id, problem_guard.problem_owner_target, time.time()) is not None:
                     raise PrePasteRejected("agent problem was claimed before tmux paste")
                 verified_send_to_codex(target, message, options, before_paste=before_paste)
         else:
@@ -2098,13 +2100,19 @@ def manager_problem_human_attempt_key(args: Args) -> str:
     return f"manager-problem-human-attempt:{args.root}"
 
 
+def agent_problem_target_repeat_active(args: Args, seen: dict[str, float], target: str, now_s: float) -> bool:
+    if args.dry_run:
+        return False
+    key = agent_problem_target_attempt_key(target)
+    return seen_contains(seen, key, now_s) and now_s - seen_get(seen, key, now_s=now_s) < args.agent_problem_repeat_s
+
+
 def agent_problem_target_is_ready(args: Args, seen: dict[str, float], target: str, now_s: float, *, bypass_repeat: bool = False) -> bool:
     """Allow one problem aggregate per interval, only when its manager is ready."""
 
     if args.dry_run:
         return True
-    key = agent_problem_target_attempt_key(target)
-    if not bypass_repeat and seen_contains(seen, key, now_s) and now_s - seen_get(seen, key, now_s=now_s) < args.agent_problem_repeat_s:
+    if not bypass_repeat and agent_problem_target_repeat_active(args, seen, target, now_s):
         return False
     return inspect_codex(CodexStatusArgs(target, 80)).status == "ready"
 
@@ -4587,7 +4595,14 @@ def format_agent_problem_report(lines: list[str]) -> str:
     return "\n".join(parts).strip()
 
 
-def agent_problem_output_by_owner(args: Args, seen: dict[str, float], output: str, now_wall_s: float, backoff_owner_target: str = "") -> dict[str, AgentProblemDispatch]:
+def agent_problem_output_by_owner(
+    args: Args,
+    seen: dict[str, float],
+    output: str,
+    now_wall_s: float,
+    backoff_owner_target: str = "",
+    force_due_lines: Sequence[str] = (),
+) -> dict[str, AgentProblemDispatch]:
     lines = output.splitlines()
     if not lines or not lines[0].startswith("agent-problems:"):
         return {}
@@ -4596,6 +4611,7 @@ def agent_problem_output_by_owner(args: Args, seen: dict[str, float], output: st
     digest_groups: dict[str, list[str]] = {}
     blocked_idle_lines: dict[str, list[tuple[str, str]]] = {}
     quiet_blocked_owners: set[str] = set()
+    force_due = set(force_due_lines)
     for line in lines[1:]:
         if line.startswith("manager-action: "):
             continue
@@ -4607,7 +4623,7 @@ def agent_problem_output_by_owner(args: Args, seen: dict[str, float], output: st
         owner = backoff_owner_target or line_owner
         backoff_owner = backoff_owner_target or line_owner
         digest_groups.setdefault(owner, []).append(line)
-        if not blocked_idle_report_due(args, seen, backoff_owner, line, now_wall_s):
+        if line not in force_due and not blocked_idle_report_due(args, seen, backoff_owner, line, now_wall_s):
             quiet_blocked_owners.add(owner)
             continue
         groups.setdefault(owner, []).append(line)
@@ -4645,11 +4661,14 @@ def active_problem_claim(claims: dict[str, ProblemClaim], problem_id: str, owner
     return claim
 
 
-def problem_claim_instructions(problem_id: str, expired_claim: ProblemClaim | None = None) -> str:
+def problem_claim_instructions(problem_id: str, expired_claim: ProblemClaim | None = None, active_claim: ProblemClaim | None = None) -> str:
     lines = [f"problem-id: {problem_id}"]
-    if expired_claim is not None:
+    if active_claim is not None:
+        lines.append(f"Claimed by {active_claim.manager_target}; fail-closed state verification caused this re-alert without revoking the current action: {active_claim.action}")
+    elif expired_claim is not None:
         lines.append(f"Previously claimed by {expired_claim.manager_target} but still present after 10 minutes; previous action: {expired_claim.action}")
-    lines.append(f"Claim responsibility for 10 minutes with: `amh_problem.py claim {problem_id} --action 'ONE CONCRETE NEXT ACTION'`")
+    if active_claim is None:
+        lines.append(f"Claim responsibility for 10 minutes with: `amh_problem.py claim {problem_id} --action 'ONE CONCRETE NEXT ACTION'`")
     lines.append("A claim is not resolution; only a later independent watcher scan can prove this problem is gone.")
     return "\n".join(lines)
 
@@ -4830,26 +4849,49 @@ def filter_manager_self_problem_output(output: str, manager_target: str = "") ->
     return filtered_problem_output(kept, suppress_message="omo_pending_watch: suppressed manager self-problem report")
 
 
-def recorded_human_wait_snapshot(status: str, target: str, owner_target: str, reason: str) -> str:
-    identity = "\0".join((status, target, owner_target, reason))
-    return f"human:{hashlib.sha256(identity.encode('utf-8')).hexdigest()}"
+def blocked_report_snapshot(kind: str, task_file: str, state: TaskState, owner_target: str, blocker_fingerprint: str = "") -> str:
+    identity = "\0".join((task_file, state.status, state.target, owner_target, state.reason, blocker_fingerprint))
+    return f"{kind}:{hashlib.sha256(identity.encode('utf-8')).hexdigest()}"
 
 
-def line_matches_blocked_report_snapshot(line: str, snapshot: str) -> bool:
-    status = problem_line_status(line)
-    if status == "blocked_idle":
-        return True
-    if status != "missing" or not snapshot.startswith("human:"):
+def authoritative_task_states(root: Path) -> dict[str, tuple[TaskLine, TaskState, str] | None]:
+    states: dict[str, tuple[TaskLine, TaskState, str] | None] = {}
+    for task in parse_task_lines(root / "TODO.md"):
+        if task.task_file == "TODO.md" or task.section not in MANAGER_TASK_STATE_LIVE_SECTIONS:
+            continue
+        if task.task_file in states:
+            states[task.task_file] = None
+            continue
+        task_path = resolve_task_path(root, task.task_file)
+        state = scan_task_state(task_path, root) if task_path is not None else None
+        states[task.task_file] = None if state is None else (task, state, effective_owner_target(root, task, task_path))
+    return states
+
+
+def authoritative_problem_line_matches(root: Path, line: str) -> bool:
+    task_file = problem_line_task(line)
+    authoritative = authoritative_task_states(root).get(task_file)
+    if not task_file or authoritative is None:
         return False
-    return snapshot == recorded_human_wait_snapshot(
-        problem_line_value(line, "task_status"),
-        problem_line_target(line),
-        problem_line_owner_target(line),
-        problem_line_value(line, "reason"),
+    _task, state, owner_target = authoritative
+    return (
+        problem_line_value(line, "task_status") == state.status
+        and problem_line_target(line) == state.target
+        and problem_line_owner_target(line) == owner_target
+        and problem_line_value(line, "reason") == state.reason
     )
 
 
-def unchanged_dependency_blocked_idle_line(line: str, current: dict[str, tuple[TaskLine, str, str]], snapshots: dict[str, str]) -> bool:
+def line_matches_blocked_report_snapshot(root: Path, line: str, snapshot: str) -> bool:
+    status = problem_line_status(line)
+    if status not in SNAPSHOT_SUPPRESSED_BLOCKED_STATUSES or not authoritative_problem_line_matches(root, line):
+        return False
+    if status == "blocked_idle":
+        return snapshot.startswith(("dependency:", "human:"))
+    return snapshot.startswith("human:")
+
+
+def unchanged_dependency_blocked_idle_line(root: Path, line: str, current: dict[str, tuple[TaskLine, str, str]], snapshots: dict[str, str]) -> bool:
     """Return true only for a repeated blocked row with a stable task snapshot."""
 
     if problem_line_status(line) not in SNAPSHOT_SUPPRESSED_BLOCKED_STATUSES or problem_line_value(line, "task_status") != "blocked":
@@ -4858,7 +4900,7 @@ def unchanged_dependency_blocked_idle_line(line: str, current: dict[str, tuple[T
     if not task_file:
         return False
     current_snapshot = current.get(task_file)
-    return current_snapshot is not None and line_matches_blocked_report_snapshot(line, current_snapshot[1]) and snapshots.get(task_file) == current_snapshot[1]
+    return current_snapshot is not None and line_matches_blocked_report_snapshot(root, line, current_snapshot[1]) and snapshots.get(task_file) == current_snapshot[1]
 
 
 def filter_unchanged_dependency_blocked_idle_output(args: Args, output: str, snapshots: dict[str, str]) -> str | None:
@@ -4871,7 +4913,7 @@ def filter_unchanged_dependency_blocked_idle_output(args: Args, output: str, sna
     kept: list[str] = []
     suppressed = False
     for line in lines[1:]:
-        if unchanged_dependency_blocked_idle_line(line, current, snapshots):
+        if unchanged_dependency_blocked_idle_line(args.root, line, current, snapshots):
             suppressed = True
             continue
         if not line.startswith("manager-action: "):
@@ -4901,7 +4943,7 @@ def dependency_snapshot_replacements_for_problem_lines(root: Path, lines: tuple[
         if not task_file or task_file in seen_tasks:
             continue
         current_snapshot = current.get(task_file)
-        if current_snapshot is None or not line_matches_blocked_report_snapshot(line, current_snapshot[1]):
+        if current_snapshot is None or not line_matches_blocked_report_snapshot(root, line, current_snapshot[1]):
             continue
         seen_tasks.add(task_file)
         replacements.append((task_file, current_snapshot[1]))
@@ -4922,21 +4964,40 @@ def dependency_snapshot_removals_for_problem_lines(root: Path, lines: tuple[str,
     return tuple(removals)
 
 
-def blocked_report_bypasses_target_repeat(root: Path, lines: tuple[str, ...], snapshots: dict[str, str]) -> bool:
+def blocked_report_lines_bypassing_repeat(root: Path, lines: tuple[str, ...], snapshots: dict[str, str]) -> tuple[str, ...]:
     current = blocked_report_snapshot_state(root)
+    bypassing: list[str] = []
     for line in lines:
+        if problem_line_status(line) not in SNAPSHOT_SUPPRESSED_BLOCKED_STATUSES:
+            continue
         task_file = problem_line_task(line)
         previous = snapshots.get(task_file)
-        if not task_file:
-            continue
         current_snapshot = current.get(task_file)
         if previous is None:
-            if current_snapshot is not None and current_snapshot[1].startswith("human:") and line_matches_blocked_report_snapshot(line, current_snapshot[1]):
-                return True
+            if current_snapshot is not None and line_matches_blocked_report_snapshot(root, line, current_snapshot[1]):
+                bypassing.append(line)
+            elif not authoritative_problem_line_matches(root, line):
+                bypassing.append(line)
             continue
-        if current_snapshot is None or current_snapshot[1] != previous or not line_matches_blocked_report_snapshot(line, current_snapshot[1]):
-            return True
-    return False
+        if current_snapshot is None or current_snapshot[1] != previous or not authoritative_problem_line_matches(root, line):
+            bypassing.append(line)
+    return tuple(bypassing)
+
+
+def blocked_report_bypasses_target_repeat(root: Path, lines: tuple[str, ...], snapshots: dict[str, str]) -> bool:
+    return bool(blocked_report_lines_bypassing_repeat(root, lines, snapshots))
+
+
+def agent_problem_dispatch_subset(dispatch: AgentProblemDispatch, problem_lines: tuple[str, ...]) -> AgentProblemDispatch:
+    remaining = Counter(problem_lines)
+    blocked_idle_lines: list[tuple[str, str]] = []
+    for owner_target, line in dispatch.blocked_idle_lines:
+        if remaining[line] <= 0:
+            continue
+        remaining[line] -= 1
+        blocked_idle_lines.append((owner_target, line))
+    text = format_agent_problem_report(list(problem_lines))
+    return AgentProblemDispatch(text, text, tuple(blocked_idle_lines), problem_lines)
 
 
 def manager_human_email_problem_output(output: str, manager_target: str = "") -> str:
@@ -5127,19 +5188,19 @@ def dependency_snapshot_state(root: Path) -> dict[str, tuple[TaskLine, str, str]
 def blocked_report_snapshot_state(root: Path) -> dict[str, tuple[TaskLine, str, str]]:
     """Return stable snapshots for dependency and recorded-human blocked rows."""
 
-    snapshots = dependency_snapshot_state(root)
-    seen_files = set(snapshots)
-    for task in parse_task_lines(root / "TODO.md"):
-        if task.task_file == "TODO.md" or task.task_file in seen_files or task.section not in MANAGER_TASK_STATE_LIVE_SECTIONS:
+    snapshots: dict[str, tuple[TaskLine, str, str]] = {}
+    for task_file, authoritative in authoritative_task_states(root).items():
+        if authoritative is None:
             continue
-        seen_files.add(task.task_file)
-        task_path = resolve_task_path(root, task.task_file)
-        state = scan_task_state(task_path, root) if task_path is not None else None
-        if state is None or state.status != "blocked" or not is_recorded_human_wait(state):
+        task, state, owner_target = authoritative
+        dependency_fingerprint = blocked_status_dependency_snapshot(root, task, state)
+        if dependency_fingerprint:
+            snapshot = blocked_report_snapshot("dependency", task_file, state, owner_target, dependency_fingerprint)
+        elif state.status == "blocked" and is_recorded_human_wait(state):
+            snapshot = blocked_report_snapshot("human", task_file, state, owner_target)
+        else:
             continue
-        owner_target = effective_owner_target(root, task, task_path)
-        snapshot = recorded_human_wait_snapshot(state.status, state.target, owner_target, state.reason)
-        snapshots[task.task_file] = (task, snapshot, owner_target)
+        snapshots[task_file] = (task, snapshot, owner_target)
     return snapshots
 
 
@@ -5278,24 +5339,36 @@ def handle_agent_problem_result(
     changed = capacity_changed or manager_problem_sent or compaction_changed or dependency_changed or reminders_changed
     claim_path = problem_claim_path(args)
     claims = read_claims(claim_path)
-    for owner_target, dispatch in agent_problem_output_by_owner(args, seen, output, now_wall_s).items():
+    force_due_lines = blocked_report_lines_bypassing_repeat(args.root, tuple(output.splitlines()[1:]), previous_dependency_reported_state)
+    for owner_target, dispatch in agent_problem_output_by_owner(args, seen, output, now_wall_s, force_due_lines=force_due_lines).items():
         claim_owner_target = owner_target or args.manager_target
+        target = owner_target or args.manager_target
         problem_id = problem_claim_id(claim_owner_target, dispatch.problem_lines)
-        claim = claims.get(problem_id)
-        if active_problem_claim(claims, problem_id, claim_owner_target, now_wall_s) is not None:
-            continue
-        expired_claim = claim if claim is not None and canonical_target(claim.manager_target) == canonical_target(claim_owner_target) else None
         key = f"agent-problem:{problem_id}"
+        active_claim = active_problem_claim(claims, problem_id, claim_owner_target, now_wall_s)
+        claim_context = active_claim
+        bypass_lines = blocked_report_lines_bypassing_repeat(args.root, dispatch.problem_lines, previous_dependency_reported_state)
+        key_repeat_active = seen_contains(seen, key, now_wall_s) and now_wall_s - seen_get(seen, key, now_s=now_wall_s) < args.agent_problem_repeat_s
+        target_repeat_active = bool(target and agent_problem_target_repeat_active(args, seen, target, now_wall_s))
+        if bypass_lines and len(bypass_lines) < len(dispatch.problem_lines) and (active_claim is not None or key_repeat_active or target_repeat_active):
+            dispatch = agent_problem_dispatch_subset(dispatch, bypass_lines)
+            problem_id = problem_claim_id(claim_owner_target, dispatch.problem_lines)
+            key = f"agent-problem:{problem_id}"
+            active_claim = active_problem_claim(claims, problem_id, claim_owner_target, now_wall_s)
+            claim_context = active_claim or claim_context
+        bypass_repeat = bool(bypass_lines)
+        if active_claim is not None and not bypass_repeat:
+            continue
+        claim = claims.get(problem_id)
+        expired_claim = claim if active_claim is None and claim is not None and canonical_target(claim.manager_target) == canonical_target(claim_owner_target) else None
         attempt_key = agent_problem_attempt_key(key)
         if seen_contains(seen, attempt_key, now_wall_s):
             continue
         expired_claim_due = expired_claim is not None and seen_get(seen, key, now_s=now_wall_s) < expired_claim.expires_at_s
-        if not expired_claim_due and not dispatch.blocked_idle_lines and now_wall_s - seen_get(seen, key, now_s=now_wall_s) < args.agent_problem_repeat_s:
+        if not expired_claim_due and not dispatch.blocked_idle_lines and not bypass_repeat and now_wall_s - seen_get(seen, key, now_s=now_wall_s) < args.agent_problem_repeat_s:
             continue
-        text = with_manager_policy_reminder(args, f"{dispatch.text}\n\n{problem_claim_instructions(problem_id, expired_claim)}")
-        target = owner_target or args.manager_target
-        bypass_target_repeat = blocked_report_bypasses_target_repeat(args.root, dispatch.problem_lines, previous_dependency_reported_state)
-        if (not target and not args.dry_run) or not agent_problem_target_is_ready(args, seen, target, now_wall_s, bypass_repeat=bypass_target_repeat):
+        text = with_manager_policy_reminder(args, f"{dispatch.text}\n\n{problem_claim_instructions(problem_id, expired_claim, claim_context)}")
+        if (not target and not args.dry_run) or not agent_problem_target_is_ready(args, seen, target, now_wall_s, bypass_repeat=bypass_repeat):
             continue
         issue_problem(claim_path, problem_id, claim_owner_target, dispatch.problem_lines, now_wall_s)
         dependency_reported_replacements = dependency_snapshot_replacements_for_problem_lines(args.root, dispatch.problem_lines)
@@ -5321,6 +5394,7 @@ def handle_agent_problem_result(
             problem_id=problem_id,
             problem_owner_target=claim_owner_target,
             problem_claim_path=claim_path,
+            allow_active_claim=active_claim is not None and bypass_repeat,
         )
         status = push_manager_text_to_target(args, text, target, event, problem_guard=guard)
         if not delivery_accepted(status):
