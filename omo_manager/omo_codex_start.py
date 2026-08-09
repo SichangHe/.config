@@ -24,6 +24,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Mapping
+from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,14 +33,14 @@ try:
     from omo_manager.omo_codex_status import Args as StatusArgs
     from omo_manager.omo_codex_status import current_block, exact_tail, inspect, report_from_lines, tail
     from omo_manager.omo_codex_status import status as classify_status
-    from omo_manager.omo_codex_stop import query_status_session_id
+    from omo_manager.omo_codex_stop import extract_new_status_session_id, query_status_session_id
     from omo_manager.omo_task_lock import task_file_lock, task_target_lock
     from omo_manager.omo_task_metadata import TARGET_RE, TASK_FRONTMATTER_STATUSES, parse_task_metadata
 except ModuleNotFoundError:
     from omo_codex_status import Args as StatusArgs
     from omo_codex_status import current_block, exact_tail, inspect, report_from_lines, tail
     from omo_codex_status import status as classify_status
-    from omo_codex_stop import query_status_session_id
+    from omo_codex_stop import extract_new_status_session_id, query_status_session_id
     from omo_task_lock import task_file_lock, task_target_lock
     from omo_task_metadata import TARGET_RE, TASK_FRONTMATTER_STATUSES, parse_task_metadata
 
@@ -78,6 +79,8 @@ RECOVERY_ISSUANCE_VERSION = "omo-codex-recovery-issuance-v1"
 DELIVERY_EVENT_DIRNAME = RECOVERY_EVENT_DIRNAME
 DELIVERY_EVENT_VERSION = "omo-pending-watch-delivery-event-v1"
 CODEX_LAUNCH_COMMAND = "bunx"
+SUPPORTED_CODEX_PROCESS_COMMANDS = {"bun", "codex"}
+ROTATION_AUDIT_MAX_BYTES = 64 * 1024
 PCODX_LAUNCH_COMMAND = str(HELPER_DIR / "pcodx")
 UPDATE_AVAILABLE_RE = re.compile(r"^✨\s*Update available! [0-9]+\.[0-9]+\.[0-9]+ -> [0-9]+\.[0-9]+\.[0-9]+$")
 UPDATE_PROMPT_SUFFIX = (
@@ -123,6 +126,12 @@ class Args:
     audit_output: Path | None = None
     assert_legacy_missing_session_id: bool = False
     expected_blocker: str | None = None
+    reconcile_rotation_audit: bool = False
+    rotation_audit: Path | None = None
+    expected_rotation_audit_sha256: str = ""
+    reconciliation_receipt: Path | None = None
+    expected_current_pane_pid: int = 0
+    expected_current_command: str = ""
 
 
 @dataclass(frozen=True)
@@ -163,13 +172,42 @@ class HumanRestartAuthority:
     pane_pid: int
 
 
+@dataclass(frozen=True)
+class RotationAuditBinding:
+    path: Path
+    device: int
+    inode: int
+    size: int
+    mtime_ns: int
+    content: bytes
+    text: str
+    sha256: str
+    fields: Mapping[str, str]
+
+
+@dataclass(frozen=True)
+class ReconciliationBinding:
+    audit: RotationAuditBinding
+    task: TaskBinding
+    target: str
+    pane_id: str
+    window_id: str
+    pane_pid: int
+    command: str
+    todo_device: int
+    todo_inode: int
+    todo_size: int
+    todo_mtime_ns: int
+    todo_sha256: str
+
+
 def parse_args(argv: list[str]) -> Args:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     _ = parser.add_argument("--root", type=Path, default=Path(os.environ.get("OMO_WORK_LOGS_ROOT", Path.home() / "work_logs")))
     _ = parser.add_argument("--task-file", required=True, help="Active tracked task whose `runat` names the target pane.")
     _ = parser.add_argument("--target", required=True, help="Exact existing pane: SESSION:WINDOW[.PANE].")
-    _ = parser.add_argument("--model", required=True)
-    _ = parser.add_argument("--reasoning-effort", required=True, choices=EFFORTS)
+    _ = parser.add_argument("--model", default="")
+    _ = parser.add_argument("--reasoning-effort", default="", choices=EFFORTS)
     _ = parser.add_argument("--session-id", default="", help="Existing Codex session to resume without a new prompt.")
     _ = parser.add_argument("--prompt-file", type=Path, help="Task-local prompt for a fresh Codex session.")
     _ = parser.add_argument("--startup-timeout-s", type=float, default=45.0)
@@ -192,6 +230,12 @@ def parse_args(argv: list[str]) -> Args:
         help="Assert that this legacy worker's old Codex UUID is unrecoverable; valid only with --rotate-worker and --expected-blocker.",
     )
     _ = parser.add_argument("--expected-blocker", help="Exact preserved lifecycle blocker; required only with --assert-legacy-missing-session-id.")
+    _ = parser.add_argument("--reconcile-rotation-audit", action="store_true", help="Record later UUID evidence without launching; the sole input is one identity-guarded `/status` query.")
+    _ = parser.add_argument("--rotation-audit", type=Path, help="Exact existing failed rotation audit for --reconcile-rotation-audit.")
+    _ = parser.add_argument("--expected-rotation-audit-sha256", help="Expected lowercase SHA-256 of the failed rotation audit.")
+    _ = parser.add_argument("--reconciliation-receipt", type=Path, help="New owner-private receipt path for later reconciliation evidence.")
+    _ = parser.add_argument("--expected-current-pane-pid", type=int, help="Exact current pane process id asserted for reconciliation.")
+    _ = parser.add_argument("--expected-current-command", help="Exact supported current Codex process command asserted for reconciliation.")
     _ = parser.add_argument(
         "--recover-update-prompt",
         action="store_true",
@@ -217,26 +261,43 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--human-email-lines", help="Inclusive source line range START-END for --human-email-file.")
     _ = parser.add_argument("--dry-run", action="store_true")
     parsed = parser.parse_args(argv)
-    if MODEL_RE.fullmatch(parsed.model) is None:
+    if parsed.model and MODEL_RE.fullmatch(parsed.model) is None:
         parser.error("--model contains unsupported characters.")
     if parsed.session_id and UUID_RE.fullmatch(parsed.session_id) is None:
         parser.error("--session-id must be a Codex UUID.")
-    modes = (parsed.restart_running, parsed.rotate_worker, parsed.recover_non_codex, parsed.record_recovery_evidence, parsed.recover_update_prompt)
+    modes = (parsed.restart_running, parsed.rotate_worker, parsed.recover_non_codex, parsed.record_recovery_evidence, parsed.recover_update_prompt, parsed.reconcile_rotation_audit)
     if sum(bool(value) for value in modes) > 1:
-        parser.error("--restart-running, --rotate-worker, --recover-non-codex, --record-recovery-evidence, and --recover-update-prompt are mutually exclusive.")
+        parser.error("launch, recovery, rotation, and audit reconciliation modes are mutually exclusive.")
+    if not parsed.reconcile_rotation_audit and (not parsed.model or not parsed.reasoning_effort):
+        parser.error("--model and --reasoning-effort are required for launch and recovery modes.")
     if parsed.restart_running and (parsed.prompt_file or parsed.session_id):
         parser.error("--restart-running captures the live session and does not accept --prompt-file or --session-id.")
-    if parsed.rotate_worker:
+    if parsed.rotate_worker or parsed.reconcile_rotation_audit:
         if parsed.prompt_file or parsed.session_id:
-            parser.error("--rotate-worker starts from the tracked task and does not accept --prompt-file or --session-id.")
-        if not all((parsed.expected_task_sha256, parsed.expected_status, parsed.expected_owner_target, parsed.expected_pending_item, parsed.protected_target, parsed.audit_output)):
-            parser.error("--rotate-worker requires task digest, status, owner, full nonempty pending queue, protected-target set, and audit output assertions.")
+            parser.error("rotation and reconciliation modes do not accept --prompt-file or --session-id.")
+        if not all((parsed.expected_task_sha256, parsed.expected_status, parsed.expected_owner_target, parsed.expected_pending_item, parsed.protected_target)):
+            parser.error("rotation and reconciliation require task digest, status, owner, full nonempty pending queue, and protected-target assertions.")
         if SHA256_RE.fullmatch(parsed.expected_task_sha256) is None:
             parser.error("--expected-task-sha256 must be a lowercase SHA-256 value.")
         if any(target_identity(target) is None for target in parsed.protected_target):
             parser.error("--protected-target values must be exact SESSION:WINDOW[.PANE] targets.")
-        if parsed.assert_legacy_missing_session_id != (parsed.expected_blocker is not None):
+        if parsed.rotate_worker and not parsed.audit_output:
+            parser.error("--rotate-worker requires --audit-output.")
+        if parsed.rotate_worker and parsed.assert_legacy_missing_session_id != (parsed.expected_blocker is not None):
             parser.error("--assert-legacy-missing-session-id and --expected-blocker must be supplied together.")
+        if parsed.reconcile_rotation_audit:
+            if parsed.expected_blocker is None or not all((parsed.rotation_audit, parsed.expected_rotation_audit_sha256, parsed.reconciliation_receipt, parsed.expected_current_pane_pid, parsed.expected_current_command)):
+                parser.error("--reconcile-rotation-audit requires original audit/hash, receipt, blocker, current pane pid/command, and all task assertions.")
+            if SHA256_RE.fullmatch(parsed.expected_rotation_audit_sha256) is None:
+                parser.error("--expected-rotation-audit-sha256 must be a lowercase SHA-256 value.")
+            if parsed.expected_current_pane_pid <= 0:
+                parser.error("--expected-current-pane-pid must be positive.")
+            if parsed.expected_current_command not in SUPPORTED_CODEX_PROCESS_COMMANDS:
+                parser.error("--expected-current-command must name a supported Codex process.")
+            if parsed.audit_output or parsed.assert_legacy_missing_session_id:
+                parser.error("rotation mutation assertions are invalid with --reconcile-rotation-audit.")
+            if parsed.dry_run:
+                parser.error("--dry-run is invalid with --reconcile-rotation-audit.")
     elif any(
         (
             parsed.expected_task_sha256,
@@ -247,6 +308,11 @@ def parse_args(argv: list[str]) -> Args:
             parsed.audit_output,
             parsed.assert_legacy_missing_session_id,
             parsed.expected_blocker is not None,
+            parsed.rotation_audit,
+            parsed.expected_rotation_audit_sha256,
+            parsed.reconciliation_receipt,
+            parsed.expected_current_pane_pid,
+            parsed.expected_current_command,
         )
     ):
         parser.error("rotation assertions are only valid with --rotate-worker.")
@@ -317,6 +383,12 @@ def parse_args(argv: list[str]) -> Args:
         audit_output=parsed.audit_output.expanduser().resolve(strict=False) if parsed.audit_output else None,
         assert_legacy_missing_session_id=parsed.assert_legacy_missing_session_id,
         expected_blocker=parsed.expected_blocker,
+        reconcile_rotation_audit=parsed.reconcile_rotation_audit,
+        rotation_audit=Path(os.path.abspath(parsed.rotation_audit.expanduser())) if parsed.rotation_audit else None,
+        expected_rotation_audit_sha256=parsed.expected_rotation_audit_sha256 or "",
+        reconciliation_receipt=Path(os.path.abspath(parsed.reconciliation_receipt.expanduser())) if parsed.reconciliation_receipt else None,
+        expected_current_pane_pid=parsed.expected_current_pane_pid or 0,
+        expected_current_command=parsed.expected_current_command or "",
     )
 
 
@@ -862,6 +934,422 @@ def finish_rotation_audit(path: Path, prepared: str, result: str, new_session_id
             temporary.unlink(missing_ok=True)
 
 
+def checkpoint_rotation_replacement(path: Path, prepared: str, original: Pane, args: Args, task: TaskBinding) -> tuple[str, Pane]:
+    """Persist proof that this rotation observed its replacement process."""
+
+    deadline_s = time.monotonic() + min(10.0, args.startup_timeout_s)
+    while True:
+        current = resolve_pane(original.target)
+        if current.pane_id != original.pane_id or current.window_id != original.window_id or current.target != original.target:
+            raise StartError("rotation replacement checkpoint found a rebound pane or window.")
+        verify_task_binding(args, current, task)
+        if current.pane_pid != original.pane_pid and current.command in SUPPORTED_CODEX_PROCESS_COMMANDS:
+            break
+        if time.monotonic() >= deadline_s:
+            raise StartError("rotation replacement checkpoint did not observe a new supported Codex process before timeout.")
+        time.sleep(0.05)
+    checkpointed = prepared + "\n".join(
+        (
+            "replacement-observed: true",
+            f"replacement-target: {current.target}",
+            f"replacement-pane-id: {current.pane_id}",
+            f"replacement-window-id: {current.window_id}",
+            f"replacement-pane-pid: {current.pane_pid}",
+            f"replacement-command: {current.command}",
+            "",
+        )
+    )
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    temporary: Path | None = None
+    try:
+        fd = os.open(path, flags)
+        with os.fdopen(fd, "r", encoding="utf-8") as audit:
+            opened = os.fstat(audit.fileno())
+            if audit.read() != prepared:
+                raise StartError("rotation audit changed before replacement checkpointing.")
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False) as audit:
+            temporary = Path(audit.name)
+            os.fchmod(audit.fileno(), 0o600)
+            audit.write(checkpointed)
+            audit.flush()
+            os.fsync(audit.fileno())
+        latest = path.stat()
+        if (latest.st_dev, latest.st_ino, latest.st_size, latest.st_mtime_ns) != (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns):
+            raise StartError("rotation audit changed before atomic replacement checkpointing.")
+        os.replace(temporary, path)
+        temporary = None
+        directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except OSError as error:
+        raise StartError(f"could not checkpoint rotation replacement: {error}") from error
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return checkpointed, current
+
+
+FAILED_ROTATION_AUDIT_FIELDS = {
+    "operation",
+    "task-file",
+    "target",
+    "pane-id",
+    "window-id",
+    "old-pane-pid",
+    "old-command",
+    "old-session-id",
+    "legacy-missing-session-id",
+    "task-sha256",
+    "status",
+    "blocker-sha256",
+    "manager-target",
+    "pending-items-sha256",
+    "protected-target-count",
+    "protected-targets-sha256",
+    "is-manager",
+    "tool",
+    "completion",
+    "replacement-observed",
+    "replacement-target",
+    "replacement-pane-id",
+    "replacement-window-id",
+    "replacement-pane-pid",
+    "replacement-command",
+    "final-result",
+}
+
+
+def private_regular_file(path: Path, purpose: str) -> tuple[int, os.stat_result]:
+    """Open one exact owner-private regular file without following its final path."""
+
+    try:
+        parent = path.parent.lstat()
+        if not stat.S_ISDIR(parent.st_mode) or parent.st_uid != os.getuid() or stat.S_IMODE(parent.st_mode) != 0o700:
+            raise StartError(f"{purpose} parent directory must be owner-private.")
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0))
+        opened = os.fstat(fd)
+    except OSError as error:
+        raise StartError(f"could not open exact {purpose}: {error}") from error
+    if not stat.S_ISREG(opened.st_mode) or opened.st_uid != os.getuid() or stat.S_IMODE(opened.st_mode) != 0o600:
+        os.close(fd)
+        raise StartError(f"{purpose} must be an owner-private regular file.")
+    if purpose == "rotation audit" and opened.st_size > ROTATION_AUDIT_MAX_BYTES:
+        os.close(fd)
+        raise StartError("rotation audit exceeds the bounded evidence size.")
+    return fd, opened
+
+
+def read_failed_rotation_audit(path: Path, expected_sha256: str) -> RotationAuditBinding:
+    fd, before = private_regular_file(path, "rotation audit")
+    try:
+        with os.fdopen(fd, "rb") as stream:
+            fd = -1
+            content = stream.read()
+            after = os.fstat(stream.fileno())
+    except (OSError, UnicodeError) as error:
+        raise StartError(f"could not read rotation audit: {error}") from error
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    def identity(value: os.stat_result) -> tuple[int, int, int, int]:
+        return value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns
+
+    if identity(before) != identity(after):
+        raise StartError("rotation audit changed while it was read.")
+    digest = hashlib.sha256(content).hexdigest()
+    if SHA256_RE.fullmatch(expected_sha256) is None or digest != expected_sha256:
+        raise StartError("rotation audit bytes do not match the expected SHA-256.")
+    if not content.endswith(b"\n") or b"\r" in content:
+        raise StartError("rotation audit must use canonical LF-terminated bytes.")
+    try:
+        text = content.decode("utf-8")
+    except UnicodeError as error:
+        raise StartError(f"rotation audit is not UTF-8: {error}") from error
+    fields: dict[str, str] = {}
+    for line in text.splitlines():
+        key, separator, value = line.partition(": ")
+        if not separator or not key or key in fields:
+            raise StartError("rotation audit has invalid or duplicate fields.")
+        fields[key] = value
+    if set(fields) != FAILED_ROTATION_AUDIT_FIELDS:
+        raise StartError("rotation audit does not have the exact failed-rotation schema.")
+    if fields["operation"] != "rotate-worker" or fields["completion"] != "unknown-until-finalized" or fields["final-result"] != "failed":
+        raise StartError("rotation audit is not one exact failed rotate-worker record.")
+    return RotationAuditBinding(path, before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, content, text, digest, fields)
+
+
+def reserve_reconciliation_receipt(path: Path, text: str) -> None:
+    """Reserve a distinct owner-private reconciliation receipt."""
+
+    try:
+        parent = path.parent.lstat()
+        if not stat.S_ISDIR(parent.st_mode) or parent.st_uid != os.getuid() or stat.S_IMODE(parent.st_mode) != 0o700:
+            raise StartError("reconciliation receipt parent directory must be owner-private.")
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as output:
+            output.write(text)
+            output.flush()
+            os.fsync(output.fileno())
+        directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except OSError as error:
+        raise StartError(f"could not reserve private reconciliation receipt: {error}") from error
+
+
+def finish_reconciliation_receipt(path: Path, prepared: str, result: str, current_session_id: str = "") -> None:
+    """Atomically finalize only the exact receipt reserved by reconciliation."""
+
+    fd, current = private_regular_file(path, "reconciliation receipt")
+    temporary: Path | None = None
+    try:
+        with os.fdopen(fd, "r", encoding="utf-8") as output:
+            if output.read() != prepared:
+                raise StartError("reserved reconciliation receipt changed before completion.")
+        suffix = f"current-session-id: {current_session_id}\n" if current_session_id else ""
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False) as output:
+            temporary = Path(output.name)
+            os.fchmod(output.fileno(), 0o600)
+            output.write(prepared + suffix + f"final-result: {result}\n")
+            output.flush()
+            os.fsync(output.fileno())
+        latest = path.stat()
+        if (latest.st_dev, latest.st_ino, latest.st_size, latest.st_mtime_ns) != (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns):
+            raise StartError("reserved reconciliation receipt changed before atomic finalization.")
+        os.replace(temporary, path)
+        temporary = None
+        directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except OSError as error:
+        raise StartError(f"could not finalize private reconciliation receipt: {error}") from error
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def reconciliation_binding(args: Args) -> ReconciliationBinding:
+    audit_path = args.rotation_audit
+    if audit_path is None:
+        raise StartError("--rotation-audit is required for reconciliation.")
+    audit = read_failed_rotation_audit(audit_path, args.expected_rotation_audit_sha256)
+    fields = audit.fields
+    if args.target.partition(":")[0].startswith("h"):
+        raise StartError("rotation audit reconciliation cannot inspect a human-owned `h*` session.")
+    if target_is_fresh_rotation_protected(args.target, args.protected_targets):
+        raise StartError("reconciliation target is in the explicit protected-target set.")
+    pane = resolve_pane(args.target)
+    if os.environ.get("TMUX_PANE") == pane.pane_id:
+        raise StartError("rotation audit reconciliation cannot query the caller's pane.")
+    task = validate_task(args, pane)
+    queue_sha256 = hashlib.sha256("\0".join(task.pending_task_items).encode()).hexdigest()
+    protected_sha256 = hashlib.sha256("\0".join(args.protected_targets).encode()).hexdigest()
+    if task.is_manager or task.tool != "codex" or task.runat != args.target:
+        raise StartError("reconciliation requires the exact non-manager Codex task and target.")
+    if (task.task_sha256, task.status, task.blocked_on, task.managerat, task.pending_task_items) != (
+        args.expected_task_sha256,
+        args.expected_status,
+        args.expected_blocker,
+        args.expected_owner_target,
+        args.expected_pending_items,
+    ):
+        raise StartError("task lifecycle does not match the explicit reconciliation assertions.")
+    try:
+        old_pid = int(fields["old-pane-pid"])
+        replacement_pid = int(fields["replacement-pane-pid"])
+        protected_count = int(fields["protected-target-count"])
+    except ValueError as error:
+        raise StartError("rotation audit has invalid numeric identity fields.") from error
+    if (
+        fields["task-file"] != args.task_file
+        or fields["target"] != pane.target
+        or fields["pane-id"] != pane.pane_id
+        or fields["window-id"] != pane.window_id
+        or fields["task-sha256"] != task.task_sha256
+        or fields["status"] != task.status
+        or fields["blocker-sha256"] != hashlib.sha256(task.blocked_on.encode()).hexdigest()
+        or fields["manager-target"] != task.managerat
+        or fields["pending-items-sha256"] != queue_sha256
+        or protected_count != len(args.protected_targets)
+        or fields["protected-targets-sha256"] != protected_sha256
+        or fields["is-manager"] != "false"
+        or fields["tool"] != "codex"
+        or fields["legacy-missing-session-id"] != "not-asserted"
+        or fields["old-command"] not in SUPPORTED_CODEX_PROCESS_COMMANDS
+        or UUID_RE.fullmatch(fields["old-session-id"]) is None
+        or fields["replacement-observed"] != "true"
+        or fields["replacement-target"] != pane.target
+        or fields["replacement-pane-id"] != pane.pane_id
+        or fields["replacement-window-id"] != pane.window_id
+        or fields["replacement-command"] != pane.command
+    ):
+        raise StartError("rotation audit does not match the exact task, pane, lifecycle, or protection binding.")
+    if pane.pane_pid != args.expected_current_pane_pid or pane.command != args.expected_current_command or pane.command not in SUPPORTED_CODEX_PROCESS_COMMANDS:
+        raise StartError("current pane process does not match the explicit reconciliation assertion.")
+    if old_pid <= 0 or replacement_pid <= 0 or replacement_pid != pane.pane_pid or pane.pane_pid == old_pid:
+        raise StartError("current pane process does not match the failed rotation's observed replacement process.")
+    todo = args.root / "TODO.md"
+    todo_before = todo.stat()
+    todo_bytes = todo.read_bytes()
+    todo_after = todo.stat()
+    def todo_identity(value: os.stat_result) -> tuple[int, int, int, int]:
+        return value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns
+
+    if todo_identity(todo_before) != todo_identity(todo_after):
+        raise StartError("TODO changed while its reconciliation binding was read.")
+    return ReconciliationBinding(
+        audit,
+        task,
+        pane.target,
+        pane.pane_id,
+        pane.window_id,
+        pane.pane_pid,
+        pane.command,
+        todo_before.st_dev,
+        todo_before.st_ino,
+        todo_before.st_size,
+        todo_before.st_mtime_ns,
+        hashlib.sha256(todo_bytes).hexdigest(),
+    )
+
+
+def reconciliation_tmux_condition(pane: Pane | ReconciliationBinding) -> str:
+    return "#{&&:#{==:#{pane_id},%s},#{==:#{window_id},%s},#{==:#{session_name}:#{window_index}.#{pane_index},%s},#{==:#{pane_pid},%s},#{==:#{pane_current_command},%s}}" % (
+        pane.pane_id,
+        pane.window_id,
+        pane.target,
+        pane.pane_pid,
+        pane.command,
+    )
+
+
+def guarded_reconciliation_tmux(pane: Pane | ReconciliationBinding, command: str) -> None:
+    result = run(["tmux", "if-shell", "-F", "-t", pane.pane_id, reconciliation_tmux_condition(pane), command, "run-shell 'exit 1'"])
+    if result.returncode != 0:
+        raise StartError("reconciliation pane/process identity changed before authorized `/status` input.")
+
+
+def reconciliation_capture(pane: Pane | ReconciliationBinding, n_lines: int) -> str:
+    result = run(["tmux", "capture-pane", "-p", "-t", pane.pane_id, "-S", f"-{n_lines}"])
+    if result.returncode != 0:
+        raise StartError(f"could not capture reconciliation status output: {result.stderr.strip()}")
+    return result.stdout
+
+
+def query_reconciliation_session_id(pane: Pane | ReconciliationBinding, n_lines: int, wait_s: float) -> str:
+    """Run the sole authorized `/status` query with a server-side guard per input."""
+
+    before = reconciliation_capture(pane, n_lines)
+    buffer_name = f"omo-rotation-reconcile-{os.getpid()}-{time.monotonic_ns()}"
+    loaded = run(["tmux", "set-buffer", "-b", buffer_name, "--", "/status"])
+    if loaded.returncode != 0:
+        raise StartError(f"could not prepare reconciliation status query: {loaded.stderr.strip()}")
+    try:
+        guarded_reconciliation_tmux(pane, f"paste-buffer -b {shlex.quote(buffer_name)} -t {pane.pane_id}")
+    finally:
+        _ = run(["tmux", "delete-buffer", "-b", buffer_name])
+    guarded_reconciliation_tmux(pane, f"send-keys -t {pane.pane_id} Enter")
+    deadline_s = time.monotonic() + wait_s
+    fallback_sent = False
+    while time.monotonic() < deadline_s:
+        after = reconciliation_capture(pane, n_lines)
+        session_id = extract_new_status_session_id(before, after)
+        if session_id:
+            return session_id
+        if not fallback_sent and any(line.lstrip().startswith("› ") and "/status" in line for line in after.splitlines()[-20:]):
+            guarded_reconciliation_tmux(pane, f"send-keys -t {pane.pane_id} Enter")
+            fallback_sent = True
+        time.sleep(0.25)
+    return ""
+
+
+def reconcile_rotation_audit_locked(args: Args) -> str:
+    """Record later UUID evidence with only one guarded `/status` input query."""
+
+    receipt = args.reconciliation_receipt
+    if receipt is None:
+        raise StartError("--reconciliation-receipt is required.")
+    initial = reconciliation_binding(args)
+    if receipt == initial.audit.path:
+        raise StartError("reconciliation receipt must be distinct from the original audit.")
+    fields = initial.audit.fields
+    prepared = "\n".join(
+        (
+            "operation: reconcile-rotation-audit",
+            "evidence-kind: later-reconciliation-only",
+            "claim: does-not-rewrite-original-failure-or-explain-immediate-capture-failure",
+            f"original-audit-path: {initial.audit.path}",
+            f"original-audit-device: {initial.audit.device}",
+            f"original-audit-inode: {initial.audit.inode}",
+            f"original-audit-size: {initial.audit.size}",
+            f"original-audit-mtime-ns: {initial.audit.mtime_ns}",
+            f"original-audit-sha256: {initial.audit.sha256}",
+            f"original-audit-content-hex: {initial.audit.content.hex()}",
+            f"task-file: {args.task_file}",
+            f"task-sha256: {initial.task.task_sha256}",
+            f"status: {initial.task.status}",
+            f"blocker-sha256: {hashlib.sha256(initial.task.blocked_on.encode()).hexdigest()}",
+            f"manager-target: {initial.task.managerat}",
+            f"pending-items-sha256: {fields['pending-items-sha256']}",
+            f"protected-target-count: {fields['protected-target-count']}",
+            f"protected-targets-sha256: {fields['protected-targets-sha256']}",
+            f"target: {initial.target}",
+            f"pane-id: {initial.pane_id}",
+            f"window-id: {initial.window_id}",
+            f"old-pane-pid: {fields['old-pane-pid']}",
+            f"old-command: {fields['old-command']}",
+            f"old-session-id: {fields['old-session-id']}",
+            f"current-pane-pid: {initial.pane_pid}",
+            f"current-command: {initial.command}",
+            f"todo-device: {initial.todo_device}",
+            f"todo-inode: {initial.todo_inode}",
+            f"todo-size: {initial.todo_size}",
+            f"todo-mtime-ns: {initial.todo_mtime_ns}",
+            f"todo-sha256: {initial.todo_sha256}",
+            "is-manager: false",
+            "tool: codex",
+            "completion: unknown-until-finalized",
+            "",
+        )
+    )
+    reserve_reconciliation_receipt(receipt, prepared)
+    try:
+        if reconciliation_binding(args) != initial:
+            raise StartError("audit, task, or pane binding changed after receipt reservation.")
+        current_session_id = query_reconciliation_session_id(initial, 240, min(10.0, args.startup_timeout_s))
+        if UUID_RE.fullmatch(current_session_id) is None:
+            raise StartError("reconciliation status query did not return one valid current Codex UUID.")
+        if current_session_id == fields["old-session-id"]:
+            raise StartError("reconciliation status query returned the failed rotation's old UUID.")
+        if reconciliation_binding(args) != initial:
+            raise StartError("audit, task, or pane binding changed during the status query.")
+    except Exception as reconciliation_error:
+        try:
+            finish_reconciliation_receipt(receipt, prepared, "failed")
+        except Exception as receipt_error:
+            reconciliation_error.add_note(f"receipt finalization also failed; reconciliation remains completion-unknown: {receipt_error}")
+        raise
+    finish_reconciliation_receipt(receipt, prepared, "success", current_session_id)
+    return "rotation-audit-reconciled"
+
+
+def reconcile_rotation_audit(args: Args) -> str:
+    """Hold the task, target, and TODO bindings across reconciliation."""
+
+    task = task_path(args.root, args.task_file)
+    todo = args.root / "TODO.md"
+    with task_target_lock(args.root, args.target), ExitStack() as locks:
+        for path in sorted({task, todo}, key=lambda candidate: str(candidate)):
+            locks.enter_context(task_file_lock(path))
+        return reconcile_rotation_audit_locked(args)
+
+
 def recovery_issuance_path(receipt: Path) -> Path:
     return receipt.with_name(f".{receipt.name}.issued")
 
@@ -1367,6 +1855,8 @@ def verify_rotation_before_respawn(args: Args, pane: Pane, original_session_id: 
 
 
 def start(args: Args) -> str:
+    if args.reconcile_rotation_audit:
+        raise StartError("rotation audit reconciliation must use its isolated reconciliation path.")
     modes = (args.restart_running, args.rotate_worker, args.recover_non_codex, args.record_recovery_evidence, args.recover_update_prompt)
     if sum(bool(value) for value in modes) > 1:
         raise StartError("--restart-running, --rotate-worker, --recover-non-codex, --record-recovery-evidence, and --recover-update-prompt are mutually exclusive.")
@@ -1524,18 +2014,20 @@ def start(args: Args) -> str:
                         )
                     )
                     reserve_rotation_audit(audit_path, prepared_audit)
+                    active_audit = prepared_audit
                     try:
                         verify_rotation_before_respawn(args, pane, original_session_id, task_binding)
                         respawn_codex(pane, command)
+                        active_audit, _replacement = checkpoint_rotation_replacement(audit_path, prepared_audit, pane, args, task_binding)
                         result = wait_started(pane, marker, args.startup_timeout_s)
                         new_session_id = verify_fresh_rotation(args, pane, original_session_id, task_binding)
                     except Exception as rotation_error:
                         try:
-                            finish_rotation_audit(audit_path, prepared_audit, "failed")
+                            finish_rotation_audit(audit_path, active_audit, "failed")
                         except Exception as audit_error:
                             rotation_error.add_note(f"private audit finalization also failed; audit remains completion-unknown: {audit_error}")
                         raise
-                    finish_rotation_audit(audit_path, prepared_audit, "success", new_session_id)
+                    finish_rotation_audit(audit_path, active_audit, "success", new_session_id)
                     return result
                 respawn_codex(pane, command)
             else:
@@ -1552,7 +2044,8 @@ def start(args: Args) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     try:
-        result = start(parse_args(sys.argv[1:] if argv is None else argv))
+        args = parse_args(sys.argv[1:] if argv is None else argv)
+        result = reconcile_rotation_audit(args) if args.reconcile_rotation_audit else start(args)
     except (OSError, StartError, subprocess.TimeoutExpired, ValueError) as error:
         print(f"omo_codex_start: {error}", file=sys.stderr)
         return 1
