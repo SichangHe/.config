@@ -21,6 +21,27 @@ omo_codex_start.py --root ROOT \
 
 Repeat `--expected-pending-item` in queue order for every item and repeat `--protected-target` for the authoritative protected set. `--expected-status` accepts `blocked` or `running`. The audit parent directory must be owner-private and the file must not exist. Rotation refuses manager tasks, PCODX, `h*` sessions, the caller's pane, any requested target in the explicit protected set, missing or rebound panes, and task/target/status/owner/queue/digest drift. It captures the old session id only as evidence, respawns a fresh command without `resume`, and proves the same pane and window, a new pane process, a different new Codex session id, and unchanged task bytes after startup. The fresh prompt contains `WORKER_DEFAULTS.md` and the tracked task file; it never adds `MANAGER.md`. The private audit records the bound identities and starts with completion explicitly unknown; an atomically finalized record distinguishes success or post-respawn failure, while a finalization fault leaves durable unknown evidence and does not replace the original rotation error.
 
+Only when the task owner has established that a legacy non-manager worker's old UUID cannot be recovered, use this exact additional assertion form:
+
+```bash
+omo_codex_start.py --root ROOT \
+  --task-file TASK.md \
+  --target SESSION:WINDOW \
+  --model MODEL \
+  --reasoning-effort EFFORT \
+  --rotate-worker \
+  --expected-task-sha256 TASK_SHA256 \
+  --expected-status blocked \
+  --expected-blocker 'EXACT BLOCKER' \
+  --expected-owner-target MANAGER_SESSION:WINDOW \
+  --expected-pending-item 'FIRST EXACT ITEM' \
+  --protected-target PROTECTED_SESSION:WINDOW \
+  --audit-output PRIVATE_NEW_AUDIT_FILE \
+  --assert-legacy-missing-session-id
+```
+
+This is an assertion, not a skipped UUID check. The helper must observe the UUID still missing during capture and again at the replacement boundary; if it recovers any UUID, it refuses the legacy path. It also binds and immediately revalidates the exact task bytes, status, blocker, manager owner, ordered queue, protected set, target, pane, window, pane id, process id, and command. It then starts fresh without `resume` or `MANAGER.md` and proves the unchanged lifecycle/task bindings, same pane/window, changed process, and newly captured UUID. The private audit records whether the legacy assertion was observed, the bound identity digests, and either success, failure, or durable completion-unknown when finalization itself fails. Omitting the legacy assertion preserves ordinary `--rotate-worker` behavior, including refusal when the old UUID cannot be captured.
+
 Restart a running Codex session in the same pane with a different model or effort:
 
 ```bash
