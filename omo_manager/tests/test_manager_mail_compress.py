@@ -431,6 +431,68 @@ class ManagerMailCompressTests(unittest.TestCase):
             self.assertIn("To: Human <human@example.test>", (Path(tmp) / "export" / "threads" / "200-101.txt").read_text(encoding="utf-8"))
             self.assertIn(('"[Gmail]/All Mail"', True), client.select_calls)
 
+    def test_export_retries_missing_full_fetch_for_only_the_frozen_uid(self) -> None:
+        raw = self.raw_message("[worker:0] complete")
+        client = FakeClient(
+            {
+                ("search", None, "ALL"): ("OK", [b"7"]),
+                ("search", None, "UNSEEN", "FROM", '"agent@example.test"'): ("OK", [b"7 8"]),
+                ("fetch", "7", HEADER_FETCH): ("OK", [(b"header", raw)]),
+                ("fetch", "7", FULL_FETCH): [("OK", [b""]), ("OK", [(b"message", raw)])],
+                ("fetch", "7", GMAIL_METADATA_FETCH): self.gmail_metadata("7"),
+                ("search", None, "X-GM-THRID", "200"): ("OK", [b"70"]),
+                ("fetch", "70", FULL_FETCH): ("OK", [(b"message", raw)]),
+                ("fetch", "70", GMAIL_METADATA_FETCH): self.gmail_metadata("70"),
+            },
+            self.gmail_mailboxes(),
+        )
+
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {"user": "human@example.test"})),
+            patch("omo_manager.omo_manager_mail_compress.configured_agent_mail", return_value=Settings()),
+        ):
+            out_dir = Path(tmp) / "export"
+            self.assertEqual(0, cmd_export(ExportArgs(out_dir)))
+            self.assertTrue((out_dir / "manifest.tsv").exists())
+        self.assertEqual(1, client.uid_calls.count(("search", None, "ALL")))
+        self.assertEqual(2, client.uid_calls.count(("fetch", "7", FULL_FETCH)))
+        self.assertFalse(any(call[:2] == ("fetch", "8") for call in client.uid_calls))
+        self.assertFalse(any(call[0].casefold() in {"copy", "move", "store", "expunge"} for call in client.uid_calls))
+
+    def test_export_fails_without_manifest_after_bounded_missing_full_fetch(self) -> None:
+        raw = self.raw_message("[worker:0] complete")
+        client = FakeClient(
+            {
+                ("search", None, "ALL"): ("OK", [b"7"]),
+                ("search", None, "UNSEEN", "FROM", '"agent@example.test"'): ("OK", [b"7"]),
+                ("fetch", "7", HEADER_FETCH): ("OK", [(b"header", raw)]),
+                ("fetch", "7", FULL_FETCH): [("OK", [b""]), ("OK", [b""])],
+            },
+            self.gmail_mailboxes(),
+        )
+
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {"user": "human@example.test"})),
+            patch("omo_manager.omo_manager_mail_compress.configured_agent_mail", return_value=Settings()),
+        ):
+            out_dir = Path(tmp) / "export"
+            with self.assertRaisesRegex(RuntimeError, "no usable record: uid=7"):
+                cmd_export(ExportArgs(out_dir))
+            self.assertFalse((out_dir / "manifest.tsv").exists())
+        self.assertEqual(1, client.uid_calls.count(("search", None, "ALL")))
+        self.assertEqual(2, client.uid_calls.count(("fetch", "7", FULL_FETCH)))
+        self.assertFalse(any(call[0].casefold() in {"copy", "move", "store", "expunge"} for call in client.uid_calls))
+
     def test_export_filters_excluded_subject_when_optional_import_fallback_is_active(self) -> None:
         raw = self.raw_message("PB news")
         client = FakeClient(

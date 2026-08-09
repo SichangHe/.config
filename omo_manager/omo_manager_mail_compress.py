@@ -31,6 +31,7 @@ GMAIL_METADATA_FETCH = "(FLAGS X-GM-MSGID X-GM-THRID X-GM-LABELS)"
 TRASH_MAILBOX = "[Gmail]/Trash"
 CONFIG_PATH = human_config_path()
 DEFAULT_THREADS_PER_BATCH = 10
+EXPORT_FULL_FETCH_ATTEMPTS = 2
 
 
 @dataclass(frozen=True)
@@ -206,18 +207,23 @@ def mailbox_exists(client: imaplib.IMAP4_SSL, mailbox: str) -> bool:
     return any(mailbox.encode() in raw for raw in data if isinstance(raw, bytes))
 
 
-def fetch_msg_bytes(client: imaplib.IMAP4_SSL, uid: str, fetch_expr: str) -> bytes:
-    typ, data = client.uid("fetch", uid, fetch_expr)
-    if typ != "OK" or not data or not isinstance(data[0], tuple):
-        raise RuntimeError(f"IMAP fetch failed: uid={uid} typ={typ}")
-    payload = data[0][1]
-    if not isinstance(payload, bytes):
-        raise RuntimeError(f"IMAP fetch payload was not bytes: uid={uid}")
-    return payload
+def fetch_msg_bytes(client: imaplib.IMAP4_SSL, uid: str, fetch_expr: str, n_attempts: int = 1) -> bytes:
+    if n_attempts < 1:
+        raise ValueError("IMAP fetch attempts must be positive")
+    for _attempt in range(n_attempts):
+        typ, data = client.uid("fetch", uid, fetch_expr)
+        if typ != "OK":
+            raise RuntimeError(f"IMAP fetch failed: uid={uid} typ={typ}")
+        if not data or not isinstance(data[0], tuple):
+            continue
+        payload = data[0][1]
+        if isinstance(payload, bytes):
+            return payload
+    raise RuntimeError(f"IMAP fetch returned no usable record: uid={uid}")
 
 
-def fetch_msg(client: imaplib.IMAP4_SSL, uid: str, fetch_expr: str) -> tuple[Message, str]:
-    payload = fetch_msg_bytes(client, uid, fetch_expr)
+def fetch_msg(client: imaplib.IMAP4_SSL, uid: str, fetch_expr: str, n_attempts: int = 1) -> tuple[Message, str]:
+    payload = fetch_msg_bytes(client, uid, fetch_expr, n_attempts)
     return BytesParser(policy=policy.default).parsebytes(payload), hashlib.sha256(payload).hexdigest()
 
 
@@ -334,8 +340,8 @@ def gmail_extension_advertised(client: imaplib.IMAP4_SSL) -> bool:
     return "X-GM-EXT-1" in imap_response_text(data).upper().split()
 
 
-def fetch_record(client: imaplib.IMAP4_SSL, uid: str, with_body: bool, with_metadata: bool) -> MailRecord:
-    msg, raw_sha256 = fetch_msg(client, uid, FULL_FETCH if with_body else HEADER_FETCH)
+def fetch_record(client: imaplib.IMAP4_SSL, uid: str, with_body: bool, with_metadata: bool, n_fetch_attempts: int = 1) -> MailRecord:
+    msg, raw_sha256 = fetch_msg(client, uid, FULL_FETCH if with_body else HEADER_FETCH, n_fetch_attempts)
     gmail_msgid, gmail_thrid, flags, labels = fetch_gmail_metadata(client, uid) if with_metadata else ("", "", "", "")
     return record_from_msg(
         uid,
@@ -349,8 +355,8 @@ def fetch_record(client: imaplib.IMAP4_SSL, uid: str, with_body: bool, with_meta
     )
 
 
-def fetch_records(client: imaplib.IMAP4_SSL, uids: list[str], with_body: bool, with_metadata: bool = False) -> list[MailRecord]:
-    return [fetch_record(client, uid, with_body, with_metadata) for uid in uids]
+def fetch_records(client: imaplib.IMAP4_SSL, uids: list[str], with_body: bool, with_metadata: bool = False, n_fetch_attempts: int = 1) -> list[MailRecord]:
+    return [fetch_record(client, uid, with_body, with_metadata, n_fetch_attempts) for uid in uids]
 
 
 def accepted_manager_headers(client: imaplib.IMAP4_SSL, uids: list[str], sender_email: str, recipient_email: str) -> tuple[list[MailRecord], list[str]]:
@@ -1080,7 +1086,16 @@ def cmd_export(args: argparse.Namespace) -> int:
         sender_email, recipient_email = mail_boundary(config)
         header_records, skipped = accepted_manager_headers(client, manager_unread_uids(client, sender_email), sender_email, recipient_email)
         uidvalidity = selected_uidvalidity(client)
-        source_records = [replace(record, source_uidvalidity=uidvalidity) for record in fetch_records(client, [record.uid for record in header_records], with_body=True, with_metadata=True)]
+        source_records = [
+            replace(record, source_uidvalidity=uidvalidity)
+            for record in fetch_records(
+                client,
+                [record.uid for record in header_records],
+                with_body=True,
+                with_metadata=True,
+                n_fetch_attempts=EXPORT_FULL_FETCH_ATTEMPTS,
+            )
+        ]
         special_use, records_by_thread = fetch_imap_thread_contexts(client, source_records)
         all_mailbox = special_use.get(r"\All", "")
         sent_mailbox = special_use.get(r"\Sent", "")
