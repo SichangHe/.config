@@ -66,7 +66,7 @@ MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$")
 LINE_RANGE_RE = re.compile(r"^([1-9]\d*)-([1-9]\d*)$")
 HUMAN_INSTRUCTION_CLOSE = "</human_instruction>"
 HUMAN_LAUNCH_REQUEST_RE = re.compile(
-    r"^\s*(?:please\s+)?(?:"
+    r"^\s*(?:(?:please|just)\s+)?(?:"
     r"(?:launch|create|start|open|spawn)\b|"
     r"(?:give\s+me|set\s+up|i\s+(?:want|need|would\s+like))\b.*\b(?:agent|manager|worker)\b"
     r")",

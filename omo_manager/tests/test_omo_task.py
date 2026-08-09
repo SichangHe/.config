@@ -1158,6 +1158,7 @@ class OmoTaskTests(unittest.TestCase):
                 "keep this worker available\n- continue the direct human task\n",
                 encoding="utf-8",
             )
+            (root / "MANAGER.md").write_text("manager instructions\n", encoding="utf-8")
             args = Args(
                 root,
                 "x.md",
@@ -1230,6 +1231,31 @@ class OmoTaskTests(unittest.TestCase):
                 return_value=subprocess.CompletedProcess(["tmux"], 0, "hvl\n", ""),
             ):
                 self.assertEqual(punctuated, validate_inputs(args))
+
+    def test_validate_inputs_allows_just_create_worker_in_named_human_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mail = root / "manager_mail"
+            mail.mkdir()
+            request = "Just create a worker at hwl to replace the previous one.\n"
+            (mail / "request.txt").write_text(request, encoding="utf-8")
+            (root / "x.md").write_text(
+                "---\nversion: v1.0.0\nstatus: blocked\nblocked_on: missing pane\nrunat: hwl:3\ntool: pcodx\n"
+                "managerat: mgr:1\nis_manager: true\npending_task_items: []\n---\n"
+                "resume the planner\n- preserve its queue\n",
+                encoding="utf-8",
+            )
+            (root / "MANAGER.md").write_text("manager instructions\n", encoding="utf-8")
+            args = Args(
+                root, "x.md", "hwl", "", "pcodx", root, "", None, False, False, "", "max", (),
+                model="gpt-5.6-sol", manager_target="mgr:1", is_manager=True,
+                human_email_file=Path("manager_mail/request.txt"), human_email_lines=(1, 1),
+            )
+            with patch(
+                "omo_manager.omo_task.subprocess.run",
+                return_value=subprocess.CompletedProcess(["tmux"], 0, "hwl\n", ""),
+            ):
+                self.assertEqual(request, validate_inputs(args))
 
     def test_validate_inputs_rejects_non_authorizing_human_session_mentions(self) -> None:
         for excerpt in (
