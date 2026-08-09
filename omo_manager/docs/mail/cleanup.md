@@ -40,12 +40,12 @@ Retain every thread with:
 
 ## execute
 
-- make a private immutable source map before mutation: mailbox-scoped UID, message and thread identity, source labels, task evidence, reason, and disposition
+- make a private immutable source map before mutation: mailbox-scoped UID, message and thread identity, content digest, task evidence, reason, and disposition; any recorded signal metadata is audit-only
 - rerun the same mailbox, task, pending, and routing classification in a read-write `INBOX` session immediately before mutation; abort on any change and record external drift separately instead of attributing it to cleanup
-- create an ordered operation plan, then fsync a paired intent and outcome receipt for every mutation; validate exact target order, identity digest, primary mailbox, and complete source-label list, not only aggregate counts
+- create an ordered operation plan, then fsync a paired intent and outcome receipt for every mutation; validate exact target order, identity/content digest, and primary mailbox—not Gmail signal metadata, and not only aggregate counts
 - send and record a replacement summary before moving any source it fully supersedes
 - verify `[Gmail]/Trash` exists; move only explicitly planned UIDs with `UID MOVE ... "[Gmail]/Trash"`; never mutate `\All`
-- retain recovery evidence sufficient to restore each moved message to its recorded primary mailbox and labels
+- retain recovery evidence sufficient to locate each moved message and its recorded primary mailbox; never restore or act on Gmail signal metadata
 - finish with live verification: every selected UID left its source and reached Trash, every retained message remains in source, complete thread membership is unchanged, counts reconcile, and permanent deletions remain zero
 
 ## report

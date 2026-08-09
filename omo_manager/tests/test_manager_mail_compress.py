@@ -40,7 +40,6 @@ from omo_manager.omo_manager_mail_compress import (
     record_from_msg,
     record_matches_reconciliation_location,
     replacement_exists,
-    revalidate_thread_contexts,
     special_use_mailboxes,
     thread_context_digest,
     verify_post_move_imap,
@@ -746,7 +745,7 @@ class ManagerMailCompressTests(unittest.TestCase):
                 self.assertFalse((source_dir / "outcomes" / "200.tsv").exists())
             self.assertFalse(any(call[0].casefold() in {"copy", "move", "store", "expunge"} for call in client.uid_calls))
 
-    def test_reconcile_trash_labels_preserve_quoted_label_identity(self) -> None:
+    def test_reconcile_ignores_unrelated_label_drift(self) -> None:
         record = MailRecord("70", "", "", "", "", "msg", gmail_msgid="100", gmail_thrid="200", labels=r"\Trash Project Alpha", raw_sha256="raw")
         source = {
             "gmail_msgid": "100",
@@ -756,9 +755,9 @@ class ManagerMailCompressTests(unittest.TestCase):
             "flags": "",
             "labels": r'\Inbox "Project Alpha"',
         }
-        self.assertFalse(record_matches_reconciliation_location(record, source, "Trash"))
+        self.assertTrue(record_matches_reconciliation_location(record, source, "Trash"))
 
-    def test_gmail_signals_are_identity_evidence_not_semantic_protection(self) -> None:
+    def test_gmail_signal_drift_is_ignored_by_identity_match(self) -> None:
         source = {
             "gmail_msgid": "100",
             "gmail_thrid": "200",
@@ -771,9 +770,9 @@ class ManagerMailCompressTests(unittest.TestCase):
         changed_flag = MailRecord("70", "", "", "", "", "msg", gmail_msgid="100", gmail_thrid="200", flags="", labels=exact.labels, raw_sha256="raw")
 
         self.assertTrue(record_matches_reconciliation_location(exact, source, "Trash"))
-        self.assertFalse(record_matches_reconciliation_location(changed_flag, source, "Trash"))
+        self.assertTrue(record_matches_reconciliation_location(changed_flag, source, "Trash"))
 
-    def test_post_move_verification_rejects_signal_label_drift(self) -> None:
+    def test_post_move_verification_ignores_signal_label_drift(self) -> None:
         raw = self.raw_message("[worker:0] complete")
         msgid_digest = hashlib.sha256(b"<one@example.test>").hexdigest()[:12]
         client = FakeClient(
@@ -796,8 +795,8 @@ class ManagerMailCompressTests(unittest.TestCase):
 
         result = verify_post_move_imap(client, source_map, "agent@example.test", "human@example.test")
 
-        self.assertFalse(result.complete)
-        self.assertEqual(1, result.changed_thread_count)
+        self.assertTrue(result.complete)
+        self.assertEqual(0, result.changed_thread_count)
 
     def test_reconcile_intent_rejects_changed_non_source_thread_member(self) -> None:
         raw = self.raw_message("[worker:0] complete")
@@ -1062,70 +1061,6 @@ class ManagerMailCompressTests(unittest.TestCase):
                 )
                 self.assertEqual(expected, replacement_exists(client, "[Gmail]/Sent Mail", "<replacement@example.test>", "human@example.test"))
 
-    def test_revalidation_refuses_conflicting_digest_for_one_thread(self) -> None:
-        raw = self.raw_message("[worker:0] complete")
-        second_raw = self.raw_message("[worker:0] complete", "second").replace(b"<one@example.test>", b"<two@example.test>")
-        client = FakeClient(
-            {
-                ("search", None, "X-GM-THRID", "200"): ("OK", [b"70 71"]),
-                ("fetch", "70", FULL_FETCH): ("OK", [(b"message", raw)]),
-                ("fetch", "70", GMAIL_METADATA_FETCH): self.gmail_metadata("70"),
-                ("fetch", "71", FULL_FETCH): ("OK", [(b"message", second_raw)]),
-                ("fetch", "71", GMAIL_METADATA_FETCH): self.gmail_metadata("71", gmail_msgid="101"),
-            }
-        )
-        source_map = {
-            "7": {"gmail_thrid": "200", "gmail_msgid": "100", "thread_context_sha256": "first"},
-            "8": {"gmail_thrid": "200", "gmail_msgid": "101", "thread_context_sha256": "second"},
-        }
-        self.assertFalse(revalidate_thread_contexts(client, "[Gmail]/All Mail", source_map, "agent@example.test", "human@example.test"))
-
-    def test_revalidation_allows_one_frozen_intermediate_from_unchanged_thread(self) -> None:
-        raw = self.raw_message("[worker:0] complete")
-        second_raw = self.raw_message("[worker:0] complete", "second").replace(b"<one@example.test>", b"<two@example.test>")
-        records = [
-            MailRecord(
-                "70",
-                "",
-                "Agent <agent@example.test>",
-                "Human <human@example.test>",
-                "[worker:0] complete",
-                hashlib.sha256(b"<one@example.test>").hexdigest()[:12],
-                "body\n",
-                "100",
-                "200",
-                "",
-                r"\Inbox",
-                hashlib.sha256(raw).hexdigest(),
-            ),
-            MailRecord(
-                "71",
-                "",
-                "Agent <agent@example.test>",
-                "Human <human@example.test>",
-                "[worker:0] complete",
-                hashlib.sha256(b"<two@example.test>").hexdigest()[:12],
-                "second\n",
-                "101",
-                "200",
-                "",
-                r"\Inbox",
-                hashlib.sha256(second_raw).hexdigest(),
-            ),
-        ]
-        client = FakeClient(
-            {
-                ("search", None, "X-GM-THRID", "200"): ("OK", [b"70 71"]),
-                ("fetch", "70", FULL_FETCH): ("OK", [(b"message", raw)]),
-                ("fetch", "70", GMAIL_METADATA_FETCH): self.gmail_metadata("70"),
-                ("fetch", "71", FULL_FETCH): ("OK", [(b"message", second_raw)]),
-                ("fetch", "71", GMAIL_METADATA_FETCH): self.gmail_metadata("71", gmail_msgid="101"),
-            }
-        )
-        source_map = {"7": {"gmail_thrid": "200", "gmail_msgid": "100", "thread_context_sha256": thread_context_digest(records)}}
-
-        self.assertTrue(revalidate_thread_contexts(client, "[Gmail]/All Mail", source_map, "agent@example.test", "human@example.test"))
-
     def test_trash_superseded_requires_yes(self) -> None:
         self.assertEqual(2, cmd_trash_superseded(Args(uids="7")))
 
@@ -1280,14 +1215,14 @@ class ManagerMailCompressTests(unittest.TestCase):
             {
                 ("search", None, "UID", "7"): [("OK", [b"7"]), ("OK", [b"7"]), ("OK", [b"7"]), ("OK", [b""])],
                 ("fetch", "7", FULL_FETCH): ("OK", [(b"message", raw)]),
-                ("fetch", "7", GMAIL_METADATA_FETCH): self.gmail_metadata("7", flags=r"\Flagged", labels=r'\Inbox \Important \Starred "Read Later" Saved Security'),
+                ("fetch", "7", GMAIL_METADATA_FETCH): self.gmail_metadata("7", labels=r"\Inbox ChangedBeforeMove"),
                 ("search", None, "X-GM-THRID", "200"): ("OK", [b"70"]),
                 ("search", None, "X-GM-MSGID", "100"): ("OK", [b"70"]),
                 ("fetch", "70", FULL_FETCH): ("OK", [(b"message", raw)]),
                 ("fetch", "70", GMAIL_METADATA_FETCH): [
-                    self.gmail_metadata("70", flags=r"\Flagged", labels=r'\Inbox \Important \Starred "Read Later" Saved Security'),
-                    self.gmail_metadata("70", flags=r"\Flagged", labels=r'\Inbox \Important \Starred "Read Later" Saved Security'),
-                    self.gmail_metadata("70", flags=r"\Flagged", labels=r'\Important \Starred "Read Later" Saved Security'),
+                    self.gmail_metadata("70", labels=r"\Inbox ChangedBeforeMove"),
+                    self.gmail_metadata("70", flags=r"\Seen", labels=r"\Inbox ChangedAgain"),
+                    self.gmail_metadata("70", flags=r"\Seen", labels=r"\Trash ChangedDuringMove"),
                 ],
                 ("MOVE", "7", '"[Gmail]/Trash"'): ("OK", [b""]),
             },

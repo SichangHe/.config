@@ -986,38 +986,13 @@ def intent_reconciliation_evidence(source_dir: Path, gmail_thrid: str) -> tuple[
     return evidence, rows, source_map
 
 
-def record_matches_reconciliation_location(record: MailRecord, source: dict[str, str], location: str) -> bool:
-    labels = imap_label_set(record.labels)
-    frozen_labels = imap_label_set(source["labels"])
-    exact = (
+def record_matches_reconciliation_location(record: MailRecord, source: dict[str, str], _location: str) -> bool:
+    return (
         record.gmail_msgid == source["gmail_msgid"]
         and record.gmail_thrid == source["gmail_thrid"]
         and record.msgid_sha256 == source["msgid_sha256"]
         and record.raw_sha256 == source["raw_sha256"]
-        and tsv_value(record.flags) == source["flags"]
     )
-    if location == "INBOX":
-        return exact and labels == frozen_labels and r"\inbox" in labels
-    return exact and r"\inbox" not in labels and labels - {r"\trash"} == frozen_labels - {r"\inbox"}
-
-
-def imap_label_set(value: str) -> set[str]:
-    matches = list(re.finditer(r'"(?:\\.|[^"\\])*"|[^\s]+', value))
-    cursor = 0
-    labels: set[str] = set()
-    for match in matches:
-        if value[cursor : match.start()].strip():
-            raise RuntimeError("Gmail labels contain malformed quoted syntax")
-        token = match.group()
-        if token.startswith('"'):
-            if not token.endswith('"'):
-                raise RuntimeError("Gmail labels contain malformed quoted syntax")
-            token = re.sub(r"\\(.)", r"\1", token[1:-1])
-        labels.add(token.casefold())
-        cursor = match.end()
-    if value[cursor:].strip():
-        raise RuntimeError("Gmail labels contain malformed quoted syntax")
-    return labels
 
 
 def observe_reconciliation_locations(
@@ -1051,7 +1026,7 @@ def require_reconciliation_locations(
             raise RuntimeError("source is in both, neither, or the wrong reconciliation location")
         record = observed[expected][uid]
         if not is_manager_record(record, sender_email, recipient_email) or not record_matches_reconciliation_location(record, source_map[uid], expected):
-            raise RuntimeError("source identity, content, flags, or labels changed")
+            raise RuntimeError("source identity or content changed")
 
 
 def reconciliation_thread_unchanged(
@@ -1059,8 +1034,9 @@ def reconciliation_thread_unchanged(
     all_mailbox: str,
     source_dir: Path,
     gmail_thrid: str,
-    trashed_msgids: set[str],
     trash_records: list[MailRecord],
+    sender_email: str,
+    recipient_email: str,
 ) -> bool:
     expected_rows = [
         row
@@ -1081,7 +1057,7 @@ def reconciliation_thread_unchanged(
         return False
     records.extend(trash_records)
     actual = {record.gmail_msgid: record for record in records}
-    if len(actual) != len(records) or set(actual) != set(expected):
+    if len(actual) != len(records) or set(actual) != set(expected) or any(not is_manager_record(record, sender_email, recipient_email) for record in records):
         return False
     for gmail_msgid, row in expected.items():
         record = actual[gmail_msgid]
@@ -1089,15 +1065,7 @@ def reconciliation_thread_unchanged(
             record.gmail_thrid != gmail_thrid
             or record.msgid_sha256 != row["msgid_sha256"]
             or record.raw_sha256 != row["raw_sha256"]
-            or tsv_value(record.flags) != row["flags"]
         ):
-            return False
-        if gmail_msgid in trashed_msgids:
-            labels = imap_label_set(record.labels)
-            frozen_labels = imap_label_set(row["labels"])
-            if r"\inbox" in labels or labels - {r"\trash"} != frozen_labels - {r"\inbox"}:
-                return False
-        elif tsv_value(record.labels) != row["labels"]:
             return False
     return True
 
@@ -1152,15 +1120,7 @@ def additive_recovery_thread_intact(
             record.gmail_thrid != gmail_thrid
             or record.msgid_sha256 != row["msgid_sha256"]
             or record.raw_sha256 != row["raw_sha256"]
-            or tsv_value(record.flags) != row["flags"]
         ):
-            return False
-        if gmail_msgid in trashed_msgids:
-            labels = imap_label_set(record.labels)
-            frozen_labels = imap_label_set(row["labels"])
-            if r"\inbox" in labels or labels - {r"\trash"} != frozen_labels - {r"\inbox"}:
-                return False
-        elif tsv_value(record.labels) != row["labels"]:
             return False
     return all(record.gmail_thrid == gmail_thrid for record in records)
 
@@ -1191,11 +1151,10 @@ def cmd_reconcile_intent(args: argparse.Namespace) -> int:
             raise RuntimeError("All Mail mailbox identity changed from the frozen source map")
         observed = observe_reconciliation_locations(client, source_map)
         require_reconciliation_locations(rows, source_map, observed, sender_email, recipient_email)
-        trashed_msgids = {source_map[row["uid"]]["gmail_msgid"] for row in rows if row["disposition"] == "trashed"}
         final_observed = observe_reconciliation_locations(client, source_map)
         require_reconciliation_locations(rows, source_map, final_observed, sender_email, recipient_email)
         final_trash_records = [final_observed["Trash"][row["uid"]] for row in rows if row["disposition"] == "trashed"]
-        if not reconciliation_thread_unchanged(client, expected_mailboxes[r"\All"], args.source_dir, args.gmail_thrid, trashed_msgids, final_trash_records):
+        if not reconciliation_thread_unchanged(client, expected_mailboxes[r"\All"], args.source_dir, args.gmail_thrid, final_trash_records, sender_email, recipient_email):
             raise RuntimeError("complete Gmail thread context changed")
     finally:
         client.logout()
@@ -1322,39 +1281,7 @@ def record_matches_source_map(record: MailRecord, source: dict[str, str]) -> boo
         and record.gmail_thrid == source["gmail_thrid"]
         and record.msgid_sha256 == source["msgid_sha256"]
         and record.raw_sha256 == source["raw_sha256"]
-        and tsv_value(record.flags) == source["flags"]
-        and tsv_value(record.labels) == source["labels"]
     )
-
-
-def revalidate_thread_contexts(
-    client: imaplib.IMAP4_SSL,
-    all_mailbox: str,
-    source_map: dict[str, dict[str, str]],
-    sender_email: str,
-    recipient_email: str,
-) -> bool:
-    source_ids_by_thread: dict[str, set[str]] = {}
-    for source in source_map.values():
-        source_ids_by_thread.setdefault(source["gmail_thrid"], set()).add(source["gmail_msgid"])
-    select_mailbox(client, all_mailbox, readonly=True)
-    try:
-        for gmail_thrid, source_ids in source_ids_by_thread.items():
-            context_records = fetch_records(client, gmail_thread_uids(client, gmail_thrid), with_body=True, with_metadata=True)
-            require_gmail_identities(context_records)
-            context_ids = [record.gmail_msgid for record in context_records]
-            if (
-                len(context_ids) != len(set(context_ids))
-                or not source_ids.issubset(context_ids)
-                or any(record.gmail_thrid != gmail_thrid or not is_manager_record(record, sender_email, recipient_email) for record in context_records)
-            ):
-                return False
-            expected_digests = {source["thread_context_sha256"] for source in source_map.values() if source["gmail_thrid"] == gmail_thrid}
-            if len(expected_digests) != 1 or thread_context_digest(context_records) != expected_digests.pop():
-                return False
-        return True
-    finally:
-        select_mailbox(client, "INBOX", readonly=False)
 
 
 def replacement_exists(
@@ -1496,7 +1423,7 @@ def verified_existing_trash_records(
                 raise RuntimeError("interrupted source was absent or ambiguous in Trash")
             record = fetch_record(client, uids[0], with_body=True, with_metadata=True)
             if not is_manager_record(record, sender_email, recipient_email) or not record_matches_reconciliation_location(record, source, "Trash"):
-                raise RuntimeError("interrupted Trash source identity, content, flags, or labels changed")
+                raise RuntimeError("interrupted Trash source identity or content changed")
             records.append(record)
         return records
     finally:
@@ -1582,23 +1509,18 @@ def cmd_trash_superseded(args: argparse.Namespace) -> int:
             print("refusing boundary mismatch", file=sys.stderr)
             return 1
         if any(not record_matches_source_map(record, source_map[record.uid]) for record in records):
-            print("refusing because source identity, flags, labels, or content changed", file=sys.stderr)
+            print("refusing because source identity or content changed", file=sys.stderr)
             return 1
-        existing_trash_msgids = {record.gmail_msgid for record in existing_trash_records}
-        thread_unchanged = (
-            reconciliation_thread_unchanged(
-                client,
-                expected_mailboxes[r"\All"],
-                source_dir,
-                args.gmail_thrid,
-                existing_trash_msgids,
-                existing_trash_records,
-            )
-            if existing_trash_records
-            else revalidate_thread_contexts(client, expected_mailboxes[r"\All"], source_map, sender_email, recipient_email)
+        thread_unchanged = reconciliation_thread_unchanged(
+            client,
+            expected_mailboxes[r"\All"],
+            source_dir,
+            args.gmail_thrid,
+            existing_trash_records,
+            sender_email,
+            recipient_email,
         )
-        if existing_trash_records:
-            select_mailbox(client, "INBOX", readonly=False)
+        select_mailbox(client, "INBOX", readonly=False)
         if not thread_unchanged:
             print("refusing because complete Gmail thread context changed", file=sys.stderr)
             return 1
@@ -1622,21 +1544,16 @@ def cmd_trash_superseded(args: argparse.Namespace) -> int:
             except RuntimeError as exc:
                 print(str(exc), file=sys.stderr)
                 return 1
-            existing_trash_msgids = {record.gmail_msgid for record in existing_trash_records}
-        thread_unchanged = (
-            reconciliation_thread_unchanged(
-                client,
-                expected_mailboxes[r"\All"],
-                source_dir,
-                args.gmail_thrid,
-                existing_trash_msgids,
-                existing_trash_records,
-            )
-            if existing_trash_records
-            else revalidate_thread_contexts(client, expected_mailboxes[r"\All"], source_map, sender_email, recipient_email)
+        thread_unchanged = reconciliation_thread_unchanged(
+            client,
+            expected_mailboxes[r"\All"],
+            source_dir,
+            args.gmail_thrid,
+            existing_trash_records,
+            sender_email,
+            recipient_email,
         )
-        if existing_trash_records:
-            select_mailbox(client, "INBOX", readonly=False)
+        select_mailbox(client, "INBOX", readonly=False)
         if not thread_unchanged:
             print("refusing because complete Gmail thread context changed immediately before move", file=sys.stderr)
             return 1

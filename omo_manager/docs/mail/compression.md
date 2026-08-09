@@ -10,7 +10,7 @@ Helper:
 ## freeze once
 
 - create a fresh owner-only directory, then run `export --out-dir PRIVATE_DIR --threads-per-batch N`
-- that export performs the run's only candidate discovery and freezes the accepted UIDs, Gmail message and thread identities, content and thread digests, labels, UIDVALIDITY, and deterministic batches
+- that export performs the run's only candidate discovery and freezes the accepted UIDs, Gmail message and thread identities, content, UIDVALIDITY, and deterministic batches; recorded signal metadata is audit-only and never a gate
 - `snapshot` and `identity-preflight` are optional diagnostics before the run; they never define or extend its source set
 - later arrivals are outside the run, never enter a batch, and never trigger another discovery pass
 - missing, duplicate, conflicting, or incomplete Gmail identity or complete-thread evidence blocks export without mutation
@@ -22,7 +22,7 @@ Helper:
 - claims are exclusive; reviewers may process different batches in parallel, but no thread may have duplicate ownership or move across batches
 - inspect each thread's exported bodies and complete `\All` context, then locate corresponding task records and record current task-state evidence
 - retain unresolved, pending, useful, out-of-scope, incomplete, or uncertain content based on message/task evidence
-- ignore Gmail state signals—including unread, Important, starred, flagged, saved, read-later, and security/category labels—when deciding retention or Trash eligibility; labels and flags remain frozen only for exact identity/drift verification
+- ignore Gmail state signals—including Seen/unread, Important, starred, flagged, saved, read-later, security/category, and all other flags/labels—through discovery, retention, mutation, reconciliation, recovery, and verification; signal-only drift never blocks progress or changes disposition
 - finish one thread before advancing: retain the whole thread, move every irrelevant fixed-start source in it, or move only irrelevant intermediate fixed-start messages
 - record retention with `retain-thread` and nonempty reason and task-evidence files
 - when replacement is required, send and record it before Trash and pass `--replacement-message-id`; otherwise pass `--replacement-not-required`
@@ -32,7 +32,7 @@ Helper:
 - otherwise, if a caller interruption leaves an intent without an outcome and every source may already match its final disposition, stop mutation retries and run `reconcile-intent --source-dir PRIVATE_DIR --gmail-thread-id THREAD`; it opens IMAP read-only, requires every frozen source in exactly its intended INBOX or `[Gmail]/Trash` location, rechecks exact identity/content and the complete thread digest, then writes only the missing local outcome receipt
 - if every frozen source of an all-Trash intent is exact in Trash and absent from INBOX but only additive later thread members prevent normal reconciliation, run `recover-already-trashed --source-dir PRIVATE_DIR --gmail-thread-id THREAD`; it performs the same read-only identity, UIDVALIDITY, mailbox, location, and frozen-content gates, permits only additional non-frozen thread identities, and writes an explicit `skipped_already_trashed` recovery receipt instead of a normal outcome
 - reconciliation fails closed if the intent is missing or malformed, an outcome already exists, a source is duplicate, absent, in both or the wrong mailbox, or source/thread evidence changed
-- identity, content, label, UIDVALIDITY, task, or thread drift fails closed for that thread without broadening or rerunning the source set
+- identity, content, UIDVALIDITY, task, physical mailbox location, or thread-membership drift fails closed for that thread without broadening or rerunning the source set
 
 ## finish
 
@@ -49,6 +49,6 @@ Helper:
 - use only explicit fixed-start UIDs from one claimed thread per mutation
 - move mail only to `[Gmail]/Trash`; never expunge or permanently delete it
 - immediate Trash verification uses frozen Gmail message identities, so unrelated later arrivals do not alter termination
-- preserve source mailbox and label evidence needed for recovery
+- preserve source mailbox evidence needed for recoverable Trash handling; never restore or act on Gmail signal metadata
 - PB news, PB stock watch, and PB urgent mail remains excluded
 - delete private evidence only when recovery is no longer needed
