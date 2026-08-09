@@ -78,6 +78,14 @@ class CodexStartTests(unittest.TestCase):
         values.update(changes)
         return self.args(root, **values)
 
+    def legacy_rotation_args(self, root: Path, **changes: object) -> Args:
+        values: dict[str, object] = {
+            "assert_legacy_missing_session_id": True,
+            "expected_blocker": "model capacity",
+        }
+        values.update(changes)
+        return self.rotation_args(root, **values)
+
     def update_prompt_lines(self, session_id: str = SESSION_ID) -> list[str]:
         return [
             f"exec bunx @openai/codex resume {session_id}",
@@ -465,6 +473,48 @@ class CodexStartTests(unittest.TestCase):
         self.assertEqual(("preserve exact queue",), args.expected_pending_items)
         self.assertEqual(("protected:9",), args.protected_targets)
 
+        legacy = parse_args(
+            [
+                *common,
+                "--expected-task-sha256",
+                "a" * 64,
+                "--expected-status",
+                "blocked",
+                "--expected-owner-target",
+                "cfg:1",
+                "--expected-pending-item",
+                "preserve exact queue",
+                "--protected-target",
+                "protected:9",
+                "--audit-output",
+                "/tmp/legacy.audit",
+                "--assert-legacy-missing-session-id",
+                "--expected-blocker",
+                "model capacity",
+            ]
+        )
+        self.assertTrue(legacy.assert_legacy_missing_session_id)
+        self.assertEqual("model capacity", legacy.expected_blocker)
+        with self.assertRaises(SystemExit):
+            parse_args(
+                [
+                    *common,
+                    "--expected-task-sha256",
+                    "a" * 64,
+                    "--expected-status",
+                    "blocked",
+                    "--expected-owner-target",
+                    "cfg:1",
+                    "--expected-pending-item",
+                    "preserve exact queue",
+                    "--protected-target",
+                    "protected:9",
+                    "--audit-output",
+                    "/tmp/legacy.audit",
+                    "--assert-legacy-missing-session-id",
+                ]
+            )
+
     def test_rotate_worker_starts_fresh_in_same_pane_and_preserves_task_boundaries(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root)
@@ -503,6 +553,147 @@ class CodexStartTests(unittest.TestCase):
             audit = root / "rotation.audit"
             self.assertEqual(0o600, audit.stat().st_mode & 0o777)
             self.assertIn(f"new-session-id: {new_session}\nfinal-result: success\n", audit.read_text(encoding="utf-8"))
+
+    def test_legacy_rotation_starts_fresh_and_records_missing_old_session_causality(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root, status="blocked", pending=["preserve exact queue"])
+            task_before = (root / "worker.md").read_bytes()
+            initial = Pane("cfg:2.0", "%2", "@2", "bun", root, 4242)
+            replacement = replace(initial, pane_pid=5252)
+            rotated = False
+            new_session = "119f670b-6a2f-7463-b9be-9aa6ff0cec43"
+
+            def resolve(_target: str) -> Pane:
+                return replacement if rotated else initial
+
+            def respawn(_pane: Pane, command: str) -> None:
+                nonlocal rotated
+                self.assertNotIn(" resume ", command)
+                rotated = True
+
+            sessions = iter((("", "legacy"), ("", "legacy"), ("", "legacy"), (new_session, "")))
+            with (
+                patch("omo_manager.omo_codex_start.resolve_pane", side_effect=resolve),
+                patch("omo_manager.omo_codex_start.inspect", return_value=Report("running", ["working"])),
+                patch("omo_manager.omo_codex_start.query_status_session_id", side_effect=lambda *_args: next(sessions)),
+                patch("omo_manager.omo_codex_start.prompt_text", return_value="worker-only prompt\n") as prompt,
+                patch("omo_manager.omo_codex_start.respawn_codex", side_effect=respawn),
+                patch("omo_manager.omo_codex_start.wait_started", return_value="running"),
+            ):
+                self.assertEqual("running", start(self.legacy_rotation_args(root)))
+
+            prompt.assert_called_once()
+            self.assertFalse(prompt.call_args.args[1])
+            self.assertEqual(task_before, (root / "worker.md").read_bytes())
+            audit = (root / "rotation.audit").read_text(encoding="utf-8")
+            self.assertIn("old-session-id: unavailable-asserted-legacy\nlegacy-missing-session-id: asserted-and-observed\n", audit)
+            self.assertIn(f"new-session-id: {new_session}\nfinal-result: success\n", audit)
+
+    def test_legacy_rotation_refuses_false_or_missing_legacy_assertion(self) -> None:
+        for case in ("assertion absent", "UUID recoverable"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as raw_root:
+                root = Path(raw_root)
+                self.write_task(root, status="blocked", pending=["preserve exact queue"])
+                pane = Pane("cfg:2.0", "%2", "@2", "bun", root, 4242)
+                args = self.rotation_args(root) if case == "assertion absent" else self.legacy_rotation_args(root)
+                session = "" if case == "assertion absent" else self.SESSION_ID
+                with (
+                    patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                    patch("omo_manager.omo_codex_start.inspect", return_value=Report("running", ["working"])),
+                    patch("omo_manager.omo_codex_start.query_status_session_id", return_value=(session, "")),
+                    patch("omo_manager.omo_codex_start.respawn_codex") as respawn,
+                    self.assertRaisesRegex(StartError, "could not capture|assertion is false"),
+                ):
+                    start(args)
+                respawn.assert_not_called()
+                self.assertFalse((root / "rotation.audit").exists())
+
+    def test_legacy_rotation_refuses_lifecycle_role_target_and_identity_mismatches(self) -> None:
+        for case in ("blocker", "manager", "human", "protected", "process"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as raw_root:
+                root = Path(raw_root)
+                self.write_task(root, status="blocked", manager=case == "manager", pending=["preserve exact queue"])
+                target = "hcfg:2" if case == "human" else "cfg:2"
+                pane = Pane("cfg:2.0", "%2", "@2", "bun", root, 4242)
+                args = self.legacy_rotation_args(
+                    root,
+                    target=target,
+                    expected_blocker="wrong blocker" if case == "blocker" else "model capacity",
+                    protected_targets=("cfg:2.0",) if case == "protected" else ("protected:9",),
+                )
+
+                def same_process(_pane: Pane) -> None:
+                    if case == "process" and (root / "rotation.audit").exists():
+                        raise StartError("tmux pane process identity changed before process replacement.")
+
+                with (
+                    patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                    patch("omo_manager.omo_codex_start.inspect", return_value=Report("running", ["working"])),
+                    patch("omo_manager.omo_codex_start.query_status_session_id", return_value=("", "legacy")),
+                    patch("omo_manager.omo_codex_start.verify_same_process", side_effect=same_process),
+                    patch("omo_manager.omo_codex_start.respawn_codex") as respawn,
+                    self.assertRaises(StartError),
+                ):
+                    start(args)
+                respawn.assert_not_called()
+                if case == "process":
+                    self.assertIn("final-result: failed", (root / "rotation.audit").read_text(encoding="utf-8"))
+
+    def test_legacy_rotation_catches_last_probe_mutation_and_respawn_failure(self) -> None:
+        for case in ("task mutation", "UUID recovery", "respawn failure"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as raw_root:
+                root = Path(raw_root)
+                self.write_task(root, status="blocked", pending=["preserve exact queue"])
+                pane = Pane("cfg:2.0", "%2", "@2", "bun", root, 4242)
+                n_queries = 0
+
+                def session(*_args: object) -> tuple[str, str]:
+                    nonlocal n_queries
+                    n_queries += 1
+                    if case == "task mutation" and n_queries == 3:
+                        task = root / "worker.md"
+                        task.write_text(task.read_text(encoding="utf-8") + "concurrent mutation\n", encoding="utf-8")
+                    if case == "UUID recovery" and n_queries == 3:
+                        return self.SESSION_ID, ""
+                    return "", "legacy"
+
+                respawn_error = StartError("respawn failed")
+                with (
+                    patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                    patch("omo_manager.omo_codex_start.inspect", return_value=Report("running", ["working"])),
+                    patch("omo_manager.omo_codex_start.query_status_session_id", side_effect=session),
+                    patch("omo_manager.omo_codex_start.prompt_text", return_value="worker-only prompt\n"),
+                    patch("omo_manager.omo_codex_start.respawn_codex", side_effect=respawn_error) as respawn,
+                    self.assertRaises(StartError),
+                ):
+                    start(self.legacy_rotation_args(root))
+
+                if case in {"task mutation", "UUID recovery"}:
+                    respawn.assert_not_called()
+                else:
+                    respawn.assert_called_once()
+                self.assertIn("final-result: failed", (root / "rotation.audit").read_text(encoding="utf-8"))
+
+    def test_legacy_rotation_audit_finalization_failure_leaves_durable_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root, status="blocked", pending=["preserve exact queue"])
+            pane = Pane("cfg:2.0", "%2", "@2", "bun", root, 4242)
+            with (
+                patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                patch("omo_manager.omo_codex_start.inspect", return_value=Report("running", ["working"])),
+                patch("omo_manager.omo_codex_start.query_status_session_id", return_value=("", "legacy")),
+                patch("omo_manager.omo_codex_start.prompt_text", return_value="worker-only prompt\n"),
+                patch("omo_manager.omo_codex_start.respawn_codex", side_effect=StartError("respawn failed")),
+                patch("omo_manager.omo_codex_start.finish_rotation_audit", side_effect=StartError("audit finalization failed")),
+                self.assertRaises(StartError) as raised,
+            ):
+                start(self.legacy_rotation_args(root))
+            self.assertTrue(any("audit remains completion-unknown" in note for note in getattr(raised.exception, "__notes__", ())))
+            audit = (root / "rotation.audit").read_text(encoding="utf-8")
+            self.assertIn("completion: unknown-until-finalized", audit)
+            self.assertNotIn("final-result:", audit)
 
     def test_rotate_worker_audit_faults_leave_unknown_without_masking_rotation_failure(self) -> None:
         for case in ("success finalization", "post-respawn failure"):

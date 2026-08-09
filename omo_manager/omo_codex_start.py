@@ -121,6 +121,8 @@ class Args:
     expected_pending_items: tuple[str, ...] = ()
     protected_targets: tuple[str, ...] = ()
     audit_output: Path | None = None
+    assert_legacy_missing_session_id: bool = False
+    expected_blocker: str | None = None
 
 
 @dataclass(frozen=True)
@@ -141,6 +143,7 @@ class TaskBinding:
     runat: str
     managerat: str
     pending_task_items: tuple[str, ...]
+    blocked_on: str
     task_sha256: str
 
 
@@ -184,6 +187,12 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--protected-target", action="append", default=[], help="Target that this rotation must not touch; repeat the authoritative protected set with --rotate-worker.")
     _ = parser.add_argument("--audit-output", type=Path, help="New owner-private audit file; required with --rotate-worker.")
     _ = parser.add_argument(
+        "--assert-legacy-missing-session-id",
+        action="store_true",
+        help="Assert that this legacy worker's old Codex UUID is unrecoverable; valid only with --rotate-worker and --expected-blocker.",
+    )
+    _ = parser.add_argument("--expected-blocker", help="Exact preserved lifecycle blocker; required only with --assert-legacy-missing-session-id.")
+    _ = parser.add_argument(
         "--recover-update-prompt",
         action="store_true",
         help="Select Skip only in Codex's exact startup update menu for the supplied resumed session.",
@@ -226,7 +235,20 @@ def parse_args(argv: list[str]) -> Args:
             parser.error("--expected-task-sha256 must be a lowercase SHA-256 value.")
         if any(target_identity(target) is None for target in parsed.protected_target):
             parser.error("--protected-target values must be exact SESSION:WINDOW[.PANE] targets.")
-    elif any((parsed.expected_task_sha256, parsed.expected_status, parsed.expected_owner_target, parsed.expected_pending_item, parsed.protected_target, parsed.audit_output)):
+        if parsed.assert_legacy_missing_session_id != (parsed.expected_blocker is not None):
+            parser.error("--assert-legacy-missing-session-id and --expected-blocker must be supplied together.")
+    elif any(
+        (
+            parsed.expected_task_sha256,
+            parsed.expected_status,
+            parsed.expected_owner_target,
+            parsed.expected_pending_item,
+            parsed.protected_target,
+            parsed.audit_output,
+            parsed.assert_legacy_missing_session_id,
+            parsed.expected_blocker is not None,
+        )
+    ):
         parser.error("rotation assertions are only valid with --rotate-worker.")
     if parsed.recover_non_codex and parsed.session_id:
         parser.error("--recover-non-codex launches a fresh session and does not accept --session-id.")
@@ -293,6 +315,8 @@ def parse_args(argv: list[str]) -> Args:
         expected_pending_items=tuple(parsed.expected_pending_item),
         protected_targets=tuple(parsed.protected_target),
         audit_output=parsed.audit_output.expanduser().resolve(strict=False) if parsed.audit_output else None,
+        assert_legacy_missing_session_id=parsed.assert_legacy_missing_session_id,
+        expected_blocker=parsed.expected_blocker,
     )
 
 
@@ -396,6 +420,8 @@ def validate_task(args: Args, pane: Pane) -> TaskBinding:
             raise StartError("task owner does not equal --expected-owner-target.")
         if metadata.pending_task_items != args.expected_pending_items:
             raise StartError("task pending queue does not equal the ordered --expected-pending-item assertions.")
+        if args.assert_legacy_missing_session_id and metadata.blocked_on != args.expected_blocker:
+            raise StartError("task blocker does not equal --expected-blocker.")
         if hashlib.sha256(task_bytes).hexdigest() != args.expected_task_sha256:
             raise StartError("task bytes do not equal --expected-task-sha256.")
     if resolve_pane(metadata.runat).pane_id != pane.pane_id:
@@ -411,6 +437,7 @@ def validate_task(args: Args, pane: Pane) -> TaskBinding:
         metadata.runat,
         metadata.managerat,
         metadata.pending_task_items,
+        metadata.blocked_on,
         hashlib.sha256(task_bytes).hexdigest(),
     )
 
@@ -1324,6 +1351,21 @@ def verify_fresh_rotation(args: Args, original: Pane, original_session_id: str, 
     return fresh_session_id
 
 
+def verify_rotation_before_respawn(args: Args, pane: Pane, original_session_id: str, task: TaskBinding) -> None:
+    """Revalidate every worker-rotation binding at the replacement boundary."""
+
+    if pane.target.partition(":")[0].startswith("h") or target_is_fresh_rotation_protected(pane.target, args.protected_targets):
+        raise StartError("worker rotation target became prohibited before respawn; the pane was not replaced.")
+    current_session_id, _ = query_status_session_id(pane.pane_id, 240, min(10.0, args.startup_timeout_s))
+    if args.assert_legacy_missing_session_id:
+        if current_session_id:
+            raise StartError("legacy missing-session assertion is false because the old worker UUID is recoverable; the pane was not replaced.")
+    elif current_session_id != original_session_id:
+        raise StartError("current worker session changed before rotation; the pane was not replaced.")
+    verify_task_binding(args, pane, task)
+    verify_same_process(pane)
+
+
 def start(args: Args) -> str:
     modes = (args.restart_running, args.rotate_worker, args.recover_non_codex, args.record_recovery_evidence, args.recover_update_prompt)
     if sum(bool(value) for value in modes) > 1:
@@ -1337,6 +1379,10 @@ def start(args: Args) -> str:
             raise StartError("worker rotation cannot modify a human-owned `h*` tmux session.")
         if target_is_fresh_rotation_protected(args.target, args.protected_targets):
             raise StartError("worker rotation target is in the explicit protected-target set.")
+        if any(target_identity(target) is None for target in args.protected_targets):
+            raise StartError("worker rotation requires exact protected SESSION:WINDOW[.PANE] targets.")
+        if args.assert_legacy_missing_session_id != (args.expected_blocker is not None):
+            raise StartError("--assert-legacy-missing-session-id and --expected-blocker must be supplied together.")
     if args.recover_non_codex:
         if args.session_id:
             raise StartError("--recover-non-codex launches a fresh session and does not accept --session-id.")
@@ -1404,7 +1450,9 @@ def start(args: Args) -> str:
                 effective_args = replace(args, session_id=session_id)
         if args.rotate_worker:
             original_session_id, _ = query_status_session_id(pane.pane_id, 240, min(10.0, args.startup_timeout_s))
-            if not original_session_id:
+            if args.assert_legacy_missing_session_id and original_session_id:
+                raise StartError("legacy missing-session assertion is false because the old worker UUID is recoverable; the pane was not replaced.")
+            if not args.assert_legacy_missing_session_id and not original_session_id:
                 raise StartError("could not capture the current worker session id; the pane was not replaced.")
             require_restartable_codex(pane)
             verify_task_binding(args, pane, task_binding)
@@ -1444,14 +1492,13 @@ def start(args: Args) -> str:
                         raise StartError("live PCODX state changed before respawn; the pane was not replaced.")
                     verify_human_restart_authority(args, pane, human_restart_authority)
                 if args.rotate_worker:
-                    verify_task_binding(args, pane, task_binding)
-                    current_session_id, _ = query_status_session_id(pane.pane_id, 240, min(10.0, args.startup_timeout_s))
-                    if current_session_id != original_session_id:
-                        raise StartError("current worker session changed before rotation; the pane was not replaced.")
+                    verify_rotation_before_respawn(args, pane, original_session_id, task_binding)
                     audit_path = args.audit_output
                     if audit_path is None:
                         raise StartError("--rotate-worker requires --audit-output.")
                     queue_sha256 = hashlib.sha256("\0".join(task_binding.pending_task_items).encode()).hexdigest()
+                    protected_sha256 = hashlib.sha256("\0".join(args.protected_targets).encode()).hexdigest()
+                    old_session_evidence = original_session_id or "unavailable-asserted-legacy"
                     prepared_audit = "\n".join(
                         (
                             "operation: rotate-worker",
@@ -1460,11 +1507,16 @@ def start(args: Args) -> str:
                             f"pane-id: {pane.pane_id}",
                             f"window-id: {pane.window_id}",
                             f"old-pane-pid: {pane.pane_pid}",
-                            f"old-session-id: {original_session_id}",
+                            f"old-command: {pane.command}",
+                            f"old-session-id: {old_session_evidence}",
+                            f"legacy-missing-session-id: {'asserted-and-observed' if args.assert_legacy_missing_session_id else 'not-asserted'}",
                             f"task-sha256: {task_binding.task_sha256}",
                             f"status: {task_binding.status}",
+                            f"blocker-sha256: {hashlib.sha256(task_binding.blocked_on.encode()).hexdigest()}",
                             f"manager-target: {task_binding.managerat}",
                             f"pending-items-sha256: {queue_sha256}",
+                            f"protected-target-count: {len(args.protected_targets)}",
+                            f"protected-targets-sha256: {protected_sha256}",
                             "is-manager: false",
                             "tool: codex",
                             "completion: unknown-until-finalized",
@@ -1473,10 +1525,7 @@ def start(args: Args) -> str:
                     )
                     reserve_rotation_audit(audit_path, prepared_audit)
                     try:
-                        current_session_id, _ = query_status_session_id(pane.pane_id, 240, min(10.0, args.startup_timeout_s))
-                        if current_session_id != original_session_id:
-                            raise StartError("current worker session changed after audit reservation; the pane was not replaced.")
-                        verify_task_binding(args, pane, task_binding)
+                        verify_rotation_before_respawn(args, pane, original_session_id, task_binding)
                         respawn_codex(pane, command)
                         result = wait_started(pane, marker, args.startup_timeout_s)
                         new_session_id = verify_fresh_rotation(args, pane, original_session_id, task_binding)
