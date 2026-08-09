@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -46,7 +47,8 @@ from omo_manager.omo_codex_start import (
     validate_task,
 )
 from omo_manager.omo_codex_status import Report
-from omo_manager.omo_pending_watch import record_terminal_delivery_failure
+from omo_manager.omo_pending_watch import record_terminal_delivery_failure, terminal_delivery_failure
+from omo_manager.omo_pending_watch import PrePasteRejected, try_send_delivery_text
 
 
 class CodexStartTests(unittest.TestCase):
@@ -1590,6 +1592,75 @@ class CodexStartTests(unittest.TestCase):
             self.assertEqual(f"{RECOVERY_RECEIPT_DIRNAME}/{event_id}.receipt", fields["receipt_file"])
             self.assertEqual(64, len(fields["receipt_nonce"]))
             self.assertIsNone(duplicate)
+
+    def test_recovery_pipeline_accepts_private_setgid_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            event_dir = root / RECOVERY_EVENT_DIRNAME
+            receipt_dir = root / RECOVERY_RECEIPT_DIRNAME
+            event_dir.mkdir()
+            receipt_dir.mkdir()
+            event_dir.chmod(0o2700)
+            receipt_dir.chmod(0o2700)
+            pane = Pane("cfg:2.0", "%2", "@2", "bunx", root)
+            event_id = "private-setgid-event"
+            identity = subprocess.CompletedProcess([], 0, f"{pane.target}\t{pane.pane_id}\t{pane.window_id}\n", "")
+            with patch("omo_manager.omo_pending_watch.subprocess.run", return_value=identity), patch("omo_manager.omo_pending_watch.exact_codex_tail", return_value=(True, ["delivery failed"])):
+                event = record_terminal_delivery_failure(root, pane.target, event_id, "sender failed")
+            self.assertIsNotNone(event)
+            receipt = receipt_dir / f"{event_id}.receipt"
+            with patch("omo_manager.omo_codex_start.exact_tail", return_value=(True, ["delivery failed"])), patch("omo_manager.omo_codex_start.verify_same_pane"):
+                record_recovery_evidence(root, pane, receipt, event_id)
+            self.assertTrue(receipt.is_file())
+            self.assertEqual(0, stat.S_IMODE(event_dir.stat().st_mode) & 0o077)
+            self.assertEqual(0, stat.S_IMODE(receipt_dir.stat().st_mode) & 0o077)
+
+    def test_watcher_event_producer_rejects_group_accessible_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            event_dir = root / RECOVERY_EVENT_DIRNAME
+            event_dir.mkdir()
+            event_dir.chmod(0o750)
+            identity = subprocess.CompletedProcess([], 0, "cfg:2.0\t%2\t@2\n", "")
+            with patch("omo_manager.omo_pending_watch.subprocess.run", return_value=identity), patch("omo_manager.omo_pending_watch.exact_codex_tail", return_value=(True, ["delivery failed"])):
+                event = record_terminal_delivery_failure(root, "cfg:2.0", "unsafe-event-dir", "sender failed")
+            self.assertIsNone(event)
+            self.assertFalse(any(event_dir.iterdir()))
+
+    def test_terminal_failure_exposes_only_durable_event_id(self) -> None:
+        root = Path("/tmp/work-logs")
+        definite = RuntimeError("target is not a Codex pane before submit: cfg:2.0")
+        event_path = root / RECOVERY_EVENT_DIRNAME / "durable-delivery.event"
+        with patch("omo_manager.omo_pending_watch.record_terminal_delivery_failure", return_value=event_path) as record:
+            result = terminal_delivery_failure(root, "cfg:2.0", "delivery-1", definite)
+        record.assert_called_once_with(root, "cfg:2.0", "delivery-1", str(definite))
+        self.assertEqual(
+            "target is not a Codex pane before submit: cfg:2.0; recovery event id `durable-delivery`",
+            result.error,
+        )
+
+        with patch("omo_manager.omo_pending_watch.record_terminal_delivery_failure", return_value=None):
+            result = terminal_delivery_failure(root, "cfg:2.0", "delivery-1", definite)
+        self.assertEqual(f"{definite}; no recovery event was created", result.error)
+
+        unknown = RuntimeError("Codex paste not verified after 5s")
+        with patch("omo_manager.omo_pending_watch.record_terminal_delivery_failure") as record:
+            result = terminal_delivery_failure(root, "cfg:2.0", "delivery-2", unknown)
+        record.assert_not_called()
+        self.assertEqual(str(unknown), result.error)
+
+    def test_sync_delivery_returns_durable_recovery_event_id(self) -> None:
+        root = Path("/tmp/work-logs")
+        event_path = root / RECOVERY_EVENT_DIRNAME / "durable-delivery.event"
+        failure = PrePasteRejected("target is not a Codex pane before submit: cfg:2.0")
+        with (
+            patch("omo_manager.omo_pending_watch.uuid.uuid4", return_value="attempted-delivery"),
+            patch("omo_manager.omo_pending_watch.submit_delivery_send", side_effect=failure),
+            patch("omo_manager.omo_pending_watch.record_terminal_delivery_failure", return_value=event_path),
+        ):
+            result = try_send_delivery_text("pending delivery", "message", "cfg:2.0", root=root)
+        self.assertEqual(1, result.status)
+        self.assertEqual(f"{failure}; recovery event id `durable-delivery`", result.error)
 
     def test_watcher_event_producer_refuses_failed_or_codex_capture(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:

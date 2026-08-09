@@ -262,7 +262,10 @@ def parse_args(argv: list[str]) -> Args:
         help="Record a one-use failed-delivery receipt after verifying this pane; does not launch Codex.",
     )
     _ = parser.add_argument("--recovery-output", type=Path, help="Watcher-issued receipt path (root/.omo-codex-recovery-receipts/<delivery-id>.receipt).")
-    _ = parser.add_argument("--failed-delivery-id", help="Watcher delivery/problem event id for --record-recovery-evidence.")
+    _ = parser.add_argument(
+        "--failed-delivery-id",
+        help="Watcher delivery-event id for --record-recovery-evidence; a 16-character agent-problem id is not valid.",
+    )
     _ = parser.add_argument("--human-email-file", type=Path, help="Authoritative human email under ROOT/manager_mail for an h* same-pane restart.")
     _ = parser.add_argument("--human-email-lines", help="Inclusive source line range START-END for --human-email-file.")
     _ = parser.add_argument("--dry-run", action="store_true")
@@ -859,7 +862,7 @@ def write_private_recovery_file_exclusive(path: Path, text: str) -> None:
         parent_stat = path.parent.lstat()
     except OSError as error:
         raise StartError(f"recovery issuance directory is not readable: {path.parent}: {error}") from error
-    if not stat.S_ISDIR(parent_stat.st_mode) or parent_stat.st_uid != os.getuid() or stat.S_IMODE(parent_stat.st_mode) != 0o700:
+    if not stat.S_ISDIR(parent_stat.st_mode) or parent_stat.st_uid != os.getuid() or stat.S_IMODE(parent_stat.st_mode) & 0o077:
         raise StartError(f"recovery issuance directory is not private: {path.parent}")
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -1492,7 +1495,7 @@ def record_recovery_evidence(root: Path, pane: Pane, output: Path | None, delive
             receipt_stat = receipt_dir.lstat()
         except OSError as error:
             raise StartError(f"recovery evidence directory cannot be prepared: {receipt_dir}: {error}") from error
-        if not stat.S_ISDIR(receipt_stat.st_mode) or receipt_stat.st_uid != os.getuid() or stat.S_IMODE(receipt_stat.st_mode) != 0o700:
+        if not stat.S_ISDIR(receipt_stat.st_mode) or receipt_stat.st_uid != os.getuid() or stat.S_IMODE(receipt_stat.st_mode) & 0o077:
             raise StartError(f"recovery evidence directory is not a private helper directory: {receipt_dir}")
         if output_path.parent != receipt_dir:
             raise StartError(f"recovery evidence output must be directly under {receipt_dir}")

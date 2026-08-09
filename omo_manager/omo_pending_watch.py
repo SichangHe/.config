@@ -465,7 +465,7 @@ def record_terminal_delivery_failure(root: Path | None, target: str, delivery_id
         if (
             not stat.S_ISDIR(directory_stat.st_mode)
             or directory_stat.st_uid != os.getuid()
-            or stat.S_IMODE(directory_stat.st_mode) != 0o700
+            or stat.S_IMODE(directory_stat.st_mode) & 0o077
         ):
             os.close(directory_fd)
             return None
@@ -542,6 +542,15 @@ def record_terminal_delivery_failure(root: Path | None, target: str, delivery_id
         return None
     finally:
         os.close(directory_fd)
+
+
+def terminal_delivery_failure(root: Path | None, target: str, delivery_id: str, exc: Exception, status: int = 1) -> DeliveryResult:
+    """Return one failed result and expose only durably recorded recovery evidence."""
+
+    definite = definitely_rejected_before_paste(exc)
+    event = record_terminal_delivery_failure(root, target, delivery_id, str(exc)) if definite else None
+    suffix = f"; recovery event id `{event.stem}`" if event is not None else "; no recovery event was created" if definite else ""
+    return DeliveryResult(status, f"{exc}{suffix}")
 
 
 @dataclass(frozen=True)
@@ -807,17 +816,16 @@ def log_send_result(
     try:
         _ = future.result()
     except Exception as exc:
-        _ = record_terminal_delivery_failure(root, target, delivery_id, str(exc))
+        result = terminal_delivery_failure(root, target, delivery_id, exc)
         if problem_guard is not None and not agent_problem_guard_current(problem_guard):
             print("omo_pending_watch: async delivery result is stale after watcher-state refresh", file=sys.stderr)
             queue_delivery_failure_event(success_event)
             return
-        print(f"omo_pending_watch: async delivery failed: {exc}", file=sys.stderr)
+        print(f"omo_pending_watch: async delivery failed: {result.error}", file=sys.stderr)
         if success_event is not None and success_event.consume_on_unknown_outcome and not definitely_rejected_before_paste(exc):
             print("omo_pending_watch: delivery outcome unknown after submit; suppressing automatic replay", file=sys.stderr)
             DELIVERY_SUCCESS_EVENTS.put(success_event)
             return
-        result = DeliveryResult(1, str(exc))
         if failure_fallback is not None:
             if failure_fallback.pending_guard is not None and not pending_marker_present(
                 failure_fallback.pending_guard.root,
@@ -3473,13 +3481,13 @@ def try_send_delivery_text(
             delivery_id=delivery_id,
         )
     except subprocess.CalledProcessError as exc:
-        print(f"omo_pending_watch: {name} failed: {exc}", file=sys.stderr)
-        _ = record_terminal_delivery_failure(root, target, delivery_id, str(exc))
-        return DeliveryResult(exc.returncode or 1, str(exc))
+        result = terminal_delivery_failure(root, target, delivery_id, exc, exc.returncode or 1)
+        print(f"omo_pending_watch: {name} failed: {result.error}", file=sys.stderr)
+        return result
     except Exception as exc:
-        print(f"omo_pending_watch: {name} failed: {exc}", file=sys.stderr)
-        _ = record_terminal_delivery_failure(root, target, delivery_id, str(exc))
-        return DeliveryResult(1, str(exc))
+        result = terminal_delivery_failure(root, target, delivery_id, exc)
+        print(f"omo_pending_watch: {name} failed: {result.error}", file=sys.stderr)
+        return result
     return DeliveryResult(ASYNC_DELIVERY_STARTED if async_job is not None else 0)
 
 
