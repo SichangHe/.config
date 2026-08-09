@@ -17,6 +17,7 @@ from omo_manager.omo_manager_mail_compress import (
     MailRecord,
     accepted_manager_headers,
     claim_batch,
+    cmd_reconcile_intent,
     cmd_retain_thread,
     cmd_export,
     cmd_identity_preflight,
@@ -35,6 +36,7 @@ from omo_manager.omo_manager_mail_compress import (
     parse_uid_text,
     prepare_thread_disposition,
     record_from_msg,
+    record_matches_reconciliation_location,
     record_has_protected_intent,
     replacement_exists,
     revalidate_thread_contexts,
@@ -120,6 +122,12 @@ class VerifyArgs:
         self.source_dir = source_dir
 
 
+class ReconcileArgs:
+    def __init__(self, source_dir: Path, gmail_thrid: str = "200") -> None:
+        self.source_dir = source_dir
+        self.gmail_thrid = gmail_thrid
+
+
 class ManagerMailCompressTests(unittest.TestCase):
     def test_direct_executable_starts_with_deployed_python(self) -> None:
         helper = Path(__file__).parents[1] / "omo_manager_mail_compress.py"
@@ -157,6 +165,12 @@ class ManagerMailCompressTests(unittest.TestCase):
             encoding="utf-8",
         )
         (parent / "run.tsv").write_text("fixed_start_utc\tsource_count\tthread_count\tthreads_per_batch\n2026-08-09T00:00:00+00:00\t1\t1\t10\n", encoding="utf-8")
+        context_lines = ["gmail_thrid\tgmail_msgid\tmsgid_sha256\traw_sha256\tflags\tlabels\tscope\tsender\trecipient\tall_mailbox_uid\tbody_bytes"]
+        for context in context_records or [record]:
+            context_lines.append(
+                f"{context.gmail_thrid}\t{context.gmail_msgid}\t{context.msgid_sha256}\t{context.raw_sha256}\t{context.flags}\t{context.labels}\tmanager-to-human\t{context.sender}\t{context.to}\t{context.uid}\t{context.body_bytes}"
+            )
+        (parent / "thread-context.tsv").write_text("\n".join(context_lines) + "\n", encoding="utf-8")
         for name in ("claims", "intents", "outcomes", "recoveries"):
             (parent / name).mkdir()
         (parent / "reason.txt").write_text("irrelevant after task review\n", encoding="utf-8")
@@ -601,6 +615,127 @@ class ManagerMailCompressTests(unittest.TestCase):
             self.assertEqual(0, cmd_verify_run(VerifyArgs(source_dir)))
 
         self.assertTrue(client.logged_out)
+
+    def test_reconcile_interrupted_intent_in_inbox_without_mutation(self) -> None:
+        raw = self.raw_message("[worker:0] complete")
+        record = MailRecord("7", "date", "Agent <agent@example.test>", "Human <human@example.test>", "[worker:0] complete", hashlib.sha256(b"<one@example.test>").hexdigest()[:12], "body\n", "100", "200", "", r"\Inbox", hashlib.sha256(raw).hexdigest())
+        client = FakeClient(
+            {
+                ("search", None, "X-GM-MSGID", "100"): [("OK", [b"7"]), ("OK", [b""]), ("OK", [b"7"]), ("OK", [b""])],
+                ("fetch", "7", FULL_FETCH): [("OK", [(b"message", raw)]), ("OK", [(b"message", raw)])],
+                ("fetch", "7", GMAIL_METADATA_FETCH): [self.gmail_metadata("7"), self.gmail_metadata("7")],
+                ("search", None, "X-GM-THRID", "200"): ("OK", [b"70"]),
+                ("fetch", "70", FULL_FETCH): ("OK", [(b"message", raw)]),
+                ("fetch", "70", GMAIL_METADATA_FETCH): self.gmail_metadata("70"),
+            },
+            self.gmail_mailboxes(),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            source_dir = Path(tmp) / "export"
+            self.write_source_map(source_dir, record)
+            prepare_thread_disposition(source_dir, "batch-0001", "reviewer-1", "200", set(), source_dir / "reason.txt", source_dir / "task-evidence.txt", "not-required-retained")
+            with (
+                patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {"user": "human@example.test"})),
+                patch("omo_manager.omo_manager_mail_compress.mail_boundary", return_value=("agent@example.test", "human@example.test")),
+            ):
+                self.assertEqual(0, cmd_reconcile_intent(ReconcileArgs(source_dir)))
+            self.assertTrue((source_dir / "outcomes" / "200.tsv").exists())
+        self.assertTrue(all(readonly for _mailbox, readonly in client.select_calls))
+        self.assertFalse(any(call[0].casefold() in {"copy", "move", "store", "expunge"} for call in client.uid_calls))
+
+    def test_reconcile_interrupted_intent_in_trash_without_mutation(self) -> None:
+        raw = self.raw_message("[worker:0] complete")
+        record = MailRecord("7", "date", "Agent <agent@example.test>", "Human <human@example.test>", "[worker:0] complete", hashlib.sha256(b"<one@example.test>").hexdigest()[:12], "body\n", "100", "200", "", r"\Inbox", hashlib.sha256(raw).hexdigest())
+        client = FakeClient(
+            {
+                ("search", None, "X-GM-MSGID", "100"): [("OK", [b""]), ("OK", [b"70"]), ("OK", [b""]), ("OK", [b"70"])],
+                ("fetch", "70", FULL_FETCH): [("OK", [(b"message", raw)]), ("OK", [(b"message", raw)])],
+                ("fetch", "70", GMAIL_METADATA_FETCH): [self.gmail_metadata("70", labels=r"\Trash"), self.gmail_metadata("70", labels=r"\Trash")],
+                ("search", None, "X-GM-THRID", "200"): ("OK", [b""]),
+            },
+            self.gmail_mailboxes(),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            source_dir = Path(tmp) / "export"
+            self.write_source_map(source_dir, record)
+            prepare_thread_disposition(source_dir, "batch-0001", "reviewer-1", "200", {"7"}, source_dir / "reason.txt", source_dir / "task-evidence.txt", "not-required")
+            with (
+                patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {"user": "human@example.test"})),
+                patch("omo_manager.omo_manager_mail_compress.mail_boundary", return_value=("agent@example.test", "human@example.test")),
+            ):
+                self.assertEqual(0, cmd_reconcile_intent(ReconcileArgs(source_dir)))
+        self.assertTrue(all(readonly for _mailbox, readonly in client.select_calls))
+        self.assertFalse(any(call[0].casefold() in {"copy", "move", "store", "expunge"} for call in client.uid_calls))
+
+    def test_reconcile_intent_fails_closed_on_both_locations_or_content_mismatch(self) -> None:
+        raw = self.raw_message("[worker:0] complete")
+        changed = self.raw_message("[worker:0] complete", "changed")
+        record = MailRecord("7", "date", "Agent <agent@example.test>", "Human <human@example.test>", "[worker:0] complete", hashlib.sha256(b"<one@example.test>").hexdigest()[:12], "body\n", "100", "200", "", r"\Inbox", hashlib.sha256(raw).hexdigest())
+        for inbox_result, trash_raw, trash_labels in ((b"7", raw, r"\Trash"), (b"", changed, r"\Trash"), (b"", raw, r"\Trash changed-label")):
+            client = FakeClient(
+                {
+                    ("search", None, "X-GM-MSGID", "100"): [("OK", [inbox_result]), ("OK", [b"70"])],
+                    ("fetch", "7", FULL_FETCH): ("OK", [(b"message", raw)]),
+                    ("fetch", "7", GMAIL_METADATA_FETCH): self.gmail_metadata("7"),
+                    ("fetch", "70", FULL_FETCH): ("OK", [(b"message", trash_raw)]),
+                    ("fetch", "70", GMAIL_METADATA_FETCH): self.gmail_metadata("70", labels=trash_labels),
+                },
+                self.gmail_mailboxes(),
+            )
+            with tempfile.TemporaryDirectory() as tmp:
+                source_dir = Path(tmp) / "export"
+                self.write_source_map(source_dir, record)
+                prepare_thread_disposition(source_dir, "batch-0001", "reviewer-1", "200", {"7"}, source_dir / "reason.txt", source_dir / "task-evidence.txt", "not-required")
+                with (
+                    patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {"user": "human@example.test"})),
+                    patch("omo_manager.omo_manager_mail_compress.mail_boundary", return_value=("agent@example.test", "human@example.test")),
+                ):
+                    with self.assertRaises(RuntimeError):
+                        cmd_reconcile_intent(ReconcileArgs(source_dir))
+                self.assertFalse((source_dir / "outcomes" / "200.tsv").exists())
+            self.assertFalse(any(call[0].casefold() in {"copy", "move", "store", "expunge"} for call in client.uid_calls))
+
+    def test_reconcile_trash_labels_preserve_quoted_label_identity(self) -> None:
+        record = MailRecord("70", "", "", "", "", "msg", gmail_msgid="100", gmail_thrid="200", labels=r"\Trash Project Alpha", raw_sha256="raw")
+        source = {
+            "gmail_msgid": "100",
+            "gmail_thrid": "200",
+            "msgid_sha256": "msg",
+            "raw_sha256": "raw",
+            "flags": "",
+            "labels": r'\Inbox "Project Alpha"',
+        }
+        self.assertFalse(record_matches_reconciliation_location(record, source, "Trash"))
+
+    def test_reconcile_intent_rejects_changed_non_source_thread_member(self) -> None:
+        raw = self.raw_message("[worker:0] complete")
+        context_raw = self.raw_message("[worker:0] context", "context").replace(b"<one@example.test>", b"<two@example.test>")
+        changed_context_raw = context_raw.replace(b"context\r\n", b"changed context\r\n")
+        record = MailRecord("7", "date", "Agent <agent@example.test>", "Human <human@example.test>", "[worker:0] complete", hashlib.sha256(b"<one@example.test>").hexdigest()[:12], "body\n", "100", "200", "", r"\Inbox", hashlib.sha256(raw).hexdigest())
+        context = MailRecord("71", "date", "Agent <agent@example.test>", "Human <human@example.test>", "[worker:0] context", hashlib.sha256(b"<two@example.test>").hexdigest()[:12], "context\n", "101", "200", "", r"\Inbox", hashlib.sha256(context_raw).hexdigest())
+        client = FakeClient(
+            {
+                ("search", None, "X-GM-MSGID", "100"): [("OK", [b""]), ("OK", [b"70"])],
+                ("fetch", "70", FULL_FETCH): ("OK", [(b"message", raw)]),
+                ("fetch", "70", GMAIL_METADATA_FETCH): self.gmail_metadata("70", labels=r"\Trash"),
+                ("search", None, "X-GM-THRID", "200"): ("OK", [b"71"]),
+                ("fetch", "71", FULL_FETCH): ("OK", [(b"message", changed_context_raw)]),
+                ("fetch", "71", GMAIL_METADATA_FETCH): self.gmail_metadata("71", gmail_msgid="101"),
+            },
+            self.gmail_mailboxes(),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            source_dir = Path(tmp) / "export"
+            self.write_source_map(source_dir, record, [record, context])
+            prepare_thread_disposition(source_dir, "batch-0001", "reviewer-1", "200", {"7"}, source_dir / "reason.txt", source_dir / "task-evidence.txt", "not-required")
+            with (
+                patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {"user": "human@example.test"})),
+                patch("omo_manager.omo_manager_mail_compress.mail_boundary", return_value=("agent@example.test", "human@example.test")),
+            ):
+                with self.assertRaises(RuntimeError):
+                    cmd_reconcile_intent(ReconcileArgs(source_dir))
+            self.assertFalse((source_dir / "outcomes" / "200.tsv").exists())
+        self.assertFalse(any(call[0].casefold() in {"copy", "move", "store", "expunge"} for call in client.uid_calls))
 
     def test_final_verify_refuses_unclassified_fixed_source(self) -> None:
         record = MailRecord("7", "date", "from", "to", "subject", "msgid", gmail_msgid="100", gmail_thrid="200")
