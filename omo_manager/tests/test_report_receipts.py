@@ -1997,6 +1997,7 @@ class ReportReceiptTests(unittest.TestCase):
             case = fixture(Path(tmp), body=b"stable replay input\n")
             _, first = run_accepted(case)
             self.assertEqual(0, first.returncode, first.stderr)
+            manager_after_acknowledgment = case.manager.read_bytes()
 
             replacement = case.message.with_name("replacement-message.md")
             replacement.write_bytes(case.message.read_bytes())
@@ -2015,6 +2016,11 @@ class ReportReceiptTests(unittest.TestCase):
 
             self.assertEqual(0, second.returncode, second.stderr)
             self.assertEqual(first.stdout, second.stdout)
+            self.assertEqual(manager_after_acknowledgment, case.manager.read_bytes())
+            self.assertNotIn(b"(pending)", manager_after_acknowledgment)
+            description = json.loads(run_report(case, describe=True).stdout)
+            acknowledgment_state, acknowledgment_key = acknowledgment_coordinates(description)
+            self.assertEqual(1, acknowledgment_state.read_text(encoding="utf-8").count(acknowledgment_key))
 
     def test_post_receipt_publication_failure_recovers_on_identical_replay(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

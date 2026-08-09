@@ -223,6 +223,37 @@ class PendingReportDeliveryTests(unittest.TestCase):
 
             self.assertNotIn("(pending)", task.read_text(encoding="utf-8"))
 
+    def test_supported_acknowledgment_makes_identical_full_rescan_quiet(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            report = valid_report(self, "worker_done_acknowledged", "already acknowledged\n")
+            task = root / "worker.md"
+            write_report_pointer(task, report)
+            args = args_for(root)
+            marker = watcher.find_markers(root, [task])[0]
+            report_key = watcher.agent_report_seen_key(args, marker, watcher.marker_attachments(args, marker))
+            authority_key = (args.state.resolve(strict=False), report_key)
+            try:
+                with (
+                    patch.object(watcher, "REPORT_AUTHORITY_LEASE_S", 10.0),
+                    patch.object(watcher, "push_marker_delivery", return_value=watcher.DeliveryResult(0)) as push,
+                ):
+                    self.assertTrue(watcher.scan_once(args, {}, [task]))
+                    self.assertFalse(watcher.scan_once(args, {}, [task]))
+
+                transition = watcher.consumed_report_transition(args.state, report_key)
+                self.assertIsNotNone(transition)
+                assert transition is not None
+                self.assertEqual("watcher-locked-pointer-transition-v1", transition[0])
+                self.assertEqual(task_frontmatter(runat="vl:2", managerat="vl:15"), task.read_text(encoding="utf-8"))
+                self.assertEqual(1, push.call_count)
+            finally:
+                lease = watcher.REPORT_AUTHORITY_LEASES.pop(authority_key, None)
+                if lease is not None and lease.process.poll() is None:
+                    lease.process.terminate()
+                    lease.process.wait(timeout=5)
+                watcher.prune_report_authorities()
+
     def test_dead_durable_authority_is_redelivered(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
