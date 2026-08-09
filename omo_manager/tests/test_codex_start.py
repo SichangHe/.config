@@ -5,7 +5,7 @@ import os
 import subprocess
 import tempfile
 import unittest
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +23,7 @@ from omo_manager.omo_codex_start import (
     StartError,
     current_todo_entries,
     consume_recovery_receipt,
+    finish_rotation_audit,
     is_codex_update_prompt,
     launch_command,
     parse_args,
@@ -119,12 +120,14 @@ class CodexStartTests(unittest.TestCase):
             "replacement-window-id": pane.window_id,
             "replacement-pane-pid": str(pane.pane_pid),
             "replacement-command": pane.command,
+            "failure-kind": "post-respawn-new-session-id-capture-failed",
             "final-result": "failed",
         }
         fields.update(changes)
         audit = root / "rotation.audit"
         audit.write_text("\n".join(f"{key}: {value}" for key, value in fields.items()) + "\n", encoding="utf-8")
         audit.chmod(0o600)
+        os.setxattr(audit, "user.omo_rotation_reconciliation_eligible_sha256", hashlib.sha256(audit.read_bytes()).hexdigest().encode())
         return audit
 
     def reconciliation_args(self, root: Path, pane: Pane, **changes: object) -> Args:
@@ -737,6 +740,194 @@ class CodexStartTests(unittest.TestCase):
             self.assertIn(f"old-session-id: {self.SESSION_ID}\ncurrent-pane-pid: 5252\n", receipt)
             self.assertIn(f"current-session-id: {new_session}\nfinal-result: success\n", receipt)
 
+    def test_rotation_marks_only_empty_post_startup_uuid_capture_as_reconcilable(self) -> None:
+        for case in ("empty UUID", "startup error", "task or pane error", "same old UUID", "unrelated error"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as raw_root:
+                root = Path(raw_root)
+                self.write_task(root, status="blocked", pending=["preserve exact queue"])
+                initial = Pane("cfg:2.0", "%2", "@2", "bun", root, 4242)
+                replacement = replace(initial, pane_pid=5252)
+                rotated = False
+
+                def resolve(_target: str) -> Pane:
+                    return replacement if rotated else initial
+
+                def respawn(_pane: Pane, _command: str) -> None:
+                    nonlocal rotated
+                    rotated = True
+
+                final_session = "" if case == "empty UUID" else self.SESSION_ID
+                sessions = iter(((self.SESSION_ID, ""), (self.SESSION_ID, ""), (self.SESSION_ID, ""), (final_session, "")))
+                startup_error = StartError("startup failed after replacement")
+                verification_error: Exception | None = (
+                    StartError("task or pane changed after replacement")
+                    if case == "task or pane error"
+                    else RuntimeError("unrelated post-checkpoint failure")
+                    if case == "unrelated error"
+                    else None
+                )
+                with ExitStack() as stack:
+                    stack.enter_context(patch("omo_manager.omo_codex_start.resolve_pane", side_effect=resolve))
+                    stack.enter_context(patch("omo_manager.omo_codex_start.inspect", return_value=Report("running", ["working"])))
+                    stack.enter_context(patch("omo_manager.omo_codex_start.query_status_session_id", side_effect=lambda *_args: next(sessions)))
+                    stack.enter_context(patch("omo_manager.omo_codex_start.prompt_text", return_value="worker-only prompt\n"))
+                    stack.enter_context(patch("omo_manager.omo_codex_start.respawn_codex", side_effect=respawn))
+                    stack.enter_context(patch("omo_manager.omo_codex_start.wait_started", side_effect=startup_error if case == "startup error" else None, return_value="running"))
+                    if verification_error is not None:
+                        stack.enter_context(patch("omo_manager.omo_codex_start.verify_fresh_rotation", side_effect=verification_error))
+                    with self.assertRaises(Exception):
+                        start(self.rotation_args(root))
+
+                audit = root / "rotation.audit"
+                audit_before = audit.read_bytes()
+                marker = b"failure-kind: post-respawn-new-session-id-capture-failed\n"
+                self.assertEqual(case == "empty UUID", marker in audit_before)
+                args = self.reconciliation_args(root, replacement)
+                with (
+                    patch("omo_manager.omo_codex_start.resolve_pane", return_value=replacement),
+                    patch("omo_manager.omo_codex_start.query_reconciliation_session_id", return_value="119f670b-6a2f-7463-b9be-9aa6ff0cec43") as query,
+                    patch("omo_manager.omo_codex_start.respawn_codex") as reconciliation_respawn,
+                    patch("omo_manager.omo_codex_start.send_shell_command") as send,
+                ):
+                    if case == "empty UUID":
+                        self.assertEqual("rotation-audit-reconciled", reconcile_rotation_audit(args))
+                        query.assert_called_once()
+                    else:
+                        with self.assertRaises(StartError):
+                            reconcile_rotation_audit(args)
+                        query.assert_not_called()
+                        self.assertFalse((root / "reconciliation.receipt").exists())
+                reconciliation_respawn.assert_not_called()
+                send.assert_not_called()
+                self.assertEqual(audit_before, audit.read_bytes())
+
+    def test_reconciliation_rejects_ambiguous_historical_failed_audit_without_kind(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root, status="blocked", pending=["preserve exact queue"])
+            pane = Pane("cfg:2.0", "%2", "@2", "bun", root, 5252)
+            audit = self.write_failed_rotation_audit(root, pane)
+            audit.write_text(
+                "\n".join(line for line in audit.read_text(encoding="utf-8").splitlines() if not line.startswith("failure-kind: ")) + "\n",
+                encoding="utf-8",
+            )
+            audit_before = audit.read_bytes()
+            with (
+                patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                patch("omo_manager.omo_codex_start.query_reconciliation_session_id") as query,
+                patch("omo_manager.omo_codex_start.respawn_codex") as respawn,
+                patch("omo_manager.omo_codex_start.send_shell_command") as send,
+                self.assertRaises(StartError),
+            ):
+                reconcile_rotation_audit(self.reconciliation_args(root, pane))
+            query.assert_not_called()
+            respawn.assert_not_called()
+            send.assert_not_called()
+            self.assertFalse((root / "reconciliation.receipt").exists())
+            self.assertEqual(audit_before, audit.read_bytes())
+
+    def test_eligible_audit_directory_fsync_failure_rolls_back_before_reconciliation(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root, status="blocked", pending=["preserve exact queue"])
+            pane = Pane("cfg:2.0", "%2", "@2", "bun", root, 5252)
+            audit = self.write_failed_rotation_audit(root, pane)
+            prepared = "\n".join(
+                line
+                for line in audit.read_text(encoding="utf-8").splitlines()
+                if not line.startswith("failure-kind: ") and not line.startswith("final-result: ")
+            ) + "\n"
+            audit.write_text(prepared, encoding="utf-8")
+            real_fsync = os.fsync
+            n_fsync = 0
+
+            def fail_post_replace_directory_fsync(fd: int) -> None:
+                nonlocal n_fsync
+                n_fsync += 1
+                if n_fsync == 2:
+                    raise OSError("directory fsync failed")
+                real_fsync(fd)
+
+            with patch("omo_manager.omo_codex_start.os.fsync", side_effect=fail_post_replace_directory_fsync), self.assertRaisesRegex(StartError, "could not finalize"):
+                finish_rotation_audit(
+                    audit,
+                    prepared,
+                    "failed",
+                    failure_kind="post-respawn-new-session-id-capture-failed",
+                )
+
+            self.assertEqual(prepared, audit.read_text(encoding="utf-8"))
+            with (
+                patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                patch("omo_manager.omo_codex_start.query_reconciliation_session_id") as query,
+                self.assertRaises(StartError),
+            ):
+                reconcile_rotation_audit(self.reconciliation_args(root, pane))
+            query.assert_not_called()
+            self.assertFalse((root / "reconciliation.receipt").exists())
+
+    def test_eligible_audit_rollback_and_removal_failures_still_lack_commit_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root, status="blocked", pending=["preserve exact queue"])
+            pane = Pane("cfg:2.0", "%2", "@2", "bun", root, 5252)
+            audit = self.write_failed_rotation_audit(root, pane)
+            prepared = "\n".join(
+                line
+                for line in audit.read_text(encoding="utf-8").splitlines()
+                if not line.startswith("failure-kind: ") and not line.startswith("final-result: ")
+            ) + "\n"
+            audit.write_text(prepared, encoding="utf-8")
+            real_fsync = os.fsync
+            real_replace = os.replace
+            real_unlink = Path.unlink
+            n_fsync = 0
+            n_replace = 0
+
+            def fail_post_replace_directory_fsync(fd: int) -> None:
+                nonlocal n_fsync
+                n_fsync += 1
+                if n_fsync == 2:
+                    raise OSError("directory fsync failed")
+                real_fsync(fd)
+
+            def fail_rollback_replace(source: Path, destination: Path) -> None:
+                nonlocal n_replace
+                n_replace += 1
+                if n_replace == 2:
+                    raise OSError("rollback replace failed")
+                real_replace(source, destination)
+
+            def fail_audit_removal(path: Path, missing_ok: bool = False) -> None:
+                if path == audit:
+                    raise OSError("audit removal failed")
+                real_unlink(path, missing_ok=missing_ok)
+
+            with (
+                patch("omo_manager.omo_codex_start.os.fsync", side_effect=fail_post_replace_directory_fsync),
+                patch("omo_manager.omo_codex_start.os.replace", side_effect=fail_rollback_replace),
+                patch.object(Path, "unlink", autospec=True, side_effect=fail_audit_removal),
+                self.assertRaisesRegex(StartError, "could not finalize"),
+            ):
+                finish_rotation_audit(
+                    audit,
+                    prepared,
+                    "failed",
+                    failure_kind="post-respawn-new-session-id-capture-failed",
+                )
+
+            self.assertIn("failure-kind: post-respawn-new-session-id-capture-failed", audit.read_text(encoding="utf-8"))
+            with self.assertRaises(OSError):
+                os.getxattr(audit, "user.omo_rotation_reconciliation_eligible_sha256")
+            with (
+                patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                patch("omo_manager.omo_codex_start.query_reconciliation_session_id") as query,
+                self.assertRaises(StartError),
+            ):
+                reconcile_rotation_audit(self.reconciliation_args(root, pane))
+            query.assert_not_called()
+            self.assertFalse((root / "reconciliation.receipt").exists())
+
     def test_reconciliation_status_query_guards_every_input_in_tmux_server(self) -> None:
         pane = Pane("cfg:2.0", "%2", "@2", "bun", Path("/tmp"), 5252)
         commands: list[list[str]] = []
@@ -807,6 +998,8 @@ class CodexStartTests(unittest.TestCase):
             "queue digest": {"pending-items-sha256": "0" * 64},
             "replacement absent": {"replacement-observed": "false"},
             "replacement pid": {"replacement-pane-pid": "6262"},
+            "unknown failure kind": {"failure-kind": "unknown"},
+            "ineligible failure kind": {"failure-kind": "startup-failed"},
         }
         for case, changes in audit_cases.items():
             with self.subTest(case=case), tempfile.TemporaryDirectory() as raw_root:
@@ -827,7 +1020,7 @@ class CodexStartTests(unittest.TestCase):
                 respawn.assert_not_called()
                 send.assert_not_called()
 
-        for case in ("absent", "symlink", "nonregular", "permissions", "owner", "hash", "extra field", "duplicate field", "CRLF", "missing final LF", "oversized"):
+        for case in ("absent", "symlink", "nonregular", "permissions", "owner", "hash", "extra field", "duplicate field", "duplicate kind", "CRLF", "missing final LF", "oversized"):
             with self.subTest(case=case), tempfile.TemporaryDirectory() as raw_root:
                 root = Path(raw_root)
                 self.write_task(root, status="blocked", pending=["preserve exact queue"])
@@ -853,6 +1046,9 @@ class CodexStartTests(unittest.TestCase):
                     args = self.reconciliation_args(root, pane)
                 elif case == "duplicate field":
                     audit.write_text(audit.read_text(encoding="utf-8") + "tool: codex\n", encoding="utf-8")
+                    args = self.reconciliation_args(root, pane)
+                elif case == "duplicate kind":
+                    audit.write_text(audit.read_text(encoding="utf-8") + "failure-kind: post-respawn-new-session-id-capture-failed\n", encoding="utf-8")
                     args = self.reconciliation_args(root, pane)
                 elif case == "CRLF":
                     audit.write_bytes(audit.read_bytes().replace(b"\n", b"\r\n"))
