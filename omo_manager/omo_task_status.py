@@ -1065,6 +1065,16 @@ def finish_replaced_done(args: Args, path: Path, text: str, before: os.stat_resu
         try:
             if replacement_path.read_text(encoding="utf-8") != replacement_text or not same_file_state(replacement_before, replacement_path.stat()):
                 raise TaskFrontmatterError("replacement task changed immediately before stale lifecycle mutation; retry.")
+            if exact_pane_id(stale.runat):
+                raise TaskFrontmatterError("stale target became live after audit reservation; retry.")
+            if exact_pane_id(replacement.runat) != replacement_pane_id:
+                raise TaskFrontmatterError("replacement pane changed after audit reservation; retry.")
+            if args.replacement_pane_evidence not in capture(replacement_pane_id, 2000):
+                raise TaskFrontmatterError("replacement pane evidence disappeared after audit reservation; retry.")
+            if exact_pane_id(replacement.runat) != replacement_pane_id:
+                raise TaskFrontmatterError("replacement pane changed while post-reservation evidence was checked; retry.")
+            if exact_pane_id(stale.runat):
+                raise TaskFrontmatterError("stale target became live while post-reservation evidence was checked; retry.")
             finish_done_transaction(args.root, path, updated, current_before, locked=True)
         except Exception as mutation_error:
             try:

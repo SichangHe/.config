@@ -19,6 +19,7 @@ from omo_manager.omo_task_status import reconcile_blocked_index
 from omo_manager.omo_task_status import reconcile_done_index
 from omo_manager.omo_task_status import reconcile_running_index
 from omo_manager.omo_task_status import replace_if_unchanged_locked
+from omo_manager.omo_task_status import reserve_private_audit
 from omo_manager.omo_task_status import run
 from omo_manager.omo_task_status import stop_done_agent
 from omo_manager.omo_task_status import update_frontmatter_status
@@ -1013,7 +1014,8 @@ class TaskStatusTests(unittest.TestCase):
             self.assertIn("status: done\nrunat: old:2", stale.read_text(encoding="utf-8"))
             self.assertEqual(replacement_text, replacement.read_text(encoding="utf-8"))
             self.assertEqual("current:\nreplacement.md new:3\n\nprevious:\nstale.md old:2\n", (root / "TODO.md").read_text(encoding="utf-8"))
-            capture_call.assert_called_once_with("%3", 2000)
+            self.assertEqual(2, capture_call.call_count)
+            capture_call.assert_called_with("%3", 2000)
             audit = root / "replacement.audit"
             self.assertEqual(0o600, audit.stat().st_mode & 0o777)
             audit_text = audit.read_text(encoding="utf-8")
@@ -1054,6 +1056,37 @@ class TaskStatusTests(unittest.TestCase):
                 self.assertFalse((root / "replacement.audit").exists())
                 if case == "pane":
                     capture_call.assert_not_called()
+
+    def test_finish_replaced_done_revalidates_live_targets_after_audit_reservation(self) -> None:
+        for case in ("stale", "successor pane", "successor evidence"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                stale, _replacement, stale_text, _replacement_text = self.write_replacement_tasks(root)
+                reserved = False
+
+                def reserve(path: Path, text: str) -> None:
+                    nonlocal reserved
+                    reserve_private_audit(path, text)
+                    reserved = True
+
+                def pane_id(target: str) -> str:
+                    if target == "old:2":
+                        return "%2" if reserved and case == "stale" else ""
+                    return "%9" if reserved and case == "successor pane" else "%3"
+
+                def capture(_pane: str, _lines: int) -> str:
+                    return "evidence changed" if reserved and case == "successor evidence" else "successor is active"
+
+                with (
+                    patch("omo_manager.omo_task_status.reserve_private_audit", side_effect=reserve),
+                    patch("omo_manager.omo_task_status.exact_pane_id", side_effect=pane_id),
+                    patch("omo_manager.omo_task_status.capture", side_effect=capture),
+                    redirect_stderr(io.StringIO()),
+                ):
+                    self.assertEqual(2, run(self.replacement_args(root)))
+
+                self.assertEqual(stale_text, stale.read_text(encoding="utf-8"))
+                self.assertIn("final-result: not-completed", (root / "replacement.audit").read_text(encoding="utf-8"))
 
     def test_finish_replaced_done_refuses_manager_owner_or_role_mismatch(self) -> None:
         for case in ("owner", "role"):
