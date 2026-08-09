@@ -33,6 +33,7 @@ from omo_manager.omo_codex_start import (
     require_recovery_target,
     require_same_shell,
     require_update_prompt,
+    reserve_rotation_audit,
     resolve_pane,
     respawn_codex,
     skip_codex_update_prompt,
@@ -483,7 +484,7 @@ class CodexStartTests(unittest.TestCase):
                 self.assertNotIn(" resume ", command)
                 rotated = True
 
-            sessions = iter(((old_session, ""), (old_session, ""), (new_session, "")))
+            sessions = iter(((old_session, ""), (old_session, ""), (old_session, ""), (new_session, "")))
             args = self.rotation_args(root)
             with (
                 patch("omo_manager.omo_codex_start.resolve_pane", side_effect=resolve),
@@ -520,7 +521,7 @@ class CodexStartTests(unittest.TestCase):
                     nonlocal rotated
                     rotated = True
 
-                sessions = iter(((self.SESSION_ID, ""), (self.SESSION_ID, ""), ("119f670b-6a2f-7463-b9be-9aa6ff0cec43", "")))
+                sessions = iter(((self.SESSION_ID, ""), (self.SESSION_ID, ""), (self.SESSION_ID, ""), ("119f670b-6a2f-7463-b9be-9aa6ff0cec43", "")))
                 startup_error = StartError("fresh startup failed after respawn")
                 with (
                     patch("omo_manager.omo_codex_start.resolve_pane", side_effect=resolve),
@@ -612,6 +613,41 @@ class CodexStartTests(unittest.TestCase):
                 start(self.rotation_args(root))
             respawn.assert_not_called()
             self.assertFalse((root / "rotation.audit").exists())
+
+    def test_rotate_worker_revalidates_binding_and_session_after_audit_reservation(self) -> None:
+        for case in ("task during reservation", "task during session check", "session"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as raw_root:
+                root = Path(raw_root)
+                self.write_task(root, status="blocked", pending=["preserve exact queue"])
+                pane = Pane("cfg:2.0", "%2", "@2", "bun", root, 4242)
+                reserved = False
+
+                def reserve(path: Path, text: str) -> None:
+                    nonlocal reserved
+                    reserve_rotation_audit(path, text)
+                    reserved = True
+                    if case == "task during reservation":
+                        task = root / "worker.md"
+                        task.write_text(task.read_text(encoding="utf-8") + "lifecycle drift\n", encoding="utf-8")
+
+                def session(*_args: object) -> tuple[str, str]:
+                    if reserved and case == "task during session check":
+                        task = root / "worker.md"
+                        task.write_text(task.read_text(encoding="utf-8") + "lifecycle drift\n", encoding="utf-8")
+                    return ("119f670b-6a2f-7463-b9be-9aa6ff0cec43", "") if reserved and case == "session" else (self.SESSION_ID, "")
+
+                with (
+                    patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                    patch("omo_manager.omo_codex_start.inspect", return_value=Report("running", ["working"])),
+                    patch("omo_manager.omo_codex_start.query_status_session_id", side_effect=session),
+                    patch("omo_manager.omo_codex_start.reserve_rotation_audit", side_effect=reserve),
+                    patch("omo_manager.omo_codex_start.respawn_codex") as respawn,
+                    self.assertRaises(StartError),
+                ):
+                    start(self.rotation_args(root))
+
+                respawn.assert_not_called()
+                self.assertIn("final-result: failed", (root / "rotation.audit").read_text(encoding="utf-8"))
 
     def test_recover_non_codex_requires_prompt_and_evidence(self) -> None:
         common = [

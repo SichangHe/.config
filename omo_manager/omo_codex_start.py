@@ -1473,6 +1473,10 @@ def start(args: Args) -> str:
                     )
                     reserve_rotation_audit(audit_path, prepared_audit)
                     try:
+                        current_session_id, _ = query_status_session_id(pane.pane_id, 240, min(10.0, args.startup_timeout_s))
+                        if current_session_id != original_session_id:
+                            raise StartError("current worker session changed after audit reservation; the pane was not replaced.")
+                        verify_task_binding(args, pane, task_binding)
                         respawn_codex(pane, command)
                         result = wait_started(pane, marker, args.startup_timeout_s)
                         new_session_id = verify_fresh_rotation(args, pane, original_session_id, task_binding)
