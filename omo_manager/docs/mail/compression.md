@@ -30,6 +30,7 @@ Helper:
 - the helper writes an immutable intent before mutation, rejects cross-batch or repeated disposition, revalidates source and complete-thread identity/content immediately before `UID MOVE`, and writes an outcome only after immediate Trash verification
 - if an interrupted Trash intent is mixed across INBOX and Trash, `trash-superseded` verifies and skips each exact Trash source, revalidates the combined complete thread, and moves only the still-intact INBOX remainder; it never retries an already-Trashed source
 - otherwise, if a caller interruption leaves an intent without an outcome and every source may already match its final disposition, stop mutation retries and run `reconcile-intent --source-dir PRIVATE_DIR --gmail-thread-id THREAD`; it opens IMAP read-only, requires every frozen source in exactly its intended INBOX or `[Gmail]/Trash` location, rechecks exact identity/content and the complete thread digest, then writes only the missing local outcome receipt
+- if every frozen source of an all-Trash intent is exact in Trash and absent from INBOX but only additive later thread members prevent normal reconciliation, run `recover-already-trashed --source-dir PRIVATE_DIR --gmail-thread-id THREAD`; it performs the same read-only identity, UIDVALIDITY, mailbox, location, and frozen-content gates, permits only additional non-frozen thread identities, and writes an explicit `skipped_already_trashed` recovery receipt instead of a normal outcome
 - reconciliation fails closed if the intent is missing or malformed, an outcome already exists, a source is duplicate, absent, in both or the wrong mailbox, or source/thread evidence changed
 - identity, content, label, UIDVALIDITY, task, or thread drift fails closed for that thread without broadening or rerunning the source set
 
@@ -38,7 +39,7 @@ Helper:
 - run `verify-run --source-dir PRIVATE_DIR`
 - final verification reconciles `run.tsv`, `manifest.tsv`, `batches.tsv`, exclusive claims, and every per-thread outcome
 - completion requires every fixed-start source to be classified exactly once as retained or verified in Trash
-- an intent without an outcome blocks completion
+- an intent without an outcome blocks completion unless it has a valid explicit `skipped_already_trashed` terminal recovery receipt; `verify-run` reports those sources and threads separately from normal Trash outcomes
 - final verification performs no full live candidate scan; later arrivals remain outside the run
 - report only topics, fixed-start counts, retained and trashed counts, replacement identities, drift, and verification status
 

@@ -18,6 +18,7 @@ from omo_manager.omo_manager_mail_compress import (
     accepted_manager_headers,
     claim_batch,
     cmd_reconcile_intent,
+    cmd_recover_already_trashed,
     cmd_retain_thread,
     cmd_export,
     cmd_identity_preflight,
@@ -172,6 +173,10 @@ class ManagerMailCompressTests(unittest.TestCase):
                 f"{context.gmail_thrid}\t{context.gmail_msgid}\t{context.msgid_sha256}\t{context.raw_sha256}\t{context.flags}\t{context.labels}\tmanager-to-human\t{context.sender}\t{context.to}\t{context.uid}\t{context.body_bytes}"
             )
         (parent / "thread-context.tsv").write_text("\n".join(context_lines) + "\n", encoding="utf-8")
+        (parent / "thread-digests.tsv").write_text(
+            f"gmail_thrid\tthread_context_sha256\n{record.gmail_thrid}\t{thread_digest}\n",
+            encoding="utf-8",
+        )
         for name in ("claims", "intents", "outcomes", "recoveries"):
             (parent / name).mkdir()
         (parent / "reason.txt").write_text("irrelevant after task review\n", encoding="utf-8")
@@ -781,6 +786,166 @@ class ManagerMailCompressTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     cmd_reconcile_intent(ReconcileArgs(source_dir))
             self.assertFalse((source_dir / "outcomes" / "200.tsv").exists())
+        self.assertFalse(any(call[0].casefold() in {"copy", "move", "store", "expunge"} for call in client.uid_calls))
+
+    def test_recover_already_trashed_allows_only_additive_later_context_and_verifies_run(self) -> None:
+        raw = self.raw_message("[worker:0] complete")
+        later_raw = self.raw_message("[worker:0] later", "later").replace(b"<one@example.test>", b"<later@example.test>")
+        source = MailRecord("7", "date", "Agent <agent@example.test>", "Human <human@example.test>", "[worker:0] complete", hashlib.sha256(b"<one@example.test>").hexdigest()[:12], "body\n", "100", "200", "", r"\Inbox", hashlib.sha256(raw).hexdigest())
+        client = FakeClient(
+            {
+                ("search", None, "X-GM-MSGID", "100"): [("OK", [b""]), ("OK", [b"70"]), ("OK", [b""]), ("OK", [b"70"]), ("OK", [b""]), ("OK", [b"70"])],
+                ("fetch", "70", FULL_FETCH): [("OK", [(b"message", raw)]), ("OK", [(b"message", raw)]), ("OK", [(b"message", raw)])],
+                ("fetch", "70", GMAIL_METADATA_FETCH): [self.gmail_metadata("70", labels=r"\Trash"), self.gmail_metadata("70", labels=r"\Trash"), self.gmail_metadata("70", labels=r"\Trash")],
+                ("search", None, "X-GM-THRID", "200"): ("OK", [b"71"]),
+                ("fetch", "71", FULL_FETCH): ("OK", [(b"message", later_raw)]),
+                ("fetch", "71", GMAIL_METADATA_FETCH): self.gmail_metadata("71", gmail_msgid="101"),
+            },
+            self.gmail_mailboxes(),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            source_dir = Path(tmp) / "export"
+            self.write_source_map(source_dir, source)
+            prepare_thread_disposition(source_dir, "batch-0001", "reviewer-1", "200", {"7"}, source_dir / "reason.txt", source_dir / "task-evidence.txt", "not-required")
+            with (
+                patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {"user": "human@example.test"})),
+                patch("omo_manager.omo_manager_mail_compress.mail_boundary", return_value=("agent@example.test", "human@example.test")),
+            ):
+                self.assertEqual(0, cmd_recover_already_trashed(ReconcileArgs(source_dir)))
+            self.assertFalse((source_dir / "outcomes" / "200.tsv").exists())
+            self.assertTrue((source_dir / "recoveries" / "200.skipped-already-trashed.tsv").exists())
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(0, cmd_verify_run(VerifyArgs(source_dir)))
+            self.assertIn("trashed=0 skipped_already_trashed=1 skipped_already_trashed_threads=1", output.getvalue())
+        self.assertTrue(all(readonly for _mailbox, readonly in client.select_calls))
+        self.assertFalse(any(call[0].casefold() in {"copy", "move", "store", "expunge"} for call in client.uid_calls))
+
+    def test_recover_already_trashed_rejects_changed_frozen_context(self) -> None:
+        raw = self.raw_message("[worker:0] complete")
+        context_raw = self.raw_message("[worker:0] context", "context").replace(b"<one@example.test>", b"<two@example.test>")
+        changed = context_raw.replace(b"context\r\n", b"changed\r\n")
+        source = MailRecord("7", "date", "Agent <agent@example.test>", "Human <human@example.test>", "[worker:0] complete", hashlib.sha256(b"<one@example.test>").hexdigest()[:12], "body\n", "100", "200", "", r"\Inbox", hashlib.sha256(raw).hexdigest())
+        context = MailRecord("71", "date", "Agent <agent@example.test>", "Human <human@example.test>", "[worker:0] context", hashlib.sha256(b"<two@example.test>").hexdigest()[:12], "context\n", "101", "200", "", r"\Inbox", hashlib.sha256(context_raw).hexdigest())
+        client = FakeClient(
+            {
+                ("search", None, "X-GM-MSGID", "100"): [("OK", [b""]), ("OK", [b"70"]), ("OK", [b""]), ("OK", [b"70"])],
+                ("fetch", "70", FULL_FETCH): [("OK", [(b"message", raw)]), ("OK", [(b"message", raw)])],
+                ("fetch", "70", GMAIL_METADATA_FETCH): [self.gmail_metadata("70", labels=r"\Trash"), self.gmail_metadata("70", labels=r"\Trash")],
+                ("search", None, "X-GM-THRID", "200"): ("OK", [b"71"]),
+                ("fetch", "71", FULL_FETCH): ("OK", [(b"message", changed)]),
+                ("fetch", "71", GMAIL_METADATA_FETCH): self.gmail_metadata("71", gmail_msgid="101"),
+            },
+            self.gmail_mailboxes(),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            source_dir = Path(tmp) / "export"
+            self.write_source_map(source_dir, source, [source, context])
+            prepare_thread_disposition(source_dir, "batch-0001", "reviewer-1", "200", {"7"}, source_dir / "reason.txt", source_dir / "task-evidence.txt", "not-required")
+            with (
+                patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {"user": "human@example.test"})),
+                patch("omo_manager.omo_manager_mail_compress.mail_boundary", return_value=("agent@example.test", "human@example.test")),
+            ):
+                with self.assertRaises(RuntimeError):
+                    cmd_recover_already_trashed(ReconcileArgs(source_dir))
+            self.assertFalse((source_dir / "recoveries" / "200.skipped-already-trashed.tsv").exists())
+
+    def test_recover_already_trashed_requires_additive_later_context(self) -> None:
+        raw = self.raw_message("[worker:0] complete")
+        source = MailRecord("7", "date", "Agent <agent@example.test>", "Human <human@example.test>", "[worker:0] complete", hashlib.sha256(b"<one@example.test>").hexdigest()[:12], "body\n", "100", "200", "", r"\Inbox", hashlib.sha256(raw).hexdigest())
+        client = FakeClient(
+            {
+                ("search", None, "X-GM-MSGID", "100"): [("OK", [b""]), ("OK", [b"70"]), ("OK", [b""]), ("OK", [b"70"])],
+                ("fetch", "70", FULL_FETCH): [("OK", [(b"message", raw)]), ("OK", [(b"message", raw)])],
+                ("fetch", "70", GMAIL_METADATA_FETCH): [self.gmail_metadata("70", labels=r"\Trash"), self.gmail_metadata("70", labels=r"\Trash")],
+                ("search", None, "X-GM-THRID", "200"): ("OK", [b""]),
+            },
+            self.gmail_mailboxes(),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            source_dir = Path(tmp) / "export"
+            self.write_source_map(source_dir, source)
+            prepare_thread_disposition(source_dir, "batch-0001", "reviewer-1", "200", {"7"}, source_dir / "reason.txt", source_dir / "task-evidence.txt", "not-required")
+            with (
+                patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {"user": "human@example.test"})),
+                patch("omo_manager.omo_manager_mail_compress.mail_boundary", return_value=("agent@example.test", "human@example.test")),
+            ):
+                with self.assertRaises(RuntimeError):
+                    cmd_recover_already_trashed(ReconcileArgs(source_dir))
+            self.assertFalse((source_dir / "recoveries" / "200.skipped-already-trashed.tsv").exists())
+
+    def test_recover_already_trashed_rejects_shortened_frozen_context_snapshot(self) -> None:
+        raw = self.raw_message("[worker:0] complete")
+        context_raw = self.raw_message("[worker:0] context", "context").replace(b"<one@example.test>", b"<two@example.test>")
+        source = MailRecord("7", "date", "Agent <agent@example.test>", "Human <human@example.test>", "[worker:0] complete", hashlib.sha256(b"<one@example.test>").hexdigest()[:12], "body\n", "100", "200", "", r"\Inbox", hashlib.sha256(raw).hexdigest())
+        context = MailRecord("71", "date", "Agent <agent@example.test>", "Human <human@example.test>", "[worker:0] context", hashlib.sha256(b"<two@example.test>").hexdigest()[:12], "context\n", "101", "200", "", r"\Inbox", hashlib.sha256(context_raw).hexdigest())
+        for removed_msgid in ("100", "101"):
+            client = FakeClient(
+                {
+                    ("search", None, "X-GM-MSGID", "100"): [("OK", [b""]), ("OK", [b"70"]), ("OK", [b""]), ("OK", [b"70"])],
+                    ("fetch", "70", FULL_FETCH): [("OK", [(b"message", raw)]), ("OK", [(b"message", raw)])],
+                    ("fetch", "70", GMAIL_METADATA_FETCH): [self.gmail_metadata("70", labels=r"\Trash"), self.gmail_metadata("70", labels=r"\Trash")],
+                },
+                self.gmail_mailboxes(),
+            )
+            with tempfile.TemporaryDirectory() as tmp:
+                source_dir = Path(tmp) / "export"
+                self.write_source_map(source_dir, source, [source, context])
+                context_path = source_dir / "thread-context.tsv"
+                lines = context_path.read_text(encoding="utf-8").splitlines()
+                context_path.write_text("\n".join([lines[0], *(line for line in lines[1:] if line.split("\t")[1] != removed_msgid)]) + "\n", encoding="utf-8")
+                prepare_thread_disposition(source_dir, "batch-0001", "reviewer-1", "200", {"7"}, source_dir / "reason.txt", source_dir / "task-evidence.txt", "not-required")
+                with (
+                    patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {"user": "human@example.test"})),
+                    patch("omo_manager.omo_manager_mail_compress.mail_boundary", return_value=("agent@example.test", "human@example.test")),
+                ):
+                    with self.assertRaises(RuntimeError):
+                        cmd_recover_already_trashed(ReconcileArgs(source_dir))
+                self.assertFalse((source_dir / "recoveries" / "200.skipped-already-trashed.tsv").exists())
+
+    def test_recover_already_trashed_rejects_ambiguous_or_wrong_location_without_mutation(self) -> None:
+        raw = self.raw_message("[worker:0] complete")
+        source = MailRecord("7", "date", "Agent <agent@example.test>", "Human <human@example.test>", "[worker:0] complete", hashlib.sha256(b"<one@example.test>").hexdigest()[:12], "body\n", "100", "200", "", r"\Inbox", hashlib.sha256(raw).hexdigest())
+        for inbox, trash in ((b"7", b"70"), (b"", b"70 72")):
+            client = FakeClient({("search", None, "X-GM-MSGID", "100"): [("OK", [inbox]), ("OK", [trash])]}, self.gmail_mailboxes())
+            with tempfile.TemporaryDirectory() as tmp:
+                source_dir = Path(tmp) / "export"
+                self.write_source_map(source_dir, source)
+                prepare_thread_disposition(source_dir, "batch-0001", "reviewer-1", "200", {"7"}, source_dir / "reason.txt", source_dir / "task-evidence.txt", "not-required")
+                with (
+                    patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {"user": "human@example.test"})),
+                    patch("omo_manager.omo_manager_mail_compress.mail_boundary", return_value=("agent@example.test", "human@example.test")),
+                ):
+                    with self.assertRaises(RuntimeError):
+                        cmd_recover_already_trashed(ReconcileArgs(source_dir))
+                self.assertFalse((source_dir / "recoveries" / "200.skipped-already-trashed.tsv").exists())
+            self.assertFalse(any(call[0].casefold() in {"copy", "move", "store", "expunge"} for call in client.uid_calls))
+
+    def test_recover_already_trashed_rechecks_location_after_context_gate(self) -> None:
+        raw = self.raw_message("[worker:0] complete")
+        source = MailRecord("7", "date", "Agent <agent@example.test>", "Human <human@example.test>", "[worker:0] complete", hashlib.sha256(b"<one@example.test>").hexdigest()[:12], "body\n", "100", "200", "", r"\Inbox", hashlib.sha256(raw).hexdigest())
+        client = FakeClient(
+            {
+                ("search", None, "X-GM-MSGID", "100"): [("OK", [b""]), ("OK", [b"70"]), ("OK", [b""]), ("OK", [b"70"]), ("OK", [b"7"]), ("OK", [b""])],
+                ("fetch", "70", FULL_FETCH): [("OK", [(b"message", raw)]), ("OK", [(b"message", raw)])],
+                ("fetch", "70", GMAIL_METADATA_FETCH): [self.gmail_metadata("70", labels=r"\Trash"), self.gmail_metadata("70", labels=r"\Trash")],
+                ("fetch", "7", FULL_FETCH): ("OK", [(b"message", raw)]),
+                ("fetch", "7", GMAIL_METADATA_FETCH): self.gmail_metadata("7"),
+            },
+            self.gmail_mailboxes(),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            source_dir = Path(tmp) / "export"
+            self.write_source_map(source_dir, source)
+            prepare_thread_disposition(source_dir, "batch-0001", "reviewer-1", "200", {"7"}, source_dir / "reason.txt", source_dir / "task-evidence.txt", "not-required")
+            with (
+                patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {"user": "human@example.test"})),
+                patch("omo_manager.omo_manager_mail_compress.mail_boundary", return_value=("agent@example.test", "human@example.test")),
+                patch("omo_manager.omo_manager_mail_compress.additive_recovery_thread_intact", return_value=True),
+            ):
+                with self.assertRaises(RuntimeError):
+                    cmd_recover_already_trashed(ReconcileArgs(source_dir))
+            self.assertFalse((source_dir / "recoveries" / "200.skipped-already-trashed.tsv").exists())
         self.assertFalse(any(call[0].casefold() in {"copy", "move", "store", "expunge"} for call in client.uid_calls))
 
     def test_final_verify_refuses_unclassified_fixed_source(self) -> None:

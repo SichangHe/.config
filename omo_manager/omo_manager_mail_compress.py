@@ -1085,6 +1085,7 @@ def reconciliation_thread_unchanged(
         return False
     select_mailbox(client, all_mailbox, readonly=True)
     records = fetch_records(client, gmail_thread_uids(client, gmail_thrid), with_body=True, with_metadata=True)
+    require_gmail_identities(records)
     all_msgids = {record.gmail_msgid for record in records}
     if any(record.gmail_msgid in all_msgids for record in trash_records):
         return False
@@ -1109,6 +1110,79 @@ def reconciliation_thread_unchanged(
         elif tsv_value(record.labels) != row["labels"]:
             return False
     return True
+
+
+def additive_recovery_thread_intact(
+    client: imaplib.IMAP4_SSL,
+    all_mailbox: str,
+    source_dir: Path,
+    gmail_thrid: str,
+    trash_records: list[MailRecord],
+) -> bool:
+    expected_rows = [
+        row
+        for row in read_tsv(
+            source_dir / "thread-context.tsv",
+            {"gmail_thrid", "gmail_msgid", "msgid_sha256", "raw_sha256", "flags", "labels"},
+        )
+        if row["gmail_thrid"] == gmail_thrid
+    ]
+    expected = {row["gmail_msgid"]: row for row in expected_rows}
+    trashed_msgids = {record.gmail_msgid for record in trash_records}
+    if not expected_rows or len(expected) != len(expected_rows) or len(trashed_msgids) != len(trash_records):
+        return False
+    digest = hashlib.sha256()
+    for row in sorted(expected_rows, key=lambda value: value["gmail_msgid"]):
+        digest.update(
+            "\t".join((row["gmail_msgid"], row["gmail_thrid"], row["msgid_sha256"], row["raw_sha256"], row["flags"], row["labels"])).encode()
+        )
+        digest.update(b"\n")
+    frozen_digest = digest.hexdigest()
+    digest_rows = [row for row in read_tsv(source_dir / "thread-digests.tsv", {"gmail_thrid", "thread_context_sha256"}) if row["gmail_thrid"] == gmail_thrid]
+    manifest_digests = {
+        row["thread_context_sha256"]
+        for row in read_tsv(source_dir / "manifest.tsv", {"gmail_thrid", "thread_context_sha256"})
+        if row["gmail_thrid"] == gmail_thrid
+    }
+    if len(digest_rows) != 1 or digest_rows[0]["thread_context_sha256"] != frozen_digest or manifest_digests != {frozen_digest}:
+        return False
+    select_mailbox(client, all_mailbox, readonly=True)
+    records = fetch_records(client, gmail_thread_uids(client, gmail_thrid), with_body=True, with_metadata=True)
+    require_gmail_identities(records)
+    all_msgids = {record.gmail_msgid for record in records}
+    if len(all_msgids) != len(records) or any(record.gmail_msgid in all_msgids for record in trash_records):
+        return False
+    records.extend(trash_records)
+    actual = {record.gmail_msgid: record for record in records}
+    if len(actual) != len(records) or not set(expected).issubset(actual) or not set(actual) - set(expected):
+        return False
+    for gmail_msgid, row in expected.items():
+        record = actual[gmail_msgid]
+        if (
+            record.gmail_thrid != gmail_thrid
+            or record.msgid_sha256 != row["msgid_sha256"]
+            or record.raw_sha256 != row["raw_sha256"]
+            or tsv_value(record.flags) != row["flags"]
+        ):
+            return False
+        if gmail_msgid in trashed_msgids:
+            labels = imap_label_set(record.labels)
+            frozen_labels = imap_label_set(row["labels"])
+            if r"\inbox" in labels or labels - {r"\trash"} != frozen_labels - {r"\inbox"} or record_has_protected_intent(record):
+                return False
+        elif tsv_value(record.labels) != row["labels"]:
+            return False
+    return all(record.gmail_thrid == gmail_thrid for record in records)
+
+
+def terminal_recovery_text(intent_rows: list[dict[str, str]]) -> str:
+    fields = ("batch_id", "owner", "gmail_thrid", "uid", "disposition", "reason_sha256", "task_evidence_sha256", "replacement", "terminal_recovery")
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=fields, delimiter="\t", lineterminator="\n")
+    writer.writeheader()
+    for row in intent_rows:
+        writer.writerow({**{field: row[field] for field in fields[:-1]}, "terminal_recovery": "skipped_already_trashed"})
+    return output.getvalue()
 
 
 def cmd_reconcile_intent(args: argparse.Namespace) -> int:
@@ -1141,6 +1215,39 @@ def cmd_reconcile_intent(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_recover_already_trashed(args: argparse.Namespace) -> int:
+    _evidence, rows, source_map = intent_reconciliation_evidence(args.source_dir, args.gmail_thrid)
+    if any(row["disposition"] != "trashed" for row in rows):
+        raise RuntimeError("terminal Trash recovery requires an all-trashed immutable intent")
+    expected_mailboxes = export_mailboxes(args.source_dir)
+    client, config = open_mailbox(readonly=True)
+    try:
+        sender_email, recipient_email = mail_boundary(config)
+        select_mailbox(client, "INBOX", readonly=True)
+        expected_uidvalidities = {source["uidvalidity"] for source in source_map.values()}
+        if len(expected_uidvalidities) != 1 or not next(iter(expected_uidvalidities)).isdecimal() or selected_uidvalidity(client) not in expected_uidvalidities:
+            raise RuntimeError("INBOX UIDVALIDITY changed from the frozen source map")
+        if not mailbox_exists(client, TRASH_MAILBOX):
+            raise RuntimeError(f"mailbox is missing: {TRASH_MAILBOX}")
+        if special_use_mailboxes(client).get(r"\All") != expected_mailboxes[r"\All"]:
+            raise RuntimeError("All Mail mailbox identity changed from the frozen source map")
+        observed = observe_reconciliation_locations(client, source_map)
+        require_reconciliation_locations(rows, source_map, observed, sender_email, recipient_email)
+        final_observed = observe_reconciliation_locations(client, source_map)
+        require_reconciliation_locations(rows, source_map, final_observed, sender_email, recipient_email)
+        trash_records = [final_observed["Trash"][row["uid"]] for row in rows]
+        if not additive_recovery_thread_intact(client, expected_mailboxes[r"\All"], args.source_dir, args.gmail_thrid, trash_records):
+            raise RuntimeError("frozen Gmail thread context changed or disappeared")
+        receipt_observed = observe_reconciliation_locations(client, source_map)
+        require_reconciliation_locations(rows, source_map, receipt_observed, sender_email, recipient_email)
+    finally:
+        client.logout()
+    receipt_path = args.source_dir / "recoveries" / f"{args.gmail_thrid}.skipped-already-trashed.tsv"
+    write_private_exclusive(receipt_path, terminal_recovery_text(rows))
+    print(f"recovered_thread={args.gmail_thrid} skipped_already_trashed={len(rows)} mailbox_mutations=0 permanent_deleted=0")
+    return 0
+
+
 def cmd_verify_run(args: argparse.Namespace) -> int:
     run_rows = read_tsv(args.source_dir / "run.tsv", {"fixed_start_utc", "source_count", "thread_count", "threads_per_batch"})
     if len(run_rows) != 1:
@@ -1156,22 +1263,48 @@ def cmd_verify_run(args: argparse.Namespace) -> int:
     if run["source_count"] != str(len(manifest)) or run["thread_count"] != str(len(threads)) or not run["fixed_start_utc"]:
         raise RuntimeError("fixed-start run counts do not match the immutable manifest")
     dispositions: list[dict[str, str]] = []
+    skipped_already_trashed = 0
+    skipped_already_trashed_threads = 0
     for gmail_thrid in sorted(threads):
-        rows = read_tsv(
-            args.source_dir / "outcomes" / f"{gmail_thrid}.tsv",
-            {"batch_id", "owner", "gmail_thrid", "uid", "disposition", "reason_sha256", "task_evidence_sha256", "replacement"},
-        )
+        outcome_path = args.source_dir / "outcomes" / f"{gmail_thrid}.tsv"
+        intent_path = args.source_dir / "intents" / f"{gmail_thrid}.tsv"
+        try:
+            intent = intent_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise RuntimeError(f"fixed-start thread lacks immutable intent: {gmail_thrid}") from exc
+        if outcome_path.exists():
+            if (args.source_dir / "recoveries" / f"{gmail_thrid}.skipped-already-trashed.tsv").exists():
+                raise RuntimeError(f"thread has both normal outcome and terminal recovery evidence: {gmail_thrid}")
+            rows = read_tsv(
+                outcome_path,
+                {"batch_id", "owner", "gmail_thrid", "uid", "disposition", "reason_sha256", "task_evidence_sha256", "replacement"},
+            )
+            outcome = outcome_path.read_text(encoding="utf-8")
+            if intent != outcome:
+                try:
+                    recovery = (args.source_dir / "recoveries" / f"{gmail_thrid}.tsv").read_text(encoding="utf-8")
+                except OSError as exc:
+                    raise RuntimeError(f"changed intent lacks recovery evidence for thread: {gmail_thrid}") from exc
+                if recovery != outcome:
+                    raise RuntimeError(f"recovery evidence does not match outcome for thread: {gmail_thrid}")
+        else:
+            recovery_path = args.source_dir / "recoveries" / f"{gmail_thrid}.skipped-already-trashed.tsv"
+            try:
+                recovery_text = recovery_path.read_text(encoding="utf-8")
+            except OSError as exc:
+                raise RuntimeError(f"fixed-start thread lacks outcome or terminal recovery: {gmail_thrid}") from exc
+            rows = read_tsv_text(
+                recovery_text,
+                {"batch_id", "owner", "gmail_thrid", "uid", "disposition", "reason_sha256", "task_evidence_sha256", "replacement", "terminal_recovery"},
+                recovery_path.name,
+            )
+            intent_rows = read_tsv_text(intent, {"batch_id", "owner", "gmail_thrid", "uid", "disposition", "reason_sha256", "task_evidence_sha256", "replacement"}, intent_path.name)
+            if recovery_text != terminal_recovery_text(intent_rows) or any(row["terminal_recovery"] != "skipped_already_trashed" or row["disposition"] != "trashed" for row in rows):
+                raise RuntimeError(f"invalid terminal recovery evidence for thread: {gmail_thrid}")
+            skipped_already_trashed += len(rows)
+            skipped_already_trashed_threads += 1
         if any(row["gmail_thrid"] != gmail_thrid or row["disposition"] not in {"retained", "trashed"} for row in rows):
             raise RuntimeError(f"invalid disposition outcome for thread: {gmail_thrid}")
-        intent = (args.source_dir / "intents" / f"{gmail_thrid}.tsv").read_text(encoding="utf-8")
-        outcome = (args.source_dir / "outcomes" / f"{gmail_thrid}.tsv").read_text(encoding="utf-8")
-        if intent != outcome:
-            try:
-                recovery = (args.source_dir / "recoveries" / f"{gmail_thrid}.tsv").read_text(encoding="utf-8")
-            except OSError as exc:
-                raise RuntimeError(f"changed intent lacks recovery evidence for thread: {gmail_thrid}") from exc
-            if recovery != outcome:
-                raise RuntimeError(f"recovery evidence does not match outcome for thread: {gmail_thrid}")
         dispositions.extend(rows)
     disposition_uids = [row["uid"] for row in dispositions]
     if len(disposition_uids) != len(set(disposition_uids)) or set(disposition_uids) != set(manifest_uids):
@@ -1187,7 +1320,7 @@ def cmd_verify_run(args: argparse.Namespace) -> int:
         require_batch_owner(args.source_dir, row["batch_id"], row["owner"])
     retained = sum(row["disposition"] == "retained" for row in dispositions)
     trashed = sum(row["disposition"] == "trashed" for row in dispositions)
-    print(f"fixed_start_verified=1 sources={len(manifest)} threads={len(threads)} retained={retained} trashed={trashed} later_arrivals_included=0 live_full_scan=0 permanent_deleted=0")
+    print(f"fixed_start_verified=1 sources={len(manifest)} threads={len(threads)} retained={retained} trashed={trashed - skipped_already_trashed} skipped_already_trashed={skipped_already_trashed} skipped_already_trashed_threads={skipped_already_trashed_threads} later_arrivals_included=0 live_full_scan=0 permanent_deleted=0")
     return 0
 
 
@@ -1602,6 +1735,10 @@ def parser() -> argparse.ArgumentParser:
     reconcile.add_argument("--source-dir", type=Path, required=True)
     reconcile.add_argument("--gmail-thread-id", dest="gmail_thrid", required=True)
     reconcile.set_defaults(func=cmd_reconcile_intent)
+    recover_trashed = sub.add_parser("recover-already-trashed", help="Read-only terminal recovery when every frozen intent source is already exact in Trash and only later thread context was added.")
+    recover_trashed.add_argument("--source-dir", type=Path, required=True)
+    recover_trashed.add_argument("--gmail-thread-id", dest="gmail_thrid", required=True)
+    recover_trashed.set_defaults(func=cmd_recover_already_trashed)
     verify = sub.add_parser("verify-run", help="Reconcile final outcomes against only the immutable fixed-start set.")
     verify.add_argument("--source-dir", type=Path, required=True)
     verify.set_defaults(func=cmd_verify_run)
