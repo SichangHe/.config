@@ -81,6 +81,8 @@ DELIVERY_EVENT_VERSION = "omo-pending-watch-delivery-event-v1"
 CODEX_LAUNCH_COMMAND = "bunx"
 SUPPORTED_CODEX_PROCESS_COMMANDS = {"bun", "codex"}
 ROTATION_AUDIT_MAX_BYTES = 64 * 1024
+RECONCILABLE_ROTATION_FAILURE_KIND = "post-respawn-new-session-id-capture-failed"
+ROTATION_ELIGIBILITY_XATTR = "user.omo_rotation_reconciliation_eligible_sha256"
 PCODX_LAUNCH_COMMAND = str(HELPER_DIR / "pcodx")
 UPDATE_AVAILABLE_RE = re.compile(r"^✨\s*Update available! [0-9]+\.[0-9]+\.[0-9]+ -> [0-9]+\.[0-9]+\.[0-9]+$")
 UPDATE_PROMPT_SUFFIX = (
@@ -94,6 +96,10 @@ UPDATE_PROMPT_SUFFIX = (
 
 class StartError(RuntimeError):
     """A same-pane launch precondition or operation failed."""
+
+
+class NewSessionIdCaptureFailed(StartError):
+    """The validated replacement exposed no UUID after successful startup."""
 
 
 @dataclass(frozen=True)
@@ -897,11 +903,12 @@ def reserve_rotation_audit(path: Path, text: str) -> None:
         raise StartError(f"could not reserve private rotation audit: {error}") from error
 
 
-def finish_rotation_audit(path: Path, prepared: str, result: str, new_session_id: str = "") -> None:
+def finish_rotation_audit(path: Path, prepared: str, result: str, new_session_id: str = "", failure_kind: str = "") -> None:
     """Finalize only the exact owner-private rotation audit reserved by this run."""
 
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     temporary: Path | None = None
+    installed = False
     try:
         fd = os.open(path, flags)
         with os.fdopen(fd, "r", encoding="utf-8") as output:
@@ -910,11 +917,12 @@ def finish_rotation_audit(path: Path, prepared: str, result: str, new_session_id
                 raise StartError("reserved rotation audit lost its owner-private file binding.")
             if output.read() != prepared:
                 raise StartError("reserved rotation audit changed before completion.")
-        suffix = f"new-session-id: {new_session_id}\n" if new_session_id else ""
+        suffix = f"new-session-id: {new_session_id}\n" if new_session_id else f"failure-kind: {failure_kind}\n" if failure_kind else ""
+        finalized = prepared + suffix + f"final-result: {result}\n"
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False) as output:
             temporary = Path(output.name)
             os.fchmod(output.fileno(), 0o600)
-            output.write(prepared + suffix + f"final-result: {result}\n")
+            output.write(finalized)
             output.flush()
             os.fsync(output.fileno())
         latest = path.stat()
@@ -922,13 +930,50 @@ def finish_rotation_audit(path: Path, prepared: str, result: str, new_session_id
             raise StartError("reserved rotation audit changed before atomic finalization.")
         os.replace(temporary, path)
         temporary = None
+        installed = True
         directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
         try:
             os.fsync(directory_fd)
         finally:
             os.close(directory_fd)
+        if failure_kind:
+            os.setxattr(path, ROTATION_ELIGIBILITY_XATTR, hashlib.sha256(finalized.encode()).hexdigest().encode(), follow_symlinks=False)
     except OSError as error:
-        raise StartError(f"could not finalize private rotation audit: {error}") from error
+        rollback_error: OSError | None = None
+        if installed and failure_kind:
+            rollback_temporary: Path | None = None
+            try:
+                with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.rollback.", delete=False) as output:
+                    rollback_temporary = Path(output.name)
+                    os.fchmod(output.fileno(), 0o600)
+                    output.write(prepared)
+                    output.flush()
+                    os.fsync(output.fileno())
+                os.replace(rollback_temporary, path)
+                rollback_temporary = None
+                directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            except OSError as caught:
+                rollback_error = caught
+                try:
+                    restored = path.read_text(encoding="utf-8") == prepared
+                except (OSError, UnicodeError):
+                    restored = False
+                if not restored:
+                    try:
+                        path.unlink(missing_ok=True)
+                    except OSError as removal_error:
+                        rollback_error.add_note(f"eligible audit removal also failed: {removal_error}")
+            finally:
+                if rollback_temporary is not None:
+                    rollback_temporary.unlink(missing_ok=True)
+        finalization_error = StartError(f"could not finalize private rotation audit: {error}")
+        if rollback_error is not None:
+            finalization_error.add_note(f"eligible audit rollback also faulted; missing eligibility commit keeps the audit unreconcilable: {rollback_error}")
+        raise finalization_error from error
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
@@ -1017,6 +1062,7 @@ FAILED_ROTATION_AUDIT_FIELDS = {
     "replacement-window-id",
     "replacement-pane-pid",
     "replacement-command",
+    "failure-kind",
     "final-result",
 }
 
@@ -1048,6 +1094,10 @@ def read_failed_rotation_audit(path: Path, expected_sha256: str) -> RotationAudi
             fd = -1
             content = stream.read()
             after = os.fstat(stream.fileno())
+            try:
+                eligibility_commit = os.getxattr(stream.fileno(), ROTATION_ELIGIBILITY_XATTR)
+            except OSError:
+                eligibility_commit = b""
     except (OSError, UnicodeError) as error:
         raise StartError(f"could not read rotation audit: {error}") from error
     finally:
@@ -1061,6 +1111,8 @@ def read_failed_rotation_audit(path: Path, expected_sha256: str) -> RotationAudi
     digest = hashlib.sha256(content).hexdigest()
     if SHA256_RE.fullmatch(expected_sha256) is None or digest != expected_sha256:
         raise StartError("rotation audit bytes do not match the expected SHA-256.")
+    if eligibility_commit != digest.encode():
+        raise StartError("rotation audit lacks the exact committed reconciliation eligibility evidence.")
     if not content.endswith(b"\n") or b"\r" in content:
         raise StartError("rotation audit must use canonical LF-terminated bytes.")
     try:
@@ -1075,7 +1127,12 @@ def read_failed_rotation_audit(path: Path, expected_sha256: str) -> RotationAudi
         fields[key] = value
     if set(fields) != FAILED_ROTATION_AUDIT_FIELDS:
         raise StartError("rotation audit does not have the exact failed-rotation schema.")
-    if fields["operation"] != "rotate-worker" or fields["completion"] != "unknown-until-finalized" or fields["final-result"] != "failed":
+    if (
+        fields["operation"] != "rotate-worker"
+        or fields["completion"] != "unknown-until-finalized"
+        or fields["failure-kind"] != RECONCILABLE_ROTATION_FAILURE_KIND
+        or fields["final-result"] != "failed"
+    ):
         raise StartError("rotation audit is not one exact failed rotate-worker record.")
     return RotationAuditBinding(path, before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, content, text, digest, fields)
 
@@ -1833,7 +1890,7 @@ def verify_fresh_rotation(args: Args, original: Pane, original_session_id: str, 
     verify_task_binding(args, current, task)
     fresh_session_id, _ = query_status_session_id(current.pane_id, 240, min(10.0, args.startup_timeout_s))
     if not fresh_session_id:
-        raise StartError("rotated worker did not expose a new Codex session id.")
+        raise NewSessionIdCaptureFailed("rotated worker did not expose a new Codex session id.")
     if fresh_session_id == original_session_id:
         raise StartError("rotated worker resumed the old Codex session instead of starting fresh.")
     return fresh_session_id
@@ -2021,6 +2078,12 @@ def start(args: Args) -> str:
                         active_audit, _replacement = checkpoint_rotation_replacement(audit_path, prepared_audit, pane, args, task_binding)
                         result = wait_started(pane, marker, args.startup_timeout_s)
                         new_session_id = verify_fresh_rotation(args, pane, original_session_id, task_binding)
+                    except NewSessionIdCaptureFailed as rotation_error:
+                        try:
+                            finish_rotation_audit(audit_path, active_audit, "failed", failure_kind=RECONCILABLE_ROTATION_FAILURE_KIND)
+                        except Exception as audit_error:
+                            rotation_error.add_note(f"private audit finalization also failed; audit remains completion-unknown: {audit_error}")
+                        raise
                     except Exception as rotation_error:
                         try:
                             finish_rotation_audit(audit_path, active_audit, "failed")
