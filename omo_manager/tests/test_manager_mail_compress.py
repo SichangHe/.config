@@ -1042,14 +1042,16 @@ class ManagerMailCompressTests(unittest.TestCase):
         )
         self.assertEqual({r"\All": "&ZeVnLIqe-", r"\Sent": "&ZeVnLIqe-/Sent"}, special_use_mailboxes(client))
 
-    def test_replacement_requires_one_exact_sent_message_to_human(self) -> None:
+    def test_replacement_requires_one_exact_message_from_agent_to_human(self) -> None:
         replacement = b"From: Agent <agent@example.test>\r\nTo: Human <human@example.test>\r\nMessage-ID: <replacement@example.test>\r\n\r\nsummary\r\n"
         wrong_recipient = replacement.replace(b"human@example.test", b"other@example.test")
+        wrong_sender = replacement.replace(b"agent@example.test", b"other@example.test")
         cases = (
             ("unique", ("OK", [b"90"]), replacement, True),
             ("missing", ("OK", [b""]), replacement, False),
             ("ambiguous", ("OK", [b"90 91"]), replacement, False),
             ("wrong-recipient", ("OK", [b"90"]), wrong_recipient, False),
+            ("wrong-sender", ("OK", [b"90"]), wrong_sender, False),
         )
         for name, search_result, raw, expected in cases:
             with self.subTest(name=name):
@@ -1059,7 +1061,16 @@ class ManagerMailCompressTests(unittest.TestCase):
                         ("fetch", "90", HEADER_FETCH): ("OK", [(b"header", raw)]),
                     }
                 )
-                self.assertEqual(expected, replacement_exists(client, "[Gmail]/Sent Mail", "<replacement@example.test>", "human@example.test"))
+                self.assertEqual(
+                    expected,
+                    replacement_exists(
+                        client,
+                        "[Gmail]/All Mail",
+                        "<replacement@example.test>",
+                        "agent@example.test",
+                        "human@example.test",
+                    ),
+                )
 
     def test_trash_superseded_requires_yes(self) -> None:
         self.assertEqual(2, cmd_trash_superseded(Args(uids="7")))
@@ -1107,6 +1118,80 @@ class ManagerMailCompressTests(unittest.TestCase):
                 self.assertEqual(1, cmd_trash_superseded(args))
 
         self.assertFalse(any(call[0] == "MOVE" for call in client.uid_calls))
+
+    def test_trash_superseded_verifies_split_account_replacement_in_recipient_all_mail(self) -> None:
+        source_raw = self.raw_message("[worker:0] complete")
+        source = MailRecord(
+            "7",
+            "date",
+            "Agent <agent@example.test>",
+            "Human <human@example.test>",
+            "[worker:0] complete",
+            hashlib.sha256(b"<one@example.test>").hexdigest()[:12],
+            "body\n",
+            "100",
+            "200",
+            "",
+            r"\Inbox",
+            hashlib.sha256(source_raw).hexdigest(),
+        )
+        replacement = b"From: Agent <agent@example.test>\r\nTo: Human <human@example.test>\r\nMessage-ID: <replacement@example.test>\r\n\r\nsummary\r\n"
+
+        class RecipientMailboxClient(FakeClient):
+            current_mailbox = "INBOX"
+
+            def select(self, mailbox: str, readonly: bool = False) -> tuple[str, list[bytes]]:
+                self.current_mailbox = mailbox
+                return super().select(mailbox, readonly)
+
+            def uid(self, *args: str) -> tuple[str, list[bytes | tuple[bytes, bytes]]]:
+                if args == ("search", None, "HEADER", "Message-ID", '"<replacement@example.test>"') and self.current_mailbox != '"[Gmail]/All Mail"':
+                    self.uid_calls.append(args)
+                    return "OK", [b""]
+                return super().uid(*args)
+
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+
+        cases = (
+            ("exact", replacement, True),
+            ("wrong-sender", replacement.replace(b"agent@example.test", b"other@example.test"), False),
+            ("wrong-recipient", replacement.replace(b"human@example.test", b"other@example.test"), False),
+        )
+        for name, replacement_raw, expected_move in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                client = RecipientMailboxClient(
+                    {
+                        ("search", None, "HEADER", "Message-ID", '"<replacement@example.test>"'): ("OK", [b"90"]),
+                        ("fetch", "90", HEADER_FETCH): ("OK", [(b"header", replacement_raw)]),
+                        ("search", None, "UID", "7"): [("OK", [b"7"]), ("OK", [b"7"]), ("OK", [b"7"]), ("OK", [b""])],
+                        ("fetch", "7", FULL_FETCH): ("OK", [(b"message", source_raw)]),
+                        ("fetch", "7", GMAIL_METADATA_FETCH): self.gmail_metadata("7"),
+                        ("search", None, "X-GM-THRID", "200"): ("OK", [b"70"]),
+                        ("search", None, "X-GM-MSGID", "100"): ("OK", [b"70"]),
+                        ("fetch", "70", FULL_FETCH): ("OK", [(b"message", source_raw)]),
+                        ("fetch", "70", GMAIL_METADATA_FETCH): [
+                            self.gmail_metadata("70"),
+                            self.gmail_metadata("70"),
+                            self.gmail_metadata("70", labels=r"\Trash"),
+                        ],
+                        ("MOVE", "7", '"[Gmail]/Trash"'): ("OK", [b""]),
+                    },
+                    self.gmail_mailboxes(),
+                )
+                uid_file = self.write_source_map(Path(tmp) / "export", source)
+                args = Args(uid_file=uid_file, yes=True)
+                args.replacement_id = "<replacement@example.test>"
+                args.replacement_not_required = False
+                with (
+                    patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {"user": "human@example.test"})),
+                    patch("omo_manager.omo_manager_mail_compress.configured_agent_mail", return_value=Settings()),
+                ):
+                    self.assertEqual(0 if expected_move else 1, cmd_trash_superseded(args))
+                self.assertEqual(expected_move, any(call[0] == "MOVE" for call in client.uid_calls))
+                self.assertIn(('"[Gmail]/All Mail"', True), client.select_calls)
+                self.assertNotIn(('"[Gmail]/Sent Mail"', True), client.select_calls)
 
     def test_trash_superseded_moves_only_revalidated_source(self) -> None:
         raw = self.raw_message("[worker:0] complete")

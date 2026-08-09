@@ -1286,13 +1286,14 @@ def record_matches_source_map(record: MailRecord, source: dict[str, str]) -> boo
 
 def replacement_exists(
     client: imaplib.IMAP4_SSL,
-    sent_mailbox: str,
+    mailbox: str,
     replacement_id: str,
+    sender_email: str,
     recipient_email: str,
 ) -> bool:
     if not re.fullmatch(r"<[^<>\s]+>", replacement_id):
         return False
-    select_mailbox(client, sent_mailbox, readonly=True)
+    select_mailbox(client, mailbox, readonly=True)
     try:
         typ, data = client.uid("search", None, "HEADER", "Message-ID", imap_quoted(replacement_id))  # pyright: ignore[reportArgumentType]
         if typ != "OK":
@@ -1301,8 +1302,9 @@ def replacement_exists(
         if len(uids) != 1:
             return False
         msg, _digest = fetch_msg(client, uids[0], HEADER_FETCH)
+        senders = [address.casefold() for _name, address in getaddresses(msg.get_all("From", [])) if address]
         recipients = [address.casefold() for _name, address in getaddresses(msg.get_all("To", [])) if address]
-        return rfc_message_id(msg) == replacement_id and recipient_email.casefold() in recipients
+        return rfc_message_id(msg) == replacement_id and senders == [sender_email.casefold()] and recipient_email.casefold() in recipients
     finally:
         select_mailbox(client, "INBOX", readonly=False)
 
@@ -1488,8 +1490,14 @@ def cmd_trash_superseded(args: argparse.Namespace) -> int:
         if current_mailboxes.get(r"\All") != expected_mailboxes[r"\All"] or current_mailboxes.get(r"\Sent") != expected_mailboxes[r"\Sent"]:
             print("refusing because special-use mailbox identity changed", file=sys.stderr)
             return 1
-        if args.replacement_id and not replacement_exists(client, expected_mailboxes[r"\Sent"], args.replacement_id, recipient_email):
-            print("refusing because the recorded replacement was not found in Sent", file=sys.stderr)
+        if args.replacement_id and not replacement_exists(
+            client,
+            expected_mailboxes[r"\All"],
+            args.replacement_id,
+            sender_email,
+            recipient_email,
+        ):
+            print("refusing because the recorded replacement was not found in the recipient mailbox", file=sys.stderr)
             return 1
         still_in_inbox = inbox_subset(client, requested)
         already_trashed = set(requested) - set(still_in_inbox)
