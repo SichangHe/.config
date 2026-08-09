@@ -737,6 +737,13 @@ def read_tsv(path: Path, required_fields: set[str]) -> list[dict[str, str]]:
         raise RuntimeError(f"could not read private source map: {path.name}") from exc
 
 
+def read_tsv_text(text: str, required_fields: set[str], evidence_name: str) -> list[dict[str, str]]:
+    reader = csv.DictReader(io.StringIO(text), delimiter="\t")
+    if reader.fieldnames is None or not required_fields.issubset(reader.fieldnames):
+        raise RuntimeError(f"private source map is missing required fields: {evidence_name}")
+    return [{key: value or "" for key, value in row.items()} for row in reader]
+
+
 def export_source_map(out_dir: Path, requested: list[str]) -> dict[str, dict[str, str]]:
     rows = read_tsv(
         out_dir / "manifest.tsv",
@@ -967,7 +974,7 @@ def intent_reconciliation_evidence(source_dir: Path, gmail_thrid: str) -> tuple[
     except OSError as exc:
         raise RuntimeError("thread has no readable immutable intent") from exc
     fields = {"batch_id", "owner", "gmail_thrid", "uid", "disposition", "reason_sha256", "task_evidence_sha256", "replacement"}
-    rows = read_tsv(intent_path, fields)
+    rows = read_tsv_text(evidence, fields, intent_path.name)
     if not rows or any(
         row["gmail_thrid"] != gmail_thrid
         or row["disposition"] not in {"retained", "trashed"}
@@ -1110,16 +1117,22 @@ def cmd_reconcile_intent(args: argparse.Namespace) -> int:
     client, config = open_mailbox(readonly=True)
     try:
         sender_email, recipient_email = mail_boundary(config)
+        select_mailbox(client, "INBOX", readonly=True)
+        expected_uidvalidities = {source["uidvalidity"] for source in source_map.values()}
+        if len(expected_uidvalidities) != 1 or not next(iter(expected_uidvalidities)).isdecimal() or selected_uidvalidity(client) not in expected_uidvalidities:
+            raise RuntimeError("INBOX UIDVALIDITY changed from the frozen source map")
         if not mailbox_exists(client, TRASH_MAILBOX):
             raise RuntimeError(f"mailbox is missing: {TRASH_MAILBOX}")
+        if special_use_mailboxes(client).get(r"\All") != expected_mailboxes[r"\All"]:
+            raise RuntimeError("All Mail mailbox identity changed from the frozen source map")
         observed = observe_reconciliation_locations(client, source_map)
         require_reconciliation_locations(rows, source_map, observed, sender_email, recipient_email)
         trashed_msgids = {source_map[row["uid"]]["gmail_msgid"] for row in rows if row["disposition"] == "trashed"}
-        trash_records = [observed["Trash"][row["uid"]] for row in rows if row["disposition"] == "trashed"]
-        if not reconciliation_thread_unchanged(client, expected_mailboxes[r"\All"], args.source_dir, args.gmail_thrid, trashed_msgids, trash_records):
-            raise RuntimeError("complete Gmail thread context changed")
         final_observed = observe_reconciliation_locations(client, source_map)
         require_reconciliation_locations(rows, source_map, final_observed, sender_email, recipient_email)
+        final_trash_records = [final_observed["Trash"][row["uid"]] for row in rows if row["disposition"] == "trashed"]
+        if not reconciliation_thread_unchanged(client, expected_mailboxes[r"\All"], args.source_dir, args.gmail_thrid, trashed_msgids, final_trash_records):
+            raise RuntimeError("complete Gmail thread context changed")
     finally:
         client.logout()
     write_private_exclusive(args.source_dir / "outcomes" / f"{args.gmail_thrid}.tsv", evidence)
@@ -1363,6 +1376,28 @@ def verify_post_move_imap(
     )
 
 
+def verified_existing_trash_records(
+    client: imaplib.IMAP4_SSL,
+    source_map: dict[str, dict[str, str]],
+    sender_email: str,
+    recipient_email: str,
+) -> list[MailRecord]:
+    select_mailbox(client, TRASH_MAILBOX, readonly=True)
+    records: list[MailRecord] = []
+    try:
+        for source in source_map.values():
+            uids = gmail_message_uids(client, source["gmail_msgid"])
+            if len(uids) != 1:
+                raise RuntimeError("interrupted source was absent or ambiguous in Trash")
+            record = fetch_record(client, uids[0], with_body=True, with_metadata=True)
+            if not is_manager_record(record, sender_email, recipient_email) or not record_matches_reconciliation_location(record, source, "Trash"):
+                raise RuntimeError("interrupted Trash source identity, content, flags, or labels changed")
+            records.append(record)
+        return records
+    finally:
+        select_mailbox(client, "INBOX", readonly=False)
+
+
 def cmd_trash_superseded(args: argparse.Namespace) -> int:
     if not args.yes:
         print("refusing to move superseded mail to Trash without --yes", file=sys.stderr)
@@ -1425,22 +1460,16 @@ def cmd_trash_superseded(args: argparse.Namespace) -> int:
             print("refusing because the recorded replacement was not found in Sent", file=sys.stderr)
             return 1
         still_in_inbox = inbox_subset(client, requested)
-        if not still_in_inbox:
-            post_move = verify_post_move_imap(client, source_map, sender_email, recipient_email)
-            if post_move.verified_message_count != len(requested) or not post_move.complete:
-                print("refusing because an interrupted intent is neither intact in INBOX nor verified in Trash", file=sys.stderr)
-                return 1
-            write_private_exclusive(source_dir / "outcomes" / f"{args.gmail_thrid}.tsv", outcome_evidence)
-            print(
-                f"trash_superseded: requested={len(requested)} moved=0 already_not_in_inbox={len(requested)}"
-                f" verify_remaining=0 verify_trash_count={post_move.verified_message_count}"
-                f" verify_thread_count={post_move.verified_thread_count} verify_changed_thread_count={post_move.changed_thread_count}"
-                f" verify_protected_count={post_move.protected_count} verify_imap_failure_count={post_move.imap_failure_count}"
-                f" same_mailbox_after_move={int(post_move.same_mailbox)} permanent_deleted=0"
+        already_trashed = set(requested) - set(still_in_inbox)
+        try:
+            existing_trash_records = verified_existing_trash_records(
+                client,
+                {uid: source_map[uid] for uid in requested if uid in already_trashed},
+                sender_email,
+                recipient_email,
             )
-            return 0
-        if set(still_in_inbox) != set(requested):
-            print("refusing because a planned source left INBOX", file=sys.stderr)
+        except RuntimeError as exc:
+            print(str(exc), file=sys.stderr)
             return 1
         records = [replace(record, source_uidvalidity=expected_uidvalidity) for record in fetch_records(client, still_in_inbox, with_body=True, with_metadata=True)]
         require_gmail_identities(records)
@@ -1453,17 +1482,26 @@ def cmd_trash_superseded(args: argparse.Namespace) -> int:
         if any(not record_matches_source_map(record, source_map[record.uid]) for record in records):
             print("refusing because source identity, flags, labels, or content changed", file=sys.stderr)
             return 1
-        if not revalidate_thread_contexts(
-            client,
-            expected_mailboxes[r"\All"],
-            source_map,
-            sender_email,
-            recipient_email,
-        ):
+        existing_trash_msgids = {record.gmail_msgid for record in existing_trash_records}
+        thread_unchanged = (
+            reconciliation_thread_unchanged(
+                client,
+                expected_mailboxes[r"\All"],
+                source_dir,
+                args.gmail_thrid,
+                existing_trash_msgids,
+                existing_trash_records,
+            )
+            if existing_trash_records
+            else revalidate_thread_contexts(client, expected_mailboxes[r"\All"], source_map, sender_email, recipient_email)
+        )
+        if existing_trash_records:
+            select_mailbox(client, "INBOX", readonly=False)
+        if not thread_unchanged:
             print("refusing because complete Gmail thread context changed", file=sys.stderr)
             return 1
         still_in_inbox = inbox_subset(client, requested)
-        if set(still_in_inbox) != set(requested):
+        if set(still_in_inbox) != set(requested) - already_trashed:
             print("refusing because a planned source changed during revalidation", file=sys.stderr)
             return 1
         final_records = [replace(record, source_uidvalidity=expected_uidvalidity) for record in fetch_records(client, still_in_inbox, with_body=True, with_metadata=True)]
@@ -1471,17 +1509,37 @@ def cmd_trash_superseded(args: argparse.Namespace) -> int:
         if any(not is_manager_record(record, sender_email, recipient_email) or not record_matches_source_map(record, source_map[record.uid]) for record in final_records):
             print("refusing because a planned source changed immediately before move", file=sys.stderr)
             return 1
-        if not revalidate_thread_contexts(
-            client,
-            expected_mailboxes[r"\All"],
-            source_map,
-            sender_email,
-            recipient_email,
-        ):
+        if existing_trash_records:
+            try:
+                existing_trash_records = verified_existing_trash_records(
+                    client,
+                    {uid: source_map[uid] for uid in requested if uid in already_trashed},
+                    sender_email,
+                    recipient_email,
+                )
+            except RuntimeError as exc:
+                print(str(exc), file=sys.stderr)
+                return 1
+            existing_trash_msgids = {record.gmail_msgid for record in existing_trash_records}
+        thread_unchanged = (
+            reconciliation_thread_unchanged(
+                client,
+                expected_mailboxes[r"\All"],
+                source_dir,
+                args.gmail_thrid,
+                existing_trash_msgids,
+                existing_trash_records,
+            )
+            if existing_trash_records
+            else revalidate_thread_contexts(client, expected_mailboxes[r"\All"], source_map, sender_email, recipient_email)
+        )
+        if existing_trash_records:
+            select_mailbox(client, "INBOX", readonly=False)
+        if not thread_unchanged:
             print("refusing because complete Gmail thread context changed immediately before move", file=sys.stderr)
             return 1
         still_in_inbox = inbox_subset(client, requested)
-        if set(still_in_inbox) != set(requested):
+        if set(still_in_inbox) != set(requested) - already_trashed:
             print("refusing because a planned source left INBOX immediately before move", file=sys.stderr)
             return 1
         if still_in_inbox:
