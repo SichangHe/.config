@@ -5,6 +5,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,12 +28,15 @@ from omo_manager.omo_codex_start import (
     parse_args,
     post_marker_lines,
     prompt_text,
+    query_reconciliation_session_id,
+    reconcile_rotation_audit,
     record_recovery_evidence,
     recovery_issuance_path,
     require_human_restart_authority,
     require_recovery_target,
     require_same_shell,
     require_update_prompt,
+    reserve_reconciliation_receipt,
     reserve_rotation_audit,
     resolve_pane,
     respawn_codex,
@@ -85,6 +89,64 @@ class CodexStartTests(unittest.TestCase):
         }
         values.update(changes)
         return self.rotation_args(root, **values)
+
+    def write_failed_rotation_audit(self, root: Path, pane: Pane, **changes: str) -> Path:
+        task = root / "worker.md"
+        protected = ("protected:9",)
+        fields = {
+            "operation": "rotate-worker",
+            "task-file": "worker.md",
+            "target": pane.target,
+            "pane-id": pane.pane_id,
+            "window-id": pane.window_id,
+            "old-pane-pid": "4242",
+            "old-command": "bun",
+            "old-session-id": self.SESSION_ID,
+            "legacy-missing-session-id": "not-asserted",
+            "task-sha256": hashlib.sha256(task.read_bytes()).hexdigest(),
+            "status": "blocked",
+            "blocker-sha256": hashlib.sha256(b"model capacity").hexdigest(),
+            "manager-target": "cfg:1",
+            "pending-items-sha256": hashlib.sha256(b"preserve exact queue").hexdigest(),
+            "protected-target-count": str(len(protected)),
+            "protected-targets-sha256": hashlib.sha256("\0".join(protected).encode()).hexdigest(),
+            "is-manager": "false",
+            "tool": "codex",
+            "completion": "unknown-until-finalized",
+            "replacement-observed": "true",
+            "replacement-target": pane.target,
+            "replacement-pane-id": pane.pane_id,
+            "replacement-window-id": pane.window_id,
+            "replacement-pane-pid": str(pane.pane_pid),
+            "replacement-command": pane.command,
+            "final-result": "failed",
+        }
+        fields.update(changes)
+        audit = root / "rotation.audit"
+        audit.write_text("\n".join(f"{key}: {value}" for key, value in fields.items()) + "\n", encoding="utf-8")
+        audit.chmod(0o600)
+        return audit
+
+    def reconciliation_args(self, root: Path, pane: Pane, **changes: object) -> Args:
+        audit = root / "rotation.audit"
+        values: dict[str, object] = {
+            "session_id": "",
+            "confirm_empty_shell": False,
+            "reconcile_rotation_audit": True,
+            "rotation_audit": audit,
+            "expected_rotation_audit_sha256": hashlib.sha256(audit.read_bytes()).hexdigest(),
+            "reconciliation_receipt": root / "reconciliation.receipt",
+            "expected_task_sha256": hashlib.sha256((root / "worker.md").read_bytes()).hexdigest(),
+            "expected_status": "blocked",
+            "expected_blocker": "model capacity",
+            "expected_owner_target": "cfg:1",
+            "expected_pending_items": ("preserve exact queue",),
+            "protected_targets": ("protected:9",),
+            "expected_current_pane_pid": pane.pane_pid,
+            "expected_current_command": pane.command,
+        }
+        values.update(changes)
+        return self.args(root, **values)
 
     def update_prompt_lines(self, session_id: str = SESSION_ID) -> list[str]:
         return [
@@ -553,6 +615,403 @@ class CodexStartTests(unittest.TestCase):
             audit = root / "rotation.audit"
             self.assertEqual(0o600, audit.stat().st_mode & 0o777)
             self.assertIn(f"new-session-id: {new_session}\nfinal-result: success\n", audit.read_text(encoding="utf-8"))
+
+    def test_rotate_worker_checkpoints_after_wrapper_becomes_supported_process(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root, status="blocked", pending=["preserve exact queue"])
+            initial = Pane("cfg:2.0", "%2", "@2", "bun", root, 4242)
+            wrapper = replace(initial, command="zsh", pane_pid=5252)
+            replacement = replace(initial, pane_pid=5252)
+            rotated = False
+            post_respawn_resolutions = 0
+
+            def resolve(_target: str) -> Pane:
+                nonlocal post_respawn_resolutions
+                if not rotated:
+                    return initial
+                post_respawn_resolutions += 1
+                return wrapper if post_respawn_resolutions == 1 else replacement
+
+            def respawn(_pane: Pane, _command: str) -> None:
+                nonlocal rotated
+                rotated = True
+
+            sessions = iter(((self.SESSION_ID, ""), (self.SESSION_ID, ""), (self.SESSION_ID, ""), ("119f670b-6a2f-7463-b9be-9aa6ff0cec43", "")))
+            with (
+                patch("omo_manager.omo_codex_start.resolve_pane", side_effect=resolve),
+                patch("omo_manager.omo_codex_start.inspect", return_value=Report("running", ["working"])),
+                patch("omo_manager.omo_codex_start.query_status_session_id", side_effect=lambda *_args: next(sessions)),
+                patch("omo_manager.omo_codex_start.prompt_text", return_value="worker-only prompt\n"),
+                patch("omo_manager.omo_codex_start.respawn_codex", side_effect=respawn),
+                patch("omo_manager.omo_codex_start.wait_started", return_value="running"),
+                patch("omo_manager.omo_codex_start.time.sleep"),
+            ):
+                self.assertEqual("running", start(self.rotation_args(root)))
+            audit = (root / "rotation.audit").read_text(encoding="utf-8")
+            self.assertIn("replacement-observed: true\nreplacement-target: cfg:2.0\n", audit)
+            self.assertIn("replacement-pane-pid: 5252\nreplacement-command: bun\n", audit)
+
+    def test_reconcile_rotation_audit_parser_requires_all_assertions_and_is_mutually_exclusive(self) -> None:
+        common = [
+            "--task-file",
+            "worker.md",
+            "--target",
+            "cfg:2",
+            "--reconcile-rotation-audit",
+            "--rotation-audit",
+            "/tmp/rotation.audit",
+            "--expected-rotation-audit-sha256",
+            "a" * 64,
+            "--reconciliation-receipt",
+            "/tmp/reconciliation.receipt",
+            "--expected-task-sha256",
+            "b" * 64,
+            "--expected-status",
+            "blocked",
+            "--expected-blocker",
+            "model capacity",
+            "--expected-owner-target",
+            "cfg:1",
+            "--expected-pending-item",
+            "preserve exact queue",
+            "--protected-target",
+            "protected:9",
+            "--expected-current-pane-pid",
+            "5252",
+            "--expected-current-command",
+            "bun",
+        ]
+        args = parse_args(common)
+        self.assertTrue(args.reconcile_rotation_audit)
+        self.assertEqual(("preserve exact queue",), args.expected_pending_items)
+        self.assertEqual(("protected:9",), args.protected_targets)
+        for missing in (
+            "--rotation-audit",
+            "--expected-rotation-audit-sha256",
+            "--reconciliation-receipt",
+            "--expected-task-sha256",
+            "--expected-status",
+            "--expected-blocker",
+            "--expected-owner-target",
+            "--expected-pending-item",
+            "--protected-target",
+            "--expected-current-pane-pid",
+            "--expected-current-command",
+        ):
+            with self.subTest(missing=missing), self.assertRaises(SystemExit):
+                index = common.index(missing)
+                parse_args(common[:index] + common[index + 2 :])
+        for incompatible in ("--rotate-worker", "--restart-running", "--record-recovery-evidence", "--recover-update-prompt", "--dry-run"):
+            with self.subTest(incompatible=incompatible), self.assertRaises(SystemExit):
+                parse_args([*common, incompatible])
+
+    def test_reconcile_rotation_audit_records_later_uuid_without_launch_or_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root, status="blocked", pending=["preserve exact queue"])
+            pane = Pane("cfg:2.0", "%2", "@2", "bun", root, 5252)
+            audit = self.write_failed_rotation_audit(root, pane)
+            args = self.reconciliation_args(root, pane)
+            task_before = (root / "worker.md").read_bytes()
+            audit_before = audit.read_bytes()
+            audit_stat = audit.stat()
+            new_session = "119f670b-6a2f-7463-b9be-9aa6ff0cec43"
+            with (
+                patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                patch("omo_manager.omo_codex_start.query_reconciliation_session_id", return_value=new_session) as query,
+                patch("omo_manager.omo_codex_start.respawn_codex") as respawn,
+                patch("omo_manager.omo_codex_start.send_shell_command") as send,
+            ):
+                self.assertEqual("rotation-audit-reconciled", reconcile_rotation_audit(args))
+            query.assert_called_once()
+            self.assertEqual(("%2", 5252, "bun", 240, 10.0), (query.call_args.args[0].pane_id, query.call_args.args[0].pane_pid, query.call_args.args[0].command, *query.call_args.args[1:]))
+            respawn.assert_not_called()
+            send.assert_not_called()
+            self.assertEqual(task_before, (root / "worker.md").read_bytes())
+            self.assertEqual(audit_before, audit.read_bytes())
+            self.assertEqual((audit_stat.st_dev, audit_stat.st_ino, audit_stat.st_size, audit_stat.st_mtime_ns), (audit.stat().st_dev, audit.stat().st_ino, audit.stat().st_size, audit.stat().st_mtime_ns))
+            receipt = (root / "reconciliation.receipt").read_text(encoding="utf-8")
+            self.assertIn(f"original-audit-path: {audit}\n", receipt)
+            self.assertIn(f"original-audit-content-hex: {audit_before.hex()}\n", receipt)
+            self.assertIn(f"old-session-id: {self.SESSION_ID}\ncurrent-pane-pid: 5252\n", receipt)
+            self.assertIn(f"current-session-id: {new_session}\nfinal-result: success\n", receipt)
+
+    def test_reconciliation_status_query_guards_every_input_in_tmux_server(self) -> None:
+        pane = Pane("cfg:2.0", "%2", "@2", "bun", Path("/tmp"), 5252)
+        commands: list[list[str]] = []
+
+        def tmux(command: list[str], *, timeout_s: float = 10.0) -> subprocess.CompletedProcess[str]:
+            del timeout_s
+            commands.append(command)
+            if "capture-pane" in command:
+                output = "before\n/status\nSession: 119f670b-6a2f-7463-b9be-9aa6ff0cec43\n" if sum("capture-pane" in item for item in commands) == 2 else "before\n"
+                return subprocess.CompletedProcess(command, 0, output, "")
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with patch("omo_manager.omo_codex_start.run", side_effect=tmux):
+            self.assertEqual("119f670b-6a2f-7463-b9be-9aa6ff0cec43", query_reconciliation_session_id(pane, 240, 10.0))
+        input_commands = [command for command in commands if "if-shell" in command]
+        self.assertEqual(2, len(input_commands))
+        for command in input_commands:
+            condition = command[5]
+            self.assertIn("#{==:#{pane_id},%2}", condition)
+            self.assertIn("#{==:#{window_id},@2}", condition)
+            self.assertIn("#{==:#{pane_pid},5252}", condition)
+            self.assertIn("#{==:#{pane_current_command},bun}", condition)
+        self.assertFalse(any(command[1] in {"paste-buffer", "send-keys"} for command in commands))
+
+    def test_reconcile_lock_order_matches_concurrent_lifecycle_order(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            todo = root / "TODO.md"
+            todo.write_text("current:\n", encoding="utf-8")
+            (root / "todo-alias.md").symlink_to(todo)
+
+            @contextmanager
+            def target_lock(_root: Path, _target: str):
+                yield
+
+            for task_file in ("worker.md", "TODO.md", "todo-alias.md"):
+                with self.subTest(task_file=task_file):
+                    entered: list[Path] = []
+
+                    @contextmanager
+                    def file_lock(path: Path):
+                        entered.append(path)
+                        yield
+
+                    args = self.args(root, task_file=task_file, session_id="", reconcile_rotation_audit=True)
+                    with (
+                        patch("omo_manager.omo_codex_start.task_target_lock", side_effect=target_lock),
+                        patch("omo_manager.omo_codex_start.task_file_lock", side_effect=file_lock),
+                        patch("omo_manager.omo_codex_start.reconcile_rotation_audit_locked", return_value="rotation-audit-reconciled"),
+                    ):
+                        self.assertEqual("rotation-audit-reconciled", reconcile_rotation_audit(args))
+                    task = (root / task_file).resolve()
+                    self.assertEqual(sorted({task, todo}, key=lambda path: str(path)), entered)
+
+    def test_reconcile_rotation_audit_refuses_invalid_audit_and_assertion_bindings(self) -> None:
+        audit_cases = {
+            "operation": {"operation": "other"},
+            "final result": {"final-result": "success"},
+            "role": {"is-manager": "true"},
+            "tool": {"tool": "pcodx"},
+            "target": {"target": "cfg:9.0"},
+            "pane": {"pane-id": "%9"},
+            "window": {"window-id": "@9"},
+            "old command": {"old-command": "zsh"},
+            "old UUID": {"old-session-id": "unavailable"},
+            "protected count": {"protected-target-count": "2"},
+            "protected digest": {"protected-targets-sha256": "0" * 64},
+            "queue digest": {"pending-items-sha256": "0" * 64},
+            "replacement absent": {"replacement-observed": "false"},
+            "replacement pid": {"replacement-pane-pid": "6262"},
+        }
+        for case, changes in audit_cases.items():
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as raw_root:
+                root = Path(raw_root)
+                self.write_task(root, status="blocked", pending=["preserve exact queue"])
+                pane = Pane("cfg:2.0", "%2", "@2", "bun", root, 5252)
+                audit = self.write_failed_rotation_audit(root, pane, **changes)
+                args = self.reconciliation_args(root, pane, expected_rotation_audit_sha256=hashlib.sha256(audit.read_bytes()).hexdigest())
+                with (
+                    patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                    patch("omo_manager.omo_codex_start.query_reconciliation_session_id") as query,
+                    patch("omo_manager.omo_codex_start.respawn_codex") as respawn,
+                    patch("omo_manager.omo_codex_start.send_shell_command") as send,
+                    self.assertRaises(StartError),
+                ):
+                    reconcile_rotation_audit(args)
+                query.assert_not_called()
+                respawn.assert_not_called()
+                send.assert_not_called()
+
+        for case in ("absent", "symlink", "nonregular", "permissions", "owner", "hash", "extra field", "duplicate field", "CRLF", "missing final LF", "oversized"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as raw_root:
+                root = Path(raw_root)
+                self.write_task(root, status="blocked", pending=["preserve exact queue"])
+                pane = Pane("cfg:2.0", "%2", "@2", "bun", root, 5252)
+                audit = self.write_failed_rotation_audit(root, pane)
+                args = self.reconciliation_args(root, pane)
+                uid_patch = patch("omo_manager.omo_codex_start.os.getuid", return_value=os.getuid() + 1) if case == "owner" else patch("omo_manager.omo_codex_start.os.getuid", wraps=os.getuid)
+                if case == "absent":
+                    audit.unlink()
+                elif case == "symlink":
+                    target = root / "target.audit"
+                    audit.rename(target)
+                    audit.symlink_to(target)
+                elif case == "nonregular":
+                    audit.unlink()
+                    audit.mkdir()
+                elif case == "permissions":
+                    audit.chmod(0o644)
+                elif case == "hash":
+                    args = self.reconciliation_args(root, pane, expected_rotation_audit_sha256="0" * 64)
+                elif case == "extra field":
+                    audit.write_text(audit.read_text(encoding="utf-8") + "extra: field\n", encoding="utf-8")
+                    args = self.reconciliation_args(root, pane)
+                elif case == "duplicate field":
+                    audit.write_text(audit.read_text(encoding="utf-8") + "tool: codex\n", encoding="utf-8")
+                    args = self.reconciliation_args(root, pane)
+                elif case == "CRLF":
+                    audit.write_bytes(audit.read_bytes().replace(b"\n", b"\r\n"))
+                    args = self.reconciliation_args(root, pane)
+                elif case == "missing final LF":
+                    audit.write_bytes(audit.read_bytes().removesuffix(b"\n"))
+                    args = self.reconciliation_args(root, pane)
+                elif case == "oversized":
+                    audit.write_bytes(audit.read_bytes() + b"x" * (64 * 1024))
+                    args = self.reconciliation_args(root, pane)
+                with uid_patch, patch("omo_manager.omo_codex_start.query_reconciliation_session_id") as query, self.assertRaises((OSError, StartError)):
+                    reconcile_rotation_audit(args)
+                query.assert_not_called()
+
+    def test_reconcile_rotation_audit_refuses_task_pane_uuid_and_receipt_mismatches(self) -> None:
+        for case in (
+            "task digest",
+            "status",
+            "blocker",
+            "owner",
+            "queue",
+            "protected",
+            "manager",
+            "tool",
+            "task target",
+            "human",
+            "self",
+            "pane pid",
+            "pane command",
+            "unchanged pid",
+            "missing UUID",
+            "malformed UUID",
+            "same UUID",
+            "query failure",
+            "receipt collision",
+            "receipt parent",
+        ):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as raw_root:
+                root = Path(raw_root)
+                self.write_task(root, status="blocked", pending=["preserve exact queue"])
+                pane = Pane("cfg:2.0", "%2", "@2", "bun", root, 5252)
+                self.write_failed_rotation_audit(root, pane, **({"old-pane-pid": "5252"} if case == "unchanged pid" else {}))
+                changes: dict[str, object] = {}
+                if case == "task digest":
+                    changes["expected_task_sha256"] = "0" * 64
+                elif case == "status":
+                    changes["expected_status"] = "running"
+                elif case == "blocker":
+                    changes["expected_blocker"] = "other"
+                elif case == "owner":
+                    changes["expected_owner_target"] = "cfg:9"
+                elif case == "queue":
+                    changes["expected_pending_items"] = ("other",)
+                elif case == "protected":
+                    changes["protected_targets"] = ("other:9",)
+                elif case in {"manager", "tool", "task target"}:
+                    self.write_task(root, runat="cfg:9" if case == "task target" else "cfg:2", status="blocked", manager=case == "manager", tool="pcodx" if case == "tool" else "codex", pending=["preserve exact queue"])
+                    changes["expected_task_sha256"] = hashlib.sha256((root / "worker.md").read_bytes()).hexdigest()
+                elif case == "human":
+                    changes["target"] = "hcfg:2"
+                elif case == "pane pid":
+                    changes["expected_current_pane_pid"] = 9999
+                elif case == "pane command":
+                    changes["expected_current_command"] = "codex"
+                elif case == "receipt collision":
+                    (root / "reconciliation.receipt").write_text("occupied", encoding="utf-8")
+                elif case == "receipt parent":
+                    parent = root / "insecure"
+                    parent.mkdir(mode=0o755)
+                    changes["reconciliation_receipt"] = parent / "receipt"
+                args = self.reconciliation_args(root, pane, **changes)
+                session = "" if case == "missing UUID" else "malformed" if case == "malformed UUID" else self.SESSION_ID if case == "same UUID" else "119f670b-6a2f-7463-b9be-9aa6ff0cec43"
+                query_error = StartError("status query failed") if case == "query failure" else None
+                caller = "%2" if case == "self" else ""
+                with (
+                    patch.dict(os.environ, {"TMUX_PANE": caller}),
+                    patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                    patch("omo_manager.omo_codex_start.query_reconciliation_session_id", return_value=session, side_effect=query_error),
+                    patch("omo_manager.omo_codex_start.respawn_codex") as respawn,
+                    patch("omo_manager.omo_codex_start.send_shell_command") as send,
+                    self.assertRaises((OSError, StartError)),
+                ):
+                    reconcile_rotation_audit(args)
+                respawn.assert_not_called()
+                send.assert_not_called()
+                if (root / "reconciliation.receipt").is_file() and case != "receipt collision":
+                    self.assertIn("final-result: failed", (root / "reconciliation.receipt").read_text(encoding="utf-8"))
+
+    def test_reconcile_rotation_audit_catches_reservation_and_query_races(self) -> None:
+        for phase in ("reservation", "query"):
+            for resource in ("audit", "task", "todo", "pane"):
+                with self.subTest(phase=phase, resource=resource), tempfile.TemporaryDirectory() as raw_root:
+                    root = Path(raw_root)
+                    self.write_task(root, status="blocked", pending=["preserve exact queue"])
+                    initial_pane = Pane("cfg:2.0", "%2", "@2", "bun", root, 5252)
+                    changed_pane = replace(initial_pane, pane_pid=6262, command="codex")
+                    audit = self.write_failed_rotation_audit(root, initial_pane)
+                    args = self.reconciliation_args(root, initial_pane)
+                    changed = False
+
+                    def mutate() -> None:
+                        nonlocal changed
+                        changed = True
+                        if resource == "audit":
+                            replacement = root / "replacement.audit"
+                            replacement.write_bytes(audit.read_bytes())
+                            replacement.chmod(0o600)
+                            os.replace(replacement, audit)
+                        elif resource == "task":
+                            task = root / "worker.md"
+                            task.write_text(task.read_text(encoding="utf-8") + "race\n", encoding="utf-8")
+                        elif resource == "todo":
+                            todo = root / "TODO.md"
+                            todo.write_text(todo.read_text(encoding="utf-8") + "concurrent entry\n", encoding="utf-8")
+
+                    def reserve(path: Path, text: str) -> None:
+                        reserve_reconciliation_receipt(path, text)
+                        if phase == "reservation":
+                            mutate()
+
+                    def query(*_args: object) -> str:
+                        if phase == "query":
+                            mutate()
+                        return "119f670b-6a2f-7463-b9be-9aa6ff0cec43"
+
+                    def resolve(_target: str) -> Pane:
+                        return changed_pane if changed and resource == "pane" else initial_pane
+
+                    with (
+                        patch("omo_manager.omo_codex_start.reserve_reconciliation_receipt", side_effect=reserve),
+                        patch("omo_manager.omo_codex_start.resolve_pane", side_effect=resolve),
+                        patch("omo_manager.omo_codex_start.query_reconciliation_session_id", side_effect=query),
+                        patch("omo_manager.omo_codex_start.respawn_codex") as respawn,
+                        patch("omo_manager.omo_codex_start.send_shell_command") as send,
+                        self.assertRaises(StartError),
+                    ):
+                        reconcile_rotation_audit(args)
+                    respawn.assert_not_called()
+                    send.assert_not_called()
+                    self.assertIn("final-result: failed", (root / "reconciliation.receipt").read_text(encoding="utf-8"))
+
+    def test_reconcile_rotation_audit_finalization_fault_leaves_durable_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root, status="blocked", pending=["preserve exact queue"])
+            pane = Pane("cfg:2.0", "%2", "@2", "bun", root, 5252)
+            audit = self.write_failed_rotation_audit(root, pane)
+            audit_before = audit.read_bytes()
+            with (
+                patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                patch("omo_manager.omo_codex_start.query_reconciliation_session_id", return_value="119f670b-6a2f-7463-b9be-9aa6ff0cec43"),
+                patch("omo_manager.omo_codex_start.finish_reconciliation_receipt", side_effect=StartError("receipt finalization failed")),
+                self.assertRaisesRegex(StartError, "receipt finalization failed"),
+            ):
+                reconcile_rotation_audit(self.reconciliation_args(root, pane))
+            receipt = (root / "reconciliation.receipt").read_text(encoding="utf-8")
+            self.assertIn("completion: unknown-until-finalized", receipt)
+            self.assertNotIn("final-result:", receipt)
+            self.assertEqual(audit_before, audit.read_bytes())
 
     def test_legacy_rotation_starts_fresh_and_records_missing_old_session_causality(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:

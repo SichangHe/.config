@@ -42,6 +42,28 @@ omo_codex_start.py --root ROOT \
 
 This is an assertion, not a skipped UUID check. The helper must observe the UUID still missing during capture and again at the replacement boundary; if it recovers any UUID, it refuses the legacy path. It also binds and immediately revalidates the exact task bytes, status, blocker, manager owner, ordered queue, protected set, target, pane, window, pane id, process id, and command. It then starts fresh without `resume` or `MANAGER.md` and proves the unchanged lifecycle/task bindings, same pane/window, changed process, and newly captured UUID. The private audit records whether the legacy assertion was observed, the bound identity digests, and either success, failure, or durable completion-unknown when finalization itself fails. Omitting the legacy assertion preserves ordinary `--rotate-worker` behavior, including refusal when the old UUID cannot be captured.
 
+If a failed rotation audit proves the pane process was replaced but its immediate new-UUID capture failed, record later evidence with the separate reconciliation-only mode:
+
+```bash
+omo_codex_start.py --root ROOT \
+  --task-file TASK.md \
+  --target SESSION:WINDOW \
+  --reconcile-rotation-audit \
+  --rotation-audit EXACT_FAILED_AUDIT \
+  --expected-rotation-audit-sha256 AUDIT_SHA256 \
+  --reconciliation-receipt PRIVATE_NEW_RECEIPT \
+  --expected-task-sha256 TASK_SHA256 \
+  --expected-status blocked \
+  --expected-blocker 'EXACT BLOCKER' \
+  --expected-owner-target MANAGER_SESSION:WINDOW \
+  --expected-pending-item 'FIRST EXACT ITEM' \
+  --protected-target PROTECTED_SESSION:WINDOW \
+  --expected-current-pane-pid CURRENT_PID \
+  --expected-current-command bun
+```
+
+Repeat the pending-item and protected-target assertions for their complete ordered sets. This mode never enters a start, resume, rotation, or respawn path. Its sole pane-input exception is one bounded `/status` UUID query; every paste and Enter uses a tmux-server guard over the exact pane, window, target, PID, and command. It strictly binds one owner-private failed rotation audit, its raw bytes and file identity, the unchanged task/TODO lifecycle and queue, and the exact current pane/window/process. The failed audit must include the helper's durable post-respawn checkpoint, and the current process must be that exact observed replacement; ambiguous pre-respawn failure audits are refused. The helper reserves a separate durable owner-private receipt before the query, requires a valid UUID distinct from the failed audit's old UUID, and revalidates every binding before success. The original failed audit, task, and TODO remain unchanged. The receipt explicitly records later evidence only; it neither rewrites the original failure nor claims why immediate capture failed. A failed reconciliation finalizes only the new receipt as failed when possible, while a receipt finalization fault leaves durable completion-unknown evidence. Reconciliation rejects `--dry-run` rather than silently performing its query or receipt write.
+
 Restart a running Codex session in the same pane with a different model or effort:
 
 ```bash
