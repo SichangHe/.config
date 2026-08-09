@@ -1,0 +1,4 @@
+interface:
+  display_name: "Report to Human"
+  short_description: "Make human reports straightforward and clear"
+  default_prompt: "Use $report-to-human to make this report straightforward and verify that a fresh reader fully understands it."
