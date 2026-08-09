@@ -140,6 +140,84 @@ class TmuxSendTests(unittest.TestCase):
         self.assertFalse(any(command[:2] == ["tmux", "paste-buffer"] for command in calls))
         self.assertFalse(any(command[:2] == ["tmux", "send-keys"] for command in calls))
 
+    def test_run_capacity_resume_refuses_pane_drift_after_buffer_load(self) -> None:
+        capacity = ["Selected model is at capacity. Please try a different model.", "› Use /skills to list available skills", "  gpt-5.5"]
+        calls: list[list[str]] = []
+
+        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch("omo_manager.omo_tmux_send.exact_pane_id", side_effect=["%42", "%42", "%43"]), patch(
+            "omo_manager.omo_tmux_send.exact_tail", return_value=(True, capacity)
+        ), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run), self.assertRaisesRegex(
+            RuntimeError, "target pane changed before paste"
+        ):
+            run_capacity_resume("hwl:4", options())
+
+        self.assertTrue(any(command[:2] == ["tmux", "load-buffer"] for command in calls))
+        self.assertFalse(any(command[:2] == ["tmux", "paste-buffer"] for command in calls))
+        self.assertFalse(any(command[:2] == ["tmux", "send-keys"] for command in calls))
+
+    def test_run_capacity_resume_refuses_changed_second_capture(self) -> None:
+        capacity = ["Selected model is at capacity. Please try a different model.", "› Use /skills to list available skills", "  gpt-5.5"]
+        changed = ["■ Error: authentication failed", "› Use /skills to list available skills", "  gpt-5.5"]
+        calls: list[list[str]] = []
+
+        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch("omo_manager.omo_tmux_send.exact_pane_id", return_value="%42"), patch(
+            "omo_manager.omo_tmux_send.exact_tail", side_effect=[(True, capacity), (True, changed)]
+        ), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run), self.assertRaisesRegex(
+            RuntimeError, "error changed before paste"
+        ):
+            run_capacity_resume("hwl:4", options())
+
+        self.assertFalse(any(command[:2] == ["tmux", "paste-buffer"] for command in calls))
+        self.assertFalse(any(command[:2] == ["tmux", "send-keys"] for command in calls))
+
+    def test_run_capacity_resume_refuses_non_codex_layout_after_paste(self) -> None:
+        capacity = ["Selected model is at capacity. Please try a different model.", "› Use /skills to list available skills", "  gpt-5.5"]
+        no_footer = ["Selected model is at capacity. Please try a different model.", "› resume"]
+        calls: list[list[str]] = []
+
+        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch("omo_manager.omo_tmux_send.exact_pane_id", return_value="%42"), patch(
+            "omo_manager.omo_tmux_send.exact_tail", side_effect=[(True, capacity), (True, capacity), (True, no_footer)]
+        ), patch("omo_manager.omo_tmux_send.require_no_existing_input"), patch(
+            "omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run
+        ), self.assertRaisesRegex(RuntimeError, "error changed before submit"):
+            run_capacity_resume("hwl:4", options())
+
+        self.assertTrue(any(command[:2] == ["tmux", "paste-buffer"] for command in calls))
+        self.assertFalse(any(command[:2] == ["tmux", "send-keys"] for command in calls))
+
+    def test_run_capacity_resume_refuses_pane_drift_during_verification(self) -> None:
+        capacity = ["Selected model is at capacity. Please try a different model.", "› Use /skills to list available skills", "  gpt-5.5"]
+        pasted = ["Selected model is at capacity. Please try a different model.", "› resume", "  gpt-5.5"]
+        running = ["• Working", "  gpt-5.5"]
+        calls: list[list[str]] = []
+
+        def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        pane_ids = ["%42", "%42", "%42", "%42", "%42", "%42", "%43"]
+        with patch("omo_manager.omo_tmux_send.exact_pane_id", side_effect=pane_ids), patch(
+            "omo_manager.omo_tmux_send.exact_tail", side_effect=[(True, capacity), (True, capacity), (True, pasted), (True, running)]
+        ), patch("omo_manager.omo_tmux_send.require_no_existing_input"), patch(
+            "omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run
+        ), self.assertRaisesRegex(RuntimeError, "target pane changed during verification"):
+            run_capacity_resume("hwl:4", options())
+
+        sends = [command for command in calls if command[:2] == ["tmux", "send-keys"]]
+        self.assertEqual(1, len(sends))
+
     def test_verify_capacity_resume_accepts_running_and_reports_persistent_capacity(self) -> None:
         running = ["• Working", "  gpt-5.5"]
         capacity = ["Selected model is at capacity. Please try a different model.", "› Use /skills to list available skills", "  gpt-5.5"]

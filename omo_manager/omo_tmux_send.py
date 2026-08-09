@@ -1050,7 +1050,7 @@ def wait_capacity_resume_paste(target: str, options: CodexSendOptions, expected_
             raise RuntimeError(f"capacity resume target pane changed before submit: {target}")
         if has_plan_prompt(lines):
             raise RuntimeError(f"plan prompt appeared before capacity resume submit: {target}")
-        if not only_exact_capacity_warning(lines):
+        if not exact_capacity_error(lines):
             raise RuntimeError(f"selected-model-capacity error changed before submit: {target}")
         if current_input_text(lines).strip() == "resume":
             return

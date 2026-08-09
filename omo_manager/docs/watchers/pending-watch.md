@@ -136,7 +136,7 @@
 
 - scoped maintenance
   - all manager-owned worker rows are handled by the same owner-routed problem scan
-  - an exact selected-model-capacity warning is recovered by submitting literal `resume` in the same pane; only a verified submission that leaves the exact warning consumes one of three attempts
+  - an exact selected-model-capacity warning is recovered by submitting literal `resume` in the same pane, including human-owned `h*` panes under this capacity-recovery exception; only a verified submission that leaves the exact warning consumes one of three attempts
   - executor, pre-paste, paste, submit, and verification failures preserve the three-attempt budget, schedule another same-pane `resume`, and alert the owner not to launch a replacement pane
   - exact-capacity `error` and `untracked_agent` rows are withheld from generic manager prompts while dedicated recovery runs; after three persistent verified submissions, the owner or main-manager peer receives same-pane recovery instructions
   - non-blocked panes classified as `stuck_input` are submitted with Enter when the Codex status helper says the visible input is safe
