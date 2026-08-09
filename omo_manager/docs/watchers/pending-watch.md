@@ -142,7 +142,7 @@
   - non-blocked panes classified as `stuck_input` are submitted with Enter when the Codex status helper says the visible input is safe
   - first and second successful Enter attempts are remembered and suppressed; the third still-stuck report is sent to the owning manager
   - remembered Enter attempts are cleared when that target is no longer reported as stuck
-  - unchanged dependency and recorded-human-wait `blocked_idle` rows are suppressed after successful delivery until their task snapshot changes; other blocked-idle rows retain exponential delay after each successful report
+  - unchanged dependency and recorded-human-wait `blocked_idle` rows, plus recorded-human-wait `missing` rows for absent exact panes, are suppressed after successful delivery until their task status, exact target, owner, or blocker snapshot changes; the first report and every changed or mismatched snapshot bypass the owner-wide repeat delay but still require a ready recipient, and asynchronous delivery completion uses compare-and-swap so a stale completion cannot hide newer state; other blocked-idle rows retain exponential delay after each successful report
   - manager self-problem rows and matching `unstuck:` rows are logged and filtered by the watcher so they are not pasted back into the manager prompt
   - `human_request` status rows are filtered from agent-problem prompts because live `(pending)` blocks are dispatched through the pending-marker path
   - manager compaction reminders say ``Unless you know the exact content of MANAGER.md, read it. Normally, don't ack human``

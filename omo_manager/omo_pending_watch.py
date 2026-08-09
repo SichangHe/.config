@@ -582,7 +582,7 @@ class DeliverySuccessEvent:
     blocked_idle_lines: tuple[tuple[str, str], ...] = ()
     dependency_replacements: tuple[tuple[str, str], ...] = ()
     dependency_removals: tuple[str, ...] = ()
-    dependency_guarded_replacements: tuple[tuple[str, str, str], ...] = ()
+    dependency_guarded_replacements: tuple[tuple[str, str | None, str], ...] = ()
     dependency_guarded_removals: tuple[tuple[str, str], ...] = ()
     failure_dependency_replacements: tuple[tuple[str, str, str], ...] = ()
     failure_dependency_removals: tuple[tuple[str, str], ...] = ()
@@ -2098,13 +2098,13 @@ def manager_problem_human_attempt_key(args: Args) -> str:
     return f"manager-problem-human-attempt:{args.root}"
 
 
-def agent_problem_target_is_ready(args: Args, seen: dict[str, float], target: str, now_s: float) -> bool:
+def agent_problem_target_is_ready(args: Args, seen: dict[str, float], target: str, now_s: float, *, bypass_repeat: bool = False) -> bool:
     """Allow one problem aggregate per interval, only when its manager is ready."""
 
     if args.dry_run:
         return True
     key = agent_problem_target_attempt_key(target)
-    if seen_contains(seen, key, now_s) and now_s - seen_get(seen, key, now_s=now_s) < args.agent_problem_repeat_s:
+    if not bypass_repeat and seen_contains(seen, key, now_s) and now_s - seen_get(seen, key, now_s=now_s) < args.agent_problem_repeat_s:
         return False
     return inspect_codex(CodexStatusArgs(target, 80)).status == "ready"
 
@@ -4541,6 +4541,8 @@ def problem_row_line(row: ProblemRow) -> str:
         return f"{label} {tagged_text('input', row.input_text)}"
     if row.status == "untracked_agent":
         return f"{label} {tagged_text('output', row.output)}"
+    if row.status == "missing" and row.reason:
+        return f"{label} {tagged_text('blocked_on', row.reason)}"
     if row.status in {"missing", "not_codex", "error", "ready", "manager_compaction", "manager_waiting_subagent"}:
         return f"{label} {tagged_text('output', row.output)}"
     if row.status == "blocked_idle":
@@ -4713,6 +4715,7 @@ def evidence_target(line: str) -> str:
 
 MANAGER_SELF_PROBLEM_STATUSES = {"blocked_idle", "error", "manager_compaction", "manager_waiting_subagent", "missing", "not_codex", "ready", "stuck_input"}
 MANAGER_HUMAN_EMAIL_PROBLEM_STATUSES = {"error", "manager_waiting_subagent", "missing", "not_codex", "stuck_input"}
+SNAPSHOT_SUPPRESSED_BLOCKED_STATUSES = {"blocked_idle", "missing"}
 
 
 def problem_line_matches_manager_target(line: str, manager_target: str = "") -> bool:
@@ -4827,16 +4830,35 @@ def filter_manager_self_problem_output(output: str, manager_target: str = "") ->
     return filtered_problem_output(kept, suppress_message="omo_pending_watch: suppressed manager self-problem report")
 
 
-def unchanged_dependency_blocked_idle_line(line: str, current: dict[str, tuple[TaskLine, str, str]], snapshots: dict[str, str]) -> bool:
-    """Return true only for a repeated, valid blocked-manager dependency row."""
+def recorded_human_wait_snapshot(status: str, target: str, owner_target: str, reason: str) -> str:
+    identity = "\0".join((status, target, owner_target, reason))
+    return f"human:{hashlib.sha256(identity.encode('utf-8')).hexdigest()}"
 
-    if problem_line_status(line) != "blocked_idle" or problem_line_value(line, "task_status") != "blocked":
+
+def line_matches_blocked_report_snapshot(line: str, snapshot: str) -> bool:
+    status = problem_line_status(line)
+    if status == "blocked_idle":
+        return True
+    if status != "missing" or not snapshot.startswith("human:"):
+        return False
+    return snapshot == recorded_human_wait_snapshot(
+        problem_line_value(line, "task_status"),
+        problem_line_target(line),
+        problem_line_owner_target(line),
+        problem_line_value(line, "reason"),
+    )
+
+
+def unchanged_dependency_blocked_idle_line(line: str, current: dict[str, tuple[TaskLine, str, str]], snapshots: dict[str, str]) -> bool:
+    """Return true only for a repeated blocked row with a stable task snapshot."""
+
+    if problem_line_status(line) not in SNAPSHOT_SUPPRESSED_BLOCKED_STATUSES or problem_line_value(line, "task_status") != "blocked":
         return False
     task_file = problem_line_task(line)
     if not task_file:
         return False
     current_snapshot = current.get(task_file)
-    return current_snapshot is not None and snapshots.get(task_file) == current_snapshot[1]
+    return current_snapshot is not None and line_matches_blocked_report_snapshot(line, current_snapshot[1]) and snapshots.get(task_file) == current_snapshot[1]
 
 
 def filter_unchanged_dependency_blocked_idle_output(args: Args, output: str, snapshots: dict[str, str]) -> str | None:
@@ -4859,11 +4881,12 @@ def filter_unchanged_dependency_blocked_idle_output(args: Args, output: str, sna
     return filtered_problem_output(kept, suppress_message="omo_pending_watch: suppressed unchanged blocked dependency report")
 
 
-def prune_dependency_reported_snapshots(root: Path, snapshots: dict[str, str]) -> None:
+def prune_dependency_reported_snapshots(root: Path, snapshots: dict[str, str], preserve_task_files: set[str] | None = None) -> None:
     current = blocked_report_snapshot_state(root)
+    preserved = preserve_task_files or set()
     for task_file in tuple(snapshots):
         current_snapshot = current.get(task_file)
-        if current_snapshot is None or current_snapshot[1] != snapshots[task_file]:
+        if task_file not in preserved and (current_snapshot is None or current_snapshot[1] != snapshots[task_file]):
             snapshots.pop(task_file, None)
 
 
@@ -4872,17 +4895,48 @@ def dependency_snapshot_replacements_for_problem_lines(root: Path, lines: tuple[
     replacements: list[tuple[str, str]] = []
     seen_tasks: set[str] = set()
     for line in lines:
-        if problem_line_status(line) != "blocked_idle" or problem_line_value(line, "task_status") != "blocked":
+        if problem_line_status(line) not in SNAPSHOT_SUPPRESSED_BLOCKED_STATUSES or problem_line_value(line, "task_status") != "blocked":
             continue
         task_file = problem_line_task(line)
         if not task_file or task_file in seen_tasks:
             continue
         current_snapshot = current.get(task_file)
-        if current_snapshot is None:
+        if current_snapshot is None or not line_matches_blocked_report_snapshot(line, current_snapshot[1]):
             continue
         seen_tasks.add(task_file)
         replacements.append((task_file, current_snapshot[1]))
     return tuple(replacements)
+
+
+def dependency_snapshot_removals_for_problem_lines(root: Path, lines: tuple[str, ...], snapshots: dict[str, str]) -> tuple[tuple[str, str], ...]:
+    current = blocked_report_snapshot_state(root)
+    removals: list[tuple[str, str]] = []
+    seen_tasks: set[str] = set()
+    for line in lines:
+        task_file = problem_line_task(line)
+        previous = snapshots.get(task_file)
+        if not task_file or task_file in seen_tasks or previous is None or task_file in current:
+            continue
+        seen_tasks.add(task_file)
+        removals.append((task_file, previous))
+    return tuple(removals)
+
+
+def blocked_report_bypasses_target_repeat(root: Path, lines: tuple[str, ...], snapshots: dict[str, str]) -> bool:
+    current = blocked_report_snapshot_state(root)
+    for line in lines:
+        task_file = problem_line_task(line)
+        previous = snapshots.get(task_file)
+        if not task_file:
+            continue
+        current_snapshot = current.get(task_file)
+        if previous is None:
+            if current_snapshot is not None and current_snapshot[1].startswith("human:") and line_matches_blocked_report_snapshot(line, current_snapshot[1]):
+                return True
+            continue
+        if current_snapshot is None or current_snapshot[1] != previous or not line_matches_blocked_report_snapshot(line, current_snapshot[1]):
+            return True
+    return False
 
 
 def manager_human_email_problem_output(output: str, manager_target: str = "") -> str:
@@ -5083,9 +5137,9 @@ def blocked_report_snapshot_state(root: Path) -> dict[str, tuple[TaskLine, str, 
         state = scan_task_state(task_path, root) if task_path is not None else None
         if state is None or state.status != "blocked" or not is_recorded_human_wait(state):
             continue
-        identity = "\0".join((state.status, state.target, state.manager_target, state.reason))
-        snapshot = f"human:{hashlib.sha256(identity.encode('utf-8')).hexdigest()}"
-        snapshots[task.task_file] = (task, snapshot, effective_owner_target(root, task, task_path))
+        owner_target = effective_owner_target(root, task, task_path)
+        snapshot = recorded_human_wait_snapshot(state.status, state.target, owner_target, state.reason)
+        snapshots[task.task_file] = (task, snapshot, owner_target)
     return snapshots
 
 
@@ -5170,10 +5224,9 @@ def handle_agent_problem_result(
         return reminders_changed
     dependency_state = dependency_snapshots if dependency_snapshots is not None else {}
     dependency_reported_state = dependency_reported_snapshots if dependency_reported_snapshots is not None else {}
-    prune_dependency_reported_snapshots(args.root, dependency_reported_state)
-    previous_dependency_reported_state = dict(dependency_reported_state)
     dependency_changed = False if visibility_only else maybe_push_dependency_transitions(args, dependency_state, now_wall_s, seen)
     if result.returncode == 0:
+        prune_dependency_reported_snapshots(args.root, dependency_reported_state)
         sync_problem_issues(problem_claim_path(args), {}, now_wall_s)
         enter_changed = clear_all_enter_attempts(args, seen)
         capacity_changed = clear_resolved_capacity_state(args, seen, set())
@@ -5184,6 +5237,9 @@ def handle_agent_problem_result(
     output = result.stdout.strip()
     if not output:
         return dependency_changed or reminders_changed
+    active_problem_task_files = {task_file for line in output.splitlines()[1:] if (task_file := problem_line_task(line))}
+    prune_dependency_reported_snapshots(args.root, dependency_reported_state, active_problem_task_files)
+    previous_dependency_reported_state = dict(dependency_reported_state)
     raw_groups = authoritative_problem_groups(args, output)
     active_problems = {
         problem_claim_id(owner_target, problem_lines): (owner_target, problem_lines)
@@ -5238,18 +5294,24 @@ def handle_agent_problem_result(
             continue
         text = with_manager_policy_reminder(args, f"{dispatch.text}\n\n{problem_claim_instructions(problem_id, expired_claim)}")
         target = owner_target or args.manager_target
-        if (not target and not args.dry_run) or not agent_problem_target_is_ready(args, seen, target, now_wall_s):
+        bypass_target_repeat = blocked_report_bypasses_target_repeat(args.root, dispatch.problem_lines, previous_dependency_reported_state)
+        if (not target and not args.dry_run) or not agent_problem_target_is_ready(args, seen, target, now_wall_s, bypass_repeat=bypass_target_repeat):
             continue
         issue_problem(claim_path, problem_id, claim_owner_target, dispatch.problem_lines, now_wall_s)
         dependency_reported_replacements = dependency_snapshot_replacements_for_problem_lines(args.root, dispatch.problem_lines)
+        dependency_reported_removals = dependency_snapshot_removals_for_problem_lines(args.root, dispatch.problem_lines, dependency_reported_state)
+        guarded_dependency_replacements = tuple(
+            (task_file, dependency_reported_state.get(task_file), snapshot) for task_file, snapshot in dependency_reported_replacements
+        )
         target_attempt_key = agent_problem_target_attempt_key(target)
         event = DeliverySuccessEvent(
             seen_keys=(key,),
             seen_removals=(attempt_key,),
             failure_seen_delays_s=((attempt_key, PENDING_DELIVERY_FAILURE_RETRY_S),),
             blocked_idle_lines=dispatch.blocked_idle_lines,
-            dependency_replacements=dependency_reported_replacements,
-            dependency_state=dependency_reported_state if dependency_reported_replacements else None,
+            dependency_guarded_replacements=guarded_dependency_replacements,
+            dependency_guarded_removals=dependency_reported_removals,
+            dependency_state=dependency_reported_state if guarded_dependency_replacements or dependency_reported_removals else None,
             seen_at_s=now_wall_s,
         )
         guard = AgentProblemGuard(
@@ -5268,8 +5330,12 @@ def handle_agent_problem_result(
         if status == 0:
             for backoff_owner, line in dispatch.blocked_idle_lines:
                 remember_blocked_idle_report(args, seen, backoff_owner, line, now_wall_s)
-            for task_file, snapshot in dependency_reported_replacements:
-                dependency_reported_state[task_file] = snapshot
+            for task_file, expected_snapshot, snapshot in guarded_dependency_replacements:
+                if dependency_reported_state.get(task_file) == expected_snapshot:
+                    dependency_reported_state[task_file] = snapshot
+            for task_file, expected_snapshot in dependency_reported_removals:
+                if dependency_reported_state.get(task_file) == expected_snapshot:
+                    dependency_reported_state.pop(task_file, None)
             remember_seen(seen, key, now_wall_s)
         changed = True
     return changed
