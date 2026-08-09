@@ -6,7 +6,7 @@
   - shared classification and execution safeguards for manager mail
   - clean stale manager-human threads conservatively and recoverably
 - `compression.md`
-  - compress only fully superseded unread manager-sent mail
+  - compress only fully superseded manager-sent mail; Gmail read/unread state never determines eligibility
   - inherit cleanup safeguards and move sources only after replacement
 - `email-idle-watcher.md`
   - ingest human email into durable manager pending blocks

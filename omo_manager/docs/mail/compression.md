@@ -1,6 +1,6 @@
 # manager mail compression
 
-Use this only to replace unread manager-sent mail with fewer topic summaries.
+Use this only to replace manager-sent mail with fewer topic summaries.
 Follow [cleanup.md](cleanup.md)'s task-authority, evidence, recovery, and mutation safeguards. Compression uses the fixed-start source set below instead of rolling cleanup discovery. A threshold starts review; it never authorizes compression or Trash.
 
 Helper:
@@ -21,8 +21,8 @@ Helper:
 - claim one batch with `claim-batch --source-dir PRIVATE_DIR --batch-id BATCH --owner OWNER`
 - claims are exclusive; reviewers may process different batches in parallel, but no thread may have duplicate ownership or move across batches
 - inspect each thread's exported bodies and complete `\All` context, then locate corresponding task records and record current task-state evidence
-- retain unresolved, pending, useful, protected, out-of-scope, incomplete, or uncertain content
-- Gmail Important alone is never a retention gate; flagged, starred, saved, and read-later intent still requires retention
+- retain unresolved, pending, useful, out-of-scope, incomplete, or uncertain content based on message/task evidence
+- ignore Gmail state signals—including unread, Important, starred, flagged, saved, read-later, and security/category labels—when deciding retention or Trash eligibility; labels and flags remain frozen only for exact identity/drift verification
 - finish one thread before advancing: retain the whole thread, move every irrelevant fixed-start source in it, or move only irrelevant intermediate fixed-start messages
 - record retention with `retain-thread` and nonempty reason and task-evidence files
 - when replacement is required, send and record it before Trash and pass `--replacement-message-id`; otherwise pass `--replacement-not-required`

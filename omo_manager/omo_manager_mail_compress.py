@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Snapshot/export unread manager mail and trash explicit superseded UIDs."""
+"""Snapshot/export manager mail and trash explicit superseded UIDs."""
 
 from __future__ import annotations
 
@@ -69,12 +69,11 @@ class PostMoveVerification:
     verified_message_count: int = 0
     verified_thread_count: int = 0
     changed_thread_count: int = 0
-    protected_count: int = 0
     imap_failure_count: int = 0
 
     @property
     def complete(self) -> bool:
-        return self.same_mailbox and not (self.changed_thread_count or self.protected_count or self.imap_failure_count)
+        return self.same_mailbox and not (self.changed_thread_count or self.imap_failure_count)
 
 
 def parse_uid_text(text: str) -> list[str]:
@@ -161,7 +160,7 @@ def load_config() -> dict[str, str]:
     return config
 
 
-def manager_unread_uids(client: imaplib.IMAP4_SSL, self_email: str) -> list[str]:
+def manager_candidate_uids(client: imaplib.IMAP4_SSL, self_email: str) -> list[str]:
     found: list[str] = []
     seen: set[str] = set()
     typ, data = client.uid("search", None, "ALL")  # pyright: ignore[reportArgumentType]
@@ -169,7 +168,7 @@ def manager_unread_uids(client: imaplib.IMAP4_SSL, self_email: str) -> list[str]
         raise RuntimeError(f"IMAP fixed-start search failed: {typ}")
     frozen = {raw.decode() for raw in data[0].split()} if data and data[0] else set()
     settings = configured_agent_mail()
-    criteria = ["UNSEEN", "FROM", f'"{self_email}"']
+    criteria = ["FROM", f'"{self_email}"']
     subject_tokens = ("",) if settings is not None else LEGACY_MANAGER_SUBJECT_TOKENS
     for token in subject_tokens:
         typ, data = client.uid("search", None, *(criteria + (["SUBJECT", f'"{token}"'] if token else [])))  # pyright: ignore[reportArgumentType]
@@ -180,15 +179,6 @@ def manager_unread_uids(client: imaplib.IMAP4_SSL, self_email: str) -> list[str]
                 seen.add(uid)
                 found.append(uid)
     return found
-
-
-def unread_subset(client: imaplib.IMAP4_SSL, uids: list[str]) -> list[str]:
-    if not uids:
-        return []
-    typ, data = client.uid("search", None, "UNSEEN", "UID", ",".join(uids))  # pyright: ignore[reportArgumentType]
-    if typ != "OK":
-        raise RuntimeError(f"IMAP unread UID search failed: {typ}")
-    return [raw.decode() for raw in data[0].split()] if data and data[0] else []
 
 
 def inbox_subset(client: imaplib.IMAP4_SSL, uids: list[str]) -> list[str]:
@@ -561,7 +551,7 @@ def cmd_identity_preflight(_args: argparse.Namespace) -> int:
     client, config = open_mailbox(readonly=True)
     try:
         sender_email, recipient_email = mail_boundary(config)
-        headers, skipped = accepted_manager_headers(client, manager_unread_uids(client, sender_email), sender_email, recipient_email)
+        headers, skipped = accepted_manager_headers(client, manager_candidate_uids(client, sender_email), sender_email, recipient_email)
         uidvalidity = ""
         source_records: list[MailRecord] = []
         records_by_thread: dict[str, list[MailRecord]] = {}
@@ -601,9 +591,9 @@ def cmd_snapshot(_args: argparse.Namespace) -> int:
     client, config = open_mailbox(readonly=True)
     try:
         sender_email, recipient_email = mail_boundary(config)
-        uids = manager_unread_uids(client, sender_email)
+        uids = manager_candidate_uids(client, sender_email)
         records, skipped = accepted_manager_headers(client, uids, sender_email, recipient_email)
-        print(f"unread_manager_count={len(records)}")
+        print(f"manager_candidate_count={len(records)}")
         if skipped:
             print(f"skipped_boundary_mismatch={len(skipped)}")
         print_records(records)
@@ -1008,7 +998,7 @@ def record_matches_reconciliation_location(record: MailRecord, source: dict[str,
     )
     if location == "INBOX":
         return exact and labels == frozen_labels and r"\inbox" in labels
-    return exact and r"\inbox" not in labels and labels - {r"\trash"} == frozen_labels - {r"\inbox"} and not record_has_protected_intent(record)
+    return exact and r"\inbox" not in labels and labels - {r"\trash"} == frozen_labels - {r"\inbox"}
 
 
 def imap_label_set(value: str) -> set[str]:
@@ -1061,7 +1051,7 @@ def require_reconciliation_locations(
             raise RuntimeError("source is in both, neither, or the wrong reconciliation location")
         record = observed[expected][uid]
         if not is_manager_record(record, sender_email, recipient_email) or not record_matches_reconciliation_location(record, source_map[uid], expected):
-            raise RuntimeError("source identity, content, flags, labels, or protection state changed")
+            raise RuntimeError("source identity, content, flags, or labels changed")
 
 
 def reconciliation_thread_unchanged(
@@ -1105,7 +1095,7 @@ def reconciliation_thread_unchanged(
         if gmail_msgid in trashed_msgids:
             labels = imap_label_set(record.labels)
             frozen_labels = imap_label_set(row["labels"])
-            if r"\inbox" in labels or labels - {r"\trash"} != frozen_labels - {r"\inbox"} or record_has_protected_intent(record):
+            if r"\inbox" in labels or labels - {r"\trash"} != frozen_labels - {r"\inbox"}:
                 return False
         elif tsv_value(record.labels) != row["labels"]:
             return False
@@ -1168,7 +1158,7 @@ def additive_recovery_thread_intact(
         if gmail_msgid in trashed_msgids:
             labels = imap_label_set(record.labels)
             frozen_labels = imap_label_set(row["labels"])
-            if r"\inbox" in labels or labels - {r"\trash"} != frozen_labels - {r"\inbox"} or record_has_protected_intent(record):
+            if r"\inbox" in labels or labels - {r"\trash"} != frozen_labels - {r"\inbox"}:
                 return False
         elif tsv_value(record.labels) != row["labels"]:
             return False
@@ -1337,13 +1327,6 @@ def record_matches_source_map(record: MailRecord, source: dict[str, str]) -> boo
     )
 
 
-def record_has_protected_intent(record: MailRecord) -> bool:
-    flags = {flag.casefold().lstrip("\\") for flag in record.flags.split()}
-    labels = record.labels.casefold().replace("\\", "")
-    protected_labels = ("flagged", "starred", "read later", "saved")
-    return "flagged" in flags or any(token in labels for token in protected_labels)
-
-
 def revalidate_thread_contexts(
     client: imaplib.IMAP4_SSL,
     all_mailbox: str,
@@ -1363,7 +1346,7 @@ def revalidate_thread_contexts(
             if (
                 len(context_ids) != len(set(context_ids))
                 or not source_ids.issubset(context_ids)
-                or any(record.gmail_thrid != gmail_thrid or not is_manager_record(record, sender_email, recipient_email) or record_has_protected_intent(record) for record in context_records)
+                or any(record.gmail_thrid != gmail_thrid or not is_manager_record(record, sender_email, recipient_email) for record in context_records)
             ):
                 return False
             expected_digests = {source["thread_context_sha256"] for source in source_map.values() if source["gmail_thrid"] == gmail_thrid}
@@ -1403,7 +1386,7 @@ def cmd_export(args: argparse.Namespace) -> int:
     client, config = open_mailbox(readonly=True)
     try:
         sender_email, recipient_email = mail_boundary(config)
-        header_records, skipped = accepted_manager_headers(client, manager_unread_uids(client, sender_email), sender_email, recipient_email)
+        header_records, skipped = accepted_manager_headers(client, manager_candidate_uids(client, sender_email), sender_email, recipient_email)
         uidvalidity = selected_uidvalidity(client)
         source_records = [
             replace(record, source_uidvalidity=uidvalidity)
@@ -1465,7 +1448,6 @@ def verify_post_move_imap(
     verified_messages = 0
     verified_threads = 0
     changed_threads = 0
-    protected = 0
     failures = 0
     for gmail_thrid, sources_by_id in sources_by_thread.items():
         thread_verified = 0
@@ -1479,18 +1461,9 @@ def verify_post_move_imap(
             except (imaplib.IMAP4.error, RuntimeError):
                 failures += 1
                 break
-            labels = record.labels.casefold().replace('"', "")
-            is_protected = record_has_protected_intent(record)
-            protected += int(is_protected)
             if (
-                record.gmail_thrid != gmail_thrid
-                or record.gmail_msgid != gmail_msgid
-                or record.msgid_sha256 != source["msgid_sha256"]
-                or record.raw_sha256 != source["raw_sha256"]
-                or tsv_value(record.flags) != source["flags"]
-                or r"\inbox" in labels
+                not record_matches_reconciliation_location(record, source, "Trash")
                 or not is_manager_record(record, sender_email, recipient_email)
-                or is_protected
             ):
                 break
             thread_verified += 1
@@ -1504,7 +1477,6 @@ def verify_post_move_imap(
         verified_message_count=verified_messages,
         verified_thread_count=verified_threads,
         changed_thread_count=changed_threads,
-        protected_count=protected,
         imap_failure_count=failures,
     )
 
@@ -1609,9 +1581,6 @@ def cmd_trash_superseded(args: argparse.Namespace) -> int:
         if any(not is_manager_record(record, sender_email, recipient_email) for record in records):
             print("refusing boundary mismatch", file=sys.stderr)
             return 1
-        if any(record_has_protected_intent(record) for record in records):
-            print("refusing protected flagged, starred, saved, or read-later source", file=sys.stderr)
-            return 1
         if any(not record_matches_source_map(record, source_map[record.uid]) for record in records):
             print("refusing because source identity, flags, labels, or content changed", file=sys.stderr)
             return 1
@@ -1697,7 +1666,6 @@ def cmd_trash_superseded(args: argparse.Namespace) -> int:
         f" verify_trash_count={post_move.verified_message_count}"
         f" verify_thread_count={post_move.verified_thread_count}"
         f" verify_changed_thread_count={post_move.changed_thread_count}"
-        f" verify_protected_count={post_move.protected_count}"
         f" verify_imap_failure_count={post_move.imap_failure_count}"
         f" same_mailbox_after_move={int(post_move.same_mailbox)} permanent_deleted=0"
     )
@@ -1710,11 +1678,11 @@ def cmd_trash_superseded(args: argparse.Namespace) -> int:
 def parser() -> argparse.ArgumentParser:
     arg_parser = argparse.ArgumentParser(description=__doc__)
     sub = arg_parser.add_subparsers(dest="cmd", required=True)
-    identity_preflight = sub.add_parser("identity-preflight", help="Read-only aggregate Gmail identity preflight for unread manager mail.")
+    identity_preflight = sub.add_parser("identity-preflight", help="Read-only aggregate Gmail identity preflight for manager mail.")
     identity_preflight.set_defaults(func=cmd_identity_preflight)
-    snapshot = sub.add_parser("snapshot", help="Print unread manager mail headers and UIDs.")
+    snapshot = sub.add_parser("snapshot", help="Print manager mail headers and UIDs.")
     snapshot.set_defaults(func=cmd_snapshot)
-    export = sub.add_parser("export", help="Export unread manager mail bodies into a private local directory.")
+    export = sub.add_parser("export", help="Export manager mail bodies into a private local directory.")
     export.add_argument("--out-dir", type=Path, required=True)
     export.add_argument("--threads-per-batch", type=int, default=DEFAULT_THREADS_PER_BATCH)
     export.set_defaults(func=cmd_export)
