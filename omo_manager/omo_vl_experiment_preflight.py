@@ -18,7 +18,7 @@ OPENROUTER_NEEDLE = "openrouter"
 
 @dataclass(frozen=True)
 class Args:
-    vlh: Path | None
+    midas_lex: Path | None
     verus: Path | None
     artifact_root: Path | None
     require_staged_verus: bool
@@ -34,7 +34,7 @@ class CheckResult:
 
 def parse_args(argv: list[str]) -> Args:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
-    _ = parser.add_argument("--vlh", type=Path, help="Intended `vlh` executable that must resolve from PATH.")
+    _ = parser.add_argument("--midas-lex", type=Path, help="Intended `midas-lex` executable that must resolve from PATH.")
     _ = parser.add_argument("--verus", type=Path, help="Verifier executable. Defaults to $VERUS or `verus` on PATH.")
     _ = parser.add_argument("--artifact-root", type=Path, help="Experiment artifact root used to decide whether Verus is staged locally.")
     _ = parser.add_argument("--require-staged-verus", action="store_true", help="Fail unless the verifier executable is inside --artifact-root.")
@@ -44,7 +44,7 @@ def parse_args(argv: list[str]) -> Args:
     verus = parsed.verus
     if verus is None and os.environ.get("VERUS"):
         verus = Path(os.environ["VERUS"])
-    return Args(parsed.vlh, verus, parsed.artifact_root, parsed.require_staged_verus, not parsed.allow_openrouter, parsed.evidence_dir)
+    return Args(parsed.midas_lex, verus, parsed.artifact_root, parsed.require_staged_verus, not parsed.allow_openrouter, parsed.evidence_dir)
 
 
 def run_cmd(
@@ -73,28 +73,29 @@ def executable(path: Path) -> Path:
     return resolved
 
 
-def check_vlh(vlh: Path | None) -> CheckResult:
-    found = shutil.which("vlh")
+def check_midas_lex(midas_lex: Path | None) -> CheckResult:
+    found = shutil.which("midas-lex")
     if found is None:
-        raise ValueError("`vlh` is not on PATH")
-    found_path = Path(found).resolve(strict=False)
-    if vlh is not None:
-        intended = executable(vlh)
+        raise ValueError("`midas-lex` is not on PATH")
+    found_entry = Path(found).absolute()
+    found_path = found_entry.resolve(strict=False)
+    if midas_lex is not None:
+        intended = executable(midas_lex)
         if found_path != intended:
-            raise ValueError(f"`vlh` resolves to {found_path}; expected {intended}")
-    with tempfile.TemporaryDirectory(prefix="omo-vlh-help-") as scratch:
+            raise ValueError(f"`midas-lex` resolves to {found_path}; expected {intended}")
+    with tempfile.TemporaryDirectory(prefix="omo-midas-lex-help-") as scratch:
         scratch_path = Path(scratch)
         help_env = {
             "HOME": str(scratch_path / "home"),
             "PATH": os.environ.get("PATH", ""),
             "XDG_CONFIG_HOME": str(scratch_path / "xdg"),
-            "VLH_RESOURCE_DIR": str(scratch_path / "resources"),
+            "MIDAS_LEX_RESOURCE_DIR": str(scratch_path / "resources"),
         }
-        help_result = run_cmd([str(found_path), "help"], env=help_env, cwd=scratch_path)
+        help_result = run_cmd([str(found_entry), "help"], env=help_env, cwd=scratch_path)
     if help_result.returncode != 0:
-        raise ValueError(f"`vlh help` failed with exit {help_result.returncode}: {help_result.stderr.strip()}")
+        raise ValueError(f"`midas-lex help` failed with exit {help_result.returncode}: {help_result.stderr.strip()}")
     return CheckResult(
-        "vlh",
+        "midas-lex",
         f"path={found_path}\nhelp_exit=0\nhelp_state=fresh_scratch_removed",
     )
 
@@ -157,7 +158,7 @@ def evidence(results: list[CheckResult]) -> str:
 def main(argv: list[str]) -> int:
     try:
         args = parse_args(argv)
-        results = [check_vlh(args.vlh), check_verus(args.verus, args.artifact_root, args.require_staged_verus)]
+        results = [check_midas_lex(args.midas_lex), check_verus(args.verus, args.artifact_root, args.require_staged_verus)]
         if args.require_gpt_backed:
             results.append(check_openrouter_absent())
         text = evidence(results)
