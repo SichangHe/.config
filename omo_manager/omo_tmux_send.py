@@ -722,7 +722,7 @@ def exact_complete_input_text(lines: list[str], *, allow_codex_footer_spacer: bo
         raise RuntimeError("target existing input is in an unsupported Codex overlay")
     body_end = end - 1
     if body_end and not lines[body_end - 1].strip():
-        if not allow_codex_footer_spacer:
+        if not allow_codex_footer_spacer or lines[body_end - 1]:
             raise RuntimeError("target existing input has an ambiguous trailing blank line")
         body_end -= 1
     input_start = -1
@@ -837,7 +837,17 @@ def verify_authorized_existing_submit(
             raise RuntimeError("Codex submit blocked by unsafe Plan prompt")
         now_s = time.monotonic()
         if is_real_input_text(input_text) and now_s >= next_enter_s:
-            capture = require_authorized_existing_input(target, authorization, pane_id)
+            try:
+                capture = require_authorized_existing_input(target, authorization, pane_id, allow_codex_footer_spacer=True)
+            except RuntimeError:
+                confirmation_lines = tail_pane_id(pane_id, EXISTING_INPUT_CAPTURE_LINES)
+                validate_error_transition(confirmation_lines, preexisting_error, target, "after submit-existing")
+                confirmation_status = status(confirmation_lines, current_block(confirmation_lines))
+                if confirmation_status in {"ready", "running", "waiting_subagent"} and not is_real_input_text(
+                    current_input_text(confirmation_lines)
+                ):
+                    return
+                raise
             send_enter(capture.pane_id)
             next_enter_s = now_s + max(options.enter_delay_s, 0.25)
         if now_s >= deadline_s:
@@ -855,11 +865,11 @@ def submit_existing_to_codex(target: str, authorization: ExistingInputAuthorizat
         return
     reject_human_owned_submit_existing_target(target)
     preexisting_error = require_sendable_codex_target(target, EXISTING_INPUT_CAPTURE_LINES)
-    initial_capture = require_authorized_existing_input(target, authorization)
+    initial_capture = require_authorized_existing_input(target, authorization, allow_codex_footer_spacer=True)
     lines = revalidate_error_transition(target, EXISTING_INPUT_CAPTURE_LINES, preexisting_error, "before submit-existing")
     if has_plan_prompt(lines):
         raise RuntimeError("Codex submit blocked by unsafe Plan prompt")
-    capture = require_authorized_existing_input(target, authorization, initial_capture.pane_id)
+    capture = require_authorized_existing_input(target, authorization, initial_capture.pane_id, allow_codex_footer_spacer=True)
     send_enter(capture.pane_id)
     verify_authorized_existing_submit(target, authorization, selected, capture.pane_id, preexisting_error)
 
