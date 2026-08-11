@@ -192,29 +192,57 @@ class ManagerMailCompressTests(unittest.TestCase):
         uid_file.write_text(f"{record.uid}\n", encoding="utf-8")
         return uid_file
 
-    def test_frozen_thread_context_uses_exact_exported_flags_and_quoted_labels(self) -> None:
-        record = MailRecord(
-            "10",
-            "2026-08-09",
-            "Agent <agent@example.test>",
-            "Human <human@example.test>",
-            "subject",
-            "msg-sha",
-            raw_sha256="raw-sha",
-            gmail_msgid="100",
-            gmail_thrid="200",
-            flags=r"\\Seen  \\Flagged",
-            labels=r'\\Inbox  "Project Alpha"  \\Important',
-            body="body",
-            source_uidvalidity="9",
-        )
+    def test_frozen_thread_context_preserves_legacy_outer_label_quotes(self) -> None:
+        digest = "1cd8aa8dc65a86f86fc2d10193aafd1262f3aa865b83364819a2a78f1c9e1e8c"
         with tempfile.TemporaryDirectory() as temp_dir:
             source_dir = Path(temp_dir) / "source"
-            self.write_source_map(source_dir, record)
+            source_dir.mkdir()
+            (source_dir / "threads").mkdir()
+            (source_dir / "thread-context.tsv").write_text(
+                "gmail_thrid\tgmail_msgid\tmsgid_sha256\traw_sha256\tflags\tlabels\n"
+                '200\t100\tmsg-a\traw-a\t\\Seen\t"\\Inbox Important Mail"\n'
+                '200\t101\tmsg-b\traw-b\t\t"\\Inbox"\n',
+                encoding="utf-8",
+            )
+            (source_dir / "thread-digests.tsv").write_text(
+                f"gmail_thrid\tthread_context_sha256\n200\t{digest}\n", encoding="utf-8"
+            )
+            (source_dir / "manifest.tsv").write_text(
+                f"gmail_thrid\tthread_context_sha256\n200\t{digest}\n", encoding="utf-8"
+            )
+            first_export = (
+                "Message-ID-SHA256: msg-a\n"
+                "Gmail-Message-ID: 100\n"
+                "Gmail-Thread-ID: 200\n"
+                "Flags: \\Seen\n"
+                'Labels: "\\Inbox Important Mail"\n'
+                "Raw-SHA256: raw-a\n\nbody\n"
+            )
+            second_export = (
+                "Message-ID-SHA256: msg-b\n"
+                "Gmail-Message-ID: 101\n"
+                "Gmail-Thread-ID: 200\n"
+                "Flags: \n"
+                'Labels: "\\Inbox"\n'
+                "Raw-SHA256: raw-b\n\nbody\n"
+            )
+            first_path = source_dir / "threads" / "200-100.txt"
+            first_path.write_text(first_export, encoding="utf-8")
+            (source_dir / "threads" / "200-101.txt").write_text(second_export, encoding="utf-8")
             frozen = frozen_thread_context(source_dir, "200")
 
-        self.assertEqual(tsv_value(record.flags), frozen["100"]["flags"])
-        self.assertEqual(tsv_value(record.labels), frozen["100"]["labels"])
+            self.assertEqual(23, len(frozen["100"]["labels"]))
+            self.assertEqual(8, len(frozen["101"]["labels"]))
+
+            first_path.write_text(first_export.replace("Flags: \\Seen", "Flags: \\Flagged"), encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "evidence files disagree"):
+                frozen_thread_context(source_dir, "200")
+            first_path.write_text(first_export, encoding="utf-8")
+            (source_dir / "thread-digests.tsv").write_text(
+                "gmail_thrid\tthread_context_sha256\n200\tcorrupt\n", encoding="utf-8"
+            )
+            with self.assertRaisesRegex(RuntimeError, "digest binding failed"):
+                frozen_thread_context(source_dir, "200")
 
     def test_parse_uid_text_dedupes_and_accepts_commas_or_space(self) -> None:
         self.assertEqual(["5841", "5842", "5843"], parse_uid_text("5841,5842 5841\n5843"))

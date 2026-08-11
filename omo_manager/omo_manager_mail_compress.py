@@ -728,6 +728,26 @@ def read_tsv(path: Path, required_fields: set[str]) -> list[dict[str, str]]:
         raise RuntimeError(f"could not read private source map: {path.name}") from exc
 
 
+def read_literal_tsv(path: Path, required_fields: set[str]) -> list[dict[str, str]]:
+    """Read historical tab-joined evidence without interpreting quote characters."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise RuntimeError(f"could not read private source map: {path.name}") from exc
+    if not lines:
+        raise RuntimeError(f"private source map is missing required fields: {path.name}")
+    fieldnames = lines[0].split("\t")
+    if len(fieldnames) != len(set(fieldnames)) or not required_fields.issubset(fieldnames):
+        raise RuntimeError(f"private source map is missing required fields: {path.name}")
+    rows: list[dict[str, str]] = []
+    for line in lines[1:]:
+        values = line.split("\t")
+        if len(values) != len(fieldnames):
+            raise RuntimeError(f"private source map has malformed row: {path.name}")
+        rows.append(dict(zip(fieldnames, values, strict=True)))
+    return rows
+
+
 def read_tsv_text(text: str, required_fields: set[str], evidence_name: str) -> list[dict[str, str]]:
     reader = csv.DictReader(io.StringIO(text), delimiter="\t")
     if reader.fieldnames is None or not required_fields.issubset(reader.fieldnames):
@@ -1033,7 +1053,7 @@ def require_reconciliation_locations(
 def frozen_thread_context(source_dir: Path, gmail_thrid: str) -> dict[str, dict[str, str]]:
     expected_rows = [
         row
-        for row in read_tsv(
+        for row in read_literal_tsv(
             source_dir / "thread-context.tsv",
             {"gmail_thrid", "gmail_msgid", "msgid_sha256", "raw_sha256", "flags", "labels"},
         )
