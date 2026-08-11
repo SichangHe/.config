@@ -27,17 +27,18 @@ Helper:
 - record retention with `retain-thread` and nonempty reason and task-evidence files
 - when replacement is required, send and record it before Trash and pass `--replacement-message-id`; the helper verifies its exact Message-ID and agent-to-human direction in the recipient account's All Mail, which also supports split sender/recipient accounts; if delivery is not yet searchable, retry verification with that same Message-ID and never send a duplicate replacement; otherwise pass `--replacement-not-required`
 - list only the chosen thread's source UIDs and run `trash-superseded` with its source directory, claimed batch, owner, Gmail thread ID, reason file, task-evidence file, replacement decision, and `--yes`
-- the helper writes an immutable intent before mutation, rejects cross-batch or repeated disposition, revalidates source and complete-thread identity/content immediately before `UID MOVE`, and writes an outcome only after immediate Trash verification
+- the helper cryptographically binds the complete frozen thread snapshot, requires every frozen identity/content member unchanged, permits only additive later identities, and never adds those later identities to the explicit move set
+- the helper writes an immutable intent before mutation, rejects cross-batch or repeated disposition, revalidates frozen source/context identity and content immediately before `UID MOVE`, and writes an outcome only after immediate Trash verification plus a re-fetch of the frozen subset and additive-only relation
 - if an interrupted Trash intent is mixed across INBOX and Trash, `trash-superseded` verifies and skips each exact Trash source, revalidates the combined complete thread, and moves only the still-intact INBOX remainder; it never retries an already-Trashed source
 - otherwise, if a caller interruption leaves an intent without an outcome and every source may already match its final disposition, stop mutation retries and run `reconcile-intent --source-dir PRIVATE_DIR --gmail-thread-id THREAD`; it opens IMAP read-only, requires every frozen source in exactly its intended INBOX or `[Gmail]/Trash` location, rechecks exact identity/content and the complete thread digest, then writes only the missing local outcome receipt
-- if every frozen source of an all-Trash intent is exact in Trash and absent from INBOX but only additive later thread members prevent normal reconciliation, run `recover-already-trashed --source-dir PRIVATE_DIR --gmail-thread-id THREAD`; it performs the same read-only identity, UIDVALIDITY, mailbox, location, and frozen-content gates, permits only additional non-frozen thread identities, and writes an explicit `skipped_already_trashed` recovery receipt instead of a normal outcome
+- normal `reconcile-intent` also tolerates additive later identities; reserve `recover-already-trashed` for an explicitly audited terminal classification of genuinely unchanged-but-unmovable all-Trash frozen sources, never as a shortcut around a failed frozen-member gate
 - reconciliation fails closed if the intent is missing or malformed, an outcome already exists, a source is duplicate, absent, in both or the wrong mailbox, or source/thread evidence changed
 - identity, content, UIDVALIDITY, task, physical mailbox location, or thread-membership drift fails closed for that thread without broadening or rerunning the source set
 
 ## finish
 
 - run `verify-run --source-dir PRIVATE_DIR`
-- final verification reconciles `run.tsv`, `manifest.tsv`, `batches.tsv`, exclusive claims, and every per-thread outcome
+- final verification reconciles `run.tsv`, `manifest.tsv`, `batches.tsv`, exclusive claims, and every per-thread outcome, and reports all threads lacking terminal evidence together
 - completion requires every fixed-start source to be classified exactly once as retained or verified in Trash
 - an intent without an outcome blocks completion unless it has a valid explicit `skipped_already_trashed` terminal recovery receipt; `verify-run` reports those sources and threads separately from normal Trash outcomes
 - final verification performs no full live candidate scan; later arrivals remain outside the run

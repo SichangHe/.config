@@ -70,6 +70,7 @@ class PostMoveVerification:
     verified_thread_count: int = 0
     changed_thread_count: int = 0
     imap_failure_count: int = 0
+    verified_records: tuple[MailRecord, ...] = ()
 
     @property
     def complete(self) -> bool:
@@ -1029,15 +1030,7 @@ def require_reconciliation_locations(
             raise RuntimeError("source identity or content changed")
 
 
-def reconciliation_thread_unchanged(
-    client: imaplib.IMAP4_SSL,
-    all_mailbox: str,
-    source_dir: Path,
-    gmail_thrid: str,
-    trash_records: list[MailRecord],
-    sender_email: str,
-    recipient_email: str,
-) -> bool:
+def frozen_thread_context(source_dir: Path, gmail_thrid: str) -> dict[str, dict[str, str]]:
     expected_rows = [
         row
         for row in read_tsv(
@@ -1048,6 +1041,34 @@ def reconciliation_thread_unchanged(
     ]
     expected = {row["gmail_msgid"]: row for row in expected_rows}
     if not expected_rows or len(expected) != len(expected_rows):
+        return {}
+    digest = hashlib.sha256()
+    for row in sorted(expected_rows, key=lambda value: value["gmail_msgid"]):
+        digest.update(
+            "\t".join((row["gmail_msgid"], row["gmail_thrid"], row["msgid_sha256"], row["raw_sha256"], row["flags"], row["labels"])).encode()
+        )
+        digest.update(b"\n")
+    frozen_digest = digest.hexdigest()
+    digest_rows = [row for row in read_tsv(source_dir / "thread-digests.tsv", {"gmail_thrid", "thread_context_sha256"}) if row["gmail_thrid"] == gmail_thrid]
+    manifest_digests = {
+        row["thread_context_sha256"]
+        for row in read_tsv(source_dir / "manifest.tsv", {"gmail_thrid", "thread_context_sha256"})
+        if row["gmail_thrid"] == gmail_thrid
+    }
+    if len(digest_rows) != 1 or digest_rows[0]["thread_context_sha256"] != frozen_digest or manifest_digests != {frozen_digest}:
+        return {}
+    return expected
+
+
+def reconciliation_thread_unchanged(
+    client: imaplib.IMAP4_SSL,
+    all_mailbox: str,
+    source_dir: Path,
+    gmail_thrid: str,
+    trash_records: list[MailRecord],
+) -> bool:
+    expected = frozen_thread_context(source_dir, gmail_thrid)
+    if not expected:
         return False
     select_mailbox(client, all_mailbox, readonly=True)
     records = fetch_records(client, gmail_thread_uids(client, gmail_thrid), with_body=True, with_metadata=True)
@@ -1057,7 +1078,7 @@ def reconciliation_thread_unchanged(
         return False
     records.extend(trash_records)
     actual = {record.gmail_msgid: record for record in records}
-    if len(actual) != len(records) or set(actual) != set(expected) or any(not is_manager_record(record, sender_email, recipient_email) for record in records):
+    if len(actual) != len(records) or not set(expected).issubset(actual) or any(record.gmail_thrid != gmail_thrid for record in records):
         return False
     for gmail_msgid, row in expected.items():
         record = actual[gmail_msgid]
@@ -1077,32 +1098,9 @@ def additive_recovery_thread_intact(
     gmail_thrid: str,
     trash_records: list[MailRecord],
 ) -> bool:
-    expected_rows = [
-        row
-        for row in read_tsv(
-            source_dir / "thread-context.tsv",
-            {"gmail_thrid", "gmail_msgid", "msgid_sha256", "raw_sha256", "flags", "labels"},
-        )
-        if row["gmail_thrid"] == gmail_thrid
-    ]
-    expected = {row["gmail_msgid"]: row for row in expected_rows}
+    expected = frozen_thread_context(source_dir, gmail_thrid)
     trashed_msgids = {record.gmail_msgid for record in trash_records}
-    if not expected_rows or len(expected) != len(expected_rows) or len(trashed_msgids) != len(trash_records):
-        return False
-    digest = hashlib.sha256()
-    for row in sorted(expected_rows, key=lambda value: value["gmail_msgid"]):
-        digest.update(
-            "\t".join((row["gmail_msgid"], row["gmail_thrid"], row["msgid_sha256"], row["raw_sha256"], row["flags"], row["labels"])).encode()
-        )
-        digest.update(b"\n")
-    frozen_digest = digest.hexdigest()
-    digest_rows = [row for row in read_tsv(source_dir / "thread-digests.tsv", {"gmail_thrid", "thread_context_sha256"}) if row["gmail_thrid"] == gmail_thrid]
-    manifest_digests = {
-        row["thread_context_sha256"]
-        for row in read_tsv(source_dir / "manifest.tsv", {"gmail_thrid", "thread_context_sha256"})
-        if row["gmail_thrid"] == gmail_thrid
-    }
-    if len(digest_rows) != 1 or digest_rows[0]["thread_context_sha256"] != frozen_digest or manifest_digests != {frozen_digest}:
+    if not expected or len(trashed_msgids) != len(trash_records):
         return False
     select_mailbox(client, all_mailbox, readonly=True)
     records = fetch_records(client, gmail_thread_uids(client, gmail_thrid), with_body=True, with_metadata=True)
@@ -1154,7 +1152,7 @@ def cmd_reconcile_intent(args: argparse.Namespace) -> int:
         final_observed = observe_reconciliation_locations(client, source_map)
         require_reconciliation_locations(rows, source_map, final_observed, sender_email, recipient_email)
         final_trash_records = [final_observed["Trash"][row["uid"]] for row in rows if row["disposition"] == "trashed"]
-        if not reconciliation_thread_unchanged(client, expected_mailboxes[r"\All"], args.source_dir, args.gmail_thrid, final_trash_records, sender_email, recipient_email):
+        if not reconciliation_thread_unchanged(client, expected_mailboxes[r"\All"], args.source_dir, args.gmail_thrid, final_trash_records):
             raise RuntimeError("complete Gmail thread context changed")
     finally:
         client.logout()
@@ -1211,6 +1209,16 @@ def cmd_verify_run(args: argparse.Namespace) -> int:
     run = run_rows[0]
     if run["source_count"] != str(len(manifest)) or run["thread_count"] != str(len(threads)) or not run["fixed_start_utc"]:
         raise RuntimeError("fixed-start run counts do not match the immutable manifest")
+    missing_terminal_evidence = [
+        gmail_thrid
+        for gmail_thrid in sorted(threads)
+        if not (args.source_dir / "outcomes" / f"{gmail_thrid}.tsv").exists()
+        and not (args.source_dir / "recoveries" / f"{gmail_thrid}.skipped-already-trashed.tsv").exists()
+    ]
+    if missing_terminal_evidence:
+        raise RuntimeError(
+            f"fixed-start threads lack outcome or terminal recovery: count={len(missing_terminal_evidence)} threads={','.join(missing_terminal_evidence)}"
+        )
     dispositions: list[dict[str, str]] = []
     skipped_already_trashed = 0
     skipped_already_trashed_threads = 0
@@ -1378,6 +1386,7 @@ def verify_post_move_imap(
     verified_threads = 0
     changed_threads = 0
     failures = 0
+    verified_records: list[MailRecord] = []
     for gmail_thrid, sources_by_id in sources_by_thread.items():
         thread_verified = 0
         for gmail_msgid, source in sources_by_id.items():
@@ -1396,6 +1405,7 @@ def verify_post_move_imap(
             ):
                 break
             thread_verified += 1
+            verified_records.append(record)
         else:
             verified_messages += thread_verified
             verified_threads += 1
@@ -1407,6 +1417,7 @@ def verify_post_move_imap(
         verified_thread_count=verified_threads,
         changed_thread_count=changed_threads,
         imap_failure_count=failures,
+        verified_records=tuple(verified_records),
     )
 
 
@@ -1438,6 +1449,9 @@ def cmd_trash_superseded(args: argparse.Namespace) -> int:
         return 2
     if args.uid_file is None:
         print("refusing without a private superseded UID file beside its source map", file=sys.stderr)
+        return 2
+    if args.uids.strip():
+        print("refusing inline UIDs; trash-superseded uses only the reviewed private --uid-file", file=sys.stderr)
         return 2
     try:
         requested = parse_uids(args.uids, args.uid_file)
@@ -1525,8 +1539,6 @@ def cmd_trash_superseded(args: argparse.Namespace) -> int:
             source_dir,
             args.gmail_thrid,
             existing_trash_records,
-            sender_email,
-            recipient_email,
         )
         select_mailbox(client, "INBOX", readonly=False)
         if not thread_unchanged:
@@ -1558,8 +1570,6 @@ def cmd_trash_superseded(args: argparse.Namespace) -> int:
             source_dir,
             args.gmail_thrid,
             existing_trash_records,
-            sender_email,
-            recipient_email,
         )
         select_mailbox(client, "INBOX", readonly=False)
         if not thread_unchanged:
@@ -1581,9 +1591,19 @@ def cmd_trash_superseded(args: argparse.Namespace) -> int:
             sender_email,
             recipient_email,
         )
+        if remaining or post_move.verified_message_count != len(requested) or not post_move.complete:
+            post_thread_unchanged = False
+        else:
+            post_thread_unchanged = reconciliation_thread_unchanged(
+                client,
+                expected_mailboxes[r"\All"],
+                source_dir,
+                args.gmail_thrid,
+                list(post_move.verified_records),
+            )
     finally:
         client.logout()
-    if not remaining and post_move.verified_message_count == len(requested) and post_move.complete:
+    if not remaining and post_move.verified_message_count == len(requested) and post_move.complete and post_thread_unchanged:
         write_private_exclusive(source_dir / "outcomes" / f"{args.gmail_thrid}.tsv", outcome_evidence)
     print(
         f"trash_superseded: requested={len(requested)} moved={len(still_in_inbox)}"
@@ -1594,7 +1614,7 @@ def cmd_trash_superseded(args: argparse.Namespace) -> int:
         f" verify_imap_failure_count={post_move.imap_failure_count}"
         f" same_mailbox_after_move={int(post_move.same_mailbox)} permanent_deleted=0"
     )
-    if remaining or post_move.verified_message_count != len(requested) or not post_move.complete:
+    if remaining or post_move.verified_message_count != len(requested) or not post_move.complete or not post_thread_unchanged:
         print(f"remaining_inbox_count={len(remaining)}")
         return 1
     return 0
@@ -1641,7 +1661,7 @@ def parser() -> argparse.ArgumentParser:
     mark_seen.add_argument("--yes", action="store_true")
     mark_seen.set_defaults(func=cmd_mark_seen)
     trash = sub.add_parser("trash-superseded", help="Move an explicit superseded manager UID set from INBOX to Trash after replacement summaries are sent.")
-    trash.add_argument("--uids", default="", help="Comma or whitespace separated UID list.")
+    trash.add_argument("--uids", default="", help="Retired for this command; inline UIDs are refused and --uid-file is authoritative.")
     trash.add_argument("--uid-file", type=Path)
     trash.add_argument("--source-dir", type=Path, required=True)
     trash.add_argument("--batch-id", required=True)
