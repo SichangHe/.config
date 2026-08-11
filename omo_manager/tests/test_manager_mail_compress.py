@@ -41,7 +41,9 @@ from omo_manager.omo_manager_mail_compress import (
     record_matches_reconciliation_location,
     replacement_exists,
     special_use_mailboxes,
+    frozen_thread_context,
     thread_context_digest,
+    tsv_value,
     verify_post_move_imap,
     write_private,
 )
@@ -169,9 +171,14 @@ class ManagerMailCompressTests(unittest.TestCase):
         context_lines = ["gmail_thrid\tgmail_msgid\tmsgid_sha256\traw_sha256\tflags\tlabels\tscope\tsender\trecipient\tall_mailbox_uid\tbody_bytes"]
         for context in context_records or [record]:
             context_lines.append(
-                f"{context.gmail_thrid}\t{context.gmail_msgid}\t{context.msgid_sha256}\t{context.raw_sha256}\t{context.flags}\t{context.labels}\tmanager-to-human\t{context.sender}\t{context.to}\t{context.uid}\t{context.body_bytes}"
+                f"{context.gmail_thrid}\t{context.gmail_msgid}\t{context.msgid_sha256}\t{context.raw_sha256}\t{tsv_value(context.flags)}\t{tsv_value(context.labels)}\tmanager-to-human\t{context.sender}\t{context.to}\t{context.uid}\t{context.body_bytes}"
             )
         (parent / "thread-context.tsv").write_text("\n".join(context_lines) + "\n", encoding="utf-8")
+        (parent / "threads").mkdir()
+        for context in context_records or [record]:
+            (parent / "threads" / f"{context.gmail_thrid}-{context.gmail_msgid}.txt").write_text(
+                export_body(context, include_addresses=True), encoding="utf-8"
+            )
         (parent / "thread-digests.tsv").write_text(
             f"gmail_thrid\tthread_context_sha256\n{record.gmail_thrid}\t{thread_digest}\n",
             encoding="utf-8",
@@ -184,6 +191,30 @@ class ManagerMailCompressTests(unittest.TestCase):
         uid_file = parent / "superseded-uids.txt"
         uid_file.write_text(f"{record.uid}\n", encoding="utf-8")
         return uid_file
+
+    def test_frozen_thread_context_uses_exact_exported_flags_and_quoted_labels(self) -> None:
+        record = MailRecord(
+            "10",
+            "2026-08-09",
+            "Agent <agent@example.test>",
+            "Human <human@example.test>",
+            "subject",
+            "msg-sha",
+            raw_sha256="raw-sha",
+            gmail_msgid="100",
+            gmail_thrid="200",
+            flags=r"\\Seen  \\Flagged",
+            labels=r'\\Inbox  "Project Alpha"  \\Important',
+            body="body",
+            source_uidvalidity="9",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_dir = Path(temp_dir) / "source"
+            self.write_source_map(source_dir, record)
+            frozen = frozen_thread_context(source_dir, "200")
+
+        self.assertEqual(tsv_value(record.flags), frozen["100"]["flags"])
+        self.assertEqual(tsv_value(record.labels), frozen["100"]["labels"])
 
     def test_parse_uid_text_dedupes_and_accepts_commas_or_space(self) -> None:
         self.assertEqual(["5841", "5842", "5843"], parse_uid_text("5841,5842 5841\n5843"))

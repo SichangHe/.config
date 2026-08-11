@@ -1041,14 +1041,54 @@ def frozen_thread_context(source_dir: Path, gmail_thrid: str) -> dict[str, dict[
     ]
     expected = {row["gmail_msgid"]: row for row in expected_rows}
     if not expected_rows or len(expected) != len(expected_rows):
-        return {}
-    digest = hashlib.sha256()
-    for row in sorted(expected_rows, key=lambda value: value["gmail_msgid"]):
-        digest.update(
-            "\t".join((row["gmail_msgid"], row["gmail_thrid"], row["msgid_sha256"], row["raw_sha256"], row["flags"], row["labels"])).encode()
+        raise RuntimeError("frozen thread evidence is missing or ambiguous")
+    exact_records: list[MailRecord] = []
+    required_headers = {
+        "Gmail-Message-ID",
+        "Gmail-Thread-ID",
+        "Message-ID-SHA256",
+        "Raw-SHA256",
+        "Flags",
+        "Labels",
+    }
+    for gmail_msgid, row in expected.items():
+        context_path = source_dir / "threads" / f"{gmail_thrid}-{gmail_msgid}.txt"
+        header_text = context_path.read_text(encoding="utf-8").split("\n\n", 1)[0]
+        headers: dict[str, str] = {}
+        for line in header_text.splitlines():
+            name, separator, value = line.partition(": ")
+            if name not in required_headers:
+                continue
+            if not separator or name in headers:
+                raise RuntimeError("frozen thread evidence has malformed exported headers")
+            headers[name] = value
+        if set(headers) != required_headers:
+            raise RuntimeError("frozen thread evidence has incomplete exported headers")
+        if (
+            headers["Gmail-Message-ID"] != gmail_msgid
+            or headers["Gmail-Thread-ID"] != gmail_thrid
+            or headers["Message-ID-SHA256"] != row["msgid_sha256"]
+            or headers["Raw-SHA256"] != row["raw_sha256"]
+            or tsv_value(headers["Flags"]) != row["flags"]
+            or tsv_value(headers["Labels"]) != row["labels"]
+        ):
+            raise RuntimeError("frozen thread evidence files disagree")
+        exact_records.append(
+            MailRecord(
+                uid="",
+                date="",
+                sender="",
+                to="",
+                subject="",
+                msgid_sha256=headers["Message-ID-SHA256"],
+                raw_sha256=headers["Raw-SHA256"],
+                gmail_msgid=headers["Gmail-Message-ID"],
+                gmail_thrid=headers["Gmail-Thread-ID"],
+                flags=headers["Flags"],
+                labels=headers["Labels"],
+            )
         )
-        digest.update(b"\n")
-    frozen_digest = digest.hexdigest()
+    frozen_digest = thread_context_digest(exact_records)
     digest_rows = [row for row in read_tsv(source_dir / "thread-digests.tsv", {"gmail_thrid", "thread_context_sha256"}) if row["gmail_thrid"] == gmail_thrid]
     manifest_digests = {
         row["thread_context_sha256"]
@@ -1056,7 +1096,7 @@ def frozen_thread_context(source_dir: Path, gmail_thrid: str) -> dict[str, dict[
         if row["gmail_thrid"] == gmail_thrid
     }
     if len(digest_rows) != 1 or digest_rows[0]["thread_context_sha256"] != frozen_digest or manifest_digests != {frozen_digest}:
-        return {}
+        raise RuntimeError("frozen thread evidence digest binding failed")
     return expected
 
 
