@@ -971,6 +971,7 @@ def codex_cmd(
     manager_file: Path | None = None,
     human_instruction_file: Path | None = None,
     include_prompt: bool = True,
+    workdir: Path | None = None,
 ) -> str:
     try:
         args = list(COMMAND_BY_TOOL[tool])
@@ -981,6 +982,8 @@ def codex_cmd(
     if reasoning_effort:
         args.extend(("--config", f'model_reasoning_effort="{reasoning_effort}"'))
     args.extend(codex_flags)
+    if session_id and tool == "codex" and workdir is not None:
+        args.extend(("--cd", str(workdir)))
     if session_id:
         args.extend(("resume", session_id))
     parts = [shlex.quote(arg) for arg in args]
@@ -1296,6 +1299,7 @@ def start_codex(target: str, args: Args) -> None:
             manager_file,
             human_instruction_file,
             not args.resume_idle,
+            args.workdir,
         )
         for attempt in range(2):
             baseline_lines = tuple(capture_pane(pane_id, 200, require=True))
@@ -1459,6 +1463,7 @@ def dry_run(args: Args) -> None:
             manager_file,
             human_instruction_file,
             not args.resume_idle,
+            args.workdir,
         )
         launch = ["tmux", "send-keys", "-t", launch_target, shell_cmd(worker_command(launch_command, launch_target, args.prelaunch_source, CODEX_LAUNCH_MARKER_DRY_RUN)), "Enter"]
         print("tmux: " + " ".join(shlex.quote(part) for part in launch))

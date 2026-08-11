@@ -22,6 +22,7 @@ from omo_manager.omo_codex_start import (
     RECOVERY_EVENT_DIRNAME,
     RECOVERY_RECEIPT_DIRNAME,
     StartError,
+    choose_resume_cwd_prompt,
     current_todo_entries,
     consume_recovery_receipt,
     finish_rotation_audit,
@@ -36,11 +37,13 @@ from omo_manager.omo_codex_start import (
     recovery_issuance_path,
     require_human_restart_authority,
     require_recovery_target,
+    require_resume_cwd_prompt,
     require_same_shell,
     require_update_prompt,
     reserve_reconciliation_receipt,
     reserve_rotation_audit,
     resolve_pane,
+    resume_cwd_prompt,
     respawn_codex,
     skip_codex_update_prompt,
     start,
@@ -161,6 +164,18 @@ class CodexStartTests(unittest.TestCase):
             "› 1. Update now (runs `bun install -g @openai/codex`)",
             "  2. Skip",
             "  3. Skip until next version",
+            "Press enter to continue",
+        ]
+
+    def resume_cwd_prompt_lines(self, session_directory: Path, current_directory: Path) -> list[str]:
+        return [
+            "Choose working directory to resume this session",
+            "Session = latest cwd recorded in the resumed session",
+            "Current = your current working directory",
+            f"› 1. Use session directory ({session_directory})",
+            f"  2. Use current directory ({current_directory})",
+            "  3. Always use session directory",
+            "  4. Always use current directory",
             "Press enter to continue",
         ]
 
@@ -443,6 +458,130 @@ class CodexStartTests(unittest.TestCase):
             respawn.assert_not_called()
             launch.assert_not_called()
 
+    def test_exact_resume_cwd_prompt_recognition(self) -> None:
+        session_directory = Path("/tmp/saved session")
+        current_directory = Path("/tmp/current work")
+        lines = self.resume_cwd_prompt_lines(session_directory, current_directory)
+        self.assertEqual((0, session_directory, current_directory), resume_cwd_prompt(lines))
+        cases = (
+            (0, "Choose a directory"),
+            (3, f"1. Use session directory ({session_directory})"),
+            (5, "3. Use session directory forever"),
+            (7, "Press any key to continue"),
+        )
+        for index, replacement in cases:
+            mismatched = [*lines]
+            mismatched[index] = replacement
+            with self.subTest(index=index):
+                self.assertIsNone(resume_cwd_prompt(mismatched))
+
+    def test_resume_cwd_prompt_rejects_human_target_without_probe(self) -> None:
+        pane = Pane("hcfg:2.0", "%2", "@2", "bunx", Path("/tmp/current"), 4242)
+        for helper, args in (
+            (require_resume_cwd_prompt, (pane, self.SESSION_ID, Path("/tmp/session"))),
+            (choose_resume_cwd_prompt, (pane, self.SESSION_ID, Path("/tmp/session"), "current")),
+        ):
+            with (
+                self.subTest(helper=helper.__name__),
+                patch("omo_manager.omo_codex_start.resolve_pane") as resolve,
+                patch("omo_manager.omo_codex_start.exact_tail") as capture,
+                patch("omo_manager.omo_codex_start.run") as run,
+                self.assertRaisesRegex(StartError, "human-owned"),
+            ):
+                helper(*args)
+            resolve.assert_not_called()
+            capture.assert_not_called()
+            run.assert_not_called()
+
+    def test_resume_cwd_prompt_requires_exact_paths_and_resumed_session(self) -> None:
+        session_directory = Path("/tmp/session")
+        current_directory = Path("/tmp/current")
+        pane = Pane("cfg:2.0", "%2", "@2", "bunx", current_directory, 4242)
+        lines = self.resume_cwd_prompt_lines(session_directory, current_directory)
+        cases = (
+            (self.SESSION_ID, Path("/tmp/other"), current_directory, "saved session directory"),
+            (self.SESSION_ID, session_directory, Path("/tmp/other"), "current working directory"),
+            ("019f670b-6a2f-7463-b9be-aaaaaaaaaaaa", session_directory, current_directory, "not resuming"),
+        )
+        for process_session, expected_session, pane_workdir, error in cases:
+            selected = replace(pane, workdir=pane_workdir)
+            with (
+                self.subTest(error=error),
+                patch("omo_manager.omo_codex_start.resolve_pane", return_value=selected),
+                patch("omo_manager.omo_codex_start.pane_process_argv", return_value=("bunx", "@openai/codex", "resume", process_session)),
+                patch("omo_manager.omo_codex_start.exact_tail", return_value=(True, lines)),
+                patch("omo_manager.omo_codex_start.run") as run,
+                self.assertRaisesRegex(StartError, error),
+            ):
+                choose_resume_cwd_prompt(selected, self.SESSION_ID, expected_session, "current")
+            run.assert_not_called()
+
+    def test_resume_cwd_prompt_rejects_non_codex_bunx_package(self) -> None:
+        session_directory = Path("/tmp/session")
+        current_directory = Path("/tmp/current")
+        pane = Pane("cfg:2.0", "%2", "@2", "bunx", current_directory, 4242)
+        with (
+            patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+            patch("omo_manager.omo_codex_start.pane_process_argv", return_value=("bunx", "some-other-package", "resume", self.SESSION_ID)),
+            patch("omo_manager.omo_codex_start.exact_tail") as capture,
+            patch("omo_manager.omo_codex_start.run") as run,
+            self.assertRaisesRegex(StartError, "not the supported Codex package invocation"),
+        ):
+            choose_resume_cwd_prompt(pane, self.SESSION_ID, session_directory, "current")
+        capture.assert_not_called()
+        run.assert_not_called()
+
+    def test_resume_cwd_prompt_atomically_selects_only_nonpersistent_choice(self) -> None:
+        session_directory = Path("/tmp/session")
+        current_directory = Path("/tmp/current")
+        pane = Pane("cfg:2.0", "%2", "@2", "bunx", current_directory, 4242)
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        for choice, key in (("session", "1"), ("current", "2")):
+            with (
+                self.subTest(choice=choice),
+                patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                patch("omo_manager.omo_codex_start.pane_process_argv", return_value=("bunx", "@openai/codex", "resume", self.SESSION_ID)),
+                patch("omo_manager.omo_codex_start.exact_tail", return_value=(True, self.resume_cwd_prompt_lines(session_directory, current_directory))),
+                patch("omo_manager.omo_codex_start.run", return_value=completed) as run,
+            ):
+                choose_resume_cwd_prompt(pane, self.SESSION_ID, session_directory, choice)
+            run.assert_called_once_with(
+                [
+                    "tmux",
+                    "if-shell",
+                    "-F",
+                    "-t",
+                    "%2",
+                    "#{&&:#{==:#{window_id},@2},#{==:#{session_name}:#{window_index}.#{pane_index},cfg:2.0},#{==:#{pane_pid},4242},#{==:#{pane_current_command},bunx}}",
+                    f"send-keys -t %2 {key} Enter",
+                    "run-shell 'exit 1'",
+                ]
+            )
+
+    def test_resume_cwd_recovery_continues_same_resumed_session(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            saved = root / "saved"
+            saved.mkdir()
+            self.write_task(root)
+            pane = Pane("cfg:2.0", "%2", "@2", "bunx", root, 4242)
+            args = self.args(
+                root,
+                confirm_empty_shell=False,
+                recover_resume_cwd_prompt=True,
+                resume_cwd_choice="current",
+                expected_session_directory=saved,
+            )
+            with (
+                patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                patch("omo_manager.omo_codex_start.pane_process_argv", return_value=("bunx", "@openai/codex", "resume", self.SESSION_ID)),
+                patch("omo_manager.omo_codex_start.exact_tail", return_value=(True, self.resume_cwd_prompt_lines(saved, root))),
+                patch("omo_manager.omo_codex_start.run", return_value=subprocess.CompletedProcess([], 0, "", "")),
+                patch("omo_manager.omo_codex_start.wait_resume_cwd_recovery", return_value="ready") as wait,
+            ):
+                self.assertEqual("ready", start(args))
+            wait.assert_called_once_with(pane, 45.0)
+
     def test_fresh_manager_prompt_includes_defaults_manager_and_task(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root)
@@ -494,6 +633,30 @@ class CodexStartTests(unittest.TestCase):
         args = parse_args([*common, "--session-id", self.SESSION_ID])
         self.assertTrue(args.recover_update_prompt)
         self.assertFalse(args.confirm_empty_shell)
+
+    def test_resume_cwd_recovery_requires_all_exact_assertions(self) -> None:
+        common = [
+            "--task-file",
+            "worker.md",
+            "--target",
+            "cfg:2",
+            "--model",
+            "gpt-5.6-terra",
+            "--reasoning-effort",
+            "max",
+            "--session-id",
+            self.SESSION_ID,
+            "--recover-resume-cwd-prompt",
+        ]
+        with self.assertRaises(SystemExit):
+            parse_args(common)
+        args = parse_args([*common, "--resume-cwd-choice", "current", "--expected-session-directory", "/tmp/session"])
+        self.assertTrue(args.recover_resume_cwd_prompt)
+        self.assertEqual("current", args.resume_cwd_choice)
+        self.assertEqual(Path("/tmp/session"), args.expected_session_directory)
+        for option in ("--resume-cwd-choice", "--expected-session-directory"):
+            with self.subTest(option=option), self.assertRaises(SystemExit):
+                parse_args([*common, option, "current" if option.endswith("choice") else "/tmp/session"])
 
     def test_restart_running_rejects_caller_supplied_session(self) -> None:
         with self.assertRaises(SystemExit):

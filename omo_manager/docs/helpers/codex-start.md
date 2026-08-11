@@ -109,6 +109,22 @@ omo_codex_start.py \
 
 This mode recognizes only the exact Codex menu ending in `2. Skip` and `Press enter to continue`, requires the latest captured Codex launch before that menu to resume the supplied session id, and atomically rechecks the target, pane, window, captured pane process id, and `bunx` command before sending `2` and Enter. It never respawns the pane or sends input after a mismatch. Update-prompt recovery and its lower-level input helpers categorically reject `h*` sessions.
 
+Recover a resumed session launched outside the supported `--cd` path and paused at Codex's working-directory chooser:
+
+```bash
+omo_codex_start.py \
+  --task-file TASK.md \
+  --target SESSION:WINDOW \
+  --model gpt-5.6-terra \
+  --reasoning-effort max \
+  --session-id SESSION_UUID \
+  --recover-resume-cwd-prompt \
+  --resume-cwd-choice current \
+  --expected-session-directory SAVED_SESSION_DIRECTORY
+```
+
+Codex [documents](https://developers.openai.com/codex/cli/reference#codex-resume) this chooser when the launch directory differs from the saved session directory. This recovery accepts only the exact default menu with the asserted saved directory and pinned pane working directory, requires the pinned `bunx` process to resume the supplied UUID, and atomically rechecks pane, window, process id, and command before sending option `1` (`session`) or `2` (`current`) plus Enter. It never selects persistent options `3` or `4`, treats arbitrary `not_codex` content as authority, or accepts `h*` targets.
+
 Start a fresh session with task-local instructions:
 
 ```bash

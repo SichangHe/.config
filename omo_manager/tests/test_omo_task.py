@@ -927,6 +927,14 @@ class OmoTaskTests(unittest.TestCase):
             codex_cmd("abc", include_prompt=False),
         )
 
+    def test_codex_cmd_resume_binds_requested_workdir_for_codex_only(self) -> None:
+        workdir = Path("/tmp/current work")
+        self.assertEqual(
+            "bunx @openai/codex --dangerously-bypass-approvals-and-sandbox --cd '/tmp/current work' resume abc",
+            codex_cmd("abc", include_prompt=False, workdir=workdir),
+        )
+        self.assertNotIn("--cd", codex_cmd("abc", tool="pcodx", include_prompt=False, workdir=workdir))
+
     def test_resume_idle_requires_session_and_rejects_prompt(self) -> None:
         with self.assertRaises(SystemExit):
             parse_args(["--task-file", "x.md", "--tmux-session", "cfg", "--resume-idle"])
@@ -2142,6 +2150,7 @@ class OmoTaskTests(unittest.TestCase):
             ) as tmux, patch("omo_manager.omo_task.wait_command_started"):
                 start_codex("hvl:9", args)
             command = tmux.call_args.args[0][3]
+            self.assertIn(f"--cd {tmp}", command)
             self.assertIn("resume abc", command)
             self.assertNotIn("$(cat --", command)
 
@@ -2173,6 +2182,7 @@ class OmoTaskTests(unittest.TestCase):
             self.assertIn("new-window -P -F", text)
             self.assertIn("-t cfg:9", text)
             self.assertIn("send-keys -t cfg:9", text)
+            self.assertIn(f"--cd {root}", text)
             self.assertIn("resume abc", text)
             self.assertNotIn("$(cat --", text)
 

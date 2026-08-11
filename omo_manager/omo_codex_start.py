@@ -92,6 +92,14 @@ UPDATE_PROMPT_SUFFIX = (
     "3. Skip until next version",
     "Press enter to continue",
 )
+RESUME_CWD_PROMPT_PREFIX = (
+    "Choose working directory to resume this session",
+    "Session = latest cwd recorded in the resumed session",
+    "Current = your current working directory",
+)
+RESUME_CWD_SESSION_RE = re.compile(r"^› 1\. Use session directory \((?P<path>/.*)\)$")
+RESUME_CWD_CURRENT_RE = re.compile(r"^2\. Use current directory \((?P<path>/.*)\)$")
+RESUME_CWD_PROMPT_SUFFIX = ("3. Always use session directory", "4. Always use current directory", "Press enter to continue")
 
 
 class StartError(RuntimeError):
@@ -138,6 +146,9 @@ class Args:
     reconciliation_receipt: Path | None = None
     expected_current_pane_pid: int = 0
     expected_current_command: str = ""
+    recover_resume_cwd_prompt: bool = False
+    resume_cwd_choice: str = ""
+    expected_session_directory: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -248,6 +259,13 @@ def parse_args(argv: list[str]) -> Args:
         help="Select Skip only in Codex's exact startup update menu for the supplied resumed session.",
     )
     _ = parser.add_argument(
+        "--recover-resume-cwd-prompt",
+        action="store_true",
+        help="Select a nonpersistent directory choice only in Codex's exact resume working-directory menu.",
+    )
+    _ = parser.add_argument("--resume-cwd-choice", choices=("current", "session"), help="Nonpersistent directory choice for --recover-resume-cwd-prompt.")
+    _ = parser.add_argument("--expected-session-directory", type=Path, help="Exact saved session directory shown by --recover-resume-cwd-prompt.")
+    _ = parser.add_argument(
         "--recover-non-codex",
         action="store_true",
         help="Explicitly replace a verified non-Codex process after a failed delivery; requires --prompt-file and --recovery-evidence.",
@@ -274,7 +292,15 @@ def parse_args(argv: list[str]) -> Args:
         parser.error("--model contains unsupported characters.")
     if parsed.session_id and UUID_RE.fullmatch(parsed.session_id) is None:
         parser.error("--session-id must be a Codex UUID.")
-    modes = (parsed.restart_running, parsed.rotate_worker, parsed.recover_non_codex, parsed.record_recovery_evidence, parsed.recover_update_prompt, parsed.reconcile_rotation_audit)
+    modes = (
+        parsed.restart_running,
+        parsed.rotate_worker,
+        parsed.recover_non_codex,
+        parsed.record_recovery_evidence,
+        parsed.recover_update_prompt,
+        parsed.recover_resume_cwd_prompt,
+        parsed.reconcile_rotation_audit,
+    )
     if sum(bool(value) for value in modes) > 1:
         parser.error("launch, recovery, rotation, and audit reconciliation modes are mutually exclusive.")
     if not parsed.reconcile_rotation_audit and (not parsed.model or not parsed.reasoning_effort):
@@ -339,6 +365,12 @@ def parse_args(argv: list[str]) -> Args:
         parser.error("--record-recovery-evidence requires --failed-delivery-id.")
     if parsed.recover_update_prompt and (not parsed.session_id or parsed.prompt_file):
         parser.error("--recover-update-prompt requires --session-id and does not accept --prompt-file.")
+    if parsed.recover_resume_cwd_prompt and (not parsed.session_id or parsed.prompt_file):
+        parser.error("--recover-resume-cwd-prompt requires --session-id and does not accept --prompt-file.")
+    if parsed.recover_resume_cwd_prompt and (not parsed.resume_cwd_choice or parsed.expected_session_directory is None):
+        parser.error("--recover-resume-cwd-prompt requires --resume-cwd-choice and --expected-session-directory.")
+    if (parsed.resume_cwd_choice or parsed.expected_session_directory is not None) and not parsed.recover_resume_cwd_prompt:
+        parser.error("--resume-cwd-choice and --expected-session-directory require --recover-resume-cwd-prompt.")
     if parsed.failed_delivery_id and not parsed.record_recovery_evidence:
         parser.error("--failed-delivery-id is only valid with --record-recovery-evidence.")
     if parsed.recovery_output and not parsed.record_recovery_evidence:
@@ -398,6 +430,9 @@ def parse_args(argv: list[str]) -> Args:
         reconciliation_receipt=Path(os.path.abspath(parsed.reconciliation_receipt.expanduser())) if parsed.reconciliation_receipt else None,
         expected_current_pane_pid=parsed.expected_current_pane_pid or 0,
         expected_current_command=parsed.expected_current_command or "",
+        recover_resume_cwd_prompt=parsed.recover_resume_cwd_prompt,
+        resume_cwd_choice=parsed.resume_cwd_choice or "",
+        expected_session_directory=parsed.expected_session_directory.expanduser().resolve(strict=False) if parsed.expected_session_directory else None,
     )
 
 
@@ -1780,6 +1815,93 @@ def is_codex_update_prompt(lines: list[str]) -> bool:
     return codex_update_prompt_start(lines) is not None
 
 
+def resume_cwd_prompt(lines: list[str]) -> tuple[int, Path, Path] | None:
+    """Recognize Codex's exact default resume-directory choice menu."""
+
+    visible = [(index, line.strip()) for index, line in enumerate(lines) if line.strip()]
+    n_prompt_lines = len(RESUME_CWD_PROMPT_PREFIX) + len(RESUME_CWD_PROMPT_SUFFIX) + 2
+    if len(visible) < n_prompt_lines:
+        return None
+    prompt = visible[-n_prompt_lines:]
+    prompt_lines = tuple(line for _, line in prompt)
+    if prompt_lines[:3] != RESUME_CWD_PROMPT_PREFIX or prompt_lines[-3:] != RESUME_CWD_PROMPT_SUFFIX:
+        return None
+    session_match = RESUME_CWD_SESSION_RE.fullmatch(prompt_lines[3])
+    current_match = RESUME_CWD_CURRENT_RE.fullmatch(prompt_lines[4])
+    if session_match is None or current_match is None:
+        return None
+    return prompt[0][0], Path(session_match.group("path")), Path(current_match.group("path"))
+
+
+def pane_process_argv(pane: Pane) -> tuple[str, ...]:
+    try:
+        raw = Path(f"/proc/{pane.pane_pid}/cmdline").read_bytes()
+    except OSError as error:
+        raise StartError("resume-directory recovery could not inspect the pinned pane process; no input was sent.") from error
+    if not raw or len(raw) > 64 * 1024 or not raw.endswith(b"\0"):
+        raise StartError("resume-directory recovery found an invalid pinned process command line; no input was sent.")
+    try:
+        return tuple(part.decode("utf-8") for part in raw[:-1].split(b"\0"))
+    except UnicodeDecodeError as error:
+        raise StartError("resume-directory recovery found a non-UTF-8 pinned process command line; no input was sent.") from error
+
+
+def require_resume_cwd_process(pane: Pane, session_id: str) -> Pane:
+    if pane.target.partition(":")[0].startswith("h"):
+        raise StartError("resume-directory recovery cannot modify a human-owned `h*` tmux session.")
+    current = resolve_pane(pane.target)
+    if current.pane_id != pane.pane_id or current.window_id != pane.window_id:
+        raise StartError("tmux pane or window identity changed before resume-directory recovery.")
+    if current.pane_pid != pane.pane_pid:
+        raise StartError("tmux pane process identity changed before resume-directory recovery.")
+    if current.command != CODEX_LAUNCH_COMMAND:
+        raise StartError(f"target {current.target} is running {current.command or 'unknown'}, not the Codex launcher.")
+    argv = pane_process_argv(current)
+    if len(argv) < 2 or Path(argv[0]).name != CODEX_LAUNCH_COMMAND or argv[1] != "@openai/codex":
+        raise StartError(f"target {current.target} process is not the supported Codex package invocation; no input was sent.")
+    resumed_sessions = tuple(argv[index + 1] for index, arg in enumerate(argv[:-1]) if arg == "resume")
+    if not resumed_sessions or resumed_sessions[-1] != session_id:
+        raise StartError(f"target {current.target} process is not resuming the asserted session {session_id}; no input was sent.")
+    return current
+
+
+def require_resume_cwd_prompt(pane: Pane, session_id: str, expected_session_directory: Path) -> None:
+    current = require_resume_cwd_process(pane, session_id)
+    captured, lines = exact_tail(current.target, 80)
+    if not captured:
+        raise StartError(f"target {current.target} resume-directory capture failed; no input was sent.")
+    require_resume_cwd_process(pane, session_id)
+    prompt = resume_cwd_prompt(lines)
+    if prompt is None:
+        raise StartError(f"target {current.target} does not show the exact Codex resume working-directory menu; no input was sent.")
+    _, session_directory, current_directory = prompt
+    if session_directory.resolve(strict=False) != expected_session_directory.resolve(strict=False):
+        raise StartError(f"target {current.target} does not show the asserted saved session directory; no input was sent.")
+    if current_directory.resolve(strict=False) != pane.workdir.resolve(strict=False):
+        raise StartError(f"target {current.target} does not show its pinned current working directory; no input was sent.")
+
+
+def choose_resume_cwd_prompt(pane: Pane, session_id: str, expected_session_directory: Path, choice: str) -> None:
+    """Choose `current` or `session` without persisting a Codex preference."""
+
+    require_resume_cwd_prompt(pane, session_id, expected_session_directory)
+    key = {"session": "1", "current": "2"}.get(choice)
+    if key is None:
+        raise StartError("resume-directory recovery choice must be `current` or `session`; no input was sent.")
+    condition = "#{&&:#{==:#{window_id},%s},#{==:#{session_name}:#{window_index}.#{pane_index},%s},#{==:#{pane_pid},%s},#{==:#{pane_current_command},%s}}" % (
+        pane.window_id,
+        pane.target,
+        pane.pane_pid,
+        CODEX_LAUNCH_COMMAND,
+    )
+    send = f"send-keys -t {pane.pane_id} {key} Enter"
+    result = run(["tmux", "if-shell", "-F", "-t", pane.pane_id, condition, send, "run-shell 'exit 1'"])
+    if result.returncode != 0:
+        detail = result.stderr.strip() or "pane/window/process identity changed before resume-directory recovery"
+        raise StartError(f"failed to choose the Codex resume directory in {pane.target}: {detail}")
+    require_resume_cwd_process(pane, session_id)
+
+
 def require_update_process(pane: Pane) -> Pane:
     if pane.target.partition(":")[0].startswith("h"):
         raise StartError("update-prompt recovery cannot modify a human-owned `h*` tmux session.")
@@ -1839,6 +1961,19 @@ def wait_update_recovery(pane: Pane, timeout_s: float) -> str:
             raise StartError("Codex update-prompt recovery reached an error state.")
         time.sleep(0.25)
     raise StartError("timed out waiting for Codex after skipping its startup update.")
+
+
+def wait_resume_cwd_recovery(pane: Pane, timeout_s: float) -> str:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        verify_same_pane(pane)
+        report = inspect(StatusArgs(pane.target, 80))
+        if report.status in SUCCESS_STATUSES:
+            return report.status
+        if report.status == "error":
+            raise StartError("Codex resume-directory recovery reached an error state.")
+        time.sleep(0.25)
+    raise StartError("timed out waiting for Codex after choosing its resume directory.")
 
 
 def wait_started(pane: Pane, marker: str, timeout_s: float) -> str:
@@ -1918,9 +2053,16 @@ def verify_rotation_before_respawn(args: Args, pane: Pane, original_session_id: 
 def start(args: Args) -> str:
     if args.reconcile_rotation_audit:
         raise StartError("rotation audit reconciliation must use its isolated reconciliation path.")
-    modes = (args.restart_running, args.rotate_worker, args.recover_non_codex, args.record_recovery_evidence, args.recover_update_prompt)
+    modes = (
+        args.restart_running,
+        args.rotate_worker,
+        args.recover_non_codex,
+        args.record_recovery_evidence,
+        args.recover_update_prompt,
+        args.recover_resume_cwd_prompt,
+    )
     if sum(bool(value) for value in modes) > 1:
-        raise StartError("--restart-running, --rotate-worker, --recover-non-codex, --record-recovery-evidence, and --recover-update-prompt are mutually exclusive.")
+        raise StartError("launch, restart, rotation, and recovery modes are mutually exclusive.")
     if args.rotate_worker:
         if args.session_id or args.prompt_file is not None:
             raise StartError("--rotate-worker starts fresh from the tracked task and does not accept a session or prompt file.")
@@ -1950,6 +2092,10 @@ def start(args: Args) -> str:
             raise StartError("--record-recovery-evidence requires --failed-delivery-id.")
     if args.recover_update_prompt and (not args.session_id or args.prompt_file is not None):
         raise StartError("--recover-update-prompt requires --session-id and does not accept --prompt-file.")
+    if args.recover_resume_cwd_prompt and (not args.session_id or args.prompt_file is not None):
+        raise StartError("--recover-resume-cwd-prompt requires --session-id and does not accept --prompt-file.")
+    if args.recover_resume_cwd_prompt and (not args.resume_cwd_choice or args.expected_session_directory is None):
+        raise StartError("--recover-resume-cwd-prompt requires a choice and expected saved session directory.")
     pane = resolve_pane(args.target)
     human_restart_authority = require_human_restart_authority(args, pane)
     if os.environ.get("TMUX_PANE") == pane.pane_id:
@@ -1983,6 +2129,20 @@ def start(args: Args) -> str:
                 return "dry-run"
             skip_codex_update_prompt(pane, args.session_id)
             return wait_update_recovery(pane, args.startup_timeout_s)
+        if args.recover_resume_cwd_prompt:
+            expected_session_directory = args.expected_session_directory
+            if expected_session_directory is None:
+                raise StartError("--recover-resume-cwd-prompt requires --expected-session-directory.")
+            if args.dry_run:
+                require_resume_cwd_prompt(pane, args.session_id, expected_session_directory)
+                print(f"target: {pane.target}")
+                print("mode: recover-resume-cwd-prompt")
+                print(f"session: {args.session_id}")
+                print(f"choice: {args.resume_cwd_choice}")
+                print(f"session-directory: {expected_session_directory}")
+                return "dry-run"
+            choose_resume_cwd_prompt(pane, args.session_id, expected_session_directory, args.resume_cwd_choice)
+            return wait_resume_cwd_recovery(pane, args.startup_timeout_s)
         effective_args = args
         live_pcodx_state: dict[str, str] | None = None
         original_session_id = ""
