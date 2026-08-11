@@ -3,11 +3,11 @@
 - `accounts.md`
   - separate agent communication mail from human mailbox cleanup
 - `cleanup.md`
-  - shared classification and execution safeguards for manager mail
-  - clean stale manager-human threads conservatively and recoverably
+  - scope, authority, and classification rules for manager-human cleanup
+  - delegates execution to the fixed-start cleanup procedure
 - `compression.md`
-  - compress only fully superseded manager-sent mail; Gmail read/unread state never determines eligibility
-  - inherit cleanup safeguards and move sources only after replacement
+  - canonical fixed-start execution and recovery procedure for every manager-human cleanup run
+  - optionally replace superseded mail with a verified topic summary before Trash
 - `email-idle-watcher.md`
   - ingest human email into durable manager pending blocks
 - `digest-and-email.md`
