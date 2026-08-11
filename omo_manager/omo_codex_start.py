@@ -31,14 +31,14 @@ from pathlib import Path
 
 try:
     from omo_manager.omo_codex_status import Args as StatusArgs
-    from omo_manager.omo_codex_status import current_block, exact_tail, inspect, report_from_lines, tail
+    from omo_manager.omo_codex_status import CODEX_FOOTER_RE, current_block, current_input_text, exact_tail, inspect, is_stock_placeholder_input_text, report_from_lines, tail, visible_error_lines
     from omo_manager.omo_codex_status import status as classify_status
     from omo_manager.omo_codex_stop import extract_new_status_session_id, query_status_session_id
     from omo_manager.omo_task_lock import task_file_lock, task_target_lock
     from omo_manager.omo_task_metadata import TARGET_RE, TASK_FRONTMATTER_STATUSES, parse_task_metadata
 except ModuleNotFoundError:
     from omo_codex_status import Args as StatusArgs
-    from omo_codex_status import current_block, exact_tail, inspect, report_from_lines, tail
+    from omo_codex_status import CODEX_FOOTER_RE, current_block, current_input_text, exact_tail, inspect, is_stock_placeholder_input_text, report_from_lines, tail, visible_error_lines
     from omo_codex_status import status as classify_status
     from omo_codex_stop import extract_new_status_session_id, query_status_session_id
     from omo_task_lock import task_file_lock, task_target_lock
@@ -100,6 +100,10 @@ RESUME_CWD_PROMPT_PREFIX = (
 RESUME_CWD_SESSION_RE = re.compile(r"^› 1\. Use session directory \((?P<path>/.*)\)$")
 RESUME_CWD_CURRENT_RE = re.compile(r"^2\. Use current directory \((?P<path>/.*)\)$")
 RESUME_CWD_PROMPT_SUFFIX = ("3. Always use session directory", "4. Always use current directory", "Press enter to continue")
+RESUME_CWD_IGNORABLE_MCP_ERRORS = (
+    "⚠ MCP client for `codex_apps` failed to start: MCP startup failed: Transport",
+    "⚠ MCP startup incomplete (failed: codex_apps)",
+)
 
 
 class StartError(RuntimeError):
@@ -1963,15 +1967,25 @@ def wait_update_recovery(pane: Pane, timeout_s: float) -> str:
     raise StartError("timed out waiting for Codex after skipping its startup update.")
 
 
-def wait_resume_cwd_recovery(pane: Pane, timeout_s: float) -> str:
+def wait_resume_cwd_recovery(pane: Pane, session_id: str, timeout_s: float) -> str:
     deadline = time.monotonic() + timeout_s
     last_status = ""
     while time.monotonic() < deadline:
-        verify_same_pane(pane)
+        require_resume_cwd_process(pane, session_id)
         report = inspect(StatusArgs(pane.target, 80))
+        require_resume_cwd_process(pane, session_id)
         last_status = report.status
         if report.status in SUCCESS_STATUSES:
             return report.status
+        if report.status == "error":
+            captured, lines = exact_tail(pane.target, 80)
+            require_resume_cwd_process(pane, session_id)
+            input_text = current_input_text(lines) if captured else ""
+            block = current_block(lines) if captured else None
+            errors = tuple(visible_error_lines(block.lines or lines[-20:], include_unmarked=True)) if block else ()
+            exact_footer = bool(lines and CODEX_FOOTER_RE.match(lines[-1]))
+            if captured and errors == RESUME_CWD_IGNORABLE_MCP_ERRORS and resume_cwd_prompt(lines) is None and exact_footer and is_stock_placeholder_input_text(input_text):
+                return "ready"
         time.sleep(0.25)
     if last_status == "error":
         raise StartError("Codex resume-directory recovery remained in an error state until timeout.")
@@ -2144,7 +2158,7 @@ def start(args: Args) -> str:
                 print(f"session-directory: {expected_session_directory}")
                 return "dry-run"
             choose_resume_cwd_prompt(pane, args.session_id, expected_session_directory, args.resume_cwd_choice)
-            return wait_resume_cwd_recovery(pane, args.startup_timeout_s)
+            return wait_resume_cwd_recovery(pane, args.session_id, args.startup_timeout_s)
         effective_args = args
         live_pcodx_state: dict[str, str] | None = None
         original_session_id = ""

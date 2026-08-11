@@ -581,43 +581,138 @@ class CodexStartTests(unittest.TestCase):
                 patch("omo_manager.omo_codex_start.wait_resume_cwd_recovery", return_value="ready") as wait,
             ):
                 self.assertEqual("ready", start(args))
-            wait.assert_called_once_with(pane, 45.0)
+            wait.assert_called_once_with(pane, self.SESSION_ID, 45.0)
 
     def test_resume_cwd_recovery_tolerates_transient_error_before_ready(self) -> None:
         pane = Pane("cfg:2.0", "%2", "@2", "bunx", Path("/tmp/current"), 4242)
         with (
             patch("omo_manager.omo_codex_start.time.monotonic", side_effect=(0.0, 0.0, 0.25)),
             patch("omo_manager.omo_codex_start.time.sleep"),
-            patch("omo_manager.omo_codex_start.verify_same_pane") as verify,
+            patch("omo_manager.omo_codex_start.require_resume_cwd_process") as verify,
+            patch("omo_manager.omo_codex_start.exact_tail", return_value=(False, [])),
             patch(
                 "omo_manager.omo_codex_start.inspect",
                 side_effect=(Report("error", ["Selected model is at capacity"]), Report("ready", ["› prompt"])),
             ),
         ):
-            self.assertEqual("ready", wait_resume_cwd_recovery(pane, 1.0))
-        self.assertEqual(2, verify.call_count)
+            self.assertEqual("ready", wait_resume_cwd_recovery(pane, self.SESSION_ID, 1.0))
+        self.assertEqual(5, verify.call_count)
 
     def test_resume_cwd_recovery_fails_if_error_persists_until_timeout(self) -> None:
         pane = Pane("cfg:2.0", "%2", "@2", "bunx", Path("/tmp/current"), 4242)
         with (
             patch("omo_manager.omo_codex_start.time.monotonic", side_effect=(0.0, 0.0, 1.0)),
             patch("omo_manager.omo_codex_start.time.sleep"),
-            patch("omo_manager.omo_codex_start.verify_same_pane"),
+            patch("omo_manager.omo_codex_start.require_resume_cwd_process"),
+            patch("omo_manager.omo_codex_start.exact_tail", return_value=(False, [])),
             patch("omo_manager.omo_codex_start.inspect", return_value=Report("error", ["error"])),
             self.assertRaisesRegex(StartError, "remained in an error state until timeout"),
         ):
-            wait_resume_cwd_recovery(pane, 1.0)
+            wait_resume_cwd_recovery(pane, self.SESSION_ID, 1.0)
 
     def test_resume_cwd_recovery_reports_timeout_if_error_clears_without_ready(self) -> None:
         pane = Pane("cfg:2.0", "%2", "@2", "bunx", Path("/tmp/current"), 4242)
         with (
             patch("omo_manager.omo_codex_start.time.monotonic", side_effect=(0.0, 0.0, 0.5, 1.0)),
             patch("omo_manager.omo_codex_start.time.sleep"),
-            patch("omo_manager.omo_codex_start.verify_same_pane"),
+            patch("omo_manager.omo_codex_start.require_resume_cwd_process"),
+            patch("omo_manager.omo_codex_start.exact_tail", return_value=(False, [])),
             patch("omo_manager.omo_codex_start.inspect", side_effect=(Report("error", ["error"]), Report("not_codex", ["starting"]))),
             self.assertRaisesRegex(StartError, "timed out waiting"),
         ):
-            wait_resume_cwd_recovery(pane, 1.0)
+            wait_resume_cwd_recovery(pane, self.SESSION_ID, 1.0)
+
+    def test_resume_cwd_recovery_accepts_exact_idle_footer_despite_warning(self) -> None:
+        pane = Pane("cfg:2.0", "%2", "@2", "bunx", Path("/tmp/current"), 4242)
+        lines = [
+            "⚠ MCP client for `codex_apps` failed to start: MCP startup failed: Transport",
+            "⚠ MCP startup incomplete (failed: codex_apps)",
+            "",
+            "› Use /skills to list available skills",
+            "",
+            "  gpt-5.6-terra medium · /tmp/current",
+        ]
+        with (
+            patch("omo_manager.omo_codex_start.time.monotonic", side_effect=(0.0, 0.0)),
+            patch("omo_manager.omo_codex_start.require_resume_cwd_process") as require_process,
+            patch("omo_manager.omo_codex_start.inspect", return_value=Report("error", ["MCP startup incomplete"])),
+            patch("omo_manager.omo_codex_start.exact_tail", return_value=(True, lines)),
+        ):
+            self.assertEqual("ready", wait_resume_cwd_recovery(pane, self.SESSION_ID, 1.0))
+        self.assertEqual(3, require_process.call_count)
+
+    def test_resume_cwd_recovery_does_not_mask_capacity_error_with_idle_footer(self) -> None:
+        pane = Pane("cfg:2.0", "%2", "@2", "bunx", Path("/tmp/current"), 4242)
+        lines = [
+            "⚠ Selected model is at capacity. Please try a different model.",
+            "",
+            "› Use /skills to list available skills",
+            "",
+            "  gpt-5.6-terra medium · /tmp/current",
+        ]
+        with (
+            patch("omo_manager.omo_codex_start.time.monotonic", side_effect=(0.0, 0.0, 1.0)),
+            patch("omo_manager.omo_codex_start.time.sleep"),
+            patch("omo_manager.omo_codex_start.require_resume_cwd_process"),
+            patch("omo_manager.omo_codex_start.inspect", return_value=Report("error", ["capacity"])),
+            patch("omo_manager.omo_codex_start.exact_tail", return_value=(True, lines)),
+            self.assertRaisesRegex(StartError, "remained in an error state until timeout"),
+        ):
+            wait_resume_cwd_recovery(pane, self.SESSION_ID, 1.0)
+
+    def test_resume_cwd_recovery_does_not_mask_unmarked_error_with_allowed_warnings(self) -> None:
+        pane = Pane("cfg:2.0", "%2", "@2", "bunx", Path("/tmp/current"), 4242)
+        lines = [
+            "⚠ MCP client for `codex_apps` failed to start: MCP startup failed: Transport",
+            "⚠ MCP startup incomplete (failed: codex_apps)",
+            "unrelated error after MCP startup",
+            "",
+            "› Use /skills to list available skills",
+            "",
+            "  gpt-5.6-terra medium · /tmp/current",
+        ]
+        with (
+            patch("omo_manager.omo_codex_start.time.monotonic", side_effect=(0.0, 0.0, 1.0)),
+            patch("omo_manager.omo_codex_start.time.sleep"),
+            patch("omo_manager.omo_codex_start.require_resume_cwd_process"),
+            patch("omo_manager.omo_codex_start.inspect", return_value=Report("error", ["error"])),
+            patch("omo_manager.omo_codex_start.exact_tail", return_value=(True, lines)),
+            self.assertRaisesRegex(StartError, "remained in an error state until timeout"),
+        ):
+            wait_resume_cwd_recovery(pane, self.SESSION_ID, 1.0)
+
+    def test_resume_cwd_recovery_rejects_unanchored_footer_text(self) -> None:
+        pane = Pane("cfg:2.0", "%2", "@2", "bunx", Path("/tmp/current"), 4242)
+        lines = [
+            "⚠ MCP client for `codex_apps` failed to start: MCP startup failed: Transport",
+            "⚠ MCP startup incomplete (failed: codex_apps)",
+            "",
+            "› Use /skills to list available skills",
+            "",
+            "not a Codex footer  gpt-5.6-terra medium · /tmp/current",
+        ]
+        with (
+            patch("omo_manager.omo_codex_start.time.monotonic", side_effect=(0.0, 0.0, 1.0)),
+            patch("omo_manager.omo_codex_start.time.sleep"),
+            patch("omo_manager.omo_codex_start.require_resume_cwd_process"),
+            patch("omo_manager.omo_codex_start.inspect", return_value=Report("error", ["error"])),
+            patch("omo_manager.omo_codex_start.exact_tail", return_value=(True, lines)),
+            self.assertRaisesRegex(StartError, "remained in an error state until timeout"),
+        ):
+            wait_resume_cwd_recovery(pane, self.SESSION_ID, 1.0)
+
+    def test_resume_cwd_recovery_rechecks_identity_after_status_capture(self) -> None:
+        pane = Pane("cfg:2.0", "%2", "@2", "bunx", Path("/tmp/current"), 4242)
+        with (
+            patch("omo_manager.omo_codex_start.time.monotonic", side_effect=(0.0, 0.0)),
+            patch(
+                "omo_manager.omo_codex_start.require_resume_cwd_process",
+                side_effect=(pane, StartError("identity changed after capture")),
+            ),
+            patch("omo_manager.omo_codex_start.inspect", return_value=Report("ready", ["ready"])),
+            self.assertRaisesRegex(StartError, "identity changed after capture"),
+        ):
+            wait_resume_cwd_recovery(pane, self.SESSION_ID, 1.0)
 
     def test_fresh_manager_prompt_includes_defaults_manager_and_task(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
