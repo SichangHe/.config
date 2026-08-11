@@ -178,6 +178,7 @@ install-id
 libvirt/
 memos.json
 mume/
+/muse/
 neofetch/
 pgcli/history
 pgcli/log
