@@ -48,6 +48,7 @@ from omo_manager.omo_codex_start import (
     skip_codex_update_prompt,
     start,
     validate_task,
+    wait_resume_cwd_recovery,
 )
 from omo_manager.omo_codex_status import Report
 from omo_manager.omo_pending_watch import record_terminal_delivery_failure, terminal_delivery_failure
@@ -581,6 +582,42 @@ class CodexStartTests(unittest.TestCase):
             ):
                 self.assertEqual("ready", start(args))
             wait.assert_called_once_with(pane, 45.0)
+
+    def test_resume_cwd_recovery_tolerates_transient_error_before_ready(self) -> None:
+        pane = Pane("cfg:2.0", "%2", "@2", "bunx", Path("/tmp/current"), 4242)
+        with (
+            patch("omo_manager.omo_codex_start.time.monotonic", side_effect=(0.0, 0.0, 0.25)),
+            patch("omo_manager.omo_codex_start.time.sleep"),
+            patch("omo_manager.omo_codex_start.verify_same_pane") as verify,
+            patch(
+                "omo_manager.omo_codex_start.inspect",
+                side_effect=(Report("error", ["Selected model is at capacity"]), Report("ready", ["› prompt"])),
+            ),
+        ):
+            self.assertEqual("ready", wait_resume_cwd_recovery(pane, 1.0))
+        self.assertEqual(2, verify.call_count)
+
+    def test_resume_cwd_recovery_fails_if_error_persists_until_timeout(self) -> None:
+        pane = Pane("cfg:2.0", "%2", "@2", "bunx", Path("/tmp/current"), 4242)
+        with (
+            patch("omo_manager.omo_codex_start.time.monotonic", side_effect=(0.0, 0.0, 1.0)),
+            patch("omo_manager.omo_codex_start.time.sleep"),
+            patch("omo_manager.omo_codex_start.verify_same_pane"),
+            patch("omo_manager.omo_codex_start.inspect", return_value=Report("error", ["error"])),
+            self.assertRaisesRegex(StartError, "remained in an error state until timeout"),
+        ):
+            wait_resume_cwd_recovery(pane, 1.0)
+
+    def test_resume_cwd_recovery_reports_timeout_if_error_clears_without_ready(self) -> None:
+        pane = Pane("cfg:2.0", "%2", "@2", "bunx", Path("/tmp/current"), 4242)
+        with (
+            patch("omo_manager.omo_codex_start.time.monotonic", side_effect=(0.0, 0.0, 0.5, 1.0)),
+            patch("omo_manager.omo_codex_start.time.sleep"),
+            patch("omo_manager.omo_codex_start.verify_same_pane"),
+            patch("omo_manager.omo_codex_start.inspect", side_effect=(Report("error", ["error"]), Report("not_codex", ["starting"]))),
+            self.assertRaisesRegex(StartError, "timed out waiting"),
+        ):
+            wait_resume_cwd_recovery(pane, 1.0)
 
     def test_fresh_manager_prompt_includes_defaults_manager_and_task(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:

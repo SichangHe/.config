@@ -1965,14 +1965,16 @@ def wait_update_recovery(pane: Pane, timeout_s: float) -> str:
 
 def wait_resume_cwd_recovery(pane: Pane, timeout_s: float) -> str:
     deadline = time.monotonic() + timeout_s
+    last_status = ""
     while time.monotonic() < deadline:
         verify_same_pane(pane)
         report = inspect(StatusArgs(pane.target, 80))
+        last_status = report.status
         if report.status in SUCCESS_STATUSES:
             return report.status
-        if report.status == "error":
-            raise StartError("Codex resume-directory recovery reached an error state.")
         time.sleep(0.25)
+    if last_status == "error":
+        raise StartError("Codex resume-directory recovery remained in an error state until timeout.")
     raise StartError("timed out waiting for Codex after choosing its resume directory.")
 
 
