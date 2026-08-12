@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
-from omo_manager.omo_task_audit import audit
+from omo_manager.omo_task_audit import Finding, audit, audit_and_write_reconciliation_queue, write_reconciliation_queue
 
 
 def task(status: str, runat: str, blocked_on: str = "") -> str:
@@ -90,6 +91,47 @@ blocked_on:
             self.assertEqual(1, len(findings))
             self.assertEqual("terminal_no_todo_summary", findings[0].kind)
             self.assertEqual("count=2", findings[0].detail)
+
+    def test_reconciliation_queue_is_stable_and_actionable_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "state" / "queue.json"
+            findings = (
+                Finding("zero_todo", "a.md", ("a.md",), "status=running", "owner_reconciliation"),
+                Finding("zero_todo", "b.md", ("b.md",), "status=running", "owner_reconciliation"),
+                Finding("human_runat_conflict", "hwl:3", ("h.md",), "claimants=2", "report_only"),
+            )
+            write_reconciliation_queue(path, findings)
+            first = path.read_bytes()
+            before = path.stat()
+            write_reconciliation_queue(path, tuple(reversed(findings)))
+            self.assertEqual(first, path.read_bytes())
+            self.assertEqual(before.st_ino, path.stat().st_ino)
+            self.assertNotIn(b"human_runat_conflict", first)
+
+    def test_reconciliation_queue_serializes_audit_and_publish(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            root.mkdir()
+            (root / "TODO.md").write_text("current:\n")
+            (root / "a.md").write_text(task("running", "wl:2"))
+            path = Path(tmp) / "state" / "queue.json"
+            barrier = threading.Barrier(3)
+
+            def publish() -> None:
+                barrier.wait()
+                audit_and_write_reconciliation_queue(root, path)
+
+            threads = [threading.Thread(target=publish) for _ in range(2)]
+            for thread in threads:
+                thread.start()
+            barrier.wait()
+            for thread in threads:
+                thread.join()
+            self.assertEqual(
+                b'[{"action":"owner_reconciliation","detail":"status=running","key":"a.md","kind":"zero_todo","tasks":["a.md"]}]\n',
+                path.read_bytes(),
+            )
+            self.assertFalse(tuple(path.parent.glob(f".{path.name}.*.tmp")))
 
 
 if __name__ == "__main__":

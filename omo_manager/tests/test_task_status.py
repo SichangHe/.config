@@ -18,6 +18,7 @@ from omo_manager.omo_task_status import parse_args
 from omo_manager.omo_task_status import reconcile_blocked_index
 from omo_manager.omo_task_status import reconcile_done_index
 from omo_manager.omo_task_status import reconcile_running_index
+from omo_manager.omo_task_status import reconcile_long_running_human_index
 from omo_manager.omo_task_status import replace_if_unchanged_locked
 from omo_manager.omo_task_status import reserve_private_audit
 from omo_manager.omo_task_status import run
@@ -63,6 +64,50 @@ def task_frontmatter(
 
 
 class TaskStatusTests(unittest.TestCase):
+    def test_reconcile_long_running_human_index_preserves_task_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            text = "---\nversion: v1.0.0\nstatus: long_running\nblocked_on: human\nrunat: wl:2\ntool: codex\nmanagerat: wl:1\nis_manager: false\npending_task_items:\n  - wait\n---\nbody\n"
+            path.write_text(text)
+            todo = root / "TODO.md"
+            todo.write_text("current:\ntask.md wl:2\nother.md wl:3\n\nhuman pending:\nwaiting.md wl:4\n")
+            reconcile_long_running_human_index(root, path, text, path.stat())
+            self.assertEqual(text, path.read_text())
+            self.assertEqual("current:\nother.md wl:3\n\nhuman pending:\ntask.md wl:2\nwaiting.md wl:4\n", todo.read_text())
+
+    def test_reconcile_long_running_human_index_rejects_nonexact_human_and_duplicate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            text = "---\nversion: v1.0.0\nstatus: long_running\nblocked_on: human review\nrunat: wl:2\ntool: codex\nmanagerat: wl:1\nis_manager: false\npending_task_items: []\n---\n"
+            path.write_text(text)
+            (root / "TODO.md").write_text("current:\ntask.md wl:2\ntask.md wl:2\n\nhuman pending:\n")
+            with self.assertRaisesRegex(TaskFrontmatterError, "blocked exactly on human"):
+                reconcile_long_running_human_index(root, path, text, path.stat())
+            exact = text.replace("human review", "human")
+            path.write_text(exact)
+            with self.assertRaisesRegex(TaskFrontmatterError, "exactly one TODO row"):
+                reconcile_long_running_human_index(root, path, exact, path.stat())
+            (root / "TODO.md").write_text("current:\n\nhuman pending:\ntask.md wl:2\n")
+            with self.assertRaisesRegex(TaskFrontmatterError, "expected.*current"):
+                reconcile_long_running_human_index(root, path, exact, path.stat())
+
+    def test_reconcile_long_running_human_index_rejects_v2_without_actor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            text = v2_task().replace("status: blocked", "status: long_running").replace("resume_status: running\n", "").replace(
+                "  - kind: pending_items\n    item_ids: [pi_019f0000-0000-7000-8000-000000000002]\n  - kind: human\n    reason: waiting for approval",
+                "  - kind: persistent\n    reason: human",
+            )
+            path.write_text(text)
+            (root / "TODO.md").write_text("current:\ntask.md wl:2\n\nhuman pending:\n")
+            args = StatusArgs(root, path, "", "", reconcile_long_running_human_index=True)
+            with patch("omo_manager.omo_task_status.blocking_request") as actor:
+                self.assertEqual(2, run(args))
+            actor.assert_not_called()
+            self.assertEqual(text, path.read_text())
     def test_stop_done_agent_treats_verified_missing_exact_pane_as_stopped(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

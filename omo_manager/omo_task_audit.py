@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
+import tempfile
 from collections import defaultdict
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -15,6 +17,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from omo_manager.omo_agent_status import parse_task_lines
+from omo_manager.omo_task_lock import task_file_lock
 from omo_manager.omo_task_metadata import RETIRED_RUNAT, TaskBlocker, TaskFrontmatterError, TaskMetadata, canonical_target, parse_task_metadata
 
 
@@ -106,13 +109,58 @@ def audit(root: Path, *, include_terminal: bool = False) -> tuple[Finding, ...]:
     return tuple(sorted(findings))
 
 
+def write_reconciliation_queue(path: Path, findings: tuple[Finding, ...], *, locked: bool = False) -> None:
+    """Atomically publish the stable actionable owner queue without notifying anyone."""
+
+    selected = tuple(sorted(finding for finding in findings if finding.action == "owner_reconciliation"))
+    payload = (json.dumps([asdict(finding) for finding in selected], sort_keys=True, separators=(",", ":")) + "\n").encode()
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    def publish() -> None:
+        if path.exists() and path.read_bytes() == payload:
+            return
+        fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+        try:
+            with open(fd, "wb", closefd=True) as stream:
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            Path(temporary).chmod(0o600)
+            Path(temporary).replace(path)
+            directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
+    if locked:
+        publish()
+    else:
+        with task_file_lock(path):
+            publish()
+
+
+def audit_and_write_reconciliation_queue(root: Path, path: Path, *, include_terminal: bool = False) -> tuple[Finding, ...]:
+    """Serialize source scanning with publication so an older scan cannot win later."""
+
+    with task_file_lock(path):
+        findings = audit(root, include_terminal=include_terminal)
+        write_reconciliation_queue(path, findings, locked=True)
+        return findings
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--include-terminal", action="store_true", help="Include one finding per done task absent from TODO instead of a summary count.")
+    parser.add_argument("--reconciliation-queue", type=Path, help="Atomically write the deterministic owner-reconciliation subset; unchanged scans leave it byte-identical.")
     args = parser.parse_args()
-    findings = audit(args.root, include_terminal=args.include_terminal)
+    findings = (
+        audit_and_write_reconciliation_queue(args.root, args.reconciliation_queue, include_terminal=args.include_terminal)
+        if args.reconciliation_queue is not None
+        else audit(args.root, include_terminal=args.include_terminal)
+    )
     if args.json:
         print(json.dumps([asdict(finding) for finding in findings], sort_keys=True, separators=(",", ":")))
     else:

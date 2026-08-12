@@ -81,6 +81,7 @@ class Args:
     pane_id: str = ""
     terminal_evidence: str = ""
     retire_blocked_target: bool = False
+    reconcile_long_running_human_index: bool = False
 
 
 class ParsedArgs(argparse.Namespace):
@@ -105,6 +106,7 @@ class ParsedArgs(argparse.Namespace):
     pane_id: str = ""
     terminal_evidence: str = ""
     retire_blocked_target: bool = False
+    reconcile_long_running_human_index: bool = False
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -121,6 +123,7 @@ shutdown.""",
     _ = parser.add_argument("--finish-replaced-done", action="store_true", help="Finish a stopped stale record without signaling its pane after proving an explicit live replacement.")
     _ = parser.add_argument("--recover-exited-shell-done", action="store_true", help="Close and finish one blocked worker whose completed Codex session exited to an unchanged shell.")
     _ = parser.add_argument("--retire-blocked-target", action="store_true", help="Atomically retire one blocked human-pending worker target that conflicts with one live lifecycle owner; performs no tmux action.")
+    _ = parser.add_argument("--reconcile-long-running-human-index", action="store_true", help="Move one unchanged long_running task with exact human blocker from TODO current to human pending without changing task or pane state.")
     _ = parser.add_argument("--session-id", default="", help="Session id captured by the prior close, if available.")
     _ = parser.add_argument("--replacement-task", type=Path, help="Active replacement task file; required with --finish-replaced-done.")
     _ = parser.add_argument("--stale-target", help="Exact stopped target recorded by the stale task; required with --finish-replaced-done.")
@@ -138,8 +141,14 @@ shutdown.""",
     _ = parser.add_argument("status", nargs="?", choices=sorted(TASK_FRONTMATTER_STATUSES))
     _ = parser.add_argument("--blocked-on", default="", help="Required when setting status to `blocked`; optional for `long_running`; removed for other statuses.")
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
-    if sum((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done, parsed.retire_blocked_target)) > 1:
+    if sum((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done, parsed.retire_blocked_target, parsed.reconcile_long_running_human_index)) > 1:
         parser.error("finish and recovery modes are mutually exclusive.")
+    if parsed.reconcile_long_running_human_index:
+        if parsed.status not in {None, ""} or parsed.blocked_on:
+            parser.error("--reconcile-long-running-human-index does not accept status or --blocked-on.")
+        if any((parsed.session_id, parsed.replacement_task, parsed.stale_target, parsed.replacement_target, parsed.stale_sha256, parsed.replacement_sha256, parsed.replacement_status, parsed.protected_target, parsed.stopped_evidence, parsed.replacement_pane_evidence, parsed.audit_output, parsed.pane_id, parsed.terminal_evidence)):
+            parser.error("unrelated lifecycle evidence is not valid with --reconcile-long-running-human-index.")
+        return Args(parsed.root.resolve(), parsed.task_file, "", "", reconcile_long_running_human_index=True)
     if parsed.retire_blocked_target:
         if parsed.status not in {None, ""}:
             parser.error("--retire-blocked-target does not accept a status.")
@@ -848,6 +857,34 @@ def reconcile_blocked_index(root: Path, path: Path, text: str, before: os.stat_r
             replace_if_unchanged_locked(todo, updated_todo, todo_before)
 
 
+def reconcile_long_running_human_index(root: Path, path: Path, text: str, before: os.stat_result) -> None:
+    """Move an unchanged long_running human-blocked task from current to human pending."""
+
+    todo = root / "TODO.md"
+    if not todo.is_file():
+        raise TaskFrontmatterError("TODO.md is not a regular file.")
+    with ExitStack() as locks:
+        for locked_path in sorted({path, todo}, key=lambda candidate: str(candidate)):
+            locks.enter_context(task_file_lock(locked_path))
+        current_before = path.stat()
+        current_text = path.read_text(encoding="utf-8")
+        metadata = parse_task_metadata(current_text, root)
+        if (
+            not same_file_state(before, current_before)
+            or current_text != text
+            or metadata is None
+            or metadata.version == V2_VERSION
+            or metadata.status != "long_running"
+            or metadata.blocked_on != "human"
+        ):
+            raise TaskFrontmatterError("index reconciliation requires one unchanged v1 long_running task blocked exactly on human.")
+        todo_before = todo.stat()
+        todo_text = todo.read_text(encoding="utf-8")
+        updated_todo = reconcile_todo_text(root, path, todo_text, metadata.runat, "human pending", ("current",))
+        if updated_todo != todo_text:
+            replace_if_unchanged_locked(todo, updated_todo, todo_before)
+
+
 def reconcile_done_index(root: Path, path: Path, text: str, before: os.stat_result) -> None:
     """Move an unchanged, already-done task's sole stale TODO row into `previous`."""
     todo = root / "TODO.md"
@@ -1230,6 +1267,8 @@ def run(args: Args) -> int:
             raise BlockingError("v1 task writes are disabled after v2 enablement")
         if args.retire_blocked_target:
             retire_blocked_target(args, path, text, before)
+        elif args.reconcile_long_running_human_index:
+            reconcile_long_running_human_index(args.root, path, text, before)
         elif args.finish_replaced_done:
             target = finish_replaced_done(args, path, text, before)
             preserved_replacement = True
