@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -151,6 +152,37 @@ def exact_tail(target: str, n_lines: int) -> tuple[bool, list[str]]:
         return False, []
     lines = tail_pane_id(pane_id, n_lines)
     return (True, lines) if exact_pane_id(target) == pane_id else (False, [])
+
+
+def pane_has_exact_codex_process(target: str, pane_id: str) -> bool:
+    """Confirm that an exact pane is still running a known Codex launcher."""
+
+    if TMUX_PANE_ID_RE.fullmatch(pane_id) is None:
+        return False
+    out = subprocess.run(
+        ["tmux", "display-message", "-p", "-t", pane_id, "#{pane_id}\t#{pane_current_command}\t#{pane_start_command}"],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        check=False,
+    )
+    if out.returncode != 0 or exact_pane_id(target) != pane_id:
+        return False
+    resolved_id, separator, process = out.stdout.strip().partition("\t")
+    current_command, separator, start_command = process.partition("\t")
+    if resolved_id != pane_id or not separator:
+        return False
+    try:
+        start_tokens = shlex.split(start_command)
+        if len(start_tokens) == 1 and start_tokens[0] != start_command:
+            start_tokens = shlex.split(start_tokens[0])
+    except ValueError:
+        return False
+    if "exec" in start_tokens:
+        start_tokens = start_tokens[start_tokens.index("exec") + 1 :]
+    if current_command == "codex":
+        return bool(start_tokens and os.path.basename(start_tokens[0]) == "codex")
+    return current_command in {"bunx", "npx"} and len(start_tokens) >= 2 and os.path.basename(start_tokens[0]) == current_command and start_tokens[1] == "@openai/codex"
 
 
 def has_codex_model_footer(lines: list[str]) -> bool:
@@ -690,7 +722,12 @@ def inspect(args: Args, *, detect_waiting_subagent: bool = False) -> Report:
     exists, lines = exact_tail(args.target, args.n_lines)
     if not exists:
         return Report("missing", [])
-    return report_from_lines(lines, detect_waiting_subagent=detect_waiting_subagent)
+    report = report_from_lines(lines, detect_waiting_subagent=detect_waiting_subagent)
+    if report.status == "not_codex":
+        pane_id = exact_pane_id(args.target)
+        if pane_id and pane_has_exact_codex_process(args.target, pane_id):
+            return Report("running", report.lines, report.input_text, False, "")
+    return report
 
 
 def wait_while_compacting(target: str, n_lines: int = COMPACTION_WAIT_LINES, timeout_s: float = DEFAULT_COMPACTION_WAIT_TIMEOUT_S, interval_s: float = COMPACTION_WAIT_INTERVAL_S) -> Report:

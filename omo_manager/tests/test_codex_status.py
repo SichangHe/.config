@@ -79,6 +79,39 @@ class CodexStatusTests(unittest.TestCase):
             report = inspect(Args('cfg:404', 80))
         self.assertEqual('missing', report.status)
 
+    def test_inspect_keeps_active_bunx_codex_running_when_queue_overlay_hides_footer(self) -> None:
+        lines = [
+            '• Queued follow-up inputs',
+            '  ↳ Capacity advisory: use another model.',
+            '› Explain this codebase',
+            '  esc again to edit previous message',
+        ]
+        process = subprocess.CompletedProcess(
+            ['tmux'], 0, '%7\tbunx\t"export OMO_AGENT_TMUX_TARGET=vlcliimprove:0.0 && exec bunx @openai/codex --model gpt-5.6-sol"\n', ''
+        )
+        with patch('omo_manager.omo_codex_status.exact_tail', return_value=(True, lines)), patch(
+            'omo_manager.omo_codex_status.exact_pane_id', return_value='%7'
+        ), patch('omo_manager.omo_codex_status.subprocess.run', return_value=process):
+            report = inspect(Args('vlcliimprove:0', 80))
+        self.assertEqual('running', report.status)
+        self.assertFalse(report.can_submit_input)
+
+    def test_inspect_does_not_broaden_shell_editor_or_similar_launcher(self) -> None:
+        cases = (
+            ('zsh', 'zsh'),
+            ('vim', 'vim README.md'),
+            ('bunx', 'bunx @example/codex'),
+            ('bunx', 'bunx @openai/codex-lookalike'),
+        )
+        for current_command, start_command in cases:
+            with self.subTest(current_command=current_command, start_command=start_command):
+                process = subprocess.CompletedProcess(['tmux'], 0, f'%7\t{current_command}\t{start_command}\n', '')
+                with patch('omo_manager.omo_codex_status.exact_tail', return_value=(True, ['$ shell prompt'])), patch(
+                    'omo_manager.omo_codex_status.exact_pane_id', return_value='%7'
+                ), patch('omo_manager.omo_codex_status.subprocess.run', return_value=process):
+                    report = inspect(Args('cfg:1', 80))
+                self.assertEqual('not_codex', report.status)
+
     def test_paused_goal_resume_snapshot_is_submit_safe_stuck_input(self) -> None:
         lines = [
             '• The vlexp:6 delivery actually succeeded despite the stale verification error: the manager is live Codex and responded to the',
