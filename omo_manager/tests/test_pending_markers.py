@@ -9516,25 +9516,25 @@ printf 'header\\n(pending)\\nchanged\\n' > {task}
         self.assertIn(line, filtered)
         submit.assert_not_called()
 
-    def test_unrelated_watcher_delivery_refuses_human_owned_hwl_4(self) -> None:
+    def test_guarded_watcher_delivery_allows_human_owned_hwl_4(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
-        with patch.object(watcher, "verified_send_to_codex") as send, self.assertRaisesRegex(
-            watcher.PrePasteRejected, "human-owned"
-        ):
-            watcher.run_verified_send("hwl:4", "unrelated mutation", watcher.CodexSendOptions(1, 0.15, False))
+        with patch.object(watcher, "verified_send_to_codex") as send:
+            watcher.run_verified_send("hwl:4", "guarded delivery", watcher.CodexSendOptions(1, 0.15, False))
 
-        send.assert_not_called()
+        send.assert_called_once()
+        self.assertEqual("hwl:4", send.call_args.args[0])
+        self.assertEqual("guarded delivery", send.call_args.args[1])
 
-    def test_ready_report_reminder_refuses_human_owned_hwl_4(self) -> None:
+    def test_ready_report_reminder_allows_human_owned_hwl_4(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
-        with patch.object(watcher, "verified_send_to_codex") as send, self.assertRaisesRegex(
-            watcher.PrePasteRejected, "human-owned"
-        ):
+        with patch.object(watcher, "verified_send_to_codex") as send:
             watcher.run_ready_report_reminder("hwl:4", "fingerprint")
 
-        send.assert_not_called()
+        send.assert_called_once()
+        self.assertEqual("hwl:4", send.call_args.args[0])
+        self.assertEqual(watcher.AGENT_READY_REPORT_REMINDER, send.call_args.args[1])
 
     def test_capacity_human_owned_hwl_4_stops_at_resume_budget(self) -> None:
         from omo_manager import omo_pending_watch as watcher

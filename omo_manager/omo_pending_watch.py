@@ -772,9 +772,6 @@ def run_verified_send(
 ) -> None:
     """Verify the pending marker immediately before the tmux paste."""
 
-    if is_human_tmux_target(target):
-        raise PrePasteRejected("watcher delivery refuses human-owned targets")
-
     def before_paste() -> None:
         if pending_guard is not None and not pending_marker_present(
             pending_guard.root,
@@ -3868,9 +3865,6 @@ def ready_report_guard_current(target: str, fingerprint: str) -> bool:
 
 
 def run_ready_report_reminder(target: str, fingerprint: str) -> None:
-    if is_human_tmux_target(target):
-        raise PrePasteRejected("ready-report reminder refuses human-owned targets")
-
     def before_paste() -> None:
         if not ready_report_guard_current(target, fingerprint):
             raise PrePasteRejected("ready turn resolved or changed before tmux paste")
