@@ -533,6 +533,18 @@ class PendingReportDeliveryTests(unittest.TestCase):
 
             self.assertIn("clock-rolled-back", watcher.consumed_report_keys(state, 201.0))
 
+    def test_receipt_read_removes_safe_stale_per_report_temporary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "receipts.tsv"
+            state.write_text("100.000000\tkey\n", encoding="utf-8")
+            stale = watcher.watcher_report_state_temporary(state, "old-report")
+            stale.write_text("interrupted rewrite", encoding="utf-8")
+            stale.chmod(0o600)
+            watcher.CONSUMED_REPORT_CACHE.clear()
+
+            self.assertEqual({"key"}, watcher.consumed_report_keys(state, 101.0))
+            self.assertFalse(stale.exists())
+
     def test_adjacent_email_metadata_cannot_be_overridden_by_payload_source_text(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

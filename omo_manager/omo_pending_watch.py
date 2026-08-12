@@ -1737,6 +1737,19 @@ def receipt_lock_path(state: Path) -> Path:
     return state.with_name(f".{state.name}.lock")
 
 
+def remove_stale_consumed_report_temporaries(state: Path) -> None:
+    """Remove private per-report rewrites after acquiring the ledger lock."""
+
+    name_pattern = re.compile(rf"^\.{re.escape(state.name)}\.omo-watch-[0-9a-f]{{64}}\.tmp$")
+    for candidate in state.parent.iterdir():
+        if name_pattern.fullmatch(candidate.name) is None:
+            continue
+        info = candidate.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600:
+            raise OSError("consumed-report temporary is unsafe")
+        candidate.unlink()
+
+
 def read_bounded_receipt_text(state: Path, max_bytes: int = 4 * 1024 * 1024) -> str:
     with state.open("rb") as handle:
         size = os.fstat(handle.fileno()).st_size
@@ -1864,6 +1877,7 @@ def locked_consumed_report_entries(state: Path, now_s: float, *, force_reload: b
         lock_path.chmod(0o600)
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         try:
+            remove_stale_consumed_report_temporaries(state)
             signature = receipt_state_signature(state)
             cached = CONSUMED_REPORT_CACHE.get(state)
             if force_reload or cached is None or cached.signature != signature:
@@ -1995,6 +2009,7 @@ def remember_consumed_report(state: Path, key: str, now_s: float | None = None) 
             lock_path.chmod(0o600)
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
+                remove_stale_consumed_report_temporaries(state)
                 entries, _dirty = parse_consumed_report_entries(state, timestamp_s)
                 previous = entries.get(key)
                 entries[key] = ConsumedReportEntry(timestamp_s, previous.transition if previous is not None else ())
@@ -2226,6 +2241,7 @@ def remember_consumed_report_transition(
             lock_path.chmod(0o600)
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
+                remove_stale_consumed_report_temporaries(state)
                 entries, _dirty = parse_consumed_report_entries(state, timestamp_s)
                 entries[key] = ConsumedReportEntry(timestamp_s, transition)
                 if len(entries) > CONSUMED_REPORT_MAX_ENTRIES:
