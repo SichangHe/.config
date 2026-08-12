@@ -449,12 +449,18 @@ def record_terminal_delivery_failure(root: Path | None, target: str, delivery_id
         return None
     if current_identity() != before:
         return None
-    event_dir = root.resolve() / RECOVERY_EVENT_DIRNAME
+    resolved_root = root.resolve()
+    try:
+        root_stat = resolved_root.stat()
+    except OSError:
+        return None
+    if not stat.S_ISDIR(root_stat.st_mode):
+        return None
+    event_dir = resolved_root / RECOVERY_EVENT_DIRNAME
     try:
         # Create only the final dedicated directory, then open it with
         # O_NOFOLLOW.  A pre-existing symlink (or non-private directory) is
         # refused; never chmod a path that could resolve outside --root.
-        event_dir.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         try:
             os.mkdir(event_dir, 0o700)
         except FileExistsError:
@@ -527,10 +533,29 @@ def record_terminal_delivery_failure(root: Path | None, target: str, delivery_id
             with os.fdopen(fd, "w", encoding="utf-8") as stream:
                 fd = -1
                 stream.write(event_text)
+                stream.flush()
+                os.fsync(stream.fileno())
             try:
                 os.link(temporary_name, event_name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd, follow_symlinks=False)
             except FileExistsError:
                 return None
+            os.fsync(directory_fd)
+            parent_fd = os.open(
+                event_dir.parent,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+            )
+            try:
+                os.fsync(parent_fd)
+            finally:
+                os.close(parent_fd)
+            try:
+                os.unlink(temporary_name, dir_fd=directory_fd)
+            except OSError:
+                os.unlink(event_name, dir_fd=directory_fd)
+                os.fsync(directory_fd)
+                temporary_name = ""
+                return None
+            temporary_name = ""
             return event_path
         finally:
             if fd >= 0:
@@ -539,6 +564,8 @@ def record_terminal_delivery_failure(root: Path | None, target: str, delivery_id
                 try:
                     os.unlink(temporary_name, dir_fd=directory_fd)
                 except FileNotFoundError:
+                    pass
+                except OSError:
                     pass
     except OSError:
         return None
@@ -551,7 +578,13 @@ def terminal_delivery_failure(root: Path | None, target: str, delivery_id: str, 
 
     definite = definitely_rejected_before_paste(exc)
     event = record_terminal_delivery_failure(root, target, delivery_id, str(exc)) if definite else None
-    suffix = f"; recovery event id `{event.stem}`" if event is not None else "; no recovery event was created" if definite else ""
+    suffix = (
+        f"; recovery event recorded at `{event}`"
+        if event is not None
+        else "; no recovery event was created"
+        if definite
+        else ""
+    )
     return DeliveryResult(status, f"{exc}{suffix}")
 
 

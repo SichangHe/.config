@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import math
 import os
 import re
@@ -153,6 +154,7 @@ class Args:
     recover_resume_cwd_prompt: bool = False
     resume_cwd_choice: str = ""
     expected_session_directory: Path | None = None
+    retire_recovery_evidence: bool = False
 
 
 @dataclass(frozen=True)
@@ -279,6 +281,11 @@ def parse_args(argv: list[str]) -> Args:
         help="Path to a recent private recovery receipt bound to this pane, its status capture, and a failed delivery (same-UID filesystem trust applies).",
     )
     _ = parser.add_argument(
+        "--retire-recovery-evidence",
+        action="store_true",
+        help="Retry cleanup of a verified recovery transaction from its durable retirement manifest; does not inspect or modify tmux.",
+    )
+    _ = parser.add_argument(
         "--record-recovery-evidence",
         action="store_true",
         help="Record a one-use failed-delivery receipt after verifying this pane; does not launch Codex.",
@@ -304,10 +311,11 @@ def parse_args(argv: list[str]) -> Args:
         parsed.recover_update_prompt,
         parsed.recover_resume_cwd_prompt,
         parsed.reconcile_rotation_audit,
+        parsed.retire_recovery_evidence,
     )
     if sum(bool(value) for value in modes) > 1:
         parser.error("launch, recovery, rotation, and audit reconciliation modes are mutually exclusive.")
-    if not parsed.reconcile_rotation_audit and (not parsed.model or not parsed.reasoning_effort):
+    if not (parsed.reconcile_rotation_audit or parsed.retire_recovery_evidence) and (not parsed.model or not parsed.reasoning_effort):
         parser.error("--model and --reasoning-effort are required for launch and recovery modes.")
     if parsed.restart_running and (parsed.prompt_file or parsed.session_id):
         parser.error("--restart-running captures the live session and does not accept --prompt-file or --session-id.")
@@ -361,6 +369,10 @@ def parse_args(argv: list[str]) -> Args:
         parser.error("--recover-non-codex requires --prompt-file for the recorded task/prompt context.")
     if parsed.recover_non_codex and not parsed.recovery_evidence:
         parser.error("--recover-non-codex requires --recovery-evidence.")
+    if parsed.retire_recovery_evidence and not parsed.recovery_evidence:
+        parser.error("--retire-recovery-evidence requires --recovery-evidence.")
+    if parsed.retire_recovery_evidence and parsed.dry_run:
+        parser.error("--dry-run is invalid with --retire-recovery-evidence.")
     if parsed.record_recovery_evidence and (parsed.session_id or parsed.prompt_file):
         parser.error("--record-recovery-evidence records the pane only and does not accept --session-id or --prompt-file.")
     if parsed.record_recovery_evidence and not parsed.recovery_output:
@@ -391,8 +403,8 @@ def parse_args(argv: list[str]) -> Args:
         parser.error("human email authority is only valid with --restart-running.")
     if not any(modes) and bool(parsed.session_id) == bool(parsed.prompt_file):
         parser.error("provide exactly one of --session-id or --prompt-file.")
-    if parsed.recovery_evidence and not parsed.recover_non_codex:
-        parser.error("--recovery-evidence is only valid with --recover-non-codex.")
+    if parsed.recovery_evidence and not (parsed.recover_non_codex or parsed.retire_recovery_evidence):
+        parser.error("--recovery-evidence is only valid with --recover-non-codex or --retire-recovery-evidence.")
     if not math.isfinite(parsed.startup_timeout_s) or parsed.startup_timeout_s <= 0:
         parser.error("--startup-timeout-s must be finite and positive.")
     if not any(modes) and not parsed.confirm_empty_shell:
@@ -437,6 +449,7 @@ def parse_args(argv: list[str]) -> Args:
         recover_resume_cwd_prompt=parsed.recover_resume_cwd_prompt,
         resume_cwd_choice=parsed.resume_cwd_choice or "",
         expected_session_directory=parsed.expected_session_directory.expanduser().resolve(strict=False) if parsed.expected_session_directory else None,
+        retire_recovery_evidence=parsed.retire_recovery_evidence,
     )
 
 
@@ -885,6 +898,8 @@ def write_private_recovery_file(path: Path, text: str) -> None:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             fd = -1
             stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
         os.replace(temporary, path)
         path.chmod(0o600)
     finally:
@@ -913,6 +928,8 @@ def write_private_recovery_file_exclusive(path: Path, text: str) -> None:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             fd = -1
             stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
     except OSError:
         path.unlink(missing_ok=True)
         raise
@@ -1658,6 +1675,75 @@ def consume_recovery_receipt(root: Path, evidence: str) -> None:
         raise StartError(f"could not consume recovery evidence receipt: {error}") from error
 
 
+def retire_recovery_receipt(root: Path, evidence: str, *, require_manifest: bool = False) -> None:
+    """Remove a consumed recovery transaction after verified replacement startup."""
+
+    root = root.expanduser().resolve()
+    receipt = Path(evidence).expanduser().resolve()
+    receipt_dir = root / RECOVERY_RECEIPT_DIRNAME
+    event_dir = root / DELIVERY_EVENT_DIRNAME
+    if receipt.parent != receipt_dir or not receipt.is_relative_to(root):
+        raise StartError("recovery evidence receipt must be directly under the helper receipt directory.")
+    delivery_id = receipt.name.removesuffix(".receipt")
+    if receipt.name != f"{delivery_id}.receipt" or DELIVERY_ID_RE.fullmatch(delivery_id) is None:
+        raise StartError("recovery evidence receipt has an invalid event identity.")
+    expected_event = delivery_event_path(root, delivery_id).resolve()
+    expected_issuance = recovery_issuance_path(receipt)
+    expected_paths = (
+        expected_event,
+        receipt,
+        expected_issuance,
+        expected_event.with_suffix(".used"),
+        receipt.with_name(f"{receipt.name}.used"),
+        expected_issuance.with_name(f"{expected_issuance.name}.used"),
+    )
+    retirement = receipt_dir / f".{delivery_id}.retiring"
+    if not any(path.exists() for path in (*expected_paths, retirement)):
+        return
+    if require_manifest and not retirement.is_file():
+        raise StartError("recovery retirement manifest is not available; refusing cleanup-only retirement.")
+    if not retirement.exists():
+        fields = parse_recovery_fields(recovery_evidence_text(str(receipt)))
+        event_path = (root / fields.get("event_file", "")).resolve()
+        if event_path != expected_event or not event_path.is_relative_to(event_dir):
+            raise StartError("recovery evidence receipt event path is not bound to --root.")
+        if not all(path.is_file() for path in expected_paths):
+            raise StartError("recovery evidence transaction is incomplete; refusing to retire forensic records.")
+        manifest = {
+            str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in expected_paths
+        }
+        write_private_recovery_file_exclusive(retirement, json.dumps(manifest, sort_keys=True) + "\n")
+        directory_fd = os.open(receipt_dir, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    try:
+        raw_manifest = json.loads(recovery_evidence_text(str(retirement)))
+        if not isinstance(raw_manifest, dict) or set(raw_manifest) != {str(path.relative_to(root)) for path in expected_paths}:
+            raise StartError("recovery retirement manifest has an invalid record set.")
+        for path in expected_paths:
+            if path.exists() and hashlib.sha256(path.read_bytes()).hexdigest() != raw_manifest[str(path.relative_to(root))]:
+                raise StartError(f"recovery record changed during retirement: {path}")
+        for path in expected_paths:
+            path.unlink(missing_ok=True)
+        for directory in (event_dir, receipt_dir):
+            directory_fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        retirement.unlink()
+        directory_fd = os.open(receipt_dir, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except (OSError, json.JSONDecodeError) as error:
+        raise StartError(f"verified recovery succeeded but its records could not be fully retired: {error}") from error
+
+
 def require_recovery_target(pane: Pane, evidence: str, root: Path | None = None) -> None:
     """Require a recent receipt and fresh status capture for a non-Codex pane."""
 
@@ -2279,6 +2365,8 @@ def start(args: Args) -> str:
             result = wait_started(pane, marker, args.startup_timeout_s)
             if args.restart_running:
                 verify_restart_continuity(effective_args, pane, effective_args.session_id, task_binding, live_pcodx_state)
+            if args.recover_non_codex:
+                retire_recovery_receipt(args.root, args.recovery_evidence)
             return result
         finally:
             if prompt_path is not None:
@@ -2288,7 +2376,13 @@ def start(args: Args) -> str:
 def main(argv: list[str] | None = None) -> int:
     try:
         args = parse_args(sys.argv[1:] if argv is None else argv)
-        result = reconcile_rotation_audit(args) if args.reconcile_rotation_audit else start(args)
+        if args.reconcile_rotation_audit:
+            result = reconcile_rotation_audit(args)
+        elif args.retire_recovery_evidence:
+            retire_recovery_receipt(args.root, args.recovery_evidence, require_manifest=True)
+            result = "recovery-evidence-retired"
+        else:
+            result = start(args)
     except (OSError, StartError, subprocess.TimeoutExpired, ValueError) as error:
         print(f"omo_codex_start: {error}", file=sys.stderr)
         return 1

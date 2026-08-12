@@ -25,15 +25,18 @@ from omo_manager.omo_codex_start import (
     choose_resume_cwd_prompt,
     current_todo_entries,
     consume_recovery_receipt,
+    delivery_event_path,
     finish_rotation_audit,
     is_codex_update_prompt,
     launch_command,
+    main,
     parse_args,
     post_marker_lines,
     prompt_text,
     query_reconciliation_session_id,
     reconcile_rotation_audit,
     record_recovery_evidence,
+    retire_recovery_receipt,
     recovery_issuance_path,
     require_human_restart_authority,
     require_recovery_target,
@@ -1868,6 +1871,133 @@ class CodexStartTests(unittest.TestCase):
                 with self.assertRaisesRegex(StartError, "already consumed"):
                     require_recovery_target(pane, str(receipt), root)
 
+    def test_verified_recovery_retirement_removes_complete_transaction_idempotently(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            pane = Pane("cfg:2.0", "%2", "@2", "bunx", root)
+            receipt = self.write_recovery_receipt(root, pane, ["delivery failed"])
+            consume_recovery_receipt(root, str(receipt))
+            retire_recovery_receipt(root, str(receipt))
+            retire_recovery_receipt(root, str(receipt))
+            self.assertEqual([], list((root / RECOVERY_EVENT_DIRNAME).iterdir()))
+            self.assertEqual([], list((root / RECOVERY_RECEIPT_DIRNAME).iterdir()))
+
+    def test_recovery_retirement_retains_ambiguous_incomplete_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            pane = Pane("cfg:2.0", "%2", "@2", "bunx", root)
+            receipt = self.write_recovery_receipt(root, pane, ["delivery failed"])
+            consume_recovery_receipt(root, str(receipt))
+            receipt.with_name(f"{receipt.name}.used").unlink()
+            with self.assertRaisesRegex(StartError, "transaction is incomplete"):
+                retire_recovery_receipt(root, str(receipt))
+            self.assertTrue(receipt.is_file())
+            self.assertTrue(delivery_event_path(root, receipt.stem).is_file())
+
+    def test_recovery_retirement_retains_remaining_records_when_event_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            pane = Pane("cfg:2.0", "%2", "@2", "bunx", root)
+            receipt = self.write_recovery_receipt(root, pane, ["delivery failed"])
+            consume_recovery_receipt(root, str(receipt))
+            delivery_event_path(root, receipt.stem).unlink()
+            with self.assertRaisesRegex(StartError, "transaction is incomplete"):
+                retire_recovery_receipt(root, str(receipt))
+            self.assertTrue(receipt.is_file())
+            self.assertTrue(recovery_issuance_path(receipt).is_file())
+
+    def test_recovery_retirement_resumes_after_interrupted_unlink(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            pane = Pane("cfg:2.0", "%2", "@2", "bunx", root)
+            receipt = self.write_recovery_receipt(root, pane, ["delivery failed"])
+            consume_recovery_receipt(root, str(receipt))
+            original_unlink = Path.unlink
+            calls = 0
+
+            def interrupted_unlink(path: Path, *args: object, **kwargs: object) -> None:
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise OSError("synthetic interruption")
+                original_unlink(path, *args, **kwargs)
+
+            with patch.object(Path, "unlink", interrupted_unlink), self.assertRaisesRegex(StartError, "synthetic interruption"):
+                retire_recovery_receipt(root, str(receipt))
+            self.assertEqual(
+                0,
+                main(
+                    [
+                        "--root",
+                        str(root),
+                        "--task-file",
+                        "unused.md",
+                        "--target",
+                        "cfg:2.0",
+                        "--retire-recovery-evidence",
+                        "--recovery-evidence",
+                        str(receipt),
+                    ]
+                ),
+            )
+            self.assertEqual(
+                0,
+                main(
+                    [
+                        "--root",
+                        str(root),
+                        "--task-file",
+                        "unused.md",
+                        "--target",
+                        "cfg:2.0",
+                        "--retire-recovery-evidence",
+                        "--recovery-evidence",
+                        str(receipt),
+                    ]
+                ),
+            )
+            self.assertEqual([], list((root / RECOVERY_EVENT_DIRNAME).iterdir()))
+            self.assertEqual([], list((root / RECOVERY_RECEIPT_DIRNAME).iterdir()))
+
+    def test_recovery_retirement_fsyncs_manifest_before_first_unlink(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            pane = Pane("cfg:2.0", "%2", "@2", "bunx", root)
+            receipt = self.write_recovery_receipt(root, pane, ["delivery failed"])
+            consume_recovery_receipt(root, str(receipt))
+            operations: list[str] = []
+            original_fsync = os.fsync
+            original_unlink = Path.unlink
+
+            def tracked_fsync(fd: int) -> None:
+                mode = os.fstat(fd).st_mode
+                operations.append("file-fsync" if stat.S_ISREG(mode) else "directory-fsync")
+                original_fsync(fd)
+
+            def tracked_unlink(path: Path, *args: object, **kwargs: object) -> None:
+                operations.append("unlink")
+                original_unlink(path, *args, **kwargs)
+
+            with patch("omo_manager.omo_codex_start.os.fsync", tracked_fsync), patch.object(Path, "unlink", tracked_unlink):
+                retire_recovery_receipt(root, str(receipt))
+            self.assertLess(operations.index("file-fsync"), operations.index("unlink"))
+            self.assertLess(operations.index("directory-fsync"), operations.index("unlink"))
+
+    def test_recovery_retirement_cli_rejects_dry_run(self) -> None:
+        with self.assertRaises(SystemExit):
+            parse_args(
+                [
+                    "--task-file",
+                    "unused.md",
+                    "--target",
+                    "cfg:2.0",
+                    "--retire-recovery-evidence",
+                    "--recovery-evidence",
+                    "/tmp/recovery.receipt",
+                    "--dry-run",
+                ]
+            )
+
     def test_watcher_event_producer_captures_status_and_rejects_duplicate_ids(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root)
@@ -1887,6 +2017,131 @@ class CodexStartTests(unittest.TestCase):
             self.assertEqual(f"{RECOVERY_RECEIPT_DIRNAME}/{event_id}.receipt", fields["receipt_file"])
             self.assertEqual(64, len(fields["receipt_nonce"]))
             self.assertIsNone(duplicate)
+
+    def test_watcher_event_is_fsynced_before_durable_path_is_returned(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            identity = subprocess.CompletedProcess([], 0, "cfg:2.0\t%2\t@2\n", "")
+            operations: list[str] = []
+            original_fsync = os.fsync
+            original_link = os.link
+
+            def tracked_fsync(fd: int) -> None:
+                operations.append("file-fsync" if stat.S_ISREG(os.fstat(fd).st_mode) else "directory-fsync")
+                original_fsync(fd)
+
+            def tracked_link(*args: object, **kwargs: object) -> None:
+                operations.append("link")
+                original_link(*args, **kwargs)
+
+            with (
+                patch("omo_manager.omo_pending_watch.subprocess.run", return_value=identity),
+                patch("omo_manager.omo_pending_watch.exact_codex_tail", return_value=(True, ["delivery failed"])),
+                patch("omo_manager.omo_pending_watch.os.fsync", tracked_fsync),
+                patch("omo_manager.omo_pending_watch.os.link", tracked_link),
+            ):
+                event = record_terminal_delivery_failure(root, "cfg:2.0", "durable-order", "sender failed")
+            self.assertIsNotNone(event)
+            self.assertLess(operations.index("file-fsync"), operations.index("link"))
+            self.assertLess(operations.index("link"), operations.index("directory-fsync"))
+
+    def test_watcher_event_reports_no_record_when_directory_fsync_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            identity = subprocess.CompletedProcess([], 0, "cfg:2.0\t%2\t@2\n", "")
+            original_fsync = os.fsync
+
+            def fail_directory_fsync(fd: int) -> None:
+                if stat.S_ISDIR(os.fstat(fd).st_mode):
+                    raise OSError("synthetic directory fsync failure")
+                original_fsync(fd)
+
+            with (
+                patch("omo_manager.omo_pending_watch.subprocess.run", return_value=identity),
+                patch("omo_manager.omo_pending_watch.exact_codex_tail", return_value=(True, ["delivery failed"])),
+                patch("omo_manager.omo_pending_watch.os.fsync", fail_directory_fsync),
+            ):
+                self.assertIsNone(record_terminal_delivery_failure(root, "cfg:2.0", "durable-failed", "sender failed"))
+
+    def test_watcher_event_fsyncs_new_directory_parent_before_return(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            identity = subprocess.CompletedProcess([], 0, "cfg:2.0\t%2\t@2\n", "")
+            directory_fsyncs = 0
+            original_fsync = os.fsync
+
+            def tracked_fsync(fd: int) -> None:
+                nonlocal directory_fsyncs
+                if stat.S_ISDIR(os.fstat(fd).st_mode):
+                    directory_fsyncs += 1
+                original_fsync(fd)
+
+            with (
+                patch("omo_manager.omo_pending_watch.subprocess.run", return_value=identity),
+                patch("omo_manager.omo_pending_watch.exact_codex_tail", return_value=(True, ["delivery failed"])),
+                patch("omo_manager.omo_pending_watch.os.fsync", tracked_fsync),
+            ):
+                event = record_terminal_delivery_failure(root, "cfg:2.0", "durable-new-dir", "sender failed")
+            self.assertIsNotNone(event)
+            self.assertEqual(2, directory_fsyncs)
+
+    def test_watcher_event_fsyncs_parent_when_event_directory_already_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            (root / RECOVERY_EVENT_DIRNAME).mkdir(mode=0o700)
+            identity = subprocess.CompletedProcess([], 0, "cfg:2.0\t%2\t@2\n", "")
+            directory_fsyncs = 0
+            original_fsync = os.fsync
+
+            def tracked_fsync(fd: int) -> None:
+                nonlocal directory_fsyncs
+                if stat.S_ISDIR(os.fstat(fd).st_mode):
+                    directory_fsyncs += 1
+                original_fsync(fd)
+
+            with (
+                patch("omo_manager.omo_pending_watch.subprocess.run", return_value=identity),
+                patch("omo_manager.omo_pending_watch.exact_codex_tail", return_value=(True, ["delivery failed"])),
+                patch("omo_manager.omo_pending_watch.os.fsync", tracked_fsync),
+            ):
+                event = record_terminal_delivery_failure(root, "cfg:2.0", "durable-existing-dir", "sender failed")
+            self.assertIsNotNone(event)
+            self.assertEqual(2, directory_fsyncs)
+
+    def test_watcher_event_refuses_to_create_missing_root(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_parent:
+            root = Path(raw_parent) / "missing-root"
+            identity = subprocess.CompletedProcess([], 0, "cfg:2.0\t%2\t@2\n", "")
+            with (
+                patch("omo_manager.omo_pending_watch.subprocess.run", return_value=identity),
+                patch("omo_manager.omo_pending_watch.exact_codex_tail", return_value=(True, ["delivery failed"])),
+            ):
+                self.assertIsNone(record_terminal_delivery_failure(root, "cfg:2.0", "missing-root", "sender failed"))
+            self.assertFalse(root.exists())
+
+    def test_watcher_event_rolls_back_canonical_record_when_temporary_unlink_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            identity = subprocess.CompletedProcess([], 0, "cfg:2.0\t%2\t@2\n", "")
+            original_unlink = os.unlink
+            failed_once = False
+
+            def fail_temporary_unlink(path: str | bytes, *args: object, **kwargs: object) -> None:
+                nonlocal failed_once
+                if str(path).startswith(".delivery-event-") and not failed_once:
+                    failed_once = True
+                    raise OSError("synthetic temporary-link cleanup failure")
+                original_unlink(path, *args, **kwargs)
+
+            with (
+                patch("omo_manager.omo_pending_watch.subprocess.run", return_value=identity),
+                patch("omo_manager.omo_pending_watch.exact_codex_tail", return_value=(True, ["delivery failed"])),
+                patch("omo_manager.omo_pending_watch.os.unlink", fail_temporary_unlink),
+            ):
+                event = record_terminal_delivery_failure(root, "cfg:2.0", "durable-cleanup-failed", "sender failed")
+            self.assertIsNone(event)
+            self.assertFalse((root / RECOVERY_EVENT_DIRNAME / "durable-cleanup-failed.event").exists())
+            self.assertEqual(1, len(list((root / RECOVERY_EVENT_DIRNAME).glob(".delivery-event-*"))))
 
     def test_recovery_pipeline_accepts_private_setgid_directories(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
@@ -1930,7 +2185,7 @@ class CodexStartTests(unittest.TestCase):
             result = terminal_delivery_failure(root, "cfg:2.0", "delivery-1", definite)
         record.assert_called_once_with(root, "cfg:2.0", "delivery-1", str(definite))
         self.assertEqual(
-            "target is not a Codex pane before submit: cfg:2.0; recovery event id `durable-delivery`",
+            f"target is not a Codex pane before submit: cfg:2.0; recovery event recorded at `{event_path}`",
             result.error,
         )
 
@@ -1955,7 +2210,7 @@ class CodexStartTests(unittest.TestCase):
         ):
             result = try_send_delivery_text("pending delivery", "message", "cfg:2.0", root=root)
         self.assertEqual(1, result.status)
-        self.assertEqual(f"{failure}; recovery event id `durable-delivery`", result.error)
+        self.assertEqual(f"{failure}; recovery event recorded at `{event_path}`", result.error)
 
     def test_watcher_event_producer_refuses_failed_or_codex_capture(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
