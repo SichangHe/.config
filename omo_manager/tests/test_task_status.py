@@ -22,6 +22,7 @@ from omo_manager.omo_task_status import reconcile_running_index
 from omo_manager.omo_task_status import reconcile_long_running_human_index
 from omo_manager.omo_task_status import replace_if_unchanged_locked
 from omo_manager.omo_task_status import reserve_private_audit
+from omo_manager.omo_task_status import restore_terminal_target
 from omo_manager.omo_task_status import run
 from omo_manager.omo_task_status import stop_done_agent
 from omo_manager.omo_task_status import tracked_dirty_state
@@ -66,6 +67,87 @@ def task_frontmatter(
 
 
 class TaskStatusTests(unittest.TestCase):
+    def test_restore_terminal_target_changes_only_proven_runat_without_tmux_or_todo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "terminal.md"
+            historical = task_frontmatter(status="done", runat="wl:7") + "body\n"
+            path.write_text(historical)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), "add", "terminal.md"], check=True)
+            subprocess.run(["git", "-C", str(root), "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "historical"], check=True)
+            commit = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+            original = historical.replace("runat: wl:7", "runat: retired")
+            path.write_text(original)
+            todo = root / "TODO.md"
+            todo.write_text("previous:\nother.md wl:3\n")
+            args = StatusArgs(root, Path("terminal.md"), "", "", restore_terminal_target=True, historical_target="wl:7", task_sha256=hashlib.sha256(original.encode()).hexdigest(), historical_commit=commit)
+            with patch("omo_manager.omo_task_status.stop") as stop:
+                self.assertEqual(0, run(args))
+            stop.assert_not_called()
+            self.assertEqual(original.replace("runat: retired", "runat: wl:7"), path.read_text())
+            self.assertEqual("previous:\nother.md wl:3\n", todo.read_text())
+
+    def test_restore_terminal_target_refuses_digest_active_queue_and_nonterminal_status(self) -> None:
+        cases = (
+            (task_frontmatter(status="done", runat="retired"), "0" * 64, "digest"),
+            (task_frontmatter(status="done", runat="retired", pending_items=("open",)), None, "empty queue"),
+            (task_frontmatter(status="blocked", blocked_on="human", runat="retired"), None, "v1 done/retired"),
+        )
+        for original, digest, error in cases:
+            with self.subTest(error=error), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                path = root / "terminal.md"
+                path.write_text(original)
+                args = StatusArgs(root, path, "", "", restore_terminal_target=True, historical_target="wl:7", task_sha256=digest or hashlib.sha256(original.encode()).hexdigest(), historical_commit="a" * 40)
+                with self.assertRaisesRegex(TaskFrontmatterError, error):
+                    restore_terminal_target(args, path, original, path.stat())
+                self.assertEqual(original, path.read_text())
+
+    def test_restore_terminal_target_rejects_same_path_unrelated_historical_content(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "terminal.md"
+            historical = task_frontmatter(status="done", runat="wl:7") + "unrelated old body\n"
+            path.write_text(historical)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), "add", "terminal.md"], check=True)
+            subprocess.run(["git", "-C", str(root), "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "historical"], check=True)
+            commit = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+            current = task_frontmatter(status="done", runat="retired") + "different current body\n"
+            path.write_text(current)
+            args = StatusArgs(root, path, "", "", restore_terminal_target=True, historical_target="wl:7", historical_commit=commit, task_sha256=hashlib.sha256(current.encode()).hexdigest())
+            with self.assertRaisesRegex(TaskFrontmatterError, "must equal current task bytes"):
+                restore_terminal_target(args, path, current, path.stat())
+            self.assertEqual(current, path.read_text())
+
+    def test_restore_terminal_target_preserves_crlf_raw_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "terminal.md"
+            historical = (task_frontmatter(status="done", runat="wl:7") + "body\n").replace("\n", "\r\n").encode()
+            path.write_bytes(historical)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "core.autocrlf", "false"], check=True)
+            subprocess.run(["git", "-C", str(root), "add", "terminal.md"], check=True)
+            subprocess.run(["git", "-C", str(root), "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "historical"], check=True)
+            commit = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+            current = historical.replace(b"runat: wl:7\r\n", b"runat: retired\r\n")
+            path.write_bytes(current)
+            args = StatusArgs(root, path, "", "", restore_terminal_target=True, historical_target="wl:7", historical_commit=commit, task_sha256=hashlib.sha256(current).hexdigest())
+            self.assertEqual(0, run(args))
+            self.assertEqual(historical, path.read_bytes())
+
+    def test_parse_disables_target_retirement_and_requires_restore_evidence(self) -> None:
+        with self.assertRaises(SystemExit):
+            parse_args(["--root", "/tmp/work", "--retire-blocked-target", "--stale-target", "wl:2", "task.md"])
+        with self.assertRaises(SystemExit):
+            parse_args(["--root", "/tmp/work", "--restore-terminal-target", "--historical-target", "wl:2", "task.md"])
+        parsed = parse_args(["--root", "/tmp/work", "--restore-terminal-target", "--historical-target", "wl:2", "--historical-commit", "b" * 40, "--task-sha256", "a" * 64, "task.md"])
+        self.assertTrue(parsed.restore_terminal_target)
+        with self.assertRaises(SystemExit):
+            parse_args(["--root", "/tmp/work", "--restore-terminal-target", "--historical-target", "wl:2", "--historical-commit", "b" * 40, "--task-sha256", "a" * 64, "--blocked-on", "human", "task.md"])
+
     def test_repository_closure_custody_accepts_clean_or_exact_dirty_handoff(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repository = Path(tmp) / "repo"
@@ -908,12 +990,12 @@ resolved_task_items: []
             ):
                 exit_code = run(StatusArgs(root, Path("stale.md"), "", "", stale_target="wl:2", retire_blocked_target=True))
 
-            self.assertEqual(0, exit_code)
+            self.assertEqual(2, exit_code)
             exact_pane_id.assert_not_called()
             stop.assert_not_called()
-            self.assertEqual(original_task.replace("runat: wl:2", "runat: retired"), path.read_text(encoding="utf-8"))
+            self.assertEqual(original_task, path.read_text(encoding="utf-8"))
             self.assertEqual(owner_text, owner.read_text(encoding="utf-8"))
-            self.assertEqual("current:\nowner.md wl:2\n\nhuman pending:\n`stale.md` retired\n", todo.read_text(encoding="utf-8"))
+            self.assertEqual("current:\nowner.md wl:2\n\nhuman pending:\n`stale.md` wl:2\n", todo.read_text(encoding="utf-8"))
 
     def test_cli_target_retirement_fails_closed_for_invalid_preconditions(self) -> None:
         cases = {

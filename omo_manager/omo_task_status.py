@@ -60,6 +60,7 @@ CLOSE_FAILED_PREFIX = "done_close_failed"
 DONE_CLOSE_IN_PROGRESS = "done_close_in_progress: manager is closing the agent before marking done"
 TODO_ROW_RE = re.compile(r"\s*`?([A-Za-z0-9_./-]+\.md)`?(?:\s+(.*?))?\s*")
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
+GIT_COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 CUSTODY_RECEIPT_VERSION = "v1.0.0"
 
 
@@ -89,6 +90,10 @@ class Args:
     reconcile_long_running_human_index: bool = False
     closure_repository: Path | None = None
     dirty_path_handoff: Path | None = None
+    restore_terminal_target: bool = False
+    historical_target: str = ""
+    task_sha256: str = ""
+    historical_commit: str = ""
 
 
 class ParsedArgs(argparse.Namespace):
@@ -116,6 +121,10 @@ class ParsedArgs(argparse.Namespace):
     reconcile_long_running_human_index: bool = False
     closure_repository: Path | None = None
     dirty_path_handoff: Path | None = None
+    restore_terminal_target: bool = False
+    historical_target: str = ""
+    task_sha256: str = ""
+    historical_commit: str = ""
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -148,6 +157,10 @@ shutdown.""",
     _ = parser.add_argument("--terminal-evidence", default="", help="Specific accepted terminal-report token visible before Codex exited; required with --recover-exited-shell-done.")
     _ = parser.add_argument("--closure-repository", type=Path, help="Owned Git repository whose clean or explicitly handed-off tracked state gates done closure.")
     _ = parser.add_argument("--dirty-path-handoff", type=Path, help="Reviewed custody receipt required when --closure-repository has tracked changes.")
+    _ = parser.add_argument("--restore-terminal-target", action="store_true", help="Restore one historically proven target on an unchanged done/retired record without pane or TODO action.")
+    _ = parser.add_argument("--historical-target", default="", help="Exact proven prior target required with --restore-terminal-target.")
+    _ = parser.add_argument("--task-sha256", default="", help="Exact current task digest required with --restore-terminal-target.")
+    _ = parser.add_argument("--historical-commit", default="", help="Full Git commit containing the proven prior target; required with --restore-terminal-target.")
     _ = parser.add_argument("task_file", type=Path)
     _ = parser.add_argument("status", nargs="?", choices=sorted(TASK_FRONTMATTER_STATUSES))
     _ = parser.add_argument("--blocked-on", default="", help="Required when setting status to `blocked`; optional for `long_running`; removed for other statuses.")
@@ -158,29 +171,22 @@ shutdown.""",
         parser.error("--closure-repository must be an explicit absolute Git worktree root.")
     if parsed.dirty_path_handoff is not None and parsed.closure_repository is None:
         parser.error("--dirty-path-handoff requires --closure-repository.")
-    if sum((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done, parsed.retire_blocked_target, parsed.reconcile_long_running_human_index)) > 1:
+    if sum((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done, parsed.retire_blocked_target, parsed.reconcile_long_running_human_index, parsed.restore_terminal_target)) > 1:
         parser.error("finish and recovery modes are mutually exclusive.")
+    if parsed.retire_blocked_target:
+        parser.error("--retire-blocked-target is disabled: preserve the historical target and resolve ownership without writing retired semantics.")
+    if parsed.restore_terminal_target:
+        if parsed.status not in {None, ""} or TARGET_RE.fullmatch(parsed.historical_target.strip()) is None or SHA256_RE.fullmatch(parsed.task_sha256.strip()) is None or GIT_COMMIT_RE.fullmatch(parsed.historical_commit.strip()) is None:
+            parser.error("--restore-terminal-target requires --historical-target TARGET, full --historical-commit, and lowercase --task-sha256, without status.")
+        if any((parsed.blocked_on, parsed.session_id, parsed.replacement_task, parsed.stale_target, parsed.replacement_target, parsed.stale_sha256, parsed.replacement_sha256, parsed.replacement_status, parsed.protected_target, parsed.stopped_evidence, parsed.replacement_pane_evidence, parsed.audit_output, parsed.pane_id, parsed.terminal_evidence, parsed.closure_repository, parsed.dirty_path_handoff)):
+            parser.error("unrelated lifecycle, replacement, pane, and repository evidence is not valid with --restore-terminal-target.")
+        return Args(parsed.root.resolve(), parsed.task_file, "", "", restore_terminal_target=True, historical_target=parsed.historical_target.strip(), task_sha256=parsed.task_sha256.strip(), historical_commit=parsed.historical_commit.strip())
     if parsed.reconcile_long_running_human_index:
         if parsed.status not in {None, ""} or parsed.blocked_on:
             parser.error("--reconcile-long-running-human-index does not accept status or --blocked-on.")
         if any((parsed.session_id, parsed.replacement_task, parsed.stale_target, parsed.replacement_target, parsed.stale_sha256, parsed.replacement_sha256, parsed.replacement_status, parsed.protected_target, parsed.stopped_evidence, parsed.replacement_pane_evidence, parsed.audit_output, parsed.pane_id, parsed.terminal_evidence)):
             parser.error("unrelated lifecycle evidence is not valid with --reconcile-long-running-human-index.")
         return Args(parsed.root.resolve(), parsed.task_file, "", "", reconcile_long_running_human_index=True)
-    if parsed.retire_blocked_target:
-        if parsed.status not in {None, ""}:
-            parser.error("--retire-blocked-target does not accept a status.")
-        if not parsed.stale_target.strip():
-            parser.error("--retire-blocked-target requires --stale-target.")
-        if any((parsed.session_id, parsed.replacement_task, parsed.replacement_target, parsed.stale_sha256, parsed.replacement_sha256, parsed.replacement_status, parsed.protected_target, parsed.stopped_evidence, parsed.replacement_pane_evidence, parsed.audit_output, parsed.pane_id, parsed.terminal_evidence, parsed.blocked_on)):
-            parser.error("unrelated lifecycle evidence is not valid with --retire-blocked-target.")
-        return Args(
-            parsed.root.resolve(),
-            parsed.task_file,
-            "",
-            "",
-            stale_target=parsed.stale_target.strip(),
-            retire_blocked_target=True,
-        )
     if parsed.recover_exited_shell_done:
         if parsed.status not in {None, "", "done"}:
             parser.error("--recover-exited-shell-done only supports status `done`.")
@@ -564,6 +570,27 @@ def replace_if_unchanged_locked(path: Path, text: str, before: os.stat_result) -
             tmp_path.unlink(missing_ok=True)
 
 
+def replace_bytes_if_unchanged(path: Path, payload: bytes, before: os.stat_result) -> None:
+    """Atomically replace exact bytes after checking the source inode snapshot."""
+
+    with task_file_lock(path):
+        temporary: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile("wb", dir=path.parent, prefix=f".{path.name}.", delete=False) as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+                temporary = Path(handle.name)
+            temporary.chmod(before.st_mode & 0o7777)
+            if not same_file_state(before, path.stat()):
+                raise TaskFrontmatterError("task file changed while target restoration was being prepared; retry after rereading it.")
+            os.replace(temporary, path)
+            temporary = None
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+
+
 def current_target_task_paths(root: Path, target: str) -> tuple[Path, ...]:
     """Return TODO `current` task paths that claim `target` in metadata or TODO text."""
 
@@ -716,6 +743,7 @@ def validate_reconciled_todo_row(root: Path, path: Path, line: str, runat: str) 
 
 def retired_task_text(text: str, stale_target: str, root: Path) -> str:
     """Replace only the authoritative frontmatter run target with `retired`."""
+    raise TaskFrontmatterError("target retirement is disabled: retired is not a run target")
     metadata = parse_task_metadata(text, root)
     if metadata is None or metadata.version == V2_VERSION or metadata.status != "blocked" or metadata.blocked_on != "human" or metadata.is_manager or not metadata.pending_task_items:
         raise TaskFrontmatterError("target retirement requires one v1 non-manager task blocked on `human` with a nonempty pending queue.")
@@ -749,6 +777,7 @@ def retired_task_text(text: str, stale_target: str, root: Path) -> str:
 
 def retire_todo_text(root: Path, path: Path, text: str, stale_target: str) -> str:
     """Replace the sole human-pending task row's exact target with `retired`."""
+    raise TaskFrontmatterError("target retirement is disabled: retired is not a run target")
     lines = text.splitlines(keepends=True)
     section = ""
     rows: list[int] = []
@@ -779,6 +808,7 @@ def retire_todo_text(root: Path, path: Path, text: str, stale_target: str) -> st
 
 def retire_blocked_target(args: Args, path: Path, text: str, before: os.stat_result) -> None:
     """Atomically retire a blocked worker's conflicting target without tmux access."""
+    raise TaskFrontmatterError("target retirement is disabled: retired is not a run target")
     if TARGET_RE.fullmatch(args.stale_target) is None:
         raise TaskFrontmatterError("--stale-target must be an exact SESSION:WINDOW[.PANE] target.")
     if args.stale_target.partition(":")[0].startswith("h"):
@@ -823,6 +853,62 @@ def retire_blocked_target(args: Args, path: Path, text: str, before: os.stat_res
                 except Exception as rollback_exc:
                     raise TaskFrontmatterError(f"blocked target retirement failed and TODO rollback also failed: {rollback_exc}") from exc
                 raise
+
+
+def restore_terminal_target(args: Args, path: Path, text: str, before: os.stat_result) -> None:
+    """Restore only a proven historical target on an unchanged terminal record."""
+
+    current_bytes = path.read_bytes()
+    if hashlib.sha256(current_bytes).hexdigest() != args.task_sha256:
+        raise TaskFrontmatterError("terminal target restoration task digest does not match current bytes")
+    try:
+        current_text = current_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise TaskFrontmatterError("terminal task must be UTF-8") from exc
+    metadata = parse_manager_child_metadata(current_text, args.root)
+    if metadata is None or metadata.version == V2_VERSION or metadata.status != "done" or metadata.runat != "retired" or metadata.pending_task_items:
+        raise TaskFrontmatterError("terminal target restoration requires one v1 done/retired task with an empty queue")
+    relative = relative_task_ref(args.root, path)
+    try:
+        repository_root = Path(subprocess.run(["git", "-C", str(args.root), "rev-parse", "--show-toplevel"], check=True, capture_output=True, text=True).stdout.strip()).resolve(strict=True)
+        if repository_root != args.root.resolve(strict=True):
+            raise TaskFrontmatterError("task root must be the exact Git worktree containing historical proof")
+        proven_commit = subprocess.run(["git", "-C", str(args.root), "rev-parse", f"{args.historical_commit}^{{commit}}"], check=True, capture_output=True, text=True).stdout.strip()
+        if proven_commit != args.historical_commit:
+            raise TaskFrontmatterError("historical commit must be the full canonical commit id")
+        historical_bytes = subprocess.run(["git", "-C", str(args.root), "show", f"{proven_commit}:{relative}"], check=True, capture_output=True).stdout
+    except subprocess.CalledProcessError as exc:
+        raise TaskFrontmatterError("cannot verify historical target from the supplied Git commit and task path") from exc
+    try:
+        historical_text = historical_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise TaskFrontmatterError("historical task blob must be UTF-8") from exc
+    historical = parse_manager_child_metadata(historical_text, args.root)
+    if historical is None or historical.runat != args.historical_target:
+        raise TaskFrontmatterError("historical Git blob does not prove the supplied target for this task")
+    lines = current_bytes.splitlines(keepends=True)
+    closing = next((idx for idx, line in enumerate(lines[1:], start=1) if line.strip() == b"---"), None)
+    if closing is None:
+        raise TaskFrontmatterError("task frontmatter opening marker has no closing marker.")
+    changed = 0
+    for idx in range(1, closing):
+        key, separator, value = lines[idx].partition(b":")
+        if separator and key.strip() == b"runat":
+            if value.strip() != b"retired":
+                raise TaskFrontmatterError("terminal target restoration source target drifted")
+            newline = lines[idx][len(lines[idx].rstrip(b"\r\n")) :]
+            lines[idx] = f"runat: {args.historical_target}".encode() + newline
+            changed += 1
+    if changed != 1:
+        raise TaskFrontmatterError(f"expected exactly one frontmatter `runat`, found {changed}.")
+    updated_bytes = b"".join(lines)
+    if historical_bytes != updated_bytes:
+        raise TaskFrontmatterError("historical Git blob must equal current task bytes except for the sole restored run target")
+    updated = updated_bytes.decode("utf-8")
+    restored = parse_task_metadata(updated, args.root)
+    if restored is None or restored.status != "done" or restored.runat != args.historical_target or restored.pending_task_items:
+        raise TaskFrontmatterError("restored terminal task metadata did not validate")
+    replace_bytes_if_unchanged(path, updated_bytes, before)
 
 
 def reconcile_todo_text(root: Path, path: Path, text: str, runat: str, destination: str, allowed_sections: tuple[str, ...]) -> str:
@@ -1356,12 +1442,14 @@ def run(args: Args) -> int:
         path = task_path(args.root, args.task_file)
         before = path.stat()
         text = path.read_text(encoding="utf-8")
-        initial_metadata = parse_task_metadata(text, args.root)
+        initial_metadata = parse_manager_child_metadata(text, args.root) if args.restore_terminal_target else parse_task_metadata(text, args.root)
         if initial_metadata is not None and initial_metadata.version == V2_VERSION and not v2_enabled(args.root):
             raise BlockingError("v2 task writes are disabled until reviewed migration enablement")
         if initial_metadata is not None and initial_metadata.version != V2_VERSION and v2_enabled(args.root):
             raise BlockingError("v1 task writes are disabled after v2 enablement")
-        if args.retire_blocked_target:
+        if args.restore_terminal_target:
+            restore_terminal_target(args, path, text, before)
+        elif args.retire_blocked_target:
             retire_blocked_target(args, path, text, before)
         elif args.reconcile_long_running_human_index:
             reconcile_long_running_human_index(args.root, path, text, before)
