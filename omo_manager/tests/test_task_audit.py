@@ -5,7 +5,7 @@ import threading
 import unittest
 from pathlib import Path
 
-from omo_manager.omo_task_audit import Finding, audit, audit_and_write_reconciliation_queue, write_reconciliation_queue
+from omo_manager.omo_task_audit import Finding, TerminalDispositionError, audit, audit_and_write_reconciliation_queue, load_terminal_dispositions, write_reconciliation_queue
 
 
 def task(status: str, runat: str, blocked_on: str = "") -> str:
@@ -14,6 +14,70 @@ def task(status: str, runat: str, blocked_on: str = "") -> str:
 
 
 class TaskAuditTests(unittest.TestCase):
+    def test_reviewed_nineteen_record_manifest_distinguishes_archives(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "TODO.md").write_text("current:\n")
+            manifest = Path(__file__).parent / "fixtures" / "blocked_record_dispositions_v1.yaml"
+            dispositions = load_terminal_dispositions(manifest)
+            closures = {name for name, disposition in dispositions.items() if disposition == "supported_closure"}
+            owners = {name for name, disposition in dispositions.items() if disposition == "owner_disposition_required"}
+            archives = {name for name, disposition in dispositions.items() if disposition == "archived_dependency"}
+            self.assertEqual(
+                {
+                    "coconut_eval_mgr.md",
+                    "contrib_eval_mgr.md",
+                    "manager_mail_compression_20260728.md",
+                    "verulaw_midas_docs.md",
+                    "vl_mlexoh_10383.md",
+                    "vlexp_arrayvec_0722.md",
+                    "vl_ignore_exp_12243.md",
+                },
+                closures,
+            )
+            self.assertEqual(
+                {
+                    "ml_run_graph_cli_remove_2013.md",
+                    "dw1_common_crawl_bounded_smoke_8649.md",
+                    "dw1_common_crawl_dataset_enlargement_resume_8550_8649.md",
+                    "pb_non_market_no_report_followup_8089.md",
+                    "vl_l4_atmosphere_quota_preservation_plain_english_relaunch_8352.md",
+                    "vl_submanager_current_8653.md",
+                    "vl_tools_mgr_9522.md",
+                    "vl_wave3_submanager_12344.md",
+                    "vl_wrapper_release_10712.md",
+                },
+                owners,
+            )
+            self.assertEqual({"midas_artifact_clean.md", "pb_public_reusable_split_4033.md", "shmig_dd8_live.md"}, archives)
+            for index, name in enumerate(dispositions):
+                (root / name).write_text(task("blocked", f"wl:{index + 2}", "dependency.md"))
+
+            findings = audit(root, terminal_dispositions=dispositions)
+            by_task = {finding.key: (finding.kind, finding.action) for finding in findings if finding.key.endswith(".md")}
+            self.assertEqual(19, len(by_task))
+            for name in closures:
+                self.assertEqual(("blocked_no_todo", "supported_closure"), by_task[name])
+            for name in owners:
+                self.assertEqual(("blocked_no_todo", "disposition_required"), by_task[name])
+            for name in archives:
+                self.assertEqual(("archived_dependency_no_todo", "none"), by_task[name])
+
+    def test_terminal_disposition_manifest_fails_closed_on_drift_and_invalid_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "TODO.md").write_text("current:\nactive.md wl:2\n")
+            (root / "active.md").write_text(task("blocked", "wl:2", "human"))
+            manifest = root / "dispositions.yaml"
+            manifest.write_text("version: v1.0.0\nrecords:\n  - task: active.md\n    disposition: archived_dependency\n    evidence: reviewed\n")
+            finding = audit(root, terminal_dispositions=load_terminal_dispositions(manifest))[0]
+            self.assertEqual(("terminal_disposition_mismatch", "disposition_required"), (finding.kind, finding.action))
+
+            for invalid in ("../escape.md", "./active.md", "sub//active.md"):
+                manifest.write_text(f"version: v1.0.0\nrecords:\n  - task: {invalid}\n    disposition: archived_dependency\n    evidence: reviewed\n")
+                with self.assertRaises(TerminalDispositionError):
+                    load_terminal_dispositions(manifest)
+
     def test_deterministic_todo_target_and_disposition_findings(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

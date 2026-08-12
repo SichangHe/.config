@@ -1,0 +1,59 @@
+version: v1.0.0
+records:
+  - task: coconut_eval_mgr.md
+    disposition: supported_closure
+    evidence: Reviewed successor owns the remaining human decision.
+  - task: contrib_eval_mgr.md
+    disposition: supported_closure
+    evidence: Reviewed successor owns the completed handoff.
+  - task: manager_mail_compression_20260728.md
+    disposition: supported_closure
+    evidence: Reviewed terminal bookkeeping completed with no remaining messages.
+  - task: verulaw_midas_docs.md
+    disposition: supported_closure
+    evidence: Reviewed named continuation is done.
+  - task: vl_mlexoh_10383.md
+    disposition: supported_closure
+    evidence: Reviewed named successor is done.
+  - task: vlexp_arrayvec_0722.md
+    disposition: supported_closure
+    evidence: Reviewed named continuation is done.
+  - task: vl_ignore_exp_12243.md
+    disposition: supported_closure
+    evidence: Reviewed relaunch completed the bounded work.
+  - task: ml_run_graph_cli_remove_2013.md
+    disposition: owner_disposition_required
+    evidence: Reviewed record retains executable human-authored items.
+  - task: dw1_common_crawl_bounded_smoke_8649.md
+    disposition: owner_disposition_required
+    evidence: Reviewed smoke failed and needs rerun or cancellation choice.
+  - task: dw1_common_crawl_dataset_enlargement_resume_8550_8649.md
+    disposition: owner_disposition_required
+    evidence: Reviewed production resume remains blocked on the failed smoke.
+  - task: pb_non_market_no_report_followup_8089.md
+    disposition: owner_disposition_required
+    evidence: Reviewed stale blocker remains with four concrete items.
+  - task: vl_l4_atmosphere_quota_preservation_plain_english_relaunch_8352.md
+    disposition: owner_disposition_required
+    evidence: Reviewed contaminated run cannot establish completion.
+  - task: vl_submanager_current_8653.md
+    disposition: owner_disposition_required
+    evidence: Reviewed human Docker approval item remains unrouted.
+  - task: vl_tools_mgr_9522.md
+    disposition: owner_disposition_required
+    evidence: Reviewed frontmatter retains two items requiring owner verification.
+  - task: vl_wave3_submanager_12344.md
+    disposition: owner_disposition_required
+    evidence: Reviewed human-facing status request lacks direct completion evidence.
+  - task: vl_wrapper_release_10712.md
+    disposition: owner_disposition_required
+    evidence: Reviewed private runtime and macOS readiness item remains.
+  - task: midas_artifact_clean.md
+    disposition: archived_dependency
+    evidence: Reviewed closed-owner provenance requires preserving this non-live record.
+  - task: pb_public_reusable_split_4033.md
+    disposition: archived_dependency
+    evidence: Reviewed low-priority placeholder remains parked pending authoritative scope.
+  - task: shmig_dd8_live.md
+    disposition: archived_dependency
+    evidence: Reviewed single human-pending gate represents the unresolved authority.
