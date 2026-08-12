@@ -32,6 +32,7 @@ try:
         has_codex_model_footer,
         has_plan_prompt,
         inspect,
+        pane_has_exact_codex_process,
         status,
         tail,
         tail_pane_id,
@@ -53,6 +54,7 @@ except ModuleNotFoundError:
         has_codex_model_footer,
         has_plan_prompt,
         inspect,
+        pane_has_exact_codex_process,
         status,
         tail,
         tail_pane_id,
@@ -501,13 +503,25 @@ def error_signature(lines: list[str]) -> tuple[str, ...]:
     return tuple(visible_error_lines(current_block(lines).lines))
 
 
+def target_status(target: str, lines: list[str]) -> str:
+    """Classify a capture while retaining the exact live-process fallback."""
+
+    current_status = status(lines, current_block(lines))
+    if current_status != "not_codex":
+        return current_status
+    pane_id = exact_pane_id(target)
+    if pane_id and pane_has_exact_codex_process(target, pane_id):
+        return "running"
+    return current_status
+
+
 def validate_error_transition(
     lines: list[str],
     preexisting_error: tuple[str, ...] | None,
     target: str,
     phase: str,
 ) -> None:
-    current_status = status(lines, current_block(lines))
+    current_status = target_status(target, lines)
     if current_status == "not_codex":
         raise RuntimeError(f"target is not a Codex pane {phase}: {target}")
     current_error = error_signature(lines)
@@ -534,7 +548,7 @@ def require_codex_target(target: str, n_lines: int = 80) -> str:
     exists, lines = exact_tail(target, n_lines)
     if not exists:
         raise RuntimeError(f"target does not exist: {target}")
-    current_status = status(lines, current_block(lines))
+    current_status = target_status(target, lines)
     if current_status == "not_codex":
         raise RuntimeError(f"target is not a Codex pane: {target}")
     return current_status
@@ -544,7 +558,7 @@ def require_sendable_codex_target(target: str, n_lines: int = 80) -> tuple[str, 
     exists, lines = exact_tail(target, n_lines)
     if not exists:
         raise RuntimeError(f"target does not exist: {target}")
-    current_status = status(lines, current_block(lines))
+    current_status = target_status(target, lines)
     if current_status == "not_codex":
         raise RuntimeError(f"target is not a Codex pane: {target}")
     if current_status not in {"ready", "running", "stuck_input", "waiting_subagent", "error"}:
@@ -607,7 +621,7 @@ def wait_paste_visible(
                 raise RuntimeError(f"Codex paste not verified after {options.submit_verify_timeout_s:g}s: file search overlay did not transition")
             time.sleep(min(0.25, max(0.05, deadline_s - now_s)))
             continue
-        last_status = status(lines, current_block(lines))
+        last_status = target_status(target, lines)
         validate_error_transition(lines, preexisting_error, target, "before submit")
         input_text = current_input_text(lines)
         if is_real_input_text(input_text) and (all(probe in input_text for probe in probes) or has_collapsed_paste_text(input_text)):
@@ -689,7 +703,7 @@ def verify_submit(
     next_enter_s = 0.0
     while True:
         lines = tail(target, n_lines)
-        last_status = status(lines, current_block(lines))
+        last_status = target_status(target, lines)
         validate_error_transition(lines, preexisting_error, target, "after submit")
         input_text = current_input_text(lines)
         real_input_visible = is_real_input_text(input_text)
@@ -828,7 +842,7 @@ def verify_authorized_existing_submit(
     last_status = "unknown"
     while True:
         lines = tail_pane_id(pane_id, EXISTING_INPUT_CAPTURE_LINES)
-        last_status = status(lines, current_block(lines))
+        last_status = target_status(target, lines)
         validate_error_transition(lines, preexisting_error, target, "after submit-existing")
         input_text = current_input_text(lines)
         if last_status in {"ready", "running", "waiting_subagent"} and not is_real_input_text(input_text):
@@ -842,7 +856,7 @@ def verify_authorized_existing_submit(
             except RuntimeError:
                 confirmation_lines = tail_pane_id(pane_id, EXISTING_INPUT_CAPTURE_LINES)
                 validate_error_transition(confirmation_lines, preexisting_error, target, "after submit-existing")
-                confirmation_status = status(confirmation_lines, current_block(confirmation_lines))
+                confirmation_status = target_status(target, confirmation_lines)
                 if confirmation_status in {"ready", "running", "waiting_subagent"} and not is_real_input_text(
                     current_input_text(confirmation_lines)
                 ):
@@ -889,7 +903,7 @@ def verify_authorized_existing_cancel(
         if exact_pane_id(target) != pane_id:
             raise RuntimeError("target pane changed after cancel-existing")
         validate_error_transition(lines, preexisting_error, target, "after cancel-existing")
-        current_status = status(lines, current_block(lines))
+        current_status = target_status(target, lines)
         input_text = exact_complete_input_text(lines, allow_codex_footer_spacer=True)
         if input_text in CODEX_PLACEHOLDER_INPUT_TEXTS:
             if current_status not in {"ready", "running", "waiting_subagent", "error"}:

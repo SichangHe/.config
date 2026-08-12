@@ -42,6 +42,8 @@ from omo_manager.omo_tmux_send import (
     send_to_codex,
     submit_existing_to_codex,
     text_sha256,
+    validate_error_transition,
+    verify_authorized_existing_submit,
     verify_capacity_resume,
     verify_submit,
     wait_capacity_resume_paste,
@@ -469,12 +471,52 @@ class TmuxSendTests(unittest.TestCase):
                 require_sendable_codex_target("cfg:1.0")
 
     def test_require_sendable_codex_target_rejects_not_codex_and_allows_error(self) -> None:
-        with patch("omo_manager.omo_tmux_send.exact_tail", return_value=(True, ["fish prompt"])):
+        with patch("omo_manager.omo_tmux_send.exact_tail", return_value=(True, ["fish prompt"])), patch(
+            "omo_manager.omo_tmux_send.exact_pane_id", return_value="%20"
+        ), patch("omo_manager.omo_tmux_send.pane_has_exact_codex_process", return_value=False):
             with self.assertRaisesRegex(RuntimeError, "not a Codex pane"):
                 require_sendable_codex_target("vl:20.0")
         lines = ["────", "■ Error: 429 Too Many Requests", "› Use /skills", "  gpt-5.5"]
         with patch("omo_manager.omo_tmux_send.exact_tail", return_value=(True, lines)):
             self.assertEqual(("■ Error: 429 Too Many Requests",), require_sendable_codex_target("cfg:1.0"))
+
+    def test_require_sendable_codex_target_accepts_live_codex_with_obscured_footer(self) -> None:
+        lines = [
+            "• Queued follow-up inputs",
+            "  ↳ Capacity advisory: use another model.",
+            "› Explain this codebase",
+            "  esc again to edit previous message",
+        ]
+        with patch("omo_manager.omo_tmux_send.exact_tail", return_value=(True, lines)), patch(
+            "omo_manager.omo_tmux_send.exact_pane_id", return_value="%7"
+        ), patch("omo_manager.omo_tmux_send.pane_has_exact_codex_process", return_value=True):
+            self.assertIsNone(require_sendable_codex_target("vlcliimprove:0"))
+
+    def test_validate_transition_accepts_live_codex_with_obscured_footer(self) -> None:
+        lines = ["• Queued follow-up inputs", "› Explain this codebase", "  esc again to edit previous message"]
+        with patch("omo_manager.omo_tmux_send.exact_pane_id", return_value="%7"), patch(
+            "omo_manager.omo_tmux_send.pane_has_exact_codex_process", return_value=True
+        ):
+            validate_error_transition(lines, None, "vlcliimprove:0", "after submit")
+
+    def test_verify_submit_accepts_live_codex_with_obscured_footer(self) -> None:
+        lines = ["• Queued follow-up inputs", "› Explain this codebase", "  esc again to edit previous message"]
+        with patch("omo_manager.omo_tmux_send.tail", return_value=lines), patch(
+            "omo_manager.omo_tmux_send.exact_pane_id", return_value="%7"
+        ), patch("omo_manager.omo_tmux_send.pane_has_exact_codex_process", return_value=True), patch(
+            "omo_manager.omo_tmux_send.current_input_text", return_value="Explain this codebase"
+        ):
+            verify_submit("vlcliimprove:0", "repair delivery", options())
+
+    def test_verify_existing_submit_accepts_live_codex_with_obscured_footer(self) -> None:
+        lines = ["• Queued follow-up inputs", "› Explain this codebase", "  esc again to edit previous message"]
+        authorization = ExistingInputAuthorization("0" * 64)
+        with patch("omo_manager.omo_tmux_send.tail_pane_id", return_value=lines), patch(
+            "omo_manager.omo_tmux_send.exact_pane_id", return_value="%7"
+        ), patch("omo_manager.omo_tmux_send.pane_has_exact_codex_process", return_value=True), patch(
+            "omo_manager.omo_tmux_send.current_input_text", return_value="Explain this codebase"
+        ):
+            verify_authorized_existing_submit("vlcliimprove:0", authorization, options(), "%7", None)
 
     def test_require_sendable_codex_target_reports_missing_target(self) -> None:
         with patch("omo_manager.omo_tmux_send.exact_tail", return_value=(False, [])), self.assertRaisesRegex(RuntimeError, "target does not exist"):
