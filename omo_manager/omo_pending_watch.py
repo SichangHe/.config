@@ -247,6 +247,7 @@ def positive_float_env(name: str, default: float) -> float:
 DEFAULT_SEEN_TTL_S = positive_float_env("OMO_MANAGER_SEEN_TTL_S", 24 * 60 * 60)
 CONSUMED_REPORT_TTL_S = positive_float_env("OMO_MANAGER_CONSUMED_REPORT_TTL_S", 90 * 24 * 60 * 60)
 CONSUMED_REPORT_MAX_ENTRIES = 10_000
+CONSUMED_REPORT_MAX_BYTES = 4 * 1024 * 1024
 REPORT_AUTHORITY_LEASE_S = min(3600.0, positive_float_env("OMO_MANAGER_REPORT_AUTHORITY_LEASE_S", 10 * 60))
 
 
@@ -1791,22 +1792,52 @@ def write_consumed_report_entries(
     entries: dict[str, ConsumedReportEntry],
     *,
     temporary: Path | None = None,
-) -> None:
+    required_key: str | None = None,
+) -> dict[str, ConsumedReportEntry]:
+    """Atomically write the newest entries that fit the shared reader bound."""
+
     state.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     selected_temporary = temporary or watcher_report_state_maintenance_temporary(state)
     if selected_temporary.parent != state.resolve(strict=False).parent:
         raise OSError("consumed-report temporary escapes its state directory")
+    encoded: list[tuple[str, ConsumedReportEntry, bytes]] = []
+    encoded_bytes = 0
+    ordered = sorted(entries.items(), key=lambda item: item[1].timestamp_s, reverse=True)
+    if required_key is not None:
+        required = entries.get(required_key)
+        if required is None:
+            raise OSError("required consumed-report entry is missing")
+        ordered = [(required_key, required), *(item for item in ordered if item[0] != required_key)]
+    for key, entry in ordered:
+        transition = "" if not entry.transition else "\t" + "\t".join(entry.transition)
+        line = f"{entry.timestamp_s:.6f}\t{key}{transition}\n".encode()
+        if len(line) > CONSUMED_REPORT_MAX_BYTES:
+            if key == required_key:
+                raise OSError("required consumed-report entry exceeds the ledger bound")
+            continue
+        if encoded_bytes + len(line) > CONSUMED_REPORT_MAX_BYTES:
+            break
+        encoded.append((key, entry, line))
+        encoded_bytes += len(line)
+    encoded.reverse()
+    retained = {key: entry for key, entry, _line in encoded}
     tmp_path: Path | None = None
     fd: int | None = None
     try:
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(selected_temporary, flags, 0o600)
+        try:
+            fd = os.open(selected_temporary, flags, 0o600)
+        except FileExistsError:
+            stale = selected_temporary.lstat()
+            if not stat.S_ISREG(stale.st_mode) or stale.st_uid != os.getuid() or stat.S_IMODE(stale.st_mode) != 0o600:
+                raise OSError("consumed-report temporary is unsafe")
+            selected_temporary.unlink()
+            fd = os.open(selected_temporary, flags, 0o600)
         tmp_path = selected_temporary
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        with os.fdopen(fd, "wb") as handle:
             fd = None
-            for key, entry in sorted(entries.items(), key=lambda item: item[1].timestamp_s):
-                transition = "" if not entry.transition else "\t" + "\t".join(entry.transition)
-                _ = handle.write(f"{entry.timestamp_s:.6f}\t{key}{transition}\n")
+            for _key, _entry, line in encoded:
+                _ = handle.write(line)
             handle.flush()
             os.fsync(handle.fileno())
         tmp_path.chmod(0o600)
@@ -1817,6 +1848,7 @@ def write_consumed_report_entries(
             os.fsync(directory_fd)
         finally:
             os.close(directory_fd)
+        return retained
     finally:
         if fd is not None:
             os.close(fd)
@@ -1844,7 +1876,7 @@ def locked_consumed_report_entries(state: Path, now_s: float, *, force_reload: b
                 del entries[key]
             dirty = dirty or bool(expired)
             if dirty:
-                write_consumed_report_entries(state, entries)
+                entries = write_consumed_report_entries(state, entries)
                 signature = receipt_state_signature(state)
             CONSUMED_REPORT_CACHE[state] = ConsumedReportCache(signature, dict(entries))
             return entries
@@ -1968,7 +2000,12 @@ def remember_consumed_report(state: Path, key: str, now_s: float | None = None) 
                 entries[key] = ConsumedReportEntry(timestamp_s, previous.transition if previous is not None else ())
                 if len(entries) > CONSUMED_REPORT_MAX_ENTRIES:
                     entries = dict(sorted(entries.items(), key=lambda item: item[1].timestamp_s)[-CONSUMED_REPORT_MAX_ENTRIES:])
-                write_consumed_report_entries(state, entries, temporary=watcher_report_state_temporary(state, key))
+                entries = write_consumed_report_entries(
+                    state,
+                    entries,
+                    temporary=watcher_report_state_temporary(state, key),
+                    required_key=key,
+                )
                 CONSUMED_REPORT_CACHE[state] = ConsumedReportCache(receipt_state_signature(state), dict(entries))
             finally:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
@@ -2193,7 +2230,12 @@ def remember_consumed_report_transition(
                 entries[key] = ConsumedReportEntry(timestamp_s, transition)
                 if len(entries) > CONSUMED_REPORT_MAX_ENTRIES:
                     entries = dict(sorted(entries.items(), key=lambda item: item[1].timestamp_s)[-CONSUMED_REPORT_MAX_ENTRIES:])
-                write_consumed_report_entries(state, entries, temporary=watcher_report_state_temporary(state, key))
+                entries = write_consumed_report_entries(
+                    state,
+                    entries,
+                    temporary=watcher_report_state_temporary(state, key),
+                    required_key=key,
+                )
                 CONSUMED_REPORT_CACHE[state] = ConsumedReportCache(receipt_state_signature(state), dict(entries))
             finally:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)

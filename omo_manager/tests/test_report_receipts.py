@@ -14,6 +14,8 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 
+from omo_manager.omo_report_receipt import regular_file_tail
+
 
 OMO_DIR = Path(__file__).resolve().parents[1]
 REPORT = OMO_DIR / "omo_report.sh"
@@ -353,6 +355,13 @@ def side_effect_paths(effects: dict[str, object]) -> set[str]:
 
 
 class ReportReceiptTests(unittest.TestCase):
+    def test_regular_file_tail_keeps_first_complete_line_at_exact_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ledger.tsv"
+            path.write_bytes(b"discarded\nfirst\nsecond\n")
+
+            self.assertEqual(b"first\nsecond\n", regular_file_tail(path, maximum=13, field="ledger"))
+
     def test_watcher_canonicalizes_state_home_for_commitment_binding(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

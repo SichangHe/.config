@@ -303,6 +303,50 @@ def regular_file_bytes(path: Path, *, maximum: int, field: str, require_owner: b
     return payload
 
 
+def regular_file_tail(path: Path, *, maximum: int, field: str) -> bytes:
+    """Read complete newest lines without rejecting an oversized append-only file."""
+
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise ReceiptError(f"{field} is not a readable regular file") from exc
+    try:
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid():
+            raise ReceiptError(f"{field} is not an owned regular file")
+        start = max(0, before.st_size - maximum)
+        read_start = max(0, start - 1)
+        _ = os.lseek(fd, read_start, os.SEEK_SET)
+        chunks: list[bytes] = []
+        remaining = min(maximum + (start > 0), before.st_size - read_start)
+        while remaining:
+            chunk = os.read(fd, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+        after = os.fstat(fd)
+        if len(payload) != before.st_size - read_start or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        ):
+            raise ReceiptError(f"{field} changed while it was read")
+        if start:
+            preceding, payload = payload[:1], payload[1:]
+            if preceding != b"\n":
+                _partial, separator, payload = payload.partition(b"\n")
+                if not separator:
+                    return b""
+        return payload
+    finally:
+        os.close(fd)
+
+
 def validate_directory(path: Path, *, private: bool, field: str) -> os.stat_result:
     try:
         info = path.lstat()
@@ -1894,7 +1938,7 @@ def read_manager_acknowledgment(plan: Plan, *, require_live_authority: bool = Tr
         exact_mode=0o600,
     ):
         return None
-    payload = regular_file_bytes(
+    payload = regular_file_tail(
         plan.acknowledgment_state,
         maximum=MAX_ACK_STATE_BYTES,
         field="manager acknowledgment state",

@@ -496,6 +496,43 @@ class PendingReportDeliveryTests(unittest.TestCase):
                 self.assertEqual({"new-1", "new-2"}, watcher.consumed_report_keys(state, 203.0))
                 self.assertLessEqual(len(state.read_text(encoding="utf-8").splitlines()), 2)
 
+    def test_receipts_stay_within_reader_bound_and_reclaim_safe_stale_temporary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "receipts.tsv"
+            watcher.CONSUMED_REPORT_CACHE.clear()
+            stale = watcher.watcher_report_state_temporary(state, "new-2")
+            stale.write_text("interrupted rewrite", encoding="utf-8")
+            stale.chmod(0o600)
+            with patch.object(watcher, "CONSUMED_REPORT_MAX_BYTES", 70):
+                self.assertTrue(watcher.remember_consumed_report(state, "old-" + "x" * 40, 100.0))
+                self.assertTrue(watcher.remember_consumed_report(state, "new-2", 200.0))
+
+            self.assertFalse(stale.exists())
+            self.assertLessEqual(state.stat().st_size, 70)
+            self.assertEqual({"new-2"}, watcher.consumed_report_keys(state, 201.0))
+
+    def test_receipts_refuse_unsafe_stale_temporary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "receipts.tsv"
+            watcher.CONSUMED_REPORT_CACHE.clear()
+            stale = watcher.watcher_report_state_temporary(state, "key")
+            stale.write_text("not private", encoding="utf-8")
+            stale.chmod(0o644)
+
+            self.assertFalse(watcher.remember_consumed_report(state, "key", 100.0))
+            self.assertEqual("not private", stale.read_text(encoding="utf-8"))
+            self.assertFalse(state.exists())
+
+    def test_receipts_keep_current_write_across_clock_rollback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "receipts.tsv"
+            watcher.CONSUMED_REPORT_CACHE.clear()
+            with patch.object(watcher, "CONSUMED_REPORT_MAX_BYTES", 55):
+                self.assertTrue(watcher.remember_consumed_report(state, "newer", 200.0))
+                self.assertTrue(watcher.remember_consumed_report(state, "clock-rolled-back", 100.0))
+
+            self.assertIn("clock-rolled-back", watcher.consumed_report_keys(state, 201.0))
+
     def test_adjacent_email_metadata_cannot_be_overridden_by_payload_source_text(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
