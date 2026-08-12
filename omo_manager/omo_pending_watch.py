@@ -587,7 +587,7 @@ class DeliverySuccessEvent:
     failure_seen_delays_s: tuple[tuple[str, float], ...] = ()
     failure_seen_deadlines_s: tuple[tuple[str, float], ...] = ()
     capacity_advisory_removals: tuple[tuple[str, str], ...] = ()
-    capacity_alerts: tuple[tuple[ProblemRow, int, str], ...] = ()
+    capacity_alerts: tuple[tuple[ProblemRow, int, str, AgentProblemGuard], ...] = ()
     blocked_idle_lines: tuple[tuple[str, str], ...] = ()
     dependency_replacements: tuple[tuple[str, str], ...] = ()
     dependency_removals: tuple[str, ...] = ()
@@ -1035,8 +1035,11 @@ def drain_delivery_successes(args: Args, seen: dict[str, float], now_wall_s: flo
         for key in event.capacity_advisory_removals:
             CAPACITY_ADVISORY_PENDING.discard(key)
             changed = True
-        for row, attempts, detail in event.capacity_alerts:
-            changed = push_capacity_owner_alert(args, seen, row, attempts, detail, now_wall_s) or changed
+        for row, attempts, detail, guard in event.capacity_alerts:
+            if not agent_problem_guard_current(guard):
+                print("omo_pending_watch: stale capacity alert cancelled after watcher-state refresh", file=sys.stderr)
+                continue
+            changed = push_capacity_owner_alert(args, seen, row, attempts, detail, now_wall_s, guard) or changed
         if clear_ok:
             for key in event.seen_after_clear_keys:
                 remember_seen(seen, key, seen_at_s)
@@ -4253,7 +4256,12 @@ def capacity_alert_text(row: ProblemRow, attempts: int, detail: str) -> str:
     )
 
 
-def route_capacity_main_manager_alert(args: Args, row: ProblemRow, text: str) -> bool:
+def route_capacity_main_manager_alert(
+    args: Args,
+    row: ProblemRow,
+    text: str,
+    guard: AgentProblemGuard | None = None,
+) -> bool:
     problem_output = f"agent-problems: error=1\nerror: task=manager evidence=target={row.target} role=manager output={CAPACITY_ERROR_TEXT}"
     targets = active_manager_problem_targets(args.root, problem_output, args.manager_target)
     if targets:
@@ -4261,12 +4269,31 @@ def route_capacity_main_manager_alert(args: Args, row: ProblemRow, text: str) ->
         if args.dry_run:
             print(f"manager problem route due: target={route_target}\n{text}", flush=True)
             return True
-        if delivery_accepted(try_send_delivery_text("capacity manager recovery alert", text, route_target, root=args.root).status):
+        if delivery_accepted(
+            try_send_delivery_text(
+                "capacity manager recovery alert",
+                text,
+                route_target,
+                root=args.root,
+                problem_guard=guard,
+            ).status
+        ):
             return True
+    if guard is not None and not agent_problem_guard_current(guard):
+        print("omo_pending_watch: stale main-manager capacity alert cancelled before email", file=sys.stderr)
+        return False
     return email_human_manager_problem(args, text)
 
 
-def push_capacity_owner_alert(args: Args, seen: dict[str, float], row: ProblemRow, attempts: int, detail: str, now_wall_s: float) -> bool:
+def push_capacity_owner_alert(
+    args: Args,
+    seen: dict[str, float],
+    row: ProblemRow,
+    attempts: int,
+    detail: str,
+    now_wall_s: float,
+    guard: AgentProblemGuard | None = None,
+) -> bool:
     target = row.owner_target or args.manager_target
     if not target:
         return False
@@ -4276,12 +4303,12 @@ def push_capacity_owner_alert(args: Args, seen: dict[str, float], row: ProblemRo
     if key in seen and now_wall_s - seen_get(seen, key, now_s=now_wall_s) < args.agent_problem_repeat_s:
         return False
     if row.main_manager and same_tmux_target(row.target, target):
-        sent = route_capacity_main_manager_alert(args, row, text)
+        sent = route_capacity_main_manager_alert(args, row, text, guard)
         if sent:
             remember_seen(seen, key, now_wall_s)
         return sent
     event = DeliverySuccessEvent(seen_keys=(key,), seen_at_s=now_wall_s)
-    status = push_manager_text_to_target(args, text, target, event)
+    status = push_manager_text_to_target(args, text, target, event, problem_guard=guard)
     if not delivery_accepted(status):
         return False
     if status == 0:
@@ -4298,6 +4325,7 @@ def log_capacity_resume_result(
     args: Args,
     row: ProblemRow,
     attempt: int,
+    guard: AgentProblemGuard,
 ) -> None:
     try:
         recovered = future.result()
@@ -4312,7 +4340,7 @@ def log_capacity_resume_result(
             f"The resume submission failed before a persistent capacity result was verified: {exc}. "
             "Retry literal `resume` in this same pane; do not replace the pane. "
         )
-        DELIVERY_SUCCESS_EVENTS.put(DeliverySuccessEvent(capacity_alerts=((row, attempt - 1, detail),)))
+        DELIVERY_SUCCESS_EVENTS.put(DeliverySuccessEvent(capacity_alerts=((row, attempt - 1, detail, guard),)))
         return
     DELIVERY_SUCCESS_EVENTS.put(recovered_event if recovered else persistent_event)
 
@@ -4359,7 +4387,7 @@ def submit_capacity_resume(
     options = CodexSendOptions(1, 0.15, False, DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S, False)
     guard = AgentProblemGuard(tuple([*status_command(args, True), "--no-auto-unstick"]), (line,), root=args.root)
     fallback = (
-        DeliveryFailureFallback(row.target, owner_target, alert, options, retry_event)
+        DeliveryFailureFallback(row.target, owner_target, alert, options, retry_event, problem_guard=guard)
         if owner_target and not same_tmux_target(row.target, owner_target)
         else None
     )
@@ -4380,6 +4408,7 @@ def submit_capacity_resume(
             f"Resume submission failed immediately before verification: {exc}. "
             "Retry literal `resume` in this same pane; do not replace the pane. ",
             now_wall_s,
+            guard,
         )
         return True
     retain_send_result(
@@ -4393,6 +4422,7 @@ def submit_capacity_resume(
             args,
             row,
             attempt,
+            guard,
         ),
     )
     return True
@@ -4414,6 +4444,7 @@ def handle_capacity_problems(args: Args, seen: dict[str, float], output: str, no
         if f"{prefix}inflight" in seen:
             continue
         if attempts >= CAPACITY_RESUME_MAX_ATTEMPTS:
+            guard = AgentProblemGuard(tuple([*status_command(args, True), "--no-auto-unstick"]), (line,), root=args.root)
             changed = push_capacity_owner_alert(
                 args,
                 seen,
@@ -4421,6 +4452,7 @@ def handle_capacity_problems(args: Args, seen: dict[str, float], output: str, no
                 attempts,
                 "The exact capacity warning persists after the retry budget was exhausted.",
                 now_wall_s,
+                guard,
             ) or changed
             continue
         if now_wall_s < seen.get(f"{prefix}next", 0.0):

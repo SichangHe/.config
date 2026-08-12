@@ -9407,6 +9407,24 @@ printf 'header\\n(pending)\\nchanged\\n' > {task}
         self.assertEqual(0, watcher.capacity_attempt_count(args, seen, row.target, 1001.0))
         self.assertEqual(1010.0, seen[f"{watcher.capacity_state_prefix(args, row.target)}next"])
 
+    def test_capacity_immediate_submit_failure_alert_carries_generation_guard(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1", agent_problem_interval_s=10.0)
+        line = "error: task=worker.md evidence=target=pbw:0 output=Selected model is at capacity. Please try a different model. owner_target=wl:2"
+        row = watcher.capacity_problem_row(line)
+        assert row is not None
+        executor = MagicMock()
+        executor.submit.side_effect = RuntimeError("executor closed")
+        with patch.object(watcher, "send_executor", return_value=executor), patch.object(
+            watcher, "push_capacity_owner_alert", return_value=True
+        ) as alert:
+            self.assertTrue(watcher.submit_capacity_resume(args, row, line, 1, {}, 1000.0))
+
+        guard = alert.call_args.args[6]
+        self.assertEqual((line,), guard.problem_lines)
+        self.assertEqual(args.root, guard.root)
+
     def test_capacity_async_transport_failure_preserves_budget_and_retries_same_pane(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
@@ -9433,6 +9451,41 @@ printf 'header\\n(pending)\\nchanged\\n' > {task}
         self.assertIn("after 0 resume attempt(s)", alert_text)
         self.assertIn("Retry literal `resume` in this same pane", alert_text)
         self.assertIn("Do not launch a replacement pane", alert_text)
+
+    def test_capacity_async_failure_alert_is_cancelled_after_verified_recovery(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1", agent_problem_interval_s=10.0)
+        line = "error: task=manager evidence=target=wl:1 role=manager output=Selected model is at capacity. Please try a different model. owner_target=wl:1"
+        row = watcher.capacity_problem_row(line)
+        assert row is not None
+        future: Future[bool] = Future()
+        future.set_exception(RuntimeError("tmux paste failed"))
+        executor = MagicMock()
+        executor.submit.return_value = future
+        seen: dict[str, float] = {}
+
+        with patch.object(watcher, "send_executor", return_value=executor), patch.object(
+            watcher, "agent_problem_guard_current", return_value=False
+        ), patch.object(watcher, "route_capacity_main_manager_alert", return_value=True) as alert:
+            self.assertTrue(watcher.submit_capacity_resume(args, row, line, 1, seen, 1000.0))
+            watcher.drain_send_results()
+            self.assertTrue(watcher.drain_delivery_successes(args, seen, 1001.0))
+
+        alert.assert_not_called()
+        self.assertEqual(0, watcher.capacity_attempt_count(args, seen, row.target, 1001.0))
+        self.assertEqual(1010.0, seen[f"{watcher.capacity_state_prefix(args, row.target)}next"])
+
+    def test_capacity_owner_alert_delivery_carries_generation_guard(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1")
+        row = watcher.ProblemRow("error", "worker.md", "pbw:0", watcher.CAPACITY_ERROR_TEXT, owner_target="wl:2")
+        guard = watcher.AgentProblemGuard(("status",), ("capacity generation",), root=args.root)
+        with patch.object(watcher, "push_manager_text_to_target", return_value=watcher.ASYNC_DELIVERY_STARTED) as push:
+            self.assertTrue(watcher.push_capacity_owner_alert(args, {}, row, 0, "failed.", 1000.0, guard))
+
+        self.assertIs(guard, push.call_args.kwargs["problem_guard"])
 
     def test_capacity_human_owned_hwl_4_exact_error_uses_bounded_resume(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -9501,6 +9554,9 @@ printf 'header\\n(pending)\\nchanged\\n' > {task}
         self.assertEqual("", filtered)
         submit.assert_not_called()
         self.assertEqual(watcher.CAPACITY_RESUME_MAX_ATTEMPTS, alert.call_args.args[3])
+        guard = alert.call_args.args[6]
+        self.assertEqual((line,), guard.problem_lines)
+        self.assertEqual(args.root, guard.root)
 
     def test_capacity_async_main_manager_failure_alert_is_rate_limited(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -9528,7 +9584,7 @@ printf 'header\\n(pending)\\nchanged\\n' > {task}
 
         alert.assert_called_once()
 
-    def test_capacity_pre_paste_guard_failure_still_alerts_without_consuming_budget(self) -> None:
+    def test_capacity_pre_paste_guard_failure_cancels_stale_alert_without_consuming_budget(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
         args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1", agent_problem_interval_s=10.0)
@@ -9549,10 +9605,7 @@ printf 'header\\n(pending)\\nchanged\\n' > {task}
             self.assertTrue(watcher.drain_delivery_successes(args, seen, 1001.0))
 
         self.assertEqual(0, watcher.capacity_attempt_count(args, seen, row.target, 1001.0))
-        alert_text = alert.call_args.args[2]
-        self.assertIn("before tmux paste", alert_text)
-        self.assertIn("Retry literal `resume` in this same pane", alert_text)
-        self.assertIn("Do not launch a replacement pane", alert_text)
+        alert.assert_not_called()
 
     def test_capacity_dry_run_does_not_consume_verified_attempt(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -9693,6 +9746,19 @@ printf 'header\\n(pending)\\nchanged\\n' > {task}
 
         self.assertEqual("wl:2", push.call_args.args[2])
 
+    def test_capacity_main_manager_peer_alert_carries_generation_guard(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1")
+        row = watcher.ProblemRow("error", "manager", "wl:1", watcher.CAPACITY_ERROR_TEXT, owner_target="wl:1", main_manager=True)
+        guard = watcher.AgentProblemGuard(("status",), ("capacity generation",), root=args.root)
+        with patch.object(watcher, "active_manager_problem_targets", return_value=["wl:2"]), patch.object(
+            watcher, "try_send_delivery_text", return_value=watcher.DeliveryResult(watcher.ASYNC_DELIVERY_STARTED)
+        ) as push:
+            self.assertTrue(watcher.route_capacity_main_manager_alert(args, row, "alert", guard))
+
+        self.assertIs(guard, push.call_args.kwargs["problem_guard"])
+
     def test_capacity_main_manager_failure_emails_without_peer(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
@@ -9704,6 +9770,19 @@ printf 'header\\n(pending)\\nchanged\\n' > {task}
             self.assertTrue(watcher.push_capacity_owner_alert(args, {}, row, 1, "send failed.", 1000.0))
 
         self.assertIn("after 1 resume attempt(s)", email.call_args.args[1])
+
+    def test_capacity_main_manager_failure_cancels_stale_email_without_peer(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1")
+        row = watcher.ProblemRow("error", "manager", "wl:1", watcher.CAPACITY_ERROR_TEXT, owner_target="wl:1", main_manager=True)
+        guard = watcher.AgentProblemGuard(("status",), ("capacity generation",), root=args.root)
+        with patch.object(watcher, "active_manager_problem_targets", return_value=[]), patch.object(
+            watcher, "agent_problem_guard_current", return_value=False
+        ), patch.object(watcher, "email_human_manager_problem") as email:
+            self.assertFalse(watcher.route_capacity_main_manager_alert(args, row, "alert", guard))
+
+        email.assert_not_called()
 
     def test_nonexact_capacity_error_keeps_normal_owner_routing(self) -> None:
         from omo_manager import omo_pending_watch as watcher
