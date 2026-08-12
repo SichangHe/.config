@@ -9,6 +9,7 @@ import errno
 import fcntl
 import html
 import hashlib
+import json
 import os
 import random
 import re
@@ -1536,6 +1537,67 @@ def agent_report_seen_key(args: Args, marker: Marker, attachments: Sequence[Sour
     return f"{args.root}:agent-report:{digest}"
 
 
+def report_has_historical_clear_tombstone(args: Args, marker: Marker, report_key: str) -> bool:
+    """Accept only a canonical, hash-bound tombstone for this exact report pointer."""
+
+    source = agent_report_source(marker, ())
+    source_path = Path(source).resolve(strict=False) if source else None
+    manager_path = (args.root / marker.file).resolve(strict=False)
+    if source_path is None:
+        return False
+    state_home = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state"))
+    if not state_home.is_absolute():
+        return False
+    tombstone_directory = state_home.resolve(strict=False) / "omo-manager" / "report-receipts"
+    report_key_sha256 = hashlib.sha256(report_key.encode()).hexdigest()
+    pointer_sha256 = hashlib.sha256(marker.block_text.splitlines()[-1].encode()).hexdigest()
+    try:
+        directory_info = tombstone_directory.lstat()
+        if not stat.S_ISDIR(directory_info.st_mode) or directory_info.st_uid != os.getuid() or stat.S_IMODE(directory_info.st_mode) != 0o700:
+            return False
+        candidates = tuple(tombstone_directory.glob("*.tombstone.json"))
+    except OSError:
+        return False
+    for candidate in candidates:
+        try:
+            candidate_info = candidate.lstat()
+            if not stat.S_ISREG(candidate_info.st_mode) or candidate_info.st_uid != os.getuid() or stat.S_IMODE(candidate_info.st_mode) != 0o600:
+                continue
+            payload = candidate.read_bytes()
+            record = json.loads(payload)
+            envelope_payload = source_path.read_bytes()
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        envelope_header = envelope_payload.partition(b"message:\n")[0].decode("utf-8", errors="replace").splitlines()
+        owner_line = next((line for line in envelope_header if line.startswith("[omo-report-owner-prefix: ")), "")
+        owner_match = re.fullmatch(
+            r"\[omo-report-owner-prefix: manager-path-sha256=([0-9a-f]{64}) sha256=([0-9a-f]{64}) size-bytes=\d+ separator-bytes=[12]\]",
+            owner_line,
+        )
+        if not isinstance(record, dict) or (json.dumps(record, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n").encode() != payload:
+            continue
+        unsigned = dict(record)
+        tombstone_id = unsigned.pop("tombstone_id", None)
+        if (
+            record.get("schema") == "omo-report-historical-clear-tombstone/v1"
+            and record.get("terminal") is True
+            and record.get("report_key_sha256") == report_key_sha256
+            and record.get("pointer_sha256") == pointer_sha256
+            and record.get("envelope_path") == str(source_path)
+            and record.get("envelope_sha256") == hashlib.sha256(envelope_payload).hexdigest()
+            and record.get("manager_path") == str(manager_path)
+            and record.get("manager_path_sha256") == hashlib.sha256(str(manager_path).encode()).hexdigest()
+            and owner_match is not None
+            and owner_match.group(1) == record.get("manager_path_sha256")
+            and owner_match.group(2) == record.get("owner_prefix_sha256")
+            and isinstance(tombstone_id, str)
+            and tombstone_id
+            == hashlib.sha256(json.dumps(unsigned, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        ):
+            return True
+    return False
+
+
 def receipt_state_signature(state: Path) -> tuple[int, int, int, int] | None:
     try:
         current = state.stat()
@@ -3046,6 +3108,8 @@ def push_agent_report_ref(
     """Deliver an immutable report once to the manager that owns its task."""
 
     report_key = agent_report_seen_key(args, marker, attachments)
+    if report_has_historical_clear_tombstone(args, marker, report_key):
+        return 0 if args.dry_run or clear_pending_marker_if_current(args.root, marker) else 1
     transition = consumed_report_transition(args.state, report_key)
     if transition is not None:
         if args.dry_run:
