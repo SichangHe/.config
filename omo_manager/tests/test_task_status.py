@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from omo_manager.omo_agent_status import TaskFrontmatterError, parse_task_metadata
 from omo_manager.omo_task_status import DONE_REMINDER
+from omo_manager.omo_task_status import ensure_repository_closure_custody
 from omo_manager.omo_task_status import StopArgs
 from omo_manager.omo_task_status import parse_args
 from omo_manager.omo_task_status import reconcile_blocked_index
@@ -23,6 +24,7 @@ from omo_manager.omo_task_status import replace_if_unchanged_locked
 from omo_manager.omo_task_status import reserve_private_audit
 from omo_manager.omo_task_status import run
 from omo_manager.omo_task_status import stop_done_agent
+from omo_manager.omo_task_status import tracked_dirty_state
 from omo_manager.omo_task_status import update_frontmatter_status
 from omo_manager.omo_task_status import Args as StatusArgs
 from omo_manager.omo_task_metadata import frontmatter_parts
@@ -64,6 +66,102 @@ def task_frontmatter(
 
 
 class TaskStatusTests(unittest.TestCase):
+    def test_repository_closure_custody_accepts_clean_or_exact_dirty_handoff(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repository = Path(tmp) / "repo"
+            repository.mkdir()
+            subprocess.run(["git", "init", "-q", str(repository)], check=True)
+            (repository / "keep.txt").write_text("before\n")
+            (repository / "remove.txt").write_text("remove\n")
+            subprocess.run(["git", "-C", str(repository), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(repository), "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "initial"], check=True)
+            ensure_repository_closure_custody(repository, None)
+            (repository / "keep.txt").write_text("after\n")
+            (repository / "remove.txt").unlink()
+            status = subprocess.run(["git", "-C", str(repository), "status", "--porcelain=v1", "-z", "--untracked-files=no"], check=True, capture_output=True).stdout
+            receipt = Path(tmp) / "handoff.yaml"
+            receipt.write_text(
+                "version: v1.0.0\n"
+                f"repository: {repository.resolve().as_posix()}\n"
+                f"status_sha256: {hashlib.sha256(status).hexdigest()}\n"
+                "assignments:\n"
+                "  - path: keep.txt\n    state: ' M'\n    owner: cleanup-successor.md\n    evidence: durable manager handoff receipt 1\n"
+                "  - path: remove.txt\n    state: ' D'\n    owner: cleanup-successor.md\n    evidence: durable manager handoff receipt 1\n"
+            )
+            ensure_repository_closure_custody(repository, receipt)
+
+    def test_repository_closure_custody_fails_closed_on_unassigned_or_drifted_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repository = Path(tmp) / "repo"
+            repository.mkdir()
+            subprocess.run(["git", "init", "-q", str(repository)], check=True)
+            (repository / "tracked.txt").write_text("before\n")
+            subprocess.run(["git", "-C", str(repository), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(repository), "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "initial"], check=True)
+            (repository / "tracked.txt").write_text("after\n")
+            with self.assertRaisesRegex(TaskFrontmatterError, "explicit dirty-path ownership handoff"):
+                ensure_repository_closure_custody(repository, None)
+            receipt = Path(tmp) / "handoff.yaml"
+            receipt.write_text(
+                "version: v1.0.0\n"
+                f"repository: {repository.resolve().as_posix()}\n"
+                f"status_sha256: {'0' * 64}\n"
+                "assignments:\n"
+                "  - path: tracked.txt\n    state: ' M'\n    owner: successor.md\n    evidence: reviewed handoff\n"
+            )
+            with self.assertRaisesRegex(TaskFrontmatterError, "does not bind"):
+                ensure_repository_closure_custody(repository, receipt)
+
+    def test_repository_closure_custody_requires_root_and_tracks_rename_destination(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repository = Path(tmp) / "repo"
+            repository.mkdir()
+            subprocess.run(["git", "init", "-q", str(repository)], check=True)
+            (repository / "old.txt").write_text("content\n")
+            subprocess.run(["git", "-C", str(repository), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(repository), "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "initial"], check=True)
+            (repository / "subdir").mkdir()
+            with self.assertRaisesRegex(TaskFrontmatterError, "exact Git worktree root"):
+                ensure_repository_closure_custody(repository / "subdir", None)
+            subprocess.run(["git", "-C", str(repository), "mv", "old.txt", "new.txt"], check=True)
+            _, states = tracked_dirty_state(repository)
+            self.assertEqual({"new.txt": "R "}, states)
+
+    def test_repository_closure_custody_rejects_non_utf8_path_and_relative_cli_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repository = Path(tmp) / "repo"
+            repository.mkdir()
+            subprocess.run(["git", "init", "-q", str(repository)], check=True)
+            raw_path = os.fsencode(repository) + b"/bad-\xff.txt"
+            descriptor = os.open(raw_path, os.O_WRONLY | os.O_CREAT, 0o600)
+            os.close(descriptor)
+            subprocess.run(["git", "-C", str(repository), "add", "-A"], check=True)
+            with self.assertRaisesRegex(TaskFrontmatterError, "must be UTF-8"):
+                tracked_dirty_state(repository)
+        with self.assertRaises(SystemExit):
+            parse_args(["--root", "/tmp/work", "--closure-repository", "relative/repo", "task.md", "done"])
+
+    def test_repository_closure_refusal_precedes_task_or_pane_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_path = root / "task.md"
+            task_text = task_frontmatter(status="running")
+            task_path.write_text(task_text)
+            (root / "TODO.md").write_text("current:\ntask.md wl:2\n\nprevious:\n")
+            repository = root / "repo"
+            repository.mkdir()
+            subprocess.run(["git", "init", "-q", str(repository)], check=True)
+            (repository / "tracked.txt").write_text("before\n")
+            subprocess.run(["git", "-C", str(repository), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(repository), "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "initial"], check=True)
+            (repository / "tracked.txt").write_text("after\n")
+            args = StatusArgs(root, Path("task.md"), "done", "", closure_repository=repository)
+            with patch("omo_manager.omo_task_status.stop_done_agent") as stop_agent:
+                self.assertEqual(2, run(args))
+            stop_agent.assert_not_called()
+            self.assertEqual(task_text, task_path.read_text())
+            self.assertEqual("current:\ntask.md wl:2\n\nprevious:\n", (root / "TODO.md").read_text())
+
     def test_reconcile_long_running_human_index_preserves_task_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

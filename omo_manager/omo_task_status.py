@@ -8,12 +8,15 @@ import os
 import re
 import shlex
 import stat
+import subprocess
 import sys
 import tempfile
 from contextlib import ExitStack
 from dataclasses import dataclass
 from dataclasses import replace
 from pathlib import Path
+
+import yaml
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -47,6 +50,7 @@ from omo_manager.omo_task_lock import task_target_lock
 from omo_manager.omo_task_lock import task_file_lock
 from omo_manager.omo_task_metadata import frontmatter_parts
 from omo_manager.omo_task_metadata import TARGET_RE
+from omo_manager.omo_task_metadata import UniqueKeyLoader
 from omo_manager.omo_blocking_actor import request as blocking_request
 
 PENDING_MARKER = "(pending)"
@@ -56,6 +60,7 @@ CLOSE_FAILED_PREFIX = "done_close_failed"
 DONE_CLOSE_IN_PROGRESS = "done_close_in_progress: manager is closing the agent before marking done"
 TODO_ROW_RE = re.compile(r"\s*`?([A-Za-z0-9_./-]+\.md)`?(?:\s+(.*?))?\s*")
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
+CUSTODY_RECEIPT_VERSION = "v1.0.0"
 
 
 @dataclass(frozen=True)
@@ -82,6 +87,8 @@ class Args:
     terminal_evidence: str = ""
     retire_blocked_target: bool = False
     reconcile_long_running_human_index: bool = False
+    closure_repository: Path | None = None
+    dirty_path_handoff: Path | None = None
 
 
 class ParsedArgs(argparse.Namespace):
@@ -107,6 +114,8 @@ class ParsedArgs(argparse.Namespace):
     terminal_evidence: str = ""
     retire_blocked_target: bool = False
     reconcile_long_running_human_index: bool = False
+    closure_repository: Path | None = None
+    dirty_path_handoff: Path | None = None
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -137,10 +146,18 @@ shutdown.""",
     _ = parser.add_argument("--audit-output", type=Path, help="New owner-private audit file; required with --finish-replaced-done.")
     _ = parser.add_argument("--pane-id", default="", help="Exact numeric pane id captured by the failed close; required with --recover-exited-shell-done.")
     _ = parser.add_argument("--terminal-evidence", default="", help="Specific accepted terminal-report token visible before Codex exited; required with --recover-exited-shell-done.")
+    _ = parser.add_argument("--closure-repository", type=Path, help="Owned Git repository whose clean or explicitly handed-off tracked state gates done closure.")
+    _ = parser.add_argument("--dirty-path-handoff", type=Path, help="Reviewed custody receipt required when --closure-repository has tracked changes.")
     _ = parser.add_argument("task_file", type=Path)
     _ = parser.add_argument("status", nargs="?", choices=sorted(TASK_FRONTMATTER_STATUSES))
     _ = parser.add_argument("--blocked-on", default="", help="Required when setting status to `blocked`; optional for `long_running`; removed for other statuses.")
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
+    if parsed.closure_repository is not None and (parsed.status != "done" or any((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done, parsed.retire_blocked_target, parsed.reconcile_long_running_human_index))):
+        parser.error("--closure-repository is only valid with a normal done transition.")
+    if parsed.closure_repository is not None and not parsed.closure_repository.is_absolute():
+        parser.error("--closure-repository must be an explicit absolute Git worktree root.")
+    if parsed.dirty_path_handoff is not None and parsed.closure_repository is None:
+        parser.error("--dirty-path-handoff requires --closure-repository.")
     if sum((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done, parsed.retire_blocked_target, parsed.reconcile_long_running_human_index)) > 1:
         parser.error("finish and recovery modes are mutually exclusive.")
     if parsed.reconcile_long_running_human_index:
@@ -239,7 +256,14 @@ shutdown.""",
         parser.error("replacement evidence is only valid with --finish-replaced-done.")
     if parsed.pane_id or parsed.terminal_evidence:
         parser.error("pane and terminal evidence are only valid with --recover-exited-shell-done.")
-    return Args(parsed.root.resolve(), parsed.task_file, parsed.status, parsed.blocked_on.strip())
+    return Args(
+        parsed.root.resolve(),
+        parsed.task_file,
+        parsed.status,
+        parsed.blocked_on.strip(),
+        closure_repository=parsed.closure_repository.expanduser().resolve(strict=False) if parsed.closure_repository is not None else None,
+        dirty_path_handoff=parsed.dirty_path_handoff.expanduser().resolve(strict=False) if parsed.dirty_path_handoff is not None else None,
+    )
 
 
 def task_path(root: Path, task_file: Path) -> Path:
@@ -257,6 +281,78 @@ def relative_task_ref(root: Path, path: Path) -> str:
         return path.relative_to(root).as_posix()
     except ValueError:
         return path.as_posix()
+
+
+def tracked_dirty_state(repository: Path) -> tuple[bytes, dict[str, str]]:
+    """Return exact tracked porcelain bytes and path states; ignore untracked files."""
+
+    result = subprocess.run(
+        ["git", "-C", str(repository), "status", "--porcelain=v1", "-z", "--untracked-files=no"],
+        check=True,
+        capture_output=True,
+    )
+    fields = result.stdout.split(b"\0")
+    states: dict[str, str] = {}
+    index = 0
+    while index < len(fields) - 1:
+        field = fields[index]
+        if len(field) < 4 or field[2:3] != b" ":
+            raise TaskFrontmatterError("Git returned malformed tracked dirty state.")
+        try:
+            state = field[:2].decode("ascii")
+            path = field[3:].decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise TaskFrontmatterError("tracked dirty paths must be UTF-8 for a durable YAML custody receipt") from exc
+        if "R" in state or "C" in state:
+            index += 1
+            if index >= len(fields) - 1:
+                raise TaskFrontmatterError("Git returned incomplete rename/copy state.")
+        if path in states:
+            raise TaskFrontmatterError(f"Git returned duplicate tracked dirty path: {path}")
+        states[path] = state
+        index += 1
+    return result.stdout, states
+
+
+def ensure_repository_closure_custody(repository: Path, receipt_path: Path | None) -> None:
+    """Require clean tracked state or an exact durable owner assignment for every dirty path."""
+
+    if not repository.is_dir():
+        raise TaskFrontmatterError("closure repository must be an existing directory explicitly named by its owner")
+    try:
+        status_bytes, dirty = tracked_dirty_state(repository)
+    except subprocess.CalledProcessError as exc:
+        raise TaskFrontmatterError("closure repository must be an explicitly named Git worktree") from exc
+    top_level = subprocess.run(["git", "-C", str(repository), "rev-parse", "--show-toplevel"], check=True, capture_output=True, text=True).stdout.strip()
+    if Path(top_level).resolve(strict=True) != repository.resolve(strict=True):
+        raise TaskFrontmatterError("closure repository must name the exact Git worktree root, not a subdirectory")
+    if not dirty:
+        if receipt_path is not None:
+            raise TaskFrontmatterError("dirty-path handoff is not valid for a clean tracked repository")
+        return
+    if receipt_path is None:
+        raise TaskFrontmatterError(f"tracked repository changes require an explicit dirty-path ownership handoff: {','.join(sorted(dirty))}")
+    try:
+        value = yaml.load(receipt_path.read_text(encoding="utf-8"), Loader=UniqueKeyLoader)
+    except (OSError, UnicodeError, yaml.YAMLError, TaskFrontmatterError) as exc:
+        raise TaskFrontmatterError(f"cannot read dirty-path ownership handoff: {exc}") from exc
+    if not isinstance(value, dict) or set(value) != {"version", "repository", "status_sha256", "assignments"} or value["version"] != CUSTODY_RECEIPT_VERSION:
+        raise TaskFrontmatterError("dirty-path handoff must contain only version v1.0.0, repository, status_sha256, and assignments")
+    expected_repository = repository.resolve(strict=True).as_posix()
+    if value["repository"] != expected_repository or value["status_sha256"] != hashlib.sha256(status_bytes).hexdigest() or not isinstance(value["assignments"], list):
+        raise TaskFrontmatterError("dirty-path handoff does not bind the current repository and tracked status snapshot")
+    assigned: dict[str, str] = {}
+    for assignment in value["assignments"]:
+        if not isinstance(assignment, dict) or set(assignment) != {"path", "state", "owner", "evidence"}:
+            raise TaskFrontmatterError("each dirty-path assignment must contain only path, state, owner, and evidence")
+        path, state, owner, evidence = assignment["path"], assignment["state"], assignment["owner"], assignment["evidence"]
+        if not all(isinstance(item, str) and item.strip() for item in (path, state, owner, evidence)) or Path(path).is_absolute() or Path(path).as_posix() != path or ".." in Path(path).parts:
+            raise TaskFrontmatterError("dirty-path assignments require canonical relative paths, exact states, and nonempty owner/evidence")
+        if path in assigned:
+            raise TaskFrontmatterError(f"duplicate dirty-path assignment: {path}")
+        assigned[path] = state
+    if assigned != dirty:
+        raise TaskFrontmatterError("dirty-path handoff must assign every and only current tracked modified/deleted path with its exact state")
 
 
 def frontmatter_managerat_aliases(text: str, manager_target: str) -> bool:
@@ -1280,6 +1376,8 @@ def run(args: Args) -> int:
             metadata = parse_task_metadata(text, args.root)
             if metadata is not None and args.status == "done":
                 ensure_manager_has_no_active_children(args.root, path, metadata)
+                if args.closure_repository is not None:
+                    ensure_repository_closure_custody(args.closure_repository, args.dirty_path_handoff)
             updated = update_frontmatter_status(text, args.status, args.blocked_on, args.root)
             already_done = metadata is not None and metadata.status == "done" and args.status == "done"
             target = metadata.runat if metadata is not None and args.status == "done" and not already_done else ""
