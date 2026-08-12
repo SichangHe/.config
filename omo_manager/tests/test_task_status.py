@@ -97,17 +97,30 @@ class TaskStatusTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             path = root / "task.md"
-            text = v2_task().replace("status: blocked", "status: long_running").replace("resume_status: running\n", "").replace(
-                "  - kind: pending_items\n    item_ids: [pi_019f0000-0000-7000-8000-000000000002]\n  - kind: human\n    reason: waiting for approval",
-                "  - kind: persistent\n    reason: human",
-            )
+            text = """---
+version: v2.0.0
+task_id: task_019f0000-0000-7000-8000-000000000001
+status: long_running
+runat: wl:2
+tool: codex
+managerat: wl:1
+is_manager: false
+blocked_on:
+  - kind: persistent
+    reason: human
+pending_task_items: []
+resolved_task_items: []
+---
+"""
             path.write_text(text)
+            (root / ENABLE_FILE).write_text("version: v2.0.0\nenabled: true\n")
             (root / "TODO.md").write_text("current:\ntask.md wl:2\n\nhuman pending:\n")
             args = StatusArgs(root, path, "", "", reconcile_long_running_human_index=True)
             with patch("omo_manager.omo_task_status.blocking_request") as actor:
                 self.assertEqual(2, run(args))
             actor.assert_not_called()
             self.assertEqual(text, path.read_text())
+            self.assertEqual("current:\ntask.md wl:2\n\nhuman pending:\n", (root / "TODO.md").read_text())
     def test_stop_done_agent_treats_verified_missing_exact_pane_as_stopped(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
