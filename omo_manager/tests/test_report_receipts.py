@@ -353,6 +353,123 @@ def side_effect_paths(effects: dict[str, object]) -> set[str]:
 
 
 class ReportReceiptTests(unittest.TestCase):
+    def test_watcher_canonicalizes_state_home_for_commitment_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            case, manager, owner = active_manager_fixture(tmp_path, body=b"canonical state home\n")
+            (tmp_path / "state-parent").mkdir()
+            case.env["XDG_STATE_HOME"] = str(tmp_path / "state-parent" / ".." / "state")
+            case.env["OMO_REPORT_ACK_TIMEOUT_S"] = "0"
+            pending = run_report(case)
+            self.assertEqual(0, pending.returncode, pending.stderr)
+            watched = run_manager_watcher_once(case, manager)
+            self.assertEqual(0, watched.returncode, watched.stderr)
+            self.assertEqual(owner, manager.read_bytes())
+
+    def test_legacy_v1_pending_retry_publication_and_consumed_verification(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            case, manager, _owner = active_manager_fixture(Path(tmp), body=b"legacy replay\n")
+            case.env["OMO_REPORT_ACK_TIMEOUT_S"] = "0"
+            description = json.loads(run_report(case, describe=True).stdout)
+            pending = run_report(case)
+            self.assertEqual(0, pending.returncode, pending.stderr)
+            commitment_path = transaction_commitment_path(description)
+            commitment = json.loads(commitment_path.read_bytes())
+            commitment.pop("transfer")
+            commitment["schema"] = "omo-report-transaction-commitment/v1"
+            commitment.pop("commitment_id")
+            commitment["commitment_id"] = hashlib.sha256(
+                json.dumps(commitment, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            commitment_path.write_bytes((json.dumps(commitment, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n").encode())
+            envelope = Path(str(description["files"]["private_envelope"]))
+            lines = envelope.read_text().splitlines(keepends=True)
+            envelope.write_text("".join(line for line in lines if not line.startswith("[omo-transfer: ")))
+
+            retried = run_report(case)
+            self.assertEqual(0, retried.returncode, retried.stderr)
+            legacy_transfer = json.loads(retried.stdout)["transfer_receipt"]
+            self.assertEqual("omo-report-transfer-receipt/legacy-v1", legacy_transfer["schema"])
+            watched = run_manager_watcher_once(case, manager)
+            self.assertEqual(0, watched.returncode, watched.stderr)
+            accepted = run_report(case)
+            self.assertEqual(0, accepted.returncode, accepted.stderr)
+            accepted_output = json.loads(accepted.stdout)
+            self.assertEqual(legacy_transfer, accepted_output["transfer_receipt"])
+            self.assertTrue(Path(accepted_output["publication_path"]).is_file())
+
+    def test_transfer_envelope_capacity_preflight_leaves_no_commitment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            case = fixture(Path(tmp), body=b"x")
+            low, high = 1, 200_000
+            while low + 1 < high:
+                middle = (low + high) // 2
+                case.message.write_bytes(b"x" * middle)
+                result = run_report(case, describe=True)
+                if result.returncode == 0:
+                    low = middle
+                else:
+                    high = middle
+            case.message.write_bytes(b"x" * high)
+            rejected = run_report(case)
+            self.assertEqual(2, rejected.returncode)
+            self.assertIn("envelope exceeds", rejected.stderr)
+            receipt_dir = Path(case.env["XDG_STATE_HOME"]) / "omo-manager" / "report-receipts"
+            self.assertEqual([], list(receipt_dir.glob("*.commitment")) if receipt_dir.exists() else [])
+
+    def test_watcher_rejects_self_consistent_tampered_transfer_attachment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            case, manager, owner = active_manager_fixture(Path(tmp), body=b"tamper transfer\n")
+            case.env["OMO_REPORT_ACK_TIMEOUT_S"] = "0"
+            description = json.loads(run_report(case, describe=True).stdout)
+            self.assertEqual(0, run_report(case).returncode)
+            envelope = Path(str(description["files"]["private_envelope"]))
+            lines = envelope.read_text().splitlines(keepends=True)
+            index = next(i for i, line in enumerate(lines) if line.startswith("[omo-transfer: "))
+            transfer = json.loads(lines[index][len("[omo-transfer: ") : -2])
+            transfer["routing"]["route_kind"] = "forged-but-not-test-sentinel"
+            unsigned = {key: value for key, value in transfer.items() if key != "transfer_id"}
+            transfer["transfer_id"] = hashlib.sha256(
+                json.dumps(unsigned, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            lines[index] = f"[omo-transfer: {json.dumps(transfer, ensure_ascii=True, sort_keys=True, separators=(',', ':'))}]\n"
+            envelope.write_text("".join(lines))
+            watched = run_manager_watcher_once(case, manager)
+            self.assertNotEqual(0, watched.returncode)
+            self.assertIn("did not consume", watched.stderr)
+            self.assertNotEqual(owner, manager.read_bytes())
+            self.assertIn("(pending)", manager.read_text())
+
+    def test_pending_and_accepted_share_stable_transfer_receipt_with_agent_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            case, manager, owner = active_manager_fixture(tmp_path, body=b"queue transfer receipt\n")
+            case.env["OMO_REPORT_ACK_TIMEOUT_S"] = "0"
+            described = run_report(case, describe=True, status="progressing")
+            self.assertEqual(0, described.returncode, described.stderr)
+            description = json.loads(described.stdout)
+            pending = run_report(case, status="progressing")
+            self.assertEqual(0, pending.returncode, pending.stderr)
+            pending_output = json.loads(pending.stdout)
+            transfer = pending_output["transfer_receipt"]
+            self.assertFalse(pending_output["accepted"])
+            self.assertEqual("omo-report-transfer-receipt/v1", transfer["schema"])
+            self.assertEqual("agent-originated", transfer["authority"]["kind"])
+            self.assertEqual(str(case.root / "worker.md"), transfer["authority"]["source_task"])
+            self.assertEqual(str(manager), transfer["receiver"])
+            self.assertEqual(str(transaction_commitment_path(description)), transfer["commitment_path"])
+            unsigned = {key: value for key, value in transfer.items() if key != "transfer_id"}
+            self.assertEqual(hashlib.sha256(json.dumps(unsigned, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()).hexdigest(), transfer["transfer_id"])
+
+            watched = run_manager_watcher_once(case, manager)
+            self.assertEqual(0, watched.returncode, watched.stderr)
+            self.assertEqual(owner, manager.read_bytes())
+            accepted = run_report(case, status="progressing")
+            self.assertEqual(0, accepted.returncode, accepted.stderr)
+            accepted_output = json.loads(accepted.stdout)
+            self.assertTrue(accepted_output["accepted"])
+            self.assertEqual(transfer, accepted_output["transfer_receipt"])
+
     def test_public_allocated_draft_rejects_then_accepts_with_exact_owner_restoration(self) -> None:
         owners = (b"", b"owner with terminal newline\n", b"owner without terminal newline")
         for owner in owners:
@@ -458,7 +575,7 @@ class ReportReceiptTests(unittest.TestCase):
             draft_b_lock.write_bytes(b"")
             draft_b_lock.chmod(0o644)
             accepted_b = run_report_from(case, draft_b)
-            self.assertEqual(accepted_a.stdout, accepted_b.stdout)
+            self.assertEqual(accepted_a.stdout, accepted_b.stdout, accepted_b.stderr)
             self.assertEqual(owner, case.manager.read_bytes())
             records = list(receipt_path.parent.glob("*.json"))
             self.assertEqual(2, len(records))
@@ -2404,6 +2521,7 @@ class ReportReceiptTests(unittest.TestCase):
                     '            injected_residue = os.environ.get("OMO_TEST_POST_ACK_RESIDUE")\n'
                     "            if injected_residue:\n"
                     '                Path(injected_residue).write_bytes(b"injected-residue")\n'
+                    "                Path(injected_residue).chmod(0o600)\n"
                     "            validate_private_layout(plan)\n"
                 )
                 self.assertIn(marker, source)
@@ -2434,7 +2552,11 @@ class ReportReceiptTests(unittest.TestCase):
                     check=False,
                 )
                 self.assertEqual(0, pending.returncode, pending.stderr)
-                self.assertFalse(json.loads(pending.stdout)["accepted"])
+                pending_result = json.loads(pending.stdout)
+                self.assertFalse(pending_result["accepted"])
+                transfer = pending_result["transfer_receipt"]
+                self.assertEqual("omo-report-transfer-receipt/v1", transfer["schema"])
+                self.assertEqual("agent-originated", transfer["authority"]["kind"])
                 watcher = run_manager_watcher_once(case, Path(str(description["files"]["manager"])))
                 self.assertEqual(0, watcher.returncode, watcher.stderr)
 
@@ -2452,6 +2574,7 @@ class ReportReceiptTests(unittest.TestCase):
                     "publication": next(path for path in temporary_files if path.parent == publication.parent and path.name.endswith(".publication.tmp")),
                 }
                 residue = residues[residue_kind]
+                residue.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
                 case.env["OMO_TEST_POST_ACK_RESIDUE"] = str(residue)
                 failed = subprocess.run(
                     command,
@@ -2471,6 +2594,35 @@ class ReportReceiptTests(unittest.TestCase):
                 self.assertEqual(b"injected-residue", residue.read_bytes())
                 self.assertFalse(receipt.exists())
                 self.assertFalse(publication.exists())
+                self.assertEqual(str(transaction_commitment_path(description)), transfer["commitment_path"])
+                self.assertTrue(transaction_commitment_path(description).is_file())
+                if residue_kind in {"receipt", "publication"}:
+                    verified = subprocess.run(
+                        [*command[:1], "--verify-consumed", *command[1:]],
+                        cwd=case.root.parent,
+                        env=case.env,
+                        text=True,
+                        capture_output=True,
+                        timeout=10,
+                        check=False,
+                    )
+                    self.assertEqual(0, verified.returncode, verified.stderr)
+                    closure = json.loads(verified.stdout)
+                    self.assertEqual("omo-report-consumed-closure/v1", closure["schema"])
+                    self.assertEqual(transfer, closure["transfer_receipt"])
+                    self.assertFalse(closure["accepted"])
+                    self.assertEqual(str(residue), closure["recovery_residue"][0]["path"])
+                    self.assertEqual(hashlib.sha256(b"injected-residue").hexdigest(), closure["recovery_residue"][0]["state"]["sha256"])
+                    replayed = subprocess.run(
+                        [*command[:1], "--verify-consumed", *command[1:]],
+                        cwd=case.root.parent,
+                        env=case.env,
+                        text=True,
+                        capture_output=True,
+                        timeout=10,
+                        check=False,
+                    )
+                    self.assertEqual(verified.stdout, replayed.stdout)
                 residue.unlink()
 
 

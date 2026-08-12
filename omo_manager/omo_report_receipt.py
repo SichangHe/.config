@@ -33,7 +33,9 @@ DESCRIPTION_SCHEMA = "omo-report-description/v1"
 ACCEPTANCE_SCHEMA = "omo-report-acceptance/v1"
 RECEIPT_SCHEMA = "omo-report-receipt/v1"
 RECEIPT_PUBLICATION_SCHEMA = "omo-report-receipt-publication/v1"
-TRANSACTION_COMMITMENT_SCHEMA = "omo-report-transaction-commitment/v1"
+TRANSFER_RECEIPT_SCHEMA = "omo-report-transfer-receipt/v1"
+LEGACY_TRANSACTION_COMMITMENT_SCHEMA = "omo-report-transaction-commitment/v1"
+TRANSACTION_COMMITMENT_SCHEMA = "omo-report-transaction-commitment/v2"
 BINDING_SCHEMA = "omo-report-binding/v1"
 MAX_ENVELOPE_BYTES = PENDING_CONTENT_CHAR_LIMIT * 8
 MAX_PROGRAM_BYTES = 4 * 1024 * 1024
@@ -758,19 +760,6 @@ def _build_plan_from_message(
     }
     replay_id = hashlib.sha256(canonical_json(binding).rstrip(b"\n")).hexdigest()
     envelope_temporary = envelope_directory / f".{envelope_final.name}.{replay_id}.tmp"
-    sample_envelope = envelope_bytes(
-        args.agent,
-        producer_target,
-        task_basename,
-        "00:00",
-        str(input_info["sha256"]),
-        owner_prefix,
-        args.route_note,
-        message,
-    )
-    if len(sample_envelope) > MAX_ENVELOPE_BYTES:
-        raise ReceiptError("authenticated report envelope exceeds the watcher size limit")
-
     receipt_directory = receipt_state_home() / "omo-manager" / "report-receipts"
     transaction_commitment_final = receipt_directory / f"{replay_id}.commitment"
     transaction_commitment_temporary = receipt_directory / f".{replay_id}.commitment.tmp"
@@ -833,6 +822,20 @@ def _build_plan_from_message(
         receipt_publication_temporary=receipt_publication_temporary,
         receipt_publication_final=receipt_publication_final,
     )
+    transfer_size_probe = {**transfer_contract(plan), "commitment_id": "0" * 64, "transfer_id": "0" * 64}
+    sample_envelope = envelope_bytes(
+        args.agent,
+        producer_target,
+        task_basename,
+        "00:00",
+        str(input_info["sha256"]),
+        owner_prefix,
+        args.route_note,
+        message,
+        transfer_size_probe,
+    )
+    if len(sample_envelope) > MAX_ENVELOPE_BYTES:
+        raise ReceiptError("authenticated report envelope exceeds the watcher size limit")
     validate_helper_snapshot(plan)
     return plan
 
@@ -846,12 +849,15 @@ def envelope_bytes(
     owner_prefix: OwnerPrefixBinding,
     route_note: str,
     message: bytes,
+    transfer: dict[str, object] | None = None,
 ) -> bytes:
     lines = [
         f"(sent from {agent} via omo_report.sh tmux={producer_target} time={stamp} task-file={task_basename})",
         f"[message-sha256: {message_hash}]",
         owner_prefix_line(owner_prefix),
     ]
+    if transfer is not None:
+        lines.append(f"[omo-transfer: {canonical_json(transfer).rstrip().decode('ascii')}]")
     if route_note:
         lines.extend(("route-warning:", route_note))
     lines.append("message:")
@@ -1063,7 +1069,7 @@ def validate_envelope(plan: Plan) -> bytes:
         _ = message.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ReceiptError("private envelope is not UTF-8") from exc
-    if len(header_lines) not in {3, 5}:
+    if len(header_lines) not in {3, 4, 5, 6}:
         raise ReceiptError("private envelope header is corrupt")
     sent_match = SENT_LINE_RE.fullmatch(header_lines[0])
     hash_match = HASH_LINE_RE.fullmatch(header_lines[1])
@@ -1075,8 +1081,57 @@ def validate_envelope(plan: Plan) -> bytes:
         raise ReceiptError("private envelope identity is inconsistent")
     if header_lines[2] != owner_prefix_line(plan.owner_prefix):
         raise ReceiptError("private envelope owner-prefix binding is inconsistent")
-    if len(header_lines) == 5:
-        if header_lines[3:] != ["route-warning:", str(plan.routing["route_note"])]:
+    legacy = len(header_lines) in {3, 5}
+    commitment_path = plan.transaction_commitment_final
+    if not legacy:
+        transfer_line = header_lines[3]
+        try:
+            transfer_hint = json.loads(transfer_line[len("[omo-transfer: ") : -1])
+        except (json.JSONDecodeError, TypeError):
+            transfer_hint = None
+        hinted_path = transfer_hint.get("commitment_path") if isinstance(transfer_hint, dict) else None
+        if isinstance(hinted_path, str) and Path(hinted_path).parent == plan.receipt_directory and Path(hinted_path).exists():
+            commitment_path = Path(hinted_path)
+    commitment_payload = regular_file_bytes(
+        commitment_path,
+        maximum=MAX_RECEIPT_BYTES,
+        field="transaction commitment",
+    )
+    try:
+        commitment = json.loads(commitment_payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ReceiptError("transaction commitment is not valid JSON") from exc
+    if not isinstance(commitment, dict) or canonical_json(commitment) != commitment_payload:
+        raise ReceiptError("transaction commitment is not canonical JSON")
+    if legacy:
+        if commitment is None or commitment.get("schema") != LEGACY_TRANSACTION_COMMITMENT_SCHEMA:
+            raise ReceiptError("private envelope transfer binding is missing")
+        if len(header_lines) == 5:
+            if header_lines[3:] != ["route-warning:", str(plan.routing["route_note"])]:
+                raise ReceiptError("private envelope route warning is inconsistent")
+        elif plan.routing["route_note"]:
+            raise ReceiptError("private envelope is missing its route warning")
+        if message != plan.message or hash_match.group(1) != plan.input_info["sha256"]:
+            raise ReceiptError("private envelope body digest is inconsistent")
+        if hashlib.sha256(message).hexdigest() != hash_match.group(1):
+            raise ReceiptError("private envelope body hash is corrupt")
+        return message
+    transfer_line = header_lines[3]
+    if not transfer_line.startswith("[omo-transfer: ") or not transfer_line.endswith("]"):
+        raise ReceiptError("private envelope transfer binding is missing")
+    try:
+        attached_transfer = json.loads(transfer_line[len("[omo-transfer: ") : -1])
+    except json.JSONDecodeError as exc:
+        raise ReceiptError("private envelope transfer binding is invalid") from exc
+    contract = commitment.get("transfer")
+    if not isinstance(contract, dict):
+        raise ReceiptError("private envelope transfer binding is inconsistent")
+    expected_record = {**contract, "commitment_id": str(commitment.get("commitment_id"))}
+    expected_transfer = {**expected_record, "transfer_id": bound_receipt_id(expected_record)}
+    if attached_transfer != expected_transfer:
+        raise ReceiptError("private envelope transfer binding is inconsistent")
+    if len(header_lines) == 6:
+        if header_lines[4:] != ["route-warning:", str(plan.routing["route_note"])]:
             raise ReceiptError("private envelope route warning is inconsistent")
     elif plan.routing["route_note"]:
         raise ReceiptError("private envelope is missing its route warning")
@@ -1116,6 +1171,7 @@ def create_or_reuse_envelope(plan: Plan, stamp: str) -> str:
         plan.owner_prefix,
         str(plan.routing["route_note"]),
         plan.message,
+        transfer_receipt(plan),
     )
     if len(payload) > MAX_ENVELOPE_BYTES:
         raise ReceiptError("authenticated report envelope exceeds the watcher size limit")
@@ -1298,7 +1354,7 @@ def adjacent_report_lock(path: Path) -> Iterator[None]:
             os.close(fd)
 
 
-def validate_private_layout(plan: Plan, *, allow_publication_recovery: bool = False) -> None:
+def validate_private_layout(plan: Plan, *, allow_publication_recovery: bool = False, allow_consumed_residue: bool = False) -> None:
     if validate_optional_directory(plan.envelope_directory, private=True, field="private envelope directory"):
         require_absent(plan.envelope_temporary, "private envelope temporary file")
     elif plan.envelope_final.exists() or plan.envelope_temporary.exists():
@@ -1324,9 +1380,15 @@ def validate_private_layout(plan: Plan, *, allow_publication_recovery: bool = Fa
             "transaction commitment",
             exact_mode=0o600,
         )
-    require_absent(plan.receipt_temporary, "receipt temporary file")
+    if allow_consumed_residue and plan.receipt_temporary.exists():
+        _ = validate_optional_regular(plan.receipt_temporary, "receipt temporary residue", exact_mode=0o600)
+    else:
+        require_absent(plan.receipt_temporary, "receipt temporary file")
     if not (allow_publication_recovery and plan.receipt_final.exists() and not plan.receipt_publication_final.exists()):
-        require_absent(plan.receipt_publication_temporary, "receipt publication temporary file")
+        if allow_consumed_residue and plan.receipt_publication_temporary.exists():
+            _ = validate_optional_regular(plan.receipt_publication_temporary, "receipt publication temporary residue", exact_mode=0o600)
+        else:
+            require_absent(plan.receipt_publication_temporary, "receipt publication temporary file")
     require_absent(plan.manager_temporary, "manager temporary file")
     require_absent(plan.manager_watcher_temporary, "watcher manager temporary file")
     require_absent(plan.acknowledgment_temporary, "watcher acknowledgment temporary file")
@@ -1973,6 +2035,8 @@ def validate_consistency(
     acknowledgment: dict[str, object] | None,
 ) -> tuple[bool, str]:
     envelope_exists = validate_optional_regular(plan.envelope_final, "private envelope", exact_mode=0o600)
+    if plan.transaction_commitment_final.exists():
+        _ = read_transaction_commitment(plan, require_current_allocation_identity=True)
     manager_payload = manager_bytes(plan.manager)
     pointer = pointer_state(manager_payload, plan)
     if pointer == "legacy-active":
@@ -2006,6 +2070,125 @@ def public_routing(plan: Plan) -> dict[str, object]:
         "task",
     )
     return {key: plan.routing[key] for key in keys}
+
+
+def authority_provenance(plan: Plan) -> dict[str, str]:
+    """Label report authority explicitly; an agent report never implies human authority."""
+
+    return {
+        "kind": "agent-originated",
+        "producer_target": str(plan.routing["producer_target"]),
+        "source_task": str(plan.task),
+    }
+
+
+def transfer_contract(plan: Plan) -> dict[str, object]:
+    """Freeze receiver ownership and provenance before any queued mutation."""
+
+    return {
+        "authority": authority_provenance(plan),
+        "commitment_path": str(plan.transaction_commitment_final),
+        "queue_item": {
+            "input_sha256": plan.input_info["sha256"],
+            "manager": str(plan.manager),
+            "pointer": plan.pointer,
+            "producer": str(plan.task),
+            "replay_id": plan.replay_id,
+        },
+        "receiver": str(plan.manager),
+        "routing": public_routing(plan),
+        "schema": TRANSFER_RECEIPT_SCHEMA,
+    }
+
+
+def transfer_receipt(
+    plan: Plan,
+    commitment_id: str | None = None,
+    *,
+    require_current_allocation_identity: bool = True,
+    allow_historical_allocation: bool = False,
+) -> dict[str, object]:
+    """Return the stable receiver-ownership receipt bound by the transaction commitment."""
+
+    if allow_historical_allocation:
+        payload = regular_file_bytes(
+            plan.transaction_commitment_final,
+            maximum=MAX_RECEIPT_BYTES,
+            field="transaction commitment",
+        )
+        try:
+            commitment = json.loads(payload)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ReceiptError("transaction commitment is not valid JSON") from exc
+        unsigned = dict(commitment) if isinstance(commitment, dict) else {}
+        parsed_id = unsigned.pop("commitment_id", None)
+        if (
+            not isinstance(commitment, dict)
+            or canonical_json(commitment) != payload
+            or commitment.get("schema") not in {LEGACY_TRANSACTION_COMMITMENT_SCHEMA, TRANSACTION_COMMITMENT_SCHEMA}
+            or commitment.get("replay_id") != plan.replay_id
+            or not isinstance(parsed_id, str)
+            or parsed_id != bound_receipt_id(unsigned)
+        ):
+            raise ReceiptError("transaction commitment identity is invalid")
+    else:
+        commitment = read_transaction_commitment(
+            plan,
+            require_current_allocation_identity=require_current_allocation_identity,
+            require_current_route_evidence=False,
+        )
+    if commitment is None:
+        raise ReceiptError("durable transfer receipt requires an immutable transaction commitment")
+    historical_id = str(commitment["commitment_id"])
+    if commitment_id is not None and commitment_id != historical_id:
+        raise ReceiptError("durable transfer receipt commitment identity is inconsistent")
+    contract = commitment.get("transfer")
+    if commitment.get("schema") == LEGACY_TRANSACTION_COMMITMENT_SCHEMA:
+        contract = {**transfer_contract(plan), "schema": "omo-report-transfer-receipt/legacy-v1"}
+    if not isinstance(contract, dict):
+        raise ReceiptError("transaction commitment transfer contract is malformed")
+    record: dict[str, object] = {**contract, "commitment_id": historical_id}
+    return {**record, "transfer_id": bound_receipt_id(record)}
+
+
+def validate_transfer_contract(
+    plan: Plan,
+    value: object,
+    *,
+    require_current_routing: bool,
+) -> dict[str, object]:
+    """Validate immutable transfer facts without reconstructing historical authority."""
+
+    if not isinstance(value, dict):
+        raise ReceiptError("transaction commitment transfer contract is malformed")
+    authority = value.get("authority")
+    queue_item = value.get("queue_item")
+    routing = value.get("routing")
+    expected_authority = authority_provenance(plan)
+    expected_queue_item = {
+        "input_sha256": plan.input_info["sha256"],
+        "manager": str(plan.manager),
+        "pointer": plan.pointer,
+        "producer": str(plan.task),
+        "replay_id": plan.replay_id,
+    }
+    if (
+        set(value) != {"authority", "commitment_path", "queue_item", "receiver", "routing", "schema"}
+        or authority != expected_authority
+        or queue_item != expected_queue_item
+        or value.get("commitment_path") != str(plan.transaction_commitment_final)
+        or value.get("receiver") != str(plan.manager)
+        or value.get("schema") != TRANSFER_RECEIPT_SCHEMA
+        or not isinstance(routing, dict)
+        or set(routing) != set(public_routing(plan))
+        or routing.get("manager") != str(plan.manager)
+        or routing.get("task") != str(plan.task)
+        or routing.get("producer_target") != expected_authority["producer_target"]
+    ):
+        raise ReceiptError("transaction commitment transfer contract is inconsistent")
+    if require_current_routing and routing != public_routing(plan):
+        raise ReceiptError("transaction commitment transfer routing changed")
+    return value
 
 
 def preflight_transaction_set(
@@ -2205,13 +2388,18 @@ def validate_transaction_commitment_bytes(
         raise ReceiptError("transaction commitment is not valid JSON") from exc
     if not isinstance(parsed, dict) or canonical_json(parsed) != payload:
         raise ReceiptError("transaction commitment is not canonical JSON")
-    if set(parsed) != {"allocation", "commitment", "commitment_id", "preflight", "replay_id", "schema"}:
+    schema = parsed.get("schema")
+    expected_keys = {"allocation", "commitment", "commitment_id", "preflight", "replay_id", "schema"}
+    if schema == TRANSACTION_COMMITMENT_SCHEMA:
+        expected_keys.add("transfer")
+    elif schema != LEGACY_TRANSACTION_COMMITMENT_SCHEMA:
+        raise ReceiptError("transaction commitment schema is invalid")
+    if set(parsed) != expected_keys:
         raise ReceiptError("transaction commitment schema is invalid")
     without_id = dict(parsed)
     commitment_id = without_id.pop("commitment_id", None)
     if (
-        parsed.get("schema") != TRANSACTION_COMMITMENT_SCHEMA
-        or parsed.get("replay_id") != plan.replay_id
+        parsed.get("replay_id") != plan.replay_id
         or not isinstance(commitment_id, str)
         or commitment_id != bound_receipt_id(without_id)
     ):
@@ -2221,7 +2409,11 @@ def validate_transaction_commitment_bytes(
         raise ReceiptError("pending report transaction is already bound to a different allocation")
     preflight_allocation = preflight.get("allocation") if isinstance(preflight, dict) else None
     realized_allocation_file = preflight_allocation.get("file") if isinstance(preflight_allocation, dict) else None
-    if expected_preflight is None and realized_allocation_file != str(plan.message_path):
+    if (
+        expected_preflight is None
+        and realized_allocation_file != str(plan.message_path)
+        and not plan.receipt_final.exists()
+    ):
         raise ReceiptError("pending report transaction is already bound to a different allocation")
     committed_routing_sources = preflight.get("routing_sources") if isinstance(preflight, dict) else None
     routing_sources = validate_committed_route_evidence(
@@ -2302,7 +2494,8 @@ def validate_transaction_commitment_bytes(
     ):
         raise ReceiptError("transaction commitment allocation replay lock is inconsistent")
     if require_current_allocation_identity:
-        validate_current_allocation_identity(plan, parsed)
+        if not plan.receipt_final.exists():
+            validate_current_allocation_identity(plan, parsed)
     commitment = parsed.get("commitment")
     if (
         not isinstance(commitment, dict)
@@ -2314,6 +2507,12 @@ def validate_transaction_commitment_bytes(
         or commitment.get("temporary_before") != {"exists": False}
     ):
         raise ReceiptError("transaction commitment effect is inconsistent")
+    if schema == TRANSACTION_COMMITMENT_SCHEMA:
+        _ = validate_transfer_contract(
+            plan,
+            parsed.get("transfer"),
+            require_current_routing=require_current_route_evidence,
+        )
     return parsed
 
 
@@ -2378,6 +2577,7 @@ def transaction_commitment_bytes(
         "preflight": preflight_transaction_set(plan),
         "replay_id": plan.replay_id,
         "schema": TRANSACTION_COMMITMENT_SCHEMA,
+        "transfer": transfer_contract(plan),
     }
     payload = canonical_json({**record, "commitment_id": bound_receipt_id(record)})
     if len(payload) > MAX_RECEIPT_BYTES:
@@ -2540,6 +2740,9 @@ def public_preflight_binding(plan: Plan, transaction: dict[str, object] | None =
 def description(plan: Plan) -> dict[str, object]:
     validate_helper_snapshot(plan)
     validate_route_snapshot(plan)
+    historical = plan_for_historical_commitment(plan)
+    if historical is not plan and historical.receipt_final.exists():
+        plan = historical
     validate_private_layout(plan)
     receipt_payload = read_existing_receipt(plan)
     publication_payload = read_existing_receipt_publication(plan, receipt_payload)
@@ -2634,24 +2837,51 @@ def plan_for_historical_commitment(plan: Plan) -> Plan:
         records = preflight.get("records") if isinstance(preflight, dict) else None
         owner_prefix = preflight.get("owner_prefix") if isinstance(preflight, dict) else None
         routing_sources = preflight.get("routing_sources") if isinstance(preflight, dict) else None
+        schema = parsed.get("schema")
+        accepted = (plan.receipt_directory / f"{replay_id}.json").exists()
+        expected_keys = {"allocation", "commitment", "commitment_id", "preflight", "replay_id", "schema"}
+        if schema == TRANSACTION_COMMITMENT_SCHEMA:
+            expected_keys.add("transfer")
+        if (
+            accepted
+            and set(parsed) == expected_keys
+            and schema in {LEGACY_TRANSACTION_COMMITMENT_SCHEMA, TRANSACTION_COMMITMENT_SCHEMA}
+            and parsed.get("replay_id") == replay_id
+            and isinstance(commitment_id, str)
+            and commitment_id == bound_receipt_id(without_id)
+            and isinstance(preflight_allocation, dict)
+            and preflight_allocation.get("file_sha256") == plan.input_info["sha256"]
+            and preflight_allocation.get("file_size_bytes") == plan.input_info["size_bytes"]
+            and isinstance(routing_sources, list)
+            and all(isinstance(item, dict) for item in routing_sources)
+        ):
+            validated = validate_committed_route_evidence(plan, routing_sources, require_current=False)
+            matches.append((replay_id, validated))
+            continue
         if (
             HASH_RE.fullmatch(replay_id) is None
-            or set(parsed) != {"allocation", "commitment", "commitment_id", "preflight", "replay_id", "schema"}
-            or parsed.get("schema") != TRANSACTION_COMMITMENT_SCHEMA
+            or set(parsed) != expected_keys
+            or schema not in {LEGACY_TRANSACTION_COMMITMENT_SCHEMA, TRANSACTION_COMMITMENT_SCHEMA}
             or parsed.get("replay_id") != replay_id
             or not isinstance(commitment_id, str)
             or commitment_id != bound_receipt_id(without_id)
             or not isinstance(allocation, dict)
-            or allocation.get("file") != str(plan.message_path)
+            or (
+                allocation.get("file") != str(plan.message_path)
+                and not accepted
+            )
             or not isinstance(preflight_allocation, dict)
-            or preflight_allocation.get("file") != str(plan.message_path)
+            or (
+                preflight_allocation.get("file") != str(plan.message_path)
+                and not accepted
+            )
             or preflight_allocation.get("file_sha256") != plan.input_info["sha256"]
             or preflight_allocation.get("file_size_bytes") != plan.input_info["size_bytes"]
             or not isinstance(records, dict)
-            or records.get("private_envelope") != str(plan.envelope_final)
+            or (records.get("private_envelope") != str(plan.envelope_final) and not accepted)
             or records.get("manager") != str(plan.manager)
             or records.get("producer") != str(plan.task)
-            or owner_prefix != owner_prefix_record(plan.owner_prefix)
+            or (owner_prefix != owner_prefix_record(plan.owner_prefix) and not accepted)
             or not isinstance(routing_sources, list)
             or not all(isinstance(item, dict) for item in routing_sources)
         ):
@@ -2690,9 +2920,8 @@ def plan_for_historical_commitment(plan: Plan) -> Plan:
 
 
 def consumed_closure_attestation(plan: Plan) -> dict[str, object]:
-    validate_helper_snapshot(plan)
     plan = plan_for_historical_commitment(plan)
-    validate_private_layout(plan)
+    validate_private_layout(plan, allow_consumed_residue=True)
     require_absent(plan.receipt_final, "durable receipt")
     require_absent(plan.receipt_publication_final, "receipt publication record")
     _ = require_valid_envelope(plan)
@@ -2708,15 +2937,25 @@ def consumed_closure_attestation(plan: Plan) -> dict[str, object]:
         raise ReceiptError("consumed report has no exact watcher transition")
     if plan.pointer.encode() in manager_bytes(plan.manager):
         raise ReceiptError("consumed report pointer is still active")
+    recovery_residue = [
+        {
+            "path": str(path),
+            "state": path_state(path),
+        }
+        for path in (plan.receipt_temporary, plan.receipt_publication_temporary)
+        if path.exists()
+    ]
     record: dict[str, object] = {
         "accepted": False,
         "consumed_at_unix_s": acknowledgment["recorded_at_unix_s"],
         "input": plan.input_info,
         "reason": "manager watcher consumed report; acceptance receipt unavailable",
+        "recovery_residue": recovery_residue,
         "replay_id": plan.replay_id,
         "schema": "omo-report-consumed-closure/v1",
         "status": plan.status,
         "terminal": True,
+        "transfer_receipt": transfer_receipt(plan, str(commitment["commitment_id"])),
     }
     return {**record, "attestation_id": bound_receipt_id(record)}
 
@@ -3187,6 +3426,12 @@ def submit(plan: Plan) -> tuple[bytes, bytes] | None:
 def acceptance_output(plan: Plan, receipt_payload: bytes, publication_payload: bytes) -> dict[str, object]:
     receipt = json.loads(receipt_payload)
     publication = json.loads(publication_payload)
+    transfer = transfer_receipt(
+        plan,
+        str(receipt["side_effects"]["private_allocation"]["transaction_commitment"]["commitment_id"]),
+        require_current_allocation_identity=False,
+        allow_historical_allocation=True,
+    )
     return {
         "accepted": True,
         "accepted_at_utc": receipt["accepted_at_utc"],
@@ -3201,13 +3446,15 @@ def acceptance_output(plan: Plan, receipt_payload: bytes, publication_payload: b
         "reason": "manager acknowledged routed report",
         "replay_id": plan.replay_id,
         "retry_required": False,
-        "routing": public_routing(plan),
+        "routing": transfer["routing"],
         "schema": ACCEPTANCE_SCHEMA,
         "status": plan.status,
+        "transfer_receipt": transfer,
     }
 
 
 def pending_output(plan: Plan) -> dict[str, object]:
+    transfer = transfer_receipt(plan)
     return {
         "accepted": False,
         "input": plan.input_info,
@@ -3215,9 +3462,10 @@ def pending_output(plan: Plan) -> dict[str, object]:
         "reason": "routed; manager acknowledgment pending",
         "replay_id": plan.replay_id,
         "retry_required": True,
-        "routing": public_routing(plan),
+        "routing": transfer["routing"],
         "schema": ACCEPTANCE_SCHEMA,
         "status": plan.status,
+        "transfer_receipt": transfer,
     }
 
 
@@ -3233,6 +3481,30 @@ def run(argv: list[str] | None = None) -> bytes:
             try:
                 result = submit(plan)
             except ReceiptError as exc:
+                if "bound to a different allocation" in str(exc):
+                    historical = plan_for_historical_commitment(plan)
+                    if historical is plan:
+                        for candidate in sorted(plan.receipt_directory.glob("*.json")):
+                            if candidate.name.endswith(".publication.json"):
+                                continue
+                            try:
+                                candidate_receipt = json.loads(candidate.read_bytes())
+                            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                                continue
+                            if isinstance(candidate_receipt, dict) and candidate_receipt.get("input") == plan.input_info:
+                                historical = replace(
+                                    plan,
+                                    replay_id=candidate.stem,
+                                    receipt_final=candidate,
+                                    receipt_publication_final=plan.receipt_directory / f"{candidate.stem}.publication.json",
+                                    transaction_commitment_final=plan.receipt_directory / f"{candidate.stem}.commitment",
+                                )
+                                break
+                    if historical is not plan and historical.receipt_final.exists():
+                        receipt_payload = read_existing_receipt(historical)
+                        publication_payload = read_existing_receipt_publication(historical, receipt_payload)
+                        if receipt_payload is not None and publication_payload is not None:
+                            return canonical_json(acceptance_output(historical, receipt_payload, publication_payload))
                 owner_changed_before_mutation = (
                     str(exc) == "manager pointer and bound owner bytes are inconsistent"
                     and not plan.envelope_final.exists()

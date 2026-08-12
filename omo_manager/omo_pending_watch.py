@@ -162,6 +162,7 @@ AGENT_REPORT_SENT_RE = re.compile(
     r"time=\S+ task-file=[A-Za-z0-9_.-]+\)$"
 )
 AGENT_REPORT_HASH_RE = re.compile(r"^\[message-sha256: ([0-9a-f]{64})\]$")
+AGENT_REPORT_TRANSFER_RE = re.compile(r"^\[omo-transfer: (\{.*\})\]$")
 AGENT_REPORT_OWNER_RE = re.compile(
     r"^\[omo-report-owner-prefix: manager-path-sha256=([0-9a-f]{64}) sha256=([0-9a-f]{64}) "
     r"size-bytes=(0|[1-9][0-9]*) separator-bytes=([12])\]$"
@@ -1382,7 +1383,7 @@ def authenticated_agent_report(source_line: str) -> AuthenticatedAgentReport | N
         _ = message.decode("utf-8")
     except UnicodeDecodeError:
         return None
-    if len(header_lines) not in {2, 3, 4, 5}:
+    if len(header_lines) not in {2, 3, 4, 5, 6}:
         return None
     sent_match = AGENT_REPORT_SENT_RE.fullmatch(header_lines[0])
     hash_match = AGENT_REPORT_HASH_RE.fullmatch(header_lines[1])
@@ -1391,6 +1392,98 @@ def authenticated_agent_report(source_line: str) -> AuthenticatedAgentReport | N
     warning_index = 2
     if len(header_lines) >= 3 and AGENT_REPORT_OWNER_RE.fullmatch(header_lines[2]) is not None:
         warning_index = 3
+    if len(header_lines) > warning_index:
+        transfer_match = AGENT_REPORT_TRANSFER_RE.fullmatch(header_lines[warning_index])
+        if transfer_match is not None:
+            try:
+                transfer = json.loads(transfer_match.group(1))
+            except json.JSONDecodeError:
+                return None
+            unsigned = dict(transfer) if isinstance(transfer, dict) else {}
+            transfer_id = unsigned.pop("transfer_id", None)
+            authority = transfer.get("authority") if isinstance(transfer, dict) else None
+            queue_item = transfer.get("queue_item") if isinstance(transfer, dict) else None
+            routing = transfer.get("routing") if isinstance(transfer, dict) else None
+            if (
+                not isinstance(transfer, dict)
+                or set(transfer)
+                != {"authority", "commitment_id", "commitment_path", "queue_item", "receiver", "routing", "schema", "transfer_id"}
+                or transfer.get("schema") != "omo-report-transfer-receipt/v1"
+                or not isinstance(transfer_id, str)
+                or transfer_id != hashlib.sha256(
+                    json.dumps(unsigned, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("ascii")
+                ).hexdigest()
+                or not isinstance(transfer.get("commitment_id"), str)
+                or not isinstance(transfer.get("commitment_path"), str)
+                or not isinstance(authority, dict)
+                or set(authority) != {"kind", "producer_target", "source_task"}
+                or authority.get("kind") != "agent-originated"
+                or authority.get("producer_target") != sent_match.group(1)
+                or not isinstance(queue_item, dict)
+                or set(queue_item) != {"input_sha256", "manager", "pointer", "producer", "replay_id"}
+                or queue_item.get("input_sha256") != hash_match.group(1)
+                or queue_item.get("pointer") != source_line
+                or queue_item.get("producer") != authority.get("source_task")
+                or queue_item.get("manager") != transfer.get("receiver")
+                or not isinstance(routing, dict)
+                or set(routing)
+                != {"manager", "producer_target", "requested_manager_target", "resolved_manager_target", "route_kind", "task"}
+                or routing.get("manager") != transfer.get("receiver")
+                or routing.get("task") != authority.get("source_task")
+                or routing.get("producer_target") != sent_match.group(1)
+                or not isinstance(routing.get("route_kind"), str)
+            ):
+                return None
+            commitment_path = Path(str(transfer["commitment_path"]))
+            state_home = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")).expanduser()
+            if not state_home.is_absolute():
+                return None
+            expected_commitment_directory = state_home.resolve(strict=False) / "omo-manager/report-receipts"
+            try:
+                commitment_fd = os.open(commitment_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+                with os.fdopen(commitment_fd, "rb") as commitment_handle:
+                    commitment_info = os.fstat(commitment_handle.fileno())
+                    commitment_payload = commitment_handle.read(4 * 1024 * 1024 + 1)
+                    commitment_after = os.fstat(commitment_handle.fileno())
+                commitment = json.loads(commitment_payload)
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                return None
+            commitment_without_id = dict(commitment) if isinstance(commitment, dict) else {}
+            commitment_id = commitment_without_id.pop("commitment_id", None)
+            commitment_contract = commitment.get("transfer") if isinstance(commitment, dict) else None
+            expected_transfer_record = (
+                {**commitment_contract, "commitment_id": commitment_id}
+                if isinstance(commitment_contract, dict)
+                else None
+            )
+            if (
+                commitment_path.parent != expected_commitment_directory
+                or not stat.S_ISREG(commitment_info.st_mode)
+                or commitment_info.st_uid != os.getuid()
+                or stat.S_IMODE(commitment_info.st_mode) != 0o600
+                or len(commitment_payload) > 4 * 1024 * 1024
+                or (commitment_info.st_dev, commitment_info.st_ino, commitment_info.st_size)
+                != (commitment_after.st_dev, commitment_after.st_ino, commitment_after.st_size)
+                or not isinstance(commitment, dict)
+                or commitment_payload
+                != (json.dumps(commitment, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii")
+                or commitment.get("schema") != "omo-report-transaction-commitment/v2"
+                or not isinstance(commitment_id, str)
+                or commitment_id
+                != hashlib.sha256(
+                    json.dumps(commitment_without_id, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("ascii")
+                ).hexdigest()
+                or transfer.get("commitment_id") != commitment_id
+                or not isinstance(expected_transfer_record, dict)
+                or transfer != {
+                    **expected_transfer_record,
+                    "transfer_id": hashlib.sha256(
+                        json.dumps(expected_transfer_record, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("ascii")
+                    ).hexdigest(),
+                }
+            ):
+                return None
+            warning_index += 1
     if len(header_lines) not in {warning_index, warning_index + 2}:
         return None
     if len(header_lines) == warning_index + 2 and (header_lines[warning_index] != "route-warning:" or not header_lines[warning_index + 1]):
@@ -1423,7 +1516,7 @@ def marker_origin_source(block_lines: list[str]) -> tuple[str, str]:
     source_line = adjacent_source_metadata(block_lines)
     if MANAGER_GENERATED_SOURCE_RE.fullmatch(source_line) is not None:
         return "agent", "manager"
-    if valid_agent_report_artifact(source_line):
+    if AGENT_POINTER_WITH_TARGET_RE.fullmatch(source_line) is not None:
         return "agent", "agent"
     if source_line.startswith(EMAIL_SOURCE_PREFIXES):
         return "human", "email"
@@ -3308,7 +3401,7 @@ def push_ref(args: Args, seen: dict[str, float], now_s: float, marker: Marker, a
     if is_blocking_wake_marker(args, marker):
         return push_blocking_wake(args, marker, now_s)
     if marker.origin == "agent" and marker.source == "agent" and not marker_has_authenticated_agent_report(marker, attachments):
-        marker = replace(marker, origin="human", source="manual", delegate_source="")
+        return 0
     if marker.origin == "agent" and marker.source == "agent":
         return push_agent_report_ref(args, seen, now_s, marker, attachments)
     marker_key = marker_seen_key(args, marker, attachments)
@@ -5589,7 +5682,7 @@ def scan_once(
     for marker in find_markers(args.root, files):
         attachments = marker_attachments(args, marker)
         if marker.origin == "agent" and marker.source == "agent" and not marker_has_authenticated_agent_report(marker, attachments):
-            marker = replace(marker, origin="human", source="manual", delegate_source="")
+            continue
         key = marker_seen_key(args, marker, attachments)
         if marker.origin == "agent" and marker.source == "agent" and report_was_consumed(args.state, key):
             status = push_ref(args, seen, now_s, marker, attachments)
