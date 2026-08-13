@@ -4,8 +4,9 @@ import hashlib
 import io
 import subprocess
 import tempfile
+import threading
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from email.message import Message
 from pathlib import Path
 from unittest.mock import patch
@@ -25,10 +26,13 @@ from omo_manager.omo_manager_mail_compress import (
     cmd_mark_seen,
     cmd_trash_superseded,
     cmd_verify_run,
+    connect_mailbox,
     ensure_empty_private_dir,
     export_body,
     export_batches,
+    fetch_msg_bytes,
     fetch_gmail_metadata,
+    imap_operation,
     imap_quoted,
     intent_reconciliation_evidence,
     is_manager_record,
@@ -45,6 +49,7 @@ from omo_manager.omo_manager_mail_compress import (
     thread_context_digest,
     tsv_value,
     verify_post_move_imap,
+    verified_existing_trash_records,
     write_private,
 )
 
@@ -435,6 +440,99 @@ class ManagerMailCompressTests(unittest.TestCase):
         )
         self.assertEqual(("", ""), fetch_gmail_metadata(client, "7")[:2])
 
+    def test_fetch_timeout_aborts_blocked_uid_fetch_without_retry(self) -> None:
+        class BlockingSocket:
+            def __init__(self) -> None:
+                self.closed = threading.Event()
+
+            def shutdown(self, _how: int) -> None:
+                self.closed.set()
+
+            def close(self) -> None:
+                self.closed.set()
+
+        class BlockingClient:
+            def __init__(self) -> None:
+                self.sock = BlockingSocket()
+                self.uid_calls: list[tuple[str, ...]] = []
+                self.release = threading.Event()
+
+            def uid(self, *args: str) -> tuple[str, list[bytes]]:
+                self.uid_calls.append(args)
+                self.release.wait()
+                raise OSError("stub socket aborted")
+
+        client = BlockingClient()
+        with (
+            patch("omo_manager.omo_manager_mail_compress.IMAP_OPERATION_TIMEOUT_S", 0.01),
+            self.assertRaisesRegex(RuntimeError, r"timed out: stage=message-fetch uid=7 timeout_s=0.01"),
+        ):
+            fetch_msg_bytes(client, "7", FULL_FETCH, n_attempts=2)  # type: ignore[arg-type]
+
+        client.release.set()
+        self.assertEqual([("fetch", "7", FULL_FETCH)], client.uid_calls)
+        self.assertTrue(client.sock.closed.is_set())
+
+        with self.assertRaisesRegex(RuntimeError, "client is unusable after timeout: stage=second-operation"):
+            imap_operation(client, "second-operation", lambda: self.fail("dead client operation ran"))  # type: ignore[arg-type]
+
+    def test_connect_timeout_returns_and_closes_late_client(self) -> None:
+        release = threading.Event()
+
+        class LateClient:
+            def __init__(self, _host: str, timeout: float) -> None:
+                self.timeout = timeout
+                self.shutdown_called = threading.Event()
+
+            def shutdown(self) -> None:
+                self.shutdown_called.set()
+
+        clients: list[LateClient] = []
+
+        def construct(host: str, timeout: float) -> LateClient:
+            client = LateClient(host, timeout)
+            clients.append(client)
+            release.wait()
+            return client
+
+        with (
+            patch("omo_manager.omo_manager_mail_compress.imaplib.IMAP4_SSL", side_effect=construct),
+            patch("omo_manager.omo_manager_mail_compress.IMAP_OPERATION_TIMEOUT_S", 0.01),
+            self.assertRaisesRegex(RuntimeError, r"timed out: stage=connect timeout_s=0.01"),
+        ):
+            connect_mailbox("imap.example.test")
+
+        release.set()
+        for _attempt in range(100):
+            if clients and clients[0].shutdown_called.wait(0.01):
+                break
+        self.assertEqual(1, len(clients))
+        self.assertEqual(0.01, clients[0].timeout)
+        self.assertTrue(clients[0].shutdown_called.is_set())
+
+    def test_replacement_timeout_does_not_restore_mailbox_on_dead_client(self) -> None:
+        client = FakeClient({})
+
+        def timeout(*_args: object) -> tuple[str, list[bytes]]:
+            setattr(client, "_omo_operation_timed_out", True)
+            raise RuntimeError("stub timeout")
+
+        with patch("omo_manager.omo_manager_mail_compress.imap_uid", side_effect=timeout), self.assertRaisesRegex(RuntimeError, "stub timeout"):
+            replacement_exists(client, "Sent", "<replacement@example.test>", "agent@example.test", "human@example.test")  # type: ignore[arg-type]
+        self.assertEqual([('"Sent"', True)], client.select_calls)
+
+    def test_trash_verification_timeout_does_not_restore_mailbox_on_dead_client(self) -> None:
+        client = FakeClient({})
+
+        def timeout(*_args: object) -> tuple[str, list[bytes]]:
+            setattr(client, "_omo_operation_timed_out", True)
+            raise RuntimeError("stub timeout")
+
+        source_map = {"7": {"gmail_msgid": "100"}}
+        with patch("omo_manager.omo_manager_mail_compress.imap_uid", side_effect=timeout), self.assertRaisesRegex(RuntimeError, "stub timeout"):
+            verified_existing_trash_records(client, source_map, "agent@example.test", "human@example.test")  # type: ignore[arg-type]
+        self.assertEqual([('"[Gmail]/Trash"', True)], client.select_calls)
+
     def test_identity_preflight_uses_existing_imap_authentication(self) -> None:
         raw = self.raw_message("[worker:0] complete")
         client = FakeClient(
@@ -467,6 +565,57 @@ class ManagerMailCompressTests(unittest.TestCase):
         self.assertIn("unique_identity_count=1", output.getvalue())
         self.assertIn("complete_thread_count=1", output.getvalue())
         self.assertIn("gate=pass", output.getvalue())
+
+    def test_identity_preflight_fetch_timeout_names_stage_and_blocks(self) -> None:
+        raw = self.raw_message("[worker:0] complete")
+
+        class BlockingSocket:
+            def shutdown(self, _how: int) -> None:
+                pass
+
+            def close(self) -> None:
+                pass
+
+        class BlockingFetchClient(FakeClient):
+            def __init__(self) -> None:
+                super().__init__(
+                    {
+                        ("search", None, "ALL"): ("OK", [b"7"]),
+                        ("search", None, "FROM", '"agent@example.test"'): ("OK", [b"7"]),
+                        ("fetch", "7", HEADER_FETCH): ("OK", [(b"header", raw)]),
+                    }
+                )
+                self.sock = BlockingSocket()
+                self.release = threading.Event()
+
+            def uid(self, *args: str) -> tuple[str, list[bytes | tuple[bytes, bytes]]]:
+                if args == ("fetch", "7", FULL_FETCH):
+                    self.uid_calls.append(args)
+                    self.release.wait()
+                    raise OSError("stub remains blocked past socket close")
+                return super().uid(*args)
+
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+
+        client = BlockingFetchClient()
+        output = io.StringIO()
+        errors = io.StringIO()
+        with (
+            patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {"user": "human@example.test"})),
+            patch("omo_manager.omo_manager_mail_compress.configured_agent_mail", return_value=Settings()),
+            patch("omo_manager.omo_manager_mail_compress.IMAP_OPERATION_TIMEOUT_S", 0.01),
+            redirect_stdout(output),
+            redirect_stderr(errors),
+        ):
+            self.assertEqual(1, cmd_identity_preflight(Args()))
+
+        client.release.set()
+        self.assertIn("gate=block", output.getvalue())
+        self.assertIn("failed_stage=message-fetch uid=7", errors.getvalue())
+        self.assertEqual(1, client.uid_calls.count(("fetch", "7", FULL_FETCH)))
+        self.assertFalse(any(call[0].casefold() in {"copy", "move", "store", "expunge"} for call in client.uid_calls))
 
     def test_export_writes_gmail_context_and_special_mailboxes(self) -> None:
         raw = self.raw_message("[worker:0] complete")
@@ -570,6 +719,58 @@ class ManagerMailCompressTests(unittest.TestCase):
         self.assertEqual(1, client.uid_calls.count(("search", None, "ALL")))
         self.assertEqual(2, client.uid_calls.count(("fetch", "7", FULL_FETCH)))
         self.assertFalse(any(call[0].casefold() in {"copy", "move", "store", "expunge"} for call in client.uid_calls))
+
+    def test_export_fetch_timeout_leaves_no_manifest_and_does_not_retry_or_mutate(self) -> None:
+        raw = self.raw_message("[worker:0] complete")
+
+        class BlockingSocket:
+            def __init__(self) -> None:
+                self.closed = threading.Event()
+
+            def shutdown(self, _how: int) -> None:
+                self.closed.set()
+
+            def close(self) -> None:
+                self.closed.set()
+
+        class BlockingFetchClient(FakeClient):
+            def __init__(self) -> None:
+                super().__init__(
+                    {
+                        ("search", None, "ALL"): ("OK", [b"7"]),
+                        ("search", None, "FROM", '"agent@example.test"'): ("OK", [b"7"]),
+                        ("fetch", "7", HEADER_FETCH): ("OK", [(b"header", raw)]),
+                    },
+                    ManagerMailCompressTests.gmail_mailboxes(),
+                )
+                self.sock = BlockingSocket()
+                self.release = threading.Event()
+
+            def uid(self, *args: str) -> tuple[str, list[bytes | tuple[bytes, bytes]]]:
+                if args == ("fetch", "7", FULL_FETCH):
+                    self.uid_calls.append(args)
+                    self.release.wait()
+                    raise OSError("stub socket aborted")
+                return super().uid(*args)
+
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+
+        client = BlockingFetchClient()
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {"user": "human@example.test"})),
+            patch("omo_manager.omo_manager_mail_compress.configured_agent_mail", return_value=Settings()),
+            patch("omo_manager.omo_manager_mail_compress.IMAP_OPERATION_TIMEOUT_S", 0.01),
+        ):
+            out_dir = Path(tmp) / "export"
+            with self.assertRaisesRegex(RuntimeError, r"timed out: stage=message-fetch uid=7 timeout_s=0.01"):
+                cmd_export(ExportArgs(out_dir))
+            client.release.set()
+            self.assertFalse((out_dir / "manifest.tsv").exists())
+            self.assertEqual(1, client.uid_calls.count(("fetch", "7", FULL_FETCH)))
+            self.assertFalse(any(call[0].casefold() in {"copy", "move", "store", "expunge"} for call in client.uid_calls))
 
     def test_export_filters_excluded_subject_when_optional_import_fallback_is_active(self) -> None:
         raw = self.raw_message("PB news")

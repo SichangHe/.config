@@ -10,6 +10,7 @@ Helper: `~/.config/omo_manager/omo_manager_mail_compress.py`
 - export is the run's only candidate discovery; it freezes one immutable fixed-start source set, exact message and thread identities, content, complete `\All` thread context, UIDVALIDITY, and deterministic disjoint thread batches
 - later arrivals are outside the run: never classify or move them, never add them to a batch, and never rerun discovery because of them
 - missing, duplicate, conflicting, or incomplete identity or context evidence blocks export without mutation
+- every IMAP operation has an absolute deadline; timeout diagnostics name the failed stage, abort the connection, do not retry a timed-out fetch, and leave no manifest
 - keep exported bodies, identities, and evidence private; use `OMO_HUMAN_EMAIL_CONFIG_PATH`
 
 ## classify and cross-review

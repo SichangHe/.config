@@ -10,7 +10,9 @@ import io
 import imaplib
 import os
 import re
+import socket
 import sys
+import threading
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from email import policy
@@ -18,6 +20,7 @@ from email.message import Message
 from email.parser import BytesParser
 from email.utils import getaddresses
 from pathlib import Path
+from typing import Callable
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -32,6 +35,13 @@ TRASH_MAILBOX = "[Gmail]/Trash"
 CONFIG_PATH = human_config_path()
 DEFAULT_THREADS_PER_BATCH = 10
 EXPORT_FULL_FETCH_ATTEMPTS = 2
+IMAP_OPERATION_TIMEOUT_S = 45.0
+
+
+class ImapOperationError(RuntimeError):
+    def __init__(self, stage: str, message: str) -> None:
+        self.stage = stage
+        super().__init__(message)
 
 
 @dataclass(frozen=True)
@@ -75,6 +85,100 @@ class PostMoveVerification:
     @property
     def complete(self) -> bool:
         return self.same_mailbox and not (self.changed_thread_count or self.imap_failure_count)
+
+
+def imap_operation[T](client: imaplib.IMAP4_SSL, stage: str, operation: Callable[[], T]) -> T:
+    """Run one IMAP operation with an absolute deadline and abort its socket on expiry."""
+    if getattr(client, "_omo_operation_timed_out", False):
+        raise ImapOperationError(stage, f"IMAP client is unusable after timeout: stage={stage}")
+    results: list[T] = []
+    failures: list[BaseException] = []
+
+    def abort() -> None:
+        setattr(client, "_omo_operation_timed_out", True)
+        sock = getattr(client, "sock", None)
+        if sock is None:
+            return
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except (AttributeError, OSError):
+            pass
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+    def run() -> None:
+        try:
+            results.append(operation())
+        except BaseException as exc:
+            failures.append(exc)
+
+    worker = threading.Thread(target=run, name=f"imap:{stage}", daemon=True)
+    worker.start()
+    worker.join(IMAP_OPERATION_TIMEOUT_S)
+    if worker.is_alive():
+        abort()
+        raise ImapOperationError(stage, f"IMAP operation timed out: stage={stage} timeout_s={IMAP_OPERATION_TIMEOUT_S:g}")
+    if failures:
+        exc = failures[0]
+        if isinstance(exc, (EOFError, OSError, imaplib.IMAP4.error)):
+            raise ImapOperationError(stage, f"IMAP operation failed: stage={stage} error={exc}") from exc
+        raise exc
+    return results[0]
+
+
+def imap_uid(client: imaplib.IMAP4_SSL, stage: str, *args: str | None) -> tuple[str, list[bytes | tuple[bytes, bytes]]]:
+    return imap_operation(client, stage, lambda: client.uid(*args))  # pyright: ignore[reportArgumentType, reportReturnType]
+
+
+def logout_mailbox(client: imaplib.IMAP4_SSL) -> None:
+    if getattr(client, "_omo_operation_timed_out", False):
+        return
+    imap_operation(client, "logout", client.logout)
+
+
+def connect_mailbox(host: str) -> imaplib.IMAP4_SSL:
+    """Connect with an absolute deadline and close any client created after expiry."""
+    clients: list[imaplib.IMAP4_SSL] = []
+    failures: list[BaseException] = []
+    completed = False
+    expired = False
+    state_changed = threading.Condition()
+
+    def run() -> None:
+        nonlocal completed, expired
+        try:
+            client = imaplib.IMAP4_SSL(host, timeout=IMAP_OPERATION_TIMEOUT_S)
+        except BaseException as exc:
+            with state_changed:
+                failures.append(exc)
+                completed = True
+                state_changed.notify()
+            return
+        with state_changed:
+            if not expired:
+                clients.append(client)
+                completed = True
+                state_changed.notify()
+                return
+        try:
+            client.shutdown()
+        except (AttributeError, OSError, imaplib.IMAP4.error):
+            pass
+
+    worker = threading.Thread(target=run, name="imap:connect", daemon=True)
+    worker.start()
+    with state_changed:
+        if not state_changed.wait_for(lambda: completed, timeout=IMAP_OPERATION_TIMEOUT_S):
+            expired = True
+            raise ImapOperationError("connect", f"IMAP operation timed out: stage=connect timeout_s={IMAP_OPERATION_TIMEOUT_S:g}")
+    if failures:
+        exc = failures[0]
+        if isinstance(exc, (EOFError, OSError, imaplib.IMAP4.error)):
+            raise ImapOperationError("connect", f"IMAP operation failed: stage=connect error={exc}") from exc
+        raise exc
+    return clients[0]
 
 
 def parse_uid_text(text: str) -> list[str]:
@@ -164,7 +268,7 @@ def load_config() -> dict[str, str]:
 def manager_candidate_uids(client: imaplib.IMAP4_SSL, self_email: str) -> list[str]:
     found: list[str] = []
     seen: set[str] = set()
-    typ, data = client.uid("search", None, "ALL")  # pyright: ignore[reportArgumentType]
+    typ, data = imap_uid(client, "fixed-start-search", "search", None, "ALL")
     if typ != "OK":
         raise RuntimeError(f"IMAP fixed-start search failed: {typ}")
     frozen = {raw.decode() for raw in data[0].split()} if data and data[0] else set()
@@ -172,7 +276,7 @@ def manager_candidate_uids(client: imaplib.IMAP4_SSL, self_email: str) -> list[s
     criteria = ["FROM", f'"{self_email}"']
     subject_tokens = ("",) if settings is not None else LEGACY_MANAGER_SUBJECT_TOKENS
     for token in subject_tokens:
-        typ, data = client.uid("search", None, *(criteria + (["SUBJECT", f'"{token}"'] if token else [])))  # pyright: ignore[reportArgumentType]
+        typ, data = imap_uid(client, "manager-candidate-search", "search", None, *(criteria + (["SUBJECT", f'"{token}"'] if token else [])))
         if typ != "OK":
             raise RuntimeError(f"IMAP search failed: {typ}")
         for uid in [raw.decode() for raw in data[0].split()] if data and data[0] else []:
@@ -185,14 +289,14 @@ def manager_candidate_uids(client: imaplib.IMAP4_SSL, self_email: str) -> list[s
 def inbox_subset(client: imaplib.IMAP4_SSL, uids: list[str]) -> list[str]:
     if not uids:
         return []
-    typ, data = client.uid("search", None, "UID", ",".join(uids))  # pyright: ignore[reportArgumentType]
+    typ, data = imap_uid(client, "inbox-subset-search", "search", None, "UID", ",".join(uids))
     if typ != "OK":
         raise RuntimeError(f"IMAP UID search failed: {typ}")
     return [raw.decode() for raw in data[0].split()] if data and data[0] else []
 
 
 def mailbox_exists(client: imaplib.IMAP4_SSL, mailbox: str) -> bool:
-    typ, data = client.list()
+    typ, data = imap_operation(client, "mailbox-list", client.list)
     if typ != "OK":
         raise RuntimeError(f"IMAP mailbox list failed: {typ}")
     return any(mailbox.encode() in raw for raw in data if isinstance(raw, bytes))
@@ -202,7 +306,7 @@ def fetch_msg_bytes(client: imaplib.IMAP4_SSL, uid: str, fetch_expr: str, n_atte
     if n_attempts < 1:
         raise ValueError("IMAP fetch attempts must be positive")
     for _attempt in range(n_attempts):
-        typ, data = client.uid("fetch", uid, fetch_expr)
+        typ, data = imap_uid(client, f"message-fetch uid={uid}", "fetch", uid, fetch_expr)
         if typ != "OK":
             raise RuntimeError(f"IMAP fetch failed: uid={uid} typ={typ}")
         if not data or not isinstance(data[0], tuple):
@@ -305,7 +409,7 @@ def imap_list_value(value: str) -> str:
 
 
 def fetch_gmail_metadata_detail(client: imaplib.IMAP4_SSL, uid: str) -> GmailMetadata:
-    typ, data = client.uid("fetch", uid, GMAIL_METADATA_FETCH)
+    typ, data = imap_uid(client, f"gmail-metadata-fetch uid={uid}", "fetch", uid, GMAIL_METADATA_FETCH)
     if typ != "OK":
         raise RuntimeError(f"IMAP Gmail metadata fetch failed: typ={typ}")
     attributes = imap_fetch_attributes(imap_response_text(data))
@@ -325,7 +429,7 @@ def fetch_gmail_metadata(client: imaplib.IMAP4_SSL, uid: str) -> tuple[str, str,
 
 
 def gmail_extension_advertised(client: imaplib.IMAP4_SSL) -> bool:
-    typ, data = client.capability()
+    typ, data = imap_operation(client, "capability", client.capability)
     if typ != "OK":
         raise RuntimeError(f"IMAP capability query failed: {typ}")
     return "X-GM-EXT-1" in imap_response_text(data).upper().split()
@@ -369,20 +473,23 @@ def mail_boundary(config: dict[str, str]) -> tuple[str, str]:
 
 def open_mailbox(readonly: bool) -> tuple[imaplib.IMAP4_SSL, dict[str, str]]:
     config = load_config()
-    client = imaplib.IMAP4_SSL(config["host"], timeout=45)
+    client = connect_mailbox(config["host"])
     try:
-        client.login(config["user"], config["password"])
-        typ, _data = client.select("INBOX", readonly=readonly)
+        imap_operation(client, "login", lambda: client.login(config["user"], config["password"]))
+        typ, _data = imap_operation(client, "select mailbox=INBOX", lambda: client.select("INBOX", readonly=readonly))
         if typ != "OK":
             raise RuntimeError(f"IMAP select INBOX failed: {typ}")
     except Exception:
-        client.logout()
+        try:
+            logout_mailbox(client)
+        except RuntimeError:
+            pass
         raise
     return client, config
 
 
 def selected_uidvalidity(client: imaplib.IMAP4_SSL) -> str:
-    _name, data = client.response("UIDVALIDITY")
+    _name, data = imap_operation(client, "selected-uidvalidity", lambda: client.response("UIDVALIDITY"))
     values = [value.decode() for value in data or [] if isinstance(value, bytes)]
     if len(values) != 1 or not values[0].isdecimal():
         raise RuntimeError("selected mailbox omitted UIDVALIDITY")
@@ -390,7 +497,7 @@ def selected_uidvalidity(client: imaplib.IMAP4_SSL) -> str:
 
 
 def select_mailbox(client: imaplib.IMAP4_SSL, mailbox: str, readonly: bool) -> None:
-    typ, _data = client.select(imap_quoted(mailbox), readonly=readonly)
+    typ, _data = imap_operation(client, f"select mailbox={mailbox}", lambda: client.select(imap_quoted(mailbox), readonly=readonly))
     if typ != "OK":
         raise RuntimeError(f"IMAP select failed: mailbox={mailbox} typ={typ}")
 
@@ -403,7 +510,7 @@ def imap_mailbox_name(value: str) -> str:
 
 
 def special_use_mailboxes(client: imaplib.IMAP4_SSL) -> dict[str, str]:
-    typ, data = client.list()
+    typ, data = imap_operation(client, "special-use-mailbox-list", client.list)
     if typ != "OK":
         raise RuntimeError(f"IMAP mailbox list failed: {typ}")
     mailboxes: dict[str, str] = {}
@@ -428,7 +535,7 @@ def special_use_mailboxes(client: imaplib.IMAP4_SSL) -> dict[str, str]:
 def gmail_thread_uids(client: imaplib.IMAP4_SSL, gmail_thrid: str) -> list[str]:
     if not gmail_thrid.isdecimal():
         raise RuntimeError("Gmail thread identity was missing or malformed")
-    typ, data = client.uid("search", None, "X-GM-THRID", gmail_thrid)  # pyright: ignore[reportArgumentType]
+    typ, data = imap_uid(client, f"gmail-thread-search thread={gmail_thrid}", "search", None, "X-GM-THRID", gmail_thrid)
     if typ != "OK":
         raise RuntimeError(f"IMAP Gmail thread search failed: {typ}")
     return [raw.decode() for raw in data[0].split()] if data and data[0] else []
@@ -437,7 +544,7 @@ def gmail_thread_uids(client: imaplib.IMAP4_SSL, gmail_thrid: str) -> list[str]:
 def gmail_message_uids(client: imaplib.IMAP4_SSL, gmail_msgid: str) -> list[str]:
     if not gmail_msgid.isdecimal():
         raise RuntimeError("Gmail message identity was missing or malformed")
-    typ, data = client.uid("search", None, "X-GM-MSGID", gmail_msgid)  # pyright: ignore[reportArgumentType]
+    typ, data = imap_uid(client, f"gmail-message-search message={gmail_msgid}", "search", None, "X-GM-MSGID", gmail_msgid)
     if typ != "OK":
         raise RuntimeError(f"IMAP Gmail message search failed: {typ}")
     return [raw.decode() for raw in data[0].split()] if data and data[0] else []
@@ -568,8 +675,10 @@ def cmd_identity_preflight(_args: argparse.Namespace) -> int:
             if len({record.gmail_msgid for record in source_records}) != len(source_records):
                 raise RuntimeError("configured IMAP mailbox returned duplicate Gmail message identities")
             _special_use, records_by_thread = fetch_imap_thread_contexts(client, source_records)
-        except (imaplib.IMAP4.error, RuntimeError):
+        except (imaplib.IMAP4.error, RuntimeError) as exc:
             imap_failure = 1
+            stage = exc.stage if isinstance(exc, ImapOperationError) else "identity-evidence"
+            print(f"identity_preflight blocked failed_stage={stage}", file=sys.stderr)
         expected_threads = len({record.gmail_thrid for record in source_records})
         gate = "pass" if uidvalidity and gmail_extension and not imap_failure and len(source_records) == len(headers) and len(records_by_thread) == expected_threads else "block"
         print(
@@ -584,7 +693,7 @@ def cmd_identity_preflight(_args: argparse.Namespace) -> int:
             f" gate={gate}"
         )
     finally:
-        client.logout()
+        logout_mailbox(client)
     return 0 if gate == "pass" else 1
 
 
@@ -599,7 +708,7 @@ def cmd_snapshot(_args: argparse.Namespace) -> int:
             print(f"skipped_boundary_mismatch={len(skipped)}")
         print_records(records)
     finally:
-        client.logout()
+        logout_mailbox(client)
     return 0
 
 
@@ -966,7 +1075,7 @@ def cmd_retain_thread(args: argparse.Namespace) -> int:
                 if record.gmail_msgid != source["gmail_msgid"] or record.gmail_thrid != source["gmail_thrid"]:
                     raise RuntimeError("cannot recover intent because source identity drifted")
         finally:
-            client.logout()
+            logout_mailbox(client)
         write_private_exclusive(args.source_dir / "recoveries" / f"{args.gmail_thrid}.tsv", evidence)
     write_private_exclusive(args.source_dir / "outcomes" / f"{args.gmail_thrid}.tsv", evidence)
     print(f"retained_thread={args.gmail_thrid} source_count={len(rows)}")
@@ -1215,7 +1324,7 @@ def cmd_reconcile_intent(args: argparse.Namespace) -> int:
         if not reconciliation_thread_unchanged(client, expected_mailboxes[r"\All"], args.source_dir, args.gmail_thrid, final_trash_records):
             raise RuntimeError("complete Gmail thread context changed")
     finally:
-        client.logout()
+        logout_mailbox(client)
     write_private_exclusive(args.source_dir / "outcomes" / f"{args.gmail_thrid}.tsv", evidence)
     trashed = sum(row["disposition"] == "trashed" for row in rows)
     print(f"reconciled_thread={args.gmail_thrid} sources={len(rows)} retained={len(rows) - trashed} trashed={trashed} mailbox_mutations=0 permanent_deleted=0")
@@ -1248,7 +1357,7 @@ def cmd_recover_already_trashed(args: argparse.Namespace) -> int:
         receipt_observed = observe_reconciliation_locations(client, source_map)
         require_reconciliation_locations(rows, source_map, receipt_observed, sender_email, recipient_email)
     finally:
-        client.logout()
+        logout_mailbox(client)
     receipt_path = args.source_dir / "recoveries" / f"{args.gmail_thrid}.skipped-already-trashed.tsv"
     write_private_exclusive(receipt_path, terminal_recovery_text(rows))
     print(f"recovered_thread={args.gmail_thrid} skipped_already_trashed={len(rows)} mailbox_mutations=0 permanent_deleted=0")
@@ -1363,7 +1472,7 @@ def replacement_exists(
         return False
     select_mailbox(client, mailbox, readonly=True)
     try:
-        typ, data = client.uid("search", None, "HEADER", "Message-ID", imap_quoted(replacement_id))  # pyright: ignore[reportArgumentType]
+        typ, data = imap_uid(client, "replacement-message-search", "search", None, "HEADER", "Message-ID", imap_quoted(replacement_id))
         if typ != "OK":
             return False
         uids = [raw.decode() for raw in data[0].split()] if data and data[0] else []
@@ -1374,7 +1483,8 @@ def replacement_exists(
         recipients = [address.casefold() for _name, address in getaddresses(msg.get_all("To", [])) if address]
         return rfc_message_id(msg) == replacement_id and senders == [sender_email.casefold()] and recipient_email.casefold() in recipients
     finally:
-        select_mailbox(client, "INBOX", readonly=False)
+        if not getattr(client, "_omo_operation_timed_out", False):
+            select_mailbox(client, "INBOX", readonly=False)
 
 
 def cmd_export(args: argparse.Namespace) -> int:
@@ -1400,7 +1510,7 @@ def cmd_export(args: argparse.Namespace) -> int:
         sent_mailbox = special_use.get(r"\Sent", "")
         records = source_records
     finally:
-        client.logout()
+        logout_mailbox(client)
     thread_digests = write_thread_context(out_dir, records_by_thread, sender_email, recipient_email)
     for record in records:
         write_private(out_dir / f"{record.uid}.txt", export_body(record))
@@ -1500,7 +1610,8 @@ def verified_existing_trash_records(
             records.append(record)
         return records
     finally:
-        select_mailbox(client, "INBOX", readonly=False)
+        if not getattr(client, "_omo_operation_timed_out", False):
+            select_mailbox(client, "INBOX", readonly=False)
 
 
 def cmd_trash_superseded(args: argparse.Namespace) -> int:
@@ -1640,7 +1751,7 @@ def cmd_trash_superseded(args: argparse.Namespace) -> int:
             print("refusing because a planned source left INBOX immediately before move", file=sys.stderr)
             return 1
         if still_in_inbox:
-            typ, _data = client.uid("MOVE", ",".join(still_in_inbox), imap_quoted(TRASH_MAILBOX))
+            typ, _data = imap_uid(client, "move-reviewed-sources-to-trash", "MOVE", ",".join(still_in_inbox), imap_quoted(TRASH_MAILBOX))
             if typ != "OK":
                 print(f"IMAP MOVE failed: {typ}", file=sys.stderr)
                 return 1
@@ -1662,7 +1773,7 @@ def cmd_trash_superseded(args: argparse.Namespace) -> int:
                 list(post_move.verified_records),
             )
     finally:
-        client.logout()
+        logout_mailbox(client)
     if not remaining and post_move.verified_message_count == len(requested) and post_move.complete and post_thread_unchanged:
         write_private_exclusive(source_dir / "outcomes" / f"{args.gmail_thrid}.tsv", outcome_evidence)
     print(
