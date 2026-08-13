@@ -56,7 +56,7 @@
   - an agent report is `origin=agent source=agent` only when its adjacent compact pointer has strict syntax, names a readable owner-only regular file in `/tmp/omo-agent-messages-$UID/`, matches the artifact tmux target, and has a valid `omo_report.sh` header and message SHA-256
   - exact manager generators from `omo_task_edit`, bidirectional blocking, and email-threshold infrastructure are `origin=agent source=manager`; other `(from manager ...)` text is human payload
   - verbose `[omo-message-source: ...]`, malformed compact pointers, unsafe files, mismatched headers or hashes, and manual/quoted lookalikes are not authenticated and remain human
-  - unmarked pending blocks are `origin=human source=manual` because prompts appended to `work_manager*.md` are human-origin unless explicitly marked otherwise
+  - unmarked pending blocks in ordinary Markdown are `origin=human source=manual`; unmarked blocks inside frontmatter task records are `origin=agent source=task` and use a manager-delegation envelope, because task prose is not evidence of a human source
   - human-origin refs routed to a manager require the manager acknowledgement flow; ordinary direct delivery sends no manager acknowledgement
   - manager-bound markers are reserved while an asynchronous send is active; failed sends back off for ten minutes, and later duplicate attempts wait until the manager is ready
   - `omo_report.sh` stores worker- and manager-produced reports on the resolved manager task; the watcher delivers an authenticated report on a manager task to that receiving task's `runat`, while compatibility reports on worker tasks route to their `managerat`
@@ -66,7 +66,7 @@
   - consumed-report receipts are timestamped, protected by a cross-process file lock, cached by file identity, bounded to 10,000 newest entries and 4 MiB reads, and expired/compacted after 90 days by default (`OMO_MANAGER_CONSUMED_REPORT_TTL_S` overrides the TTL)
   - a definite target or guard rejection before paste, including `not a Codex pane`, remains retryable and may safely escalate; an indeterminate result after submit is durably consumed and never automatically redelivered
   - delivery and cleanup are separate idempotent states: failed cleanup leaves a consumed report that later scans clear without delivery
-  - ordinary pending blocks in frontmatter task files route directly to `runat`; each delivery starts with `Immediately record every pending task with `omo_pending.py add`:` and wraps only the clean request, readable linked content, and retained source pointer in `<human_instruction>`
+  - ordinary pending blocks in validated frontmatter task files route directly to `runat` as `<manager_delegation>`; they never use the human add-task prompt or `<human_instruction>`
   - direct delivery does not include manager record/replace/remove instructions, relocates and clears the consumed `(pending)` only when its complete original block is unchanged, and sends no manager copy
   - if a resolved manager delivery target is unavailable and differs from `OMO_MANAGER_TMUX_TARGET`, the same manager-facing message is escalated to `OMO_MANAGER_TMUX_TARGET` with the failed target and error inline
   - `for manager` or `for a manager` at the beginning or end of active unquoted content routes to `managerat`; matching ignores case, surrounding punctuation, and edge whitespace, but changed internal spacing does not match

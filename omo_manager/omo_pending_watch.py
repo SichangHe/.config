@@ -1541,7 +1541,7 @@ def report_owner_binding(source_line: str, manager: Path) -> ReportOwnerBinding 
     return binding
 
 
-def marker_origin_source(block_lines: list[str]) -> tuple[str, str]:
+def marker_origin_source(block_lines: list[str], *, task_record: bool = False) -> tuple[str, str]:
     """Classify origin from authenticated, structurally adjacent metadata."""
 
     source_line = adjacent_source_metadata(block_lines)
@@ -1551,6 +1551,8 @@ def marker_origin_source(block_lines: list[str]) -> tuple[str, str]:
         return "agent", "agent"
     if source_line.startswith(EMAIL_SOURCE_PREFIXES):
         return "human", "email"
+    if task_record:
+        return "agent", "task"
     return "human", "manual"
 
 
@@ -2846,7 +2848,7 @@ def find_markers(root: Path, files: list[Path]) -> list[Marker]:
                     break
             block_lines = remove_ignored_pending_notes(lines[idx - 1 : end_idx])
             pending_tail = "\n".join(remove_ignored_pending_notes(lines[idx - 1 :]))
-            origin, source = marker_origin_source(block_lines)
+            origin, source = marker_origin_source(block_lines, task_record=read_task_metadata(path, root) is not None)
             digest = pending_tail_digest(rel, idx, pending_guard_text(lines, idx - 1))
             markers.append(
                 Marker(
@@ -3225,7 +3227,9 @@ def push_direct_ref(
     result = push_marker_delivery(
         args,
         marker,
-        manager_delegation_delivery_text(args, marker, attachments) if marker.source == "manager" else marker_direct_text(marker, attachments),
+        manager_delegation_delivery_text(args, marker, attachments)
+        if marker.origin == "agent"
+        else marker_direct_text(marker, attachments),
         target,
         DeliverySuccessEvent(
             seen_keys=(direct_key,),
@@ -3529,7 +3533,11 @@ def push_ref(args: Args, seen: dict[str, float], now_s: float, marker: Marker, a
             return 1
         if repeated_manager_delivery_is_busy(args, seen, error_key, manager_target, now_s):
             return 1
-        text = marker_delivery_text(marker, attachments)
+        text = (
+            manager_delegation_delivery_text(args, marker, attachments)
+            if marker.origin == "agent"
+            else marker_delivery_text(marker, attachments)
+        )
         status = push_marker_text_or_escalate(
             args,
             marker,
@@ -3542,7 +3550,11 @@ def push_ref(args: Args, seen: dict[str, float], now_s: float, marker: Marker, a
         if status == 0:
             remember_seen(seen, error_key, now_s)
         return status if status not in {0, 2} else 1
-    text = marker_delivery_text(marker, attachments)
+    text = (
+        manager_delegation_delivery_text(args, marker, attachments)
+        if marker.origin == "agent"
+        else marker_delivery_text(marker, attachments)
+    )
     if repeated_manager_delivery_is_busy(args, seen, marker_key, manager_target, now_s):
         return 1
     status = push_marker_text_or_escalate(

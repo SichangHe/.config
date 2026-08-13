@@ -469,6 +469,35 @@ class PendingMarkerTests(unittest.TestCase):
             with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
                 self.assertTrue(scan_once(args, {}, [path]))
             self.assertEqual("wl:1", calls[0][calls[0].index("--manager-target") + 1])
+            self.assertIn("<manager_delegation>", calls[0][1])
+            self.assertNotIn("<human_instruction>", calls[0][1])
+
+    def test_task_record_attachment_error_routes_as_manager_delegation(self) -> None:
+        from omo_manager.omo_pending_watch import scan_once
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "submanager.md"
+            path.write_text(
+                f"{task_frontmatter(runat='wl:2', managerat='wl:1', is_manager=True)}\n"
+                "(pending)\nfor manager\ndocs/missing.md\n",
+                encoding="utf-8",
+            )
+            calls: list[list[str]] = []
+
+            def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+                calls.append(capture_delivery_call(command))
+                return subprocess.CompletedProcess(command, 0)
+
+            args = Args(
+                root=root, manager_url="", state=root / "seen.tsv", interval_s=1.0, full_scan_interval_s=1.0, idle_status_interval_s=1800.0, status_script=Path("/bin/false"), once=True, dry_run=False, manager_target="main:0.0"
+            )
+            with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
+                self.assertFalse(scan_once(args, {}, [path]))
+            self.assertEqual("wl:1", calls[0][calls[0].index("--manager-target") + 1])
+            self.assertIn("<manager_delegation>", calls[0][1])
+            self.assertNotIn("<human_instruction>", calls[0][1])
+            self.assertNotIn("omo_record_pending.py", calls[0][1])
 
     def test_exact_for_a_manager_suffix_routes_manager_task_to_managerat(self) -> None:
         from omo_manager.omo_pending_watch import scan_once
@@ -533,7 +562,9 @@ class PendingMarkerTests(unittest.TestCase):
             with patch("omo_manager.omo_pending_watch.subprocess.run", side_effect=fake_run):
                 self.assertTrue(scan_once(args, {}, [path]))
             self.assertEqual("wl:1", calls[0][calls[0].index("--manager-target") + 1])
-            self.assertIn('<snippet file="docs/request.md:1-1">', calls[0][1])
+            self.assertIn("Please route this to the parent manager for manager", calls[0][1])
+            self.assertIn("<manager_delegation>", calls[0][1])
+            self.assertNotIn("<human_instruction>", calls[0][1])
 
     def test_linked_email_for_manager_routes_manager_task_to_managerat(self) -> None:
         from omo_manager.omo_pending_watch import scan_once
@@ -617,12 +648,80 @@ class PendingMarkerTests(unittest.TestCase):
 
             self.assertEqual(1, len(calls))
             self.assertEqual("wl:2", calls[0][calls[0].index("--manager-target") + 1])
-            self.assertEqual(
-                "Immediately record every pending task with `omo_pending.py add`:\n"
-                "<human_instruction>\nPlease discuss DM only literally.\n</human_instruction>",
-                calls[0][1],
-            )
+            self.assertIn("<manager_delegation>\nPlease discuss DM only literally.\n</manager_delegation>", calls[0][1])
+            self.assertNotIn("<human_instruction>", calls[0][1])
             self.assertNotIn("(pending)", path.read_text(encoding="utf-8"))
+
+    def test_unmarked_task_record_text_is_not_human_authority(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "worker.md"
+            task.write_text(
+                f"{task_frontmatter(runat='vl:2', managerat='vl:1')}\n"
+                "(pending)\nAgent-derived custody wording.\n",
+                encoding="utf-8",
+            )
+
+            marker = watcher.find_markers(root, [task])[0]
+
+            self.assertEqual(("agent", "task"), (marker.origin, marker.source))
+            delivered = watcher.marker_manager_delegation_text(marker, ())
+            self.assertIn("<manager_delegation>", delivered)
+            self.assertNotIn("<human_instruction>", delivered)
+
+    def test_unmarked_non_task_markdown_remains_manual_human_input(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = root / "work_manager_today.md"
+            manager.write_text("(pending)\nHuman prompt text.\n", encoding="utf-8")
+
+            marker = watcher.find_markers(root, [manager])[0]
+
+            self.assertEqual(("human", "manual"), (marker.origin, marker.source))
+
+    def test_unmarked_ordinary_yaml_frontmatter_remains_manual_human_input(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            document = root / "notes.md"
+            document.write_text("---\ntitle: Notes\n---\n(pending)\nHuman prompt text.\n", encoding="utf-8")
+
+            marker = watcher.find_markers(root, [document])[0]
+
+            self.assertEqual(("human", "manual"), (marker.origin, marker.source))
+
+    def test_unmarked_malformed_task_frontmatter_remains_manual_human_input(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            document = root / "broken.md"
+            document.write_text(
+                "---\nversion: v1.0.0\nstatus: running\nrunat: not-a-target\n---\n"
+                "(pending)\nHuman prompt text.\n",
+                encoding="utf-8",
+            )
+
+            marker = watcher.find_markers(root, [document])[0]
+
+            self.assertEqual(("human", "manual"), (marker.origin, marker.source))
+
+    def test_unmarked_unclosed_frontmatter_remains_manual_human_input(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            document = root / "unclosed.md"
+            document.write_text("---\ntitle: Notes\n(pending)\nHuman prompt text.\n", encoding="utf-8")
+
+            marker = watcher.find_markers(root, [document])[0]
+
+            self.assertEqual(("human", "manual"), (marker.origin, marker.source))
 
     def test_direct_message_escapes_human_instruction_markup(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -736,7 +835,7 @@ class PendingMarkerTests(unittest.TestCase):
 
             self.assertEqual(2, len(markers))
             self.assertEqual(("agent", "agent"), (marker.origin, marker.source))
-            self.assertEqual(("human", "manual"), (markers[1].origin, markers[1].source))
+            self.assertEqual(("agent", "task"), (markers[1].origin, markers[1].source))
             self.assertEqual([str(report)], [attachment.source for attachment in attachments])
             self.assertIn("worker report only", delivered)
             self.assertNotIn("manager_mail/13083.txt", delivered)
