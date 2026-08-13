@@ -1531,12 +1531,21 @@ def read_delivery_event(root: Path, pane: Pane, delivery_id: str) -> tuple[Path,
     return event_path, fields, event_text
 
 
-def record_recovery_evidence(root: Path, pane: Pane, output: Path | None, delivery_id: str) -> None:
+def record_recovery_evidence(
+    root: Path,
+    pane: Pane,
+    output: Path | None,
+    delivery_id: str,
+    task_file: str = "",
+    task: TaskBinding | None = None,
+) -> None:
     """Record a helper-produced, one-use receipt after a non-destructive probe."""
 
     root = root.expanduser().resolve()
     if output is None:
         raise StartError("--record-recovery-evidence requires --recovery-output.")
+    if task is None or not task_file:
+        raise StartError("recovery evidence requires an exact tracked task and pending-queue binding.")
     if pane.target.partition(":")[0].startswith("h"):
         raise StartError("same-pane recovery evidence cannot be recorded for a human-owned `h*` tmux session.")
     if pane.command in SHELL_COMMANDS or not pane.command:
@@ -1546,13 +1555,6 @@ def record_recovery_evidence(root: Path, pane: Pane, output: Path | None, delive
     try:
         output_path = output.expanduser().resolve()
         receipt_dir = root / RECOVERY_RECEIPT_DIRNAME
-        try:
-            receipt_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-            receipt_stat = receipt_dir.lstat()
-        except OSError as error:
-            raise StartError(f"recovery evidence directory cannot be prepared: {receipt_dir}: {error}") from error
-        if not stat.S_ISDIR(receipt_stat.st_mode) or receipt_stat.st_uid != os.getuid() or stat.S_IMODE(receipt_stat.st_mode) & 0o077:
-            raise StartError(f"recovery evidence directory is not a private helper directory: {receipt_dir}")
         if output_path.parent != receipt_dir:
             raise StartError(f"recovery evidence output must be directly under {receipt_dir}")
         if output_path.exists():
@@ -1571,8 +1573,7 @@ def record_recovery_evidence(root: Path, pane: Pane, output: Path | None, delive
     if output_path != expected_receipt:
         raise StartError(f"recovery evidence output must be the watcher-issued path {expected_receipt}")
     tail_sha256 = hashlib.sha256("\n".join(captured_lines).encode("utf-8")).hexdigest()
-    if event_fields["tail_sha256"] != tail_sha256:
-        raise StartError("failed delivery event status capture changed before receipt recording.")
+    queue_sha256 = hashlib.sha256("\0".join(task.pending_task_items).encode()).hexdigest()
     event_sha256 = hashlib.sha256(event_text.encode("utf-8")).hexdigest()
     receipt_fields = {
         "version": RECOVERY_RECEIPT_VERSION,
@@ -1591,9 +1592,22 @@ def record_recovery_evidence(root: Path, pane: Pane, output: Path | None, delive
         "source": "omo_pending_watch",
         "delivery_id": delivery_id,
         "observed_at": event_fields["observed_at"],
+        "original_tail_sha256": event_fields["tail_sha256"],
         "tail_sha256": tail_sha256,
+        "task_file": task_file,
+        "task_sha256": task.task_sha256,
+        "task_status": task.status,
+        "task_owner": task.managerat,
+        "pending_items_sha256": queue_sha256,
     }
     receipt_text = ";".join(f"{key}={value}" for key, value in receipt_fields.items()) + "\n"
+    try:
+        receipt_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        receipt_stat = receipt_dir.lstat()
+    except OSError as error:
+        raise StartError(f"recovery evidence directory cannot be prepared: {receipt_dir}: {error}") from error
+    if not stat.S_ISDIR(receipt_stat.st_mode) or receipt_stat.st_uid != os.getuid() or stat.S_IMODE(receipt_stat.st_mode) & 0o077:
+        raise StartError(f"recovery evidence directory is not a private helper directory: {receipt_dir}")
     write_private_recovery_file(output_path, receipt_text)
     receipt_stat = output_path.stat()
     issuance_fields = {
@@ -1744,7 +1758,13 @@ def retire_recovery_receipt(root: Path, evidence: str, *, require_manifest: bool
         raise StartError(f"verified recovery succeeded but its records could not be fully retired: {error}") from error
 
 
-def require_recovery_target(pane: Pane, evidence: str, root: Path | None = None) -> None:
+def require_recovery_target(
+    pane: Pane,
+    evidence: str,
+    root: Path | None = None,
+    task_file: str = "",
+    task: TaskBinding | None = None,
+) -> None:
     """Require a recent receipt and fresh status capture for a non-Codex pane."""
 
     if pane.target.partition(":")[0].startswith("h"):
@@ -1773,7 +1793,13 @@ def require_recovery_target(pane: Pane, evidence: str, root: Path | None = None)
         "source",
         "delivery_id",
         "observed_at",
+        "original_tail_sha256",
         "tail_sha256",
+        "task_file",
+        "task_sha256",
+        "task_status",
+        "task_owner",
+        "pending_items_sha256",
         "version",
         "producer",
         "event_id",
@@ -1800,6 +1826,17 @@ def require_recovery_target(pane: Pane, evidence: str, root: Path | None = None)
         or fields["source"] != "omo_pending_watch"
     ):
         raise StartError("recovery evidence receipt must prove a fresh not_codex result after failed delivery.")
+    if task is None or not task_file:
+        raise StartError("recovery requires an exact tracked task and pending-queue binding.")
+    queue_sha256 = hashlib.sha256("\0".join(task.pending_task_items).encode()).hexdigest()
+    if (
+        fields["task_file"] != task_file
+        or fields["task_sha256"] != task.task_sha256
+        or fields["task_status"] != task.status
+        or fields["task_owner"] != task.managerat
+        or fields["pending_items_sha256"] != queue_sha256
+    ):
+        raise StartError("recovery evidence receipt is not bound to the current task and immutable pending queue.")
     if DELIVERY_ID_RE.fullmatch(fields["delivery_id"]) is None or DELIVERY_ID_RE.fullmatch(fields["event_id"]) is None:
         raise StartError("recovery evidence receipt has an invalid event identity.")
     if SHA256_RE.fullmatch(fields["event_sha256"]) is None or SHA256_RE.fullmatch(fields["receipt_nonce"]) is None:
@@ -1829,7 +1866,7 @@ def require_recovery_target(pane: Pane, evidence: str, root: Path | None = None)
         "observed_at": fields["observed_at"],
         "receipt_file": fields["receipt_file"],
         "receipt_nonce": fields["receipt_nonce"],
-        "tail_sha256": fields["tail_sha256"],
+        "tail_sha256": fields["original_tail_sha256"],
         "error_sha256": event_fields.get("error_sha256", ""),
     }
     if set(event_fields) != set(expected_event_fields) or any(event_fields[key] != value for key, value in expected_event_fields.items() if key != "error_sha256"):
@@ -1864,8 +1901,8 @@ def require_recovery_target(pane: Pane, evidence: str, root: Path | None = None)
     age_s = (datetime.now(timezone.utc) - observed_at).total_seconds()
     if age_s < -30.0 or age_s > RECOVERY_EVIDENCE_MAX_AGE_S:
         raise StartError("recovery evidence receipt is stale or from the future.")
-    if SHA256_RE.fullmatch(fields["tail_sha256"]) is None:
-        raise StartError("recovery evidence receipt has an invalid tail_sha256.")
+    if SHA256_RE.fullmatch(fields["tail_sha256"]) is None or SHA256_RE.fullmatch(fields["original_tail_sha256"]) is None:
+        raise StartError("recovery evidence receipt has an invalid status snapshot digest.")
     captured, captured_lines = exact_tail(current.target, 80)
     if not captured:
         raise StartError(f"target {current.target} status capture failed; recovery is not safe.")
@@ -2213,14 +2250,21 @@ def start(args: Args) -> str:
         if args.restart_running or args.rotate_worker:
             require_restartable_codex(pane)
         if args.recover_non_codex:
-            require_recovery_target(pane, args.recovery_evidence, args.root)
+            require_recovery_target(pane, args.recovery_evidence, args.root, args.task_file, task_binding)
         if args.record_recovery_evidence:
             if args.dry_run:
                 print(f"target: {pane.target}")
                 print("mode: record-recovery-evidence")
                 print(f"output: {args.recovery_output}")
                 return "dry-run"
-            record_recovery_evidence(args.root, pane, args.recovery_output, args.failed_delivery_id)
+            record_recovery_evidence(
+                args.root,
+                pane,
+                args.recovery_output,
+                args.failed_delivery_id,
+                args.task_file,
+                task_binding,
+            )
             return "recovery-evidence-recorded"
         if args.recover_update_prompt:
             if args.dry_run:
@@ -2297,7 +2341,8 @@ def start(args: Args) -> str:
                 return "dry-run"
             if args.restart_running or args.rotate_worker or args.recover_non_codex:
                 if args.recover_non_codex:
-                    require_recovery_target(pane, args.recovery_evidence, args.root)
+                    verify_task_binding(args, pane, task_binding)
+                    require_recovery_target(pane, args.recovery_evidence, args.root, args.task_file, task_binding)
                     consume_recovery_receipt(args.root, args.recovery_evidence)
                 if args.restart_running:
                     verify_task_binding(args, pane, task_binding)

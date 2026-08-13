@@ -22,6 +22,7 @@ from omo_manager.omo_codex_start import (
     RECOVERY_EVENT_DIRNAME,
     RECOVERY_RECEIPT_DIRNAME,
     StartError,
+    TaskBinding,
     choose_resume_cwd_prompt,
     current_todo_entries,
     consume_recovery_receipt,
@@ -60,6 +61,18 @@ from omo_manager.omo_pending_watch import PrePasteRejected, try_send_delivery_te
 
 class CodexStartTests(unittest.TestCase):
     SESSION_ID = "019f670b-6a2f-7463-b9be-9aa6ff0cec43"
+
+    def recovery_task(self, pane: Pane) -> TaskBinding:
+        return TaskBinding(
+            False,
+            "codex",
+            "blocked",
+            pane.target,
+            "cfg:1",
+            ("preserve exact queue",),
+            "model capacity",
+            hashlib.sha256(b"task bytes").hexdigest(),
+        )
 
     def args(self, root: Path, **changes: object) -> Args:
         values: dict[str, object] = {
@@ -223,6 +236,11 @@ class CodexStartTests(unittest.TestCase):
         return source
 
     def write_recovery_receipt(self, root: Path, pane: Pane, lines: list[str], *, observed_at: datetime | None = None, digest_lines: list[str] | None = None) -> Path:
+        if (root / "worker.md").is_file():
+            with patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane):
+                task = validate_task(self.args(root), pane)
+        else:
+            task = self.recovery_task(pane)
         event_number = len(list((root / RECOVERY_EVENT_DIRNAME).glob("*.event"))) + 1
         event_id = f"11111111-1111-4111-8111-{event_number:012d}"
         identity = subprocess.CompletedProcess([], 0, f"{pane.target}\t{pane.pane_id}\t{pane.window_id}\n", "")
@@ -231,7 +249,7 @@ class CodexStartTests(unittest.TestCase):
         receipt_dir = root / RECOVERY_RECEIPT_DIRNAME
         receipt = receipt_dir / f"{event_id}.receipt"
         with patch("omo_manager.omo_codex_start.exact_tail", return_value=(True, lines)), patch("omo_manager.omo_codex_start.verify_same_pane"):
-            record_recovery_evidence(root, pane, receipt, event_id)
+            record_recovery_evidence(root, pane, receipt, event_id, "worker.md", task)
         if observed_at is not None:
             text = receipt.read_text(encoding="utf-8")
             fields = dict(item.split("=", 1) for item in text.strip().split(";"))
@@ -251,14 +269,6 @@ class CodexStartTests(unittest.TestCase):
             fields = dict(item.split("=", 1) for item in text.strip().split(";"))
             digest = hashlib.sha256("\n".join(digest_lines).encode("utf-8")).hexdigest()
             fields["tail_sha256"] = digest
-            event_path = root / fields["event_file"]
-            event_text = event_path.read_text(encoding="utf-8")
-            event_fields = dict(item.split("=", 1) for item in event_text.strip().split(";"))
-            event_fields["tail_sha256"] = digest
-            updated_event = ";".join(f"{key}={value}" for key, value in event_fields.items()) + "\n"
-            event_path.write_text(updated_event, encoding="utf-8")
-            event_path.chmod(0o600)
-            fields["event_sha256"] = hashlib.sha256(updated_event.encode("utf-8")).hexdigest()
             receipt.write_text(";".join(f"{key}={value}" for key, value in fields.items()) + "\n", encoding="utf-8")
             receipt.chmod(0o600)
         issuance = recovery_issuance_path(receipt)
@@ -1866,10 +1876,71 @@ class CodexStartTests(unittest.TestCase):
             pane = Pane("cfg:2.0", "%2", "@2", "bunx", root)
             receipt = self.write_recovery_receipt(root, pane, ["delivery failed"])
             with patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane), patch("omo_manager.omo_codex_start.exact_tail", return_value=(True, ["delivery failed"])):
-                require_recovery_target(pane, str(receipt), root)
+                require_recovery_target(pane, str(receipt), root, "worker.md", self.recovery_task(pane))
                 consume_recovery_receipt(root, str(receipt))
                 with self.assertRaisesRegex(StartError, "already consumed"):
-                    require_recovery_target(pane, str(receipt), root)
+                    require_recovery_target(pane, str(receipt), root, "worker.md", self.recovery_task(pane))
+
+    def test_recovery_receipt_accepts_stable_later_not_codex_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            pane = Pane("cfg:2.0", "%2", "@2", "bunx", root)
+            original = ["malformed agent output", "first failure"]
+            later = ["malformed agent output", "first failure", "stable fatal detail"]
+            event_id = "11111111-1111-4111-8111-222222222222"
+            identity = subprocess.CompletedProcess([], 0, f"{pane.target}\t{pane.pane_id}\t{pane.window_id}\n", "")
+            with patch("omo_manager.omo_pending_watch.subprocess.run", return_value=identity), patch(
+                "omo_manager.omo_pending_watch.exact_codex_tail", return_value=(True, original)
+            ):
+                self.assertIsNotNone(record_terminal_delivery_failure(root, pane.target, event_id, "status=not_codex"))
+            receipt = root / RECOVERY_RECEIPT_DIRNAME / f"{event_id}.receipt"
+            task = self.recovery_task(pane)
+            with patch("omo_manager.omo_codex_start.exact_tail", return_value=(True, later)), patch(
+                "omo_manager.omo_codex_start.verify_same_pane"
+            ):
+                record_recovery_evidence(root, pane, receipt, event_id, "worker.md", task)
+            fields = dict(item.split("=", 1) for item in receipt.read_text(encoding="utf-8").strip().split(";"))
+            self.assertEqual(hashlib.sha256("\n".join(original).encode()).hexdigest(), fields["original_tail_sha256"])
+            self.assertEqual(hashlib.sha256("\n".join(later).encode()).hexdigest(), fields["tail_sha256"])
+            with patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane), patch(
+                "omo_manager.omo_codex_start.exact_tail", return_value=(True, later)
+            ):
+                require_recovery_target(pane, str(receipt), root, "worker.md", task)
+
+    def test_record_recovery_evidence_rejects_before_creating_receipt_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            pane = Pane("cfg:2.0", "%2", "@2", "bunx", root)
+            receipt = root / RECOVERY_RECEIPT_DIRNAME / "missing-event.receipt"
+            with self.assertRaisesRegex(StartError, "tracked task"):
+                record_recovery_evidence(root, pane, receipt, "missing-event")
+            self.assertFalse((root / RECOVERY_RECEIPT_DIRNAME).exists())
+            with patch("omo_manager.omo_codex_start.exact_tail", return_value=(True, ["fatal output"])), patch(
+                "omo_manager.omo_codex_start.verify_same_pane"
+            ):
+                with self.assertRaisesRegex(StartError, "not readable"):
+                    record_recovery_evidence(root, pane, receipt, "missing-event", "worker.md", self.recovery_task(pane))
+            self.assertFalse((root / RECOVERY_RECEIPT_DIRNAME).exists())
+
+    def test_recovery_receipt_rejects_queue_drift_and_recovered_codex(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            pane = Pane("cfg:2.0", "%2", "@2", "bunx", root)
+            lines = ["malformed agent output", "stable fatal detail"]
+            receipt = self.write_recovery_receipt(root, pane, lines)
+            drifted = replace(self.recovery_task(pane), pending_task_items=("different queue",))
+            with patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane), patch(
+                "omo_manager.omo_codex_start.exact_tail"
+            ) as capture:
+                with self.assertRaisesRegex(StartError, "immutable pending queue"):
+                    require_recovery_target(pane, str(receipt), root, "worker.md", drifted)
+            capture.assert_not_called()
+            running = ["• Working (1s • esc to interrupt)", "  gpt-5.6"]
+            with patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane), patch(
+                "omo_manager.omo_codex_start.exact_tail", return_value=(True, running)
+            ):
+                with self.assertRaisesRegex(StartError, "fresh not_codex"):
+                    require_recovery_target(pane, str(receipt), root, "worker.md", self.recovery_task(pane))
 
     def test_verified_recovery_retirement_removes_complete_transaction_idempotently(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
@@ -2160,7 +2231,7 @@ class CodexStartTests(unittest.TestCase):
             self.assertIsNotNone(event)
             receipt = receipt_dir / f"{event_id}.receipt"
             with patch("omo_manager.omo_codex_start.exact_tail", return_value=(True, ["delivery failed"])), patch("omo_manager.omo_codex_start.verify_same_pane"):
-                record_recovery_evidence(root, pane, receipt, event_id)
+                record_recovery_evidence(root, pane, receipt, event_id, "worker.md", self.recovery_task(pane))
             self.assertTrue(receipt.is_file())
             self.assertEqual(0, stat.S_IMODE(event_dir.stat().st_mode) & 0o077)
             self.assertEqual(0, stat.S_IMODE(receipt_dir.stat().st_mode) & 0o077)
@@ -2261,7 +2332,7 @@ class CodexStartTests(unittest.TestCase):
             receipt.chmod(0o600)
             with patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane), patch("omo_manager.omo_codex_start.exact_tail") as capture:
                 with self.assertRaisesRegex(StartError, "event record changed|not bound"):
-                    require_recovery_target(pane, str(receipt), root)
+                    require_recovery_target(pane, str(receipt), root, "worker.md", self.recovery_task(pane))
             capture.assert_not_called()
 
     def test_recovery_rejects_copied_receipt_outside_helper_directory(self) -> None:
@@ -2274,7 +2345,7 @@ class CodexStartTests(unittest.TestCase):
             copied.chmod(0o600)
             with patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane), patch("omo_manager.omo_codex_start.exact_tail") as capture:
                 with self.assertRaisesRegex(StartError, "directly under the helper receipt directory"):
-                    require_recovery_target(pane, str(copied), root)
+                    require_recovery_target(pane, str(copied), root, "worker.md", self.recovery_task(pane))
             capture.assert_not_called()
 
     def test_recovery_rejects_handwritten_same_dir_receipt_without_issuance(self) -> None:
@@ -2289,7 +2360,7 @@ class CodexStartTests(unittest.TestCase):
             forged.chmod(0o600)
             with patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane), patch("omo_manager.omo_codex_start.exact_tail") as capture:
                 with self.assertRaisesRegex(StartError, "watcher-issued path|bind this pane"):
-                    require_recovery_target(pane, str(forged), root)
+                    require_recovery_target(pane, str(forged), root, "worker.md", self.recovery_task(pane))
             capture.assert_not_called()
 
     def test_recovery_rejects_handwritten_canonical_receipt_without_issuance(self) -> None:
@@ -2301,7 +2372,7 @@ class CodexStartTests(unittest.TestCase):
             issuance.unlink()
             with patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane), patch("omo_manager.omo_codex_start.exact_tail") as capture:
                 with self.assertRaisesRegex(StartError, "readable|issuance"):
-                    require_recovery_target(pane, str(receipt), root)
+                    require_recovery_target(pane, str(receipt), root, "worker.md", self.recovery_task(pane))
             capture.assert_not_called()
 
     def test_recovery_rejects_mismatched_issuance_sidecar(self) -> None:
@@ -2316,7 +2387,7 @@ class CodexStartTests(unittest.TestCase):
             issuance.chmod(0o600)
             with patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane), patch("omo_manager.omo_codex_start.exact_tail") as capture:
                 with self.assertRaisesRegex(StartError, "immutable issuance"):
-                    require_recovery_target(pane, str(receipt), root)
+                    require_recovery_target(pane, str(receipt), root, "worker.md", self.recovery_task(pane))
             capture.assert_not_called()
 
     def test_watcher_event_producer_refuses_symlinked_event_directory(self) -> None:
@@ -2340,31 +2411,31 @@ class CodexStartTests(unittest.TestCase):
             receipt = self.write_recovery_receipt(root, pane, ["delivery failed"], digest_lines=running_lines)
             with patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane), patch("omo_manager.omo_codex_start.exact_tail", return_value=(True, running_lines)):
                 with self.assertRaisesRegex(StartError, "fresh not_codex"):
-                    require_recovery_target(pane, str(receipt))
+                    require_recovery_target(pane, str(receipt), task_file="worker.md", task=self.recovery_task(pane))
             shell = Pane("cfg:2.0", "%2", "@2", "zsh", root)
             with patch("omo_manager.omo_codex_start.resolve_pane", return_value=shell), patch("omo_manager.omo_codex_start.exact_tail") as capture:
                 with self.assertRaisesRegex(StartError, "not a verified non-Codex"):
-                    require_recovery_target(shell, str(receipt))
+                    require_recovery_target(shell, str(receipt), task_file="worker.md", task=self.recovery_task(pane))
             capture.assert_not_called()
             with patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane), patch("omo_manager.omo_codex_start.exact_tail", return_value=(True, [])):
                 with self.assertRaisesRegex(StartError, "empty status capture"):
-                    require_recovery_target(pane, str(receipt))
+                    require_recovery_target(pane, str(receipt), task_file="worker.md", task=self.recovery_task(pane))
             with patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane), patch("omo_manager.omo_codex_start.exact_tail", return_value=(False, [])):
                 with self.assertRaisesRegex(StartError, "capture failed"):
-                    require_recovery_target(pane, str(receipt))
+                    require_recovery_target(pane, str(receipt), task_file="worker.md", task=self.recovery_task(pane))
             stale = self.write_recovery_receipt(root, pane, ["delivery failed"], observed_at=datetime.now(timezone.utc).replace(year=2020))
             with patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane), patch("omo_manager.omo_codex_start.exact_tail") as capture:
                 with self.assertRaisesRegex(StartError, "stale"):
-                    require_recovery_target(pane, str(stale))
+                    require_recovery_target(pane, str(stale), task_file="worker.md", task=self.recovery_task(pane))
             capture.assert_not_called()
             mismatched_digest = self.write_recovery_receipt(root, pane, ["delivery failed"], digest_lines=["different output"])
             with patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane), patch("omo_manager.omo_codex_start.exact_tail", return_value=(True, ["delivery failed"])):
                 with self.assertRaisesRegex(StartError, "status capture changed"):
-                    require_recovery_target(pane, str(mismatched_digest))
+                    require_recovery_target(pane, str(mismatched_digest), task_file="worker.md", task=self.recovery_task(pane))
             changed = Pane("cfg:2.0", "%9", "@9", "bunx", root)
             with patch("omo_manager.omo_codex_start.resolve_pane", return_value=changed), patch("omo_manager.omo_codex_start.exact_tail") as capture:
                 with self.assertRaisesRegex(StartError, "identity changed"):
-                    require_recovery_target(pane, str(receipt))
+                    require_recovery_target(pane, str(receipt), task_file="worker.md", task=self.recovery_task(pane))
             capture.assert_not_called()
 
     def test_restart_command_execs_resumed_session(self) -> None:
@@ -2481,6 +2552,31 @@ class CodexStartTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(StartError, "no longer has fresh not_codex"):
                     start(args)
+            respawn.assert_not_called()
+
+    def test_recovery_refuses_task_queue_drift_at_respawn_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root)
+            prompt = root / "recovery-prompt.md"
+            prompt.write_text("Continue the recorded task.\n", encoding="utf-8")
+            pane = Pane("cfg:2.0", "%2", "@2", "bunx", root)
+            receipt = self.write_recovery_receipt(root, pane, ["delivery failed"])
+            args = self.args(root, session_id="", prompt_file=prompt, recover_non_codex=True, recovery_evidence=str(receipt))
+
+            def capture_with_task_drift(_target: str, _lines: int) -> tuple[bool, list[str]]:
+                self.write_task(root, pending=["different queue"])
+                return True, ["delivery failed"]
+
+            with (
+                patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                patch("omo_manager.omo_codex_start.exact_tail", side_effect=capture_with_task_drift),
+                patch("omo_manager.omo_codex_start.consume_recovery_receipt") as consume,
+                patch("omo_manager.omo_codex_start.respawn_codex") as respawn,
+            ):
+                with self.assertRaisesRegex(StartError, "task or pending queue"):
+                    start(args)
+            consume.assert_not_called()
             respawn.assert_not_called()
 
     def test_restart_does_not_replace_process_when_session_capture_fails(self) -> None:
