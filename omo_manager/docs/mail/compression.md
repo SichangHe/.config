@@ -11,6 +11,8 @@ Helper: `~/.config/omo_manager/omo_manager_mail_compress.py`
 - later arrivals are outside the run: never classify or move them, never add them to a batch, and never rerun discovery because of them
 - missing, duplicate, conflicting, or incomplete identity or context evidence blocks export without mutation
 - every IMAP operation has an absolute deadline; timeout diagnostics name the failed stage, abort the connection, do not retry a timed-out fetch, and leave no manifest
+- export always fsyncs one owner-private hidden terminal receipt beside the attempted run directory before returning or raising; it binds the directory by path digest, records a sanitized exact exit category and stage, contains no mail or proof content, grants no run authority, and blocks same-directory discovery retry
+- only a complete `manifest.tsv` inside the run directory makes the fixed-start set authoritative; an empty or partial directory and its sibling terminal receipt do not
 - keep exported bodies, identities, and evidence private; use `OMO_HUMAN_EMAIL_CONFIG_PATH`
 
 ## classify and cross-review

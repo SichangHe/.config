@@ -10,4 +10,4 @@ Watcher logs live under `~/.local/state/omo-manager/` by default: `pending-watch
 
 `omo_manager_quiet_check.sh` runs unittest under the same uv project when available. Direct `#!/usr/bin/env python3` helper execution remains supported for existing callers.
 
-`omo_manager_mail_compress.py` also supports deployed Python 3.10.12. Its focused regression explicitly uses `/usr/bin/python3.10` to compile and import the helper and exercise the bounded IMAP operation path without connecting to a mailbox.
+`omo_manager_mail_compress.py` also supports deployed Python 3.10.12. Its focused regression explicitly uses `/usr/bin/python3.10` to compile and import the helper and exercise the bounded IMAP operation and durable export-receipt paths without connecting to a mailbox.

@@ -731,6 +731,61 @@ def write_private_exclusive(path: Path, text: str) -> None:
         os.fsync(handle.fileno())
 
 
+def fsync_dir(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def export_receipt_path(out_dir: Path) -> Path:
+    out_dir = out_dir.resolve(strict=False)
+    return out_dir.parent / f".{out_dir.name}.export-terminal.tsv"
+
+
+def export_receipt_text(out_dir: Path, category: str, stage: str, error: str) -> str:
+    run_dir_sha256 = hashlib.sha256(str(out_dir.resolve(strict=False)).encode()).hexdigest()
+    return (
+        "version\trun_dir_sha256\texit_category\tstage\terror\tauthority\n"
+        f"1\t{run_dir_sha256}\t{tsv_value(category)}\t{tsv_value(stage)}\t{tsv_value(error)}\tnone\n"
+    )
+
+
+def export_failure_diagnostics(exc: BaseException, export_stage: str) -> tuple[str, str, str]:
+    if isinstance(exc, ImapOperationError):
+        stage = re.sub(r"\bmailbox=.*", "mailbox=<redacted>", exc.stage)
+        stage = re.sub(r"\b(uid|thread|message)=[^ ]+", r"\1=<redacted>", stage)
+        if "timed out" in str(exc):
+            return "imap-timeout", stage, "deadline-expired"
+        return "imap-failure", stage, "operation-failed"
+    if isinstance(exc, (OSError, RuntimeError, imaplib.IMAP4.error)):
+        return "export-failure", export_stage, type(exc).__name__
+    return "unexpected-exception", export_stage, type(exc).__name__
+
+
+def write_export_receipt(out_dir: Path, category: str, stage: str, error: str) -> None:
+    receipt_path = export_receipt_path(out_dir)
+    try:
+        fd = os.open(receipt_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError as exc:
+        raise RuntimeError(f"private evidence already exists: {receipt_path.name}") from exc
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(export_receipt_text(out_dir, category, stage, error))
+            handle.flush()
+            os.fsync(handle.fileno())
+        fsync_dir(receipt_path.parent)
+    except BaseException as exc:
+        fd = os.open(receipt_path, os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(export_receipt_text(out_dir, "receipt-failure", "terminal-receipt", type(exc).__name__))
+            handle.flush()
+            os.fsync(handle.fileno())
+        fsync_dir(receipt_path.parent)
+        raise
+
+
 def ensure_empty_private_dir(path: Path) -> None:
     if path.exists() and any(path.iterdir()):
         raise RuntimeError(f"export directory must be empty: {path}")
@@ -1488,14 +1543,18 @@ def replacement_exists(
             select_mailbox(client, "INBOX", readonly=False)
 
 
-def cmd_export(args: argparse.Namespace) -> int:
+def run_export(args: argparse.Namespace, set_stage: Callable[[str], None]) -> int:
     out_dir = args.out_dir
+    set_stage("prepare-output")
     ensure_empty_private_dir(out_dir)
+    set_stage("open-readonly-mailbox")
     client, config = open_mailbox(readonly=True)
     try:
+        set_stage("freeze-candidates")
         sender_email, recipient_email = mail_boundary(config)
         header_records, skipped = accepted_manager_headers(client, manager_candidate_uids(client, sender_email), sender_email, recipient_email)
         uidvalidity = selected_uidvalidity(client)
+        set_stage("fetch-fixed-start-sources")
         source_records = [
             replace(record, source_uidvalidity=uidvalidity)
             for record in fetch_records(
@@ -1506,17 +1565,20 @@ def cmd_export(args: argparse.Namespace) -> int:
                 n_fetch_attempts=EXPORT_FULL_FETCH_ATTEMPTS,
             )
         ]
+        set_stage("fetch-thread-context")
         special_use, records_by_thread = fetch_imap_thread_contexts(client, source_records)
         all_mailbox = special_use.get(r"\All", "")
         sent_mailbox = special_use.get(r"\Sent", "")
         records = source_records
     finally:
         logout_mailbox(client)
+    set_stage("persist-thread-context")
     thread_digests = write_thread_context(out_dir, records_by_thread, sender_email, recipient_email)
+    set_stage("persist-source-records")
     for record in records:
         write_private(out_dir / f"{record.uid}.txt", export_body(record))
+    set_stage("persist-run-evidence")
     write_private(out_dir / "mailboxes.tsv", f"role\tmailbox\nINBOX\tINBOX\n\\All\t{tsv_value(all_mailbox)}\n\\Sent\t{tsv_value(sent_mailbox)}\n")
-    write_private(out_dir / "manifest.tsv", export_manifest(records, thread_digests))
     write_private(out_dir / "batches.tsv", export_batches(records, args.threads_per_batch))
     write_private(
         out_dir / "run.tsv",
@@ -1527,9 +1589,34 @@ def cmd_export(args: argparse.Namespace) -> int:
     write_private_dir(out_dir / "intents")
     write_private_dir(out_dir / "outcomes")
     write_private_dir(out_dir / "recoveries")
+    set_stage("publish-manifest")
+    write_private(out_dir / "manifest.tsv", export_manifest(records, thread_digests))
+    set_stage("report-success")
     suffix = f" skipped_boundary_mismatch={len(skipped)}" if skipped else ""
     print(f"exported={len(records)}{suffix} out_dir={out_dir}")
     return 0
+
+
+def cmd_export(args: argparse.Namespace) -> int:
+    out_dir = args.out_dir.resolve(strict=False)
+    args.out_dir = out_dir
+    receipt_path = export_receipt_path(out_dir)
+    if os.path.lexists(receipt_path):
+        raise RuntimeError(f"terminal export receipt already exists: {receipt_path.name}")
+    export_stage = "start"
+
+    def set_stage(stage: str) -> None:
+        nonlocal export_stage
+        export_stage = stage
+
+    try:
+        result = run_export(args, set_stage)
+    except BaseException as exc:
+        category, stage, error = export_failure_diagnostics(exc, export_stage)
+        write_export_receipt(out_dir, category, stage, error)
+        raise
+    write_export_receipt(out_dir, "success", "complete", "none")
+    return result
 
 
 def cmd_mark_seen(args: argparse.Namespace) -> int:

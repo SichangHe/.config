@@ -16,6 +16,7 @@ from omo_manager.omo_manager_mail_compress import (
     FULL_FETCH,
     GMAIL_METADATA_FETCH,
     HEADER_FETCH,
+    ImapOperationError,
     MailRecord,
     accepted_manager_headers,
     claim_batch,
@@ -29,6 +30,8 @@ from omo_manager.omo_manager_mail_compress import (
     cmd_verify_run,
     connect_mailbox,
     ensure_empty_private_dir,
+    export_receipt_path,
+    export_failure_diagnostics,
     export_body,
     export_batches,
     fetch_msg_bytes,
@@ -51,6 +54,7 @@ from omo_manager.omo_manager_mail_compress import (
     tsv_value,
     verify_post_move_imap,
     verified_existing_trash_records,
+    write_export_receipt,
     write_private,
 )
 
@@ -147,11 +151,13 @@ import os
 import socket
 import sys
 import threading
+import tempfile
 from unittest.mock import patch
 
 py_compile.compile(os.environ["HELPER"], doraise=True)
 assert sys.version_info[:3] == (3, 10, 12), sys.version
-from omo_manager.omo_manager_mail_compress import ImapOperationError, imap_operation
+from pathlib import Path
+from omo_manager.omo_manager_mail_compress import ImapOperationError, export_receipt_path, imap_operation, write_export_receipt
 
 class Socket:
     def __init__(self):
@@ -180,6 +186,13 @@ with patch("omo_manager.omo_manager_mail_compress.IMAP_OPERATION_TIMEOUT_S", 0.0
         raise AssertionError("bounded operation did not time out")
 release.set()
 assert client.sock.closed.is_set()
+with tempfile.TemporaryDirectory() as tmp:
+    out_dir = Path(tmp) / "run"
+    write_export_receipt(out_dir, "success", "complete", "none")
+    receipt = export_receipt_path(out_dir)
+    assert receipt.is_file()
+    assert receipt.stat().st_mode & 0o777 == 0o600
+    assert "\\tsuccess\\tcomplete\\tnone\\tnone\\n" in receipt.read_text()
 """
         env = os.environ.copy()
         env["HELPER"] = str(helper)
@@ -198,6 +211,13 @@ assert client.sock.closed.is_set()
         result = subprocess.run([helper, "--help"], capture_output=True, text=True, check=False)
         self.assertEqual(0, result.returncode, result.stderr)
 
+    def test_export_timeout_diagnostics_redact_complete_mailbox_name(self) -> None:
+        exc = ImapOperationError("select mailbox=Projects Alice Secret", "IMAP operation timed out")
+        self.assertEqual(
+            ("imap-timeout", "select mailbox=<redacted>", "deadline-expired"),
+            export_failure_diagnostics(exc, "freeze-candidates"),
+        )
+
     @staticmethod
     def raw_message(subject: str, body: str = "body") -> bytes:
         return (f"From: Agent <agent@example.test>\r\nTo: Human <human@example.test>\r\nSubject: {subject}\r\nMessage-ID: <one@example.test>\r\n\r\n{body}\r\n").encode()
@@ -213,6 +233,10 @@ assert client.sock.closed.is_set()
             b'(\\HasNoChildren \\Sent) "/" "[Gmail]/Sent Mail"',
             b'(\\HasNoChildren) "/" "[Gmail]/Trash"',
         ]
+
+    @staticmethod
+    def export_receipt(out_dir: Path) -> str:
+        return export_receipt_path(out_dir).read_text(encoding="utf-8")
 
     @staticmethod
     def write_source_map(parent: Path, record: MailRecord, context_records: list[MailRecord] | None = None) -> Path:
@@ -701,17 +725,21 @@ assert client.sock.closed.is_set()
             patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {"user": "human@example.test"})),
             patch("omo_manager.omo_manager_mail_compress.configured_agent_mail", return_value=Settings()),
         ):
-            self.assertEqual(0, cmd_export(ExportArgs(Path(tmp) / "export")))
-            manifest = (Path(tmp) / "export" / "manifest.tsv").read_text(encoding="utf-8")
-            mailboxes = (Path(tmp) / "export" / "mailboxes.tsv").read_text(encoding="utf-8")
+            out_dir = Path(tmp) / "export"
+            self.assertEqual(0, cmd_export(ExportArgs(out_dir)))
+            manifest = (out_dir / "manifest.tsv").read_text(encoding="utf-8")
+            mailboxes = (out_dir / "mailboxes.tsv").read_text(encoding="utf-8")
             self.assertIn("gmail_thrid", manifest)
             self.assertIn("\t200\t", manifest)
             self.assertIn("[Gmail]/All Mail", mailboxes)
-            self.assertIn("fixed_start_utc", (Path(tmp) / "export" / "run.tsv").read_text(encoding="utf-8"))
-            self.assertIn("batch-0001\t200\t7", (Path(tmp) / "export" / "batches.tsv").read_text(encoding="utf-8"))
-            self.assertTrue((Path(tmp) / "export" / "threads" / "200-100.txt").exists())
-            self.assertIn("From: Other <other@example.test>", (Path(tmp) / "export" / "threads" / "200-101.txt").read_text(encoding="utf-8"))
-            self.assertIn("To: Human <human@example.test>", (Path(tmp) / "export" / "threads" / "200-101.txt").read_text(encoding="utf-8"))
+            self.assertIn("fixed_start_utc", (out_dir / "run.tsv").read_text(encoding="utf-8"))
+            self.assertIn("batch-0001\t200\t7", (out_dir / "batches.tsv").read_text(encoding="utf-8"))
+            self.assertTrue((out_dir / "threads" / "200-100.txt").exists())
+            self.assertIn("From: Other <other@example.test>", (out_dir / "threads" / "200-101.txt").read_text(encoding="utf-8"))
+            self.assertIn("To: Human <human@example.test>", (out_dir / "threads" / "200-101.txt").read_text(encoding="utf-8"))
+            receipt = self.export_receipt(out_dir)
+            self.assertIn("\tsuccess\tcomplete\tnone\tnone\n", receipt)
+            self.assertNotIn(str(out_dir), receipt)
             self.assertIn(('"[Gmail]/All Mail"', True), client.select_calls)
 
     def test_export_retries_missing_full_fetch_for_only_the_frozen_uid(self) -> None:
@@ -772,6 +800,9 @@ assert client.sock.closed.is_set()
             with self.assertRaisesRegex(RuntimeError, "no usable record: uid=7"):
                 cmd_export(ExportArgs(out_dir))
             self.assertFalse((out_dir / "manifest.tsv").exists())
+            receipt = self.export_receipt(out_dir)
+            self.assertIn("\texport-failure\tfetch-fixed-start-sources\tRuntimeError\tnone\n", receipt)
+            self.assertNotIn("uid=7", receipt)
         self.assertEqual(1, client.uid_calls.count(("search", None, "ALL")))
         self.assertEqual(2, client.uid_calls.count(("fetch", "7", FULL_FETCH)))
         self.assertFalse(any(call[0].casefold() in {"copy", "move", "store", "expunge"} for call in client.uid_calls))
@@ -825,8 +856,135 @@ assert client.sock.closed.is_set()
                 cmd_export(ExportArgs(out_dir))
             client.release.set()
             self.assertFalse((out_dir / "manifest.tsv").exists())
+            receipt = self.export_receipt(out_dir)
+            self.assertIn("\timap-timeout\tmessage-fetch uid=<redacted>\tdeadline-expired\tnone\n", receipt)
+            self.assertNotIn("uid=7", receipt)
             self.assertEqual(1, client.uid_calls.count(("fetch", "7", FULL_FETCH)))
             self.assertFalse(any(call[0].casefold() in {"copy", "move", "store", "expunge"} for call in client.uid_calls))
+
+    def test_export_terminal_receipt_blocks_discovery_retry_after_partial_unexpected_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp) / "export"
+
+            def partial(_args: ExportArgs, set_stage: object) -> int:
+                del set_stage
+                ensure_empty_private_dir(out_dir)
+                write_private(out_dir / "partial.txt", "private proof must not escape\n")
+                raise ValueError("message body credential secret@example.test")
+
+            with patch("omo_manager.omo_manager_mail_compress.run_export", side_effect=partial):
+                with self.assertRaisesRegex(ValueError, "message body"):
+                    cmd_export(ExportArgs(out_dir))
+            receipt = self.export_receipt(out_dir)
+            self.assertIn("\tunexpected-exception\tstart\tValueError\tnone\n", receipt)
+            self.assertNotIn("private proof", receipt)
+            self.assertNotIn("secret@example.test", receipt)
+            self.assertFalse((out_dir / "manifest.tsv").exists())
+            with patch("omo_manager.omo_manager_mail_compress.open_mailbox") as open_mailbox_mock:
+                with self.assertRaisesRegex(RuntimeError, "terminal export receipt already exists"):
+                    cmd_export(ExportArgs(out_dir))
+            open_mailbox_mock.assert_not_called()
+
+    def test_export_terminal_receipt_does_not_authorize_empty_failed_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp) / "export"
+            with patch("omo_manager.omo_manager_mail_compress.run_export", side_effect=ValueError("secret body")):
+                with self.assertRaisesRegex(ValueError, "secret body"):
+                    cmd_export(ExportArgs(out_dir))
+            self.assertFalse(out_dir.exists())
+            self.assertFalse((out_dir / "manifest.tsv").exists())
+            receipt = self.export_receipt(out_dir)
+            self.assertIn("\tunexpected-exception\tstart\tValueError\tnone\n", receipt)
+            self.assertNotIn("secret body", receipt)
+
+    def test_export_terminal_receipt_is_private_and_fsyncs_file_and_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp) / "export"
+            fsync = os.fsync
+            fsynced: list[Path] = []
+
+            def observe(fd: int) -> None:
+                fsynced.append(Path(os.readlink(f"/proc/self/fd/{fd}")))
+                fsync(fd)
+
+            with (
+                patch("omo_manager.omo_manager_mail_compress.run_export", return_value=0),
+                patch("omo_manager.omo_manager_mail_compress.os.fsync", side_effect=observe),
+            ):
+                self.assertEqual(0, cmd_export(ExportArgs(out_dir)))
+            receipt_path = export_receipt_path(out_dir)
+            self.assertEqual(0o600, receipt_path.stat().st_mode & 0o777)
+            self.assertEqual([receipt_path, receipt_path.parent], fsynced)
+
+    def test_export_parent_fsync_failure_replaces_success_with_failure_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp) / "export"
+            fsync = os.fsync
+            n_calls = 0
+
+            def fail_first_parent(fd: int) -> None:
+                nonlocal n_calls
+                n_calls += 1
+                if n_calls == 2:
+                    raise OSError("parent fsync failed")
+                fsync(fd)
+
+            with (
+                patch("omo_manager.omo_manager_mail_compress.run_export", return_value=0),
+                patch("omo_manager.omo_manager_mail_compress.os.fsync", side_effect=fail_first_parent),
+            ):
+                with self.assertRaisesRegex(OSError, "parent fsync failed"):
+                    cmd_export(ExportArgs(out_dir))
+            receipt = self.export_receipt(out_dir)
+            self.assertIn("\treceipt-failure\tterminal-receipt\tOSError\tnone\n", receipt)
+            self.assertNotIn("\tsuccess\tcomplete\t", receipt)
+
+    def test_export_file_fsync_failure_replaces_success_with_failure_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp) / "export"
+            fsync = os.fsync
+            n_calls = 0
+
+            def fail_first_file(fd: int) -> None:
+                nonlocal n_calls
+                n_calls += 1
+                if n_calls == 1:
+                    raise OSError("file fsync failed")
+                fsync(fd)
+
+            with (
+                patch("omo_manager.omo_manager_mail_compress.run_export", return_value=0),
+                patch("omo_manager.omo_manager_mail_compress.os.fsync", side_effect=fail_first_file),
+            ):
+                with self.assertRaisesRegex(OSError, "file fsync failed"):
+                    cmd_export(ExportArgs(out_dir))
+            receipt = self.export_receipt(out_dir)
+            self.assertIn("\treceipt-failure\tterminal-receipt\tOSError\tnone\n", receipt)
+            self.assertNotIn("\tsuccess\tcomplete\t", receipt)
+
+    def test_export_receipt_creation_race_preserves_existing_terminal_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp) / "export"
+            write_export_receipt(out_dir, "success", "complete", "none")
+            original = self.export_receipt(out_dir)
+            with self.assertRaisesRegex(RuntimeError, "private evidence already exists"):
+                write_export_receipt(out_dir, "export-failure", "start", "RuntimeError")
+            self.assertEqual(original, self.export_receipt(out_dir))
+
+    def test_export_symlink_alias_cannot_bypass_terminal_retry_block(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            parent = Path(tmp)
+            out_dir = parent / "actual-run"
+            out_dir.mkdir()
+            alias = parent / "alias"
+            alias.symlink_to(out_dir, target_is_directory=True)
+            with patch("omo_manager.omo_manager_mail_compress.run_export", return_value=0):
+                self.assertEqual(0, cmd_export(ExportArgs(alias)))
+            self.assertEqual(export_receipt_path(out_dir), export_receipt_path(alias))
+            with patch("omo_manager.omo_manager_mail_compress.open_mailbox") as open_mailbox_mock:
+                with self.assertRaisesRegex(RuntimeError, "terminal export receipt already exists"):
+                    cmd_export(ExportArgs(out_dir))
+            open_mailbox_mock.assert_not_called()
 
     def test_export_filters_excluded_subject_when_optional_import_fallback_is_active(self) -> None:
         raw = self.raw_message("PB news")
@@ -855,7 +1013,10 @@ assert client.sock.closed.is_set()
             patch("omo_manager.email_idle_watcher.subject_base", None),
             redirect_stdout(output),
         ):
-            self.assertEqual(0, cmd_export(ExportArgs(Path(tmp) / "export")))
+            out_dir = Path(tmp) / "export"
+            self.assertEqual(0, cmd_export(ExportArgs(out_dir)))
+            self.assertIn("\tsuccess\tcomplete\tnone\tnone\n", self.export_receipt(out_dir))
+            self.assertIn("\tauthority\n", self.export_receipt(out_dir))
         self.assertIn("exported=0 skipped_boundary_mismatch=1", output.getvalue())
         self.assertTrue(all(readonly for _mailbox, readonly in client.select_calls))
         self.assertFalse(any(call[0].casefold() in {"copy", "move", "store", "expunge"} for call in client.uid_calls))
