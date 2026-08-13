@@ -2,7 +2,7 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from omo_manager.omo_codex_status import Args, PlanPromptRecovery, Report, can_submit_stuck_input, current_block, current_input_text, dismiss_plan_prompt_if_present, exact_pane_id, final_assistant_output, has_compacting_indicator, has_resume_paused_goal_prompt, has_terminal_enter_prompt_after_codex_footer, has_waiting_subagent_prompt, inspect, interrupt_waiting_subagent_if_present, last_output, report_from_lines, status, submit_stuck_input_if_present, tail, tail_pane_id, visible_error_lines
+from omo_manager.omo_codex_status import Args, PlanPromptRecovery, Report, can_submit_stuck_input, current_block, current_input_text, dismiss_plan_prompt_if_present, dismiss_skills_menu_if_present, exact_pane_id, final_assistant_output, has_active_skills_menu, has_compacting_indicator, has_resume_paused_goal_prompt, has_terminal_enter_prompt_after_codex_footer, has_waiting_subagent_prompt, inspect, interrupt_waiting_subagent_if_present, last_output, report_from_lines, status, submit_stuck_input_if_present, tail, tail_pane_id, visible_error_lines
 from omo_manager.omo_tmux_send import error_signature, exact_capacity_error
 
 
@@ -574,6 +574,47 @@ class CodexStatusTests(unittest.TestCase):
         with patch('omo_manager.omo_codex_status.exact_pane_id', return_value=''), patch('omo_manager.omo_codex_status.subprocess.run') as run:
             recovery = dismiss_plan_prompt_if_present('cfg:1.0', report_from_lines(modal))
         self.assertEqual(PlanPromptRecovery('not_safe:ambiguous_pane', 'plan_prompt', 'not_checked'), recovery)
+        run.assert_not_called()
+
+    def test_dismiss_skills_menu_sends_one_escape_with_before_after_evidence(self) -> None:
+        menu = ['Skills', 'Choose an action', '› 1. List skills            Tip: press @ to open this list directly.', '  2. Enable/Disable Skills  Enable or disable skills.', 'Press enter to confirm or esc to go back']
+        after = ['› Continue task', '  gpt-5.6-terra']
+        self.assertTrue(has_active_skills_menu(menu))
+        with patch('omo_manager.omo_codex_status.exact_pane_id', return_value='%7'), patch('omo_manager.omo_codex_status.pane_has_exact_codex_process', return_value=True), patch('omo_manager.omo_codex_status.tail_pane_id', side_effect=[menu, after]), patch('omo_manager.omo_codex_status.subprocess.run', return_value=subprocess.CompletedProcess(['tmux'], 0)) as run:
+            recovery = dismiss_skills_menu_if_present('cfg:1.0', report_from_lines(menu))
+        self.assertEqual(PlanPromptRecovery('sent_escape', 'skills_menu', 'stuck_input'), recovery)
+        run.assert_called_once_with(['tmux', 'send-keys', '-t', '%7', 'Escape'], capture_output=True, text=True, timeout=5, check=False)
+
+    def test_dismiss_skills_menu_fails_closed_when_menu_is_historical(self) -> None:
+        historical = ['Skills', 'Choose an action', '› 1. List skills', '  2. Enable/Disable Skills', 'Press enter to confirm or esc to go back', '› Continue task', '  gpt-5.6-terra']
+        self.assertFalse(has_active_skills_menu(historical))
+        with patch('omo_manager.omo_codex_status.exact_pane_id') as resolve, patch('omo_manager.omo_codex_status.subprocess.run') as run:
+            recovery = dismiss_skills_menu_if_present('cfg:1.0', report_from_lines(historical))
+        self.assertEqual(PlanPromptRecovery('not_safe:not_skills_menu', 'stuck_input', 'not_checked'), recovery)
+        resolve.assert_not_called()
+        run.assert_not_called()
+
+    def test_dismiss_skills_menu_fails_closed_for_stale_or_human_target(self) -> None:
+        menu = ['Skills', 'Choose an action', '› 1. List skills', '  2. Enable/Disable Skills', 'Press enter to confirm or esc to go back']
+        latest = ['› Continue task', '  gpt-5.6-terra']
+        with patch('omo_manager.omo_codex_status.exact_pane_id', return_value='%7'), patch('omo_manager.omo_codex_status.pane_has_exact_codex_process', return_value=True), patch('omo_manager.omo_codex_status.tail_pane_id', return_value=latest), patch('omo_manager.omo_codex_status.subprocess.run') as run:
+            stale = dismiss_skills_menu_if_present('cfg:1.0', report_from_lines(menu))
+        self.assertEqual(PlanPromptRecovery('not_safe:stale_evidence', 'skills_menu', 'stuck_input'), stale)
+        run.assert_not_called()
+        with patch('omo_manager.omo_codex_status.exact_pane_id') as resolve:
+            human = dismiss_skills_menu_if_present('hcfg:1.0', report_from_lines(menu))
+        self.assertEqual(PlanPromptRecovery('not_safe:human_target', 'skills_menu', 'not_checked'), human)
+        resolve.assert_not_called()
+
+    def test_dismiss_skills_menu_requires_codex_process_and_stable_target(self) -> None:
+        menu = ['Skills', 'Choose an action', '› 1. List skills', '  2. Enable/Disable Skills', 'Press enter to confirm or esc to go back']
+        with patch('omo_manager.omo_codex_status.exact_pane_id', return_value='%7'), patch('omo_manager.omo_codex_status.pane_has_exact_codex_process', return_value=False), patch('omo_manager.omo_codex_status.subprocess.run') as run:
+            not_codex = dismiss_skills_menu_if_present('cfg:1.0', report_from_lines(menu))
+        self.assertEqual(PlanPromptRecovery('not_safe:not_codex_process', 'skills_menu', 'not_checked'), not_codex)
+        run.assert_not_called()
+        with patch('omo_manager.omo_codex_status.exact_pane_id', side_effect=['%7', '%8']), patch('omo_manager.omo_codex_status.pane_has_exact_codex_process', return_value=True), patch('omo_manager.omo_codex_status.tail_pane_id', return_value=menu), patch('omo_manager.omo_codex_status.subprocess.run') as run:
+            rebound = dismiss_skills_menu_if_present('cfg:1.0', report_from_lines(menu))
+        self.assertEqual(PlanPromptRecovery('not_safe:target_rebound', 'skills_menu', 'not_checked'), rebound)
         run.assert_not_called()
 
     def test_status_ready_with_idle_queued_placeholder_footer(self) -> None:

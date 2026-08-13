@@ -41,6 +41,10 @@ PAUSED_GOAL_RE = re.compile(r"^\s*Goal:\s+\S", re.IGNORECASE)
 RESUME_GOAL_CHOICE_RE = re.compile(r"^\s*(?P<selected>›\s*)?1\.\s+Resume goal\b", re.IGNORECASE)
 LEAVE_PAUSED_CHOICE_RE = re.compile(r"^\s*(?P<selected>›\s*)?2\.\s+Leave paused\b", re.IGNORECASE)
 CHOICE_CONFIRM_RE = re.compile(r"^\s*Press (?:enter|return) to confirm or esc(?:ape)? to go back\s*$", re.IGNORECASE)
+SKILLS_TITLE_RE = re.compile(r"^\s*Skills\s*$")
+SKILLS_ACTION_RE = re.compile(r"^\s*Choose an action\s*$")
+SKILLS_LIST_RE = re.compile(r"^\s*›\s*1\.\s+List skills(?:\s+Tip: press @ to open this list directly\.)?\s*$")
+SKILLS_TOGGLE_RE = re.compile(r"^\s*2\.\s+Enable/Disable Skills(?:\s+Enable or disable skills\.)?\s*$")
 SESSION_MODEL_RESUME_RE = re.compile(r"\bThis session (?:was recorded|started) with model\b.+?\bis resuming with\b", re.IGNORECASE)
 FILE_SEARCH_NO_MATCHES_RE = re.compile(r"^\s*no matches\s*$", re.IGNORECASE)
 FILE_SEARCH_HELP_RE = re.compile(r"\benter insert\s*·\s*esc close\s*·\s*←/→ switch search modes\b")
@@ -68,6 +72,7 @@ TMUX_PANE_ID_RE = re.compile(r"^%[0-9]+$")
 class Args:
     target: str
     n_lines: int
+    dismiss_skills_menu: bool = False
 
 
 @dataclass(frozen=True)
@@ -95,16 +100,18 @@ class PlanPromptRecovery:
 class ParsedArgs(argparse.Namespace):
     target: str = ""
     n_lines: int = 80
+    dismiss_skills_menu: bool = False
 
 
 def parse_args(argv: list[str]) -> Args:
     parser = argparse.ArgumentParser(description=__doc__)
     _ = parser.add_argument("target")
     _ = parser.add_argument("--lines", type=int, default=80)
+    _ = parser.add_argument("--dismiss-skills-menu", action="store_true", help="dismiss the exact active Codex Skills menu with one Escape")
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     if parsed.n_lines <= 0:
         parser.error("--lines must be positive.")
-    return Args(parsed.target, parsed.n_lines)
+    return Args(parsed.target, parsed.n_lines, parsed.dismiss_skills_menu)
 
 
 def exact_pane_id(target: str) -> str:
@@ -216,6 +223,31 @@ def plan_prompt_classification(lines: list[str]) -> str:
         return "capture_failed"
     if has_active_plan_prompt(lines) and report_from_lines(lines).status == "stuck_input":
         return "plan_prompt"
+    return report_from_lines(lines).status
+
+
+def has_active_skills_menu(lines: list[str]) -> bool:
+    """Match only the complete Skills choice menu at the bottom of the pane."""
+
+    visible = [line.rstrip() for line in lines if line.strip()]
+    if len(visible) < 5:
+        return False
+    menu = visible[-5:]
+    return all(
+        pattern.fullmatch(line) is not None
+        for pattern, line in zip(
+            (SKILLS_TITLE_RE, SKILLS_ACTION_RE, SKILLS_LIST_RE, SKILLS_TOGGLE_RE, CHOICE_CONFIRM_RE),
+            menu,
+            strict=True,
+        )
+    )
+
+
+def skills_menu_classification(lines: list[str]) -> str:
+    if not lines:
+        return "capture_failed"
+    if has_active_skills_menu(lines):
+        return "skills_menu"
     return report_from_lines(lines).status
 
 
@@ -649,6 +681,53 @@ def dismiss_plan_prompt_if_present(target: str, report: Report, n_lines: int = C
     return PlanPromptRecovery("sent_escape", fresh, after)
 
 
+def dismiss_skills_menu_if_present(target: str, report: Report, n_lines: int = COMPACTION_WAIT_LINES) -> PlanPromptRecovery:
+    """Send one Escape after exact, fresh verification of the Skills menu."""
+
+    before = "skills_menu" if has_active_skills_menu(report.lines) else report.status
+    match = TMUX_TARGET_RE.fullmatch(target)
+    if match is None:
+        return PlanPromptRecovery("not_safe:ambiguous_target", before, "not_checked")
+    if match.group(1).startswith("h"):
+        return PlanPromptRecovery("not_safe:human_target", before, "not_checked")
+    if before != "skills_menu":
+        return PlanPromptRecovery("not_safe:not_skills_menu", before, "not_checked")
+    try:
+        pane_id = exact_pane_id(target)
+    except (OSError, subprocess.SubprocessError):
+        return PlanPromptRecovery("not_safe:ambiguous_pane", before, "not_checked")
+    if not pane_id:
+        return PlanPromptRecovery("not_safe:ambiguous_pane", before, "not_checked")
+    try:
+        if not pane_has_exact_codex_process(target, pane_id):
+            return PlanPromptRecovery("not_safe:not_codex_process", before, "not_checked")
+    except (OSError, subprocess.SubprocessError):
+        return PlanPromptRecovery("not_safe:not_codex_process", before, "not_checked")
+    try:
+        fresh_lines = tail_pane_id(pane_id, n_lines)
+    except (OSError, subprocess.SubprocessError):
+        return PlanPromptRecovery("not_safe:capture_failed", before, "capture_failed")
+    fresh = skills_menu_classification(fresh_lines)
+    if fresh != "skills_menu":
+        return PlanPromptRecovery("not_safe:stale_evidence", before, fresh)
+    try:
+        if exact_pane_id(target) != pane_id:
+            return PlanPromptRecovery("not_safe:target_rebound", fresh, "not_checked")
+    except (OSError, subprocess.SubprocessError):
+        return PlanPromptRecovery("not_safe:target_rebound", fresh, "not_checked")
+    try:
+        result = subprocess.run(["tmux", "send-keys", "-t", pane_id, "Escape"], capture_output=True, text=True, timeout=5, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return PlanPromptRecovery("failed", fresh, "not_checked")
+    if result.returncode != 0:
+        return PlanPromptRecovery("failed", fresh, "not_checked")
+    try:
+        after = skills_menu_classification(tail_pane_id(pane_id, n_lines))
+    except (OSError, subprocess.SubprocessError):
+        after = "capture_failed"
+    return PlanPromptRecovery("sent_escape", fresh, after)
+
+
 def status(lines: list[str], block: Block, *, detect_waiting_subagent: bool = False) -> str:
     if not lines:
         return "not_codex"
@@ -761,7 +840,14 @@ def wait_for_file_search_overlay_transition(
 
 def main(argv: list[str]) -> int:
     try:
-        report = inspect(parse_args(argv))
+        args = parse_args(argv)
+        report = inspect(args)
+        if args.dismiss_skills_menu:
+            recovery = dismiss_skills_menu_if_present(args.target, report, args.n_lines)
+            print(f"action: {recovery.action}")
+            print(f"before: {recovery.before}")
+            print(f"after: {recovery.after}")
+            return 0 if recovery.action == "sent_escape" else 1
         print(f"status: {report.status}")
         print("last_output:")
         for line in report.lines:

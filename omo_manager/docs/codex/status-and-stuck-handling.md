@@ -14,6 +14,8 @@ It reports `stuck_input` when the current Codex input box contains non-placehold
 
 The exact plan modal signature is `Create a plan?  shift + tab use Plan mode   esc dismiss` as the last visible line. `dismiss_plan_prompt_if_present` accepts only an exact numeric target outside sessions whose names begin with `h`, resolves it to one pane id, freshly recaptures that pane, and sends exactly one Escape only while that signature is the active `stuck_input` modal. Its result records the before and after classifications. Different screens, stale evidence, failed or ambiguous pane resolution, and human-owned targets return `not_safe:REASON` without input.
 
+`omo_codex_status.py TARGET --dismiss-skills-menu` dismisses only the complete active `Skills` / `Choose an action` / `List skills` / `Enable/Disable Skills` choice menu ending in `Press enter to confirm or esc to go back`. It pins and recaptures the exact pane before sending one Escape. Historical or changed menus, ambiguous or missing panes, other screens, and sessions whose names begin with `h` fail without input.
+
 Active stuck handling runs through the pending watcher. `omo_pending_watch.py` runs `omo_agent_status.py --problems-only` on its agent-problem interval; that status pass reports `stuck_input` rows, dismisses a freshly verified plan modal, or calls `submit_stuck_input_if_present` for other non-blocked panes when the latest screen is submit-safe.
 
 Successful status-pass recoveries are emitted as `unstuck: target=TARGET task=TASK action=sent_enter|sent_escape`; plan-modal rows also include `recovery=BEFORE->AFTER`. Both recovery actions use the existing pending-watcher attempt memory. Still-stuck panes are reported to the owning manager after the remembered attempts are exhausted.
