@@ -6,6 +6,7 @@ import argparse
 import contextlib
 import fcntl
 import hashlib
+import html
 import os
 import re
 import shlex
@@ -79,6 +80,8 @@ def infer_work_log_root(path: Path) -> Path:
 MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$")
 LINE_RANGE_RE = re.compile(r"^([1-9]\d*)-([1-9]\d*)$")
 HUMAN_INSTRUCTION_CLOSE = "</human_instruction>"
+HUMAN_INSTRUCTION_OPEN = "<human_instruction"
+MANAGER_DELEGATION_CLOSE = "</manager_delegation>"
 HUMAN_LAUNCH_REQUEST_RE = re.compile(
     r"^\s*(?:(?:please|just)\s+)?(?:"
     r"(?:launch|create|start|open|spawn)\b|"
@@ -720,6 +723,8 @@ def insert_pending_task_items_marker(text: str) -> str:
 
 def first_goal_line_index(lines: list[str]) -> int:
     idx = frontmatter_body_line_index(lines)
+    if idx < len(lines) and lines[idx].strip().startswith("<manager_delegation "):
+        idx += 1
     if idx < len(lines) and is_runat_header(lines[idx]):
         idx += 1
     while idx < len(lines) and any(lines[idx].strip().startswith(prefix) for prefix in TASK_METADATA_PREFIXES):
@@ -908,9 +913,9 @@ def new_task_text(args: Args, tmux_target: str, validate_target: bool = True) ->
         raise ValueError("runat tmux target is required to write task frontmatter.")
     if validate_target and TMUX_TARGET_RE.fullmatch(tmux_target) is None:
         raise ValueError("runat tmux target must be a full tmux target like `SESSION:WINDOW`.")
-    prompt = args.prompt_file.read_text(encoding="utf-8").rstrip() if args.prompt_file is not None else ""
     managerat = managerat_for_task(args, tmux_target)
-    return f"{task_frontmatter(args, tmux_target, managerat)}\n{prompt}\n"
+    body = task_instruction_text(args, managerat)
+    return f"{task_frontmatter(args, tmux_target, managerat)}\n{body}\n"
 
 
 def readable_file(path: Path, label: str) -> None:
@@ -944,20 +949,58 @@ def human_email_excerpt(args: Args) -> str:
     if end > len(lines):
         raise ValueError(f"human email line range ends at {end}, but the file has only {len(lines)} lines.")
     excerpt = "".join(lines[start - 1 : end])
-    if HUMAN_INSTRUCTION_CLOSE in excerpt:
-        raise ValueError(f"human email excerpt must not contain {HUMAN_INSTRUCTION_CLOSE}.")
+    if HUMAN_INSTRUCTION_CLOSE in excerpt.casefold():
+        raise ValueError(f"human email excerpt must not contain {HUMAN_INSTRUCTION_CLOSE} in any letter case.")
     return excerpt
 
 
-def authoritative_human_instruction(excerpt: str) -> str:
-    return f'<human_instruction authoritative="true">\n{excerpt}{HUMAN_INSTRUCTION_CLOSE}'
+def human_email_source(args: Args) -> str:
+    path = human_email_path(args)
+    if path is None or args.human_email_lines is None:
+        return ""
+    start, end = args.human_email_lines
+    relative = path.relative_to(args.root.resolve()).as_posix()
+    return f"{relative}:{start}-{end}"
 
 
-def write_human_instruction_file(excerpt: str) -> Path:
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", prefix="omo-human-instruction.", delete=False) as handle:
+def authoritative_human_instruction(excerpt: str, source: str = "") -> str:
+    source_attr = f' source="{html.escape(source, quote=True)}"' if source else ""
+    return f'<human_instruction authoritative="true"{source_attr}>\n{excerpt}{HUMAN_INSTRUCTION_CLOSE}'
+
+
+def manager_delegation(prompt: str, source_target: str) -> str:
+    lowered = prompt.casefold()
+    if MANAGER_DELEGATION_CLOSE in lowered:
+        raise ValueError(f"manager prompt must not contain {MANAGER_DELEGATION_CLOSE} in any letter case.")
+    if HUMAN_INSTRUCTION_OPEN in lowered:
+        raise ValueError(f"manager prompt must not contain {HUMAN_INSTRUCTION_OPEN} in any letter case.")
+    source = html.escape(source_target, quote=True)
+    return f'<manager_delegation from="{source}">\n{prompt.rstrip()}\n{MANAGER_DELEGATION_CLOSE}'
+
+
+def task_instruction_text(args: Args, manager_target: str) -> str:
+    parts: list[str] = []
+    if args.prompt_file is not None:
+        parts.append(manager_delegation(args.prompt_file.read_text(encoding="utf-8"), manager_target))
+    excerpt = human_email_excerpt(args)
+    if excerpt:
+        parts.append(authoritative_human_instruction(excerpt, human_email_source(args)))
+    return "\n".join(parts)
+
+
+def write_instruction_file(text: str, prefix: str) -> Path:
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", prefix=prefix, delete=False) as handle:
         os.fchmod(handle.fileno(), 0o600)
-        _ = handle.write(f"\n{authoritative_human_instruction(excerpt)}")
+        _ = handle.write(f"\n{text}")
         return Path(handle.name)
+
+
+def write_human_instruction_file(excerpt: str, source: str = "") -> Path:
+    return write_instruction_file(authoritative_human_instruction(excerpt, source), "omo-human-instruction.")
+
+
+def write_manager_delegation_file(prompt_file: Path, source_target: str) -> Path:
+    return write_instruction_file(manager_delegation(prompt_file.read_text(encoding="utf-8"), source_target), "omo-manager-delegation.")
 
 
 def prompt_input(
@@ -1302,7 +1345,10 @@ def start_codex(target: str, args: Args) -> None:
         raise ValueError("VL launches require --prompt-file so the end-goal and reviewer guidance has task-local context.")
     manager_file = args.root / "MANAGER.md" if args.is_manager else None
     excerpt = human_email_excerpt(args)
-    human_instruction_file = write_human_instruction_file(excerpt) if excerpt else None
+    human_instruction_file = write_human_instruction_file(excerpt, human_email_source(args)) if excerpt else None
+    manager_source = args.manager_target.strip() or current_manager_target() or "unknown"
+    manager_delegation_file = write_manager_delegation_file(args.prompt_file, manager_source) if args.prompt_file is not None and args.prompt_file.is_file() else args.prompt_file
+    remove_manager_delegation_file = manager_delegation_file is not None and manager_delegation_file != args.prompt_file
     try:
         pane_id = exact_pane_id(target)
         if not pane_id:
@@ -1311,7 +1357,7 @@ def start_codex(target: str, args: Args) -> None:
             args.session_id,
             args.reasoning_effort,
             args.codex_flags,
-            args.prompt_file,
+            manager_delegation_file,
             effective_tool(args),
             vl_agent,
             args.model,
@@ -1335,6 +1381,8 @@ def start_codex(target: str, args: Args) -> None:
     finally:
         if human_instruction_file is not None:
             human_instruction_file.unlink(missing_ok=True)
+        if remove_manager_delegation_file and manager_delegation_file is not None:
+            manager_delegation_file.unlink(missing_ok=True)
 
 
 def new_window(args: Args) -> str:
@@ -1380,7 +1428,8 @@ def ensure_task_file(args: Args, tmux_target: str) -> Path:
     if args.prompt_file is not None:
         if existed:
             sep = "" if not text or text.endswith("\n") else "\n"
-            text += sep + args.prompt_file.read_text(encoding="utf-8").rstrip() + "\n"
+            manager_source = metadata.managerat if metadata is not None else managerat_for_task(args, tmux_target)
+            text += sep + task_instruction_text(args, manager_source) + "\n"
     if text != stored_existing or not existed:
         if existed:
             if parse_task_metadata(text, args.root) is None:
@@ -1564,6 +1613,8 @@ def validate_inputs(args: Args) -> str:
         readable_file(args.root / "MANAGER.md", "manager instructions")
     if args.prompt_file is not None and not args.prompt_file.is_file():
         raise ValueError(f"prompt file not found: {args.prompt_file}")
+    if args.prompt_file is not None:
+        _ = manager_delegation(args.prompt_file.read_text(encoding="utf-8"), args.manager_target or current_manager_target() or "unknown")
     if args.prelaunch_source is not None:
         if not args.prelaunch_source.is_file():
             raise ValueError(f"prelaunch source file not found: {args.prelaunch_source}")
