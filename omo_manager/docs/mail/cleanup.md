@@ -13,7 +13,7 @@ Use [compression.md](compression.md) for every manager-human cleanup run. It def
 - thresholds and body length trigger review only; neither makes mail eligible for Trash
 - read each candidate's complete exported context newest-to-oldest and bind the decision to the authoritative multi-word `TODO.md` heading and current task state
 - completed, resolved, or `previous` evidence overrides stale active-looking status; a generic filename or path list is not task evidence
-- retain unresolved human decisions, pending or still-relevant work, distinct useful context, out-of-scope context, and genuine uncertainty
+- preserve unresolved human decisions and useful context while blocked, but do not treat multiple retained messages as a terminal outcome; every task must ultimately have one self-contained manager email
 - ask a focused human question only when a material disposition remains uncertain
 - ignore every Gmail signal, including unread and Important, when deciding retention or Trash
 
@@ -23,3 +23,4 @@ Use [compression.md](compression.md) for every manager-human cleanup run. It def
 - move only independently reviewed fixed-start UIDs to `[Gmail]/Trash`; never expunge or permanently delete
 - fail closed and isolate only the affected thread on identity, content, task, replacement, mailbox-location, or frozen-member drift; additive later identities remain outside the run
 - preserve immutable receipts and source evidence until interrupted work is reconciled and the full manifest verifies
+- treat uncertainty, missing context, tooling limits, and unsafe consolidation as blockers requiring repair and independent review, never as permanent exceptions or authority for forced mutation

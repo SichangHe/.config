@@ -53,6 +53,7 @@ from omo_manager.omo_manager_mail_compress import (
     thread_context_digest,
     tsv_value,
     verify_post_move_imap,
+    validate_task_terminal_dispositions,
     verified_existing_trash_records,
     write_export_receipt,
     write_private,
@@ -112,6 +113,8 @@ class Args:
         self.task_evidence_file = self.source_dir / "task-evidence.txt"
         self.replacement_id = ""
         self.replacement_not_required = True
+        self.task_id = "task-a"
+        self.reviewer = "reviewer-2"
 
 
 class ExportArgs:
@@ -128,6 +131,8 @@ class RetainArgs:
         self.gmail_thrid = gmail_thrid
         self.reason_file = source_dir / "reason.txt"
         self.task_evidence_file = source_dir / "task-evidence.txt"
+        self.task_id = "task-a"
+        self.reviewer = "reviewer-2"
 
 
 class VerifyArgs:
@@ -142,6 +147,75 @@ class ReconcileArgs:
 
 
 class ManagerMailCompressTests(unittest.TestCase):
+    def test_task_terminal_rejects_multiple_retained_messages(self) -> None:
+        rows = [
+            {"task_id": "task-a", "uid": "7", "disposition": "retained", "replacement": "not-required-retained"},
+            {"task_id": "task-a", "uid": "8", "disposition": "retained", "replacement": "not-required-retained"},
+        ]
+        with self.assertRaisesRegex(RuntimeError, "exactly one"):
+            validate_task_terminal_dispositions(rows)
+
+    def test_task_terminal_rejects_zero_retained_and_no_replacement(self) -> None:
+        rows = [{"task_id": "task-a", "uid": "7", "disposition": "trashed", "replacement": "not-required"}]
+        with self.assertRaisesRegex(RuntimeError, "exactly one"):
+            validate_task_terminal_dispositions(rows)
+
+    def test_task_terminal_accepts_one_verified_replacement_after_all_originals_trashed(self) -> None:
+        rows = [
+            {"task_id": "task-a", "uid": "7", "disposition": "trashed", "replacement": "<replacement@example.test>"},
+            {"task_id": "task-a", "uid": "8", "disposition": "trashed", "replacement": "<replacement@example.test>"},
+        ]
+        validate_task_terminal_dispositions(rows)
+
+    def test_task_terminal_blocks_replacement_with_retained_original(self) -> None:
+        rows = [
+            {"task_id": "task-a", "uid": "7", "disposition": "retained", "replacement": "<replacement@example.test>"},
+            {"task_id": "task-a", "uid": "8", "disposition": "trashed", "replacement": "<replacement@example.test>"},
+        ]
+        with self.assertRaisesRegex(RuntimeError, "does not supersede every"):
+            validate_task_terminal_dispositions(rows)
+
+    def test_task_terminal_rejects_conflicting_replacement_identities(self) -> None:
+        rows = [
+            {"task_id": "task-a", "uid": "7", "disposition": "trashed", "replacement": "<one@example.test>"},
+            {"task_id": "task-a", "uid": "8", "disposition": "trashed", "replacement": "<two@example.test>"},
+        ]
+        with self.assertRaisesRegex(RuntimeError, "conflicting replacement"):
+            validate_task_terminal_dispositions(rows)
+
+    def test_task_terminal_rejects_malformed_replacement_identity(self) -> None:
+        rows = [{"task_id": "task-a", "uid": "7", "disposition": "trashed", "replacement": "<broken identity>"}]
+        with self.assertRaisesRegex(RuntimeError, "malformed replacement"):
+            validate_task_terminal_dispositions(rows)
+
+    def test_task_terminal_rejects_mixed_replacement_and_not_required(self) -> None:
+        rows = [
+            {"task_id": "task-a", "uid": "7", "disposition": "trashed", "replacement": "<one@example.test>"},
+            {"task_id": "task-a", "uid": "8", "disposition": "trashed", "replacement": "not-required"},
+        ]
+        with self.assertRaisesRegex(RuntimeError, "not bound"):
+            validate_task_terminal_dispositions(rows)
+
+    def test_trash_rejects_malformed_replacement_before_intent(self) -> None:
+        record = MailRecord("7", "date", "from", "to", "subject", "msgid", gmail_msgid="100", gmail_thrid="200")
+        with tempfile.TemporaryDirectory() as tmp:
+            source_dir = Path(tmp) / "export"
+            uid_file = self.write_source_map(source_dir, record)
+            args = Args(uid_file=uid_file, yes=True)
+            args.replacement_id = "<broken identity>"
+            args.replacement_not_required = False
+            self.assertEqual(2, cmd_trash_superseded(args))
+            self.assertFalse((source_dir / "intents" / "200.tsv").exists())
+
+    def test_disposition_rejects_owner_as_reviewer_before_intent(self) -> None:
+        record = MailRecord("7", "date", "from", "to", "subject", "msgid", gmail_msgid="100", gmail_thrid="200")
+        with tempfile.TemporaryDirectory() as tmp:
+            source_dir = Path(tmp) / "export"
+            self.write_source_map(source_dir, record)
+            with self.assertRaisesRegex(RuntimeError, "distinct"):
+                prepare_thread_disposition(source_dir, "batch-0001", "reviewer-1", "200", set(), source_dir / "reason.txt", source_dir / "task-evidence.txt", "not-required-retained", "task-a", "reviewer-1")
+            self.assertFalse((source_dir / "intents" / "200.tsv").exists())
+
     def test_deployed_python_310_compiles_imports_and_bounds_imap_operation(self) -> None:
         root = Path(__file__).parents[2]
         helper = root / "omo_manager" / "omo_manager_mail_compress.py"
@@ -1360,8 +1434,8 @@ with tempfile.TemporaryDirectory() as tmp:
             self.assertTrue((source_dir / "recoveries" / "200.skipped-already-trashed.tsv").exists())
             output = io.StringIO()
             with redirect_stdout(output):
-                self.assertEqual(0, cmd_verify_run(VerifyArgs(source_dir)))
-            self.assertIn("trashed=0 skipped_already_trashed=1 skipped_already_trashed_threads=1", output.getvalue())
+                with self.assertRaisesRegex(RuntimeError, "exactly one"):
+                    cmd_verify_run(VerifyArgs(source_dir))
         self.assertTrue(all(readonly for _mailbox, readonly in client.select_calls))
         self.assertFalse(any(call[0].casefold() in {"copy", "move", "store", "expunge"} for call in client.uid_calls))
 
@@ -1594,6 +1668,15 @@ with tempfile.TemporaryDirectory() as tmp:
                         "human@example.test",
                     ),
                 )
+
+    def test_replacement_lookup_can_restore_inbox_readonly(self) -> None:
+        raw = b"From: Agent <agent@example.test>\r\nTo: Human <human@example.test>\r\nMessage-ID: <replacement@example.test>\r\n\r\nsummary\r\n"
+        client = FakeClient({
+            ("search", None, "HEADER", "Message-ID", '"<replacement@example.test>"'): ("OK", [b"90"]),
+            ("fetch", "90", HEADER_FETCH): ("OK", [(b"header", raw)]),
+        })
+        self.assertTrue(replacement_exists(client, "[Gmail]/All Mail", "<replacement@example.test>", "agent@example.test", "human@example.test", restore_readonly=True))
+        self.assertEqual(('"INBOX"', True), client.select_calls[-1])
 
     def test_trash_superseded_requires_yes(self) -> None:
         self.assertEqual(2, cmd_trash_superseded(Args(uids="7")))

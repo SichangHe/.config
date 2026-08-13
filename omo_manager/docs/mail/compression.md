@@ -19,16 +19,17 @@ Helper: `~/.config/omo_manager/omo_manager_mail_compress.py`
 
 - claim batches exclusively with `claim-batch`; different owners may classify disjoint batches in parallel
 - inspect every exported thread with its complete context and authoritative task/TODO evidence; record the exact task state, reason, and proposed disposition
-- retain unresolved, pending, useful, out-of-scope, incomplete, or uncertain content
-- consolidate all distinct useful context into one verified replacement and keep at most one useful manager email per task; if safe consolidation is impossible, isolate the thread rather than discard useful context
+- retain unresolved, pending, useful, or out-of-scope content only while the run remains unfinished
+- every task must ultimately have exactly one self-contained useful manager email. Consolidate all distinct useful context into one exact verified replacement before moving superseded fixed-start originals to recoverable Trash
+- uncertainty, insufficient context, tooling limits, or an unsafe consolidation are blockers requiring repair and independent review. They never authorize forced mutation, terminal multi-retain, or a permanent `cannot safely consolidate` exception
 - Gmail state signals—including unread, Important, starred, flagged, saved, read-later, categories, and all other flags or labels—are audit metadata, never retention or Trash criteria
-- require a reviewer distinct from the batch owner to cross-review each proposed disposition against the same frozen evidence before execution; record that approval in the task-evidence file so its digest is bound into the immutable intent and outcome, and resolve disagreements without expanding the source set
+- require a reviewer distinct from the batch owner to cross-review each proposed disposition against the same frozen evidence before execution; pass that identity with `--reviewer` so owner and reviewer are machine-checked and bound into immutable intent/outcome evidence, record the approval in the task-evidence file, and resolve disagreements without expanding the source set
 - finish one thread at a time: retain it, move all irrelevant fixed-start sources, or move only irrelevant intermediate fixed-start sources
 
 ## execute reviewed UIDs
 
-- record retention with `retain-thread` and nonempty reason and task-evidence files
-- if a useful replacement is required, send and record it before Trash; use its exact Message-ID with `--replacement-message-id`, retry lookup of that same identity if delivery is delayed, and never send a duplicate replacement; otherwise use `--replacement-not-required`
+- bind every disposition to the same explicit `--task-id` for that task; record a sole retention with `retain-thread` and nonempty reason and task-evidence files
+- if a useful replacement is required, send and record it before Trash; use its exact Message-ID with `--replacement-message-id`, retry lookup of that same identity if delivery is delayed, and never send a duplicate replacement. The exact syntactically valid identity is bound into immutable intent/outcome evidence and verified uniquely in the recipient mailbox before mutation. Use `--replacement-not-required` only when exactly one fixed-start original will remain retained for the task
 - pass only the reviewed fixed-start UIDs from one claimed thread in the private UID file to `trash-superseded`; later identities are never eligible for that file
 - immediately before `UID MOVE`, revalidate frozen source identity/content, complete frozen context, task evidence, batch ownership, and replacement evidence
 - additive later thread identities are allowed but never moved; changed or missing frozen members, task drift, identity/content drift, or non-additive context drift fails closed for that thread without affecting other batches
@@ -45,7 +46,7 @@ Helper: `~/.config/omo_manager/omo_manager_mail_compress.py`
 ## finish once
 
 - run `verify-run --source-dir PRIVATE_DIR` against the complete frozen manifest
-- completion requires every fixed-start source to have exactly one verified retained or Trash disposition, every thread to have terminal evidence, counts to reconcile, and permanent deletions to remain zero
+- completion requires every fixed-start source to have exactly one verified retained or Trash disposition, every thread to have terminal evidence, and every task to end with exactly one useful manager message. Multiple retained threads for one task block verification unless exactly one replacement identity is bound and every superseded fixed-start original has a recoverable terminal Trash disposition
 - verification performs no repeated candidate scan or full live mailbox scan; later arrivals neither enter the result nor trigger another run
 - report concisely: topics, fixed-start/thread counts, retained and trashed counts, replacement identities, isolated drift or recovery exceptions, verification status, and zero permanent deletions; omit private bodies, identifiers, and task evidence
 

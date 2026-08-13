@@ -1033,11 +1033,13 @@ def disposition_text(
     reason_sha256: str,
     task_evidence_sha256: str,
     replacement: str,
+    task_id: str,
+    reviewer: str,
 ) -> str:
     output = io.StringIO()
     writer = csv.DictWriter(
         output,
-        fieldnames=("batch_id", "owner", "gmail_thrid", "uid", "disposition", "reason_sha256", "task_evidence_sha256", "replacement"),
+        fieldnames=("batch_id", "owner", "reviewer", "gmail_thrid", "uid", "disposition", "reason_sha256", "task_evidence_sha256", "replacement", "task_id"),
         delimiter="\t",
         lineterminator="\n",
     )
@@ -1047,12 +1049,14 @@ def disposition_text(
             {
                 "batch_id": batch_id,
                 "owner": owner,
+                "reviewer": reviewer,
                 "gmail_thrid": row["gmail_thrid"],
                 "uid": row["uid"],
                 "disposition": "trashed" if row["uid"] in moved_uids else "retained",
                 "reason_sha256": reason_sha256,
                 "task_evidence_sha256": task_evidence_sha256,
                 "replacement": replacement,
+                "task_id": task_id,
             }
         )
     return output.getvalue()
@@ -1067,7 +1071,13 @@ def prepare_thread_disposition(
     reason_file: Path,
     task_evidence_file: Path,
     replacement: str,
+    task_id: str = "test-task",
+    reviewer: str = "independent-reviewer",
 ) -> tuple[list[dict[str, str]], str, bool]:
+    if not task_id or tsv_value(task_id) != task_id:
+        raise RuntimeError("task identity must be one nonempty line")
+    if not reviewer or tsv_value(reviewer) != reviewer or reviewer == owner:
+        raise RuntimeError("reviewer must be a distinct nonempty one-line identity")
     rows = thread_batch_rows(source_dir, batch_id, owner, gmail_thrid)
     thread_uids = {row["uid"] for row in rows}
     thread_sources = export_source_map(source_dir, sorted(thread_uids))
@@ -1083,6 +1093,8 @@ def prepare_thread_disposition(
         evidence_digest(reason_file, "reason"),
         evidence_digest(task_evidence_file, "task"),
         replacement,
+        task_id,
+        reviewer,
     )
     outcome_path = source_dir / "outcomes" / f"{gmail_thrid}.tsv"
     if outcome_path.exists():
@@ -1118,6 +1130,8 @@ def cmd_retain_thread(args: argparse.Namespace) -> int:
         args.reason_file,
         args.task_evidence_file,
         "not-required-retained",
+        args.task_id,
+        args.reviewer,
     )
     if recovery_needed:
         source_map = export_source_map(args.source_dir, [row["uid"] for row in rows])
@@ -1149,7 +1163,7 @@ def intent_reconciliation_evidence(source_dir: Path, gmail_thrid: str) -> tuple[
         evidence = intent_path.read_text(encoding="utf-8")
     except OSError as exc:
         raise RuntimeError("thread has no readable immutable intent") from exc
-    fields = {"batch_id", "owner", "gmail_thrid", "uid", "disposition", "reason_sha256", "task_evidence_sha256", "replacement"}
+    fields = {"batch_id", "owner", "reviewer", "gmail_thrid", "uid", "disposition", "reason_sha256", "task_evidence_sha256", "replacement", "task_id"}
     rows = read_tsv_text(evidence, fields, intent_path.name)
     if not rows or any(
         row["gmail_thrid"] != gmail_thrid
@@ -1157,6 +1171,9 @@ def intent_reconciliation_evidence(source_dir: Path, gmail_thrid: str) -> tuple[
         or not re.fullmatch(r"[0-9a-f]{64}", row["reason_sha256"])
         or not re.fullmatch(r"[0-9a-f]{64}", row["task_evidence_sha256"])
         or not row["replacement"]
+        or not row["task_id"]
+        or not row["reviewer"]
+        or row["reviewer"] == row["owner"]
         for row in rows
     ):
         raise RuntimeError("immutable intent is malformed or names a different thread")
@@ -1349,7 +1366,7 @@ def additive_recovery_thread_intact(
 
 
 def terminal_recovery_text(intent_rows: list[dict[str, str]]) -> str:
-    fields = ("batch_id", "owner", "gmail_thrid", "uid", "disposition", "reason_sha256", "task_evidence_sha256", "replacement", "terminal_recovery")
+    fields = ("batch_id", "owner", "reviewer", "gmail_thrid", "uid", "disposition", "reason_sha256", "task_evidence_sha256", "replacement", "task_id", "terminal_recovery")
     output = io.StringIO()
     writer = csv.DictWriter(output, fieldnames=fields, delimiter="\t", lineterminator="\n")
     writer.writeheader()
@@ -1364,6 +1381,7 @@ def cmd_reconcile_intent(args: argparse.Namespace) -> int:
     client, config = open_mailbox(readonly=True)
     try:
         sender_email, recipient_email = mail_boundary(config)
+        validate_replacements_in_mailbox(client, expected_mailboxes[r"\All"], rows, sender_email, recipient_email)
         select_mailbox(client, "INBOX", readonly=True)
         expected_uidvalidities = {source["uidvalidity"] for source in source_map.values()}
         if len(expected_uidvalidities) != 1 or not next(iter(expected_uidvalidities)).isdecimal() or selected_uidvalidity(client) not in expected_uidvalidities:
@@ -1395,6 +1413,7 @@ def cmd_recover_already_trashed(args: argparse.Namespace) -> int:
     client, config = open_mailbox(readonly=True)
     try:
         sender_email, recipient_email = mail_boundary(config)
+        validate_replacements_in_mailbox(client, expected_mailboxes[r"\All"], rows, sender_email, recipient_email)
         select_mailbox(client, "INBOX", readonly=True)
         expected_uidvalidities = {source["uidvalidity"] for source in source_map.values()}
         if len(expected_uidvalidities) != 1 or not next(iter(expected_uidvalidities)).isdecimal() or selected_uidvalidity(client) not in expected_uidvalidities:
@@ -1459,7 +1478,7 @@ def cmd_verify_run(args: argparse.Namespace) -> int:
                 raise RuntimeError(f"thread has both normal outcome and terminal recovery evidence: {gmail_thrid}")
             rows = read_tsv(
                 outcome_path,
-                {"batch_id", "owner", "gmail_thrid", "uid", "disposition", "reason_sha256", "task_evidence_sha256", "replacement"},
+                {"batch_id", "owner", "reviewer", "gmail_thrid", "uid", "disposition", "reason_sha256", "task_evidence_sha256", "replacement", "task_id"},
             )
             outcome = outcome_path.read_text(encoding="utf-8")
             if intent != outcome:
@@ -1477,10 +1496,10 @@ def cmd_verify_run(args: argparse.Namespace) -> int:
                 raise RuntimeError(f"fixed-start thread lacks outcome or terminal recovery: {gmail_thrid}") from exc
             rows = read_tsv_text(
                 recovery_text,
-                {"batch_id", "owner", "gmail_thrid", "uid", "disposition", "reason_sha256", "task_evidence_sha256", "replacement", "terminal_recovery"},
+                {"batch_id", "owner", "reviewer", "gmail_thrid", "uid", "disposition", "reason_sha256", "task_evidence_sha256", "replacement", "task_id", "terminal_recovery"},
                 recovery_path.name,
             )
-            intent_rows = read_tsv_text(intent, {"batch_id", "owner", "gmail_thrid", "uid", "disposition", "reason_sha256", "task_evidence_sha256", "replacement"}, intent_path.name)
+            intent_rows = read_tsv_text(intent, {"batch_id", "owner", "reviewer", "gmail_thrid", "uid", "disposition", "reason_sha256", "task_evidence_sha256", "replacement", "task_id"}, intent_path.name)
             if recovery_text != terminal_recovery_text(intent_rows) or any(row["terminal_recovery"] != "skipped_already_trashed" or row["disposition"] != "trashed" for row in rows):
                 raise RuntimeError(f"invalid terminal recovery evidence for thread: {gmail_thrid}")
             skipped_already_trashed += len(rows)
@@ -1499,11 +1518,60 @@ def cmd_verify_run(args: argparse.Namespace) -> int:
             raise RuntimeError("disposition lacks bound reason or task evidence")
         if not row["replacement"]:
             raise RuntimeError("disposition lacks replacement decision evidence")
+        if not row["task_id"] or tsv_value(row["task_id"]) != row["task_id"]:
+            raise RuntimeError("disposition lacks a valid task identity")
+        if not row["reviewer"] or tsv_value(row["reviewer"]) != row["reviewer"] or row["reviewer"] == row["owner"]:
+            raise RuntimeError("disposition lacks an independent reviewer identity")
         require_batch_owner(args.source_dir, row["batch_id"], row["owner"])
+    validate_task_terminal_dispositions(dispositions)
+    replacement_ids = {row["replacement"] for row in dispositions if row["replacement"] not in {"not-required", "not-required-retained"}}
+    if replacement_ids:
+        client, config = open_mailbox(readonly=True)
+        try:
+            sender_email, recipient_email = mail_boundary(config)
+            all_mailbox = export_mailboxes(args.source_dir)[r"\All"]
+            validate_replacements_in_mailbox(client, all_mailbox, dispositions, sender_email, recipient_email)
+        finally:
+            logout_mailbox(client)
     retained = sum(row["disposition"] == "retained" for row in dispositions)
     trashed = sum(row["disposition"] == "trashed" for row in dispositions)
     print(f"fixed_start_verified=1 sources={len(manifest)} threads={len(threads)} retained={retained} trashed={trashed - skipped_already_trashed} skipped_already_trashed={skipped_already_trashed} skipped_already_trashed_threads={skipped_already_trashed_threads} later_arrivals_included=0 live_full_scan=0 permanent_deleted=0")
     return 0
+
+
+def validate_task_terminal_dispositions(dispositions: list[dict[str, str]]) -> None:
+    by_task: dict[str, list[dict[str, str]]] = {}
+    for row in dispositions:
+        by_task.setdefault(row["task_id"], []).append(row)
+    for task_id, rows in by_task.items():
+        retained_uids = {row["uid"] for row in rows if row["disposition"] == "retained"}
+        replacement_values = {row["replacement"] for row in rows if row["replacement"] not in {"not-required", "not-required-retained"}}
+        if any(not re.fullmatch(r"<[^<>\s]+>", value) for value in replacement_values):
+            raise RuntimeError(f"task has malformed replacement identity: {task_id}")
+        replacement_ids = replacement_values
+        if len(replacement_ids) > 1:
+            raise RuntimeError(f"task has duplicate or conflicting replacement identities: {task_id}")
+        if replacement_ids and any(row["replacement"] not in replacement_ids for row in rows):
+            raise RuntimeError(f"task has originals not bound to its sole replacement identity: {task_id}")
+        if replacement_ids and retained_uids:
+            raise RuntimeError(f"task replacement does not supersede every fixed-start original: {task_id}")
+        if not replacement_ids and len(retained_uids) != 1:
+            raise RuntimeError(f"task must have exactly one retained manager message or one verified replacement: {task_id}")
+
+
+def validate_replacements_in_mailbox(
+    client: imaplib.IMAP4_SSL,
+    all_mailbox: str,
+    dispositions: list[dict[str, str]],
+    sender_email: str,
+    recipient_email: str,
+) -> None:
+    replacement_ids = {row["replacement"] for row in dispositions if row["replacement"] not in {"not-required", "not-required-retained"}}
+    for replacement_id in replacement_ids:
+        if not re.fullmatch(r"<[^<>\s]+>", replacement_id) or not replacement_exists(
+            client, all_mailbox, replacement_id, sender_email, recipient_email, restore_readonly=True
+        ):
+            raise RuntimeError("replacement identity is malformed, missing, ambiguous, or has the wrong mail boundary")
 
 
 def record_matches_source_map(record: MailRecord, source: dict[str, str]) -> bool:
@@ -1523,6 +1591,8 @@ def replacement_exists(
     replacement_id: str,
     sender_email: str,
     recipient_email: str,
+    *,
+    restore_readonly: bool = False,
 ) -> bool:
     if not re.fullmatch(r"<[^<>\s]+>", replacement_id):
         return False
@@ -1540,7 +1610,7 @@ def replacement_exists(
         return rfc_message_id(msg) == replacement_id and senders == [sender_email.casefold()] and recipient_email.casefold() in recipients
     finally:
         if not getattr(client, "_omo_operation_timed_out", False):
-            select_mailbox(client, "INBOX", readonly=False)
+            select_mailbox(client, "INBOX", readonly=restore_readonly)
 
 
 def run_export(args: argparse.Namespace, set_stage: Callable[[str], None]) -> int:
@@ -1732,6 +1802,8 @@ def cmd_trash_superseded(args: argparse.Namespace) -> int:
         replacement = args.replacement_id if args.replacement_id else "not-required"
         if tsv_value(replacement) != replacement:
             raise RuntimeError("replacement identity must be one line")
+        if args.replacement_id and not re.fullmatch(r"<[^<>\s]+>", args.replacement_id):
+            raise RuntimeError("replacement identity must be a syntactically valid Message-ID")
         _thread_rows, outcome_evidence, recovery_needed = prepare_thread_disposition(
             source_dir,
             args.batch_id,
@@ -1741,6 +1813,8 @@ def cmd_trash_superseded(args: argparse.Namespace) -> int:
             args.reason_file,
             args.task_evidence_file,
             replacement,
+            args.task_id,
+            args.reviewer,
         )
         if recovery_needed:
             raise RuntimeError("Trash disposition cannot replace a different existing intent")
@@ -1902,6 +1976,8 @@ def parser() -> argparse.ArgumentParser:
     retain.add_argument("--gmail-thread-id", dest="gmail_thrid", required=True)
     retain.add_argument("--reason-file", type=Path, required=True)
     retain.add_argument("--task-evidence-file", type=Path, required=True)
+    retain.add_argument("--task-id", required=True, help="Immutable task identity; terminal verification permits exactly one useful manager message per task.")
+    retain.add_argument("--reviewer", required=True, help="Independent reviewer identity; must differ from --owner.")
     retain.set_defaults(func=cmd_retain_thread)
     reconcile = sub.add_parser("reconcile-intent", help="Read-only reconciliation of one interrupted immutable intent in INBOX or Trash.")
     reconcile.add_argument("--source-dir", type=Path, required=True)
@@ -1928,6 +2004,8 @@ def parser() -> argparse.ArgumentParser:
     trash.add_argument("--gmail-thread-id", dest="gmail_thrid", required=True)
     trash.add_argument("--reason-file", type=Path, required=True)
     trash.add_argument("--task-evidence-file", type=Path, required=True)
+    trash.add_argument("--task-id", required=True, help="Immutable task identity shared by every fixed-start message for the task.")
+    trash.add_argument("--reviewer", required=True, help="Independent reviewer identity; must differ from --owner.")
     trash.add_argument("--yes", action="store_true")
     replacement = trash.add_mutually_exclusive_group(required=True)
     replacement.add_argument("--replacement-message-id", dest="replacement_id", default="")
