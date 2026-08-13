@@ -9,11 +9,13 @@ import unittest
 from contextlib import redirect_stderr
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest.mock import DEFAULT
 from unittest.mock import patch
 
 from omo_manager.omo_agent_status import TaskFrontmatterError, parse_task_metadata
 from omo_manager.omo_task_status import DONE_REMINDER
 from omo_manager.omo_task_status import ensure_repository_closure_custody
+from omo_manager.omo_task_status import finish_shared_target_done
 from omo_manager.omo_task_status import StopArgs
 from omo_manager.omo_task_status import parse_args
 from omo_manager.omo_task_status import reconcile_blocked_index
@@ -67,6 +69,171 @@ def task_frontmatter(
 
 
 class TaskStatusTests(unittest.TestCase):
+    def test_shared_target_closure_is_metadata_only_and_moves_current_to_previous(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "manager.md"
+            original = task_frontmatter(status="long_running", runat="wl:1", managerat="vl:1", is_manager=True) + "body\n"
+            task.write_text(original, encoding="utf-8")
+            todo = root / "TODO.md"
+            todo.write_text("current:\nmanager.md wl:1\n\nprevious:\n", encoding="utf-8")
+            args = StatusArgs(root, Path("manager.md"), "done", "", close_shared_target=True, shared_target="wl:1", source_sha256=hashlib.sha256(original.encode()).hexdigest())
+            tmux_names = (
+                "stop", "capture", "exact_pane_id", "pane_id", "close_note", "record_close",
+                "close_exited_codex_shell", "blocking_request",
+            )
+            with patch.multiple("omo_manager.omo_task_status", **{name: DEFAULT for name in tmux_names}) as mocked:
+                self.assertEqual(0, run(args))
+                for name, mock in mocked.items():
+                    mock.assert_not_called()
+            self.assertIn("status: done\n", task.read_text(encoding="utf-8"))
+            self.assertIn("runat: wl:1\n", task.read_text(encoding="utf-8"))
+            self.assertEqual("current:\n\nprevious:\nmanager.md wl:1\n", todo.read_text(encoding="utf-8"))
+
+    def test_shared_target_closure_fails_closed_for_digest_queue_ownership_and_todo_drift(self) -> None:
+        cases = (
+            ("digest", lambda text, todo: StatusArgs(Path("."), Path("manager.md"), "done", "", close_shared_target=True, shared_target="wl:1", source_sha256="0" * 64), "source bytes"),
+            ("queue", lambda text, todo: StatusArgs(Path("."), Path("manager.md"), "done", "", close_shared_target=True, shared_target="wl:1", source_sha256=hashlib.sha256(text.encode()).hexdigest()), "empty queue"),
+            ("todo", lambda text, todo: StatusArgs(Path("."), Path("manager.md"), "done", "", close_shared_target=True, shared_target="wl:1", source_sha256=hashlib.sha256(text.encode()).hexdigest()), "TODO"),
+        )
+        for label, make_args, expected in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                task = root / "manager.md"
+                text = task_frontmatter(status="long_running", runat="wl:1", managerat="vl:1", is_manager=True, pending_items=("open",)) if label == "queue" else task_frontmatter(status="long_running", runat="wl:1", managerat="vl:1", is_manager=True)
+                task.write_text(text, encoding="utf-8")
+                todo_text = "current:\nother.md wl:1\n\nprevious:\n" if label == "todo" else "current:\nmanager.md wl:1\n\nprevious:\n"
+                (root / "TODO.md").write_text(todo_text, encoding="utf-8")
+                args = make_args(text, todo_text)
+                args = StatusArgs(root, args.task_file, args.status, args.blocked_on, close_shared_target=True, shared_target=args.shared_target, source_sha256=args.source_sha256)
+                with self.assertRaisesRegex(TaskFrontmatterError, expected):
+                    finish_shared_target_done(args, task, text, task.stat())
+                self.assertEqual(text, task.read_text(encoding="utf-8"))
+                self.assertEqual(todo_text, (root / "TODO.md").read_text(encoding="utf-8"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "manager.md"
+            text = task_frontmatter(status="long_running", runat="wl:1", managerat="vl:1", is_manager=True)
+            task.write_text(text, encoding="utf-8")
+            (root / "other.md").write_text(task_frontmatter(status="running", runat="wl:1", managerat="vl:1") + "other\n", encoding="utf-8")
+            (root / "TODO.md").write_text("current:\nmanager.md wl:1\n\nprevious:\n", encoding="utf-8")
+            args = StatusArgs(root, Path("manager.md"), "done", "", close_shared_target=True, shared_target="wl:1", source_sha256=hashlib.sha256(text.encode()).hexdigest())
+            with self.assertRaisesRegex(TaskFrontmatterError, "sole active owner"):
+                finish_shared_target_done(args, task, text, task.stat())
+
+    def test_shared_target_closure_rejects_malformed_todo_sections_rows_and_target(self) -> None:
+        cases = (
+            ("wrong section", "human pending:\nmanager.md wl:1\n\nprevious:\n", "current"),
+            ("duplicate current", "current:\nmanager.md wl:1\n\ncurrent:\n\nprevious:\n", "exactly one canonical"),
+            ("duplicate", "current:\nmanager.md wl:1\nmanager.md wl:1\n\nprevious:\n", "exactly one"),
+            ("wrong target", "current:\nmanager.md vl:2\n\nprevious:\n", "exact shared target"),
+            ("missing previous", "current:\nmanager.md wl:1\n", "previous"),
+            ("mixed-case current", "Current:\nmanager.md wl:1\n\nprevious:\n", "canonical lowercase"),
+            ("mixed-case previous", "current:\nmanager.md wl:1\n\nPrevious:\n", "canonical lowercase"),
+        )
+        for label, todo_text, expected in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                task = root / "manager.md"
+                text = task_frontmatter(status="long_running", runat="wl:1", managerat="vl:1", is_manager=True)
+                task.write_text(text, encoding="utf-8")
+                (root / "TODO.md").write_text(todo_text, encoding="utf-8")
+                args = StatusArgs(root, Path("manager.md"), "done", "", close_shared_target=True, shared_target="wl:1", source_sha256=hashlib.sha256(text.encode()).hexdigest())
+                with self.assertRaisesRegex(TaskFrontmatterError, expected):
+                    finish_shared_target_done(args, task, text, task.stat())
+                self.assertEqual(text, task.read_text(encoding="utf-8"))
+                self.assertEqual(todo_text, (root / "TODO.md").read_text(encoding="utf-8"))
+
+    def test_shared_target_closure_rolls_back_todo_when_task_write_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "manager.md"
+            text = task_frontmatter(status="long_running", runat="wl:1", managerat="vl:1", is_manager=True)
+            task.write_text(text, encoding="utf-8")
+            todo = root / "TODO.md"
+            todo_text = "current:\nmanager.md wl:1\n\nprevious:\n"
+            todo.write_text(todo_text, encoding="utf-8")
+            args = StatusArgs(root, Path("manager.md"), "done", "", close_shared_target=True, shared_target="wl:1", source_sha256=hashlib.sha256(text.encode()).hexdigest())
+
+            def fail_task_replace(target: Path, replacement: str, before: os.stat_result) -> None:
+                if target == task:
+                    raise OSError("task write failed")
+                replace_if_unchanged_locked(target, replacement, before)
+
+            with patch("omo_manager.omo_task_status.replace_if_unchanged_locked", side_effect=fail_task_replace):
+                with self.assertRaises(OSError):
+                    finish_shared_target_done(args, task, text, task.stat())
+            self.assertEqual(text, task.read_text(encoding="utf-8"))
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+
+    def test_shared_target_closure_rejects_todo_changed_after_strict_preflight(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "manager.md"
+            original = task_frontmatter(status="long_running", runat="wl:1", managerat="vl:1", is_manager=True) + "body\n"
+            task.write_text(original, encoding="utf-8")
+            todo = root / "TODO.md"
+            todo_text = "current:\nmanager.md wl:1\n\nprevious:\n"
+            todo.write_text(todo_text, encoding="utf-8")
+            args = StatusArgs(
+                root,
+                Path("manager.md"),
+                "done",
+                "",
+                close_shared_target=True,
+                shared_target="wl:1",
+                source_sha256=hashlib.sha256(original.encode()).hexdigest(),
+            )
+            original_update = update_frontmatter_status
+
+            def inject_todo_change(current: str, status: str, blocked_on: str, root_arg: Path) -> str:
+                todo.write_text("current:\nmanager.md wl:9\n\nprevious:\n", encoding="utf-8")
+                return original_update(current, status, blocked_on, root_arg)
+
+            with patch("omo_manager.omo_task_status.update_frontmatter_status", side_effect=inject_todo_change):
+                with self.assertRaisesRegex(TaskFrontmatterError, "TODO changed"):
+                    finish_shared_target_done(args, task, original, task.stat())
+            self.assertEqual(original, task.read_text(encoding="utf-8"))
+            self.assertEqual("current:\nmanager.md wl:9\n\nprevious:\n", todo.read_text(encoding="utf-8"))
+
+    def test_shared_target_closure_moves_backticked_current_row_with_strict_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "manager.md"
+            original = task_frontmatter(status="long_running", runat="wl:1", managerat="vl:1", is_manager=True) + "body\n"
+            task.write_text(original, encoding="utf-8")
+            todo = root / "TODO.md"
+            todo.write_text("current:\n`manager.md` wl:1\n\nprevious:\n", encoding="utf-8")
+            args = StatusArgs(
+                root,
+                Path("manager.md"),
+                "done",
+                "",
+                close_shared_target=True,
+                shared_target="wl:1",
+                source_sha256=hashlib.sha256(original.encode()).hexdigest(),
+            )
+            self.assertEqual(0, run(args))
+            self.assertIn("status: done\n", task.read_text(encoding="utf-8"))
+            self.assertEqual("current:\n\nprevious:\n`manager.md` wl:1\n", todo.read_text(encoding="utf-8"))
+
+    def test_shared_target_closure_rechecks_manager_children_under_locks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "manager.md"
+            text = task_frontmatter(status="long_running", runat="wl:1", managerat="vl:1", is_manager=True)
+            task.write_text(text, encoding="utf-8")
+            child = root / "child.md"
+            child.write_text(task_frontmatter(status="running", runat="vl:2", managerat="wl:1") + "child\n", encoding="utf-8")
+            todo_text = "current:\nmanager.md wl:1\n\nprevious:\n"
+            (root / "TODO.md").write_text(todo_text, encoding="utf-8")
+            args = StatusArgs(root, Path("manager.md"), "done", "", close_shared_target=True, shared_target="wl:1", source_sha256=hashlib.sha256(text.encode()).hexdigest())
+            with self.assertRaisesRegex(TaskFrontmatterError, "active child"):
+                finish_shared_target_done(args, task, text, task.stat())
+            self.assertEqual(text, task.read_text(encoding="utf-8"))
+            self.assertEqual(todo_text, (root / "TODO.md").read_text(encoding="utf-8"))
+
     def test_restore_terminal_target_changes_only_proven_runat_without_tmux_or_todo(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

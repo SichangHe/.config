@@ -24,6 +24,7 @@ from omo_manager.omo_task import (
     effective_tool,
     ensure_task_file,
     has_live_codex_launch,
+    migrate_manager_owner,
     refreshed_todo_entry,
     is_vl_agent,
     launched_frontmatter_text,
@@ -1414,6 +1415,38 @@ class OmoTaskTests(unittest.TestCase):
             self.assertEqual(0, result)
             self.assertEqual(original.replace("managerat: cfg:1", "managerat: cfg:2"), task.read_text(encoding="utf-8"))
 
+    def test_direct_nested_migration_derives_work_log_root_for_membership_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            nested = root / "nested"
+            nested.mkdir()
+            task = nested / "worker.md"
+            task.write_text(
+                "---\nversion: v1.0.0\nstatus: running\nrunat: worker:1\ntool: codex\nmanagerat: old:1\n"
+                "is_manager: false\npending_task_items: []\n---\nbody\n",
+                encoding="utf-8",
+            )
+            (root / "TODO.md").write_text("current:\n", encoding="utf-8")
+            locked_roots: list[Path] = []
+
+            @contextlib.contextmanager
+            def fake_membership(lock_root: Path):
+                locked_roots.append(lock_root)
+                yield
+
+            with patch("omo_manager.omo_task.root_membership_lock", side_effect=fake_membership), contextlib.redirect_stdout(io.StringIO()):
+                migrate_manager_owner(task, "old:1", "new:2")
+            self.assertEqual([root.resolve()], locked_roots)
+            self.assertIn("managerat: new:2\n", task.read_text(encoding="utf-8"))
+
+    def test_direct_nested_migration_requires_authoritative_root_when_no_todo_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            task = Path(tmp) / "nested" / "worker.md"
+            task.parent.mkdir()
+            task.write_text("body\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "requires --root"):
+                migrate_manager_owner(task, "old:1", "new:2")
+
     def test_migration_rejects_model(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()) as stderr, self.assertRaises(SystemExit):
             parse_args(
@@ -1852,12 +1885,26 @@ class OmoTaskTests(unittest.TestCase):
             prompt = root / "prompt.md"
             prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
             events: list[str] = []
+            membership_held = False
+
+            @contextlib.contextmanager
+            def fake_membership(_root: Path):
+                nonlocal membership_held
+                events.append("membership_enter")
+                membership_held = True
+                try:
+                    yield
+                finally:
+                    membership_held = False
+                    events.append("membership_exit")
 
             def fake_ensure(_args: Args, _target: str) -> Path:
                 events.append("ensure_task_file")
                 return root / "x.md"
 
-            def fake_link(_args: Args, _target: str) -> None:
+            def fake_link(_args: Args, _target: str, *, locked: bool = False) -> None:
+                self.assertTrue(membership_held)
+                self.assertFalse(locked)
                 events.append("link_todo")
 
             def fake_start(_target: str, _args: Args) -> None:
@@ -1866,6 +1913,7 @@ class OmoTaskTests(unittest.TestCase):
             out = io.StringIO()
             with (
                 patch("omo_manager.omo_task.new_window", return_value="cfg:7") as new_window_mock,
+                patch("omo_manager.omo_task.root_membership_lock", side_effect=fake_membership),
                 patch("omo_manager.omo_task.ensure_task_file", side_effect=fake_ensure),
                 patch("omo_manager.omo_task.link_todo", side_effect=fake_link),
                 patch("omo_manager.omo_task.start_codex", side_effect=fake_start),
@@ -1895,7 +1943,7 @@ class OmoTaskTests(unittest.TestCase):
                     ),
                 )
             new_window_mock.assert_called_once()
-            self.assertEqual(["ensure_task_file", "link_todo", "start_codex"], events)
+            self.assertEqual(["membership_enter", "ensure_task_file", "link_todo", "start_codex", "membership_exit"], events)
             self.assertIn("wait patiently for the agent to report instead of eagerly checking its status", out.getvalue())
 
     def test_main_resume_idle_does_not_promise_agent_report(self) -> None:

@@ -62,6 +62,20 @@ CODEX_TRUST_NOTE_RE = re.compile(r"^Note: You’re in a subdirectory of a Git pr
 CODEX_TRUST_YES_RE = re.compile(r"^\s*› 1\. Yes, continue\s*$")
 CODEX_TRUST_NO_RE = re.compile(r"^\s*2\. No, quit\s*$")
 CODEX_TRUST_CONFIRM_RE = re.compile(r"^\s*Press enter to continue(?: and create a sandbox\.\.\.)?\s*$")
+
+
+def root_membership_lock(root: Path):
+    """Serialize task creation and manager-owner membership changes."""
+    return task_file_lock(root / ".omo-task-membership.lock")
+
+
+def infer_work_log_root(path: Path) -> Path:
+    """Find the nearest ancestor whose TODO index identifies the work-log root."""
+    resolved = path.resolve(strict=False)
+    for candidate in (resolved.parent, *resolved.parents):
+        if (candidate / "TODO.md").is_file():
+            return candidate
+    raise ValueError("manager-owner migration requires --root when no ancestor TODO.md identifies the work-log root.")
 MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$")
 LINE_RANGE_RE = re.compile(r"^([1-9]\d*)-([1-9]\d*)$")
 HUMAN_INSTRUCTION_CLOSE = "</human_instruction>"
@@ -428,15 +442,20 @@ def migrate_manager_owner(
     """Validate and migrate one existing task owner without touching other state."""
     if not path.is_file():
         raise ValueError(f"ownership migration requires an existing task file: {path}")
+    membership_root = (work_log_root or infer_work_log_root(path)).resolve(strict=False)
+    try:
+        path.resolve(strict=False).relative_to(membership_root)
+    except ValueError as exc:
+        raise ValueError("ownership migration task must be inside the authoritative work-log root.") from exc
     while True:
-        with path.open("r", encoding="utf-8", newline="") as handle:
+        with root_membership_lock(membership_root), path.open("r", encoding="utf-8", newline="") as handle:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
             before = os.fstat(handle.fileno())
             if not same_file_identity(before, path.stat()):
                 continue
             existing = handle.read()
-            _ = migration_source_metadata(existing, work_log_root)
-            updated = manager_owner_migration_text(existing, old_owner, new_owner, work_log_root)
+            _ = migration_source_metadata(existing, membership_root)
+            updated = manager_owner_migration_text(existing, old_owner, new_owner, membership_root)
             if dry_run_only:
                 print(f"dry-run: would change only managerat from {old_owner} to {new_owner} in {path}; no files or tmux panes changed.")
                 return
@@ -1405,9 +1424,10 @@ def refreshed_todo_entry(existing: str, ref: str, tmux_target: str) -> str:
     return f"{leading}{ref} {tmux_target} {rest}"
 
 
-def link_todo(args: Args, tmux_target: str) -> None:
+def link_todo(args: Args, tmux_target: str, *, locked: bool = False) -> None:
     todo = args.root / "TODO.md"
-    with task_file_lock(todo):
+    lock = contextlib.nullcontext() if locked else task_file_lock(todo)
+    with lock:
         line = todo_line(args, tmux_target)
         lines = todo.read_text(encoding="utf-8").splitlines() if todo.exists() else ["current:", ""]
         ref = task_ref(args.root, args.task_file)
@@ -1601,20 +1621,21 @@ def main(argv: list[str]) -> int:
             migrate_manager_owner(migration_path, args.old_manager_target, args.new_manager_target, args.dry_run, args.root)
             return 0
         existing_target = target(args) if args.workdir is None else ""
-        ownership_lock = task_target_lock(args.root, existing_target) if existing_target else contextlib.nullcontext()
-        with ownership_lock:
-            args = replace(args, human_email_text=validate_inputs(args))
-            existing_pane_id = validate_existing_target_runtime(args)
-            if args.dry_run:
-                dry_run(args)
-                return 0
-            existed = task_path(args.root, args.task_file).exists()
-            tmux_target = new_window(args)
-            if existing_pane_id and exact_pane_id(tmux_target) != existing_pane_id:
-                raise ValueError(f"existing target `{tmux_target}` changed before task registration; retry or use --workdir to launch a new worker.")
-            path = ensure_task_file(args, tmux_target)
-            if not args.no_link:
-                link_todo(args, tmux_target)
+        with root_membership_lock(args.root):
+            ownership_lock = task_target_lock(args.root, existing_target) if existing_target else contextlib.nullcontext()
+            with ownership_lock:
+                args = replace(args, human_email_text=validate_inputs(args))
+                existing_pane_id = validate_existing_target_runtime(args)
+                if args.dry_run:
+                    dry_run(args)
+                    return 0
+                existed = task_path(args.root, args.task_file).exists()
+                tmux_target = new_window(args)
+                if existing_pane_id and exact_pane_id(tmux_target) != existing_pane_id:
+                    raise ValueError(f"existing target `{tmux_target}` changed before task registration; retry or use --workdir to launch a new worker.")
+                path = ensure_task_file(args, tmux_target)
+                if not args.no_link:
+                    link_todo(args, tmux_target)
             if args.workdir is not None:
                 start_codex(tmux_target, args)
         print(path)

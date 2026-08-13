@@ -64,6 +64,11 @@ GIT_COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 CUSTODY_RECEIPT_VERSION = "v1.0.0"
 
 
+def root_membership_lock(root: Path):
+    """Serialize task creation/manager ownership membership with closure scans."""
+    return task_file_lock(root / ".omo-task-membership.lock")
+
+
 @dataclass(frozen=True)
 class Args:
     root: Path
@@ -94,6 +99,9 @@ class Args:
     historical_target: str = ""
     task_sha256: str = ""
     historical_commit: str = ""
+    close_shared_target: bool = False
+    shared_target: str = ""
+    source_sha256: str = ""
 
 
 class ParsedArgs(argparse.Namespace):
@@ -125,6 +133,9 @@ class ParsedArgs(argparse.Namespace):
     historical_target: str = ""
     task_sha256: str = ""
     historical_commit: str = ""
+    close_shared_target: bool = False
+    shared_target: str = ""
+    source_sha256: str = ""
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -161,6 +172,9 @@ shutdown.""",
     _ = parser.add_argument("--historical-target", default="", help="Exact proven prior target required with --restore-terminal-target.")
     _ = parser.add_argument("--task-sha256", default="", help="Exact current task digest required with --restore-terminal-target.")
     _ = parser.add_argument("--historical-commit", default="", help="Full Git commit containing the proven prior target; required with --restore-terminal-target.")
+    _ = parser.add_argument("--close-shared-target", action="store_true", help="Close one explicitly proven manager record on a shared target using metadata and TODO files only; never accesses tmux.")
+    _ = parser.add_argument("--shared-target", default="", help="Exact shared manager target required with --close-shared-target.")
+    _ = parser.add_argument("--source-sha256", default="", help="Exact SHA-256 of the source task bytes required with --close-shared-target.")
     _ = parser.add_argument("task_file", type=Path)
     _ = parser.add_argument("status", nargs="?", choices=sorted(TASK_FRONTMATTER_STATUSES))
     _ = parser.add_argument("--blocked-on", default="", help="Required when setting status to `blocked`; optional for `long_running`; removed for other statuses.")
@@ -171,7 +185,7 @@ shutdown.""",
         parser.error("--closure-repository must be an explicit absolute Git worktree root.")
     if parsed.dirty_path_handoff is not None and parsed.closure_repository is None:
         parser.error("--dirty-path-handoff requires --closure-repository.")
-    if sum((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done, parsed.retire_blocked_target, parsed.reconcile_long_running_human_index, parsed.restore_terminal_target)) > 1:
+    if sum((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done, parsed.retire_blocked_target, parsed.reconcile_long_running_human_index, parsed.restore_terminal_target, parsed.close_shared_target)) > 1:
         parser.error("finish and recovery modes are mutually exclusive.")
     if parsed.retire_blocked_target:
         parser.error("--retire-blocked-target is disabled: preserve the historical target and resolve ownership without writing retired semantics.")
@@ -181,6 +195,11 @@ shutdown.""",
         if any((parsed.blocked_on, parsed.session_id, parsed.replacement_task, parsed.stale_target, parsed.replacement_target, parsed.stale_sha256, parsed.replacement_sha256, parsed.replacement_status, parsed.protected_target, parsed.stopped_evidence, parsed.replacement_pane_evidence, parsed.audit_output, parsed.pane_id, parsed.terminal_evidence, parsed.closure_repository, parsed.dirty_path_handoff)):
             parser.error("unrelated lifecycle, replacement, pane, and repository evidence is not valid with --restore-terminal-target.")
         return Args(parsed.root.resolve(), parsed.task_file, "", "", restore_terminal_target=True, historical_target=parsed.historical_target.strip(), task_sha256=parsed.task_sha256.strip(), historical_commit=parsed.historical_commit.strip())
+    if parsed.close_shared_target:
+        unrelated = (parsed.status, parsed.blocked_on, parsed.session_id, parsed.replacement_task, parsed.stale_target, parsed.replacement_target, parsed.stale_sha256, parsed.replacement_sha256, parsed.replacement_status, parsed.protected_target, parsed.stopped_evidence, parsed.replacement_pane_evidence, parsed.audit_output, parsed.pane_id, parsed.terminal_evidence, parsed.closure_repository, parsed.dirty_path_handoff, parsed.historical_target, parsed.task_sha256, parsed.historical_commit)
+        if any(unrelated) or TARGET_RE.fullmatch(parsed.shared_target.strip()) is None or SHA256_RE.fullmatch(parsed.source_sha256.strip()) is None:
+            parser.error("--close-shared-target requires exact --shared-target and lowercase --source-sha256, without lifecycle or repository evidence.")
+        return Args(parsed.root.resolve(), parsed.task_file, "done", "", close_shared_target=True, shared_target=parsed.shared_target.strip(), source_sha256=parsed.source_sha256.strip())
     if parsed.reconcile_long_running_human_index:
         if parsed.status not in {None, ""} or parsed.blocked_on:
             parser.error("--reconcile-long-running-human-index does not accept status or --blocked-on.")
@@ -963,6 +982,91 @@ def reconcile_done_todo_text(root: Path, path: Path, text: str, runat: str) -> s
     return reconcile_todo_text(root, path, text, runat, "previous", ("current", "human pending"))
 
 
+def reconcile_shared_done_todo_text(root: Path, path: Path, text: str, shared_target: str) -> str:
+    """Move one exact current TODO row for a shared-target manager into `previous`."""
+    lines = text.splitlines(keepends=True)
+    section = ""
+    rows: list[str] = []
+    current_headers = 0
+    previous_headers = 0
+    invalid_lifecycle_headers = 0
+    for line in lines:
+        stripped = line.strip()
+        if stripped.endswith(":"):
+            section = stripped[:-1].casefold()
+            if stripped == "current:":
+                current_headers += 1
+            elif stripped == "previous:":
+                previous_headers += 1
+            elif section in {"current", "previous"}:
+                invalid_lifecycle_headers += 1
+        elif path in todo_row_task_paths(root, line):
+            if section == "current":
+                rows.append(line)
+            else:
+                rows.append(f"__wrong_section__:{section}")
+    if len(rows) != 1 or rows[0].startswith("__wrong_section__:"):
+        found = len(rows)
+        raise TaskFrontmatterError(f"shared-target closure requires exactly one TODO row in `current`, found {found}.")
+    if current_headers != 1 or previous_headers != 1 or invalid_lifecycle_headers:
+        raise TaskFrontmatterError("shared-target closure requires exactly one canonical lowercase `current:` and `previous:` TODO section.")
+    match = TODO_ROW_RE.fullmatch(rows[0].rstrip("\r\n"))
+    if match is None or TARGET_RE.findall(match.group(2) or "") != [shared_target]:
+        raise TaskFrontmatterError("shared-target closure requires the sole current TODO row to name the exact shared target.")
+    return reconcile_todo_text(root, path, text, shared_target, "previous", ("current",))
+
+
+def finish_shared_target_done(args: Args, path: Path, text: str, before: os.stat_result) -> str:
+    """Close a manager record that shares an explicitly supplied target, without tmux."""
+    if hashlib.sha256(path.read_bytes()).hexdigest() != args.source_sha256:
+        raise TaskFrontmatterError("shared-target closure source bytes do not match --source-sha256.")
+    metadata = parse_task_metadata(text, args.root)
+    if metadata is None or metadata.version == V2_VERSION or metadata.status != "long_running" or not metadata.is_manager:
+        raise TaskFrontmatterError("shared-target closure requires one unchanged v1 long_running manager record.")
+    if metadata.runat != args.shared_target:
+        raise TaskFrontmatterError("shared-target closure target does not equal the authoritative task `runat`.")
+    if same_tmux_target(metadata.managerat, args.shared_target):
+        raise TaskFrontmatterError("shared-target closure requires a distinct manager owner target.")
+    if metadata.pending_task_items or has_pending_marker(text):
+        raise TaskFrontmatterError("shared-target closure requires an empty queue and no live pending marker.")
+    todo = args.root / "TODO.md"
+    if not todo.is_file():
+        raise TaskFrontmatterError("TODO.md is not a regular file.")
+    with root_membership_lock(args.root), task_target_lock(args.root, args.shared_target):
+        # Membership is serialized by the root lock. Acquire the ordinary task
+        # and TODO locks in the repository-wide sorted order used by status
+        # reconciliation, avoiding a TODO-first inversion.
+        with ExitStack() as locks:
+            task_files = {candidate.resolve(strict=False) for candidate in args.root.rglob("*.md")}
+            task_files.add(path)
+            task_files.add(todo)
+            for locked_path in sorted(task_files, key=lambda candidate: str(candidate)):
+                locks.enter_context(task_file_lock(locked_path))
+            current_before = path.stat()
+            current_text = path.read_text(encoding="utf-8")
+            if not same_file_state(before, current_before) or current_text != text:
+                raise TaskFrontmatterError("shared-target task changed while closure was being prepared; retry.")
+            current_metadata = parse_task_metadata(current_text, args.root)
+            if current_metadata is None or current_metadata.status != "long_running" or current_metadata.runat != args.shared_target or not current_metadata.is_manager:
+                raise TaskFrontmatterError("shared-target task ownership or lifecycle changed while closure was being prepared; retry.")
+            ensure_manager_has_no_active_children(args.root, path, current_metadata)
+            owners = authoritative_active_target_task_paths(args.root, args.shared_target)
+            if owners != (path,):
+                refs = ", ".join(relative_task_ref(args.root, owner) for owner in owners) or "none"
+                raise TaskFrontmatterError(f"shared-target closure requires the task to be the sole active owner of `{args.shared_target}`: {refs}.")
+            todo_text = todo.read_text(encoding="utf-8")
+            todo_before = todo.stat()
+            updated_todo = reconcile_shared_done_todo_text(args.root, path, todo_text, args.shared_target)
+            updated_task = update_frontmatter_status(current_text, "done", "", args.root)
+            if updated_todo == todo_text:
+                raise TaskFrontmatterError("shared-target closure requires the sole TODO row to move from current to previous.")
+            # The strict preflight proves the row invariant; the existing
+            # done transaction provides the canonical replacement/rollback
+            # protocol while the target and file locks remain held.
+            finish_done_transaction(args.root, path, updated_task, current_before, locked=True, prepared_todo=updated_todo, todo_text=todo_text, todo_before=todo_before)
+    return args.shared_target
+
+
 def reconcile_running_index(root: Path, path: Path, text: str, before: os.stat_result) -> None:
     """Move an already-running task's sole inactive TODO row into `current`."""
     todo = root / "TODO.md"
@@ -1117,27 +1221,32 @@ def mark_done_bookkeeping_failed(root: Path, path: Path, exc: Exception) -> None
     replace_if_unchanged(path, rollback, rollback_before)
 
 
-def finish_done_transaction(root: Path, path: Path, text: str, before: os.stat_result, *, locked: bool = False) -> None:
+def finish_done_transaction(root: Path, path: Path, text: str, before: os.stat_result, *, locked: bool = False, todo_text: str | None = None, prepared_todo: str | None = None, todo_before: os.stat_result | None = None) -> None:
     """Atomically replace each bookkeeping file and roll back `TODO.md` if the task replacement fails."""
     replace_file = replace_if_unchanged_locked if locked else replace_if_unchanged
     todo = root / "TODO.md"
     if not todo.exists():
         replace_file(path, text, before)
         return
-    todo_before = todo.stat()
-    todo_text = todo.read_text(encoding="utf-8")
+    current_todo_before = todo.stat()
+    current_todo_text = todo.read_text(encoding="utf-8")
+    if todo_text is not None and current_todo_text != todo_text:
+        raise TaskFrontmatterError("TODO changed after strict shared-target validation; retry.")
+    if todo_before is not None and not same_file_state(todo_before, current_todo_before):
+        raise TaskFrontmatterError("TODO changed after strict shared-target validation; retry.")
+    original_todo_text = current_todo_text if todo_text is None else todo_text
     task_file = path.relative_to(root).as_posix()
-    updated_todo = moved_todo_text(root, task_file, todo_text)
-    if updated_todo == todo_text:
+    updated_todo = prepared_todo if prepared_todo is not None else moved_todo_text(root, task_file, original_todo_text)
+    if updated_todo == original_todo_text:
         replace_file(path, text, before)
         return
-    replace_file(todo, updated_todo, todo_before)
+    replace_file(todo, updated_todo, current_todo_before)
     moved_todo_state = todo.stat()
     try:
         replace_file(path, text, before)
     except Exception as exc:
         try:
-            replace_file(todo, todo_text, moved_todo_state)
+            replace_file(todo, original_todo_text, moved_todo_state)
         except Exception as rollback_exc:
             raise TaskFrontmatterError(f"task update failed and TODO rollback also failed: {rollback_exc}") from exc
         raise
@@ -1438,6 +1547,7 @@ def run(args: Args) -> int:
     target = ""
     session_id = ""
     preserved_replacement = False
+    shared_target_closure = False
     try:
         path = task_path(args.root, args.task_file)
         before = path.stat()
@@ -1460,6 +1570,9 @@ def run(args: Args) -> int:
             target, session_id = recover_exited_shell_done(args, path, text, before)
         elif args.finish_closed_done:
             target, session_id = finish_closed_done(args, path, text, before)
+        elif args.close_shared_target:
+            target = finish_shared_target_done(args, path, text, before)
+            shared_target_closure = True
         else:
             metadata = parse_task_metadata(text, args.root)
             if metadata is not None and args.status == "done":
@@ -1517,7 +1630,7 @@ def run(args: Args) -> int:
     if args.status == "done":
         if preserved_replacement:
             print(f"Finalized stopped stale task {target} without signaling it or the live successor pane.")
-        elif target:
+        elif target and not shared_target_closure:
             print(done_close_message(target, session_id))
         print(DONE_REMINDER)
     return 0
