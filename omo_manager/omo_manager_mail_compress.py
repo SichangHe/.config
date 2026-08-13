@@ -20,7 +20,7 @@ from email.message import Message
 from email.parser import BytesParser
 from email.utils import getaddresses
 from pathlib import Path
-from typing import Callable
+from typing import Callable, TypeVar
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -36,6 +36,7 @@ CONFIG_PATH = human_config_path()
 DEFAULT_THREADS_PER_BATCH = 10
 EXPORT_FULL_FETCH_ATTEMPTS = 2
 IMAP_OPERATION_TIMEOUT_S = 45.0
+T = TypeVar("T")
 
 
 class ImapOperationError(RuntimeError):
@@ -87,7 +88,7 @@ class PostMoveVerification:
         return self.same_mailbox and not (self.changed_thread_count or self.imap_failure_count)
 
 
-def imap_operation[T](client: imaplib.IMAP4_SSL, stage: str, operation: Callable[[], T]) -> T:
+def imap_operation(client: imaplib.IMAP4_SSL, stage: str, operation: Callable[[], T]) -> T:
     """Run one IMAP operation with an absolute deadline and abort its socket on expiry."""
     if getattr(client, "_omo_operation_timed_out", False):
         raise ImapOperationError(stage, f"IMAP client is unusable after timeout: stage={stage}")

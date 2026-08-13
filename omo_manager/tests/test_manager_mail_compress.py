@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import os
 import subprocess
 import tempfile
 import threading
@@ -137,6 +138,61 @@ class ReconcileArgs:
 
 
 class ManagerMailCompressTests(unittest.TestCase):
+    def test_deployed_python_310_compiles_imports_and_bounds_imap_operation(self) -> None:
+        root = Path(__file__).parents[2]
+        helper = root / "omo_manager" / "omo_manager_mail_compress.py"
+        code = """
+import py_compile
+import os
+import socket
+import sys
+import threading
+from unittest.mock import patch
+
+py_compile.compile(os.environ["HELPER"], doraise=True)
+assert sys.version_info[:3] == (3, 10, 12), sys.version
+from omo_manager.omo_manager_mail_compress import ImapOperationError, imap_operation
+
+class Socket:
+    def __init__(self):
+        self.closed = threading.Event()
+
+    def shutdown(self, how):
+        assert how == socket.SHUT_RDWR
+        self.closed.set()
+
+    def close(self):
+        self.closed.set()
+
+class Client:
+    def __init__(self):
+        self.sock = Socket()
+
+client = Client()
+assert imap_operation(client, "success", lambda: 7) == 7
+release = threading.Event()
+with patch("omo_manager.omo_manager_mail_compress.IMAP_OPERATION_TIMEOUT_S", 0.01):
+    try:
+        imap_operation(client, "bounded", release.wait)
+    except ImapOperationError as exc:
+        assert "timed out: stage=bounded timeout_s=0.01" in str(exc)
+    else:
+        raise AssertionError("bounded operation did not time out")
+release.set()
+assert client.sock.closed.is_set()
+"""
+        env = os.environ.copy()
+        env["HELPER"] = str(helper)
+        result = subprocess.run(
+            ["/usr/bin/python3.10", "-c", code],
+            cwd=root,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+
     def test_direct_executable_starts_with_deployed_python(self) -> None:
         helper = Path(__file__).parents[1] / "omo_manager_mail_compress.py"
         result = subprocess.run([helper, "--help"], capture_output=True, text=True, check=False)
