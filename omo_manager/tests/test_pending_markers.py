@@ -9683,6 +9683,78 @@ printf 'header\\n(pending)\\nchanged\\n' > {task}
 
         alert.assert_called_once()
 
+    def test_capacity_advisory_async_acceptance_reserves_repeat_window(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(
+            Path("/tmp"),
+            "",
+            Path("/tmp/seen.tsv"),
+            1.0,
+            1.0,
+            30.0,
+            Path("/status.py"),
+            False,
+            False,
+            manager_target="wl:1",
+            agent_problem_interval_s=10.0,
+            agent_problem_repeat_s=300.0,
+        )
+        seen: dict[str, float] = {}
+        watcher.CAPACITY_ADVISORY_PENDING.clear()
+        watcher.CAPACITY_ADVISORY_PENDING.add((str(args.root), "gpt-5.6-terra"))
+
+        with patch.object(watcher, "push_manager_text", return_value=watcher.ASYNC_DELIVERY_STARTED) as push:
+            self.assertTrue(watcher.retry_capacity_advisory(args, seen, 1000.0))
+            self.assertFalse(watcher.retry_capacity_advisory(args, seen, 1010.0))
+
+        push.assert_called_once()
+        key = watcher.capacity_advisory_seen_key(args, ("gpt-5.6-terra",))
+        self.assertEqual(1000.0, seen[key])
+
+    def test_capacity_advisory_inflight_failure_preserves_pending_retry(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(
+            Path("/tmp"),
+            "",
+            Path("/tmp/seen.tsv"),
+            1.0,
+            1.0,
+            30.0,
+            Path("/status.py"),
+            False,
+            False,
+            manager_target="wl:1",
+            agent_problem_interval_s=10.0,
+            agent_problem_repeat_s=300.0,
+        )
+        seen: dict[str, float] = {}
+        model = (str(args.root), "gpt-5.6-terra")
+        watcher.CAPACITY_ADVISORY_PENDING.clear()
+        watcher.CAPACITY_ADVISORY_PENDING.add(model)
+        events: list[watcher.DeliverySuccessEvent] = []
+
+        def accepted(_args: Args, _text: str, event: watcher.DeliverySuccessEvent) -> int:
+            events.append(event)
+            return watcher.ASYNC_DELIVERY_STARTED
+
+        with patch.object(watcher, "push_manager_text", side_effect=accepted) as push:
+            self.assertTrue(watcher.retry_capacity_advisory(args, seen, 1000.0))
+            self.assertFalse(watcher.retry_capacity_advisory(args, seen, 1001.0))
+        self.assertIn(model, watcher.CAPACITY_ADVISORY_PENDING)
+        push.assert_called_once()
+
+        watcher.queue_delivery_failure_event(events[0])
+        self.assertTrue(watcher.drain_delivery_successes(args, seen, 1002.0))
+        key = watcher.capacity_advisory_seen_key(args, ("gpt-5.6-terra",))
+        self.assertNotIn(key, seen)
+        self.assertIn(model, watcher.CAPACITY_ADVISORY_PENDING)
+        self.assertFalse(watcher.retry_capacity_advisory(args, seen, 1005.0))
+        with patch.object(watcher, "push_manager_text", return_value=watcher.ASYNC_DELIVERY_STARTED) as retry:
+            self.assertTrue(watcher.retry_capacity_advisory(args, seen, 1010.0))
+        retry.assert_called_once()
+
     def test_capacity_pre_paste_guard_failure_cancels_stale_alert_without_consuming_budget(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 

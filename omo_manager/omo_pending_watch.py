@@ -4464,17 +4464,18 @@ def retry_capacity_advisory(args: Args, seen: dict[str, float], now_wall_s: floa
         return False
     key = capacity_advisory_seen_key(args, models)
     pending = tuple((str(args.root), model) for model in models)
-    if key in seen and now_wall_s - seen_get(seen, key, now_s=now_wall_s) < args.agent_problem_repeat_s:
-        CAPACITY_ADVISORY_PENDING.difference_update(pending)
-        return False
     inflight_key = f"{key}:inflight"
+    if key in seen and now_wall_s - seen_get(seen, key, now_s=now_wall_s) < args.agent_problem_repeat_s:
+        if inflight_key not in seen:
+            CAPACITY_ADVISORY_PENDING.difference_update(pending)
+        return False
     next_key = f"{key}:next"
     if inflight_key in seen or now_wall_s < seen.get(next_key, 0.0):
         return False
     event = DeliverySuccessEvent(
         seen_keys=(key,),
         seen_removals=(inflight_key, next_key),
-        failure_seen_removals=(inflight_key,),
+        failure_seen_removals=(key, inflight_key),
         failure_seen_values=((next_key, now_wall_s + args.agent_problem_interval_s),),
         capacity_advisory_removals=pending,
         seen_at_s=now_wall_s,
@@ -4485,8 +4486,8 @@ def retry_capacity_advisory(args: Args, seen: dict[str, float], now_wall_s: floa
         seen.pop(inflight_key, None)
         seen[next_key] = now_wall_s + args.agent_problem_interval_s
         return False
+    remember_seen(seen, key, now_wall_s)
     if status == 0:
-        remember_seen(seen, key, now_wall_s)
         seen.pop(inflight_key, None)
         CAPACITY_ADVISORY_PENDING.difference_update(pending)
     return True
