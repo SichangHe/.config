@@ -40,6 +40,7 @@ from omo_manager.omo_manager_mail_compress import (
     imap_quoted,
     intent_reconciliation_evidence,
     is_manager_record,
+    load_reviewed_scope,
     mail_boundary,
     mailbox_exists,
     manager_candidate_uids,
@@ -54,6 +55,7 @@ from omo_manager.omo_manager_mail_compress import (
     tsv_value,
     verify_post_move_imap,
     validate_task_terminal_dispositions,
+    validate_scoped_records,
     verified_existing_trash_records,
     write_export_receipt,
     write_private,
@@ -121,6 +123,7 @@ class ExportArgs:
     def __init__(self, out_dir: Path) -> None:
         self.out_dir = out_dir
         self.threads_per_batch = 10
+        self.scope_file = None
 
 
 class RetainArgs:
@@ -147,6 +150,112 @@ class ReconcileArgs:
 
 
 class ManagerMailCompressTests(unittest.TestCase):
+    def test_reviewed_scope_binds_hash_review_and_rejects_tamper_or_task_mismatch(self) -> None:
+        digest = hashlib.sha256(b"raw").hexdigest()
+        text = (
+            "version\ttask_id\tuid\tgmail_msgid\tgmail_thrid\traw_sha256\tpreparer\treviewer\tprovenance\n"
+            f"v1.0.0\ttask-a\t7\t100\t200\t{digest}\towner-a\treviewer-b\tread-only current-mail inventory\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            scope_file = Path(tmp) / "scope.tsv"
+            scope_file.write_text(text, encoding="utf-8")
+            scope_file.chmod(0o600)
+            scope = load_reviewed_scope(scope_file)
+            self.assertEqual(hashlib.sha256(text.encode()).hexdigest(), scope.sha256)
+            validate_scoped_records(scope, [MailRecord("7", "", "", "", "", "", gmail_msgid="100", gmail_thrid="200", raw_sha256=digest)])
+            with self.assertRaisesRegex(RuntimeError, "does not match reviewed scope"):
+                validate_scoped_records(scope, [MailRecord("7", "", "", "", "", "", gmail_msgid="100", gmail_thrid="200", raw_sha256="0" * 64)])
+            scope_file.write_text(text.replace("owner-a\treviewer-b", "owner-a\towner-a"), encoding="utf-8")
+            scope_file.chmod(0o600)
+            with self.assertRaisesRegex(RuntimeError, "reviewer must be distinct"):
+                load_reviewed_scope(scope_file)
+            scope_file.write_text(text + f"v1.0.0\ttask-b\t8\t101\t200\t{digest}\towner-a\treviewer-b\tread-only current-mail inventory\n", encoding="utf-8")
+            scope_file.chmod(0o600)
+            with self.assertRaisesRegex(RuntimeError, "multiple tasks"):
+                load_reviewed_scope(scope_file)
+
+    def test_scoped_export_excludes_unrelated_and_freezes_before_fetch(self) -> None:
+        raw = self.raw_message("[worker:0] complete")
+        unrelated = self.raw_message("[worker:1] unrelated")
+        digest = hashlib.sha256(raw).hexdigest()
+        client = FakeClient(
+            {
+                ("search", None, "ALL"): ("OK", [b"7 8"]),
+                ("search", None, "FROM", '"agent@example.test"'): ("OK", [b"7 8"]),
+                ("fetch", "7", HEADER_FETCH): ("OK", [(b"header", raw)]),
+                ("fetch", "7", FULL_FETCH): ("OK", [(b"message", raw)]),
+                ("fetch", "7", GMAIL_METADATA_FETCH): self.gmail_metadata("7"),
+                ("search", None, "X-GM-THRID", "200"): ("OK", [b"70"]),
+                ("fetch", "70", FULL_FETCH): ("OK", [(b"message", raw)]),
+                ("fetch", "70", GMAIL_METADATA_FETCH): self.gmail_metadata("70"),
+                ("fetch", "8", FULL_FETCH): ("OK", [(b"message", unrelated)]),
+            },
+            self.gmail_mailboxes(),
+        )
+
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scope_file = root / "scope.tsv"
+            scope_file.write_text(
+                "version\ttask_id\tuid\tgmail_msgid\tgmail_thrid\traw_sha256\tpreparer\treviewer\tprovenance\n"
+                f"v1.0.0\ttask-a\t7\t100\t200\t{digest}\towner-a\treviewer-b\tcurrent read-only mail\n",
+                encoding="utf-8",
+            )
+            scope_file.chmod(0o600)
+            args = ExportArgs(root / "export")
+            args.scope_file = scope_file
+            with (
+                patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {"user": "human@example.test"})),
+                patch("omo_manager.omo_manager_mail_compress.configured_agent_mail", return_value=Settings()),
+            ):
+                self.assertEqual(0, cmd_export(args))
+            self.assertIn("scope_sha256", (args.out_dir / "scope.tsv").read_text(encoding="utf-8"))
+            self.assertNotIn("\n8\t", (args.out_dir / "manifest.tsv").read_text(encoding="utf-8"))
+            claim_batch(args.out_dir, "batch-0001", "owner-a")
+            reason = args.out_dir / "reason.txt"
+            task_evidence = args.out_dir / "task-evidence.txt"
+            reason.write_text("reviewed reason\n", encoding="utf-8")
+            task_evidence.write_text("reviewed task evidence\n", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "does not match independently reviewed scope"):
+                prepare_thread_disposition(args.out_dir, "batch-0001", "owner-a", "200", set(), reason, task_evidence, "not-required-retained", "task-b", "reviewer-b")
+            scope_tasks = args.out_dir / "scope-tasks.tsv"
+            scope_tasks.write_text(scope_tasks.read_text(encoding="utf-8").replace("task-a", "task-b"), encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "digest is missing or tampered"):
+                prepare_thread_disposition(args.out_dir, "batch-0001", "owner-a", "200", set(), reason, task_evidence, "not-required-retained", "task-a", "reviewer-b")
+            self.assertFalse(any(call[:2] == ("fetch", "8") for call in client.uid_calls))
+            self.assertFalse(any(call[0].casefold() in {"copy", "move", "store", "expunge"} for call in client.uid_calls))
+
+    def test_scoped_export_rejects_missing_current_identity(self) -> None:
+        digest = hashlib.sha256(b"raw").hexdigest()
+        client = FakeClient({("search", None, "ALL"): ("OK", [b"8"]), ("search", None, "FROM", '"agent@example.test"'): ("OK", [b"8"])})
+
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scope_file = root / "scope.tsv"
+            scope_file.write_text(
+                "version\ttask_id\tuid\tgmail_msgid\tgmail_thrid\traw_sha256\tpreparer\treviewer\tprovenance\n"
+                f"v1.0.0\ttask-a\t7\t100\t200\t{digest}\towner-a\treviewer-b\tcurrent read-only mail\n",
+                encoding="utf-8",
+            )
+            scope_file.chmod(0o600)
+            args = ExportArgs(root / "export")
+            args.scope_file = scope_file
+            with (
+                patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {"user": "human@example.test"})),
+                patch("omo_manager.omo_manager_mail_compress.configured_agent_mail", return_value=Settings()),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "absent at fixed start"):
+                    cmd_export(args)
+            self.assertFalse((args.out_dir / "manifest.tsv").exists())
+
     def test_task_terminal_rejects_multiple_retained_messages(self) -> None:
         rows = [
             {"task_id": "task-a", "uid": "7", "disposition": "retained", "replacement": "not-required-retained"},

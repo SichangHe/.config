@@ -88,6 +88,79 @@ class PostMoveVerification:
         return self.same_mailbox and not (self.changed_thread_count or self.imap_failure_count)
 
 
+@dataclass(frozen=True)
+class ScopedSource:
+    task_id: str
+    uid: str
+    gmail_msgid: str
+    gmail_thrid: str
+    raw_sha256: str
+
+
+@dataclass(frozen=True)
+class ReviewedScope:
+    sources: tuple[ScopedSource, ...]
+    preparer: str
+    reviewer: str
+    provenance: str
+    sha256: str
+
+
+def load_reviewed_scope(path: Path) -> ReviewedScope:
+    """Load a private, independently reviewed exact-identity successor scope."""
+    try:
+        stat = path.lstat()
+    except OSError as exc:
+        raise RuntimeError("could not inspect scope file") from exc
+    if not path.is_file() or path.is_symlink() or stat.st_uid != os.geteuid() or stat.st_mode & 0o077:
+        raise RuntimeError("scope file must be a regular owner-only file owned by the current user")
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(fd, "rb") as handle:
+        raw = handle.read()
+    try:
+        rows = list(csv.DictReader(io.StringIO(raw.decode("utf-8")), delimiter="\t"))
+    except UnicodeDecodeError as exc:
+        raise RuntimeError("scope file must be UTF-8 TSV") from exc
+    fields = ("version", "task_id", "uid", "gmail_msgid", "gmail_thrid", "raw_sha256", "preparer", "reviewer", "provenance")
+    if not rows or tuple(rows[0]) != fields:
+        raise RuntimeError(f"scope file must have exactly these columns: {','.join(fields)}")
+    metadata = {(row["version"], row["preparer"], row["reviewer"], row["provenance"]) for row in rows}
+    if len(metadata) != 1:
+        raise RuntimeError("scope review metadata must be identical on every row")
+    version, preparer, reviewer, provenance = metadata.pop()
+    if version != "v1.0.0" or not preparer.strip() or not reviewer.strip() or not provenance.strip():
+        raise RuntimeError("scope requires v1.0.0 and nonempty preparer, reviewer, and provenance")
+    if preparer.strip() == reviewer.strip():
+        raise RuntimeError("scope reviewer must be distinct from its preparer")
+    sources: list[ScopedSource] = []
+    for row in rows:
+        source = ScopedSource(*(row[name].strip() for name in fields[1:6]))
+        if not source.task_id or not source.uid.isdecimal() or not source.gmail_msgid.isdecimal() or not source.gmail_thrid.isdecimal():
+            raise RuntimeError("scope has an invalid task or source identity")
+        if not re.fullmatch(r"[0-9a-f]{64}", source.raw_sha256):
+            raise RuntimeError("scope raw_sha256 must be a lowercase SHA-256 digest")
+        sources.append(source)
+    identities = [(source.uid, source.gmail_msgid) for source in sources]
+    if len(identities) != len(set(identities)) or len({source.uid for source in sources}) != len(sources):
+        raise RuntimeError("scope contains a duplicate or ambiguous source identity")
+    tasks_by_thread: dict[str, set[str]] = {}
+    for source in sources:
+        tasks_by_thread.setdefault(source.gmail_thrid, set()).add(source.task_id)
+    if any(len(tasks) != 1 for tasks in tasks_by_thread.values()):
+        raise RuntimeError("scope assigns one mail thread to multiple tasks")
+    return ReviewedScope(tuple(sources), preparer.strip(), reviewer.strip(), provenance.strip(), hashlib.sha256(raw).hexdigest())
+
+
+def validate_scoped_records(scope: ReviewedScope, records: list[MailRecord]) -> None:
+    expected = {source.uid: source for source in scope.sources}
+    if len(records) != len(expected) or {record.uid for record in records} != set(expected):
+        raise RuntimeError("current fixed-start messages do not exactly match reviewed scope")
+    for record in records:
+        source = expected[record.uid]
+        if (record.gmail_msgid, record.gmail_thrid, record.raw_sha256) != (source.gmail_msgid, source.gmail_thrid, source.raw_sha256):
+            raise RuntimeError(f"current message identity does not match reviewed scope: uid={record.uid}")
+
+
 def imap_operation(client: imaplib.IMAP4_SSL, stage: str, operation: Callable[[], T]) -> T:
     """Run one IMAP operation with an absolute deadline and abort its socket on expiry."""
     if getattr(client, "_omo_operation_timed_out", False):
@@ -811,7 +884,7 @@ def export_body(record: MailRecord, include_addresses: bool = False) -> str:
     )
 
 
-def export_manifest(records: list[MailRecord], thread_digests: dict[str, str]) -> str:
+def export_manifest(records: list[MailRecord], thread_digests: dict[str, str], scope: ReviewedScope | None = None, scope_tasks_sha256: str = "") -> str:
     output = io.StringIO()
     writer = csv.DictWriter(
         output,
@@ -827,6 +900,11 @@ def export_manifest(records: list[MailRecord], thread_digests: dict[str, str]) -
             "flags",
             "labels",
             "thread_context_sha256",
+            "scope_tasks_sha256",
+            "scope_sha256",
+            "scope_preparer",
+            "scope_reviewer",
+            "scope_provenance",
             "body_bytes",
             "subject",
         ),
@@ -848,6 +926,11 @@ def export_manifest(records: list[MailRecord], thread_digests: dict[str, str]) -
                 "flags": tsv_value(record.flags),
                 "labels": tsv_value(record.labels),
                 "thread_context_sha256": thread_digests[record.gmail_thrid],
+                "scope_tasks_sha256": scope_tasks_sha256,
+                "scope_sha256": scope.sha256 if scope else "",
+                "scope_preparer": scope.preparer if scope else "",
+                "scope_reviewer": scope.reviewer if scope else "",
+                "scope_provenance": scope.provenance if scope else "",
                 "body_bytes": str(record.body_bytes),
                 "subject": tsv_value(record.subject),
             }
@@ -1025,6 +1108,65 @@ def thread_batch_rows(source_dir: Path, batch_id: str, owner: str, gmail_thrid: 
     return rows
 
 
+def scoped_task_map(source_dir: Path) -> dict[str, str]:
+    path = source_dir / "scope-tasks.tsv"
+    manifest_path = source_dir / "manifest.tsv"
+    try:
+        manifest_text = manifest_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError("could not read immutable manifest") from exc
+    reader = csv.DictReader(io.StringIO(manifest_text), delimiter="\t")
+    if reader.fieldnames is None or "uid" not in reader.fieldnames:
+        raise RuntimeError("private source map is missing required fields: manifest.tsv")
+    scope_fields = {"scope_tasks_sha256", "scope_sha256", "scope_preparer", "scope_reviewer", "scope_provenance"}
+    if not scope_fields.issubset(reader.fieldnames):
+        if path.exists() or (source_dir / "scope.tsv").exists():
+            raise RuntimeError("legacy unscoped manifest has unexpected scope artifacts")
+        return {}
+    manifest_rows = list(reader)
+    if not manifest_rows:
+        raise RuntimeError("immutable manifest must not be empty")
+    manifest_digests = {row["scope_tasks_sha256"] for row in manifest_rows}
+    if len(manifest_digests) != 1:
+        raise RuntimeError("manifest has inconsistent scoped task map digests")
+    manifest_digest = next(iter(manifest_digests))
+    scope_path = source_dir / "scope.tsv"
+    if not manifest_digest:
+        if path.exists() or scope_path.exists():
+            raise RuntimeError("unscoped manifest has unexpected scope artifacts")
+        return {}
+    if not path.is_file() or not scope_path.is_file():
+        raise RuntimeError("scoped manifest lacks required reviewed task evidence")
+    rows = read_tsv(path, {"uid", "task_id", "gmail_msgid", "gmail_thrid", "raw_sha256"})
+    mapping = {row["uid"]: row["task_id"] for row in rows}
+    manifest = export_source_map(source_dir, [row["uid"] for row in manifest_rows])
+    if len(mapping) != len(rows) or set(mapping) != set(manifest):
+        raise RuntimeError("scoped task map is missing, duplicate, or extra")
+    for row in rows:
+        source = manifest[row["uid"]]
+        if (row["gmail_msgid"], row["gmail_thrid"], row["raw_sha256"]) != (source["gmail_msgid"], source["gmail_thrid"], source["raw_sha256"]):
+            raise RuntimeError("scoped task map does not match immutable manifest")
+    scope_rows = read_tsv(scope_path, {"scope_sha256", "scope_tasks_sha256", "preparer", "reviewer", "provenance"})
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    bound_review = {(row["scope_sha256"], row["scope_preparer"], row["scope_reviewer"], row["scope_provenance"]) for row in manifest_rows}
+    if len(scope_rows) != 1 or len(bound_review) != 1 or scope_rows[0]["scope_tasks_sha256"] != digest or manifest_digest != digest:
+        raise RuntimeError("scoped task map digest is missing or tampered")
+    scope_row = scope_rows[0]
+    if (scope_row["scope_sha256"], scope_row["preparer"], scope_row["reviewer"], scope_row["provenance"]) not in bound_review or not scope_row["preparer"] or not scope_row["reviewer"] or scope_row["preparer"] == scope_row["reviewer"]:
+        raise RuntimeError("scoped review identity or provenance is missing or tampered")
+    for evidence_path in (path, scope_path):
+        stat = evidence_path.lstat()
+        if evidence_path.is_symlink() or not evidence_path.is_file() or stat.st_uid != os.geteuid() or stat.st_mode & 0o077:
+            raise RuntimeError("scoped evidence must remain regular owner-only files")
+    return mapping
+
+
+def require_scoped_task(source_dir: Path, rows: list[dict[str, str]], task_id: str) -> None:
+    mapping = scoped_task_map(source_dir)
+    if mapping and any(mapping.get(row["uid"]) != task_id for row in rows):
+        raise RuntimeError("task identity does not match independently reviewed scope")
+
+
 def disposition_text(
     rows: list[dict[str, str]],
     batch_id: str,
@@ -1079,6 +1221,7 @@ def prepare_thread_disposition(
     if not reviewer or tsv_value(reviewer) != reviewer or reviewer == owner:
         raise RuntimeError("reviewer must be a distinct nonempty one-line identity")
     rows = thread_batch_rows(source_dir, batch_id, owner, gmail_thrid)
+    require_scoped_task(source_dir, rows, task_id)
     thread_uids = {row["uid"] for row in rows}
     thread_sources = export_source_map(source_dir, sorted(thread_uids))
     if {source["gmail_thrid"] for source in thread_sources.values()} != {gmail_thrid}:
@@ -1445,6 +1588,7 @@ def cmd_verify_run(args: argparse.Namespace) -> int:
         raise RuntimeError("fixed-start run evidence must contain exactly one row")
     manifest = read_tsv(args.source_dir / "manifest.tsv", {"uid", "gmail_thrid", "gmail_msgid"})
     batches = batch_rows(args.source_dir)
+    approved_tasks = scoped_task_map(args.source_dir)
     manifest_uids = [row["uid"] for row in manifest]
     batch_uids = [row["uid"] for row in batches]
     if len(manifest_uids) != len(set(manifest_uids)) or set(manifest_uids) != set(batch_uids):
@@ -1504,6 +1648,8 @@ def cmd_verify_run(args: argparse.Namespace) -> int:
                 raise RuntimeError(f"invalid terminal recovery evidence for thread: {gmail_thrid}")
             skipped_already_trashed += len(rows)
             skipped_already_trashed_threads += 1
+        if approved_tasks and any(approved_tasks.get(row["uid"]) != row["task_id"] for row in rows):
+            raise RuntimeError(f"terminal disposition regrouped an independently reviewed task: {gmail_thrid}")
         if any(row["gmail_thrid"] != gmail_thrid or row["disposition"] not in {"retained", "trashed"} for row in rows):
             raise RuntimeError(f"invalid disposition outcome for thread: {gmail_thrid}")
         dispositions.extend(rows)
@@ -1621,8 +1767,20 @@ def run_export(args: argparse.Namespace, set_stage: Callable[[str], None]) -> in
     client, config = open_mailbox(readonly=True)
     try:
         set_stage("freeze-candidates")
+        fixed_start_utc = datetime.now(timezone.utc).isoformat()
         sender_email, recipient_email = mail_boundary(config)
-        header_records, skipped = accepted_manager_headers(client, manager_candidate_uids(client, sender_email), sender_email, recipient_email)
+        candidate_uids = manager_candidate_uids(client, sender_email)
+        scope_file = getattr(args, "scope_file", None)
+        scope = load_reviewed_scope(scope_file) if scope_file is not None else None
+        if scope is not None:
+            requested = {source.uid for source in scope.sources}
+            missing = requested - set(candidate_uids)
+            if missing:
+                raise RuntimeError(f"reviewed scope identity is absent at fixed start: count={len(missing)}")
+            candidate_uids = [uid for uid in candidate_uids if uid in requested]
+        header_records, skipped = accepted_manager_headers(client, candidate_uids, sender_email, recipient_email)
+        if scope is not None and {record.uid for record in header_records} != {source.uid for source in scope.sources}:
+            raise RuntimeError("reviewed scope contains a boundary-mismatched or ambiguous identity")
         uidvalidity = selected_uidvalidity(client)
         set_stage("fetch-fixed-start-sources")
         source_records = [
@@ -1635,6 +1793,8 @@ def run_export(args: argparse.Namespace, set_stage: Callable[[str], None]) -> in
                 n_fetch_attempts=EXPORT_FULL_FETCH_ATTEMPTS,
             )
         ]
+        if scope is not None:
+            validate_scoped_records(scope, source_records)
         set_stage("fetch-thread-context")
         special_use, records_by_thread = fetch_imap_thread_contexts(client, source_records)
         all_mailbox = special_use.get(r"\All", "")
@@ -1652,15 +1812,31 @@ def run_export(args: argparse.Namespace, set_stage: Callable[[str], None]) -> in
     write_private(out_dir / "batches.tsv", export_batches(records, args.threads_per_batch))
     write_private(
         out_dir / "run.tsv",
-        f"fixed_start_utc\tsource_count\tthread_count\tthreads_per_batch\n{datetime.now(timezone.utc).isoformat()}\t{len(records)}\t{len(records_by_thread)}\t{args.threads_per_batch}\n",
+        f"fixed_start_utc\tsource_count\tthread_count\tthreads_per_batch\n{fixed_start_utc}\t{len(records)}\t{len(records_by_thread)}\t{args.threads_per_batch}\n",
     )
+    if scope is not None:
+        scope_tasks = io.StringIO()
+        writer = csv.DictWriter(scope_tasks, fieldnames=("uid", "task_id", "gmail_msgid", "gmail_thrid", "raw_sha256"), delimiter="\t", lineterminator="\n")
+        writer.writeheader()
+        for source in sorted(scope.sources, key=lambda value: int(value.uid)):
+            writer.writerow({field: getattr(source, field) for field in writer.fieldnames})
+        scope_tasks_text = scope_tasks.getvalue()
+        scope_tasks_sha256 = hashlib.sha256(scope_tasks_text.encode()).hexdigest()
+        write_private(out_dir / "scope-tasks.tsv", scope_tasks_text)
+        write_private(
+            out_dir / "scope.tsv",
+            "scope_sha256\tscope_tasks_sha256\tpreparer\treviewer\tprovenance\n"
+            f"{scope.sha256}\t{scope_tasks_sha256}\t{tsv_value(scope.preparer)}\t{tsv_value(scope.reviewer)}\t{tsv_value(scope.provenance)}\n",
+        )
+    else:
+        scope_tasks_sha256 = ""
     write_private(out_dir / "uids.txt", "\n".join(record.uid for record in records) + ("\n" if records else ""))
     write_private_dir(out_dir / "claims")
     write_private_dir(out_dir / "intents")
     write_private_dir(out_dir / "outcomes")
     write_private_dir(out_dir / "recoveries")
     set_stage("publish-manifest")
-    write_private(out_dir / "manifest.tsv", export_manifest(records, thread_digests))
+    write_private(out_dir / "manifest.tsv", export_manifest(records, thread_digests, scope, scope_tasks_sha256))
     set_stage("report-success")
     suffix = f" skipped_boundary_mismatch={len(skipped)}" if skipped else ""
     print(f"exported={len(records)}{suffix} out_dir={out_dir}")
@@ -1963,6 +2139,7 @@ def parser() -> argparse.ArgumentParser:
     export = sub.add_parser("export", help="Export manager mail bodies into a private local directory.")
     export.add_argument("--out-dir", type=Path, required=True)
     export.add_argument("--threads-per-batch", type=int, default=DEFAULT_THREADS_PER_BATCH)
+    export.add_argument("--scope-file", type=Path, help="Private independently reviewed v1.0.0 TSV limiting this new fixed-start export to exact current identities.")
     export.set_defaults(func=cmd_export)
     claim = sub.add_parser("claim-batch", help="Atomically claim one fixed-start review batch.")
     claim.add_argument("--source-dir", type=Path, required=True)

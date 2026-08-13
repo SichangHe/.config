@@ -7,6 +7,10 @@ Helper: `~/.config/omo_manager/omo_manager_mail_compress.py`
 ## freeze once
 
 - create a fresh owner-only directory and run `export --out-dir PRIVATE_DIR --threads-per-batch N`
+- a corrected successor must add `--scope-file REVIEWED.tsv`; the owner-only regular-file v1.0.0 TSV columns are `version`, `task_id`, `uid`, `gmail_msgid`, `gmail_thrid`, `raw_sha256`, `preparer`, `reviewer`, and `provenance`. Every row repeats the same nonempty review metadata, and reviewer must differ from preparer
+- build that scope only from a fresh read-only view of currently present mail and have a distinct reviewer approve the exact task/source mapping. Prior-run evidence may inform provenance but is evidence only, never mutation authority
+- scoped export takes a new fixed-start snapshot, excludes unrelated and later-arriving candidates, rejects missing, duplicate, boundary-mismatched, task-conflicting, or content/identity-drifted sources, and binds the scope-file SHA-256 plus review identities in immutable `scope.tsv`
+- scoped export still requires an explicitly authorized fresh private output directory; the helper does not grant directory-creation authority
 - export is the run's only candidate discovery; it freezes one immutable fixed-start source set, exact message and thread identities, content, complete `\All` thread context, UIDVALIDITY, and deterministic disjoint thread batches
 - later arrivals are outside the run: never classify or move them, never add them to a batch, and never rerun discovery because of them
 - missing, duplicate, conflicting, or incomplete identity or context evidence blocks export without mutation
@@ -20,10 +24,10 @@ Helper: `~/.config/omo_manager/omo_manager_mail_compress.py`
 - claim batches exclusively with `claim-batch`; different owners may classify disjoint batches in parallel
 - inspect every exported thread with its complete context and authoritative task/TODO evidence; record the exact task state, reason, and proposed disposition
 - retain unresolved, pending, useful, or out-of-scope content only while the run remains unfinished
-- every task must ultimately have exactly one self-contained useful manager email. Consolidate all distinct useful context into one exact verified replacement before moving superseded fixed-start originals to recoverable Trash
+- keep at most one useful manager email per task during reconciliation, and every task must ultimately have exactly one self-contained useful manager email. Consolidate all distinct useful context into one exact verified replacement before moving superseded fixed-start originals to recoverable Trash
 - uncertainty, insufficient context, tooling limits, or an unsafe consolidation are blockers requiring repair and independent review. They never authorize forced mutation, terminal multi-retain, or a permanent `cannot safely consolidate` exception
 - Gmail state signals—including unread, Important, starred, flagged, saved, read-later, categories, and all other flags or labels—are audit metadata, never retention or Trash criteria
-- require a reviewer distinct from the batch owner to cross-review each proposed disposition against the same frozen evidence before execution; pass that identity with `--reviewer` so owner and reviewer are machine-checked and bound into immutable intent/outcome evidence, record the approval in the task-evidence file, and resolve disagreements without expanding the source set
+- require a reviewer distinct from the batch owner to cross-review each proposed disposition against the same frozen evidence before execution; pass that identity with `--reviewer` so owner and reviewer are machine-checked and the digest is bound into the immutable intent and outcome, record the approval in the task-evidence file, and resolve disagreements without expanding the source set
 - finish one thread at a time: retain it, move all irrelevant fixed-start sources, or move only irrelevant intermediate fixed-start sources
 
 ## execute reviewed UIDs
