@@ -288,8 +288,12 @@ Ownership migration:
         parser.error("--resume-idle requires --workdir.")
     if parsed.resume_idle and parsed.prompt_file is not None:
         parser.error("--resume-idle does not accept --prompt-file.")
+    if parsed.resume_idle and parsed.human_email_file is not None:
+        parser.error("--resume-idle does not accept human email instructions.")
     if parsed.human_email_file is not None and parsed.workdir is None:
         parser.error("--human-email-file and --human-email-lines require --workdir.")
+    if parsed.human_email_file is not None and parsed.prompt_file is None:
+        parser.error("--human-email-file and --human-email-lines require --prompt-file.")
     if parsed.workdir is not None and not parsed.resume_idle and (not parsed.model.strip() or not parsed.reasoning_effort.strip()):
         parser.error("--workdir requires nonempty --model MODEL and --reasoning-effort EFFORT.")
     if invalid_model := model_error(parsed.model):

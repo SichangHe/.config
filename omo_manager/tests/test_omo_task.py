@@ -1482,6 +1482,7 @@ class OmoTaskTests(unittest.TestCase):
         self.assertEqual(Path("/tmp/pre launch.sh"), args.prelaunch_source)
 
     def test_parse_args_accepts_paired_human_email_options(self) -> None:
+        prompt = "/tmp/prompt.md"
         args = parse_args(
             [
                 "--root",
@@ -1496,6 +1497,8 @@ class OmoTaskTests(unittest.TestCase):
                 "gpt-5.6-terra",
                 "--reasoning-effort",
                 "medium",
+                "--prompt-file",
+                prompt,
                 "--human-email-file",
                 "manager_mail/request.md",
                 "--human-email-lines",
@@ -1570,6 +1573,26 @@ class OmoTaskTests(unittest.TestCase):
                 ]
             )
         self.assertIn("require --workdir", stderr.getvalue())
+
+    def test_human_email_options_require_prompted_non_resume_launch(self) -> None:
+        base = [
+            "--task-file",
+            "x.md",
+            "--tmux-session",
+            "cfg",
+            "--workdir",
+            "/tmp",
+            "--human-email-file",
+            "manager_mail/request.md",
+            "--human-email-lines",
+            "1-1",
+        ]
+        with contextlib.redirect_stderr(io.StringIO()) as stderr, self.assertRaises(SystemExit):
+            parse_args(base + ["--model", "gpt-5.6-terra", "--reasoning-effort", "medium"])
+        self.assertIn("require --prompt-file", stderr.getvalue())
+        with contextlib.redirect_stderr(io.StringIO()) as stderr, self.assertRaises(SystemExit):
+            parse_args(base + ["--session-id", "abc", "--resume-idle"])
+        self.assertIn("does not accept human email", stderr.getvalue())
 
     def test_invalid_human_email_is_rejected_before_task_todo_or_tmux_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
