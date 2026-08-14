@@ -27,6 +27,7 @@ if __package__ in {None, ""}:
 
 from omo_manager.email_idle_watcher import LEGACY_MANAGER_SUBJECT_TOKENS, is_mail_cleanup_excluded_subject, message_text, parse_env_config
 from omo_manager.omo_email_config import configured_agent_mail, human_config_path
+from omo_manager.omo_email_subject import subject_tmux_target
 
 HEADER_FETCH = "(BODY.PEEK[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)])"
 FULL_FETCH = "(BODY.PEEK[])"
@@ -871,9 +872,11 @@ def cmd_inspect_explicit(args: argparse.Namespace) -> int:
                 print(f"context_date={tsv_value(record.date)}")
                 print(f"context_from={tsv_value(record.sender)}")
                 print(f"context_to={tsv_value(record.to)}")
+                print(f"context_sender_tmux_target={subject_tmux_target(record.subject)}")
                 print("----- context body -----")
                 print(export_body(record, include_addresses=False), end="")
         for record in records:
+            print(f"selected_source_sender_tmux_target={subject_tmux_target(record.subject)}")
             print("----- selected source body -----")
             print(export_body(record, include_addresses=False), end="")
     finally:
@@ -1900,6 +1903,55 @@ def replacement_gmail_msgid(client: imaplib.IMAP4_SSL, mailbox: str, replacement
             select_mailbox(client, "INBOX", readonly=False)
 
 
+def replacement_subject(
+    client: imaplib.IMAP4_SSL,
+    mailbox: str,
+    replacement_id: str,
+    sender_email: str,
+    recipient_email: str,
+) -> str:
+    """Fetch the subject of one exact replacement with its mail boundary."""
+    select_mailbox(client, mailbox, readonly=True)
+    try:
+        typ, data = imap_uid(client, "replacement-subject-search", "search", None, "HEADER", "Message-ID", imap_quoted(replacement_id))
+        uids = [raw.decode() for raw in data[0].split()] if typ == "OK" and data and data[0] else []
+        if len(uids) != 1:
+            raise RuntimeError("replacement identity is missing or ambiguous")
+        msg, _digest = fetch_msg(client, uids[0], HEADER_FETCH)
+        senders = [address.casefold() for _name, address in getaddresses(msg.get_all("From", [])) if address]
+        recipients = [address.casefold() for _name, address in getaddresses(msg.get_all("To", [])) if address]
+        if rfc_message_id(msg) != replacement_id or senders != [sender_email.casefold()] or recipient_email.casefold() not in recipients:
+            raise RuntimeError("replacement identity has the wrong mail boundary")
+        return str(msg.get("Subject", "")).replace("\n", " ")
+    finally:
+        if not getattr(client, "_omo_operation_timed_out", False):
+            select_mailbox(client, "INBOX", readonly=False)
+
+
+def original_sender_targets_by_task(
+    task_ids: list[str],
+    task_sources: set[tuple[int, str]],
+    source_records: list[MailRecord],
+    context_records: list[MailRecord],
+    replacement_gmail_ids: set[str],
+) -> list[str]:
+    """Derive one fail-closed original sender target for every task."""
+    source_by_id = {record.gmail_msgid: record for record in source_records}
+    targets: list[str] = []
+    for task_index, task_id in enumerate(task_ids, 1):
+        bound_sources = [source_by_id[gmail_msgid] for index, gmail_msgid in task_sources if index == task_index]
+        thread_ids = {record.gmail_thrid for record in bound_sources}
+        relevant = [record for record in context_records if record.gmail_thrid in thread_ids and record.gmail_msgid not in replacement_gmail_ids]
+        found = [subject_tmux_target(record.subject) for record in relevant]
+        unique = set(found)
+        if not found or "" in unique:
+            raise RuntimeError(f"task has missing original sender tmux target: {task_id}")
+        if len(unique) != 1:
+            raise RuntimeError(f"task has conflicting original sender tmux targets: {task_id}")
+        targets.append(next(iter(unique)))
+    return targets
+
+
 def run_export(args: argparse.Namespace, set_stage: Callable[[str], None]) -> int:
     out_dir = args.out_dir
     set_stage("prepare-output")
@@ -2250,6 +2302,31 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
         if set(replacement_gmail_ids) & {source.gmail_msgid for source in sources}:
             print("refusing because a replacement is one of the superseded sources", file=sys.stderr)
             return 1
+        context_records_by_thread = fetch_direct_thread_contexts(client, [*inbox_records, *trash_records])
+        bound_context_records = [
+            record
+            for records in context_records_by_thread.values()
+            for record in records
+            if record.gmail_msgid in context_ids
+        ]
+        try:
+            original_targets = original_sender_targets_by_task(
+                task_ids,
+                task_sources,
+                [*inbox_records, *trash_records],
+                bound_context_records,
+                set(replacement_gmail_ids),
+            )
+            replacement_subjects = [
+                replacement_subject(client, special_use[r"\All"], replacement_id, sender_email, recipient_email)
+                for replacement_id in replacement_ids
+            ]
+        except RuntimeError as exc:
+            print(f"refusing because {exc}", file=sys.stderr)
+            return 1
+        if [subject_tmux_target(subject) for subject in replacement_subjects] != original_targets:
+            print("refusing because a replacement does not preserve its original sender tmux target", file=sys.stderr)
+            return 1
         if special_use_mailboxes(client) != special_use:
             print("refusing because special-use mailbox identity changed", file=sys.stderr)
             return 1
@@ -2286,6 +2363,17 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
             for replacement_id in replacement_ids
         ] != replacement_gmail_ids:
             print("refusing because a replacement identity changed immediately before move", file=sys.stderr)
+            return 1
+        try:
+            final_replacement_subjects = [
+                replacement_subject(client, special_use[r"\All"], replacement_id, sender_email, recipient_email)
+                for replacement_id in replacement_ids
+            ]
+        except RuntimeError as exc:
+            print(f"refusing because {exc}", file=sys.stderr)
+            return 1
+        if final_replacement_subjects != replacement_subjects or [subject_tmux_target(subject) for subject in final_replacement_subjects] != original_targets:
+            print("refusing because a replacement sender tmux target changed immediately before move", file=sys.stderr)
             return 1
         select_mailbox(client, "INBOX", readonly=False)
         if selected_uidvalidity(client) != expected_uidvalidity:

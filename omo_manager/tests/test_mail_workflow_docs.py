@@ -52,6 +52,10 @@ class MailWorkflowDocumentationTests(unittest.TestCase):
             "verify that exact message is uniquely present",
             "only the explicitly selected, independently reviewed sources",
             "current read-only mailbox view to recheck",
+            "`selected_source_sender_tmux_target=`",
+            "`email_me.py --manager-human --sender-tmux-target ORIGINAL_TARGET`",
+            "without defaulting to the compression worker's target",
+            "blocks Trash unless every replacement preserves its task's target through the final mutation gate",
             "never expunge, permanently delete, or mutate `\\All`",
             "report concisely",
         ):

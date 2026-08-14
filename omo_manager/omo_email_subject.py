@@ -30,6 +30,7 @@ RESERVED_AGENT_TAG_RE = re.compile(r"^(?:re:\s*)*\[omo\]\s*", re.IGNORECASE)
 RE_PREFIX_RE = re.compile(r"^\s*re:\s*", re.IGNORECASE)
 TMUX_TARGET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?$")
 TMUX_SUBJECT_TAG_RE = re.compile(r"^\s*(?:\[[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?\]|[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)(?:\s+|$)")
+TMUX_SUBJECT_TARGET_RE = re.compile(r"^\s*(?:\[([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\]|([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?))(?:\s+|$)")
 BRACKETED_TMUX_TAG_RE = re.compile(r"\[([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\]")
 BRACKETED_TMUX_PREFIX_RE = re.compile(r"^\[([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\](?:\s+|$)")
 PLACEHOLDER_RE = re.compile(r"subject\W*", re.IGNORECASE)
@@ -158,6 +159,19 @@ def canonical_tmux_target(tmux_target: str) -> str:
     if dot and pane == "0" and ":" in window_target:
         return window_target
     return clean_target
+
+
+def subject_tmux_target(subject: str) -> str:
+    """Return the current leading producer target encoded by a mail subject."""
+    text = subject.strip()
+    while True:
+        before = text
+        text = RE_PREFIX_RE.sub("", text, count=1).strip()
+        text = SUBJECT_TAG_RE.sub("", text, count=1).strip()
+        if text == before:
+            break
+    match = TMUX_SUBJECT_TARGET_RE.match(text)
+    return canonical_tmux_target(next((value for value in match.groups() if value), "")) if match is not None else ""
 
 
 def manager_subject_w_target(base: str, tmux_target: str = "", reply: bool = False) -> str:
