@@ -355,6 +355,24 @@ def side_effect_paths(effects: dict[str, object]) -> set[str]:
 
 
 class ReportReceiptTests(unittest.TestCase):
+    def test_submit_rejects_explicitly_discarded_replay(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            case = fixture(Path(tmp), body=b"discarded replay\n")
+            described = run_report(case, describe=True)
+            self.assertEqual(0, described.returncode, described.stderr)
+            receipt = Path(str(json.loads(described.stdout)["files"]["private_receipt"]))
+            for directory in reversed(receipt.parents[:3]):
+                directory.mkdir(mode=0o700, exist_ok=True)
+                directory.chmod(0o700)
+            receipt.with_suffix(".discarded.json").symlink_to(receipt.parent / "missing-disposition")
+
+            rejected = run_report(case)
+
+            self.assertEqual(2, rejected.returncode)
+            self.assertIn("report transaction was explicitly discarded", rejected.stderr)
+            self.assertFalse(receipt.exists())
+            self.assertFalse(receipt.with_suffix(".commitment").exists())
+
     def test_regular_file_tail_keeps_first_complete_line_at_exact_boundary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "ledger.tsv"

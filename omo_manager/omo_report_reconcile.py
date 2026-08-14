@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -11,11 +12,15 @@ import re
 import stat
 import subprocess
 import tempfile
+from contextlib import contextmanager
+from collections.abc import Iterator
 from pathlib import Path
 
 
 HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 SCHEMA = "omo-report-historical-clear-tombstone/v1"
+DISCARD_SCHEMA = "omo-report-authorized-discard/v1"
+LOCAL_ENV_PATH = Path(__file__).with_name("local.env")
 SENT_RE = re.compile(r"^\(sent from ([A-Za-z0-9_.-]+) via omo_report\.sh tmux=([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?) time=\S+ task-file=([A-Za-z0-9_.-]+)\)$")
 MESSAGE_HASH_RE = re.compile(r"^\[message-sha256: ([0-9a-f]{64})\]$")
 OWNER_RE = re.compile(r"^\[omo-report-owner-prefix: manager-path-sha256=([0-9a-f]{64}) sha256=([0-9a-f]{64}) size-bytes=(\d+) separator-bytes=([12])\]$")
@@ -27,6 +32,28 @@ class ReconcileError(RuntimeError):
 
 def canonical_json(value: object) -> bytes:
     return (json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+
+def configured_mail_root() -> Path:
+    """Resolve the mail root from the fixed, owner-controlled manager configuration."""
+
+    try:
+        info = LOCAL_ENV_PATH.lstat()
+        payload = LOCAL_ENV_PATH.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ReconcileError("trusted manager configuration is unavailable") from exc
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o022:
+        raise ReconcileError("trusted manager configuration is unsafe")
+    matches = re.findall(r'^export OMO_WORK_LOGS_ROOT="([^"\n]+)"$', payload, flags=re.MULTILINE)
+    if len(matches) != 1 or not Path(matches[0]).is_absolute():
+        raise ReconcileError("trusted manager mail root is not configured exactly once")
+    return (Path(matches[0]) / "manager_mail").resolve(strict=False)
+
+
+def name_exists(path: Path) -> bool:
+    """Return whether a directory entry exists, including dangling symlinks."""
+
+    return os.path.lexists(path)
 
 
 def git_blob(repo: Path, revision: str, relative_path: str) -> bytes:
@@ -59,7 +86,155 @@ def load_commitment(path: Path, replay_id: str) -> dict[str, object]:
     return value
 
 
-def reconcile(args: argparse.Namespace) -> dict[str, object]:
+@contextmanager
+def report_transaction_lock(manager: Path) -> Iterator[None]:
+    """Share the receipt writer's adjacent per-manager transaction lock."""
+
+    lock_path = Path(f"{manager}.omo_report.lock")
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+            raise ReconcileError("report transaction lock is unsafe")
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def discard_commitment(args: argparse.Namespace, *, locked: bool = False) -> dict[str, object]:
+    """Retire one exact commitment after an explicit human disposition."""
+
+    if HASH_RE.fullmatch(args.replay_id) is None or HASH_RE.fullmatch(args.commitment_id or "") is None:
+        raise ReconcileError("discard identity is invalid")
+    if re.fullmatch(r"manager_mail/[A-Za-z0-9_.-]+\.txt", args.authorization_source or "") is None:
+        raise ReconcileError("discard authorization source is invalid")
+    authorization_file = args.authorization_file
+    try:
+        authorization_payload = authorization_file.read_bytes()
+        authorization_info = authorization_file.lstat()
+    except OSError as exc:
+        raise ReconcileError("discard authorization source is unavailable") from exc
+    if (
+        not authorization_file.is_absolute()
+        or authorization_file.resolve(strict=False) != (configured_mail_root() / Path(args.authorization_source).name).resolve(strict=False)
+        or not stat.S_ISREG(authorization_info.st_mode)
+        or authorization_info.st_uid != os.getuid()
+        or authorization_file.name != Path(args.authorization_source).name
+        or HASH_RE.fullmatch(args.authorization_sha256 or "") is None
+        or hashlib.sha256(authorization_payload).hexdigest() != args.authorization_sha256
+        or args.replay_id.encode() not in authorization_payload
+        or b"Consider it done, and make it go away." not in authorization_payload
+    ):
+        raise ReconcileError("discard authorization source is not the exact human disposition")
+    directory_info = args.receipt_directory.lstat()
+    if not stat.S_ISDIR(directory_info.st_mode) or directory_info.st_uid != os.getuid() or stat.S_IMODE(directory_info.st_mode) != 0o700:
+        raise ReconcileError("receipt directory is not owner-private")
+    commitment_path = args.receipt_directory / f"{args.replay_id}.commitment"
+    disposition_path = args.receipt_directory / f"{args.replay_id}.discarded.json"
+    lock_path = args.receipt_directory / ".reconcile.lock"
+    lock_fd = None if locked else os.open(lock_path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        if lock_fd is not None:
+            os.fchmod(lock_fd, 0o600)
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        if name_exists(disposition_path) and not name_exists(commitment_path):
+            info = disposition_path.lstat()
+            try:
+                record = json.loads(disposition_path.read_bytes())
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise ReconcileError("existing discard disposition is unreadable") from exc
+            unsigned = dict(record) if isinstance(record, dict) else {}
+            disposition_id = unsigned.pop("disposition_id", None)
+            expected_keys = {
+                "authorization_source", "authorization_sha256", "commitment_id", "commitment_sha256",
+                "disposition_id", "replay_id", "schema", "terminal",
+            }
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.getuid()
+                or stat.S_IMODE(info.st_mode) != 0o600
+                or not isinstance(record, dict)
+                or set(record) != expected_keys
+                or canonical_json(record) != disposition_path.read_bytes()
+                or record.get("schema") != DISCARD_SCHEMA
+                or record.get("terminal") is not True
+                or record.get("replay_id") != args.replay_id
+                or record.get("commitment_id") != args.commitment_id
+                or record.get("authorization_source") != args.authorization_source
+                or record.get("authorization_sha256") != args.authorization_sha256
+                or HASH_RE.fullmatch(str(record.get("commitment_sha256", ""))) is None
+                or disposition_id != hashlib.sha256(canonical_json(unsigned).rstrip(b"\n")).hexdigest()
+            ):
+                raise ReconcileError("existing discard disposition differs from the exact authorization")
+            return record
+        commitment = load_commitment(commitment_path, args.replay_id)
+        preflight = commitment.get("preflight")
+        records = preflight.get("records") if isinstance(preflight, dict) else None
+        manager_value = records.get("manager") if isinstance(records, dict) else None
+        if not isinstance(manager_value, str) or not manager_value or not Path(manager_value).is_absolute():
+            raise ReconcileError("transaction commitment has no manager lock binding")
+        manager = Path(manager_value).resolve(strict=False)
+        if not locked:
+            with report_transaction_lock(manager):
+                return discard_commitment(args, locked=True)
+        if commitment.get("commitment_id") != args.commitment_id:
+            raise ReconcileError("discard commitment ID differs from the exact authorization")
+        for suffix in (".json", ".publication.json", ".tombstone.json"):
+            if name_exists(args.receipt_directory / f"{args.replay_id}{suffix}"):
+                raise ReconcileError("transaction already has a terminal receipt or reconciliation")
+        commitment_payload = canonical_json(commitment)
+        record: dict[str, object] = {
+            "authorization_source": args.authorization_source,
+            "authorization_sha256": args.authorization_sha256,
+            "commitment_id": args.commitment_id,
+            "commitment_sha256": hashlib.sha256(commitment_payload).hexdigest(),
+            "replay_id": args.replay_id,
+            "schema": DISCARD_SCHEMA,
+            "terminal": True,
+        }
+        record["disposition_id"] = hashlib.sha256(canonical_json(record).rstrip(b"\n")).hexdigest()
+        payload = canonical_json(record)
+        if name_exists(disposition_path):
+            info = disposition_path.lstat()
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600:
+                raise ReconcileError("existing discard disposition is not owner-private")
+            if disposition_path.read_bytes() != payload:
+                raise ReconcileError("existing discard disposition differs from the exact authorization")
+        else:
+            fd, temporary = tempfile.mkstemp(prefix=f".{args.replay_id}.", suffix=".tmp", dir=args.receipt_directory)
+            try:
+                os.fchmod(fd, 0o600)
+                with os.fdopen(fd, "wb") as stream:
+                    fd = -1
+                    stream.write(payload)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.link(temporary, disposition_path, follow_symlinks=False)
+            finally:
+                if fd >= 0:
+                    os.close(fd)
+                Path(temporary).unlink(missing_ok=True)
+            directory_fd = os.open(args.receipt_directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        if commitment_path.read_bytes() != commitment_payload:
+            raise ReconcileError("transaction commitment changed before retirement")
+        commitment_path.unlink()
+        directory_fd = os.open(args.receipt_directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        return record
+    finally:
+        if lock_fd is not None:
+            os.close(lock_fd)
+
+
+def reconcile(args: argparse.Namespace, *, locked: bool = False) -> dict[str, object]:
     if HASH_RE.fullmatch(args.replay_id) is None or HASH_RE.fullmatch(args.report_key_sha256) is None:
         raise ReconcileError("reconciliation hashes are invalid")
     commitment_path = args.receipt_directory / f"{args.replay_id}.commitment"
@@ -87,6 +262,11 @@ def reconcile(args: argparse.Namespace) -> dict[str, object]:
     manager = Path(str(records["manager"])).resolve(strict=False)
     envelope = Path(str(records["private_envelope"])).resolve(strict=False)
     producer = Path(str(records["producer"])).resolve(strict=False)
+    if not locked:
+        with report_transaction_lock(manager):
+            return reconcile(args, locked=True)
+    if name_exists(args.receipt_directory / f"{args.replay_id}.discarded.json"):
+        raise ReconcileError("transaction was explicitly discarded")
     if manager != (args.repo / args.manager_path).resolve(strict=False) or envelope != args.envelope.resolve(strict=False):
         raise ReconcileError("explicit historical paths do not match the commitment")
     if not producer.is_relative_to(args.repo.resolve(strict=False)):
@@ -104,7 +284,7 @@ def reconcile(args: argparse.Namespace) -> dict[str, object]:
         or HASH_RE.fullmatch(str(owner["sha256"])) is None
     ):
         raise ReconcileError("committed owner-prefix binding is invalid")
-    if (args.receipt_directory / f"{args.replay_id}.json").exists() or (args.receipt_directory / f"{args.replay_id}.publication.json").exists():
+    if name_exists(args.receipt_directory / f"{args.replay_id}.json") or name_exists(args.receipt_directory / f"{args.replay_id}.publication.json"):
         raise ReconcileError("transaction already has a durable receipt")
     try:
         envelope_payload = envelope.read_bytes()
@@ -205,15 +385,30 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--receipt-directory", type=Path, required=True)
     parser.add_argument("--replay-id", required=True)
-    parser.add_argument("--report-key-sha256", required=True)
-    parser.add_argument("--repo", type=Path, required=True)
-    parser.add_argument("--manager-path", required=True)
-    parser.add_argument("--before-revision", required=True)
-    parser.add_argument("--after-revision", required=True)
-    parser.add_argument("--envelope", type=Path, required=True)
-    parser.add_argument("--producer-target", required=True)
+    parser.add_argument("--report-key-sha256")
+    parser.add_argument("--repo", type=Path)
+    parser.add_argument("--manager-path")
+    parser.add_argument("--before-revision")
+    parser.add_argument("--after-revision")
+    parser.add_argument("--envelope", type=Path)
+    parser.add_argument("--producer-target")
+    parser.add_argument("--discard-authorized", action="store_true")
+    parser.add_argument("--commitment-id")
+    parser.add_argument("--authorization-source")
+    parser.add_argument("--authorization-file", type=Path)
+    parser.add_argument("--authorization-sha256")
     try:
-        print(json.dumps(reconcile(parser.parse_args()), sort_keys=True))
+        args = parser.parse_args()
+        required = (args.report_key_sha256, args.repo, args.manager_path, args.before_revision, args.after_revision, args.envelope, args.producer_target)
+        if args.discard_authorized:
+            if any(required) or args.authorization_file is None:
+                raise ReconcileError("discard mode cannot be combined with historical reconciliation")
+            result = discard_commitment(args)
+        else:
+            if not all(required) or args.commitment_id or args.authorization_source or args.authorization_file or args.authorization_sha256:
+                raise ReconcileError("historical reconciliation arguments are incomplete")
+            result = reconcile(args)
+        print(json.dumps(result, sort_keys=True))
     except (ReconcileError, OSError, ValueError) as exc:
         print(f"omo_report_reconcile.py: {exc}", file=os.sys.stderr)
         return 2

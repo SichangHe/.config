@@ -10,10 +10,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 from omo_manager import omo_pending_watch as watcher
-from omo_manager.omo_report_reconcile import ReconcileError, canonical_json, reconcile
+from omo_manager.omo_report_reconcile import ReconcileError, canonical_json, discard_commitment, reconcile
 
 
 class ReportReconcileTests(unittest.TestCase):
+    def discard(self, args: Namespace) -> dict[str, object]:
+        with patch("omo_manager.omo_report_reconcile.LOCAL_ENV_PATH", args.local_env):
+            return discard_commitment(args)
+
     def fixture(self, root: Path) -> Namespace:
         repo = root / "logs"
         repo.mkdir()
@@ -75,6 +79,12 @@ class ReportReconcileTests(unittest.TestCase):
         }
         commitment = {**unsigned, "commitment_id": hashlib.sha256(canonical_json(unsigned).rstrip(b"\n")).hexdigest()}
         (receipts / f"{replay_id}.commitment").write_bytes(canonical_json(commitment))
+        authorization_root = root / "trusted"
+        authorization = authorization_root / "manager_mail" / "example.txt"
+        authorization.parent.mkdir(parents=True)
+        authorization.write_text(f"Replay {replay_id}: Consider it done, and make it go away.\n")
+        local_env = root / "local.env"
+        local_env.write_text(f'export OMO_WORK_LOGS_ROOT="{authorization_root}"\n')
         return Namespace(
             receipt_directory=receipts,
             replay_id=replay_id,
@@ -85,7 +95,112 @@ class ReportReconcileTests(unittest.TestCase):
             after_revision=after_revision,
             envelope=envelope,
             producer_target="wl:18",
+            commitment_id=commitment["commitment_id"],
+            authorization_source="manager_mail/example.txt",
+            authorization_file=authorization,
+            local_env=local_env,
+            authorization_sha256=hashlib.sha256(authorization.read_bytes()).hexdigest(),
         )
+
+    def test_exact_human_authorized_discard_retires_only_commitment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self.fixture(Path(tmp))
+            result = self.discard(args)
+            self.assertEqual(result, self.discard(args))
+            self.assertFalse((args.receipt_directory / f"{args.replay_id}.commitment").exists())
+            disposition = args.receipt_directory / f"{args.replay_id}.discarded.json"
+            self.assertEqual(0o600, disposition.stat().st_mode & 0o777)
+            self.assertEqual("omo-report-authorized-discard/v1", result["schema"])
+
+    def test_discard_rejects_wrong_commitment_identity_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self.fixture(Path(tmp))
+            args.commitment_id = "0" * 64
+            with self.assertRaisesRegex(ReconcileError, "differs"):
+                self.discard(args)
+            self.assertTrue((args.receipt_directory / f"{args.replay_id}.commitment").exists())
+            self.assertFalse((args.receipt_directory / f"{args.replay_id}.discarded.json").exists())
+
+    def test_discard_rejects_missing_manager_lock_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self.fixture(Path(tmp))
+            commitment_path = args.receipt_directory / f"{args.replay_id}.commitment"
+            commitment = json.loads(commitment_path.read_bytes())
+            commitment["preflight"]["records"]["manager"] = None
+            unsigned = {key: value for key, value in commitment.items() if key != "commitment_id"}
+            commitment["commitment_id"] = hashlib.sha256(canonical_json(unsigned).rstrip(b"\n")).hexdigest()
+            args.commitment_id = commitment["commitment_id"]
+            commitment_path.write_bytes(canonical_json(commitment))
+            with self.assertRaisesRegex(ReconcileError, "manager lock binding"):
+                self.discard(args)
+            self.assertFalse((args.receipt_directory / f"{args.replay_id}.discarded.json").exists())
+
+    def test_discard_rejects_existing_receipt_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self.fixture(Path(tmp))
+            (args.receipt_directory / f"{args.replay_id}.json").write_text("receipt")
+            with self.assertRaisesRegex(ReconcileError, "terminal receipt"):
+                self.discard(args)
+            self.assertTrue((args.receipt_directory / f"{args.replay_id}.commitment").exists())
+
+    def test_discard_rejects_non_mail_authority_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self.fixture(Path(tmp))
+            args.authorization_source = "agent report"
+            with self.assertRaisesRegex(ReconcileError, "authorization source"):
+                self.discard(args)
+            self.assertTrue((args.receipt_directory / f"{args.replay_id}.commitment").exists())
+
+    def test_discard_rejects_fabricated_or_changed_authority_without_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self.fixture(Path(tmp))
+            args.authorization_file.write_text("changed")
+            with self.assertRaisesRegex(ReconcileError, "exact human disposition"):
+                self.discard(args)
+            self.assertTrue((args.receipt_directory / f"{args.replay_id}.commitment").exists())
+
+    def test_discard_rejects_mail_outside_trusted_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self.fixture(Path(tmp))
+            args.local_env.write_text(f'export OMO_WORK_LOGS_ROOT="{Path(tmp) / "other"}"\n')
+            with patch("omo_manager.omo_report_reconcile.LOCAL_ENV_PATH", args.local_env):
+                with self.assertRaisesRegex(ReconcileError, "exact human disposition"):
+                    self.discard(args)
+            self.assertTrue((args.receipt_directory / f"{args.replay_id}.commitment").exists())
+
+    def test_historical_reconciliation_rejects_discard_terminal_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self.fixture(Path(tmp))
+            disposition = args.receipt_directory / f"{args.replay_id}.discarded.json"
+            disposition.symlink_to(args.receipt_directory / "missing-disposition")
+            with self.assertRaisesRegex(ReconcileError, "explicitly discarded"):
+                reconcile(args)
+            self.assertFalse((args.receipt_directory / f"{args.replay_id}.tombstone.json").exists())
+
+    def test_discard_persists_disposition_before_commitment_retirement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self.fixture(Path(tmp))
+            commitment_path = args.receipt_directory / f"{args.replay_id}.commitment"
+            original_unlink = Path.unlink
+
+            def interrupt_commitment(path: Path, *call_args: object, **call_kwargs: object) -> None:
+                if path == commitment_path:
+                    raise OSError("interrupted before commitment retirement")
+                original_unlink(path, *call_args, **call_kwargs)
+
+            with patch.object(Path, "unlink", autospec=True, side_effect=interrupt_commitment):
+                with self.assertRaisesRegex(OSError, "interrupted"):
+                    self.discard(args)
+            self.assertTrue(commitment_path.exists())
+            self.assertTrue((args.receipt_directory / f"{args.replay_id}.discarded.json").exists())
+            self.assertEqual("omo-report-authorized-discard/v1", self.discard(args)["schema"])
+            self.assertFalse(commitment_path.exists())
+
+    def test_receipt_layout_rejects_terminal_discard(self) -> None:
+        source = Path(__file__).parents[1] / "omo_report_receipt.py"
+        text = source.read_text()
+        self.assertIn('f"{plan.replay_id}.discarded.json"', text)
+        self.assertIn("report transaction was explicitly discarded", text)
 
     def test_exact_historical_clear_creates_idempotent_tombstone(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -106,6 +221,14 @@ class ReportReconcileTests(unittest.TestCase):
             args.after_revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=args.repo, text=True).strip()
             with self.assertRaisesRegex(ReconcileError, "owner bytes"):
                 reconcile(args)
+
+    def test_historical_reconciliation_rejects_dangling_receipt_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self.fixture(Path(tmp))
+            (args.receipt_directory / f"{args.replay_id}.json").symlink_to(args.receipt_directory / "missing-receipt")
+            with self.assertRaisesRegex(ReconcileError, "durable receipt"):
+                reconcile(args)
+            self.assertFalse((args.receipt_directory / f"{args.replay_id}.tombstone.json").exists())
 
     def test_commitment_owner_must_name_exact_manager(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -1399,6 +1399,8 @@ def adjacent_report_lock(path: Path) -> Iterator[None]:
 
 
 def validate_private_layout(plan: Plan, *, allow_publication_recovery: bool = False, allow_consumed_residue: bool = False) -> None:
+    if os.path.lexists(plan.receipt_directory / f"{plan.replay_id}.discarded.json"):
+        raise ReceiptError("report transaction was explicitly discarded")
     if validate_optional_directory(plan.envelope_directory, private=True, field="private envelope directory"):
         require_absent(plan.envelope_temporary, "private envelope temporary file")
     elif plan.envelope_final.exists() or plan.envelope_temporary.exists():
