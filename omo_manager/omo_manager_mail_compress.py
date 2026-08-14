@@ -106,6 +106,37 @@ class ReviewedScope:
     sha256: str
 
 
+def parse_explicit_source(value: str, *, with_task: bool = False) -> ScopedSource:
+    """Parse one in-memory source binding without creating evidence files."""
+    fields = value.split(":")
+    expected_fields = 5 if with_task else 4
+    if len(fields) != expected_fields:
+        prefix = "TASK-ID:" if with_task else ""
+        raise ValueError(f"explicit source must be {prefix}UID:GMAIL-MSGID:GMAIL-THRID:RAW-SHA256")
+    task_id = fields.pop(0) if with_task else ""
+    uid, gmail_msgid, gmail_thrid, raw_sha256 = fields
+    if with_task and (not task_id or tsv_value(task_id) != task_id):
+        raise ValueError("explicit source task identity must be one nonempty line")
+    if not uid.isdecimal() or not gmail_msgid.isdecimal() or not gmail_thrid.isdecimal():
+        raise ValueError("explicit source UID and Gmail identities must be decimal")
+    if not re.fullmatch(r"[0-9a-f]{64}", raw_sha256):
+        raise ValueError("explicit source raw SHA-256 must be lowercase hexadecimal")
+    return ScopedSource(task_id, uid, gmail_msgid, gmail_thrid, raw_sha256)
+
+
+def parse_explicit_context(value: str) -> ScopedSource:
+    """Parse one thread member binding whose mailbox-specific UID is irrelevant."""
+    fields = value.split(":")
+    if len(fields) != 3:
+        raise ValueError("explicit context must be GMAIL-MSGID:GMAIL-THRID:RAW-SHA256")
+    gmail_msgid, gmail_thrid, raw_sha256 = fields
+    if not gmail_msgid.isdecimal() or not gmail_thrid.isdecimal():
+        raise ValueError("explicit context Gmail identities must be decimal")
+    if not re.fullmatch(r"[0-9a-f]{64}", raw_sha256):
+        raise ValueError("explicit context raw SHA-256 must be lowercase hexadecimal")
+    return ScopedSource("", "", gmail_msgid, gmail_thrid, raw_sha256)
+
+
 def load_reviewed_scope(path: Path) -> ReviewedScope:
     """Load a private, independently reviewed exact-identity successor scope."""
     try:
@@ -1759,6 +1790,22 @@ def replacement_exists(
             select_mailbox(client, "INBOX", readonly=restore_readonly)
 
 
+def replacement_gmail_msgid(client: imaplib.IMAP4_SSL, mailbox: str, replacement_id: str) -> str:
+    """Resolve one already-validated replacement to its exact Gmail identity."""
+    select_mailbox(client, mailbox, readonly=True)
+    try:
+        typ, data = imap_uid(client, "replacement-gmail-identity-search", "search", None, "HEADER", "Message-ID", imap_quoted(replacement_id))
+        uids = [raw.decode() for raw in data[0].split()] if typ == "OK" and data and data[0] else []
+        if len(uids) != 1:
+            raise RuntimeError("replacement identity is missing or ambiguous")
+        record = fetch_record(client, uids[0], with_body=False, with_metadata=True)
+        require_gmail_identities([record])
+        return record.gmail_msgid
+    finally:
+        if not getattr(client, "_omo_operation_timed_out", False):
+            select_mailbox(client, "INBOX", readonly=False)
+
+
 def run_export(args: argparse.Namespace, set_stage: Callable[[str], None]) -> int:
     out_dir = args.out_dir
     set_stage("prepare-output")
@@ -1946,6 +1993,195 @@ def verified_existing_trash_records(
     finally:
         if not getattr(client, "_omo_operation_timed_out", False):
             select_mailbox(client, "INBOX", readonly=False)
+
+
+def direct_context_intact(
+    client: imaplib.IMAP4_SSL,
+    all_mailbox: str,
+    expected_sources: list[ScopedSource],
+    *,
+    allow_additive: bool,
+) -> bool:
+    """Revalidate an in-memory fixed-start thread while ignoring additive arrivals."""
+    if not expected_sources:
+        return False
+    gmail_thrids = {source.gmail_thrid for source in expected_sources}
+    if len(gmail_thrids) != 1:
+        return False
+    gmail_thrid = next(iter(gmail_thrids))
+    select_mailbox(client, all_mailbox, readonly=True)
+    current = fetch_records(client, gmail_thread_uids(client, gmail_thrid), with_body=True, with_metadata=True)
+    select_mailbox(client, TRASH_MAILBOX, readonly=True)
+    trash_records = fetch_records(client, gmail_thread_uids(client, gmail_thrid), with_body=True, with_metadata=True)
+    require_gmail_identities([*current, *trash_records])
+    current_ids = {record.gmail_msgid for record in current}
+    trash_ids = {record.gmail_msgid for record in trash_records}
+    if len(current_ids) != len(current) or len(trash_ids) != len(trash_records) or current_ids & trash_ids:
+        return False
+    actual = {record.gmail_msgid: record for record in [*current, *trash_records]}
+    expected = {source.gmail_msgid: source for source in expected_sources}
+    if len(expected) != len(expected_sources) or not set(expected).issubset(actual):
+        return False
+    if not allow_additive and set(expected) != set(actual):
+        return False
+    return all(
+        source.gmail_thrid == gmail_thrid
+        and actual[gmail_msgid].gmail_thrid == gmail_thrid
+        and actual[gmail_msgid].raw_sha256 == source.raw_sha256
+        for gmail_msgid, source in expected.items()
+    ) and all(record.gmail_thrid == gmail_thrid for record in actual.values())
+
+
+def observe_explicit_sources(
+    client: imaplib.IMAP4_SSL,
+    sources: list[ScopedSource],
+    sender_email: str,
+    recipient_email: str,
+) -> tuple[list[MailRecord], list[MailRecord]]:
+    """Resolve exact bound sources in either INBOX or recoverable Trash."""
+    observed: dict[str, list[MailRecord]] = {"INBOX": [], "Trash": []}
+    for location, mailbox in (("INBOX", "INBOX"), ("Trash", TRASH_MAILBOX)):
+        select_mailbox(client, mailbox, readonly=True)
+        for source in sources:
+            matches = gmail_message_uids(client, source.gmail_msgid)
+            if len(matches) > 1:
+                raise RuntimeError(f"explicit source is ambiguous in {location}")
+            if not matches:
+                continue
+            record = fetch_record(client, matches[0], with_body=True, with_metadata=True)
+            if (
+                (location == "INBOX" and record.uid != source.uid)
+                or
+                not is_manager_record(record, sender_email, recipient_email)
+                or (record.gmail_msgid, record.gmail_thrid, record.raw_sha256)
+                != (source.gmail_msgid, source.gmail_thrid, source.raw_sha256)
+            ):
+                raise RuntimeError("explicit source identity, content, or boundary changed")
+            observed[location].append(record)
+    inbox_ids = {record.gmail_msgid for record in observed["INBOX"]}
+    trash_ids = {record.gmail_msgid for record in observed["Trash"]}
+    expected_ids = {source.gmail_msgid for source in sources}
+    if inbox_ids & trash_ids or inbox_ids | trash_ids != expected_ids:
+        raise RuntimeError("explicit source is in both, neither, or an unknown mailbox")
+    return observed["INBOX"], observed["Trash"]
+
+
+def cmd_trash_explicit(args: argparse.Namespace) -> int:
+    """Move exact live-bound sources to recoverable Trash without persisted evidence."""
+    if not args.yes:
+        print("refusing to move superseded mail to Trash without --yes", file=sys.stderr)
+        return 2
+    try:
+        sources = [replace(parse_explicit_source(value), task_id=args.task_id) for value in args.source]
+        contexts = [parse_explicit_context(value) for value in args.context]
+        if not sources:
+            raise ValueError("at least one explicit source is required")
+        if len({source.uid for source in sources}) != len(sources) or len({source.gmail_msgid for source in sources}) != len(sources):
+            raise ValueError("explicit sources contain duplicate or ambiguous identities")
+        if not args.task_id or "\n" in args.task_id or "\r" in args.task_id:
+            raise ValueError("one nonempty task identity is required")
+        if not contexts or {source.gmail_thrid for source in sources} - {context.gmail_thrid for context in contexts}:
+            raise ValueError("explicit context must cover every source thread")
+        context_ids = {context.gmail_msgid for context in contexts}
+        if len(context_ids) != len(contexts) or any(source.gmail_msgid not in context_ids for source in sources):
+            raise ValueError("explicit context must contain every source identity exactly once")
+        if not re.fullmatch(r"<[^<>\s]+>", args.replacement_id):
+            raise ValueError("replacement identity must be a syntactically valid Message-ID")
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    client, config = open_mailbox(readonly=False)
+    try:
+        sender_email, recipient_email = mail_boundary(config)
+        select_mailbox(client, "INBOX", readonly=False)
+        expected_uidvalidity = selected_uidvalidity(client)
+        if not mailbox_exists(client, TRASH_MAILBOX):
+            print(f"refusing because mailbox is missing: {TRASH_MAILBOX}", file=sys.stderr)
+            return 1
+        special_use = special_use_mailboxes(client)
+        if not special_use.get(r"\All") or not special_use.get(r"\Sent"):
+            print("refusing because Gmail special-use mailboxes are missing", file=sys.stderr)
+            return 1
+        inbox_records, trash_records = observe_explicit_sources(client, sources, sender_email, recipient_email)
+        if not replacement_exists(client, special_use[r"\All"], args.replacement_id, sender_email, recipient_email):
+            print("refusing because the recorded replacement was not found in the recipient mailbox", file=sys.stderr)
+            return 1
+        replacement_gmail_id = replacement_gmail_msgid(client, special_use[r"\All"], args.replacement_id)
+        if replacement_gmail_id in {source.gmail_msgid for source in sources}:
+            print("refusing because the replacement is one of the superseded sources", file=sys.stderr)
+            return 1
+        if special_use_mailboxes(client) != special_use:
+            print("refusing because special-use mailbox identity changed", file=sys.stderr)
+            return 1
+        select_mailbox(client, "INBOX", readonly=False)
+        if selected_uidvalidity(client) != expected_uidvalidity:
+            print("refusing because INBOX UIDVALIDITY changed", file=sys.stderr)
+            return 1
+        contexts_by_thread: dict[str, list[ScopedSource]] = {}
+        for context in contexts:
+            contexts_by_thread.setdefault(context.gmail_thrid, []).append(context)
+        if any(
+            not direct_context_intact(client, special_use[r"\All"], records, allow_additive=False)
+            for records in contexts_by_thread.values()
+        ):
+            print("refusing because complete Gmail thread context changed", file=sys.stderr)
+            return 1
+        select_mailbox(client, "INBOX", readonly=False)
+        inbox_uids = [record.uid for record in inbox_records]
+        if set(inbox_subset(client, inbox_uids)) != set(inbox_uids):
+            print("refusing because a planned source moved during revalidation", file=sys.stderr)
+            return 1
+        final_inbox, _final_trash = observe_explicit_sources(client, sources, sender_email, recipient_email)
+        if {record.gmail_msgid for record in final_inbox} != {record.gmail_msgid for record in inbox_records}:
+            print("refusing because a planned source moved immediately before mutation", file=sys.stderr)
+            return 1
+        if not replacement_exists(client, special_use[r"\All"], args.replacement_id, sender_email, recipient_email):
+            print("refusing because the replacement changed immediately before move", file=sys.stderr)
+            return 1
+        if replacement_gmail_msgid(client, special_use[r"\All"], args.replacement_id) != replacement_gmail_id:
+            print("refusing because the replacement identity changed immediately before move", file=sys.stderr)
+            return 1
+        select_mailbox(client, "INBOX", readonly=False)
+        if selected_uidvalidity(client) != expected_uidvalidity:
+            print("refusing because INBOX UIDVALIDITY changed immediately before move", file=sys.stderr)
+            return 1
+        if any(
+            not direct_context_intact(client, special_use[r"\All"], records, allow_additive=True)
+            for records in contexts_by_thread.values()
+        ):
+            print("refusing because complete Gmail thread context changed immediately before move", file=sys.stderr)
+            return 1
+        select_mailbox(client, "INBOX", readonly=False)
+        if selected_uidvalidity(client) != expected_uidvalidity:
+            print("refusing because INBOX UIDVALIDITY changed at the mutation gate", file=sys.stderr)
+            return 1
+        if set(inbox_subset(client, [record.uid for record in final_inbox])) != {record.uid for record in final_inbox}:
+            print("refusing because a planned source left INBOX at the mutation gate", file=sys.stderr)
+            return 1
+        if final_inbox:
+            typ, _data = imap_uid(
+                client,
+                "move-explicit-sources-to-trash",
+                "MOVE",
+                ",".join(record.uid for record in final_inbox),
+                imap_quoted(TRASH_MAILBOX),
+            )
+            if typ != "OK":
+                print(f"IMAP MOVE failed: {typ}", file=sys.stderr)
+                return 1
+        verified_inbox, verified_trash = observe_explicit_sources(client, sources, sender_email, recipient_email)
+        post_threads_intact = not verified_inbox and all(
+            direct_context_intact(client, special_use[r"\All"], records, allow_additive=True)
+            for records in contexts_by_thread.values()
+        )
+    finally:
+        logout_mailbox(client)
+    print(
+        f"trash_explicit: task_id={args.task_id} requested={len(sources)}"
+        f" moved_now={len(final_inbox)} verified_inbox={len(verified_inbox)} verified_trash={len(verified_trash)}"
+        f" later_arrivals_moved=0 permanent_deleted=0 persisted_evidence=0"
+    )
+    return 0 if post_threads_intact and len(verified_trash) == len(sources) else 1
 
 
 def cmd_trash_superseded(args: argparse.Namespace) -> int:
@@ -2188,6 +2424,25 @@ def parser() -> argparse.ArgumentParser:
     replacement.add_argument("--replacement-message-id", dest="replacement_id", default="")
     replacement.add_argument("--replacement-not-required", action="store_true")
     trash.set_defaults(func=cmd_trash_superseded)
+    direct = sub.add_parser("trash-explicit", help="Move live-bound superseded manager sources to recoverable Trash without an evidence directory.")
+    direct.add_argument(
+        "--source",
+        action="append",
+        default=[],
+        metavar="UID:GMAIL-MSGID:GMAIL-THRID:RAW-SHA256",
+        help="Exact current source binding; repeat once per superseded message.",
+    )
+    direct.add_argument(
+        "--context",
+        action="append",
+        default=[],
+        metavar="GMAIL-MSGID:GMAIL-THRID:RAW-SHA256",
+        help="Exact initial thread context binding; repeat for every member present when execution starts.",
+    )
+    direct.add_argument("--replacement-message-id", dest="replacement_id", required=True)
+    direct.add_argument("--task-id", required=True, help="Task identity shared by every explicit source in this operation.")
+    direct.add_argument("--yes", action="store_true")
+    direct.set_defaults(func=cmd_trash_explicit)
     return arg_parser
 
 
