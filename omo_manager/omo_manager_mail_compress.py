@@ -27,7 +27,7 @@ if __package__ in {None, ""}:
 
 from omo_manager.email_idle_watcher import LEGACY_MANAGER_SUBJECT_TOKENS, is_mail_cleanup_excluded_subject, message_text, parse_env_config
 from omo_manager.omo_email_config import configured_agent_mail, human_config_path
-from omo_manager.omo_email_subject import subject_tmux_target
+from omo_manager.omo_email_subject import TMUX_TARGET_RE, canonical_tmux_target, subject_tmux_target
 
 HEADER_FETCH = "(BODY.PEEK[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)])"
 FULL_FETCH = "(BODY.PEEK[])"
@@ -1952,6 +1952,23 @@ def original_sender_targets_by_task(
     return targets
 
 
+def parse_route_resolutions(values: list[str], task_ids: list[str]) -> dict[str, str]:
+    """Parse an optional complete reviewed task-to-target route transition."""
+    if not values:
+        return {}
+    resolutions: dict[str, str] = {}
+    for value in values:
+        task_id, separator, raw_target = value.partition("=")
+        if not separator or not task_id or tsv_value(task_id) != task_id or not TMUX_TARGET_RE.fullmatch(raw_target):
+            raise ValueError("route-resolution must be TASK-ID=SESSION:WINDOW[.PANE]")
+        if task_id in resolutions:
+            raise ValueError("route-resolution contains a duplicate task identity")
+        resolutions[task_id] = canonical_tmux_target(raw_target)
+    if set(resolutions) != set(task_ids):
+        raise ValueError("route-resolution must bind every exact task identity once")
+    return resolutions
+
+
 def run_export(args: argparse.Namespace, set_stage: Callable[[str], None]) -> int:
     out_dir = args.out_dir
     set_stage("prepare-output")
@@ -2252,6 +2269,9 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
             or any(gmail_msgid not in source_ids for _task_index, gmail_msgid in task_sources)
         ):
             raise ValueError("task-source bindings must cover every task and source exactly within this operation")
+        raw_route_resolutions = getattr(args, "route_resolution", [])
+        route_resolution_values = raw_route_resolutions if isinstance(raw_route_resolutions, list) else [raw_route_resolutions]
+        route_resolutions = parse_route_resolutions(route_resolution_values, task_ids)
         if (
             not args.preparer
             or not args.reviewer
@@ -2310,12 +2330,16 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
             if record.gmail_msgid in context_ids
         ]
         try:
-            original_targets = original_sender_targets_by_task(
-                task_ids,
-                task_sources,
-                [*inbox_records, *trash_records],
-                bound_context_records,
-                set(replacement_gmail_ids),
+            original_targets = (
+                [route_resolutions[task_id] for task_id in task_ids]
+                if route_resolutions
+                else original_sender_targets_by_task(
+                    task_ids,
+                    task_sources,
+                    [*inbox_records, *trash_records],
+                    bound_context_records,
+                    set(replacement_gmail_ids),
+                )
             )
             replacement_subjects = [
                 replacement_subject(client, special_use[r"\All"], replacement_id, sender_email, recipient_email)
@@ -2699,6 +2723,13 @@ def parser() -> argparse.ArgumentParser:
         required=True,
         metavar="TASK-INDEX:GMAIL-MSGID",
         help="Bind one 1-based task/replacement position to one source Gmail identity; repeat for shared or multi-source tasks.",
+    )
+    direct.add_argument(
+        "--route-resolution",
+        action="append",
+        default=[],
+        metavar="TASK-ID=SESSION:WINDOW[.PANE]",
+        help="Independently reviewed authoritative current sender target for a verified route transition; when used, repeat exactly once for every task.",
     )
     direct.add_argument("--source-uidvalidity", required=True, help="Exact INBOX UIDVALIDITY printed by inspect-explicit.")
     direct.add_argument("--preparer", required=True, help="Identity that prepared the task grouping and replacement decision.")
