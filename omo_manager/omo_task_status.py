@@ -944,8 +944,24 @@ def close_retired_done(args: Args, path: Path, text: str, before: os.stat_result
     if hashlib.sha256(source_bytes).hexdigest() != args.source_sha256:
         raise TaskFrontmatterError("retired closure source bytes do not match --source-sha256")
     metadata = parse_manager_child_metadata(text, args.root)
-    if metadata is None or metadata.version == V2_VERSION or metadata.status != "blocked" or metadata.runat != "retired" or metadata.is_manager or metadata.pending_task_items:
-        raise TaskFrontmatterError("retired closure requires one unchanged v1 blocked/retired worker with an empty queue")
+    blocked_source = (
+        metadata is not None
+        and metadata.version != V2_VERSION
+        and metadata.status == "blocked"
+        and metadata.runat == "retired"
+        and not metadata.is_manager
+        and not metadata.pending_task_items
+    )
+    recoverable_intermediate = (
+        metadata is not None
+        and metadata.version != V2_VERSION
+        and metadata.status == "done"
+        and metadata.runat == args.historical_target
+        and not metadata.is_manager
+        and not metadata.pending_task_items
+    )
+    if not blocked_source and not recoverable_intermediate:
+        raise TaskFrontmatterError("retired closure requires one unchanged blocked/retired worker or its exact done-task intermediate state")
     relative = relative_task_ref(args.root, path)
     try:
         repository_root = Path(subprocess.run(["git", "-C", str(args.root), "rev-parse", "--show-toplevel"], check=True, capture_output=True, text=True).stdout.strip()).resolve(strict=True)
@@ -964,38 +980,40 @@ def close_retired_done(args: Args, path: Path, text: str, before: os.stat_result
     if close_pattern.search(text) is None:
         raise TaskFrontmatterError("retired closure requires a recorded manager-close note for the proven historical target")
 
-    lines = source_bytes.splitlines(keepends=True)
-    closing = next((idx for idx, line in enumerate(lines[1:], start=1) if line.strip() == b"---"), None)
-    if closing is None:
-        raise TaskFrontmatterError("task frontmatter opening marker has no closing marker.")
-    updated_lines: list[bytes] = []
-    changed_status = 0
-    changed_runat = 0
-    removed_blocker = 0
-    for idx, line in enumerate(lines):
-        if 0 < idx < closing:
-            key, separator, value = line.partition(b":")
-            normalized = key.strip()
-            newline = line[len(line.rstrip(b"\r\n")) :]
-            if separator and normalized == b"status":
-                if value.strip() != b"blocked":
-                    raise TaskFrontmatterError("retired closure source status drifted")
-                updated_lines.append(b"status: done" + newline)
-                changed_status += 1
-                continue
-            if separator and normalized == b"runat":
-                if value.strip() != b"retired":
-                    raise TaskFrontmatterError("retired closure source target drifted")
-                updated_lines.append(f"runat: {args.historical_target}".encode() + newline)
-                changed_runat += 1
-                continue
-            if separator and normalized == b"blocked_on":
-                removed_blocker += 1
-                continue
-        updated_lines.append(line)
-    if (changed_status, changed_runat, removed_blocker) != (1, 1, 1):
-        raise TaskFrontmatterError("retired closure requires exactly one status, runat, and blocked_on field")
-    updated_bytes = b"".join(updated_lines)
+    updated_bytes = source_bytes
+    if blocked_source:
+        lines = source_bytes.splitlines(keepends=True)
+        closing = next((idx for idx, line in enumerate(lines[1:], start=1) if line.strip() == b"---"), None)
+        if closing is None:
+            raise TaskFrontmatterError("task frontmatter opening marker has no closing marker.")
+        updated_lines: list[bytes] = []
+        changed_status = 0
+        changed_runat = 0
+        removed_blocker = 0
+        for idx, line in enumerate(lines):
+            if 0 < idx < closing:
+                key, separator, value = line.partition(b":")
+                normalized = key.strip()
+                newline = line[len(line.rstrip(b"\r\n")) :]
+                if separator and normalized == b"status":
+                    if value.strip() != b"blocked":
+                        raise TaskFrontmatterError("retired closure source status drifted")
+                    updated_lines.append(b"status: done" + newline)
+                    changed_status += 1
+                    continue
+                if separator and normalized == b"runat":
+                    if value.strip() != b"retired":
+                        raise TaskFrontmatterError("retired closure source target drifted")
+                    updated_lines.append(f"runat: {args.historical_target}".encode() + newline)
+                    changed_runat += 1
+                    continue
+                if separator and normalized == b"blocked_on":
+                    removed_blocker += 1
+                    continue
+            updated_lines.append(line)
+        if (changed_status, changed_runat, removed_blocker) != (1, 1, 1):
+            raise TaskFrontmatterError("retired closure requires exactly one status, runat, and blocked_on field")
+        updated_bytes = b"".join(updated_lines)
     updated_text = updated_bytes.decode("utf-8")
     updated_metadata = parse_task_metadata(updated_text, args.root)
     if updated_metadata is None or updated_metadata.status != "done" or updated_metadata.runat != args.historical_target or updated_metadata.pending_task_items:
@@ -1019,16 +1037,20 @@ def close_retired_done(args: Args, path: Path, text: str, before: os.stat_result
         todo_lines[row_idx] = re.sub(r"retired(?P<trailing>\s*)$", rf"{args.historical_target}\g<trailing>", row)
         normalized_todo = "".join(todo_lines)
         updated_todo = reconcile_todo_text(args.root, path, normalized_todo, args.historical_target, "previous", ("human pending",))
-        replace_if_unchanged_locked(todo, updated_todo, todo_before)
-        moved_todo_before = todo.stat()
-        try:
+        updated_task_before = current_before
+        if blocked_source:
             replace_if_unchanged_locked(path, updated_text, current_before)
+            updated_task_before = path.stat()
+        try:
+            replace_if_unchanged_locked(todo, updated_todo, todo_before)
         except Exception as exc:
-            try:
-                replace_if_unchanged_locked(todo, todo_text, moved_todo_before)
-            except Exception as rollback_exc:
-                raise TaskFrontmatterError(f"retired closure failed and TODO rollback also failed: {rollback_exc}") from exc
-            raise TaskFrontmatterError(f"retired closure failed and TODO was rolled back: {exc}") from exc
+            if blocked_source:
+                try:
+                    replace_if_unchanged_locked(path, text, updated_task_before)
+                except Exception as rollback_exc:
+                    raise TaskFrontmatterError(f"retired closure failed and task rollback also failed: {rollback_exc}") from exc
+                raise TaskFrontmatterError(f"retired closure failed and task was rolled back: {exc}") from exc
+            raise TaskFrontmatterError(f"retired closure recovery could not finish TODO: {exc}") from exc
     return args.historical_target
 
 

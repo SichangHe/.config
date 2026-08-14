@@ -139,9 +139,30 @@ class TaskStatusTests(unittest.TestCase):
             with self.assertRaisesRegex(TaskFrontmatterError, "targetless retired TODO row"):
                 close_retired_done(args, task, current, task.stat())
             todo.write_text("current:\n\nhuman pending:\nlegacy.md retired\n\nprevious:\n", encoding="utf-8")
-            with patch("omo_manager.omo_task_status.replace_if_unchanged_locked", side_effect=[None, OSError("task failed"), OSError("rollback failed")]):
-                with self.assertRaisesRegex(TaskFrontmatterError, "TODO rollback also failed: rollback failed"):
+            with patch("omo_manager.omo_task_status.replace_if_unchanged_locked", side_effect=[None, OSError("TODO failed"), OSError("rollback failed")]):
+                with self.assertRaisesRegex(TaskFrontmatterError, "task rollback also failed: rollback failed"):
                     close_retired_done(args, task, current, task.stat())
+
+    def test_retired_closure_recovers_done_task_before_todo_intermediate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "legacy.md"
+            historical = task_frontmatter(status="running", runat="wl:2") + "body\n"
+            task.write_text(historical, encoding="utf-8")
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), "add", "legacy.md"], check=True)
+            subprocess.run(["git", "-C", str(root), "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "historical"], check=True)
+            commit = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+            intermediate = task_frontmatter(status="done", runat="wl:2") + "body\n(manager closed Codex agent; tmux target `wl:2`.)\n"
+            task.write_text(intermediate, encoding="utf-8")
+            todo = root / "TODO.md"
+            todo.write_text("current:\n\nhuman pending:\nlegacy.md retired\n\nprevious:\n", encoding="utf-8")
+            args = StatusArgs(root, Path("legacy.md"), "done", "", close_retired_done=True, historical_target="wl:2", historical_commit=commit, source_sha256=hashlib.sha256(intermediate.encode()).hexdigest())
+
+            self.assertEqual("wl:2", close_retired_done(args, task, intermediate, task.stat()))
+
+            self.assertEqual(intermediate, task.read_text(encoding="utf-8"))
+            self.assertEqual("current:\n\nhuman pending:\n\nprevious:\nlegacy.md wl:2\n", todo.read_text(encoding="utf-8"))
 
     def test_retired_closure_parser_rejects_unused_task_digest(self) -> None:
         with self.assertRaises(SystemExit):

@@ -47,13 +47,49 @@ def configured_mail_root() -> Path:
     matches = re.findall(r'^export OMO_WORK_LOGS_ROOT="([^"\n]+)"$', payload, flags=re.MULTILINE)
     if len(matches) != 1 or not Path(matches[0]).is_absolute():
         raise ReconcileError("trusted manager mail root is not configured exactly once")
-    return (Path(matches[0]) / "manager_mail").resolve(strict=False)
+    return Path(matches[0]) / "manager_mail"
 
 
 def name_exists(path: Path) -> bool:
     """Return whether a directory entry exists, including dangling symlinks."""
 
     return os.path.lexists(path)
+
+
+def read_exact_private_file(path: Path, *, mode: int | None = None) -> tuple[bytes, os.stat_result]:
+    """Read one owned regular file through a no-follow descriptor."""
+
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        info = os.fstat(fd)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) & 0o022
+            or (mode is not None and stat.S_IMODE(info.st_mode) != mode)
+        ):
+            raise ReconcileError("private file is unsafe")
+        with os.fdopen(os.dup(fd), "rb") as stream:
+            return stream.read(), info
+    finally:
+        os.close(fd)
+
+
+def require_nonsymlink_directory(path: Path) -> Path:
+    """Resolve an absolute directory only when every path component is a directory."""
+
+    if not path.is_absolute():
+        raise ReconcileError("trusted directory is not absolute")
+    current = Path(path.anchor)
+    for part in path.parts[1:]:
+        current /= part
+        try:
+            info = current.lstat()
+        except OSError as exc:
+            raise ReconcileError("trusted directory is unavailable") from exc
+        if not stat.S_ISDIR(info.st_mode):
+            raise ReconcileError("trusted directory contains a non-directory component")
+    return current
 
 
 def git_blob(repo: Path, revision: str, relative_path: str) -> bytes:
@@ -86,6 +122,23 @@ def load_commitment(path: Path, replay_id: str) -> dict[str, object]:
     return value
 
 
+def load_private_commitment(path: Path, replay_id: str) -> tuple[dict[str, object], bytes, os.stat_result]:
+    """Load one exact owner-private commitment without following links."""
+
+    try:
+        payload, info = read_exact_private_file(path, mode=0o600)
+        value = json.loads(payload)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ReconcileError) as exc:
+        raise ReconcileError("transaction commitment is unreadable or unsafe") from exc
+    if not isinstance(value, dict) or canonical_json(value) != payload or value.get("replay_id") != replay_id:
+        raise ReconcileError("transaction commitment identity is invalid")
+    unsigned = dict(value)
+    commitment_id = unsigned.pop("commitment_id", None)
+    if commitment_id != hashlib.sha256(canonical_json(unsigned).rstrip(b"\n")).hexdigest():
+        raise ReconcileError("transaction commitment signature is invalid")
+    return value, payload, info
+
+
 @contextmanager
 def report_transaction_lock(manager: Path) -> Iterator[None]:
     """Share the receipt writer's adjacent per-manager transaction lock."""
@@ -111,15 +164,14 @@ def discard_commitment(args: argparse.Namespace, *, locked: bool = False) -> dic
         raise ReconcileError("discard authorization source is invalid")
     authorization_file = args.authorization_file
     try:
-        authorization_payload = authorization_file.read_bytes()
-        authorization_info = authorization_file.lstat()
-    except OSError as exc:
+        mail_root = require_nonsymlink_directory(configured_mail_root())
+        expected_authorization = mail_root / Path(args.authorization_source).name
+        authorization_payload, _authorization_info = read_exact_private_file(authorization_file)
+    except (OSError, ReconcileError) as exc:
         raise ReconcileError("discard authorization source is unavailable") from exc
     if (
         not authorization_file.is_absolute()
-        or authorization_file.resolve(strict=False) != (configured_mail_root() / Path(args.authorization_source).name).resolve(strict=False)
-        or not stat.S_ISREG(authorization_info.st_mode)
-        or authorization_info.st_uid != os.getuid()
+        or authorization_file != expected_authorization
         or authorization_file.name != Path(args.authorization_source).name
         or HASH_RE.fullmatch(args.authorization_sha256 or "") is None
         or hashlib.sha256(authorization_payload).hexdigest() != args.authorization_sha256
@@ -168,7 +220,7 @@ def discard_commitment(args: argparse.Namespace, *, locked: bool = False) -> dic
             ):
                 raise ReconcileError("existing discard disposition differs from the exact authorization")
             return record
-        commitment = load_commitment(commitment_path, args.replay_id)
+        commitment, commitment_payload, commitment_info = load_private_commitment(commitment_path, args.replay_id)
         preflight = commitment.get("preflight")
         records = preflight.get("records") if isinstance(preflight, dict) else None
         manager_value = records.get("manager") if isinstance(records, dict) else None
@@ -183,7 +235,6 @@ def discard_commitment(args: argparse.Namespace, *, locked: bool = False) -> dic
         for suffix in (".json", ".publication.json", ".tombstone.json"):
             if name_exists(args.receipt_directory / f"{args.replay_id}{suffix}"):
                 raise ReconcileError("transaction already has a terminal receipt or reconciliation")
-        commitment_payload = canonical_json(commitment)
         record: dict[str, object] = {
             "authorization_source": args.authorization_source,
             "authorization_sha256": args.authorization_sha256,
@@ -220,7 +271,17 @@ def discard_commitment(args: argparse.Namespace, *, locked: bool = False) -> dic
                 os.fsync(directory_fd)
             finally:
                 os.close(directory_fd)
-        if commitment_path.read_bytes() != commitment_payload:
+        try:
+            current_payload, current_info = read_exact_private_file(commitment_path, mode=0o600)
+            directory_entry = commitment_path.lstat()
+        except (OSError, ReconcileError) as exc:
+            raise ReconcileError("transaction commitment changed before retirement") from exc
+        if (
+            current_payload != commitment_payload
+            or (current_info.st_dev, current_info.st_ino) != (commitment_info.st_dev, commitment_info.st_ino)
+            or (directory_entry.st_dev, directory_entry.st_ino) != (commitment_info.st_dev, commitment_info.st_ino)
+            or not stat.S_ISREG(directory_entry.st_mode)
+        ):
             raise ReconcileError("transaction commitment changed before retirement")
         commitment_path.unlink()
         directory_fd = os.open(args.receipt_directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))

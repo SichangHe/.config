@@ -78,7 +78,9 @@ class ReportReconcileTests(unittest.TestCase):
             "schema": "omo-report-transaction-commitment/v1",
         }
         commitment = {**unsigned, "commitment_id": hashlib.sha256(canonical_json(unsigned).rstrip(b"\n")).hexdigest()}
-        (receipts / f"{replay_id}.commitment").write_bytes(canonical_json(commitment))
+        commitment_path = receipts / f"{replay_id}.commitment"
+        commitment_path.write_bytes(canonical_json(commitment))
+        commitment_path.chmod(0o600)
         authorization_root = root / "trusted"
         authorization = authorization_root / "manager_mail" / "example.txt"
         authorization.parent.mkdir(parents=True)
@@ -159,14 +161,56 @@ class ReportReconcileTests(unittest.TestCase):
                 self.discard(args)
             self.assertTrue((args.receipt_directory / f"{args.replay_id}.commitment").exists())
 
+    def test_discard_rejects_writable_or_symlinked_authority_without_mutation(self) -> None:
+        for case in ("writable", "symlink"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                args = self.fixture(Path(tmp))
+                if case == "writable":
+                    args.authorization_file.chmod(0o660)
+                else:
+                    payload = args.authorization_file.read_bytes()
+                    external = Path(tmp) / "external.txt"
+                    external.write_bytes(payload)
+                    args.authorization_file.unlink()
+                    args.authorization_file.symlink_to(external)
+                with self.assertRaisesRegex(ReconcileError, "authorization source"):
+                    self.discard(args)
+                self.assertTrue((args.receipt_directory / f"{args.replay_id}.commitment").exists())
+                self.assertFalse((args.receipt_directory / f"{args.replay_id}.discarded.json").exists())
+
+    def test_discard_rejects_symlinked_commitment_without_detached_terminal_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self.fixture(Path(tmp))
+            commitment = args.receipt_directory / f"{args.replay_id}.commitment"
+            external = Path(tmp) / "external.commitment"
+            commitment.replace(external)
+            commitment.symlink_to(external)
+            with self.assertRaisesRegex(ReconcileError, "commitment"):
+                self.discard(args)
+            self.assertTrue(external.exists())
+            self.assertTrue(commitment.is_symlink())
+            self.assertFalse((args.receipt_directory / f"{args.replay_id}.discarded.json").exists())
+
     def test_discard_rejects_mail_outside_trusted_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             args = self.fixture(Path(tmp))
             args.local_env.write_text(f'export OMO_WORK_LOGS_ROOT="{Path(tmp) / "other"}"\n')
             with patch("omo_manager.omo_report_reconcile.LOCAL_ENV_PATH", args.local_env):
-                with self.assertRaisesRegex(ReconcileError, "exact human disposition"):
+                with self.assertRaisesRegex(ReconcileError, "authorization source"):
                     self.discard(args)
             self.assertTrue((args.receipt_directory / f"{args.replay_id}.commitment").exists())
+
+    def test_discard_rejects_symlinked_configured_mail_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = self.fixture(Path(tmp))
+            mail_root = args.authorization_file.parent
+            external = Path(tmp) / "external-manager-mail"
+            mail_root.replace(external)
+            mail_root.symlink_to(external, target_is_directory=True)
+            with self.assertRaisesRegex(ReconcileError, "authorization source"):
+                self.discard(args)
+            self.assertTrue((args.receipt_directory / f"{args.replay_id}.commitment").exists())
+            self.assertFalse((args.receipt_directory / f"{args.replay_id}.discarded.json").exists())
 
     def test_historical_reconciliation_rejects_discard_terminal_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
