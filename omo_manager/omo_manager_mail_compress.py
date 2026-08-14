@@ -1958,7 +1958,7 @@ def parse_route_resolutions(values: list[str], task_ids: list[str]) -> dict[str,
         return {}
     resolutions: dict[str, str] = {}
     for value in values:
-        task_id, separator, raw_target = value.partition("=")
+        task_id, separator, raw_target = value.rpartition("=")
         if not separator or not task_id or tsv_value(task_id) != task_id or not TMUX_TARGET_RE.fullmatch(raw_target):
             raise ValueError("route-resolution must be TASK-ID=SESSION:WINDOW[.PANE]")
         if task_id in resolutions:

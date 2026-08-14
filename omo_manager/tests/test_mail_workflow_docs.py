@@ -57,6 +57,11 @@ class MailWorkflowDocumentationTests(unittest.TestCase):
             "plus `--subject-file` and `--message-file` as needed",
             "without defaulting to the compression worker's target",
             "blocks Trash unless every replacement preserves its task's target through the final mutation gate",
+            "distinct reviewer confirm both each exact task identity and its one authoritative current target",
+            "`--route-resolution 'TASK-ID=TARGET'` exactly once for every task",
+            "explicit reviewer-controlled override of historical subject targets",
+            "never the compression worker's default target",
+            "match the resolved target at both the initial and final mutation gates",
             "never expunge, permanently delete, or mutate `\\All`",
             "report concisely",
         ):
