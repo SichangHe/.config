@@ -53,7 +53,8 @@ class MailWorkflowDocumentationTests(unittest.TestCase):
             "only the explicitly selected, independently reviewed sources",
             "current read-only mailbox view to recheck",
             "`selected_source_sender_tmux_target=`",
-            "`email_me.py --manager-human --sender-tmux-target ORIGINAL_TARGET`",
+            "`email_me.py --sender-tmux-target ORIGINAL_TARGET`",
+            "plus `--subject-file` and `--message-file` as needed",
             "without defaulting to the compression worker's target",
             "blocks Trash unless every replacement preserves its task's target through the final mutation gate",
             "never expunge, permanently delete, or mutate `\\All`",
@@ -68,6 +69,7 @@ class MailWorkflowDocumentationTests(unittest.TestCase):
             "task-evidence file",
             "immutable intent",
             "immutable outcome",
+            "email_me.py --manager-human",
         ):
             self.assertNotIn(conflicting_rule, compression)
 

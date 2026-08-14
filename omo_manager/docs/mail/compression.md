@@ -30,7 +30,7 @@ A threshold may start review; it never authorizes Trash. PB news, PB stock watch
 - finish one task at a time
 - when one selected source already provides the one useful, self-contained manager message for a task, retain it and do not send a replacement
 - when a replacement is needed, send exactly one self-contained replacement for the task and verify that exact message is uniquely present in the recipient mailbox before any source mutation; if delivery verification is delayed, look up the same message identity rather than sending a duplicate
-- send each replacement with `email_me.py --manager-human --sender-tmux-target ORIGINAL_TARGET`; this reuses the source task's tmux subject tag and thread instead of the compression worker's target
+- send each replacement with `email_me.py --sender-tmux-target ORIGINAL_TARGET` plus `--subject-file` and `--message-file` as needed; this reuses the source task's tmux subject tag and thread instead of the compression worker's target
 - require the independently reviewed task grouping to identify one original target from its selected sources and current thread context; if the target is missing or conflicting, stop and resolve it without defaulting to the compression worker's target
 - `trash-explicit` independently derives that target from the live-bound sources and context, fetches each verified replacement subject, and blocks Trash unless every replacement preserves its task's target through the final mutation gate
 - immediately before mutation, use a current read-only mailbox view to recheck the selected source identities, task grouping, disposition, and replacement; changed, missing, duplicate, or ambiguous mail blocks that task without affecting reviewed tasks
