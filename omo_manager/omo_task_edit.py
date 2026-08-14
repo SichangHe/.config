@@ -23,6 +23,7 @@ from omo_manager.omo_blocking import load_task
 from omo_manager.omo_blocking import v2_enabled
 from omo_manager.omo_blocking_actor import request as blocking_request
 from omo_manager.omo_task_context import current_active_task
+from omo_manager.omo_task_status import parse_manager_child_metadata
 from omo_manager.omo_task_status import replace_if_unchanged
 from omo_manager.omo_task_status import task_path
 from omo_manager.omo_task_metadata import TASK_FRONTMATTER_V1
@@ -522,8 +523,7 @@ def append_comment_line(text: str, comment_line: str) -> str:
     return f"{text}{separator}{comment_line}{newline}"
 
 
-def summary_text(text: str, work_log_root: Path | None = None) -> str:
-    metadata = require_metadata(text, work_log_root)
+def metadata_summary_text(metadata: TaskMetadata) -> str:
     lines = [
         f"status: {metadata.status}",
         f"runat: {metadata.runat}",
@@ -538,15 +538,28 @@ def summary_text(text: str, work_log_root: Path | None = None) -> str:
     return "\n".join(lines) + "\n"
 
 
+def require_summary_metadata(text: str, work_log_root: Path | None = None) -> TaskMetadata:
+    metadata = parse_manager_child_metadata(text, work_log_root)
+    if metadata is None:
+        raise TaskFrontmatterError("task file has no frontmatter.")
+    if metadata.status == "done" and metadata.runat == "retired" and metadata.pending_task_items:
+        raise TaskFrontmatterError("historical done/retired summary requires an empty pending queue.")
+    return metadata
+
+
+def summary_text(text: str, work_log_root: Path | None = None) -> str:
+    return metadata_summary_text(require_summary_metadata(text, work_log_root))
+
+
 def summary_output(root: Path, task_files: tuple[Path, ...]) -> str:
     """Return validated task summaries sorted by manager then task-file label."""
     summaries: list[tuple[str, str, str]] = []
     for task_file in task_files:
         path = task_path(root, task_file)
         text = path.read_text(encoding="utf-8")
-        metadata = require_metadata(text, root)
+        metadata = require_summary_metadata(text, root)
         label = path.relative_to(root).as_posix()
-        summaries.append((metadata.managerat, label, summary_text(text, root)))
+        summaries.append((metadata.managerat, label, metadata_summary_text(metadata)))
     return "".join(f"task_file: {label}\n{text}" for _, label, text in sorted(summaries))
 
 

@@ -103,6 +103,72 @@ class TaskEditTests(unittest.TestCase):
                 stdout.getvalue(),
             )
 
+    def test_summary_accepts_historical_done_retired_task_read_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "terminal.md"
+            task.write_text(
+                task_frontmatter(status="done").replace("runat: wl:2", "runat: retired") + "historical body\n",
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+
+            with redirect_stdout(stdout):
+                exit_code = run(Args(root, Path("terminal.md"), "summary"))
+
+            self.assertEqual(0, exit_code)
+            self.assertEqual(
+                "task_file: terminal.md\nstatus: done\nrunat: retired\nmanagerat: wl:1\nis_manager: false\npending_task_items: []\n",
+                stdout.getvalue(),
+            )
+
+    def test_non_summary_command_rejects_historical_done_retired_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "terminal.md"
+            task.write_text(
+                task_frontmatter(status="done").replace("runat: wl:2", "runat: retired"),
+                encoding="utf-8",
+            )
+            stderr = io.StringIO()
+
+            with redirect_stderr(stderr):
+                exit_code = run(Args(root, Path("terminal.md"), "pending-list"))
+
+            self.assertEqual(2, exit_code)
+            self.assertIn("`runat: retired` is only valid when `status` is `blocked`", stderr.getvalue())
+
+    def test_summary_rejects_done_retired_task_with_pending_work(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "not-terminal.md"
+            task.write_text(
+                task_frontmatter(status="done", pending_items=("still open",)).replace("runat: wl:2", "runat: retired"),
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                exit_code = run(Args(root, Path("not-terminal.md"), "summary"))
+
+            self.assertEqual(2, exit_code)
+            self.assertEqual("", stdout.getvalue())
+            self.assertIn("historical done/retired summary requires an empty pending queue", stderr.getvalue())
+
+    def test_summary_rejects_active_retired_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "active.md"
+            task.write_text(task_frontmatter().replace("runat: wl:2", "runat: retired"), encoding="utf-8")
+            stderr = io.StringIO()
+
+            with redirect_stderr(stderr):
+                exit_code = run(Args(root, Path("active.md"), "summary"))
+
+            self.assertEqual(2, exit_code)
+            self.assertIn("`runat: retired` is only valid when `status` is `blocked`", stderr.getvalue())
+
     def test_summary_rejects_invalid_file_without_partial_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
