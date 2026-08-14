@@ -90,7 +90,14 @@ printf 'cfg\\t7\\t0\\t%%1701\\tworker\\n'
     message.write_bytes(body)
     message.chmod(0o600)
     env = dict(os.environ)
-    for name in ("OMO_WORK_LOGS_ROOT", "OMO_MANAGER_TMUX_TARGET", "OMO_AGENT_NAME", "TMUX"):
+    for name in (
+        "OMO_WORK_LOGS_ROOT",
+        "OMO_MANAGER_TMUX_TARGET",
+        "OMO_AGENT_NAME",
+        "OMO_REPORT_DESCRIPTION_ROUTE_ATTEMPT",
+        "OMO_REPORT_DESCRIPTION_ROUTE_RETRY_FD",
+        "TMUX",
+    ):
         env.pop(name, None)
     env.update(
         {
@@ -288,6 +295,54 @@ def copy_report_helper(tmp_path: Path) -> Path:
     report = package / "omo_report.sh"
     report.chmod(0o700)
     return report
+
+
+def install_description_route_barrier(report: Path) -> None:
+    receiver = report.parent / "omo_report_receipt.py"
+    source = receiver.read_text(encoding="utf-8")
+    marker = """def description(plan: Plan) -> dict[str, object]:
+    validate_helper_snapshot(plan)
+    try:
+"""
+    injection = """def description(plan: Plan) -> dict[str, object]:
+    validate_helper_snapshot(plan)
+    ready_raw = os.environ.get("OMO_TEST_DESCRIPTION_ROUTE_READY")
+    release_raw = os.environ.get("OMO_TEST_DESCRIPTION_ROUTE_RELEASE")
+    if ready_raw and release_raw and not Path(release_raw).exists():
+        with Path(ready_raw).open("ab", buffering=0) as stream:
+            stream.write(b"ready\\n")
+            os.fsync(stream.fileno())
+        deadline = time.monotonic() + 5
+        while not Path(release_raw).exists():
+            if time.monotonic() >= deadline:
+                raise ReceiptError("description route barrier timed out")
+            time.sleep(0.01)
+    try:
+"""
+    if marker not in source:
+        raise AssertionError("description route barrier marker is missing")
+    receiver.write_text(source.replace(marker, injection, 1), encoding="utf-8")
+
+
+def install_description_route_churn(report: Path) -> None:
+    receiver = report.parent / "omo_report_receipt.py"
+    source = receiver.read_text(encoding="utf-8")
+    marker = """def description(plan: Plan) -> dict[str, object]:
+    validate_helper_snapshot(plan)
+    try:
+"""
+    injection = """def description(plan: Plan) -> dict[str, object]:
+    validate_helper_snapshot(plan)
+    if os.environ.get("OMO_TEST_DESCRIPTION_ROUTE_CHURN") == "1":
+        attempt = os.environ.get("OMO_REPORT_DESCRIPTION_ROUTE_ATTEMPT", "0")
+        with plan.manager.open("ab", buffering=0) as stream:
+            stream.write(f"manager churn attempt {attempt}\\n".encode())
+            os.fsync(stream.fileno())
+    try:
+"""
+    if marker not in source:
+        raise AssertionError("description route churn marker is missing")
+    receiver.write_text(source.replace(marker, injection, 1), encoding="utf-8")
 
 
 def entry_name_sha256(path: Path) -> str:
@@ -1165,6 +1220,230 @@ class ReportReceiptTests(unittest.TestCase):
                 self.assertNotIn(body.decode().strip(), public)
                 self.assertNotIn(str(draft_a), public)
                 self.assertNotIn(str(draft_b), public)
+
+    def test_fresh_allocated_describe_retries_manager_advance_during_routing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            case, manager, owner = active_manager_fixture(tmp_path)
+            body = b"fresh describe retries manager routing advance\n"
+            case.env["OMO_REPORT_DESCRIPTION_ROUTE_ATTEMPT"] = "ambient-invalid"
+            draft = allocate_report_draft(case, body)
+            case.env["OMO_REPORT_DESCRIPTION_ROUTE_ATTEMPT"] = "7"
+            self.addCleanup(draft.unlink, missing_ok=True)
+            report = copy_report_helper(tmp_path)
+            install_description_route_barrier(report)
+            ready = tmp_path / "description-route-ready"
+            release = tmp_path / "description-route-release"
+            case.env["OMO_TEST_DESCRIPTION_ROUTE_READY"] = str(ready)
+            case.env["OMO_TEST_DESCRIPTION_ROUTE_RELEASE"] = str(release)
+            process = subprocess.Popen(
+                [
+                    str(report),
+                    "--describe",
+                    "--status",
+                    "done",
+                    "--message-file",
+                    str(draft),
+                    "--agent",
+                    "receipt-worker",
+                ],
+                cwd=case.root.parent,
+                env=case.env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            deadline = time.monotonic() + 5
+            while not ready.exists():
+                if time.monotonic() >= deadline:
+                    process.kill()
+                    raise AssertionError("description did not reach the route barrier")
+                time.sleep(0.01)
+            advanced = owner + b"\nmanager-owned advance during description\n"
+            manager.write_bytes(advanced)
+            release.write_text("release\n", encoding="utf-8")
+
+            stdout, stderr = process.communicate(timeout=10)
+
+            self.assertEqual(0, process.returncode, stderr)
+            description = json.loads(stdout)
+            self.assertTrue(description["read_only"])
+            self.assertEqual(hashlib.sha256(advanced).hexdigest(), description["transaction"]["owner_prefix"]["sha256"])
+            self.assertEqual(len(advanced), description["transaction"]["owner_prefix"]["size_bytes"])
+            self.assertEqual(advanced, manager.read_bytes())
+            self.assertNotIn("(pending)", manager.read_text(encoding="utf-8"))
+            self.assertFalse(Path(str(description["files"]["private_envelope"])).exists())
+            self.assertFalse(Path(str(description["files"]["private_receipt"])).exists())
+            self.assertFalse(Path(str(description["files"]["receipt_publication"])).exists())
+            self.assertNotIn(body.decode().strip(), stdout + stderr)
+            self.assertNotIn(str(draft), stdout + stderr)
+
+    def test_concurrent_fresh_describes_retry_one_manager_routing_advance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            case, manager, owner = active_manager_fixture(tmp_path)
+            bodies = [f"concurrent fresh routing advance {index}\n".encode() for index in range(4)]
+            drafts = [allocate_report_draft(case, body) for body in bodies]
+            for draft in drafts:
+                self.addCleanup(draft.unlink, missing_ok=True)
+            report = copy_report_helper(tmp_path)
+            install_description_route_barrier(report)
+            ready = tmp_path / "concurrent-description-route-ready"
+            release = tmp_path / "concurrent-description-route-release"
+            case.env["OMO_TEST_DESCRIPTION_ROUTE_READY"] = str(ready)
+            case.env["OMO_TEST_DESCRIPTION_ROUTE_RELEASE"] = str(release)
+            commands = [replace(case, message=draft).command(describe=True) for draft in drafts]
+            for command in commands:
+                command[0] = str(report)
+            processes = [
+                subprocess.Popen(
+                    command,
+                    cwd=case.root.parent,
+                    env=case.env,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                for command in commands
+            ]
+            deadline = time.monotonic() + 5
+            while True:
+                try:
+                    ready_count = ready.read_text(encoding="utf-8").count("ready\n")
+                except FileNotFoundError:
+                    ready_count = 0
+                if ready_count == len(processes):
+                    break
+                if time.monotonic() >= deadline:
+                    for process in processes:
+                        process.kill()
+                    raise AssertionError("concurrent descriptions did not reach the route barrier")
+                time.sleep(0.01)
+            advanced = owner + b"\none manager-owned advance for concurrent descriptions\n"
+            manager.write_bytes(advanced)
+            release.write_text("release\n", encoding="utf-8")
+
+            results = [process.communicate(timeout=10) for process in processes]
+
+            descriptions: list[dict[str, object]] = []
+            for body, draft, process, (stdout, stderr) in zip(bodies, drafts, processes, results, strict=True):
+                self.assertEqual(0, process.returncode, stderr)
+                description = json.loads(stdout)
+                descriptions.append(description)
+                self.assertEqual(
+                    hashlib.sha256(advanced).hexdigest(),
+                    description["transaction"]["owner_prefix"]["sha256"],
+                )
+                self.assertNotIn(body.decode().strip(), stdout + stderr)
+                self.assertNotIn(str(draft), stdout + stderr)
+            self.assertEqual(len(descriptions), len({item["receipt"]["replay_id"] for item in descriptions}))
+            self.assertEqual(advanced, manager.read_bytes())
+            self.assertNotIn("(pending)", manager.read_text(encoding="utf-8"))
+            self.assertFalse(Path(f"{manager}.omo_report.lock").exists())
+
+    def test_repeated_fresh_description_route_advances_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            case, manager, owner = active_manager_fixture(tmp_path)
+            body = b"repeated fresh description route churn fails closed\n"
+            draft = allocate_report_draft(case, body)
+            self.addCleanup(draft.unlink, missing_ok=True)
+            report = copy_report_helper(tmp_path)
+            install_description_route_churn(report)
+            case.env["OMO_TEST_DESCRIPTION_ROUTE_CHURN"] = "1"
+
+            rejected = run_report_from(case, draft, describe=True, report=report)
+
+            self.assertEqual(2, rejected.returncode)
+            self.assertEqual("", rejected.stdout)
+            self.assertIn("report route did not stabilize during description", rejected.stderr)
+            self.assertNotIn(body.decode().strip(), rejected.stderr)
+            self.assertNotIn(str(draft), rejected.stderr)
+            expected = owner + b"".join(f"manager churn attempt {attempt}\n".encode() for attempt in range(8))
+            self.assertEqual(expected, manager.read_bytes())
+            self.assertNotIn("(pending)", manager.read_text(encoding="utf-8"))
+            self.assertFalse(Path(f"{manager}.omo_report.lock").exists())
+            self.assertFalse((tmp_path / "state").exists())
+
+    def test_non_description_exit_75_is_not_retried(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            case = fixture(tmp_path)
+            attempts = tmp_path / "local-env-attempts"
+            local_env = Path(case.env["OMO_MANAGER_LOCAL_ENV"])
+            local_env.write_text(
+                """if [ -n "${OMO_REPORT_DESCRIPTION_ROUTE_RETRY_FD:-}" ]; then
+  printf 'omo-report-description-route-retry-v1\\n' >&"$OMO_REPORT_DESCRIPTION_ROUTE_RETRY_FD"
+fi
+if [ -n "${description_route_retry_fd:-}" ]; then
+  printf 'omo-report-description-route-retry-v1\\n' 2>/dev/null >&"$description_route_retry_fd" || :
+fi
+printf 'attempt\\n' >> "$OMO_TEST_LOCAL_ENV_ATTEMPTS"
+return 75
+""",
+                encoding="utf-8",
+            )
+            case.env["OMO_TEST_LOCAL_ENV_ATTEMPTS"] = str(attempts)
+
+            result = subprocess.run(
+                [str(REPORT), "--alloc-message-file"],
+                cwd=case.root.parent,
+                env=case.env,
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+
+            self.assertEqual(75, result.returncode)
+            self.assertEqual("", result.stdout)
+            self.assertNotIn("report route did not stabilize during description", result.stderr)
+            self.assertEqual("attempt\n", attempts.read_text(encoding="utf-8"))
+
+    def test_isolated_local_env_preserves_agent_and_receiver_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            case = fixture(tmp_path)
+            local_env = Path(case.env["OMO_MANAGER_LOCAL_ENV"])
+            with local_env.open("a", encoding="utf-8") as stream:
+                stream.write("OMO_AGENT_NAME=local-config-agent\nexport OMO_REPORT_ACK_TIMEOUT_S=0\n")
+            case.env.pop("OMO_REPORT_ACK_TIMEOUT_S")
+            base_command = [
+                str(REPORT),
+                "--status",
+                "done",
+                "--message-file",
+                str(case.message),
+            ]
+            described = subprocess.run(
+                [str(REPORT), "--describe", *base_command[1:]],
+                cwd=case.root.parent,
+                env=case.env,
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+            self.assertEqual(0, described.returncode, described.stderr)
+            description = json.loads(described.stdout)
+            self.addCleanup(cleanup_private_tmp, description)
+
+            started = time.monotonic()
+            pending = subprocess.run(
+                base_command,
+                cwd=case.root.parent,
+                env=case.env,
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+
+            self.assertEqual(0, pending.returncode, pending.stderr)
+            self.assertFalse(json.loads(pending.stdout)["accepted"])
+            self.assertLess(time.monotonic() - started, 1.0)
+            envelope = Path(str(description["files"]["private_envelope"]))
+            self.assertIn("(sent from local-config-agent via omo_report.sh", envelope.read_text(encoding="utf-8"))
 
     def test_fresh_draft_replay_after_unreceipted_consumption_remains_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

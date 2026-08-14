@@ -45,22 +45,6 @@ try:
 finally:
     os.close(fd)
 
-read_fd, write_fd = os.pipe()
-writer = os.fork()
-if writer == 0:
-    os.close(read_fd)
-    try:
-        offset = 0
-        while offset < len(payload):
-            written = os.write(write_fd, payload[offset:])
-            if written <= 0:
-                os._exit(2)
-            offset += written
-    finally:
-        os.close(write_fd)
-    os._exit(0)
-os.close(write_fd)
-os.set_inheritable(read_fd, True)
 bash = shutil.which("bash")
 if bash is None:
     raise RuntimeError("bash is required")
@@ -72,17 +56,120 @@ environment.update(
         "OMO_REPORT_IMMUTABLE_EXEC": "1",
     }
 )
-os.execve(bash, [bash, f"/proc/self/fd/{read_fd}", *sys.argv[2:]], environment)
+
+def exit_code(wait_status: int) -> int:
+    if os.WIFEXITED(wait_status):
+        return os.WEXITSTATUS(wait_status)
+    if os.WIFSIGNALED(wait_status):
+        return 128 + os.WTERMSIG(wait_status)
+    return 2
+
+def wait_for(pid: int) -> int:
+    while True:
+        try:
+            return exit_code(os.waitpid(pid, 0)[1])
+        except InterruptedError:
+            continue
+
+def run_snapshot(attempt: int) -> tuple[int, bool]:
+    read_fd, write_fd = os.pipe()
+    os.set_inheritable(read_fd, True)
+    writer = os.fork()
+    if writer == 0:
+        os.close(read_fd)
+        try:
+            offset = 0
+            while offset < len(payload):
+                written = os.write(write_fd, payload[offset:])
+                if written <= 0:
+                    os._exit(2)
+                offset += written
+        except OSError:
+            os._exit(2)
+        finally:
+            os.close(write_fd)
+        os._exit(0)
+    os.close(write_fd)
+    retry_read_fd, retry_write_fd = os.pipe()
+    os.set_inheritable(retry_write_fd, True)
+    try:
+        shell = os.fork()
+    except OSError:
+        os.close(read_fd)
+        os.close(retry_read_fd)
+        os.close(retry_write_fd)
+        wait_for(writer)
+        raise
+    if shell == 0:
+        os.close(retry_read_fd)
+        child_environment = dict(environment)
+        child_environment["OMO_REPORT_DESCRIPTION_ROUTE_ATTEMPT"] = str(attempt)
+        child_environment["OMO_REPORT_DESCRIPTION_ROUTE_RETRY_FD"] = str(retry_write_fd)
+        os.execve(bash, [bash, f"/proc/self/fd/{read_fd}", *sys.argv[2:]], child_environment)
+    os.close(read_fd)
+    os.close(retry_write_fd)
+    shell_status = wait_for(shell)
+    os.set_blocking(retry_read_fd, False)
+    try:
+        try:
+            retry_marker = os.read(retry_read_fd, 128)
+        except BlockingIOError:
+            retry_marker = b""
+    finally:
+        os.close(retry_read_fd)
+    writer_status = wait_for(writer)
+    if shell_status == 0 and writer_status != 0:
+        raise RuntimeError("could not provide the immutable report-helper execution snapshot")
+    return shell_status, retry_marker == b"omo-report-description-route-retry-v1\n"
+
+for description_route_attempt in range(8):
+    status, retry_description = run_snapshot(description_route_attempt)
+    if status != 75 or not retry_description:
+        raise SystemExit(status)
+print("report route did not stabilize during description", file=sys.stderr)
+raise SystemExit(2)
 PY
     ;;
 esac
+description_route_retry_fd="${OMO_REPORT_DESCRIPTION_ROUTE_RETRY_FD:-}"
+unset OMO_REPORT_DESCRIPTION_ROUTE_RETRY_FD
+export -n description_route_retry_fd
 readonly OMO_REPORT_HELPER_PATH OMO_REPORT_HELPER_SHA256 OMO_REPORT_IMMUTABLE_EXEC
 local_env="${OMO_MANAGER_LOCAL_ENV:-$HOME/.config/omo_manager/local.env}"
 env_root="${OMO_WORK_LOGS_ROOT:-}"
 if [ -f "$local_env" ]; then
-  # shellcheck disable=SC1090
-  source "$local_env"
+  set +e
+  config_declarations=$(
+    set -e
+    case "$description_route_retry_fd" in
+      ''|*[!0-9]*) ;;
+      *) eval "exec ${description_route_retry_fd}>&-" ;;
+    esac
+    unset description_route_retry_fd
+    # shellcheck disable=SC1090
+    source "$local_env" >&2
+    unset OMO_REPORT_DESCRIPTION_ROUTE_RETRY_FD
+    while IFS= read -r declaration; do
+      case "$declaration" in
+        *" OMO_REPORT_DESCRIPTION_ROUTE_ATTEMPT="* | \
+        *" OMO_REPORT_DESCRIPTION_ROUTE_RETRY_FD="* | \
+        *" OMO_REPORT_HELPER_PATH="* | \
+        *" OMO_REPORT_HELPER_SHA256="* | \
+        *" OMO_REPORT_IMMUTABLE_EXEC="*) ;;
+        *) printf '%s\n' "$declaration" ;;
+      esac
+    done < <(builtin export -p)
+    OMO_WORK_LOGS_ROOT="${OMO_WORK_LOGS_ROOT:-}"
+    OMO_MANAGER_TMUX_TARGET="${OMO_MANAGER_TMUX_TARGET:-}"
+    OMO_AGENT_NAME="${OMO_AGENT_NAME:-}"
+    builtin declare -p OMO_WORK_LOGS_ROOT OMO_MANAGER_TMUX_TARGET OMO_AGENT_NAME
+  )
+  config_status=$?
+  set -e
+  if [ "$config_status" -ne 0 ]; then exit "$config_status"; fi
+  builtin eval "$config_declarations"
 fi
+unset OMO_REPORT_DESCRIPTION_ROUTE_RETRY_FD
 root="${OMO_WORK_LOGS_ROOT:-$HOME/work_logs}"
 manager_target="${OMO_MANAGER_TMUX_TARGET:-}"
 if [ -n "$env_root" ]; then root="$env_root"; fi
@@ -607,7 +694,11 @@ task_lock_path="$(dirname "$helper_path")/omo_task_lock.py"
 mode="submit"
 if [ "$describe" -eq 1 ]; then mode="describe"; fi
 if [ "$verify_consumed" -eq 1 ]; then mode="verify-consumed"; fi
-exec env OMO_REPORT_RECEIVER_BOOTSTRAP=1 PYTHONDONTWRITEBYTECODE=1 python3 -I -S - "$receiver_path" "$pending_digest_path" "$task_lock_path" "$helper_path" \
+receiver_environment=(OMO_REPORT_RECEIVER_BOOTSTRAP=1 PYTHONDONTWRITEBYTECODE=1)
+if [ "$describe" -eq 1 ]; then
+  receiver_environment+=("OMO_REPORT_DESCRIPTION_ROUTE_RETRY_FD=$description_route_retry_fd")
+fi
+exec env "${receiver_environment[@]}" python3 -I -S - "$receiver_path" "$pending_digest_path" "$task_lock_path" "$helper_path" \
   --mode "$mode" \
   --helper "$helper_path" \
   --root "$task_root_real" \

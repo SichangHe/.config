@@ -66,6 +66,23 @@ class ReceiptError(RuntimeError):
     """A fail-closed report transaction error."""
 
 
+class RetryableDescriptionError(ReceiptError):
+    """A read-only description lost its routing snapshot before validation."""
+
+
+def notify_description_route_retry() -> None:
+    """Tell the immutable helper supervisor that exit 75 is its retry signal."""
+    raw_fd = os.environ.get("OMO_REPORT_DESCRIPTION_ROUTE_RETRY_FD", "")
+    try:
+        retry_fd = int(raw_fd)
+    except ValueError:
+        return
+    try:
+        os.write(retry_fd, b"omo-report-description-route-retry-v1\n")
+    except OSError:
+        return
+
+
 @dataclass(frozen=True)
 class OwnerPrefixBinding:
     manager_path_sha256: str
@@ -2795,7 +2812,12 @@ def public_preflight_binding(plan: Plan, transaction: dict[str, object] | None =
 
 def description(plan: Plan) -> dict[str, object]:
     validate_helper_snapshot(plan)
-    validate_route_snapshot(plan)
+    try:
+        validate_route_snapshot(plan)
+    except ReceiptError as exc:
+        if str(exc) != "route evidence changed before acceptance":
+            raise
+        raise RetryableDescriptionError(str(exc)) from exc
     historical = plan_for_historical_commitment(plan)
     if historical is not plan and historical.receipt_final.exists():
         plan = historical
@@ -3629,6 +3651,9 @@ def run(argv: list[str] | None = None) -> bytes:
 def main() -> int:
     try:
         output = run()
+    except RetryableDescriptionError:
+        notify_description_route_retry()
+        return 75
     except (ReceiptError, OSError, ValueError) as exc:
         print(f"omo_report_receipt.py: {exc}", file=sys.stderr)
         return 2
