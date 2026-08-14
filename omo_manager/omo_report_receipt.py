@@ -620,12 +620,11 @@ def manager_transaction_state(payload: bytes, binding: OwnerPrefixBinding, point
 def bind_owner_prefix(
     manager: Path,
     envelope: Path,
-    pointer: str,
-    *,
-    allow_stale_consumed: bool = False,
 ) -> OwnerPrefixBinding:
     current = manager_bytes(manager)
     if validate_optional_regular(envelope, "private envelope", exact_mode=0o600):
+        # Preserve the historical owner binding until durable state can decide
+        # whether current manager growth is an accepted replay or corruption.
         try:
             binding = parse_envelope_owner_prefix(envelope)
         except ReceiptError as exc:
@@ -639,8 +638,6 @@ def bind_owner_prefix(
         )
     if binding.manager_path_sha256 != hashlib.sha256(str(manager).encode()).hexdigest():
         raise ReceiptError("private envelope owner route is inconsistent")
-    if manager_transaction_state(current, binding, pointer) == "invalid" and not allow_stale_consumed:
-        raise ReceiptError("manager bytes differ from the bound report transaction")
     return binding
 
 
@@ -790,8 +787,6 @@ def _build_plan_from_message(
     owner_prefix = bind_owner_prefix(
         manager,
         envelope_final,
-        pointer,
-        allow_stale_consumed=args.mode == "verify-consumed",
     )
     binding = {
         "helper": helper,
@@ -1495,6 +1490,7 @@ def validate_receipt_bytes(
     payload: bytes,
     *,
     allow_publication_recovery: bool = False,
+    require_current_route_evidence: bool = True,
 ) -> dict[str, object]:
     try:
         parsed = json.loads(payload)
@@ -1536,6 +1532,7 @@ def validate_receipt_bytes(
         plan,
         expected_preflight=preflight,
         require_current_allocation_identity=False,
+        require_current_route_evidence=require_current_route_evidence,
     )
     if transaction_commitment is None:
         raise ReceiptError("durable receipt has no immutable transaction commitment")
@@ -1861,7 +1858,12 @@ def read_existing_receipt(plan: Plan) -> bytes | None:
     if not validate_optional_regular(plan.receipt_final, "durable receipt", exact_mode=0o600):
         return None
     payload = regular_file_bytes(plan.receipt_final, maximum=MAX_RECEIPT_BYTES, field="durable receipt")
-    _ = validate_receipt_bytes(plan, payload, allow_publication_recovery=True)
+    _ = validate_receipt_bytes(
+        plan,
+        payload,
+        allow_publication_recovery=True,
+        require_current_route_evidence=False,
+    )
     return payload
 
 
@@ -2082,15 +2084,23 @@ def validate_consistency(
 ) -> tuple[bool, str]:
     envelope_exists = validate_optional_regular(plan.envelope_final, "private envelope", exact_mode=0o600)
     if plan.transaction_commitment_final.exists():
-        _ = read_transaction_commitment(plan, require_current_allocation_identity=True)
+        _ = read_transaction_commitment(
+            plan,
+            require_current_allocation_identity=receipt_payload is None,
+            require_current_route_evidence=receipt_payload is None,
+        )
     manager_payload = manager_bytes(plan.manager)
     pointer = pointer_state(manager_payload, plan)
     if pointer == "legacy-active":
         raise ReceiptError("legacy report marker cannot establish receipt acceptance")
     owner_state = manager_transaction_state(manager_payload, plan.owner_prefix, plan.pointer)
     expected_pointer = "active" if owner_state == "active" else "absent"
-    if owner_state == "invalid" or pointer != expected_pointer:
+    if receipt_payload is None and owner_state == "invalid" and envelope_exists:
+        raise ReceiptError("manager bytes differ from the bound report transaction")
+    if receipt_payload is None and (owner_state == "invalid" or pointer != expected_pointer):
         raise ReceiptError("manager pointer and bound owner bytes are inconsistent")
+    if receipt_payload is not None and pointer != "absent":
+        raise ReceiptError("durable receipt and manager pointer state are inconsistent")
     if envelope_exists:
         _ = require_valid_envelope(plan)
     if receipt_payload is None:
@@ -2792,8 +2802,10 @@ def description(plan: Plan) -> dict[str, object]:
     validate_private_layout(plan)
     receipt_payload = read_existing_receipt(plan)
     publication_payload = read_existing_receipt_publication(plan, receipt_payload)
+    available, pointer = validate_consistency(plan, receipt_payload, None)
     acknowledgment = None if receipt_payload is not None else read_manager_acknowledgment(plan)
-    available, pointer = validate_consistency(plan, receipt_payload, acknowledgment)
+    if acknowledgment is not None:
+        available, pointer = validate_consistency(plan, receipt_payload, acknowledgment)
     existing_receipt = json.loads(receipt_payload) if receipt_payload is not None else None
     recorded_preflight = existing_receipt.get("preflight") if isinstance(existing_receipt, dict) else None
     if receipt_payload is None:
@@ -3070,15 +3082,32 @@ def receipt_publication_payload(plan: Plan, receipt: dict[str, object]) -> bytes
     return canonical_json({**record, "publication_id": bound_receipt_id(record)})
 
 
-def finish_receipt_publication(plan: Plan, payload: bytes, receipt_payload: bytes) -> bytes:
+def finish_receipt_publication(
+    plan: Plan,
+    payload: bytes,
+    receipt_payload: bytes,
+    *,
+    require_current_route_evidence: bool = True,
+) -> bytes:
     try:
         os.rename(plan.receipt_publication_temporary, plan.receipt_publication_final)
     except OSError as exc:
         raise ReceiptError("cannot publish receipt publication record") from exc
-    return confirm_receipt_publication(plan, payload, receipt_payload)
+    return confirm_receipt_publication(
+        plan,
+        payload,
+        receipt_payload,
+        require_current_route_evidence=require_current_route_evidence,
+    )
 
 
-def confirm_receipt_publication(plan: Plan, payload: bytes, receipt_payload: bytes) -> bytes:
+def confirm_receipt_publication(
+    plan: Plan,
+    payload: bytes,
+    receipt_payload: bytes,
+    *,
+    require_current_route_evidence: bool = True,
+) -> bytes:
     """Durably confirm an exact final publication, including its directory entry."""
 
     fsync_directory(plan.receipt_directory)
@@ -3090,11 +3119,20 @@ def confirm_receipt_publication(plan: Plan, payload: bytes, receipt_payload: byt
     if readback != payload:
         raise ReceiptError("receipt publication readback differs from committed bytes")
     _ = validate_receipt_publication_bytes(plan, readback, receipt_payload)
-    _ = validate_receipt_bytes(plan, receipt_payload)
+    _ = validate_receipt_bytes(
+        plan,
+        receipt_payload,
+        require_current_route_evidence=require_current_route_evidence,
+    )
     return readback
 
 
-def commit_receipt_publication(plan: Plan, receipt_payload: bytes) -> bytes:
+def commit_receipt_publication(
+    plan: Plan,
+    receipt_payload: bytes,
+    *,
+    require_current_route_evidence: bool = True,
+) -> bytes:
     receipt = json.loads(receipt_payload)
     if not isinstance(receipt, dict):
         raise ReceiptError("durable receipt is malformed during publication")
@@ -3102,7 +3140,12 @@ def commit_receipt_publication(plan: Plan, receipt_payload: bytes) -> bytes:
     require_absent(plan.receipt_publication_temporary, "receipt publication temporary file")
     require_absent(plan.receipt_publication_final, "receipt publication final file")
     write_new_file(plan.receipt_publication_temporary, payload, 0o600)
-    return finish_receipt_publication(plan, payload, receipt_payload)
+    return finish_receipt_publication(
+        plan,
+        payload,
+        receipt_payload,
+        require_current_route_evidence=require_current_route_evidence,
+    )
 
 
 def recover_receipt_publication(plan: Plan, receipt_payload: bytes) -> bytes:
@@ -3121,13 +3164,22 @@ def recover_receipt_publication(plan: Plan, receipt_payload: bytes) -> bytes:
             field="receipt publication temporary file",
         )
         if temporary == expected:
-            return finish_receipt_publication(plan, expected, receipt_payload)
+            return finish_receipt_publication(
+                plan,
+                expected,
+                receipt_payload,
+                require_current_route_evidence=False,
+            )
         try:
             plan.receipt_publication_temporary.unlink()
         except OSError as exc:
             raise ReceiptError("cannot discard incomplete receipt publication") from exc
         fsync_directory(plan.receipt_directory)
-    return commit_receipt_publication(plan, receipt_payload)
+    return commit_receipt_publication(
+        plan,
+        receipt_payload,
+        require_current_route_evidence=False,
+    )
 
 
 def read_existing_receipt_publication(plan: Plan, receipt_payload: bytes | None) -> bytes | None:
@@ -3250,15 +3302,22 @@ def submit(plan: Plan) -> tuple[bytes, bytes] | None:
                 validate_lock_file(lock_path, "route transaction lock")
             receipt_payload = read_existing_receipt(plan)
             publication_payload = read_existing_receipt_publication(plan, receipt_payload)
+            available, pointer = validate_consistency(plan, receipt_payload, None)
             acknowledgment = None if receipt_payload is not None else read_manager_acknowledgment(plan)
-            available, pointer = validate_consistency(plan, receipt_payload, acknowledgment)
+            if acknowledgment is not None:
+                available, pointer = validate_consistency(plan, receipt_payload, acknowledgment)
             if available:
                 if receipt_payload is None:
                     raise ReceiptError("receipt availability changed unexpectedly")
                 if publication_payload is None:
                     publication_payload = recover_receipt_publication(plan, receipt_payload)
                 else:
-                    publication_payload = confirm_receipt_publication(plan, publication_payload, receipt_payload)
+                    publication_payload = confirm_receipt_publication(
+                        plan,
+                        publication_payload,
+                        receipt_payload,
+                        require_current_route_evidence=False,
+                    )
                 signal_manager_acknowledgment_publication(plan, receipt_payload)
                 return receipt_payload, publication_payload
             commitment = read_transaction_commitment(plan, require_current_allocation_identity=True)

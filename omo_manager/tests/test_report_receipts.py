@@ -1139,6 +1139,67 @@ class ReportReceiptTests(unittest.TestCase):
                 self.assertNotIn(str(draft_a), public)
                 self.assertNotIn(str(draft_b), public)
 
+    def test_post_acceptance_fresh_draft_replay_survives_manager_owned_advance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            case, manager, owner = active_manager_fixture(Path(tmp))
+            body = b"accepted replay after manager-owned advance\n"
+            draft_a = allocate_report_draft(case, body)
+            draft_b = allocate_report_draft(case, body)
+            self.addCleanup(draft_a.unlink, missing_ok=True)
+            self.addCleanup(draft_b.unlink, missing_ok=True)
+            description_a, accepted_a = run_accepted(replace(case, message=draft_a))
+            self.assertEqual(0, accepted_a.returncode, accepted_a.stderr)
+            manager.write_bytes(owner + b"\nnew manager-owned work after acceptance\n")
+            manager_after = manager.read_bytes()
+
+            described_b = run_report_from(case, draft_b, describe=True)
+            accepted_b = run_report_from(case, draft_b)
+
+            self.assertEqual(0, described_b.returncode, described_b.stderr)
+            self.assertEqual(accepted_a.stdout, accepted_b.stdout)
+            description_b = json.loads(described_b.stdout)
+            self.assertTrue(description_b["receipt"]["available"])
+            self.assertEqual(description_a["transaction"], description_b["transaction"])
+            self.assertEqual(manager_after, manager.read_bytes())
+            for public in (described_b.stdout, accepted_b.stdout):
+                self.assertNotIn(body.decode().strip(), public)
+                self.assertNotIn(str(draft_a), public)
+                self.assertNotIn(str(draft_b), public)
+
+    def test_fresh_draft_replay_after_unreceipted_consumption_remains_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            case, manager, owner = active_manager_fixture(Path(tmp))
+            body = b"unreceipted replay after manager-owned advance\n"
+            draft_a = allocate_report_draft(case, body)
+            draft_b = allocate_report_draft(case, body)
+            self.addCleanup(draft_a.unlink, missing_ok=True)
+            self.addCleanup(draft_b.unlink, missing_ok=True)
+            description = json.loads(run_report_from(case, draft_a, describe=True).stdout)
+            case.env["OMO_REPORT_ACK_TIMEOUT_S"] = "0"
+            pending = run_report_from(case, draft_a)
+            self.assertEqual(0, pending.returncode, pending.stderr)
+            self.assertFalse(json.loads(pending.stdout)["accepted"])
+            watched = run_manager_watcher_once(case, manager)
+            self.assertEqual(0, watched.returncode, watched.stderr)
+            manager.write_bytes(owner + b"\nnew manager-owned work before receipt\n")
+            manager_after = manager.read_bytes()
+            receipt = Path(str(description["files"]["private_receipt"]))
+            publication = Path(str(description["files"]["receipt_publication"]))
+            self.assertFalse(receipt.exists())
+            self.assertFalse(publication.exists())
+
+            rejected = run_report_from(case, draft_b, describe=True)
+
+            self.assertEqual(2, rejected.returncode)
+            self.assertEqual("", rejected.stdout)
+            self.assertIn("bound to a different allocation", rejected.stderr)
+            self.assertNotIn(body.decode().strip(), rejected.stderr)
+            self.assertNotIn(str(draft_a), rejected.stderr)
+            self.assertNotIn(str(draft_b), rejected.stderr)
+            self.assertEqual(manager_after, manager.read_bytes())
+            self.assertFalse(receipt.exists())
+            self.assertFalse(publication.exists())
+
     def test_commitment_cleanup_failure_fails_closed_and_recovers_for_original(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -2168,9 +2229,22 @@ class ReportReceiptTests(unittest.TestCase):
             report = copy_report_helper(tmp_path)
             receiver = report.parent / "omo_report_receipt.py"
             source = receiver.read_text(encoding="utf-8")
-            marker = "def commit_receipt_publication(plan: Plan, receipt_payload: bytes) -> bytes:\n    receipt = json.loads(receipt_payload)"
+            marker = (
+                "def commit_receipt_publication(\n"
+                "    plan: Plan,\n"
+                "    receipt_payload: bytes,\n"
+                "    *,\n"
+                "    require_current_route_evidence: bool = True,\n"
+                ") -> bytes:\n"
+                "    receipt = json.loads(receipt_payload)"
+            )
             injection = (
-                "def commit_receipt_publication(plan: Plan, receipt_payload: bytes) -> bytes:\n"
+                "def commit_receipt_publication(\n"
+                "    plan: Plan,\n"
+                "    receipt_payload: bytes,\n"
+                "    *,\n"
+                "    require_current_route_evidence: bool = True,\n"
+                ") -> bytes:\n"
                 '    if os.environ.get("OMO_TEST_FAIL_PUBLICATION") == "1":\n'
                 '        raise ReceiptError("injected publication failure")\n'
                 "    receipt = json.loads(receipt_payload)"
