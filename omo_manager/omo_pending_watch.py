@@ -4183,7 +4183,8 @@ def agent_pending_item_reminder_counts(root: Path) -> dict[str, int]:
             or metadata.runat == "retired"
         ):
             continue
-        queues.append((metadata.runat, len(metadata.pending_task_items), metadata.status in {"running", "long_running"}))
+        eligible = metadata.status == "running" or (metadata.status == "long_running" and not metadata.blocked_on)
+        queues.append((metadata.runat, len(metadata.pending_task_items), eligible))
     counts: dict[str, int] = {}
     for index, (target, count, eligible) in enumerate(queues):
         collision = any(other != index and tmux_targets_overlap(target, other_target) for other, (other_target, _, _) in enumerate(queues))

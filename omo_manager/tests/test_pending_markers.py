@@ -6092,7 +6092,7 @@ class PendingMarkerTests(unittest.TestCase):
 
             self.assertEqual("wl:4", push.call_args.args[2])
 
-    def test_long_running_agent_with_blocked_on_keeps_pending_item_reminders(self) -> None:
+    def test_long_running_agent_with_blocked_on_suppresses_pending_item_reminders(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -6109,7 +6109,7 @@ class PendingMarkerTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            self.assertIn("1 open pending items", watcher.agent_pending_item_reminder_texts(root)["wl:4"])
+            self.assertEqual({}, watcher.agent_pending_item_reminder_texts(root))
 
     def test_delivery_to_long_running_agent_with_blocked_on_appends_reminder(self) -> None:
         from omo_manager import omo_pending_watch as watcher
