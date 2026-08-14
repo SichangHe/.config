@@ -1,3 +1,6 @@
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -39,6 +42,12 @@ def task_frontmatter(status: str, runat: str = "cfg:1", managerat: str = "mgr:1"
 
 class AgentStatusTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.manager_target_patch = patch("omo_manager.omo_agent_status.DEFAULT_MANAGER_TARGET", "")
+        self.manager_target_patch.start()
+        self.addCleanup(self.manager_target_patch.stop)
+        self.parsed_manager_target_patch = patch("omo_manager.omo_agent_status.ParsedArgs.manager_target", "")
+        self.parsed_manager_target_patch.start()
+        self.addCleanup(self.parsed_manager_target_patch.stop)
         self.tmux_list_panes_patch = patch("omo_manager.omo_agent_status.tmux_list_panes", return_value=[])
         self.tmux_list_panes_patch.start()
         self.addCleanup(self.tmux_list_panes_patch.stop)
@@ -544,6 +553,50 @@ resolved_task_items: []
             _ = local_env.write_text('export OMO_WORK_LOGS_ROOT="/tmp/current-root"\n', encoding="utf-8")
             with patch.dict("os.environ", {"HOME": str(home)}, clear=True):
                 self.assertEqual("/tmp/current-root", load_local_env()["OMO_WORK_LOGS_ROOT"])
+
+    def test_configured_taskless_primary_manager_is_not_untracked(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            local_env = root / "local.env"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nwork_manager_2026-08-14.md wl:1\n", encoding="utf-8")
+            _ = (root / "work_manager_2026-08-14.md").write_text("# intake ledger\n", encoding="utf-8")
+            _ = local_env.write_text('OMO_MANAGER_TMUX_TARGET="wl:1"\n', encoding="utf-8")
+            script = f"""
+from contextlib import redirect_stdout
+from io import StringIO
+from pathlib import Path
+from unittest.mock import patch
+
+from omo_manager.omo_agent_status import main
+from omo_manager.omo_codex_status import Report
+
+root = Path({str(root)!r})
+output = StringIO()
+with patch("omo_manager.omo_agent_status.tmux_list_panes", return_value=["wl:1", "wl:2"]), patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(output):
+    status = main(["--root", str(root), "--registry", str(root / "sessions.json"), "--problems-only", "--no-auto-unstick"])
+print(status)
+print(output.getvalue(), end="")
+"""
+            env = dict(os.environ)
+            env.pop("OMO_MANAGER_TMUX_TARGET", None)
+            env["OMO_MANAGER_LOCAL_ENV"] = str(local_env)
+            result = subprocess.run(
+                [sys.executable, "-c", script],
+                cwd=Path(__file__).resolve().parents[2],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertTrue(result.stdout.startswith("3\n"), result.stdout)
+            self.assertIn("agent-problems: untracked_agent=1", result.stdout)
+            self.assertIn("untracked_agent: task=tmux:wl:2", result.stdout)
+            self.assertNotIn("work_manager_2026-08-14.md", result.stdout)
+            self.assertNotIn("tmux:wl:1", result.stdout)
 
     def test_session_records_reads_registry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

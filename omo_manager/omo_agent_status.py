@@ -81,7 +81,7 @@ def load_local_env() -> dict[str, str]:
 LOCAL_ENV = load_local_env()
 DEFAULT_ROOT = Path(LOCAL_ENV.get("OMO_WORK_LOGS_ROOT", str(Path.home() / "work_logs")))
 DEFAULT_REGISTRY = Path(LOCAL_ENV.get("OMO_MANAGER_SESSION_REGISTRY", str(default_state_dir() / "sessions.json")))
-DEFAULT_MANAGER_TARGET = ""
+DEFAULT_MANAGER_TARGET = LOCAL_ENV.get("OMO_MANAGER_TMUX_TARGET", "")
 PENDING_TASK_ITEMS_MARKER = "(above are pending task items)"
 TASK_RE = re.compile(r"`?([A-Za-z0-9_./-]+\.md)`?")
 BLOCKED_DEPENDENCY_LIST_RE = re.compile(r"`?[A-Za-z0-9_./-]+\.md`?(?:\s*,\s*`?[A-Za-z0-9_./-]+\.md`?)*")
