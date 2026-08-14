@@ -6092,7 +6092,7 @@ class PendingMarkerTests(unittest.TestCase):
 
             self.assertEqual("wl:4", push.call_args.args[2])
 
-    def test_long_running_agent_with_blocked_on_suppresses_pending_item_reminders(self) -> None:
+    def test_long_running_agent_with_blocked_on_keeps_pending_item_reminders(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -6109,7 +6109,90 @@ class PendingMarkerTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            self.assertEqual({}, watcher.agent_pending_item_reminder_texts(root))
+            self.assertIn("1 open pending items", watcher.agent_pending_item_reminder_texts(root)["wl:4"])
+
+    def test_delivery_to_long_running_agent_with_blocked_on_appends_reminder(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "TODO.md").write_text("current:\ncontact.md wl:4\n", encoding="utf-8")
+            (root / "contact.md").write_text(
+                task_frontmatter(
+                    status="long_running",
+                    blocked_on="waiting for human follow-up",
+                    runat="wl:4",
+                    managerat="wl:1",
+                ),
+                encoding="utf-8",
+            )
+
+            submitted: list[str] = []
+
+            class ImmediateExecutor:
+                def submit(self, _function: object, _target: str, message: str, *_args: object) -> Future[None]:
+                    submitted.append(message)
+                    future: Future[None] = Future()
+                    future.set_result(None)
+                    return future
+
+            with patch.object(watcher, "send_executor", return_value=ImmediateExecutor()):
+                watcher.submit_send("wl:4", "new request", watcher.CodexSendOptions(2, 0.15, False), root=root)
+                watcher.drain_send_results()
+
+            self.assertEqual(
+                "new request\n\nRemove your `blocked_on` if this message unblocks you.\n",
+                submitted[0],
+            )
+
+    def test_long_running_blocker_reminder_rejects_window_pane_ambiguity(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "TODO.md").write_text("current:\nwindow.md wl:4\npane.md wl:4.1\n", encoding="utf-8")
+            for name, runat in (("window.md", "wl:4"), ("pane.md", "wl:4.1")):
+                (root / name).write_text(
+                    task_frontmatter(status="long_running", blocked_on="persistent role", runat=runat, managerat="wl:1"),
+                    encoding="utf-8",
+                )
+
+            self.assertEqual("message", watcher.with_long_running_blocker_reminder(root, "wl:4.1", "message"))
+
+    def test_long_running_blocker_reminder_ignores_embedded_quote(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "TODO.md").write_text("current:\ncontact.md wl:4\n", encoding="utf-8")
+            (root / "contact.md").write_text(
+                task_frontmatter(status="long_running", blocked_on="persistent role", runat="wl:4", managerat="wl:1"),
+                encoding="utf-8",
+            )
+            message = "Earlier text said: Remove your `blocked_on` if this message unblocks you.\nContinue now."
+
+            self.assertTrue(watcher.with_long_running_blocker_reminder(root, "wl:4", message).endswith(f"\n{watcher.LONG_RUNNING_BLOCKER_REMINDER}\n"))
+
+    def test_long_running_blocker_reminder_ignores_done_target_history(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "TODO.md").write_text("current:\ncontact.md wl:4\nprevious:\nold.md wl:4\n", encoding="utf-8")
+            (root / "contact.md").write_text(
+                task_frontmatter(status="long_running", blocked_on="persistent role", runat="wl:4", managerat="wl:1"),
+                encoding="utf-8",
+            )
+            (root / "old.md").write_text(
+                task_frontmatter(status="done", runat="wl:4", managerat="wl:1"),
+                encoding="utf-8",
+            )
+
+            self.assertTrue(
+                watcher.with_long_running_blocker_reminder(root, "wl:4", "message").endswith(
+                    f"\n{watcher.LONG_RUNNING_BLOCKER_REMINDER}\n"
+                )
+            )
 
     def test_blocked_agent_does_not_receive_pending_item_reminders(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -6142,6 +6225,43 @@ class PendingMarkerTests(unittest.TestCase):
             )
             (root / "b.md").write_text(
                 task_frontmatter(runat="wl:4.0", managerat="wl:1"),
+                encoding="utf-8",
+            )
+
+            self.assertEqual({}, watcher.agent_pending_item_reminder_texts(root))
+
+    def test_pending_item_reminders_reject_window_pane_collision(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "TODO.md").write_text("current:\nwindow.md wl:4\npane.md wl:4.1\n", encoding="utf-8")
+            for name, runat in (("window.md", "wl:4"), ("pane.md", "wl:4.1")):
+                (root / name).write_text(
+                    task_frontmatter(runat=runat, managerat="wl:1", pending_items=("open work",)),
+                    encoding="utf-8",
+                )
+
+            self.assertEqual({}, watcher.agent_pending_item_reminder_texts(root))
+
+    def test_pending_item_reminders_reject_blocked_target_collision(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "TODO.md").write_text("current:\ncontact.md wl:4\nblocked.md wl:4\n", encoding="utf-8")
+            (root / "contact.md").write_text(
+                task_frontmatter(
+                    status="long_running",
+                    blocked_on="persistent contact",
+                    runat="wl:4",
+                    managerat="wl:1",
+                    pending_items=("open work",),
+                ),
+                encoding="utf-8",
+            )
+            (root / "blocked.md").write_text(
+                task_frontmatter(status="blocked", blocked_on="waiting for dependency", runat="wl:4", managerat="wl:1"),
                 encoding="utf-8",
             )
 
@@ -8462,9 +8582,11 @@ class PendingMarkerTests(unittest.TestCase):
                 pending_guard: watcher.PendingGuard | None = None,
                 success_event: watcher.DeliverySuccessEvent | None = None,
                 failure_fallback: watcher.DeliveryFailureFallback | None = None,
+                root: Path | None = None,
             ) -> Future[None]:
                 self.assertIsNotNone(pending_guard)
                 self.assertIsNone(failure_fallback)
+                self.assertEqual(Path(tmp), root)
                 submitted.append((target, message, success_event, failure_fallback))
                 self.assertEqual("vl:64", target)
                 return fallback_future
@@ -8475,7 +8597,7 @@ class PendingMarkerTests(unittest.TestCase):
                 self.assertTrue(watcher.scan_once(args, seen, [path]))
                 self.assertEqual(1, len(seen))
                 owner_future.set_exception(RuntimeError("Codex paste not verified after 5s"))
-                watcher.log_send_result(owner_future, submitted[0][2], submitted[0][3])
+                watcher.log_send_result(owner_future, submitted[0][2], submitted[0][3], root=root)
                 self.assertEqual(2, len(submitted))
                 self.assertEqual("vl:64", submitted[1][0])
                 self.assertIn("Delivery to resolved target `wl:2` failed: Codex paste not verified after 5s.", submitted[1][1])
@@ -8767,9 +8889,11 @@ class PendingMarkerTests(unittest.TestCase):
             pending_guard: watcher.PendingGuard | None = None,
             success_event: watcher.DeliverySuccessEvent | None = None,
             failure_fallback: watcher.DeliveryFailureFallback | None = None,
+            root: Path | None = None,
         ) -> Future[None]:
             self.assertIsNone(pending_guard)
             self.assertIsNone(failure_fallback)
+            self.assertIsNone(root)
             calls.append((target, message, success_event))
             return fallback_future
 
@@ -9551,6 +9675,23 @@ printf 'header\\n(pending)\\nchanged\\n' > {task}
         self.assertIn("Retry literal `resume` in this same pane", alert_text)
         self.assertIn("Do not launch a replacement pane", alert_text)
 
+    def test_capacity_async_failure_threads_root_to_fallback_delivery(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        root = Path("/tmp/work-logs")
+        args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1")
+        row = watcher.ProblemRow("error", "worker.md", "vl:2", watcher.CAPACITY_ERROR_TEXT, owner_target="wl:1")
+        guard = watcher.AgentProblemGuard(("status",), ("capacity generation",), root=root)
+        event = watcher.DeliverySuccessEvent()
+        fallback = watcher.DeliveryFailureFallback("vl:2", "wl:1", "capacity failed", watcher.CodexSendOptions(2, 0.15, False))
+        future: Future[bool] = Future()
+        future.set_exception(RuntimeError("tmux paste failed"))
+
+        with patch.object(watcher, "log_send_result") as log:
+            watcher.log_capacity_resume_result(future, event, event, event, fallback, args, row, 1, guard)
+
+        self.assertEqual(root, log.call_args.kwargs["root"])
+
     def test_capacity_async_failure_alert_is_cancelled_after_verified_recovery(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
@@ -9628,12 +9769,20 @@ printf 'header\\n(pending)\\nchanged\\n' > {task}
     def test_ready_report_reminder_allows_human_owned_hwl_4(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
-        with patch.object(watcher, "verified_send_to_codex") as send:
-            watcher.run_ready_report_reminder("hwl:4", "fingerprint")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "TODO.md").write_text("current:\ncontact.md hwl:4\n", encoding="utf-8")
+            (root / "contact.md").write_text(
+                task_frontmatter(status="long_running", blocked_on="persistent contact", runat="hwl:4", managerat="wl:1"),
+                encoding="utf-8",
+            )
+            with patch.object(watcher, "verified_send_to_codex") as send:
+                watcher.run_ready_report_reminder(root, "hwl:4", "fingerprint")
 
         send.assert_called_once()
         self.assertEqual("hwl:4", send.call_args.args[0])
-        self.assertEqual(watcher.AGENT_READY_REPORT_REMINDER, send.call_args.args[1])
+        self.assertIn(watcher.AGENT_READY_REPORT_REMINDER, send.call_args.args[1])
+        self.assertTrue(send.call_args.args[1].endswith(f"{watcher.LONG_RUNNING_BLOCKER_REMINDER}\n"))
 
     def test_capacity_human_owned_hwl_4_stops_at_resume_budget(self) -> None:
         from omo_manager import omo_pending_watch as watcher

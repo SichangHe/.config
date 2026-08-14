@@ -191,6 +191,7 @@ AGENT_PENDING_ITEMS_REMINDER = (
     "You have {count} open pending items. To see them, run `omo_pending.py list`. Continue working and complete them, "
     "and run `omo_pending.py remove` only after verifying an item is complete or cancelled."
 )
+LONG_RUNNING_BLOCKER_REMINDER = "Remove your `blocked_on` if this message unblocks you."
 AGENT_READY_REPORT_REMINDER = (
     "Your latest completed turn did not invoke `email_me.py` or `omo_report.sh`. "
     "Report through the appropriate helper, or continue working."
@@ -883,6 +884,7 @@ def log_send_result(
                         failure_fallback.options,
                         pending_guard=failure_fallback.pending_guard,
                         success_event=failure_fallback.success_event,
+                        root=root,
                     )
                 else:
                     _ = submit_send(
@@ -892,6 +894,7 @@ def log_send_result(
                         pending_guard=failure_fallback.pending_guard,
                         problem_guard=failure_fallback.problem_guard,
                         success_event=failure_fallback.success_event,
+                        root=root,
                     )
             except Exception as fallback_exc:
                 print(f"omo_pending_watch: async fallback delivery failed: {fallback_exc}", file=sys.stderr)
@@ -976,6 +979,7 @@ def submit_send(
 ) -> Future[None]:
     """Submit verified tmux delivery without forking a helper process."""
 
+    message = with_long_running_blocker_reminder(root, target, message)
     future = send_executor().submit(run_verified_send, target, message, options, pending_guard, problem_guard)
     retain_send_result(future, lambda completed: log_send_result(completed, success_event, failure_fallback, problem_guard, root, target, delivery_id))
     return future
@@ -3967,13 +3971,14 @@ def ready_report_guard_current(target: str, fingerprint: str) -> bool:
     )
 
 
-def run_ready_report_reminder(target: str, fingerprint: str) -> None:
+def run_ready_report_reminder(root: Path, target: str, fingerprint: str) -> None:
     def before_paste() -> None:
         if not ready_report_guard_current(target, fingerprint):
             raise PrePasteRejected("ready turn resolved or changed before tmux paste")
 
     options = CodexSendOptions(DEFAULT_TMUX_ENTER_COUNT, 0.15, False, DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S, True)
-    verified_send_to_codex(target, AGENT_READY_REPORT_REMINDER, options, before_paste=before_paste)
+    message = with_long_running_blocker_reminder(root, target, AGENT_READY_REPORT_REMINDER)
+    verified_send_to_codex(target, message, options, before_paste=before_paste)
 
 
 def log_ready_report_result(future: Future[None], args: Args, target_key: str, seen_key: str) -> None:
@@ -4011,7 +4016,7 @@ def submit_ready_report_reminder(
         return False
     remember_seen(seen, key, now_wall_s)
     try:
-        future = send_executor().submit(run_ready_report_reminder, target, turn.fingerprint)
+        future = send_executor().submit(run_ready_report_reminder, args.root, target, turn.fingerprint)
     except Exception:
         _ = rollback_ready_report_key(args, target_key, key)
         seen.pop(key, None)
@@ -4164,7 +4169,7 @@ def agent_pending_item_reminder_counts(root: Path) -> dict[str, int]:
     """Return open queue sizes for active agents with unambiguous targets."""
 
     todo = root / "TODO.md"
-    queues: list[tuple[str, int]] = []
+    queues: list[tuple[str, int, bool]] = []
     seen: set[str] = set()
     for task in parse_task_lines(todo):
         if task.task_file == "TODO.md" or task.task_file in seen or task.section not in AGENT_PENDING_ITEM_SECTIONS:
@@ -4174,18 +4179,45 @@ def agent_pending_item_reminder_counts(root: Path) -> dict[str, int]:
         metadata = read_task_metadata(state_path, root)
         if (
             metadata is None
-            or metadata.status not in {"running", "long_running"}
+            or metadata.status not in {"running", "long_running", "blocked"}
             or metadata.runat == "retired"
-            or (metadata.status == "long_running" and metadata.blocked_on)
         ):
             continue
-        queues.append((metadata.runat, len(metadata.pending_task_items)))
+        queues.append((metadata.runat, len(metadata.pending_task_items), metadata.status in {"running", "long_running"}))
     counts: dict[str, int] = {}
-    for index, (target, count) in enumerate(queues):
-        collision = any(other != index and same_tmux_target(target, other_target) for other, (other_target, _) in enumerate(queues))
-        if not collision:
+    for index, (target, count, eligible) in enumerate(queues):
+        collision = any(other != index and tmux_targets_overlap(target, other_target) for other, (other_target, _, _) in enumerate(queues))
+        if eligible and not collision:
             counts[target] = count
     return counts
+
+
+def with_long_running_blocker_reminder(root: Path | None, target: str, text: str) -> str:
+    """Remind one unambiguous long-running recipient to clear a stale blocker."""
+
+    if root is None or text.rstrip().endswith(LONG_RUNNING_BLOCKER_REMINDER):
+        return text
+    matches = []
+    seen: set[str] = set()
+    for task in parse_task_lines(root / "TODO.md"):
+        if task.task_file == "TODO.md" or task.task_file in seen or task.section not in AGENT_PENDING_ITEM_SECTIONS:
+            continue
+        seen.add(task.task_file)
+        path = resolve_task_path(root, task.task_file)
+        try:
+            metadata = read_task_metadata(path, root)
+        except (OSError, ValueError):
+            continue
+        if (
+            metadata is not None
+            and metadata.status in {"running", "long_running", "blocked"}
+            and metadata.runat != "retired"
+            and tmux_targets_overlap(metadata.runat, target)
+        ):
+            matches.append(metadata)
+    if len(matches) != 1 or matches[0].status != "long_running" or not matches[0].blocked_on:
+        return text
+    return f"{text.rstrip()}\n\n{LONG_RUNNING_BLOCKER_REMINDER}\n"
 
 
 def agent_pending_item_reminder_texts(root: Path) -> dict[str, str]:
@@ -4588,7 +4620,7 @@ def log_capacity_resume_result(
         if fallback is not None:
             failed: Future[None] = Future()
             failed.set_exception(exc)
-            log_send_result(failed, retry_event, fallback)
+            log_send_result(failed, retry_event, fallback, root=args.root)
             return
         queue_delivery_failure_event(retry_event)
         detail = (
@@ -5001,6 +5033,12 @@ def same_tmux_window_unless_both_panes(left: str, right: str) -> bool:
     if target_session(left) != target_session(right) or target_window(left) != target_window(right):
         return False
     return not (target_has_explicit_pane(left) and target_has_explicit_pane(right))
+
+
+def tmux_targets_overlap(left: str, right: str) -> bool:
+    """Return whether exact or implicit-window routing can reach the same pane."""
+
+    return same_tmux_target(left, right) or same_tmux_window_unless_both_panes(left, right)
 
 
 def same_tmux_target(left: str, right: str) -> bool:
