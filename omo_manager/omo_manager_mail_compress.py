@@ -690,6 +690,26 @@ def fetch_imap_thread_contexts(
     return special_use, records_by_thread
 
 
+def fetch_direct_thread_contexts(
+    client: imaplib.IMAP4_SSL,
+    records: list[MailRecord],
+) -> dict[str, list[MailRecord]]:
+    """Fetch the exact All Mail plus recoverable Trash context used by `trash-explicit`."""
+    _special_use, records_by_thread = fetch_imap_thread_contexts(client, records)
+    select_mailbox(client, TRASH_MAILBOX, readonly=True)
+    for gmail_thrid, all_records in records_by_thread.items():
+        trash_records = fetch_records(client, gmail_thread_uids(client, gmail_thrid), with_body=True, with_metadata=True)
+        require_gmail_identities(trash_records)
+        if any(record.gmail_thrid != gmail_thrid for record in trash_records):
+            raise RuntimeError("Gmail Trash thread context changed during discovery")
+        all_ids = {record.gmail_msgid for record in all_records}
+        trash_ids = {record.gmail_msgid for record in trash_records}
+        if len(all_ids) != len(all_records) or len(trash_ids) != len(trash_records) or all_ids & trash_ids:
+            raise RuntimeError("Gmail All Mail and Trash context was duplicate or ambiguous")
+        records_by_thread[gmail_thrid] = [*all_records, *trash_records]
+    return records_by_thread
+
+
 def thread_context_digest(records: list[MailRecord]) -> str:
     digest = hashlib.sha256()
     for record in sorted(records, key=lambda value: value.gmail_msgid):
@@ -812,6 +832,80 @@ def cmd_snapshot(_args: argparse.Namespace) -> int:
         if skipped:
             print(f"skipped_boundary_mismatch={len(skipped)}")
         print_records(records)
+    finally:
+        logout_mailbox(client)
+    return 0
+
+
+def cmd_inspect_explicit(args: argparse.Namespace) -> int:
+    """Print live source/context bindings and bodies without persisted evidence."""
+    try:
+        if not args.task_id or "\n" in args.task_id or "\r" in args.task_id:
+            raise ValueError("one nonempty task identity is required")
+        uids = parse_uids(args.uids, None)
+        if not uids:
+            raise ValueError("at least one explicit source UID is required")
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    client, config = open_mailbox(readonly=True)
+    try:
+        sender_email, recipient_email = mail_boundary(config)
+        uidvalidity = selected_uidvalidity(client)
+        records = [replace(record, source_uidvalidity=uidvalidity) for record in fetch_records(client, uids, with_body=True, with_metadata=True)]
+        if len(records) != len(uids) or {record.uid for record in records} != set(uids):
+            raise RuntimeError("one or more explicit source UIDs are missing or duplicated")
+        require_gmail_identities(records)
+        if any(not is_manager_record(record, sender_email, recipient_email) for record in records):
+            raise RuntimeError("one or more explicit sources are outside the manager-mail boundary")
+        records_by_thread = fetch_direct_thread_contexts(client, records)
+        print(f"task_id={args.task_id}")
+        print(f"source_uidvalidity={uidvalidity}")
+        for record in records:
+            print(f"source={record.uid}:{record.gmail_msgid}:{record.gmail_thrid}:{record.raw_sha256}")
+        selected_message_ids = {record.gmail_msgid for record in records}
+        for gmail_thrid in sorted(records_by_thread):
+            for record in sorted(records_by_thread[gmail_thrid], key=lambda value: value.gmail_msgid):
+                print(f"context={record.gmail_msgid}:{record.gmail_thrid}:{record.raw_sha256}")
+                print(f"context_selected={int(record.gmail_msgid in selected_message_ids)}")
+                print(f"context_date={tsv_value(record.date)}")
+                print(f"context_from={tsv_value(record.sender)}")
+                print(f"context_to={tsv_value(record.to)}")
+                print("----- context body -----")
+                print(export_body(record, include_addresses=False), end="")
+        for record in records:
+            print("----- selected source body -----")
+            print(export_body(record, include_addresses=False), end="")
+    finally:
+        logout_mailbox(client)
+    return 0
+
+
+def cmd_locate_replacement(args: argparse.Namespace) -> int:
+    """Print the unique RFC Message-ID for an exact current manager-mail subject."""
+    if not args.subject or "\n" in args.subject or "\r" in args.subject:
+        print("one nonempty exact subject is required", file=sys.stderr)
+        return 2
+    client, config = open_mailbox(readonly=True)
+    try:
+        sender_email, recipient_email = mail_boundary(config)
+        all_mailbox = special_use_mailboxes(client).get(r"\All")
+        if not all_mailbox:
+            print("refusing because Gmail All Mail is missing", file=sys.stderr)
+            return 1
+        select_mailbox(client, all_mailbox, readonly=True)
+        records, _skipped = accepted_manager_headers(client, manager_candidate_uids(client, sender_email), sender_email, recipient_email)
+        matches = [record for record in records if record.subject == args.subject]
+        if len(matches) != 1:
+            print(f"replacement_subject_matches={len(matches)}", file=sys.stderr)
+            return 1
+        msg, _raw_sha256 = fetch_msg(client, matches[0].uid, HEADER_FETCH)
+        message_id = rfc_message_id(msg)
+        if not message_id:
+            print("replacement has no unique valid Message-ID", file=sys.stderr)
+            return 1
+        print(f"message_id={message_id}")
+        print(f"uid={matches[0].uid}")
     finally:
         logout_mailbox(client)
     return 0
@@ -2072,21 +2166,55 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
         print("refusing to move superseded mail to Trash without --yes", file=sys.stderr)
         return 2
     try:
-        sources = [replace(parse_explicit_source(value), task_id=args.task_id) for value in args.source]
+        task_ids = args.task_id if isinstance(args.task_id, list) else [args.task_id]
+        replacement_ids = args.replacement_id if isinstance(args.replacement_id, list) else [args.replacement_id]
+        raw_task_sources = getattr(args, "task_source", [])
+        task_source_values = raw_task_sources if isinstance(raw_task_sources, list) else [raw_task_sources]
+        task_identity = ",".join(task_ids)
+        sources = [replace(parse_explicit_source(value), task_id=task_identity) for value in args.source]
         contexts = [parse_explicit_context(value) for value in args.context]
         if not sources:
             raise ValueError("at least one explicit source is required")
         if len({source.uid for source in sources}) != len(sources) or len({source.gmail_msgid for source in sources}) != len(sources):
             raise ValueError("explicit sources contain duplicate or ambiguous identities")
-        if not args.task_id or "\n" in args.task_id or "\r" in args.task_id:
-            raise ValueError("one nonempty task identity is required")
+        if (
+            not task_ids
+            or len(task_ids) != len(replacement_ids)
+            or len(set(task_ids)) != len(task_ids)
+            or any(not task_id or tsv_value(task_id) != task_id for task_id in task_ids)
+        ):
+            raise ValueError("one unique nonempty task identity is required per replacement")
+        if len(set(replacement_ids)) != len(replacement_ids):
+            raise ValueError("replacement identities must be unique")
+        task_sources: set[tuple[int, str]] = set()
+        for value in task_source_values:
+            fields = value.split(":")
+            if len(fields) != 2 or not fields[0].isdecimal() or not fields[1].isdecimal():
+                raise ValueError("task-source binding must be TASK-INDEX:GMAIL-MSGID")
+            task_sources.add((int(fields[0]), fields[1]))
+        source_ids = {source.gmail_msgid for source in sources}
+        expected_task_indexes = set(range(1, len(task_ids) + 1))
+        if (
+            {task_index for task_index, _gmail_msgid in task_sources} != expected_task_indexes
+            or {gmail_msgid for _task_index, gmail_msgid in task_sources} != source_ids
+            or any(gmail_msgid not in source_ids for _task_index, gmail_msgid in task_sources)
+        ):
+            raise ValueError("task-source bindings must cover every task and source exactly within this operation")
+        if (
+            not args.preparer
+            or not args.reviewer
+            or args.preparer.strip() != args.preparer
+            or args.reviewer.strip() != args.reviewer
+            or args.preparer == args.reviewer
+        ):
+            raise ValueError("distinct nonempty preparer and reviewer identities are required")
         if not contexts or {source.gmail_thrid for source in sources} - {context.gmail_thrid for context in contexts}:
             raise ValueError("explicit context must cover every source thread")
         context_ids = {context.gmail_msgid for context in contexts}
         if len(context_ids) != len(contexts) or any(source.gmail_msgid not in context_ids for source in sources):
             raise ValueError("explicit context must contain every source identity exactly once")
-        if not re.fullmatch(r"<[^<>\s]+>", args.replacement_id):
-            raise ValueError("replacement identity must be a syntactically valid Message-ID")
+        if any(not re.fullmatch(r"<[^<>\s]+>", replacement_id) for replacement_id in replacement_ids):
+            raise ValueError("each replacement identity must be a syntactically valid Message-ID")
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
@@ -2095,6 +2223,9 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
         sender_email, recipient_email = mail_boundary(config)
         select_mailbox(client, "INBOX", readonly=False)
         expected_uidvalidity = selected_uidvalidity(client)
+        if expected_uidvalidity != getattr(args, "source_uidvalidity", ""):
+            print("refusing because inspected INBOX UIDVALIDITY changed", file=sys.stderr)
+            return 1
         if not mailbox_exists(client, TRASH_MAILBOX):
             print(f"refusing because mailbox is missing: {TRASH_MAILBOX}", file=sys.stderr)
             return 1
@@ -2103,12 +2234,21 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
             print("refusing because Gmail special-use mailboxes are missing", file=sys.stderr)
             return 1
         inbox_records, trash_records = observe_explicit_sources(client, sources, sender_email, recipient_email)
-        if not replacement_exists(client, special_use[r"\All"], args.replacement_id, sender_email, recipient_email):
-            print("refusing because the recorded replacement was not found in the recipient mailbox", file=sys.stderr)
+        if any(
+            not replacement_exists(client, special_use[r"\All"], replacement_id, sender_email, recipient_email)
+            for replacement_id in replacement_ids
+        ):
+            print("refusing because a recorded replacement was not found in the recipient mailbox", file=sys.stderr)
             return 1
-        replacement_gmail_id = replacement_gmail_msgid(client, special_use[r"\All"], args.replacement_id)
-        if replacement_gmail_id in {source.gmail_msgid for source in sources}:
-            print("refusing because the replacement is one of the superseded sources", file=sys.stderr)
+        replacement_gmail_ids = [
+            replacement_gmail_msgid(client, special_use[r"\All"], replacement_id)
+            for replacement_id in replacement_ids
+        ]
+        if len(set(replacement_gmail_ids)) != len(replacement_gmail_ids):
+            print("refusing because replacement identities resolve to the same message", file=sys.stderr)
+            return 1
+        if set(replacement_gmail_ids) & {source.gmail_msgid for source in sources}:
+            print("refusing because a replacement is one of the superseded sources", file=sys.stderr)
             return 1
         if special_use_mailboxes(client) != special_use:
             print("refusing because special-use mailbox identity changed", file=sys.stderr)
@@ -2135,11 +2275,17 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
         if {record.gmail_msgid for record in final_inbox} != {record.gmail_msgid for record in inbox_records}:
             print("refusing because a planned source moved immediately before mutation", file=sys.stderr)
             return 1
-        if not replacement_exists(client, special_use[r"\All"], args.replacement_id, sender_email, recipient_email):
-            print("refusing because the replacement changed immediately before move", file=sys.stderr)
+        if any(
+            not replacement_exists(client, special_use[r"\All"], replacement_id, sender_email, recipient_email)
+            for replacement_id in replacement_ids
+        ):
+            print("refusing because a replacement changed immediately before move", file=sys.stderr)
             return 1
-        if replacement_gmail_msgid(client, special_use[r"\All"], args.replacement_id) != replacement_gmail_id:
-            print("refusing because the replacement identity changed immediately before move", file=sys.stderr)
+        if [
+            replacement_gmail_msgid(client, special_use[r"\All"], replacement_id)
+            for replacement_id in replacement_ids
+        ] != replacement_gmail_ids:
+            print("refusing because a replacement identity changed immediately before move", file=sys.stderr)
             return 1
         select_mailbox(client, "INBOX", readonly=False)
         if selected_uidvalidity(client) != expected_uidvalidity:
@@ -2177,7 +2323,7 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
     finally:
         logout_mailbox(client)
     print(
-        f"trash_explicit: task_id={args.task_id} requested={len(sources)}"
+        f"trash_explicit: task_ids={','.join(task_ids)} replacements={len(replacement_ids)} requested={len(sources)}"
         f" moved_now={len(final_inbox)} verified_inbox={len(verified_inbox)} verified_trash={len(verified_trash)}"
         f" later_arrivals_moved=0 permanent_deleted=0 persisted_evidence=0"
     )
@@ -2372,6 +2518,13 @@ def parser() -> argparse.ArgumentParser:
     identity_preflight.set_defaults(func=cmd_identity_preflight)
     snapshot = sub.add_parser("snapshot", help="Print manager mail headers and UIDs.")
     snapshot.set_defaults(func=cmd_snapshot)
+    inspect_explicit = sub.add_parser("inspect-explicit", help="Print exact live bindings and bodies for selected manager UIDs without creating evidence files.")
+    inspect_explicit.add_argument("--uids", required=True, help="Comma or whitespace separated current INBOX UIDs.")
+    inspect_explicit.add_argument("--task-id", required=True, help="Task identity assigned to every selected source.")
+    inspect_explicit.set_defaults(func=cmd_inspect_explicit)
+    locate_replacement = sub.add_parser("locate-replacement", help="Find the unique exact current manager-mail subject and print its RFC Message-ID.")
+    locate_replacement.add_argument("--subject", required=True, help="Exact current subject, including any manager prefix.")
+    locate_replacement.set_defaults(func=cmd_locate_replacement)
     export = sub.add_parser("export", help="Export manager mail bodies into a private local directory.")
     export.add_argument("--out-dir", type=Path, required=True)
     export.add_argument("--threads-per-batch", type=int, default=DEFAULT_THREADS_PER_BATCH)
@@ -2439,8 +2592,29 @@ def parser() -> argparse.ArgumentParser:
         metavar="GMAIL-MSGID:GMAIL-THRID:RAW-SHA256",
         help="Exact initial thread context binding; repeat for every member present when execution starts.",
     )
-    direct.add_argument("--replacement-message-id", dest="replacement_id", required=True)
-    direct.add_argument("--task-id", required=True, help="Task identity shared by every explicit source in this operation.")
+    direct.add_argument(
+        "--replacement-message-id",
+        action="append",
+        dest="replacement_id",
+        required=True,
+        help="Verified replacement Message-ID; repeat once per task when splitting multi-task sources.",
+    )
+    direct.add_argument(
+        "--task-id",
+        action="append",
+        required=True,
+        help="Explicit task identity; repeat in replacement order when splitting multi-task sources.",
+    )
+    direct.add_argument(
+        "--task-source",
+        action="append",
+        required=True,
+        metavar="TASK-INDEX:GMAIL-MSGID",
+        help="Bind one 1-based task/replacement position to one source Gmail identity; repeat for shared or multi-source tasks.",
+    )
+    direct.add_argument("--source-uidvalidity", required=True, help="Exact INBOX UIDVALIDITY printed by inspect-explicit.")
+    direct.add_argument("--preparer", required=True, help="Identity that prepared the task grouping and replacement decision.")
+    direct.add_argument("--reviewer", required=True, help="Distinct identity that independently reviewed the task grouping and replacement decision.")
     direct.add_argument("--yes", action="store_true")
     direct.set_defaults(func=cmd_trash_explicit)
     return arg_parser
