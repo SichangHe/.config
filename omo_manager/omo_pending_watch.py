@@ -4762,6 +4762,47 @@ def enter_attempt_prefix(args: Args, target: str) -> str:
     return f"agent-problem-enter-attempt:{args.root}:{canonical_target(target)}:"
 
 
+def enter_progress_prefix(args: Args, target: str) -> str:
+    return f"agent-problem-enter-progress:{args.root}:{canonical_target(target)}:"
+
+
+def clear_enter_attempts_for_target(args: Args, seen: dict[str, float], target: str) -> bool:
+    prefix = enter_attempt_prefix(args, target)
+    removed = False
+    for key in tuple(seen):
+        if key.startswith(prefix):
+            del seen[key]
+            removed = True
+    return removed
+
+
+def refresh_enter_attempt_progress(args: Args, seen: dict[str, float], target: str, now_wall_s: float) -> bool:
+    """Reset Enter recovery only after a newly completed, non-human Codex turn.
+
+    A completed turn's prompt-through-``Worked for`` fingerprint is stable across
+    render refreshes.  This deliberately does not treat a spinner, partial
+    output, or an unchanged visible prompt as recovery progress.
+    """
+
+    if is_human_tmux_target(target):
+        return False
+    turn = latest_visible_turn(codex_tail(target, 2000))
+    if turn is None:
+        return False
+    prefix = enter_progress_prefix(args, target)
+    key = f"{prefix}{turn.fingerprint}"
+    prior_keys = tuple(item for item in seen if item.startswith(prefix))
+    if not prior_keys:
+        seen[key] = now_wall_s
+        return False
+    if key in seen:
+        return False
+    for prior_key in prior_keys:
+        del seen[prior_key]
+    seen[key] = now_wall_s
+    return clear_enter_attempts_for_target(args, seen, target)
+
+
 def enter_attempt_count(seen: dict[str, float], args: Args, target: str, now_wall_s: float) -> int:
     prune_seen(seen, now_wall_s)
     prefix = enter_attempt_prefix(args, target)
@@ -4795,12 +4836,16 @@ def clear_resolved_enter_attempts(args: Args, seen: dict[str, float], lines: lis
     }
     prune_seen(seen, now_wall_s)
     prefix = f"agent-problem-enter-attempt:{args.root}:"
+    progress_prefix = f"agent-problem-enter-progress:{args.root}:"
     for key in list(seen):
-        if not key.startswith(prefix):
+        if not key.startswith(prefix) and not key.startswith(progress_prefix):
             continue
-        target = key[len(prefix) :].rsplit(":", 1)[0]
+        key_prefix = prefix if key.startswith(prefix) else progress_prefix
+        target = key[len(key_prefix) :].rsplit(":", 1)[0]
         if target not in current_stuck:
             del seen[key]
+    for target in current_stuck:
+        _ = refresh_enter_attempt_progress(args, seen, target, now_wall_s)
 
 
 def clear_all_enter_attempts(args: Args, seen: dict[str, float]) -> bool:

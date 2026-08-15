@@ -7124,6 +7124,49 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertTrue(watcher.handle_agent_problem_result(args, seen, still_stuck, 1002.0))
         self.assertEqual(2, sum(1 for key in seen if key.startswith("agent-problem-enter-attempt:/tmp:cfg:1:")))
 
+    def test_agent_problem_check_resets_enter_attempts_after_new_completed_turn(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, True, manager_target="wl:16", agent_problem_repeat_s=300.0)
+        line = "stuck_input: task=owned.md evidence=target=cfg:1 task_status=running unstick=sent_enter owner_target=wl:17"
+        first_turn = watcher.VisibleTurn(("› first prompt", "• Worked for 1s"), "first")
+        second_turn = watcher.VisibleTurn(("› second prompt", "• Worked for 1s"), "second")
+        seen: dict[str, float] = {}
+
+        with patch.object(watcher, "latest_visible_turn", side_effect=[first_turn, first_turn, second_turn]), patch.object(
+            watcher, "codex_tail", return_value=["irrelevant"]
+        ):
+            for now_wall_s in (1000.0, 1001.0, 1002.0):
+                watcher.clear_resolved_enter_attempts(args, seen, [line], now_wall_s)
+                self.assertTrue(watcher.suppress_enter_attempt_row(args, seen, line, now_wall_s))
+
+        self.assertEqual(1, watcher.enter_attempt_count(seen, args, "cfg:1", 1002.0))
+
+    def test_agent_problem_check_does_not_read_human_pane_for_enter_progress(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, True, manager_target="wl:16", agent_problem_repeat_s=300.0)
+        line = "stuck_input: task=owned.md evidence=target=hwl:4 task_status=running unstick=sent_enter owner_target=wl:17"
+        with patch.object(watcher, "codex_tail", side_effect=AssertionError("must not inspect human pane")):
+            watcher.clear_resolved_enter_attempts(args, {}, [line], 1000.0)
+
+    def test_agent_problem_check_keeps_enter_counter_for_unchanged_or_partial_turn(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, True, manager_target="wl:16", agent_problem_repeat_s=300.0)
+        line = "stuck_input: task=owned.md evidence=target=cfg:1 task_status=running unstick=sent_enter owner_target=wl:17"
+        prefix = watcher.enter_attempt_prefix(args, "cfg:1")
+        progress = watcher.enter_progress_prefix(args, "cfg:1")
+        seen = {f"{prefix}1": 1000.0, f"{prefix}2": 1001.0, f"{progress}same": 1000.0}
+        unchanged_turn = watcher.VisibleTurn(("› same prompt", "• Worked for 1s"), "same")
+
+        with patch.object(watcher, "latest_visible_turn", return_value=unchanged_turn), patch.object(watcher, "codex_tail", return_value=["irrelevant"]):
+            watcher.clear_resolved_enter_attempts(args, seen, [line], 1002.0)
+        self.assertEqual(2, watcher.enter_attempt_count(seen, args, "cfg:1", 1002.0))
+        with patch.object(watcher, "latest_visible_turn", return_value=None), patch.object(watcher, "codex_tail", return_value=["partial"]):
+            watcher.clear_resolved_enter_attempts(args, seen, [line], 1003.0)
+        self.assertEqual(2, watcher.enter_attempt_count(seen, args, "cfg:1", 1003.0))
+
     def test_agent_problem_check_clears_enter_attempts_after_clean_status(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
