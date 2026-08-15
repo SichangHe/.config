@@ -2,6 +2,8 @@
 
 - `live-model-switch.md`
   - manual live-session model switching reference
+- `main-manager-model-recovery.md`
+  - fail-closed same-pane recovery for the fixed `wl:1` main manager
 - `manager-rotation.md`
   - fresh main-manager session in the same tmux pane
 - `raw-turn-cost.md`
