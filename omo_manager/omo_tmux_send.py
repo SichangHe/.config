@@ -573,7 +573,7 @@ def exact_capacity_error(lines: list[str]) -> bool:
 
 def only_exact_capacity_warning(lines: list[str]) -> bool:
     errors = visible_error_lines(current_block(lines).lines)
-    return bool(errors) and all(SELECTED_MODEL_CAPACITY_RE.fullmatch(line) is not None for line in errors)
+    return bool(errors) and SELECTED_MODEL_CAPACITY_RE.fullmatch(errors[-1]) is not None
 
 
 def send_literal(target: str, text: str) -> None:

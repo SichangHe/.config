@@ -655,6 +655,7 @@ class DeliveryFailureFallback:
     pending_guard: PendingGuard | None = None
     problem_guard: AgentProblemGuard | None = None
     defer_if_busy: bool = False
+    stale_event: DeliverySuccessEvent | None = None
 
 
 DELIVERY_SUCCESS_EVENTS: SimpleQueue[DeliverySuccessEvent] = SimpleQueue()
@@ -842,6 +843,7 @@ def log_send_result(
     success_event: DeliverySuccessEvent | None = None,
     failure_fallback: DeliveryFailureFallback | None = None,
     problem_guard: AgentProblemGuard | None = None,
+    stale_event: DeliverySuccessEvent | None = None,
     root: Path | None = None,
     target: str = "",
     delivery_id: str = "",
@@ -854,7 +856,12 @@ def log_send_result(
         result = terminal_delivery_failure(root, target, delivery_id, exc)
         if problem_guard is not None and not agent_problem_guard_current(problem_guard):
             print("omo_pending_watch: async delivery result is stale after watcher-state refresh", file=sys.stderr)
-            queue_delivery_failure_event(success_event)
+            if stale_event is not None:
+                DELIVERY_SUCCESS_EVENTS.put(stale_event)
+            elif failure_fallback is not None and failure_fallback.stale_event is not None:
+                DELIVERY_SUCCESS_EVENTS.put(failure_fallback.stale_event)
+            else:
+                queue_delivery_failure_event(success_event)
             return
         print(f"omo_pending_watch: async delivery failed: {result.error}", file=sys.stderr)
         if success_event is not None and success_event.consume_on_unknown_outcome and not definitely_rejected_before_paste(exc):
@@ -877,6 +884,7 @@ def log_send_result(
                 queue_delivery_failure_event(failure_fallback.success_event)
                 return
             text = with_failed_target_escalation(failure_fallback.text, failure_fallback.failed_target, result)
+            stale_kwargs = {"stale_event": failure_fallback.stale_event} if failure_fallback.stale_event is not None else {}
             try:
                 if failure_fallback.problem_guard is None:
                     _ = submit_send(
@@ -886,6 +894,7 @@ def log_send_result(
                         pending_guard=failure_fallback.pending_guard,
                         success_event=failure_fallback.success_event,
                         root=root,
+                        **stale_kwargs,
                     )
                 else:
                     _ = submit_send(
@@ -896,15 +905,22 @@ def log_send_result(
                         problem_guard=failure_fallback.problem_guard,
                         success_event=failure_fallback.success_event,
                         root=root,
+                        **stale_kwargs,
                     )
             except Exception as fallback_exc:
                 print(f"omo_pending_watch: async fallback delivery failed: {fallback_exc}", file=sys.stderr)
-                queue_delivery_failure_event(success_event)
+                if failure_fallback.problem_guard is not None and failure_fallback.stale_event is not None and not agent_problem_guard_current(failure_fallback.problem_guard):
+                    DELIVERY_SUCCESS_EVENTS.put(failure_fallback.stale_event)
+                else:
+                    queue_delivery_failure_event(success_event)
             return
         queue_delivery_failure_event(success_event)
         return
     if success_event is not None:
-        DELIVERY_SUCCESS_EVENTS.put(success_event)
+        if problem_guard is not None and stale_event is not None and not agent_problem_guard_current(problem_guard):
+            DELIVERY_SUCCESS_EVENTS.put(stale_event)
+        else:
+            DELIVERY_SUCCESS_EVENTS.put(success_event)
 
 
 def queue_delivery_failure_event(success_event: DeliverySuccessEvent | None) -> None:
@@ -975,6 +991,7 @@ def submit_send(
     problem_guard: AgentProblemGuard | None = None,
     success_event: DeliverySuccessEvent | None = None,
     failure_fallback: DeliveryFailureFallback | None = None,
+    stale_event: DeliverySuccessEvent | None = None,
     root: Path | None = None,
     delivery_id: str = "",
 ) -> Future[None]:
@@ -982,7 +999,7 @@ def submit_send(
 
     message = with_long_running_blocker_reminder(root, target, message)
     future = send_executor().submit(run_verified_send, target, message, options, pending_guard, problem_guard)
-    retain_send_result(future, lambda completed: log_send_result(completed, success_event, failure_fallback, problem_guard, root, target, delivery_id))
+    retain_send_result(future, lambda completed: log_send_result(completed, success_event, failure_fallback, problem_guard, stale_event, root, target, delivery_id))
     return future
 
 
@@ -3721,14 +3738,14 @@ def try_send_delivery_text(
     )
     failure_fallback = (
         DeliveryFailureFallback(
-            target,
-            failure_fallback_target,
-            failure_fallback_text or text,
-            options,
-            failure_success_event or success_event,
-            failure_pending_guard or pending_guard,
-            failure_problem_guard or problem_guard,
-            failure_fallback_defer_if_busy,
+            failed_target=target,
+            target=failure_fallback_target,
+            text=failure_fallback_text or text,
+            options=options,
+            success_event=failure_success_event or success_event,
+            pending_guard=failure_pending_guard or pending_guard,
+            problem_guard=failure_problem_guard or problem_guard,
+            defer_if_busy=failure_fallback_defer_if_busy,
         )
         if failure_fallback_target and not same_tmux_target(target, failure_fallback_target)
         else None
@@ -4441,24 +4458,25 @@ def capacity_problem_row(line: str) -> ProblemRow | None:
     return None
 
 
-def capacity_state_prefix(args: Args, target: str) -> str:
-    return f"capacity-retry:{args.root}:{canonical_target(target)}:"
+def capacity_state_prefix(args: Args, target: str, problem_line: str = "") -> str:
+    problem_part = f"{hashlib.sha256(problem_line.encode()).hexdigest()[:16]}:" if problem_line else ""
+    return f"capacity-retry:{args.root}:{canonical_target(target)}:{problem_part}"
 
 
-def capacity_attempt_count(args: Args, seen: dict[str, float], target: str, now_wall_s: float) -> int:
+def capacity_attempt_count(args: Args, seen: dict[str, float], target: str, now_wall_s: float, problem_line: str = "") -> int:
     prune_seen(seen, now_wall_s)
-    prefix = capacity_state_prefix(args, target)
+    prefix = capacity_state_prefix(args, target, problem_line)
     return sum(key.startswith(f"{prefix}attempt:") for key in seen)
 
 
-def clear_resolved_capacity_state(args: Args, seen: dict[str, float], active_targets: set[str]) -> bool:
+def clear_resolved_capacity_state(args: Args, seen: dict[str, float], active_prefixes: set[str]) -> bool:
     root_prefix = f"capacity-retry:{args.root}:"
-    active_prefixes = tuple(capacity_state_prefix(args, target) for target in active_targets)
+    active = tuple(active_prefixes)
     changed = False
     for key in tuple(seen):
         if not key.startswith(root_prefix):
             continue
-        if key.startswith(active_prefixes):
+        if active and key.startswith(active):
             continue
         del seen[key]
         changed = True
@@ -4622,9 +4640,15 @@ def log_capacity_resume_result(
     attempt: int,
     guard: AgentProblemGuard,
 ) -> None:
+    if not agent_problem_guard_current(guard):
+        DELIVERY_SUCCESS_EVENTS.put(recovered_event)
+        return
     try:
         recovered = future.result()
     except Exception as exc:
+        if not agent_problem_guard_current(guard):
+            DELIVERY_SUCCESS_EVENTS.put(recovered_event)
+            return
         if fallback is not None:
             failed: Future[None] = Future()
             failed.set_exception(exc)
@@ -4648,7 +4672,7 @@ def submit_capacity_resume(
     seen: dict[str, float],
     now_wall_s: float,
 ) -> bool:
-    prefix = capacity_state_prefix(args, row.target)
+    prefix = capacity_state_prefix(args, row.target, line)
     inflight_key = f"{prefix}inflight"
     attempt_key = f"{prefix}attempt:{attempt}"
     next_key = f"{prefix}next"
@@ -4682,7 +4706,15 @@ def submit_capacity_resume(
     options = CodexSendOptions(1, 0.15, False, DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S, False)
     guard = AgentProblemGuard(tuple([*status_command(args, True), "--no-auto-unstick"]), (line,), root=args.root)
     fallback = (
-        DeliveryFailureFallback(row.target, owner_target, alert, options, retry_event, problem_guard=guard)
+        DeliveryFailureFallback(
+            failed_target=row.target,
+            target=owner_target,
+            text=alert,
+            options=options,
+            success_event=retry_event,
+            problem_guard=guard,
+            stale_event=recovered_event,
+        )
         if owner_target and not same_tmux_target(row.target, owner_target)
         else None
     )
@@ -4728,14 +4760,14 @@ def handle_capacity_problems(args: Args, seen: dict[str, float], output: str, no
     if not lines or not lines[0].startswith("agent-problems:"):
         return output, False
     capacity_lines = [(line, row) for line in lines[1:] if (row := capacity_problem_row(line)) is not None]
-    active_targets = {canonical_target(row.target) for _line, row in capacity_lines}
-    changed = clear_resolved_capacity_state(args, seen, active_targets)
+    active_prefixes = {capacity_state_prefix(args, row.target, line) for line, row in capacity_lines}
+    changed = clear_resolved_capacity_state(args, seen, active_prefixes)
     if args.dry_run and capacity_lines:
         CAPACITY_ADVISORY_PENDING.update((str(args.root), model) for model in capacity_models([row.target for _line, row in capacity_lines]))
         changed = retry_capacity_advisory(args, seen, now_wall_s) or changed
     for line, row in capacity_lines:
-        prefix = capacity_state_prefix(args, row.target)
-        attempts = capacity_attempt_count(args, seen, row.target, now_wall_s)
+        prefix = capacity_state_prefix(args, row.target, line)
+        attempts = capacity_attempt_count(args, seen, row.target, now_wall_s, line)
         if f"{prefix}inflight" in seen:
             continue
         if attempts >= CAPACITY_RESUME_MAX_ATTEMPTS:

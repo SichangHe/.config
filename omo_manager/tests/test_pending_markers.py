@@ -8950,6 +8950,29 @@ class PendingMarkerTests(unittest.TestCase):
         self.assertIs(event, calls[0][2])
         self.assertIn("async delivery failed: target is not a Codex pane after submit: vl:64", err.getvalue())
 
+    def test_delivery_failure_fallback_legacy_positional_fields(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        event = watcher.DeliverySuccessEvent(seen_keys=("agent-problem:abc",))
+        pending_guard = watcher.PendingGuard(Path("/tmp"), Path("/tmp/task.md"), 2, "digest", "(pending)")
+        problem_guard = watcher.AgentProblemGuard(("status",), ("line",), root=Path("/tmp"))
+        fallback = watcher.DeliveryFailureFallback(
+            "vl:64",
+            "wl:1",
+            "fallback text",
+            watcher.CodexSendOptions(2, 0.15, False),
+            event,
+            pending_guard,
+            problem_guard,
+            True,
+        )
+
+        self.assertIs(event, fallback.success_event)
+        self.assertIs(pending_guard, fallback.pending_guard)
+        self.assertIs(problem_guard, fallback.problem_guard)
+        self.assertTrue(fallback.defer_if_busy)
+        self.assertIsNone(fallback.stale_event)
+
     def test_agent_problem_owner_async_failure_does_not_fallback_into_main_manager(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
@@ -9632,36 +9655,60 @@ printf 'header\\n(pending)\\nchanged\\n' > {task}
     def test_capacity_verified_persistent_resumes_use_linear_timing_and_exhaust_to_owner(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
-        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1", agent_problem_interval_s=10.0)
-        row = "error: task=worker.md evidence=target=vl:2 output=Selected model is at capacity. Please try a different model. owner_target=vl:64"
-        result = watcher.CommandOutput("agent-problems", 3, f"agent-problems: error=1\n{row}\n", "")
-        seen: dict[str, float] = {}
-        alerts: list[tuple[str, str]] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            args = Args(Path(tmp), "", Path(tmp) / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1", agent_problem_interval_s=10.0)
+            row = "error: task=worker.md evidence=target=vl:2 output=Selected model is at capacity. Please try a different model. owner_target=vl:64"
+            result = watcher.CommandOutput("agent-problems", 3, f"agent-problems: error=1\n{row}\n", "")
+            seen: dict[str, float] = {}
+            alerts: list[tuple[str, str]] = []
 
-        def fake_push(_args: Args, text: str, target: str, *_pos: object, **_kwargs: object) -> int:
-            alerts.append((target, text))
-            return 0
+            def fake_push(_args: Args, text: str, target: str, *_pos: object, **_kwargs: object) -> int:
+                alerts.append((target, text))
+                return 0
 
-        class ImmediateExecutor:
-            def submit(self, function: object, *submit_args: object) -> Future[bool]:
-                future: Future[bool] = Future()
-                future.set_result(False)
-                return future
+            class ImmediateExecutor:
+                def submit(self, function: object, *submit_args: object) -> Future[bool]:
+                    future: Future[bool] = Future()
+                    future.set_result(False)
+                    return future
 
-        with patch.object(watcher, "send_executor", return_value=ImmediateExecutor()), patch.object(
-            watcher, "push_manager_text_to_target", side_effect=fake_push
-        ):
-            for now_s, expected_attempts in ((1000.0, 1), (1010.0, 2), (1030.0, 3)):
-                self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, now_s))
-                watcher.drain_send_results()
-                self.assertTrue(watcher.drain_delivery_successes(args, seen, now_s))
-                self.assertEqual(expected_attempts, watcher.capacity_attempt_count(args, seen, "vl:2", now_s))
-            self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 1031.0))
+            with patch.object(watcher, "send_executor", return_value=ImmediateExecutor()), patch.object(
+                watcher, "push_manager_text_to_target", side_effect=fake_push
+            ), patch.object(watcher, "agent_problem_guard_current", return_value=True):
+                for now_s, expected_attempts in ((1000.0, 1), (1010.0, 2), (1030.0, 3)):
+                    self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, now_s))
+                    watcher.drain_send_results()
+                    self.assertTrue(watcher.drain_delivery_successes(args, seen, now_s))
+                    self.assertEqual(expected_attempts, watcher.capacity_attempt_count(args, seen, "vl:2", now_s, row))
+                self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 1031.0))
 
         self.assertEqual("vl:64", alerts[0][0])
         self.assertIn("after 3 resume attempt(s)", alerts[0][1])
         self.assertIn("Recover the same tmux pane", alerts[0][1])
         self.assertIn("Do not launch a replacement pane", alerts[0][1])
+
+    def test_capacity_retry_budget_resets_when_problem_line_changes(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1", agent_problem_interval_s=10.0)
+        old_line = "error: task=worker.md evidence=target=vl:2 output=Selected model is at capacity. Please try a different model. output_tail=old owner_target=vl:64"
+        new_line = "error: task=worker.md evidence=target=vl:2 output=Selected model is at capacity. Please try a different model. output_tail=new owner_target=vl:64"
+        prefix = watcher.capacity_state_prefix(args, "vl:2", old_line)
+        seen = {f"{prefix}attempt:{attempt}": 1000.0 + attempt for attempt in range(1, 4)}
+        output = f"agent-problems: error=1\n{new_line}\n"
+        attempts: list[int] = []
+
+        def record_submit(_args: Args, _row: watcher.ProblemRow, _line: str, attempt: int, _seen: dict[str, float], _now: float) -> bool:
+            attempts.append(attempt)
+            return True
+
+        with patch.object(watcher, "submit_capacity_resume", side_effect=record_submit):
+            filtered, changed = watcher.handle_capacity_problems(args, seen, output, 1010.0)
+
+        self.assertTrue(changed)
+        self.assertEqual("", filtered)
+        self.assertEqual([1], attempts)
+        self.assertFalse(any(key.startswith(prefix) for key in seen))
 
     def test_capacity_immediate_submit_failure_preserves_retry_budget(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -9680,8 +9727,8 @@ printf 'header\\n(pending)\\nchanged\\n' > {task}
         self.assertIn("failed immediately before verification", alert.call_args.args[4])
         self.assertIn("Retry literal `resume` in this same pane", alert.call_args.args[4])
         self.assertIn("do not replace the pane", alert.call_args.args[4])
-        self.assertEqual(0, watcher.capacity_attempt_count(args, seen, row.target, 1001.0))
-        self.assertEqual(1010.0, seen[f"{watcher.capacity_state_prefix(args, row.target)}next"])
+        self.assertEqual(0, watcher.capacity_attempt_count(args, seen, row.target, 1001.0, line))
+        self.assertEqual(1010.0, seen[f"{watcher.capacity_state_prefix(args, row.target, line)}next"])
 
     def test_capacity_immediate_submit_failure_alert_carries_generation_guard(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -9721,8 +9768,8 @@ printf 'header\\n(pending)\\nchanged\\n' > {task}
             watcher.drain_send_results()
             self.assertTrue(watcher.drain_delivery_successes(args, seen, 1001.0))
 
-        self.assertEqual(0, watcher.capacity_attempt_count(args, seen, row.target, 1001.0))
-        self.assertEqual(1010.0, seen[f"{watcher.capacity_state_prefix(args, row.target)}next"])
+        self.assertEqual(0, watcher.capacity_attempt_count(args, seen, row.target, 1001.0, line))
+        self.assertEqual(1010.0, seen[f"{watcher.capacity_state_prefix(args, row.target, line)}next"])
         alert_text = alert.call_args.args[2]
         self.assertIn("after 0 resume attempt(s)", alert_text)
         self.assertIn("Retry literal `resume` in this same pane", alert_text)
@@ -9740,10 +9787,135 @@ printf 'header\\n(pending)\\nchanged\\n' > {task}
         future: Future[bool] = Future()
         future.set_exception(RuntimeError("tmux paste failed"))
 
-        with patch.object(watcher, "log_send_result") as log:
+        with patch.object(watcher, "agent_problem_guard_current", return_value=True), patch.object(watcher, "log_send_result") as log:
             watcher.log_capacity_resume_result(future, event, event, event, fallback, args, row, 1, guard)
 
         self.assertEqual(root, log.call_args.kwargs["root"])
+
+    def test_capacity_fallback_failure_clears_stale_retry_state(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1")
+        line = "error: task=worker.md evidence=target=vl:2 output=Selected model is at capacity. Please try a different model. owner_target=vl:64"
+        prefix = watcher.capacity_state_prefix(args, "vl:2", line)
+        retry_event = watcher.DeliverySuccessEvent(seen_values=((f"{prefix}next", 1010.0),), failure_seen_values=((f"{prefix}next", 1010.0),))
+        fallback_future: Future[None] = Future()
+        failed_resume: Future[bool] = Future()
+        failed_resume.set_exception(RuntimeError("resume paste failed"))
+        executor = MagicMock()
+        executor.submit.return_value = fallback_future
+        seen = {f"{prefix}next": 1010.0}
+
+        with patch.object(watcher, "agent_problem_guard_current", side_effect=(True, True, False)), patch.object(
+            watcher, "send_executor", return_value=executor
+        ):
+            watcher.log_capacity_resume_result(
+                failed_resume,
+                retry_event,
+                watcher.DeliverySuccessEvent(seen_removals=(f"{prefix}next",)),
+                retry_event,
+                watcher.DeliveryFailureFallback(
+                    failed_target="vl:2",
+                    target="vl:64",
+                    text="capacity failed",
+                    options=watcher.CodexSendOptions(2, 0.15, False),
+                    success_event=retry_event,
+                    stale_event=watcher.DeliverySuccessEvent(seen_removals=(f"{prefix}next",)),
+                    problem_guard=watcher.AgentProblemGuard(("status",), (line,), root=args.root),
+                ),
+                args,
+                watcher.ProblemRow("error", "worker.md", "vl:2", watcher.CAPACITY_ERROR_TEXT, owner_target="vl:64"),
+                1,
+                watcher.AgentProblemGuard(("status",), (line,), root=args.root),
+            )
+            executor.submit.assert_called_once()
+            fallback_future.set_exception(RuntimeError("fallback paste failed"))
+            watcher.drain_send_results()
+            self.assertTrue(watcher.drain_delivery_successes(args, seen, 1001.0))
+
+        self.assertNotIn(f"{prefix}next", seen)
+
+    def test_capacity_fallback_success_clears_stale_retry_state(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1")
+        line = "error: task=worker.md evidence=target=vl:2 output=Selected model is at capacity. Please try a different model. owner_target=vl:64"
+        prefix = watcher.capacity_state_prefix(args, "vl:2", line)
+        retry_event = watcher.DeliverySuccessEvent(seen_values=((f"{prefix}next", 1010.0),), failure_seen_values=((f"{prefix}next", 1010.0),))
+        fallback_future: Future[None] = Future()
+        failed_resume: Future[bool] = Future()
+        failed_resume.set_exception(RuntimeError("resume paste failed"))
+        executor = MagicMock()
+        executor.submit.return_value = fallback_future
+        seen = {f"{prefix}next": 1010.0}
+
+        with patch.object(watcher, "agent_problem_guard_current", side_effect=(True, True, False)), patch.object(
+            watcher, "send_executor", return_value=executor
+        ):
+            watcher.log_capacity_resume_result(
+                failed_resume,
+                retry_event,
+                watcher.DeliverySuccessEvent(seen_removals=(f"{prefix}next",)),
+                retry_event,
+                watcher.DeliveryFailureFallback(
+                    failed_target="vl:2",
+                    target="vl:64",
+                    text="capacity failed",
+                    options=watcher.CodexSendOptions(2, 0.15, False),
+                    success_event=retry_event,
+                    stale_event=watcher.DeliverySuccessEvent(seen_removals=(f"{prefix}next",)),
+                    problem_guard=watcher.AgentProblemGuard(("status",), (line,), root=args.root),
+                ),
+                args,
+                watcher.ProblemRow("error", "worker.md", "vl:2", watcher.CAPACITY_ERROR_TEXT, owner_target="vl:64"),
+                1,
+                watcher.AgentProblemGuard(("status",), (line,), root=args.root),
+            )
+            executor.submit.assert_called_once()
+            fallback_future.set_result(None)
+            watcher.drain_send_results()
+            self.assertTrue(watcher.drain_delivery_successes(args, seen, 1001.0))
+
+        self.assertNotIn(f"{prefix}next", seen)
+
+    def test_capacity_fallback_immediate_failure_clears_stale_retry_state(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1")
+        line = "error: task=worker.md evidence=target=vl:2 output=Selected model is at capacity. Please try a different model. owner_target=vl:64"
+        prefix = watcher.capacity_state_prefix(args, "vl:2", line)
+        retry_event = watcher.DeliverySuccessEvent(seen_values=((f"{prefix}next", 1010.0),), failure_seen_values=((f"{prefix}next", 1010.0),))
+        failed_resume: Future[bool] = Future()
+        failed_resume.set_exception(RuntimeError("resume paste failed"))
+        executor = MagicMock()
+        executor.submit.side_effect = RuntimeError("fallback could not start")
+        seen = {f"{prefix}next": 1010.0}
+
+        with patch.object(watcher, "agent_problem_guard_current", side_effect=(True, True, False)), patch.object(
+            watcher, "send_executor", return_value=executor
+        ):
+            watcher.log_capacity_resume_result(
+                failed_resume,
+                retry_event,
+                watcher.DeliverySuccessEvent(seen_removals=(f"{prefix}next",)),
+                retry_event,
+                watcher.DeliveryFailureFallback(
+                    failed_target="vl:2",
+                    target="vl:64",
+                    text="capacity failed",
+                    options=watcher.CodexSendOptions(2, 0.15, False),
+                    success_event=retry_event,
+                    problem_guard=watcher.AgentProblemGuard(("status",), (line,), root=args.root),
+                    stale_event=watcher.DeliverySuccessEvent(seen_removals=(f"{prefix}next",)),
+                ),
+                args,
+                watcher.ProblemRow("error", "worker.md", "vl:2", watcher.CAPACITY_ERROR_TEXT, owner_target="vl:64"),
+                1,
+                watcher.AgentProblemGuard(("status",), (line,), root=args.root),
+            )
+            self.assertTrue(watcher.drain_delivery_successes(args, seen, 1001.0))
+
+        self.assertNotIn(f"{prefix}next", seen)
 
     def test_capacity_async_failure_alert_is_cancelled_after_verified_recovery(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -9766,8 +9938,8 @@ printf 'header\\n(pending)\\nchanged\\n' > {task}
             self.assertTrue(watcher.drain_delivery_successes(args, seen, 1001.0))
 
         alert.assert_not_called()
-        self.assertEqual(0, watcher.capacity_attempt_count(args, seen, row.target, 1001.0))
-        self.assertEqual(1010.0, seen[f"{watcher.capacity_state_prefix(args, row.target)}next"])
+        self.assertEqual(0, watcher.capacity_attempt_count(args, seen, row.target, 1001.0, line))
+        self.assertNotIn(f"{watcher.capacity_state_prefix(args, row.target, line)}next", seen)
 
     def test_capacity_owner_alert_delivery_carries_generation_guard(self) -> None:
         from omo_manager import omo_pending_watch as watcher
@@ -9843,7 +10015,7 @@ printf 'header\\n(pending)\\nchanged\\n' > {task}
         args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1")
         line = "error: task=contact.md evidence=target=hwl:4 output=Selected model is at capacity. Please try a different model. owner_target=wl:1"
         output = f"agent-problems: error=1\n{line}"
-        prefix = watcher.capacity_state_prefix(args, "hwl:4")
+        prefix = watcher.capacity_state_prefix(args, "hwl:4", line)
         seen = {f"{prefix}attempt:{attempt}": 999.0 for attempt in range(1, watcher.CAPACITY_RESUME_MAX_ATTEMPTS + 1)}
 
         with patch.object(watcher, "submit_capacity_resume") as submit, patch.object(
@@ -9977,7 +10149,7 @@ printf 'header\\n(pending)\\nchanged\\n' > {task}
             watcher.drain_send_results()
             self.assertTrue(watcher.drain_delivery_successes(args, seen, 1001.0))
 
-        self.assertEqual(0, watcher.capacity_attempt_count(args, seen, row.target, 1001.0))
+        self.assertEqual(0, watcher.capacity_attempt_count(args, seen, row.target, 1001.0, line))
         alert.assert_not_called()
 
     def test_capacity_dry_run_does_not_consume_verified_attempt(self) -> None:
@@ -9992,23 +10164,24 @@ printf 'header\\n(pending)\\nchanged\\n' > {task}
         with redirect_stdout(StringIO()):
             self.assertTrue(watcher.submit_capacity_resume(args, row, line, 1, seen, 1000.0))
 
-        self.assertEqual(0, watcher.capacity_attempt_count(args, seen, row.target, 1001.0))
+        self.assertEqual(0, watcher.capacity_attempt_count(args, seen, row.target, 1001.0, line))
 
     def test_capacity_exhausted_untracked_agent_alerts_owner_without_generic_row(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
-        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, True, manager_target="wl:1", agent_problem_interval_s=10.0, agent_problem_repeat_s=300.0)
-        line = (
-            "untracked_agent: task=tmux:wl:6 evidence=target=wl:6 role=tmux_unmanaged "
-            f"output={watcher.CAPACITY_ERROR_TEXT} owner_target=wl:1"
-        )
-        result = watcher.CommandOutput("agent-problems", 3, f"agent-problems: untracked_agent=1\n{line}\n", "")
-        prefix = watcher.capacity_state_prefix(args, "wl:6")
-        seen = {f"{prefix}attempt:{attempt}": 1000.0 + attempt for attempt in range(1, 4)}
-        out = StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            args = Args(Path(tmp), "", Path(tmp) / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, True, manager_target="wl:1", agent_problem_interval_s=10.0, agent_problem_repeat_s=300.0)
+            line = (
+                "untracked_agent: task=tmux:wl:6 evidence=target=wl:6 role=tmux_unmanaged "
+                f"output={watcher.CAPACITY_ERROR_TEXT} owner_target=wl:1"
+            )
+            result = watcher.CommandOutput("agent-problems", 3, f"agent-problems: untracked_agent=1\n{line}\n", "")
+            prefix = watcher.capacity_state_prefix(args, "wl:6", line)
+            seen = {f"{prefix}attempt:{attempt}": 1000.0 + attempt for attempt in range(1, 4)}
+            out = StringIO()
 
-        with redirect_stdout(out), patch.object(watcher, "push_manager_text_to_target", return_value=0) as alert:
-            self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 1010.0))
+            with redirect_stdout(out), patch.object(watcher, "push_manager_text_to_target", return_value=0) as alert:
+                self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 1010.0))
 
         self.assertNotIn(watcher.AGENT_PROBLEM_HEADER, out.getvalue())
         alert_text = alert.call_args.args[1]
@@ -10024,7 +10197,7 @@ printf 'header\\n(pending)\\nchanged\\n' > {task}
             output = """■ {"detail":"The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account."}"""
             line = f"error: task=worker.md evidence=target=vl:2 output={output} owner_target=vl:64"
             result = watcher.CommandOutput("agent-problems", 3, f"agent-problems: error=1\n{line}\n", "")
-            prefix = watcher.capacity_state_prefix(args, "vl:2")
+            prefix = watcher.capacity_state_prefix(args, "vl:2", line)
             seen = {f"{prefix}attempt:{attempt}": 1000.0 + attempt for attempt in range(1, 4)}
 
             with patch.object(watcher, "push_manager_text_to_target", return_value=0) as alert:
@@ -10038,13 +10211,14 @@ printf 'header\\n(pending)\\nchanged\\n' > {task}
     def test_capacity_retry_state_clears_when_target_recovers(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
-        args = Args(Path("/tmp"), "", Path("/tmp/seen.tsv"), 1.0, 1.0, 30.0, Path("/status.py"), False, True, manager_target="wl:1", agent_problem_interval_s=10.0)
-        prefix = watcher.capacity_state_prefix(args, "vl:2")
-        seen = {f"{prefix}attempt:1": 1000.0, f"{prefix}next": 1010.0}
-        healthy = watcher.CommandOutput("agent-problems", 0, "", "")
+        with tempfile.TemporaryDirectory() as tmp:
+            args = Args(Path(tmp), "", Path(tmp) / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, True, manager_target="wl:1", agent_problem_interval_s=10.0)
+            prefix = watcher.capacity_state_prefix(args, "vl:2")
+            seen = {f"{prefix}attempt:1": 1000.0, f"{prefix}next": 1010.0}
+            healthy = watcher.CommandOutput("agent-problems", 0, "", "")
 
-        self.assertTrue(watcher.handle_agent_problem_result(args, seen, healthy, 1001.0))
-        self.assertFalse(any(key.startswith(prefix) for key in seen))
+            self.assertTrue(watcher.handle_agent_problem_result(args, seen, healthy, 1001.0))
+            self.assertFalse(any(key.startswith(prefix) for key in seen))
 
     def test_capacity_model_advisory_aggregates_and_dedupes_models(self) -> None:
         from omo_manager import omo_pending_watch as watcher

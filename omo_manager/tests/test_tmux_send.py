@@ -78,6 +78,7 @@ class TmuxSendTests(unittest.TestCase):
         capacity = ["Selected model is at capacity. Please try a different model.", "› Use /skills to list available skills", "  gpt-5.5"]
         non_codex = ["Selected model is at capacity. Please try a different model."]
         mixed = ["Selected model is at capacity. Please try a different model.", "■ Error: network failed", "› Use /skills to list available skills", "  gpt-5.5"]
+        progressed = ["■ Error: earlier recovery command failed", "Selected model is at capacity. Please try a different model.", "› Use /skills to list available skills", "  gpt-5.5"]
         historical = ["Selected model is at capacity. Please try a different model.", "────", "■ Error: network failed", "› Use /skills to list available skills", "  gpt-5.5"]
         trailing_goal = [
             "Selected model is at capacity. Please try a different model.",
@@ -87,6 +88,7 @@ class TmuxSendTests(unittest.TestCase):
         ]
 
         self.assertTrue(exact_capacity_error(capacity))
+        self.assertTrue(exact_capacity_error(progressed))
         self.assertTrue(exact_capacity_error(trailing_goal))
         self.assertFalse(exact_capacity_error(non_codex))
         self.assertFalse(exact_capacity_error(mixed))
