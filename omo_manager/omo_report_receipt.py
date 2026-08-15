@@ -293,7 +293,9 @@ def orphan_transfer_plan(plan: Plan) -> Plan:
     if old_manager_state in {"restored", "active"}:
         return plan
     if read_manager_acknowledgment(old_plan, require_live_authority=False) is not None:
-        return plan
+        raise ReceiptError(
+            "watcher-acknowledged predecessor requires --verify-consumed with its original committed allocation"
+        )
     for temporary in preflight.get("temporary_files", []):
         if not isinstance(temporary, str) or os.path.lexists(temporary):
             raise ReceiptError("pending predecessor has ambiguous temporary residue")

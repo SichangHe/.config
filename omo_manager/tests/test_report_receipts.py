@@ -1963,13 +1963,24 @@ return 75
 
             self.assertEqual(2, rejected.returncode)
             self.assertEqual("", rejected.stdout)
-            self.assertIn("bound to a different allocation", rejected.stderr)
+            self.assertIn(
+                "watcher-acknowledged predecessor requires --verify-consumed with its original committed allocation",
+                rejected.stderr,
+            )
             self.assertNotIn(body.decode().strip(), rejected.stderr)
             self.assertNotIn(str(draft_a), rejected.stderr)
             self.assertNotIn(str(draft_b), rejected.stderr)
             self.assertEqual(manager_after, manager.read_bytes())
             self.assertFalse(receipt.exists())
             self.assertFalse(publication.exists())
+
+            verified = run_report_from(case, draft_a, verify_consumed=True)
+
+            self.assertEqual(0, verified.returncode, verified.stderr)
+            closure = json.loads(verified.stdout)
+            self.assertEqual("omo-report-consumed-closure/v1", closure["schema"])
+            self.assertFalse(closure["accepted"])
+            self.assertTrue(closure["terminal"])
 
     def test_commitment_cleanup_failure_fails_closed_and_recovers_for_original(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
