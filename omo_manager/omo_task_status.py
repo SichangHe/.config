@@ -101,6 +101,7 @@ class Args:
     historical_commit: str = ""
     close_shared_target: bool = False
     close_retired_done: bool = False
+    normalize_retired_todo: bool = False
     shared_target: str = ""
     source_sha256: str = ""
 
@@ -136,6 +137,7 @@ class ParsedArgs(argparse.Namespace):
     historical_commit: str = ""
     close_shared_target: bool = False
     close_retired_done: bool = False
+    normalize_retired_todo: bool = False
     shared_target: str = ""
     source_sha256: str = ""
 
@@ -176,8 +178,9 @@ shutdown.""",
     _ = parser.add_argument("--historical-commit", default="", help="Full Git commit containing the proven prior target; required with --restore-terminal-target.")
     _ = parser.add_argument("--close-shared-target", action="store_true", help="Close one explicitly proven manager record on a shared target using metadata and TODO files only; never accesses tmux.")
     _ = parser.add_argument("--close-retired-done", action="store_true", help="Close one already-stopped blocked/retired worker using Git-proven historical target and recorded close evidence; never accesses tmux.")
+    _ = parser.add_argument("--normalize-retired-todo", action="store_true", help="Normalize the sole targetless human-pending row for one already-retired blocked worker; never accesses tmux or task bytes.")
     _ = parser.add_argument("--shared-target", default="", help="Exact shared manager target required with --close-shared-target.")
-    _ = parser.add_argument("--source-sha256", default="", help="Exact SHA-256 of the source task bytes required with --close-shared-target.")
+    _ = parser.add_argument("--source-sha256", default="", help="Exact SHA-256 of the source task bytes required with --close-shared-target, --close-retired-done, or --normalize-retired-todo.")
     _ = parser.add_argument("task_file", type=Path)
     _ = parser.add_argument("status", nargs="?", choices=sorted(TASK_FRONTMATTER_STATUSES))
     _ = parser.add_argument("--blocked-on", default="", help="Required when setting status to `blocked`; optional for `long_running`; removed for other statuses.")
@@ -188,7 +191,7 @@ shutdown.""",
         parser.error("--closure-repository must be an explicit absolute Git worktree root.")
     if parsed.dirty_path_handoff is not None and parsed.closure_repository is None:
         parser.error("--dirty-path-handoff requires --closure-repository.")
-    if sum((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done, parsed.retire_blocked_target, parsed.reconcile_long_running_human_index, parsed.restore_terminal_target, parsed.close_shared_target, parsed.close_retired_done)) > 1:
+    if sum((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done, parsed.retire_blocked_target, parsed.reconcile_long_running_human_index, parsed.restore_terminal_target, parsed.close_shared_target, parsed.close_retired_done, parsed.normalize_retired_todo)) > 1:
         parser.error("finish and recovery modes are mutually exclusive.")
     if parsed.retire_blocked_target:
         parser.error("--retire-blocked-target is disabled: preserve the historical target and resolve ownership without writing retired semantics.")
@@ -203,6 +206,11 @@ shutdown.""",
         if any(unrelated) or TARGET_RE.fullmatch(parsed.historical_target.strip()) is None or SHA256_RE.fullmatch(parsed.source_sha256.strip()) is None or GIT_COMMIT_RE.fullmatch(parsed.historical_commit.strip()) is None:
             parser.error("--close-retired-done requires --historical-target TARGET, full --historical-commit, and lowercase --source-sha256, without lifecycle or pane evidence.")
         return Args(parsed.root.resolve(), parsed.task_file, "done", "", close_retired_done=True, historical_target=parsed.historical_target.strip(), historical_commit=parsed.historical_commit.strip(), source_sha256=parsed.source_sha256.strip())
+    if parsed.normalize_retired_todo:
+        unrelated = (parsed.status, parsed.blocked_on, parsed.session_id, parsed.replacement_task, parsed.stale_target, parsed.replacement_target, parsed.stale_sha256, parsed.replacement_sha256, parsed.replacement_status, parsed.protected_target, parsed.stopped_evidence, parsed.replacement_pane_evidence, parsed.audit_output, parsed.pane_id, parsed.terminal_evidence, parsed.closure_repository, parsed.dirty_path_handoff, parsed.historical_target, parsed.task_sha256, parsed.historical_commit, parsed.shared_target)
+        if any(unrelated) or SHA256_RE.fullmatch(parsed.source_sha256.strip()) is None:
+            parser.error("--normalize-retired-todo requires only lowercase --source-sha256 for one exact blocked/retired source task.")
+        return Args(parsed.root.resolve(), parsed.task_file, "", "", normalize_retired_todo=True, source_sha256=parsed.source_sha256.strip())
     if parsed.close_shared_target:
         unrelated = (parsed.status, parsed.blocked_on, parsed.session_id, parsed.replacement_task, parsed.stale_target, parsed.replacement_target, parsed.stale_sha256, parsed.replacement_sha256, parsed.replacement_status, parsed.protected_target, parsed.stopped_evidence, parsed.replacement_pane_evidence, parsed.audit_output, parsed.pane_id, parsed.terminal_evidence, parsed.closure_repository, parsed.dirty_path_handoff, parsed.historical_target, parsed.task_sha256, parsed.historical_commit)
         if any(unrelated) or TARGET_RE.fullmatch(parsed.shared_target.strip()) is None or SHA256_RE.fullmatch(parsed.source_sha256.strip()) is None:
@@ -1054,6 +1062,72 @@ def close_retired_done(args: Args, path: Path, text: str, before: os.stat_result
     return args.historical_target
 
 
+def normalize_retired_todo(args: Args, path: Path, text: str, before: os.stat_result) -> None:
+    """Add the required `retired` marker to one exact already-retired TODO row.
+
+    This is deliberately an index-only preflight for ``--close-retired-done``.
+    It never restores a target, changes frontmatter, or accesses tmux.
+    """
+    source_bytes = path.read_bytes()
+    if hashlib.sha256(source_bytes).hexdigest() != args.source_sha256:
+        raise TaskFrontmatterError("retired TODO normalization source bytes do not match --source-sha256")
+    metadata = parse_task_metadata(text, args.root)
+    if (
+        metadata is None
+        or metadata.version == V2_VERSION
+        or metadata.status != "blocked"
+        or metadata.runat != "retired"
+        or metadata.is_manager
+        or metadata.pending_task_items
+        or PENDING_MARKER in text
+    ):
+        raise TaskFrontmatterError("retired TODO normalization requires one unchanged v1 blocked/retired non-manager worker with an empty queue and no live pending marker")
+    todo = args.root / "TODO.md"
+    if not todo.is_file():
+        raise TaskFrontmatterError("TODO.md is not a regular file.")
+    relative = relative_task_ref(args.root, path)
+    canonical_targetless_row = re.compile(rf"^\s*{re.escape(relative)}\s*$")
+    with ExitStack() as locks:
+        for locked_path in sorted({path, todo}, key=lambda candidate: str(candidate)):
+            locks.enter_context(task_file_lock(locked_path))
+        current_before = path.stat()
+        current_bytes = path.read_bytes()
+        if not same_file_state(before, current_before) or current_bytes != source_bytes:
+            raise TaskFrontmatterError("retired task changed while TODO normalization was being prepared; retry")
+        current_metadata = parse_task_metadata(current_bytes.decode("utf-8"), args.root)
+        if (
+            current_metadata is None
+            or current_metadata.version == V2_VERSION
+            or current_metadata.status != "blocked"
+            or current_metadata.runat != "retired"
+            or current_metadata.is_manager
+            or current_metadata.pending_task_items
+            or PENDING_MARKER in current_bytes.decode("utf-8")
+        ):
+            raise TaskFrontmatterError("retired task changed while TODO normalization was being prepared; retry")
+        todo_before = todo.stat()
+        todo_text = todo.read_text(encoding="utf-8")
+        rows: list[tuple[int, str]] = []
+        section = ""
+        lines = todo_text.splitlines(keepends=True)
+        for index, line in enumerate(lines):
+            heading = line.strip()
+            if heading.endswith(":"):
+                section = heading[:-1].casefold()
+                continue
+            if path in todo_row_task_paths(args.root, line):
+                rows.append((index, section))
+        if len(rows) != 1 or rows[0][1] != "human pending":
+            raise TaskFrontmatterError("retired TODO normalization requires exactly one human-pending TODO row")
+        row_index, _ = rows[0]
+        row = lines[row_index]
+        if TARGET_RE.findall(row) or canonical_targetless_row.fullmatch(row.rstrip("\r\n")) is None:
+            raise TaskFrontmatterError("retired TODO normalization requires one exact targetless task row")
+        line_ending = row[len(row.rstrip("\r\n")) :]
+        lines[row_index] = f"{row.rstrip(chr(13) + chr(10))} retired{line_ending}"
+        replace_if_unchanged_locked(todo, "".join(lines), todo_before)
+
+
 def reconcile_todo_text(root: Path, path: Path, text: str, runat: str, destination: str, allowed_sections: tuple[str, ...]) -> str:
     """Move one validated TODO row between allowed lifecycle sections."""
     lines = text.splitlines(keepends=True)
@@ -1685,6 +1759,8 @@ def run(args: Args) -> int:
             restore_terminal_target(args, path, text, before)
         elif args.close_retired_done:
             target = close_retired_done(args, path, text, before)
+        elif args.normalize_retired_todo:
+            normalize_retired_todo(args, path, text, before)
         elif args.retire_blocked_target:
             retire_blocked_target(args, path, text, before)
         elif args.reconcile_long_running_human_index:

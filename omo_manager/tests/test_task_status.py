@@ -16,6 +16,7 @@ from omo_manager.omo_agent_status import TaskFrontmatterError, parse_task_metada
 from omo_manager.omo_task_status import DONE_REMINDER
 from omo_manager.omo_task_status import ensure_repository_closure_custody
 from omo_manager.omo_task_status import close_retired_done
+from omo_manager.omo_task_status import normalize_retired_todo
 from omo_manager.omo_task_status import finish_shared_target_done
 from omo_manager.omo_task_status import StopArgs
 from omo_manager.omo_task_status import parse_args
@@ -70,6 +71,79 @@ def task_frontmatter(
 
 
 class TaskStatusTests(unittest.TestCase):
+    def test_retired_todo_normalization_is_index_only_and_unblocks_proven_closure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "legacy.md"
+            historical = task_frontmatter(status="running", runat="wl:2") + "body\n"
+            task.write_text(historical, encoding="utf-8")
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), "add", "legacy.md"], check=True)
+            subprocess.run(["git", "-C", str(root), "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "historical"], check=True)
+            commit = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+            current = task_frontmatter(status="blocked", blocked_on="human", runat="retired") + "body\n(manager closed Codex agent; tmux target `wl:2`.)\n"
+            task.write_text(current, encoding="utf-8")
+            todo = root / "TODO.md"
+            todo.write_text("current:\n\nhuman pending:\nlegacy.md\n\nprevious:\n", encoding="utf-8")
+            source_sha256 = hashlib.sha256(current.encode()).hexdigest()
+            normalize_args = StatusArgs(root, Path("legacy.md"), "", "", normalize_retired_todo=True, source_sha256=source_sha256)
+            tmux_names = ("stop", "capture", "exact_pane_id", "pane_id", "close_note", "record_close", "close_exited_codex_shell", "blocking_request")
+            with patch.multiple("omo_manager.omo_task_status", **{name: DEFAULT for name in tmux_names}) as mocked:
+                self.assertEqual(0, run(normalize_args))
+                for mock in mocked.values():
+                    mock.assert_not_called()
+            self.assertEqual(current, task.read_text(encoding="utf-8"))
+            self.assertEqual("current:\n\nhuman pending:\nlegacy.md retired\n\nprevious:\n", todo.read_text(encoding="utf-8"))
+
+            close_args = StatusArgs(root, Path("legacy.md"), "done", "", close_retired_done=True, historical_target="wl:2", historical_commit=commit, source_sha256=source_sha256)
+            with patch.multiple("omo_manager.omo_task_status", **{name: DEFAULT for name in tmux_names}) as mocked:
+                self.assertEqual(0, run(close_args))
+                for mock in mocked.values():
+                    mock.assert_not_called()
+            self.assertIn("status: done\n", task.read_text(encoding="utf-8"))
+            self.assertEqual("current:\n\nhuman pending:\n\nprevious:\nlegacy.md wl:2\n", todo.read_text(encoding="utf-8"))
+
+    def test_retired_todo_normalization_rejects_drift_queue_and_noncanonical_row(self) -> None:
+        for label, task_text, todo_text, source_sha256, expected in (
+            ("digest", task_frontmatter(status="blocked", blocked_on="human", runat="retired") + "body\n", "human pending:\nlegacy.md\n", "0" * 64, "source bytes"),
+            ("queue", task_frontmatter(status="blocked", blocked_on="human", runat="retired", pending_items=("open",)) + "body\n", "human pending:\nlegacy.md\n", "", "empty queue"),
+            ("v2", v2_task().replace("runat: wl:2", "runat: retired"), "human pending:\nlegacy.md\n", "", "unchanged v1"),
+            ("manager", task_frontmatter(status="blocked", blocked_on="human", runat="retired", is_manager=True) + "body\n", "human pending:\nlegacy.md\n", "", "non-manager"),
+            ("pending marker", task_frontmatter(status="blocked", blocked_on="human", runat="retired") + "(pending)\n", "human pending:\nlegacy.md\n", "", "no live pending marker"),
+            ("row", task_frontmatter(status="blocked", blocked_on="human", runat="retired") + "body\n", "human pending:\nlegacy.md stale\n", "", "exact targetless task row"),
+            ("target suffix", task_frontmatter(status="blocked", blocked_on="human", runat="retired") + "body\n", "human pending:\nlegacy.md wl:2\n", "", "exact targetless task row"),
+            ("duplicate", task_frontmatter(status="blocked", blocked_on="human", runat="retired") + "body\n", "current:\nlegacy.md\n\nhuman pending:\nlegacy.md\n", "", "exactly one human-pending TODO row"),
+            ("outside human pending", task_frontmatter(status="blocked", blocked_on="human", runat="retired") + "body\n", "current:\nlegacy.md\n\nhuman pending:\n", "", "exactly one human-pending TODO row"),
+        ):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                task = root / "legacy.md"
+                task.write_text(task_text, encoding="utf-8")
+                todo = root / "TODO.md"
+                todo.write_text(todo_text, encoding="utf-8")
+                args = StatusArgs(root, Path("legacy.md"), "", "", normalize_retired_todo=True, source_sha256=source_sha256 or hashlib.sha256(task_text.encode()).hexdigest())
+                with self.assertRaisesRegex(TaskFrontmatterError, expected):
+                    normalize_retired_todo(args, task, task_text, task.stat())
+                self.assertEqual(task_text, task.read_text(encoding="utf-8"))
+                self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+
+    def test_retired_todo_normalization_parser_rejects_unrelated_lifecycle_inputs(self) -> None:
+        with self.assertRaises(SystemExit):
+            parse_args([
+                "--normalize-retired-todo",
+                "--source-sha256", "a" * 64,
+                "--historical-target", "wl:2",
+                "legacy.md",
+            ])
+        args = parse_args([
+            "--normalize-retired-todo",
+            "--source-sha256", "a" * 64,
+            "legacy.md",
+        ])
+        self.assertTrue(args.normalize_retired_todo)
+        self.assertEqual("", args.status)
+        self.assertEqual("a" * 64, args.source_sha256)
+
     def test_retired_closure_is_metadata_only_with_git_proof_and_close_note(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
