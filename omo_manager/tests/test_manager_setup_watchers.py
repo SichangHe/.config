@@ -42,6 +42,7 @@ class WatcherSetupTests(unittest.TestCase):
         fake_uv.write_text(
             """#!/usr/bin/env bash
 set -euo pipefail
+printf 'OMO_MANAGER_TMUX_TARGET=%s\\n' "${OMO_MANAGER_TMUX_TARGET-}" >>"${FAKE_UV_LOG:?}"
 printf '%s\\n' "$*" >>"${FAKE_UV_LOG:?}"
 is_email=0
 script=""
@@ -210,6 +211,35 @@ esac
                 assert pending_pid is not None
                 self.assertEqual(pending_pid, os.getsid(pending_pid))
                 self.assertIn("omo_pending_watch.py", (tmp / "fake-uv.log").read_text(encoding="utf-8"))
+            finally:
+                self.stop_supervisors(tmp / "state")
+
+    def test_local_env_manager_target_overrides_stale_inherited_target(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            local_env = tmp / "local.env"
+            local_env.write_text(
+                f"""
+export OMO_WORK_LOGS_ROOT="{tmp / "work_logs"}"
+export OMO_MANAGER_STATE_DIR="{tmp / "state"}"
+export OMO_MANAGER_TMUX_TARGET="wl:1"
+export OMO_MANAGER_URL=""
+export OMO_MANAGER_ENABLE_EMAIL_WATCHER="false"
+""".lstrip(),
+                encoding="utf-8",
+            )
+            try:
+                result = self.run_setup(
+                    tmp,
+                    extra_env={
+                        "OMO_MANAGER_LOCAL_ENV": str(local_env),
+                        "OMO_MANAGER_TMUX_TARGET": "vlportfolio:32.0",
+                    },
+                    timeout_s=60,
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertIn("manager_target=wl:1", result.stdout)
+                self.assertIn("OMO_MANAGER_TMUX_TARGET=wl:1", (tmp / "fake-uv.log").read_text(encoding="utf-8"))
             finally:
                 self.stop_supervisors(tmp / "state")
 

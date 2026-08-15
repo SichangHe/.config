@@ -18,7 +18,9 @@ COMPACTION_WAIT_LINES = 2000
 CODEX_RE = re.compile(r"  gpt-")
 CODEX_FOOTER_RE = re.compile(r"^  gpt-")
 ERROR_RE = re.compile(r"\b(failed|panic|traceback|exception)\b|\berror\b(?!\s*=\s*\d)", re.IGNORECASE)
-SELECTED_MODEL_CAPACITY_RE = re.compile(r"^\s*(?:⚠\ufe0f?\s*)?Selected model is at capacity\. Please try a different model\.\s*$")
+SELECTED_MODEL_CAPACITY_RE = re.compile(
+    r"^\s*(?:(?:⚠\ufe0f?\s*)?Selected model is at capacity\. Please try a different model\.|■\s*\{\"detail\":\"The '[A-Za-z0-9][A-Za-z0-9._-]*' model is not supported when using Codex with a ChatGPT account\.\"\})\s*$"
+)
 CONTENT_HIDDEN_RE = re.compile(r"^\s*ⓘ\s+This content can(?:not|['’]t) be shown[.!?]?\s*$", re.IGNORECASE)
 UNRELATED_FATAL_LINE_RE = re.compile(r"^\s*(?:(?:[A-Za-z][\w-]*\s+)?failed\b|error\b|exception\b|fatal\b|panic\b|traceback\b)", re.I)
 WAKE_EXECUTION_BUDGET_REFUSAL_RE = re.compile(

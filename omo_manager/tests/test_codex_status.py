@@ -765,6 +765,26 @@ class CodexStatusTests(unittest.TestCase):
                 lines = ['────', warning, '› Use /skills to list available skills', '  gpt-5.5']
                 self.assertEqual('error', report_from_lines(lines).status)
 
+    def test_unsupported_chatgpt_model_is_exact_capacity_error(self) -> None:
+        for model in ('gpt-5.6-sol', 'gpt-5.7_codex.preview'):
+            with self.subTest(model=model):
+                error = f'''■ {{"detail":"The '{model}' model is not supported when using Codex with a ChatGPT account."}}'''
+                lines = ['────', error, '› Use /skills to list available skills', '  gpt-5.5']
+                self.assertEqual('error', report_from_lines(lines).status)
+                self.assertEqual([error], visible_error_lines(current_block(lines).lines))
+                self.assertTrue(exact_capacity_error(lines))
+
+    def test_other_unsupported_model_errors_are_not_capacity_errors(self) -> None:
+        errors = (
+            '''■ {"detail":"The 'gpt-5.6-sol' model is not supported when using the API."}''',
+            '''■ {"detail":"The 'gpt 5.6 sol' model is not supported when using Codex with a ChatGPT account."}''',
+            '''■ {"detail":"The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account.","code":"unsupported"}''',
+        )
+        for error in errors:
+            with self.subTest(error=error):
+                lines = ['────', error, '› Use /skills to list available skills', '  gpt-5.5']
+                self.assertFalse(exact_capacity_error(lines))
+
     def test_status_error_from_wake_execution_budget_refusal(self) -> None:
         for refusal in [
             "• I can’t safely complete another wake prompt in the remaining execution budget.",

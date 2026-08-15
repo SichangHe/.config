@@ -80,7 +80,6 @@ if [ -n "${TMUX:-}" ] \
   exit "$bridge_result"
 fi
 env_manager_url="${OMO_MANAGER_URL+x}${OMO_MANAGER_URL-}"
-env_manager_target="${OMO_MANAGER_TMUX_TARGET+x}${OMO_MANAGER_TMUX_TARGET-}"
 env_root="${OMO_WORK_LOGS_ROOT+x}${OMO_WORK_LOGS_ROOT-}"
 env_state_dir="${OMO_MANAGER_STATE_DIR+x}${OMO_MANAGER_STATE_DIR-}"
 env_mail_dir="${OMO_MANAGER_MAIL_DIR+x}${OMO_MANAGER_MAIL_DIR-}"
@@ -106,7 +105,6 @@ if [ -n "$inherited_root" ] && [ -n "$configured_root" ] && [ "$inherited_root" 
   fi
 fi
 [ -n "${env_manager_url#x}" ] && OMO_MANAGER_URL="${env_manager_url#x}"
-[ -n "${env_manager_target#x}" ] && OMO_MANAGER_TMUX_TARGET="${env_manager_target#x}"
 [ -n "${env_root#x}" ] && OMO_WORK_LOGS_ROOT="${env_root#x}"
 [ -n "${env_state_dir#x}" ] && OMO_MANAGER_STATE_DIR="${env_state_dir#x}"
 [ -n "${env_mail_dir#x}" ] && OMO_MANAGER_MAIL_DIR="${env_mail_dir#x}"

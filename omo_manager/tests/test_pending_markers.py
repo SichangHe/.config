@@ -9528,6 +9528,16 @@ printf 'header\\n(pending)\\nchanged\\n' > {task}
                 assert row is not None
                 self.assertEqual(watcher.CAPACITY_ERROR_TEXT, row.output)
 
+    def test_capacity_problem_row_accepts_chatgpt_account_model_error(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        output = """■ {"detail":"The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account."}"""
+        line = f"error: task=worker.md evidence=target=vl:2 output={output} owner_target=wl:1"
+        row = watcher.capacity_problem_row(line)
+        self.assertIsNotNone(row)
+        assert row is not None
+        self.assertEqual(output, row.output)
+
     def test_capacity_untracked_agent_resumes_without_generic_manager_row(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
@@ -9961,6 +9971,25 @@ printf 'header\\n(pending)\\nchanged\\n' > {task}
         alert_text = alert.call_args.args[1]
         self.assertIn("after 3 resume attempt(s)", alert_text)
         self.assertIn("Recover the same tmux pane", alert_text)
+        self.assertIn("Do not launch a replacement pane", alert_text)
+
+    def test_unsupported_chatgpt_model_exhausts_to_switch_model_alert(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            args = Args(Path(tmp), "", Path(tmp) / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, True, manager_target="wl:1", agent_problem_interval_s=10.0, agent_problem_repeat_s=300.0)
+            output = """■ {"detail":"The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account."}"""
+            line = f"error: task=worker.md evidence=target=vl:2 output={output} owner_target=vl:64"
+            result = watcher.CommandOutput("agent-problems", 3, f"agent-problems: error=1\n{line}\n", "")
+            prefix = watcher.capacity_state_prefix(args, "vl:2")
+            seen = {f"{prefix}attempt:{attempt}": 1000.0 + attempt for attempt in range(1, 4)}
+
+            with patch.object(watcher, "push_manager_text_to_target", return_value=0) as alert:
+                self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 1010.0))
+
+        alert_text = alert.call_args.args[1]
+        self.assertIn("after 3 resume attempt(s)", alert_text)
+        self.assertIn("switch the live Codex model", alert_text)
         self.assertIn("Do not launch a replacement pane", alert_text)
 
     def test_capacity_retry_state_clears_when_target_recovers(self) -> None:

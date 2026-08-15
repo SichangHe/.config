@@ -61,6 +61,7 @@ from omo_manager.omo_blocking import v2_enabled
 from omo_manager.omo_blocking_actor import BlockingActor
 from omo_manager.omo_blocking_actor import request as blocking_request
 from omo_manager.omo_codex_status import Args as CodexStatusArgs
+from omo_manager.omo_codex_status import SELECTED_MODEL_CAPACITY_RE
 from omo_manager.omo_codex_status import inspect as inspect_codex
 from omo_manager.omo_codex_status import exact_tail as exact_codex_tail
 from omo_manager.omo_codex_status import report_from_lines as report_codex_lines
@@ -4431,7 +4432,13 @@ def capacity_problem_row(line: str) -> ProblemRow | None:
     if row is None:
         return None
     output = re.sub(r"^⚠\ufe0f?\s*", "", row.output)
-    return replace(row, output=output) if row.status in {"error", "untracked_agent"} and output == CAPACITY_ERROR_TEXT and row.target else None
+    if row.status not in {"error", "untracked_agent"} or not row.target:
+        return None
+    if output == CAPACITY_ERROR_TEXT:
+        return replace(row, output=output)
+    if SELECTED_MODEL_CAPACITY_RE.fullmatch(row.output):
+        return row
+    return None
 
 
 def capacity_state_prefix(args: Args, target: str) -> str:
