@@ -2812,12 +2812,17 @@ def validate_committed_route_evidence(
         committed[path] = dict(item)
 
     current = {Path(str(item["path"])): item for item in plan.route_evidence}
-    if set(committed) != set(current):
-        raise ReceiptError("transaction commitment route evidence is inconsistent")
+    if (
+        not require_current
+        and plan.routing["route_kind"] == "active-manager-task"
+        and plan.manager not in committed
+    ):
+        raise ReceiptError("historical transaction commitment manager route evidence is missing")
+    if require_current and set(committed) != set(current):
+        raise ReceiptError("transaction commitment route evidence path set changed")
     for path, frozen in committed.items():
-        observed = current[path]
         if path != plan.manager:
-            if require_current and observed != frozen:
+            if require_current and current[path] != frozen:
                 raise ReceiptError("transaction commitment route evidence changed")
             continue
 
@@ -2836,6 +2841,7 @@ def validate_committed_route_evidence(
         if not require_current:
             continue
 
+        observed = current[path]
         manager_payload = manager_bytes(plan.manager)
         if manager_transaction_state(manager_payload, plan.owner_prefix, plan.pointer) == "invalid":
             raise ReceiptError("manager bytes differ from the bound report transaction")
@@ -3365,7 +3371,11 @@ def description_under_route_locks(plan: Plan) -> dict[str, object]:
     }
 
 
-def plan_for_historical_commitment(plan: Plan) -> Plan:
+def plan_for_historical_commitment(
+    plan: Plan,
+    *,
+    allow_historical_route_inventory: bool = False,
+) -> Plan:
     if plan.transaction_commitment_final.exists():
         return plan
     matches: list[tuple[str, tuple[dict[str, object], ...]]] = []
@@ -3406,7 +3416,11 @@ def plan_for_historical_commitment(plan: Plan) -> Plan:
             and isinstance(routing_sources, list)
             and all(isinstance(item, dict) for item in routing_sources)
         ):
-            validated = validate_committed_route_evidence(plan, routing_sources, require_current=False)
+            validated = validate_committed_route_evidence(
+                plan,
+                routing_sources,
+                require_current=not allow_historical_route_inventory,
+            )
             matches.append((replay_id, validated))
             continue
         if (
@@ -3440,7 +3454,7 @@ def plan_for_historical_commitment(plan: Plan) -> Plan:
         validated_routing_sources = validate_committed_route_evidence(
             plan,
             routing_sources,
-            require_current=False,
+            require_current=not allow_historical_route_inventory,
         )
         matches.append((replay_id, validated_routing_sources))
     if not matches:
@@ -3471,7 +3485,7 @@ def plan_for_historical_commitment(plan: Plan) -> Plan:
 
 
 def consumed_closure_attestation(plan: Plan) -> dict[str, object]:
-    plan = plan_for_historical_commitment(plan)
+    plan = plan_for_historical_commitment(plan, allow_historical_route_inventory=True)
     validate_private_layout(plan, allow_consumed_residue=True)
     require_absent(plan.receipt_final, "durable receipt")
     require_absent(plan.receipt_publication_final, "receipt publication record")

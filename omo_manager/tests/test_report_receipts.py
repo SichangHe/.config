@@ -14,8 +14,9 @@ import unittest
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
-from omo_manager.omo_report_receipt import regular_file_tail
+from omo_manager.omo_report_receipt import OwnerPrefixBinding, ReceiptError, regular_file_tail, validate_committed_route_evidence
 
 
 OMO_DIR = Path(__file__).resolve().parents[1]
@@ -2150,6 +2151,17 @@ return 75
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             case, manager, owner = active_manager_fixture(tmp_path)
+            legacy_manager = case.root / "legacy-manager.md"
+            legacy_manager.write_text(
+                frontmatter(runat="vl:2", managerat="main:0.0", is_manager=True).replace(
+                    "status: running", "status: done"
+                ),
+                encoding="utf-8",
+            )
+            (case.root / "TODO.md").write_text(
+                "current:\nworker.md cfg:7\nmanager.md vl:2\n\nprevious:\nlegacy-manager.md vl:2\n",
+                encoding="utf-8",
+            )
             body = f"historically consumed report closure {tmp}\n".encode()
             draft = allocate_report_draft(case, body)
             self.addCleanup(draft.unlink, missing_ok=True)
@@ -2169,13 +2181,33 @@ return 75
             self.assertEqual(0, watched.returncode, watched.stderr)
             self.assertEqual(owner, manager.read_bytes())
             manager.write_bytes(owner + b"\nnew manager-owned work after consumption\n")
+            new_manager = case.root / "new-manager.md"
+            new_manager.write_text(
+                frontmatter(runat="vl:2", managerat="main:0.0", is_manager=True).replace(
+                    "status: running", "status: done"
+                ),
+                encoding="utf-8",
+            )
             (case.root / "TODO.md").write_text(
-                "current:\nworker.md cfg:7\nmanager.md vl:2\nnew-worker.md cfg:8\n",
+                "current:\nworker.md cfg:7\nmanager.md vl:2\nnew-worker.md cfg:8\n\nprevious:\nnew-manager.md vl:2\n",
                 encoding="utf-8",
             )
             manager_after = manager.read_bytes()
             commitment_path = transaction_commitment_path(description)
             commitment_bytes = commitment_path.read_bytes()
+
+            for current_mode in ("describe", "submit"):
+                current_result = run_report_from(
+                    case,
+                    draft,
+                    describe=current_mode == "describe",
+                    status="progressing",
+                    report=report,
+                )
+                self.assertNotEqual(0, current_result.returncode)
+                self.assertIn("route evidence path set changed", current_result.stderr)
+                self.assertEqual(manager_after, manager.read_bytes())
+
             malformed = json.loads(commitment_bytes)
             malformed["preflight"]["routing_sources"] = [{}]
             unsigned_commitment = {key: value for key, value in malformed.items() if key != "commitment_id"}
@@ -2195,6 +2227,61 @@ return 75
             self.assertEqual(manager_after, manager.read_bytes())
             self.assertFalse(Path(str(description["files"]["private_receipt"])).exists())
             self.assertFalse(Path(str(description["files"]["receipt_publication"])).exists())
+            commitment_path.write_bytes(commitment_bytes)
+
+            committed = json.loads(commitment_bytes)
+            committed_routes = committed["preflight"]["routing_sources"]
+            committed_owner = committed["preflight"]["owner_prefix"]
+            historical_plan = SimpleNamespace(
+                manager=manager,
+                owner_prefix=OwnerPrefixBinding(
+                    committed_owner["manager_path_sha256"],
+                    committed_owner["sha256"],
+                    committed_owner["size_bytes"],
+                    committed_owner["separator_bytes"],
+                ),
+                pointer="unused for historical-only validation",
+                route_evidence=(),
+                routing={"route_kind": "active-manager-task"},
+            )
+            with self.assertRaisesRegex(ReceiptError, "historical transaction commitment manager route evidence is missing"):
+                validate_committed_route_evidence(
+                    historical_plan,
+                    [item for item in committed_routes if item["path"] != str(manager)],
+                    require_current=False,
+                )
+
+            tampered = json.loads(commitment_bytes)
+            non_manager = next(
+                item for item in tampered["preflight"]["routing_sources"] if item["path"] != str(manager)
+            )
+            if non_manager["exists"]:
+                non_manager["sha256"] = "0" * 64
+            else:
+                non_manager["exists"] = True
+                non_manager["sha256"] = "0" * 64
+                non_manager["size_bytes"] = 0
+            unsigned_commitment = {key: value for key, value in tampered.items() if key != "commitment_id"}
+            tampered["commitment_id"] = hashlib.sha256(
+                json.dumps(
+                    unsigned_commitment,
+                    ensure_ascii=True,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest()
+            commitment_path.write_bytes(
+                (json.dumps(tampered, ensure_ascii=True, sort_keys=True, separators=(",", ":")) + "\n").encode()
+            )
+            tampered_rejected = run_report_from(
+                case,
+                draft,
+                verify_consumed=True,
+                status="progressing",
+                report=report,
+            )
+            self.assertNotEqual(0, tampered_rejected.returncode)
+            self.assertIn("stale or corrupt report file", tampered_rejected.stderr)
             commitment_path.write_bytes(commitment_bytes)
             with (report.parent / "omo_report_receipt.py").open("a", encoding="utf-8") as stream:
                 stream.write("\n# upgraded after historical watcher consumption\n")
