@@ -1150,6 +1150,134 @@ class ReportReceiptTests(unittest.TestCase):
             self.assertEqual(0o600, draft_b.stat().st_mode & 0o777)
             self.assertFalse(any(path.name.endswith(".tmp") for path in receipt_directory.iterdir()))
 
+    def test_exact_unreachable_pending_transaction_gets_bound_transfer_namespace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            case, manager, owner = active_manager_fixture(tmp_path, body=b"unused\n")
+            body = b"exact orphan transfer body\n"
+            first = allocate_report_draft(case, body)
+            second = allocate_report_draft(case, body)
+            self.addCleanup(first.unlink, missing_ok=True)
+            self.addCleanup(second.unlink, missing_ok=True)
+            case.env["OMO_REPORT_ACK_TIMEOUT_S"] = "0"
+            first_description = json.loads(run_report_from(case, first, describe=True).stdout)
+            pending = run_report_from(case, first)
+            self.assertEqual(0, pending.returncode, pending.stderr)
+            self.assertFalse(json.loads(pending.stdout)["accepted"])
+            predecessor_envelope = Path(first_description["files"]["private_envelope"])
+            predecessor_commitment = transaction_commitment_path(first_description)
+
+            manager.write_bytes(owner + b"concurrent manager lifecycle update\n")
+            described = run_report_from(case, second, describe=True)
+
+            self.assertEqual(0, described.returncode, described.stderr)
+            description = json.loads(described.stdout)
+            transfer_envelope = Path(description["files"]["private_envelope"])
+            self.assertNotEqual(predecessor_envelope, transfer_envelope)
+            self.assertIn(".transfer-", transfer_envelope.name)
+            self.assertFalse(transfer_envelope.exists())
+            self.assertEqual(body, first.read_bytes())
+            self.assertEqual(body, second.read_bytes())
+            self.assertTrue(predecessor_envelope.is_file())
+            self.assertTrue(predecessor_commitment.is_file())
+            self.assertEqual([], list(predecessor_commitment.parent.glob("*.json")))
+
+            manager.write_bytes(owner + b"another manager lifecycle update\n")
+            churned = run_report_from(case, second, describe=True)
+            self.assertEqual(0, churned.returncode, churned.stderr)
+            churned_description = json.loads(churned.stdout)
+            self.assertEqual(str(transfer_envelope), churned_description["files"]["private_envelope"])
+            self.assertNotEqual(description["receipt"]["replay_id"], churned_description["receipt"]["replay_id"])
+            self.assertFalse(transfer_envelope.exists())
+
+    def test_orphan_transfer_rejects_any_predecessor_temporary_residue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            case, manager, owner = active_manager_fixture(tmp_path, body=b"unused\n")
+            body = b"ambiguous orphan residue\n"
+            first = allocate_report_draft(case, body)
+            second = allocate_report_draft(case, body)
+            self.addCleanup(first.unlink, missing_ok=True)
+            self.addCleanup(second.unlink, missing_ok=True)
+            case.env["OMO_REPORT_ACK_TIMEOUT_S"] = "0"
+            first_description = json.loads(run_report_from(case, first, describe=True).stdout)
+            self.assertEqual(0, run_report_from(case, first).returncode)
+            commitment = json.loads(transaction_commitment_path(first_description).read_bytes())
+            temporary = Path(commitment["preflight"]["temporary_files"][0])
+            temporary.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            temporary.symlink_to(temporary.with_name("missing-residue-target"))
+            self.addCleanup(temporary.unlink, missing_ok=True)
+            manager.write_bytes(owner + b"concurrent manager lifecycle update\n")
+
+            rejected = run_report_from(case, second, describe=True)
+
+            self.assertEqual(2, rejected.returncode)
+            self.assertIn("ambiguous temporary residue", rejected.stderr)
+            self.assertNotIn(body.decode().strip(), rejected.stderr)
+            self.assertFalse(any(path.name.endswith(".json") for path in transaction_commitment_path(first_description).parent.iterdir()))
+
+    def test_orphan_transfer_requires_manager_bytes_to_have_advanced(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            case, manager, owner = active_manager_fixture(tmp_path, body=b"unused\n")
+            body = b"owner never advanced\n"
+            first = allocate_report_draft(case, body)
+            second = allocate_report_draft(case, body)
+            self.addCleanup(first.unlink, missing_ok=True)
+            self.addCleanup(second.unlink, missing_ok=True)
+            case.env["OMO_REPORT_ACK_TIMEOUT_S"] = "0"
+            self.assertEqual(0, run_report_from(case, first).returncode)
+            manager.write_bytes(owner)
+
+            rejected = run_report_from(case, second, describe=True)
+
+            self.assertEqual(2, rejected.returncode, rejected.stdout + rejected.stderr)
+            self.assertIn("bound to a different allocation", rejected.stderr)
+            self.assertNotIn("transfer-", rejected.stdout)
+
+    def test_orphan_transfer_rejects_predecessor_commitment_with_public_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            case, manager, owner = active_manager_fixture(tmp_path, body=b"unused\n")
+            body = b"public predecessor commitment\n"
+            first = allocate_report_draft(case, body)
+            second = allocate_report_draft(case, body)
+            self.addCleanup(first.unlink, missing_ok=True)
+            self.addCleanup(second.unlink, missing_ok=True)
+            case.env["OMO_REPORT_ACK_TIMEOUT_S"] = "0"
+            description = json.loads(run_report_from(case, first, describe=True).stdout)
+            self.assertEqual(0, run_report_from(case, first).returncode)
+            transaction_commitment_path(description).chmod(0o644)
+            manager.write_bytes(owner + b"manager lifecycle update\n")
+
+            rejected = run_report_from(case, second, describe=True)
+
+            self.assertEqual(2, rejected.returncode)
+            self.assertIn("invalid mode", rejected.stderr)
+
+    def test_orphan_transfer_rejects_a_second_unreachable_pending_namespace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            case, manager, owner = active_manager_fixture(tmp_path, body=b"unused\n")
+            body = b"two unreachable pending namespaces\n"
+            drafts = [allocate_report_draft(case, body) for _ in range(3)]
+            for draft in drafts:
+                self.addCleanup(draft.unlink, missing_ok=True)
+            case.env["OMO_REPORT_ACK_TIMEOUT_S"] = "0"
+            self.assertEqual(0, run_report_from(case, drafts[0]).returncode)
+            manager.write_bytes(owner + b"first lifecycle update\n")
+            transferred = run_report_from(case, drafts[1])
+            self.assertEqual(0, transferred.returncode, transferred.stderr)
+            manager.write_bytes(owner + b"second lifecycle update\n")
+            commitment_directory = Path(case.env["XDG_STATE_HOME"]) / "omo-manager" / "report-receipts"
+            commitments_before = {path.name: path.read_bytes() for path in commitment_directory.glob("*.commitment")}
+
+            rejected = run_report_from(case, drafts[2], describe=True)
+
+            self.assertEqual(2, rejected.returncode)
+            self.assertIn("multiple pending predecessor transactions", rejected.stderr)
+            self.assertEqual(commitments_before, {path.name: path.read_bytes() for path in commitment_directory.glob("*.commitment")})
+
     def test_watcher_restart_keeps_first_commitment_and_single_delivery(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             case = fixture(Path(tmp), body=b"unused\n")
