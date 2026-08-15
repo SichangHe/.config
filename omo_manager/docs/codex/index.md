@@ -1,5 +1,7 @@
 # Codex helpers
 
+- `cligate-quota-planning.md`
+  - quota planning check before large OpenAI/Codex work
 - `live-model-switch.md`
   - manual live-session model switching reference
 - `main-manager-model-recovery.md`

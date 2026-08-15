@@ -1,7 +1,3 @@
-Draft status: not approved. Managers must not use the proposed instruction below until the Human approves it.
-
-Proposed persistent instruction:
-
 Before starting quota-heavy OpenAI/Codex work on this host, such as long-running or multi-agent work, read CliGate quota help:
 
 `curl -sS 'http://127.0.0.1:18181/api/quota/help'`
