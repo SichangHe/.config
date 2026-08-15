@@ -1190,6 +1190,60 @@ class ReportReceiptTests(unittest.TestCase):
             self.assertNotEqual(description["receipt"]["replay_id"], churned_description["receipt"]["replay_id"])
             self.assertFalse(transfer_envelope.exists())
 
+    def test_orphan_transfer_reconstructs_predecessor_temporaries_across_helper_upgrade(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            case, manager, owner = active_manager_fixture(tmp_path, body=b"unused\n")
+            body = b"helper-upgrade orphan transfer\n"
+            first = allocate_report_draft(case, body)
+            second = allocate_report_draft(case, body)
+            self.addCleanup(first.unlink, missing_ok=True)
+            self.addCleanup(second.unlink, missing_ok=True)
+            report = copy_report_helper(tmp_path)
+            case.env["OMO_REPORT_ACK_TIMEOUT_S"] = "0"
+            first_description = json.loads(run_report_from(case, first, describe=True, report=report).stdout)
+            pending = run_report_from(case, first, report=report)
+            self.assertEqual(0, pending.returncode, pending.stderr)
+            receiver = report.parent / "omo_report_receipt.py"
+            receiver.write_text(receiver.read_text(encoding="utf-8") + "\n# reviewed helper upgrade\n", encoding="utf-8")
+            manager.write_bytes(owner + b"concurrent manager lifecycle update\n")
+
+            described = run_report_from(case, second, describe=True, report=report)
+
+            self.assertEqual(0, described.returncode, described.stderr)
+            description = json.loads(described.stdout)
+            self.assertNotEqual(first_description["receipt"]["replay_id"], description["receipt"]["replay_id"])
+            self.assertIn(".transfer-", Path(description["files"]["private_envelope"]).name)
+            self.assertFalse(Path(description["files"]["private_envelope"]).exists())
+
+    def test_orphan_transfer_reconstructs_transferred_predecessor_ack_temporaries_after_upgrade(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            case, manager, owner = active_manager_fixture(tmp_path, body=b"unused\n")
+            body = b"transferred helper-upgrade orphan\n"
+            drafts = [allocate_report_draft(case, body) for _ in range(3)]
+            for draft in drafts:
+                self.addCleanup(draft.unlink, missing_ok=True)
+            report = copy_report_helper(tmp_path)
+            case.env["OMO_REPORT_ACK_TIMEOUT_S"] = "0"
+            first_description = json.loads(run_report_from(case, drafts[0], describe=True, report=report).stdout)
+            self.assertEqual(0, run_report_from(case, drafts[0], report=report).returncode)
+            manager.write_bytes(owner + b"first lifecycle update\n")
+            transferred_description = json.loads(run_report_from(case, drafts[1], describe=True, report=report).stdout)
+            transferred = run_report_from(case, drafts[1], report=report)
+            self.assertEqual(0, transferred.returncode, transferred.stderr)
+            transaction_commitment_path(first_description).unlink()
+            receiver = report.parent / "omo_report_receipt.py"
+            receiver.write_text(receiver.read_text(encoding="utf-8") + "\n# second reviewed helper upgrade\n", encoding="utf-8")
+            manager.write_bytes(owner + b"second lifecycle update\n")
+
+            described = run_report_from(case, drafts[2], describe=True, report=report)
+
+            self.assertEqual(0, described.returncode, described.stderr)
+            description = json.loads(described.stdout)
+            self.assertNotEqual(transferred_description["receipt"]["replay_id"], description["receipt"]["replay_id"])
+            self.assertIn(".transfer-", Path(description["files"]["private_envelope"]).name)
+
     def test_orphan_transfer_rejects_any_predecessor_temporary_residue(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

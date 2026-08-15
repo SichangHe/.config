@@ -272,13 +272,20 @@ def orphan_transfer_plan(plan: Plan) -> Plan:
         replay_id=replay_id,
         owner_prefix=old_owner,
         envelope_final=old_envelope,
+        envelope_temporary=plan.envelope_directory / f".{old_envelope.name}.{replay_id}.tmp",
         pointer=old_pointer,
         acknowledgment_key=old_ack_key,
+        manager_watcher_temporary=watcher_report_manager_temporary(plan.manager, old_ack_key),
+        acknowledgment_temporary=watcher_report_state_temporary(plan.acknowledgment_state, old_ack_key),
         acknowledgment_authority_lock=old_authority_lock,
         acknowledgment_authority_completion=old_authority_lock.with_name(f"{old_authority_lock.name}.complete"),
         transaction_commitment_final=old_commitment,
+        transaction_commitment_temporary=plan.receipt_directory / f".{replay_id}.commitment.tmp",
         receipt_final=old_receipt,
+        receipt_temporary=plan.receipt_directory / f".{replay_id}.tmp",
         receipt_publication_final=old_publication,
+        receipt_publication_temporary=plan.receipt_directory / f".{replay_id}.publication.tmp",
+        manager_temporary=plan.manager.parent / f".{plan.manager.name}.omo-report-{replay_id}.tmp",
     )
     if any(os.path.lexists(path) for path in (old_receipt, old_publication, old_plan.acknowledgment_authority_completion)):
         return plan
@@ -328,13 +335,16 @@ def orphan_transfer_plan(plan: Plan) -> Plan:
             route_locks=old_route_locks,
             task_lock=next(lock for target, lock in old_route_locks if target == plan.manager),
         )
-        _ = validate_transaction_commitment_bytes(
-            old_plan,
-            regular_file_bytes(old_commitment, maximum=MAX_RECEIPT_BYTES, field="historical transaction commitment"),
-            require_current_allocation_identity=True,
-            require_current_route_evidence=False,
-        )
-        _ = validate_envelope(old_plan)
+        try:
+            _ = validate_transaction_commitment_bytes(
+                old_plan,
+                regular_file_bytes(old_commitment, maximum=MAX_RECEIPT_BYTES, field="historical transaction commitment"),
+                require_current_allocation_identity=True,
+                require_current_route_evidence=False,
+            )
+            _ = validate_envelope(old_plan)
+        except ReceiptError as exc:
+            raise ReceiptError(f"orphan predecessor validation failed: {exc}") from exc
     finally:
         os.close(snapshot_fd)
 
@@ -382,6 +392,7 @@ def orphan_transfer_plan(plan: Plan) -> Plan:
         envelope_temporary=plan.envelope_directory / f".{new_envelope.name}.{new_replay}.tmp",
         pointer=new_pointer,
         acknowledgment_key=new_ack_key,
+        manager_watcher_temporary=watcher_report_manager_temporary(plan.manager, new_ack_key),
         acknowledgment_temporary=watcher_report_state_temporary(plan.acknowledgment_state, new_ack_key),
         acknowledgment_authority_lock=new_authority_lock,
         acknowledgment_authority_completion=new_authority_lock.with_name(f"{new_authority_lock.name}.complete"),
