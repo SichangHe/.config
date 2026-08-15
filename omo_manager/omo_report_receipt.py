@@ -60,6 +60,9 @@ OWNER_PREFIX_LINE_RE = re.compile(
     r"size-bytes=(0|[1-9][0-9]*) separator-bytes=([12])\]$"
 )
 VOLATILE_REPLAY_ROUTING_KEYS = frozenset({"route_evidence", "route_evidence_sha256", "route_local_date", "tmux"})
+ACTIVE_MANAGER_STATUSES = frozenset({"running", "long_running", "blocked"})
+RUNNING_MANAGER_STATUSES = frozenset({"running", "long_running"})
+MANAGER_ROUTE_SELECTIONS = frozenset({"not-applicable", "sole-active", "sole-running"})
 
 
 class ReceiptError(RuntimeError):
@@ -104,6 +107,8 @@ class Arguments:
     route_note: str
     task_route_evidence: str
     manager_route_evidence: str
+    manager_route_selection: str
+    manager_frontmatter_sha256: str
     route_local_date: str
     status: str
     message_file: Path
@@ -133,6 +138,9 @@ class Plan:
     report_context: dict[str, object]
     routing: dict[str, object]
     route_evidence: tuple[dict[str, object], ...]
+    manager_route_selection: str
+    manager_frontmatter_sha256: str
+    description_manager_snapshot: bytes | None
     route_locks: tuple[tuple[Path, Path], ...]
     helper: dict[str, object]
     replay_id: str
@@ -174,6 +182,8 @@ def parse_args(argv: list[str] | None = None) -> Arguments:
     _ = parser.add_argument("--route-note", required=True)
     _ = parser.add_argument("--task-route-evidence", required=True)
     _ = parser.add_argument("--manager-route-evidence", required=True)
+    _ = parser.add_argument("--manager-route-selection", required=True, choices=sorted(MANAGER_ROUTE_SELECTIONS))
+    _ = parser.add_argument("--manager-frontmatter-sha256", required=True)
     _ = parser.add_argument("--route-local-date", required=True)
     _ = parser.add_argument("--status", required=True)
     _ = parser.add_argument("--message-file", required=True, type=Path)
@@ -197,6 +207,8 @@ def parse_args(argv: list[str] | None = None) -> Arguments:
         parsed.route_note,
         parsed.task_route_evidence,
         parsed.manager_route_evidence,
+        parsed.manager_route_selection,
+        parsed.manager_frontmatter_sha256,
         parsed.route_local_date,
         parsed.status,
         parsed.message_file,
@@ -544,6 +556,63 @@ def route_evidence_state(path: Path) -> dict[str, object]:
     }
 
 
+def route_evidence_for_payload(path: Path, payload: bytes) -> dict[str, object]:
+    return {
+        "exists": True,
+        "path": str(path),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "size_bytes": len(payload),
+    }
+
+
+def frontmatter_snapshot(payload: bytes) -> tuple[dict[str, str], str] | None:
+    try:
+        exact_lines = payload.decode("utf-8").splitlines(keepends=True)
+    except UnicodeDecodeError:
+        return None
+    lines = [line.rstrip("\r\n") for line in exact_lines]
+    if not lines or lines[0].strip() != "---":
+        return None
+    try:
+        end = next(index for index, line in enumerate(lines[1:], start=1) if line.strip() == "---")
+    except StopIteration:
+        return None
+    values: dict[str, str] = {}
+    for line in lines[1:end]:
+        if not line or line.startswith("  - "):
+            continue
+        key, separator, value = line.partition(":")
+        if separator:
+            values[key.strip()] = value.strip()
+    digest = hashlib.sha256("".join(exact_lines[: end + 1]).encode()).hexdigest()
+    return values, digest
+
+
+def manager_route_selection_matches(
+    payload: bytes,
+    *,
+    resolved_target: str,
+    selection: str,
+    frontmatter_sha256: str,
+) -> bool:
+    snapshot = frontmatter_snapshot(payload)
+    if snapshot is None:
+        return False
+    metadata, current_frontmatter_sha256 = snapshot
+    if current_frontmatter_sha256 != frontmatter_sha256 or metadata.get("is_manager") != "true":
+        return False
+    status = metadata.get("status", "")
+    if status not in ACTIVE_MANAGER_STATUSES:
+        return False
+    try:
+        runat = canonical_target(metadata.get("runat", ""), required=True, field="manager run target")
+    except ReceiptError:
+        return False
+    if runat != resolved_target:
+        return False
+    return selection == "sole-active" or (selection == "sole-running" and status in RUNNING_MANAGER_STATUSES)
+
+
 def validate_route_snapshot(plan: Plan, *, ignore: frozenset[Path] = frozenset()) -> None:
     if datetime.now().astimezone().strftime("%Y-%m-%d") != plan.routing["route_local_date"]:
         raise ReceiptError("route date changed during submission")
@@ -595,6 +664,70 @@ def owner_prefix_record(binding: OwnerPrefixBinding) -> dict[str, object]:
         "sha256": binding.sha256,
         "size_bytes": binding.size_bytes,
     }
+
+
+def rebind_fresh_description_manager(plan: Plan) -> Plan:
+    """Bind a fresh read-only description to one coherent manager snapshot."""
+    validate_private_layout(plan)
+    if (
+        plan.envelope_final.exists()
+        or plan.transaction_commitment_final.exists()
+        or plan.receipt_final.exists()
+        or plan.receipt_publication_final.exists()
+    ):
+        raise ReceiptError("manager bytes differ from the bound report transaction")
+    reject_pending_allocation_rebind(plan)
+    current_manager = manager_bytes(plan.manager)
+    if plan.routing["route_kind"] != "active-manager-task" or not manager_route_selection_matches(
+        current_manager,
+        resolved_target=str(plan.routing["resolved_manager_target"]),
+        selection=plan.manager_route_selection,
+        frontmatter_sha256=plan.manager_frontmatter_sha256,
+    ):
+        raise ReceiptError("manager routing identity changed before description")
+
+    manager_evidence = route_evidence_for_payload(plan.manager, current_manager)
+    current_evidence = tuple(
+        manager_evidence if Path(str(item["path"])) == plan.manager else item
+        for item in plan.route_evidence
+    )
+    routing = {
+        **plan.routing,
+        "route_evidence": list(current_evidence),
+        "route_evidence_sha256": hashlib.sha256(canonical_json(list(current_evidence)).rstrip(b"\n")).hexdigest(),
+    }
+    owner_prefix = OwnerPrefixBinding(
+        hashlib.sha256(str(plan.manager).encode()).hexdigest(),
+        hashlib.sha256(current_manager).hexdigest(),
+        len(current_manager),
+        1 if not current_manager or current_manager.endswith(b"\n") else 2,
+    )
+    binding = {
+        "helper": plan.helper,
+        "input": plan.input_info,
+        "owner_prefix": owner_prefix_record(owner_prefix),
+        "report_context": plan.report_context,
+        "routing": replay_routing_identity(routing),
+        "schema": BINDING_SCHEMA,
+        "status": plan.status,
+    }
+    replay_id = hashlib.sha256(canonical_json(binding).rstrip(b"\n")).hexdigest()
+    return replace(
+        plan,
+        routing=routing,
+        route_evidence=current_evidence,
+        owner_prefix=owner_prefix,
+        replay_id=replay_id,
+        description_manager_snapshot=current_manager,
+        manager_temporary=plan.manager.parent / f".{plan.manager.name}.omo-report-{replay_id}.tmp",
+        envelope_temporary=plan.envelope_directory / f".{plan.envelope_final.name}.{replay_id}.tmp",
+        transaction_commitment_temporary=plan.receipt_directory / f".{replay_id}.commitment.tmp",
+        transaction_commitment_final=plan.receipt_directory / f"{replay_id}.commitment",
+        receipt_temporary=plan.receipt_directory / f".{replay_id}.tmp",
+        receipt_final=plan.receipt_directory / f"{replay_id}.json",
+        receipt_publication_temporary=plan.receipt_directory / f".{replay_id}.publication.tmp",
+        receipt_publication_final=plan.receipt_directory / f"{replay_id}.publication.json",
+    )
 
 
 def owner_prefix_line(binding: OwnerPrefixBinding) -> str:
@@ -725,6 +858,13 @@ def _build_plan_from_message(
         manager=manager,
         route_kind=args.route_kind,
     )
+    if args.route_kind == "active-manager-task":
+        if args.manager_route_selection not in {"sole-active", "sole-running"}:
+            raise ReceiptError("active manager route selection is invalid")
+        if HASH_RE.fullmatch(args.manager_frontmatter_sha256) is None:
+            raise ReceiptError("active manager frontmatter binding is invalid")
+    elif args.manager_route_selection != "not-applicable" or args.manager_frontmatter_sha256 != "not-applicable":
+        raise ReceiptError("manager route selection is inconsistent")
 
     try:
         message_text = message.decode("utf-8")
@@ -851,6 +991,9 @@ def _build_plan_from_message(
         report_context=report_context,
         routing=routing,
         route_evidence=route_evidence,
+        manager_route_selection=args.manager_route_selection,
+        manager_frontmatter_sha256=args.manager_frontmatter_sha256,
+        description_manager_snapshot=None,
         route_locks=route_locks,
         helper=helper,
         replay_id=replay_id,
@@ -2098,6 +2241,8 @@ def validate_consistency(
     plan: Plan,
     receipt_payload: bytes | None,
     acknowledgment: dict[str, object] | None,
+    *,
+    manager_snapshot: bytes | None = None,
 ) -> tuple[bool, str]:
     envelope_exists = validate_optional_regular(plan.envelope_final, "private envelope", exact_mode=0o600)
     if plan.transaction_commitment_final.exists():
@@ -2106,7 +2251,7 @@ def validate_consistency(
             require_current_allocation_identity=receipt_payload is None,
             require_current_route_evidence=receipt_payload is None,
         )
-    manager_payload = manager_bytes(plan.manager)
+    manager_payload = manager_bytes(plan.manager) if manager_snapshot is None else manager_snapshot
     pointer = pointer_state(manager_payload, plan)
     if pointer == "legacy-active":
         raise ReceiptError("legacy report marker cannot establish receipt acceptance")
@@ -2812,22 +2957,47 @@ def public_preflight_binding(plan: Plan, transaction: dict[str, object] | None =
 
 def description(plan: Plan) -> dict[str, object]:
     validate_helper_snapshot(plan)
-    try:
-        validate_route_snapshot(plan)
-    except ReceiptError as exc:
-        if str(exc) != "route evidence changed before acceptance":
-            raise
-        raise RetryableDescriptionError(str(exc)) from exc
+    with ExitStack() as route_locks:
+        for _, lock_path in plan.route_locks:
+            route_locks.enter_context(task_file_lock_at_path(lock_path))
+        try:
+            validate_route_snapshot(plan)
+        except ReceiptError as exc:
+            if str(exc) != "route evidence changed before acceptance":
+                raise
+            try:
+                validate_route_snapshot(plan, ignore=frozenset({plan.manager}))
+            except ReceiptError as route_exc:
+                if str(route_exc) != "route evidence changed before acceptance":
+                    raise
+                raise RetryableDescriptionError(str(route_exc)) from route_exc
+            if plan.routing["route_kind"] != "active-manager-task":
+                raise RetryableDescriptionError(str(exc)) from exc
+            plan = rebind_fresh_description_manager(plan)
+        return description_under_route_locks(plan)
+
+
+def description_under_route_locks(plan: Plan) -> dict[str, object]:
     historical = plan_for_historical_commitment(plan)
     if historical is not plan and historical.receipt_final.exists():
         plan = historical
     validate_private_layout(plan)
     receipt_payload = read_existing_receipt(plan)
     publication_payload = read_existing_receipt_publication(plan, receipt_payload)
-    available, pointer = validate_consistency(plan, receipt_payload, None)
+    available, pointer = validate_consistency(
+        plan,
+        receipt_payload,
+        None,
+        manager_snapshot=plan.description_manager_snapshot,
+    )
     acknowledgment = None if receipt_payload is not None else read_manager_acknowledgment(plan)
     if acknowledgment is not None:
-        available, pointer = validate_consistency(plan, receipt_payload, acknowledgment)
+        available, pointer = validate_consistency(
+            plan,
+            receipt_payload,
+            acknowledgment,
+            manager_snapshot=plan.description_manager_snapshot,
+        )
     existing_receipt = json.loads(receipt_payload) if receipt_payload is not None else None
     recorded_preflight = existing_receipt.get("preflight") if isinstance(existing_receipt, dict) else None
     if receipt_payload is None:

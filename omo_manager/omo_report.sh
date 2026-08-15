@@ -327,7 +327,8 @@ def parse_frontmatter(path: Path) -> dict[str, str] | None:
     text = route_text(path)
     if text is None:
         return None
-    lines = text.splitlines()
+    exact_lines = text.splitlines(keepends=True)
+    lines = [line.rstrip("\r\n") for line in exact_lines]
     if not lines or lines[0].strip() != "---":
         return None
     try:
@@ -480,6 +481,7 @@ ACTIVE_MANAGER_STATUSES = {"running", "long_running", "blocked"}
 RUNNING_MANAGER_STATUSES = {"running", "long_running"}
 MAX_ROUTE_FILE_BYTES = 64 * 1024 * 1024
 route_evidence: dict[str, dict[str, object]] = {}
+frontmatter_sha256: dict[str, str] = {}
 route_local_date = datetime.now().astimezone().strftime("%Y-%m-%d")
 
 def route_text(path: Path) -> str | None:
@@ -551,13 +553,15 @@ def parse_frontmatter(path: Path) -> dict[str, str] | None:
     text = route_text(path)
     if text is None:
         return None
-    lines = text.splitlines()
+    exact_lines = text.splitlines(keepends=True)
+    lines = [line.rstrip("\r\n") for line in exact_lines]
     if not lines or lines[0].strip() != "---":
         return None
     try:
         end = next(idx for idx, line in enumerate(lines[1:], start=1) if line.strip() == "---")
     except StopIteration:
         return None
+    frontmatter_sha256[str(path.absolute())] = hashlib.sha256("".join(exact_lines[: end + 1]).encode()).hexdigest()
     values: dict[str, str] = {}
     for line in lines[1:end]:
         if not line or line.startswith("  - "):
@@ -570,7 +574,15 @@ def parse_frontmatter(path: Path) -> dict[str, str] | None:
 def main_manager_file() -> Path:
     return root / f"work_manager_{route_local_date}.md"
 
-def print_route(path: Path, note: str, requested: str, resolved: str, kind: str) -> None:
+def print_route(
+    path: Path,
+    note: str,
+    requested: str,
+    resolved: str,
+    kind: str,
+    manager_selection: str = "not-applicable",
+    manager_frontmatter_sha256: str = "not-applicable",
+) -> None:
     print(path)
     print(note)
     print(requested)
@@ -578,6 +590,8 @@ def print_route(path: Path, note: str, requested: str, resolved: str, kind: str)
     print(kind)
     print(evidence_json())
     print(route_local_date)
+    print(manager_selection)
+    print(manager_frontmatter_sha256)
 
 def active_task_refs() -> list[tuple[Path, tuple[str, ...]]]:
     todo = root / "TODO.md"
@@ -628,8 +642,8 @@ if same_tmux_target(managerat, main_target):
 if is_named_main_manager_target(managerat):
     print_route(main_manager_file(), "", managerat, main_target or managerat, "named-main-manager")
     raise SystemExit(0)
-manager_matches: list[tuple[Path, str]] = []
-running_manager_matches: list[tuple[Path, str]] = []
+manager_matches: list[tuple[Path, str, str, str]] = []
+running_manager_matches: list[tuple[Path, str, str, str]] = []
 for candidate, listed_targets in active_task_refs():
     if listed_targets and not any(same_tmux_target(target, managerat) for target in listed_targets):
         continue
@@ -639,19 +653,20 @@ for candidate, listed_targets in active_task_refs():
         continue
     runat = candidate_metadata.get("runat", "")
     if same_tmux_target(runat, managerat):
-        manager_matches.append((candidate, runat))
+        metadata_sha256 = frontmatter_sha256[str(candidate.absolute())]
+        manager_matches.append((candidate, runat, status, metadata_sha256))
         if status in RUNNING_MANAGER_STATUSES:
-            running_manager_matches.append((candidate, runat))
+            running_manager_matches.append((candidate, runat, status, metadata_sha256))
 if len(manager_matches) == 1:
-    candidate, runat = manager_matches[0]
-    print_route(candidate, "", managerat, runat, "active-manager-task")
+    candidate, runat, _status, metadata_sha256 = manager_matches[0]
+    print_route(candidate, "", managerat, runat, "active-manager-task", "sole-active", metadata_sha256)
     raise SystemExit(0)
 if len(manager_matches) > 1:
     if len(running_manager_matches) == 1:
-        candidate, runat = running_manager_matches[0]
-        print_route(candidate, "", managerat, runat, "active-manager-task")
+        candidate, runat, _status, metadata_sha256 = running_manager_matches[0]
+        print_route(candidate, "", managerat, runat, "active-manager-task", "sole-running", metadata_sha256)
         raise SystemExit(0)
-    choices = ", ".join(str(candidate.relative_to(root)) for candidate, _ in manager_matches)
+    choices = ", ".join(str(candidate.relative_to(root)) for candidate, _, _, _ in manager_matches)
     print(f"multiple active manager task files match tmux target {managerat}: {choices}", file=sys.stderr)
     raise SystemExit(2)
 note = f"Target manager `{managerat}` has no active manager task file. Main manager: find where that manager moved or reassign this report."
@@ -659,7 +674,7 @@ print_route(main_manager_file(), note, managerat, main_target, "main-manager-fal
 PY
 )
 mapfile -t append_fields <<<"$append_info"
-if [ "${#append_fields[@]}" -ne 7 ]; then echo "report route resolution returned incomplete evidence" >&2; exit 2; fi
+if [ "${#append_fields[@]}" -ne 9 ]; then echo "report route resolution returned incomplete evidence" >&2; exit 2; fi
 append_path_real="${append_fields[0]}"
 route_note="${append_fields[1]}"
 requested_manager_target="${append_fields[2]}"
@@ -667,6 +682,8 @@ resolved_manager_target="${append_fields[3]}"
 route_kind="${append_fields[4]}"
 manager_route_evidence="${append_fields[5]}"
 route_local_date="${append_fields[6]}"
+manager_route_selection="${append_fields[7]}"
+manager_frontmatter_sha256="${append_fields[8]}"
 case "$append_path_real" in "$task_root_real"/*) ;; *) echo "report route escapes root" >&2; exit 2 ;; esac
 tmux_target="${TMUX_PANE:-}"
 tmux_info=""
@@ -710,6 +727,8 @@ exec env "${receiver_environment[@]}" python3 -I -S - "$receiver_path" "$pending
   --route-note "$route_note" \
   --task-route-evidence "$task_route_evidence" \
   --manager-route-evidence "$manager_route_evidence" \
+  --manager-route-selection "$manager_route_selection" \
+  --manager-frontmatter-sha256 "$manager_frontmatter_sha256" \
   --route-local-date "$route_local_date" \
   --status "$status" \
   --message-file "$message_file" \

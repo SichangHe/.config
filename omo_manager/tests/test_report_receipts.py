@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from dataclasses import dataclass, replace
@@ -300,24 +301,22 @@ def copy_report_helper(tmp_path: Path) -> Path:
 def install_description_route_barrier(report: Path) -> None:
     receiver = report.parent / "omo_report_receipt.py"
     source = receiver.read_text(encoding="utf-8")
-    marker = """def description(plan: Plan) -> dict[str, object]:
-    validate_helper_snapshot(plan)
-    try:
+    marker = """        try:
+            validate_route_snapshot(plan)
 """
-    injection = """def description(plan: Plan) -> dict[str, object]:
-    validate_helper_snapshot(plan)
-    ready_raw = os.environ.get("OMO_TEST_DESCRIPTION_ROUTE_READY")
-    release_raw = os.environ.get("OMO_TEST_DESCRIPTION_ROUTE_RELEASE")
-    if ready_raw and release_raw and not Path(release_raw).exists():
-        with Path(ready_raw).open("ab", buffering=0) as stream:
-            stream.write(b"ready\\n")
-            os.fsync(stream.fileno())
-        deadline = time.monotonic() + 5
-        while not Path(release_raw).exists():
-            if time.monotonic() >= deadline:
-                raise ReceiptError("description route barrier timed out")
-            time.sleep(0.01)
-    try:
+    injection = """        ready_raw = os.environ.get("OMO_TEST_DESCRIPTION_ROUTE_READY")
+        release_raw = os.environ.get("OMO_TEST_DESCRIPTION_ROUTE_RELEASE")
+        if ready_raw and release_raw and not Path(release_raw).exists():
+            with Path(ready_raw).open("ab", buffering=0) as stream:
+                stream.write(b"ready\\n")
+                os.fsync(stream.fileno())
+            deadline = time.monotonic() + 5
+            while not Path(release_raw).exists():
+                if time.monotonic() >= deadline:
+                    raise ReceiptError("description route barrier timed out")
+                time.sleep(0.01)
+        try:
+            validate_route_snapshot(plan)
 """
     if marker not in source:
         raise AssertionError("description route barrier marker is missing")
@@ -327,21 +326,38 @@ def install_description_route_barrier(report: Path) -> None:
 def install_description_route_churn(report: Path) -> None:
     receiver = report.parent / "omo_report_receipt.py"
     source = receiver.read_text(encoding="utf-8")
-    marker = """def description(plan: Plan) -> dict[str, object]:
-    validate_helper_snapshot(plan)
-    try:
+    marker = """        try:
+            validate_route_snapshot(plan)
 """
-    injection = """def description(plan: Plan) -> dict[str, object]:
-    validate_helper_snapshot(plan)
-    if os.environ.get("OMO_TEST_DESCRIPTION_ROUTE_CHURN") == "1":
-        attempt = os.environ.get("OMO_REPORT_DESCRIPTION_ROUTE_ATTEMPT", "0")
-        with plan.manager.open("ab", buffering=0) as stream:
-            stream.write(f"manager churn attempt {attempt}\\n".encode())
-            os.fsync(stream.fileno())
-    try:
+    injection = """        if os.environ.get("OMO_TEST_DESCRIPTION_ROUTE_CHURN") == "1":
+            attempt = os.environ.get("OMO_REPORT_DESCRIPTION_ROUTE_ATTEMPT", "0")
+            with plan.manager.open("ab", buffering=0) as stream:
+                stream.write(f"manager churn attempt {attempt}\\n".encode())
+                os.fsync(stream.fileno())
+        try:
+            validate_route_snapshot(plan)
 """
     if marker not in source:
         raise AssertionError("description route churn marker is missing")
+    receiver.write_text(source.replace(marker, injection, 1), encoding="utf-8")
+
+
+def install_description_non_manager_route_churn(report: Path) -> None:
+    receiver = report.parent / "omo_report_receipt.py"
+    source = receiver.read_text(encoding="utf-8")
+    marker = """        try:
+            validate_route_snapshot(plan)
+"""
+    injection = """        if os.environ.get("OMO_TEST_DESCRIPTION_TASK_ROUTE_CHURN") == "1":
+            attempt = os.environ.get("OMO_REPORT_DESCRIPTION_ROUTE_ATTEMPT", "0")
+            with plan.task.open("ab", buffering=0) as stream:
+                stream.write(f"task route churn attempt {attempt}\\n".encode())
+                os.fsync(stream.fileno())
+        try:
+            validate_route_snapshot(plan)
+"""
+    if marker not in source:
+        raise AssertionError("description non-manager route churn marker is missing")
     receiver.write_text(source.replace(marker, injection, 1), encoding="utf-8")
 
 
@@ -1278,6 +1294,269 @@ class ReportReceiptTests(unittest.TestCase):
             self.assertNotIn(body.decode().strip(), stdout + stderr)
             self.assertNotIn(str(draft), stdout + stderr)
 
+    def test_fresh_describe_survives_manager_changes_across_allocate_write_and_describe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            case, manager, owner = active_manager_fixture(tmp_path)
+            report = copy_report_helper(tmp_path)
+            stop = threading.Event()
+            ready = threading.Event()
+            observed: set[tuple[str, int]] = set()
+            churn_errors: list[BaseException] = []
+
+            def churn_manager() -> None:
+                replacement = manager.with_name(f".{manager.name}.full-interval-churn")
+                sequence = 0
+                try:
+                    while not stop.is_set():
+                        payload = owner + f"manager full interval churn {sequence}\n".encode()
+                        replacement.write_bytes(payload)
+                        replacement.replace(manager)
+                        observed.add((hashlib.sha256(payload).hexdigest(), len(payload)))
+                        sequence += 1
+                        if sequence >= 2:
+                            ready.set()
+                        time.sleep(0.002)
+                except BaseException as exc:
+                    churn_errors.append(exc)
+                    ready.set()
+
+            churn = threading.Thread(target=churn_manager, daemon=True)
+            churn.start()
+            try:
+                self.assertTrue(ready.wait(timeout=5), "manager churn did not start")
+                self.assertEqual([], churn_errors)
+                allocation_count = len(observed)
+                allocation = subprocess.run(
+                    [str(REPORT), "--alloc-message-file"],
+                    cwd=case.root.parent,
+                    env=case.env,
+                    text=True,
+                    capture_output=True,
+                    timeout=10,
+                    check=False,
+                )
+                self.assertEqual(0, allocation.returncode, allocation.stderr)
+                draft = Path(allocation.stdout.strip())
+                self.addCleanup(draft.unlink, missing_ok=True)
+                time.sleep(0.02)
+                self.assertGreater(len(observed), allocation_count)
+                body = b"full allocation draft describe manager churn\n"
+                draft.write_bytes(body)
+                write_count = len(observed)
+                time.sleep(0.02)
+                self.assertGreater(len(observed), write_count)
+                describe_count = len(observed)
+
+                described = run_report_from(case, draft, describe=True, report=report)
+                self.assertGreater(len(observed), describe_count)
+            finally:
+                stop.set()
+                churn.join(timeout=5)
+
+            self.assertEqual(0, described.returncode, described.stderr)
+            self.assertEqual([], churn_errors)
+            self.assertFalse(churn.is_alive())
+            description = json.loads(described.stdout)
+            owner_prefix = description["transaction"]["owner_prefix"]
+            self.assertIn(
+                (owner_prefix["sha256"], owner_prefix["size_bytes"]),
+                observed,
+            )
+            self.assertNotIn("(pending)", manager.read_text(encoding="utf-8"))
+            self.assertNotIn(body.decode().strip(), described.stdout + described.stderr)
+            self.assertFalse(Path(str(description["files"]["private_envelope"])).exists())
+            self.assertFalse(Path(str(description["files"]["private_receipt"])).exists())
+
+    def test_fresh_description_rejects_manager_route_identity_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            case, manager, _owner = active_manager_fixture(tmp_path)
+            body = b"manager route identity change stays fail closed\n"
+            draft = allocate_report_draft(case, body)
+            self.addCleanup(draft.unlink, missing_ok=True)
+            report = copy_report_helper(tmp_path)
+            install_description_route_barrier(report)
+            ready = tmp_path / "manager-route-identity-ready"
+            release = tmp_path / "manager-route-identity-release"
+            case.env["OMO_TEST_DESCRIPTION_ROUTE_READY"] = str(ready)
+            case.env["OMO_TEST_DESCRIPTION_ROUTE_RELEASE"] = str(release)
+            command = replace(case, message=draft).command(describe=True)
+            command[0] = str(report)
+            process = subprocess.Popen(
+                command,
+                cwd=case.root.parent,
+                env=case.env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            deadline = time.monotonic() + 5
+            while not ready.exists():
+                if time.monotonic() >= deadline:
+                    process.kill()
+                    raise AssertionError("description did not reach the route barrier")
+                time.sleep(0.01)
+            manager.write_text(frontmatter(runat="other:9", managerat="main:0.0", is_manager=True), encoding="utf-8")
+            release.write_text("release\n", encoding="utf-8")
+
+            stdout, stderr = process.communicate(timeout=10)
+
+            self.assertEqual(2, process.returncode)
+            self.assertEqual("", stdout)
+            self.assertIn("manager routing identity changed before description", stderr)
+            self.assertNotIn(body.decode().strip(), stderr)
+            self.assertNotIn(str(draft), stderr)
+            self.assertNotIn("(pending)", manager.read_text(encoding="utf-8"))
+            self.assertFalse(Path(f"{manager}.omo_report.lock").exists())
+
+    def test_fresh_description_rejects_manager_frontmatter_status_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            case, manager, owner = active_manager_fixture(tmp_path)
+            body = b"manager frontmatter status change stays fail closed\n"
+            draft = allocate_report_draft(case, body)
+            self.addCleanup(draft.unlink, missing_ok=True)
+            report = copy_report_helper(tmp_path)
+            install_description_route_barrier(report)
+            ready = tmp_path / "manager-frontmatter-status-ready"
+            release = tmp_path / "manager-frontmatter-status-release"
+            case.env["OMO_TEST_DESCRIPTION_ROUTE_READY"] = str(ready)
+            case.env["OMO_TEST_DESCRIPTION_ROUTE_RELEASE"] = str(release)
+            command = replace(case, message=draft).command(describe=True)
+            command[0] = str(report)
+            process = subprocess.Popen(
+                command,
+                cwd=case.root.parent,
+                env=case.env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            deadline = time.monotonic() + 5
+            while not ready.exists():
+                if time.monotonic() >= deadline:
+                    process.kill()
+                    raise AssertionError("description did not reach the frontmatter barrier")
+                time.sleep(0.01)
+            manager.write_bytes(owner.replace(b"status: running", b"status: blocked"))
+            release.write_text("release\n", encoding="utf-8")
+
+            stdout, stderr = process.communicate(timeout=10)
+
+            self.assertEqual(2, process.returncode)
+            self.assertEqual("", stdout)
+            self.assertIn("manager routing identity changed before description", stderr)
+            self.assertNotIn(body.decode().strip(), stderr)
+            self.assertNotIn(str(draft), stderr)
+            self.assertNotIn("(pending)", manager.read_text(encoding="utf-8"))
+            self.assertFalse(Path(f"{manager}.omo_report.lock").exists())
+
+    def test_fresh_description_rejects_frontmatter_newline_byte_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            case, manager, owner = active_manager_fixture(tmp_path)
+            body = b"manager frontmatter newline change stays fail closed\n"
+            draft = allocate_report_draft(case, body)
+            self.addCleanup(draft.unlink, missing_ok=True)
+            report = copy_report_helper(tmp_path)
+            install_description_route_barrier(report)
+            ready = tmp_path / "manager-frontmatter-newline-ready"
+            release = tmp_path / "manager-frontmatter-newline-release"
+            case.env["OMO_TEST_DESCRIPTION_ROUTE_READY"] = str(ready)
+            case.env["OMO_TEST_DESCRIPTION_ROUTE_RELEASE"] = str(release)
+            command = replace(case, message=draft).command(describe=True)
+            command[0] = str(report)
+            process = subprocess.Popen(
+                command,
+                cwd=case.root.parent,
+                env=case.env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            deadline = time.monotonic() + 5
+            while not ready.exists():
+                if time.monotonic() >= deadline:
+                    process.kill()
+                    raise AssertionError("description did not reach the newline barrier")
+                time.sleep(0.01)
+            manager.write_bytes(owner.replace(b"\n", b"\r\n") + b"manager body update\r\n")
+            release.write_text("release\n", encoding="utf-8")
+
+            stdout, stderr = process.communicate(timeout=10)
+
+            self.assertEqual(2, process.returncode)
+            self.assertEqual("", stdout)
+            self.assertIn("manager routing identity changed before description", stderr)
+            self.assertNotIn(body.decode().strip(), stderr)
+            self.assertNotIn(str(draft), stderr)
+            self.assertNotIn("(pending)", manager.read_text(encoding="utf-8"))
+
+    def test_fresh_description_rejects_original_replay_temporary_residue(self) -> None:
+        temporary_cases = {
+            "envelope": (0, "private envelope temporary file"),
+            "manager": (1, "manager temporary file"),
+            "receipt": (6, "receipt temporary file"),
+            "commitment": (7, "transaction commitment temporary file"),
+        }
+        for label, (temporary_index, expected_error) in temporary_cases.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp)
+                case, manager, owner = active_manager_fixture(tmp_path)
+                body = f"original replay {label} residue stays fail closed\n".encode()
+                draft = allocate_report_draft(case, body)
+                self.addCleanup(draft.unlink, missing_ok=True)
+                report = copy_report_helper(tmp_path)
+                install_description_route_barrier(report)
+                first = run_report_from(case, draft, describe=True, report=report)
+                self.assertEqual(0, first.returncode, first.stderr)
+                first_description = json.loads(first.stdout)
+                residue = Path(first_description["temporary_files"][temporary_index])
+                ready = tmp_path / f"original-{label}-residue-ready"
+                release = tmp_path / f"original-{label}-residue-release"
+                case.env["OMO_TEST_DESCRIPTION_ROUTE_READY"] = str(ready)
+                case.env["OMO_TEST_DESCRIPTION_ROUTE_RELEASE"] = str(release)
+                command = replace(case, message=draft).command(describe=True)
+                command[0] = str(report)
+                process = subprocess.Popen(
+                    command,
+                    cwd=case.root.parent,
+                    env=case.env,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                deadline = time.monotonic() + 5
+                while not ready.exists():
+                    if time.monotonic() >= deadline:
+                        process.kill()
+                        raise AssertionError("description did not reach the residue barrier")
+                    time.sleep(0.01)
+                residue.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                ancestor = residue.parent
+                while ancestor != tmp_path.parent:
+                    if ancestor.exists() and (ancestor == tmp_path or tmp_path in ancestor.parents):
+                        ancestor.chmod(0o700)
+                    if ancestor == tmp_path:
+                        break
+                    ancestor = ancestor.parent
+                residue.write_bytes(b"incomplete\n")
+                residue.chmod(0o600)
+                manager.write_bytes(owner + b"manager body update before rebind\n")
+                release.write_text("release\n", encoding="utf-8")
+                try:
+                    stdout, stderr = process.communicate(timeout=10)
+                finally:
+                    residue.unlink(missing_ok=True)
+
+                self.assertEqual(2, process.returncode)
+                self.assertEqual("", stdout)
+                self.assertIn(expected_error, stderr)
+                self.assertNotIn(body.decode().strip(), stderr)
+                self.assertNotIn(str(draft), stderr)
+                self.assertNotIn("(pending)", manager.read_text(encoding="utf-8"))
+
     def test_concurrent_fresh_describes_retry_one_manager_routing_advance(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -1312,12 +1591,12 @@ class ReportReceiptTests(unittest.TestCase):
                     ready_count = ready.read_text(encoding="utf-8").count("ready\n")
                 except FileNotFoundError:
                     ready_count = 0
-                if ready_count == len(processes):
+                if ready_count >= 1:
                     break
                 if time.monotonic() >= deadline:
                     for process in processes:
                         process.kill()
-                    raise AssertionError("concurrent descriptions did not reach the route barrier")
+                    raise AssertionError("no concurrent description reached the route barrier")
                 time.sleep(0.01)
             advanced = owner + b"\none manager-owned advance for concurrent descriptions\n"
             manager.write_bytes(advanced)
@@ -1341,7 +1620,7 @@ class ReportReceiptTests(unittest.TestCase):
             self.assertNotIn("(pending)", manager.read_text(encoding="utf-8"))
             self.assertFalse(Path(f"{manager}.omo_report.lock").exists())
 
-    def test_repeated_fresh_description_route_advances_fail_closed(self) -> None:
+    def test_fresh_description_rebinds_manager_churn_under_route_lock(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             case, manager, owner = active_manager_fixture(tmp_path)
@@ -1354,13 +1633,44 @@ class ReportReceiptTests(unittest.TestCase):
 
             rejected = run_report_from(case, draft, describe=True, report=report)
 
+            self.assertEqual(0, rejected.returncode, rejected.stderr)
+            description = json.loads(rejected.stdout)
+            self.assertTrue(description["read_only"])
+            self.assertNotIn(body.decode().strip(), rejected.stdout + rejected.stderr)
+            self.assertNotIn(str(draft), rejected.stdout + rejected.stderr)
+            expected = owner + b"manager churn attempt 0\n"
+            self.assertEqual(
+                hashlib.sha256(expected).hexdigest(),
+                description["transaction"]["owner_prefix"]["sha256"],
+            )
+            self.assertEqual(expected, manager.read_bytes())
+            self.assertNotIn("(pending)", manager.read_text(encoding="utf-8"))
+            self.assertFalse(Path(f"{manager}.omo_report.lock").exists())
+            self.assertFalse((tmp_path / "state").exists())
+
+    def test_repeated_non_manager_description_route_advances_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            case, manager, owner = active_manager_fixture(tmp_path)
+            task = case.root / "worker.md"
+            task_owner = task.read_bytes()
+            body = b"repeated non-manager description route churn fails closed\n"
+            draft = allocate_report_draft(case, body)
+            self.addCleanup(draft.unlink, missing_ok=True)
+            report = copy_report_helper(tmp_path)
+            install_description_non_manager_route_churn(report)
+            case.env["OMO_TEST_DESCRIPTION_TASK_ROUTE_CHURN"] = "1"
+
+            rejected = run_report_from(case, draft, describe=True, report=report)
+
             self.assertEqual(2, rejected.returncode)
             self.assertEqual("", rejected.stdout)
             self.assertIn("report route did not stabilize during description", rejected.stderr)
             self.assertNotIn(body.decode().strip(), rejected.stderr)
             self.assertNotIn(str(draft), rejected.stderr)
-            expected = owner + b"".join(f"manager churn attempt {attempt}\n".encode() for attempt in range(8))
-            self.assertEqual(expected, manager.read_bytes())
+            expected_task = task_owner + b"".join(f"task route churn attempt {attempt}\n".encode() for attempt in range(8))
+            self.assertEqual(expected_task, task.read_bytes())
+            self.assertEqual(owner, manager.read_bytes())
             self.assertNotIn("(pending)", manager.read_text(encoding="utf-8"))
             self.assertFalse(Path(f"{manager}.omo_report.lock").exists())
             self.assertFalse((tmp_path / "state").exists())
