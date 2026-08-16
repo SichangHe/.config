@@ -6,6 +6,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+from contextlib import nullcontext
 from contextlib import redirect_stderr
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -17,6 +18,7 @@ from omo_manager.omo_task_status import DONE_REMINDER
 from omo_manager.omo_task_status import ensure_repository_closure_custody
 from omo_manager.omo_task_status import close_retired_done
 from omo_manager.omo_task_status import normalize_retired_todo
+from omo_manager.omo_task_status import normalize_low_priority_current
 from omo_manager.omo_task_status import finish_shared_target_done
 from omo_manager.omo_task_status import StopArgs
 from omo_manager.omo_task_status import parse_args
@@ -71,6 +73,125 @@ def task_frontmatter(
 
 
 class TaskStatusTests(unittest.TestCase):
+    def test_low_priority_current_normalization_promotes_only_one_exact_active_manager_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "manager.md"
+            text = task_frontmatter(status="long_running", runat="vl:2", managerat="vl:1", is_manager=True, pending_items=("keep ordered queue",)) + "body\n"
+            path.write_text(text, encoding="utf-8")
+            todo = root / "TODO.md"
+            todo.write_text("current:\nother.md vl:9\n\nlow priority:\nmanager.md vl:2\n\nhuman pending:\n\nprevious:\n", encoding="utf-8")
+            args = StatusArgs(root, Path("manager.md"), "", "", normalize_low_priority_current=True, active_target="vl:2", manager_target="vl:1", source_sha256=hashlib.sha256(text.encode()).hexdigest())
+
+            self.assertEqual(0, run(args))
+            self.assertEqual(text, path.read_text(encoding="utf-8"))
+            self.assertEqual("current:\nmanager.md vl:2\nother.md vl:9\n\nlow priority:\n\nhuman pending:\n\nprevious:\n", todo.read_text(encoding="utf-8"))
+
+    def test_low_priority_current_normalization_rejects_adversarial_task_and_todo_drift(self) -> None:
+        cases = (
+            ("digest", task_frontmatter(status="long_running", runat="vl:2", managerat="vl:1", is_manager=True), "low-priority normalization source bytes"),
+            ("status", task_frontmatter(status="blocked", blocked_on="human", runat="vl:2", managerat="vl:1", is_manager=True), "unchanged active v1 manager"),
+            ("target", task_frontmatter(status="long_running", runat="vl:3", managerat="vl:1", is_manager=True), "unchanged active v1 manager"),
+            ("manager", task_frontmatter(status="long_running", runat="vl:2", managerat="vl:3", is_manager=True), "unchanged active v1 manager"),
+            ("worker", task_frontmatter(status="long_running", runat="vl:2", managerat="vl:1"), "unchanged active v1 manager"),
+            ("pending", task_frontmatter(status="long_running", runat="vl:2", managerat="vl:1", is_manager=True) + "(pending)\n", "unchanged active v1 manager"),
+        )
+        for label, text, expected in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                path = root / "manager.md"
+                path.write_text(text, encoding="utf-8")
+                (root / "TODO.md").write_text("current:\n\nlow priority:\nmanager.md vl:2\n\nhuman pending:\n\nprevious:\n", encoding="utf-8")
+                digest = "0" * 64 if label == "digest" else hashlib.sha256(text.encode()).hexdigest()
+                args = StatusArgs(root, Path("manager.md"), "", "", normalize_low_priority_current=True, active_target="vl:2", manager_target="vl:1", source_sha256=digest)
+                with self.assertRaisesRegex(TaskFrontmatterError, expected):
+                    normalize_low_priority_current(args, path, text, path.stat())
+
+        todo_cases = (
+            ("missing", "current:\n\nlow priority:\n\nhuman pending:\n\nprevious:\n", "exactly one TODO row in low priority"),
+            ("duplicate", "current:\n\nlow priority:\nmanager.md vl:2\nmanager.md vl:2\n\nhuman pending:\n\nprevious:\n", "exactly one TODO row in low priority"),
+            ("wrong target", "current:\n\nlow priority:\nmanager.md vl:3\n\nhuman pending:\n\nprevious:\n", "exact active target"),
+            ("annotation", "current:\n\nlow priority:\nmanager.md vl:2 reviewer annotation\n\nhuman pending:\n\nprevious:\n", "sole canonical TODO row"),
+            ("backticks", "current:\n\nlow priority:\n`manager.md` vl:2\n\nhuman pending:\n\nprevious:\n", "sole canonical TODO row"),
+            ("whitespace", "current:\n\nlow priority:\n  manager.md vl:2  \n\nhuman pending:\n\nprevious:\n", "sole canonical TODO row"),
+            ("wrong section", "current:\nmanager.md vl:2\n\nlow priority:\n\nhuman pending:\n\nprevious:\n", "exactly one TODO row in low priority"),
+            ("human pending", "current:\n\nlow priority:\nmanager.md vl:2\n\nhuman pending:\nmanager.md vl:2\n\nprevious:\n", "exactly one TODO row in low priority"),
+            ("previous", "current:\n\nlow priority:\nmanager.md vl:2\n\nhuman pending:\n\nprevious:\nmanager.md vl:2\n", "exactly one TODO row in low priority"),
+        )
+        for label, todo_text, expected in todo_cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                path = root / "manager.md"
+                text = task_frontmatter(status="long_running", runat="vl:2", managerat="vl:1", is_manager=True)
+                path.write_text(text, encoding="utf-8")
+                (root / "TODO.md").write_text(todo_text, encoding="utf-8")
+                args = StatusArgs(root, Path("manager.md"), "", "", normalize_low_priority_current=True, active_target="vl:2", manager_target="vl:1", source_sha256=hashlib.sha256(text.encode()).hexdigest())
+                with self.assertRaisesRegex(TaskFrontmatterError, expected):
+                    normalize_low_priority_current(args, path, text, path.stat())
+
+    def test_low_priority_current_normalization_rechecks_locked_ownership_and_rejects_human_or_v2(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "manager.md"
+            text = task_frontmatter(status="long_running", runat="vl:2", managerat="vl:1", is_manager=True)
+            path.write_text(text, encoding="utf-8")
+            (root / "other.md").write_text(task_frontmatter(status="running", runat="vl:2", managerat="vl:1") + "body\n", encoding="utf-8")
+            (root / "TODO.md").write_text("current:\n\nlow priority:\nmanager.md vl:2\n\nhuman pending:\n\nprevious:\n", encoding="utf-8")
+            args = StatusArgs(root, Path("manager.md"), "", "", normalize_low_priority_current=True, active_target="vl:2", manager_target="vl:1", source_sha256=hashlib.sha256(text.encode()).hexdigest())
+            with self.assertRaisesRegex(TaskFrontmatterError, "sole active owner"):
+                normalize_low_priority_current(args, path, text, path.stat())
+
+            human_args = StatusArgs(root, Path("manager.md"), "", "", normalize_low_priority_current=True, active_target="h:2", manager_target="vl:1", source_sha256=hashlib.sha256(text.encode()).hexdigest())
+            with self.assertRaisesRegex(TaskFrontmatterError, "non-human exact"):
+                normalize_low_priority_current(human_args, path, text, path.stat())
+            v2 = root / "v2.md"
+            v2_text = v2_task().replace("runat: wl:2", "runat: vl:2").replace("managerat: wl:1", "managerat: vl:1").replace("is_manager: false", "is_manager: true")
+            v2.write_text(v2_text, encoding="utf-8")
+            v2_args = StatusArgs(root, Path("v2.md"), "", "", normalize_low_priority_current=True, active_target="vl:2", manager_target="vl:1", source_sha256=hashlib.sha256(v2_text.encode()).hexdigest())
+            with self.assertRaisesRegex(TaskFrontmatterError, "unchanged active v1 manager"):
+                normalize_low_priority_current(v2_args, v2, v2_text, v2.stat())
+
+    def test_parse_low_priority_current_requires_exact_targets_and_digest(self) -> None:
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            parse_args(["--root", "/tmp/work", "--normalize-low-priority-current", "manager.md"])
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            parse_args(["--root", "/tmp/work", "--active-target", "vl:2", "manager.md", "running"])
+        args = parse_args(["--root", "/tmp/work", "--normalize-low-priority-current", "--active-target", "vl:2", "--manager-target", "vl:1", "--source-sha256", "a" * 64, "manager.md"])
+        self.assertTrue(args.normalize_low_priority_current)
+        self.assertEqual(("vl:2", "vl:1"), (args.active_target, args.manager_target))
+
+    def test_low_priority_current_normalization_rejects_task_or_todo_race_and_keeps_lock_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "manager.md"
+            text = task_frontmatter(status="long_running", runat="vl:2", managerat="vl:1", is_manager=True)
+            path.write_text(text, encoding="utf-8")
+            todo = root / "TODO.md"
+            todo_text = "current:\n\nlow priority:\nmanager.md vl:2\n\nhuman pending:\n\nprevious:\n"
+            todo.write_text(todo_text, encoding="utf-8")
+            args = StatusArgs(root, Path("manager.md"), "", "", normalize_low_priority_current=True, active_target="vl:2", manager_target="vl:1", source_sha256=hashlib.sha256(text.encode()).hexdigest())
+            before = path.stat()
+            path.write_text(text + "drift\n", encoding="utf-8")
+            with self.assertRaisesRegex(TaskFrontmatterError, "source bytes do not match"):
+                normalize_low_priority_current(args, path, text, before)
+
+            path.write_text(text, encoding="utf-8")
+            def mutate_todo(*_args: object) -> str:
+                todo.write_text(todo_text.replace("vl:2", "vl:3"), encoding="utf-8")
+                return "current:\nmanager.md vl:2\n\nlow priority:\n\nhuman pending:\n\nprevious:\n"
+            with patch("omo_manager.omo_task_status.reconcile_todo_text", side_effect=mutate_todo):
+                with self.assertRaisesRegex(TaskFrontmatterError, "TODO changed while low-priority normalization"):
+                    normalize_low_priority_current(args, path, text, path.stat())
+            self.assertEqual(todo_text.replace("vl:2", "vl:3"), todo.read_text(encoding="utf-8"))
+
+            todo.write_text(todo_text, encoding="utf-8")
+            locks: list[str] = []
+            def record_lock(candidate: Path):
+                locks.append(candidate.name)
+                return nullcontext()
+            with patch("omo_manager.omo_task_status.root_membership_lock", side_effect=lambda _root: nullcontext()), patch("omo_manager.omo_task_status.task_target_lock", side_effect=lambda _root, _target: nullcontext()), patch("omo_manager.omo_task_status.task_file_lock", side_effect=record_lock):
+                normalize_low_priority_current(args, path, text, path.stat())
+            self.assertEqual(sorted(locks), locks)
     def test_retired_todo_normalization_is_index_only_and_unblocks_proven_closure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

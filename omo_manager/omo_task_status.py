@@ -102,7 +102,10 @@ class Args:
     close_shared_target: bool = False
     close_retired_done: bool = False
     normalize_retired_todo: bool = False
+    normalize_low_priority_current: bool = False
     shared_target: str = ""
+    active_target: str = ""
+    manager_target: str = ""
     source_sha256: str = ""
 
 
@@ -138,7 +141,10 @@ class ParsedArgs(argparse.Namespace):
     close_shared_target: bool = False
     close_retired_done: bool = False
     normalize_retired_todo: bool = False
+    normalize_low_priority_current: bool = False
     shared_target: str = ""
+    active_target: str = ""
+    manager_target: str = ""
     source_sha256: str = ""
 
 
@@ -179,7 +185,10 @@ shutdown.""",
     _ = parser.add_argument("--close-shared-target", action="store_true", help="Close one explicitly proven manager record on a shared target using metadata and TODO files only; never accesses tmux.")
     _ = parser.add_argument("--close-retired-done", action="store_true", help="Close one already-stopped blocked/retired worker using Git-proven historical target and recorded close evidence; never accesses tmux.")
     _ = parser.add_argument("--normalize-retired-todo", action="store_true", help="Normalize the sole targetless human-pending row for one already-retired blocked worker; never accesses tmux or task bytes.")
+    _ = parser.add_argument("--normalize-low-priority-current", action="store_true", help="Move the sole low-priority TODO row for one exact active v1 manager record to current; never accesses tmux.")
     _ = parser.add_argument("--shared-target", default="", help="Exact shared manager target required with --close-shared-target.")
+    _ = parser.add_argument("--active-target", default="", help="Exact active task target required with --normalize-low-priority-current.")
+    _ = parser.add_argument("--manager-target", default="", help="Exact manager owner target required with --normalize-low-priority-current.")
     _ = parser.add_argument("--source-sha256", default="", help="Exact SHA-256 of the source task bytes required with --close-shared-target, --close-retired-done, or --normalize-retired-todo.")
     _ = parser.add_argument("task_file", type=Path)
     _ = parser.add_argument("status", nargs="?", choices=sorted(TASK_FRONTMATTER_STATUSES))
@@ -191,8 +200,10 @@ shutdown.""",
         parser.error("--closure-repository must be an explicit absolute Git worktree root.")
     if parsed.dirty_path_handoff is not None and parsed.closure_repository is None:
         parser.error("--dirty-path-handoff requires --closure-repository.")
-    if sum((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done, parsed.retire_blocked_target, parsed.reconcile_long_running_human_index, parsed.restore_terminal_target, parsed.close_shared_target, parsed.close_retired_done, parsed.normalize_retired_todo)) > 1:
+    if sum((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done, parsed.retire_blocked_target, parsed.reconcile_long_running_human_index, parsed.restore_terminal_target, parsed.close_shared_target, parsed.close_retired_done, parsed.normalize_retired_todo, parsed.normalize_low_priority_current)) > 1:
         parser.error("finish and recovery modes are mutually exclusive.")
+    if (parsed.active_target or parsed.manager_target) and not parsed.normalize_low_priority_current:
+        parser.error("--active-target and --manager-target are only valid with --normalize-low-priority-current.")
     if parsed.retire_blocked_target:
         parser.error("--retire-blocked-target is disabled: preserve the historical target and resolve ownership without writing retired semantics.")
     if parsed.restore_terminal_target:
@@ -211,6 +222,15 @@ shutdown.""",
         if any(unrelated) or SHA256_RE.fullmatch(parsed.source_sha256.strip()) is None:
             parser.error("--normalize-retired-todo requires only lowercase --source-sha256 for one exact blocked/retired source task.")
         return Args(parsed.root.resolve(), parsed.task_file, "", "", normalize_retired_todo=True, source_sha256=parsed.source_sha256.strip())
+    if parsed.normalize_low_priority_current:
+        unrelated = (parsed.status, parsed.blocked_on, parsed.session_id, parsed.replacement_task, parsed.stale_target, parsed.replacement_target, parsed.stale_sha256, parsed.replacement_sha256, parsed.replacement_status, parsed.protected_target, parsed.stopped_evidence, parsed.replacement_pane_evidence, parsed.audit_output, parsed.pane_id, parsed.terminal_evidence, parsed.closure_repository, parsed.dirty_path_handoff, parsed.historical_target, parsed.task_sha256, parsed.historical_commit, parsed.shared_target)
+        active_target = parsed.active_target.strip()
+        manager_target = parsed.manager_target.strip()
+        if any(unrelated) or TARGET_RE.fullmatch(active_target) is None or TARGET_RE.fullmatch(manager_target) is None or SHA256_RE.fullmatch(parsed.source_sha256.strip()) is None:
+            parser.error("--normalize-low-priority-current requires exact --active-target, --manager-target, and lowercase --source-sha256, without lifecycle or repository evidence.")
+        if active_target.partition(":")[0].startswith("h") or manager_target.partition(":")[0].startswith("h"):
+            parser.error("--normalize-low-priority-current cannot modify a human-owned `h*` target.")
+        return Args(parsed.root.resolve(), parsed.task_file, "", "", normalize_low_priority_current=True, active_target=active_target, manager_target=manager_target, source_sha256=parsed.source_sha256.strip())
     if parsed.close_shared_target:
         unrelated = (parsed.status, parsed.blocked_on, parsed.session_id, parsed.replacement_task, parsed.stale_target, parsed.replacement_target, parsed.stale_sha256, parsed.replacement_sha256, parsed.replacement_status, parsed.protected_target, parsed.stopped_evidence, parsed.replacement_pane_evidence, parsed.audit_output, parsed.pane_id, parsed.terminal_evidence, parsed.closure_repository, parsed.dirty_path_handoff, parsed.historical_target, parsed.task_sha256, parsed.historical_commit)
         if any(unrelated) or TARGET_RE.fullmatch(parsed.shared_target.strip()) is None or SHA256_RE.fullmatch(parsed.source_sha256.strip()) is None:
@@ -1128,6 +1148,94 @@ def normalize_retired_todo(args: Args, path: Path, text: str, before: os.stat_re
         replace_if_unchanged_locked(todo, "".join(lines), todo_before)
 
 
+def normalize_low_priority_current(args: Args, path: Path, text: str, before: os.stat_result) -> None:
+    """Promote one exact active manager TODO row from low priority to current."""
+    if (
+        TARGET_RE.fullmatch(args.active_target) is None
+        or TARGET_RE.fullmatch(args.manager_target) is None
+        or args.active_target.partition(":")[0].startswith("h")
+        or args.manager_target.partition(":")[0].startswith("h")
+    ):
+        raise TaskFrontmatterError("low-priority normalization requires non-human exact active and manager targets")
+    source_bytes = path.read_bytes()
+    if hashlib.sha256(source_bytes).hexdigest() != args.source_sha256:
+        raise TaskFrontmatterError("low-priority normalization source bytes do not match --source-sha256")
+    metadata = parse_task_metadata(text, args.root)
+    if (
+        metadata is None
+        or metadata.version == V2_VERSION
+        or metadata.status not in {"running", "long_running"}
+        or not metadata.is_manager
+        or metadata.runat != args.active_target
+        or metadata.managerat != args.manager_target
+        or has_pending_marker(text)
+    ):
+        raise TaskFrontmatterError("low-priority normalization requires one unchanged active v1 manager with exact runat and manager ownership and no live pending marker")
+    todo = args.root / "TODO.md"
+    if not todo.is_file():
+        raise TaskFrontmatterError("TODO.md is not a regular file.")
+    with root_membership_lock(args.root), task_target_lock(args.root, args.active_target):
+        with ExitStack() as locks:
+            task_files = {candidate.resolve(strict=False) for candidate in args.root.rglob("*.md")}
+            task_files.update((path, todo))
+            for locked_path in sorted(task_files, key=lambda candidate: str(candidate)):
+                locks.enter_context(task_file_lock(locked_path))
+            current_before = path.stat()
+            current_bytes = path.read_bytes()
+            if not same_file_state(before, current_before) or current_bytes != source_bytes:
+                raise TaskFrontmatterError("active manager task changed while low-priority normalization was being prepared; retry")
+            current_text = current_bytes.decode("utf-8")
+            current = parse_task_metadata(current_text, args.root)
+            if (
+                current is None
+                or current.version == V2_VERSION
+                or current.status not in {"running", "long_running"}
+                or not current.is_manager
+                or current.runat != args.active_target
+                or current.managerat != args.manager_target
+                or has_pending_marker(current_text)
+            ):
+                raise TaskFrontmatterError("active manager task ownership or lifecycle changed while low-priority normalization was being prepared; retry")
+            owners = authoritative_active_target_task_paths(args.root, args.active_target)
+            if owners != (path,):
+                refs = ", ".join(relative_task_ref(args.root, owner) for owner in owners) or "none"
+                raise TaskFrontmatterError(f"low-priority normalization requires the task to be the sole active owner of `{args.active_target}`: {refs}.")
+            todo_before = todo.stat()
+            todo_text = todo.read_text(encoding="utf-8")
+            lines = todo_text.splitlines(keepends=True)
+            section = ""
+            headers = {"current": 0, "low priority": 0, "human pending": 0, "previous": 0}
+            rows: list[tuple[int, str]] = []
+            for index, line in enumerate(lines):
+                heading = line.strip()
+                if heading.endswith(":"):
+                    normalized = heading[:-1].casefold()
+                    if normalized in headers:
+                        if heading != f"{normalized}:":
+                            raise TaskFrontmatterError("low-priority normalization requires canonical lowercase TODO section headers")
+                        headers[normalized] += 1
+                    section = normalized
+                    continue
+                if path in todo_row_task_paths(args.root, line):
+                    rows.append((index, section))
+            if any(count != 1 for count in headers.values()):
+                raise TaskFrontmatterError("low-priority normalization requires exactly one canonical current, low priority, human pending, and previous TODO section")
+            if len(rows) != 1 or rows[0][1] != "low priority":
+                raise TaskFrontmatterError("low-priority normalization requires exactly one TODO row in low priority")
+            row_index, _ = rows[0]
+            row = lines[row_index]
+            match = TODO_ROW_RE.fullmatch(row.rstrip("\r\n"))
+            canonical_row = f"{relative_task_ref(args.root, path)} {args.active_target}"
+            if match is None or row.rstrip("\r\n") != canonical_row:
+                raise TaskFrontmatterError("low-priority normalization requires the sole canonical TODO row to name the exact active target")
+            updated_todo = reconcile_todo_text(args.root, path, todo_text, args.active_target, "current", ("low priority",))
+            if updated_todo == todo_text:
+                raise TaskFrontmatterError("low-priority normalization requires the sole TODO row to move from low priority to current")
+            if todo.read_text(encoding="utf-8") != todo_text or not same_file_state(todo_before, todo.stat()):
+                raise TaskFrontmatterError("TODO changed while low-priority normalization was being prepared; retry")
+            replace_if_unchanged_locked(todo, updated_todo, todo_before)
+
+
 def reconcile_todo_text(root: Path, path: Path, text: str, runat: str, destination: str, allowed_sections: tuple[str, ...]) -> str:
     """Move one validated TODO row between allowed lifecycle sections."""
     lines = text.splitlines(keepends=True)
@@ -1761,6 +1869,8 @@ def run(args: Args) -> int:
             target = close_retired_done(args, path, text, before)
         elif args.normalize_retired_todo:
             normalize_retired_todo(args, path, text, before)
+        elif args.normalize_low_priority_current:
+            normalize_low_priority_current(args, path, text, before)
         elif args.retire_blocked_target:
             retire_blocked_target(args, path, text, before)
         elif args.reconcile_long_running_human_index:
