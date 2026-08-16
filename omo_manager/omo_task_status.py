@@ -43,6 +43,10 @@ from omo_manager.omo_codex_stop import moved_todo_text
 from omo_manager.omo_codex_stop import pane_id
 from omo_manager.omo_codex_stop import record_close
 from omo_manager.omo_codex_stop import stop
+try:
+    from omo_manager.omo_codex_stop import validate_human_close_authorization as _validate_human_close_authorization
+except ImportError:
+    _validate_human_close_authorization = None
 from omo_manager.omo_agent_status import parse_task_metadata
 from omo_manager.omo_agent_status import parse_task_lines
 from omo_manager.omo_codex_status import exact_pane_id
@@ -107,6 +111,8 @@ class Args:
     active_target: str = ""
     manager_target: str = ""
     source_sha256: str = ""
+    human_close_authorization_source: str = ""
+    human_close_authorization_sha256: str = ""
 
 
 class ParsedArgs(argparse.Namespace):
@@ -146,6 +152,8 @@ class ParsedArgs(argparse.Namespace):
     active_target: str = ""
     manager_target: str = ""
     source_sha256: str = ""
+    human_close_authorization_source: str = ""
+    human_close_authorization_sha256: str = ""
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -190,10 +198,18 @@ shutdown.""",
     _ = parser.add_argument("--active-target", default="", help="Exact active task target required with --normalize-low-priority-current.")
     _ = parser.add_argument("--manager-target", default="", help="Exact manager owner target required with --normalize-low-priority-current.")
     _ = parser.add_argument("--source-sha256", default="", help="Exact SHA-256 of the source task bytes required with --close-shared-target, --close-retired-done, or --normalize-retired-todo.")
+    _ = parser.add_argument("--human-close-authorization-source", default="", help="Exact manager_mail/<id>.txt record that directly authorizes closing this human-owned task target during normal done closure.")
+    _ = parser.add_argument("--human-close-authorization-sha256", default="", help="Lowercase SHA-256 of that exact human-close authorization record.")
     _ = parser.add_argument("task_file", type=Path)
     _ = parser.add_argument("status", nargs="?", choices=sorted(TASK_FRONTMATTER_STATUSES))
     _ = parser.add_argument("--blocked-on", default="", help="Required when setting status to `blocked`; optional for `long_running`; removed for other statuses.")
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
+    human_close_authority = (
+        parsed.human_close_authorization_source.strip(),
+        parsed.human_close_authorization_sha256.strip(),
+    )
+    if any(human_close_authority) and not all(human_close_authority):
+        parser.error("human-close authorization requires both source and digest.")
     if parsed.closure_repository is not None and (parsed.status != "done" or any((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done, parsed.retire_blocked_target, parsed.reconcile_long_running_human_index))):
         parser.error("--closure-repository is only valid with a normal done transition.")
     if parsed.closure_repository is not None and not parsed.closure_repository.is_absolute():
@@ -204,6 +220,11 @@ shutdown.""",
         parser.error("finish and recovery modes are mutually exclusive.")
     if (parsed.active_target or parsed.manager_target) and not parsed.normalize_low_priority_current:
         parser.error("--active-target and --manager-target are only valid with --normalize-low-priority-current.")
+    if any(human_close_authority) and (
+        parsed.status != "done"
+        or any((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done, parsed.retire_blocked_target, parsed.reconcile_long_running_human_index, parsed.restore_terminal_target, parsed.close_shared_target, parsed.close_retired_done, parsed.normalize_retired_todo, parsed.normalize_low_priority_current))
+    ):
+        parser.error("human-close authorization is valid only for a normal done transition.")
     if parsed.retire_blocked_target:
         parser.error("--retire-blocked-target is disabled: preserve the historical target and resolve ownership without writing retired semantics.")
     if parsed.restore_terminal_target:
@@ -324,6 +345,8 @@ shutdown.""",
         parsed.blocked_on.strip(),
         closure_repository=parsed.closure_repository.expanduser().resolve(strict=False) if parsed.closure_repository is not None else None,
         dirty_path_handoff=parsed.dirty_path_handoff.expanduser().resolve(strict=False) if parsed.dirty_path_handoff is not None else None,
+        human_close_authorization_source=human_close_authority[0],
+        human_close_authorization_sha256=human_close_authority[1],
     )
 
 
@@ -712,19 +735,45 @@ def worker_self_close_allowed(root: Path, path: Path, metadata: TaskMetadata) ->
     return current_target_task_paths(root, metadata.runat) == (path,)
 
 
-def stop_done_agent(root: Path, path: Path, metadata: TaskMetadata) -> tuple[StopArgs, str]:
+def human_close_stop_args(root: Path, task_file: str, target: str, source: str, digest: str, authorized_target: str) -> StopArgs:
+    """Build a hash-bound human-close request only when the stop helper supports it."""
+    try:
+        return StopArgs(target, 10.0, 2000, False, False, root, task_file, True, 0.0, source, digest, authorized_target)
+    except TypeError as exc:
+        raise TaskFrontmatterError("human-close authorization requires the compatible omo_codex_stop helper") from exc
+
+
+def validate_human_close_authorization(args: StopArgs) -> None:
+    """Fail closed until the paired stop helper can validate human authority."""
+    if _validate_human_close_authorization is None:
+        raise TaskFrontmatterError("human-close authorization requires the compatible omo_codex_stop helper")
+    _validate_human_close_authorization(args)
+
+
+def stop_done_agent(
+    root: Path,
+    path: Path,
+    metadata: TaskMetadata,
+    human_close_authorization_source: str = "",
+    human_close_authorization_sha256: str = "",
+) -> tuple[StopArgs, str]:
     """Close the task's Codex pane and return the captured session id."""
 
     task_file = path.relative_to(root).as_posix()
     with task_target_lock(root, metadata.runat):
         stable_pane_id = exact_pane_id(metadata.runat)
-        record_args = StopArgs(metadata.runat, 10.0, 2000, False, False, root, task_file, True, 0.0)
+        human_target = metadata.runat if metadata.runat.partition(":")[0].startswith("h") else ""
+        record_args = (
+            human_close_stop_args(root, task_file, metadata.runat, human_close_authorization_source, human_close_authorization_sha256, human_target)
+            if human_target
+            else StopArgs(metadata.runat, 10.0, 2000, False, False, root, task_file, True, 0.0)
+        )
         if not stable_pane_id:
             return record_args, ""
         allow_self = bool(stable_pane_id and worker_self_close_allowed(root, path, metadata))
         if allow_self:
             allow_self = worker_self_close_allowed(root, path, metadata) and exact_pane_id(metadata.runat) == stable_pane_id
-        stop_args = StopArgs(stable_pane_id, 10.0, 2000, False, allow_self, root, task_file, True, 0.0)
+        stop_args = replace(record_args, target=stable_pane_id, allow_self=allow_self)
         try:
             session_id = stop(stop_args)
         except Exception:
@@ -1898,11 +1947,28 @@ def run(args: Args) -> int:
             if already_done:
                 reconcile_done_index(args.root, path, text, before)
             elif target:
+                if metadata is not None and metadata.runat.partition(":")[0].startswith("h"):
+                    validate_human_close_authorization(
+                        human_close_stop_args(
+                            args.root,
+                            path.relative_to(args.root).as_posix(),
+                            metadata.runat,
+                            args.human_close_authorization_source,
+                            args.human_close_authorization_sha256,
+                            metadata.runat,
+                        )
+                    )
                 in_progress = update_frontmatter_status(text, "blocked", DONE_CLOSE_IN_PROGRESS, args.root)
                 replace_if_unchanged(path, in_progress, before)
                 try:
                     assert metadata is not None
-                    close_args, session_id = stop_done_agent(args.root, path, metadata)
+                    close_args, session_id = stop_done_agent(
+                        args.root,
+                        path,
+                        metadata,
+                        args.human_close_authorization_source,
+                        args.human_close_authorization_sha256,
+                    )
                 except Exception as exc:
                     rollback_before = path.stat()
                     rollback_text = path.read_text(encoding="utf-8")

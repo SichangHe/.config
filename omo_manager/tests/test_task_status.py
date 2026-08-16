@@ -73,6 +73,59 @@ def task_frontmatter(
 
 
 class TaskStatusTests(unittest.TestCase):
+    def test_normal_done_parser_preserves_hash_bound_human_close_authority(self) -> None:
+        args = parse_args(
+            [
+                "--root",
+                "/tmp/work_logs",
+                "--human-close-authorization-source",
+                "manager_mail/authority.txt",
+                "--human-close-authorization-sha256",
+                "a" * 64,
+                "task.md",
+                "done",
+            ]
+        )
+        self.assertEqual("manager_mail/authority.txt", args.human_close_authorization_source)
+        self.assertEqual("a" * 64, args.human_close_authorization_sha256)
+
+    def test_normal_done_refuses_human_target_before_state_or_tmux_change_without_compatible_close_helper(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            original = task_frontmatter(status="running", runat="hwork:1") + "body\n"
+            task.write_text(original, encoding="utf-8")
+            args = StatusArgs(root, Path("task.md"), "done", "")
+            with patch("omo_manager.omo_task_status.exact_pane_id") as pane_id, redirect_stderr(io.StringIO()):
+                self.assertEqual(2, run(args))
+            pane_id.assert_not_called()
+            self.assertEqual(original, task.read_text(encoding="utf-8"))
+
+    def test_normal_done_forwards_human_authority_to_close_preflights(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            text = task_frontmatter(status="running", runat="hwork:1") + "body\n"
+            task.write_text(text, encoding="utf-8")
+            args = StatusArgs(
+                root,
+                Path("task.md"),
+                "done",
+                "",
+                human_close_authorization_source="manager_mail/authority.txt",
+                human_close_authorization_sha256="a" * 64,
+            )
+            record_args = StopArgs("hwork:1", 0.0, 10, False, False, root, "task.md", True, 0.0)
+            with (
+                patch("omo_manager.omo_task_status.human_close_stop_args", return_value=record_args) as build,
+                patch("omo_manager.omo_task_status.validate_human_close_authorization") as validate,
+                patch("omo_manager.omo_task_status.stop_done_agent", return_value=(record_args, "")) as close,
+            ):
+                self.assertEqual(0, run(args))
+            self.assertEqual(1, build.call_count)
+            validate.assert_called_once_with(record_args)
+            close.assert_called_once_with(root, task, parse_task_metadata(text, root), "manager_mail/authority.txt", "a" * 64)
+
     def test_low_priority_current_normalization_promotes_only_one_exact_active_manager_row(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
