@@ -648,6 +648,11 @@ def append_marker_clear_ack_sent(text: str, line_number: int, comment: str, clea
     return append_comment_line(text, comment_line)
 
 
+def marker_clear_should_ack_human(clear_kind: str) -> bool:
+    """Return false for clears that only state an already-known duplicate."""
+    return clear_kind not in {"duplicate", "existing-owner-item"}
+
+
 def remove_marker_clear_ack_sent(text: str, line_number: int, comment: str, clear_kind: str) -> str:
     comment_line = clear_ack_sent_line(line_number, comment, clear_kind)
     lines = text.splitlines(keepends=True)
@@ -825,17 +830,18 @@ def run(args: Args) -> int:
         if command == "pending-marker-clear":
             email_path = task_path(args.root, args.email_file) if args.email_file is not None else None
             validate_clear_kind_value(args.clear_kind)
+            should_ack_human = args.ack_human and marker_clear_should_ack_human(args.clear_kind)
             if marker_clear_recorded(text, args.line, args.comment, args.clear_kind):
-                if args.ack_human and not marker_clear_ack_sent(text, args.line, args.comment, args.clear_kind) and line_is_pending_marker(text, args.line):
+                if should_ack_human and not marker_clear_ack_sent(text, args.line, args.comment, args.clear_kind) and line_is_pending_marker(text, args.line):
                     raise TaskFrontmatterError("cannot retry human acknowledgement while a new live `(pending)` marker is at the original line.")
-                if args.ack_human:
+                if should_ack_human:
                     send_marker_clear_ack_once(path, args, email_path)
                 print(f"already removed `(pending)` from {path.name}:{args.line}; no pending item added")
                 return 0
             validate_marker_clear_semantics(args, text)
             updated, changed = clear_pending_marker(text, args.line, args.comment, args.clear_kind)
             write_if_changed(path, text, updated, before)
-            if args.ack_human:
+            if should_ack_human:
                 send_marker_clear_ack_once(path, args, email_path)
             action = "removed" if changed else "already removed"
             print(f"{action} `(pending)` from {path.name}:{args.line}; no pending item added")

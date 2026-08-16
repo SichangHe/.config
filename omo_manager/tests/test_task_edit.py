@@ -521,7 +521,7 @@ class TaskEditTests(unittest.TestCase):
             owner.write_text(task_frontmatter(pending_items=("already tracked",)) + "body\n", encoding="utf-8")
             pending_line = text.splitlines().index("(pending)") + 1
 
-            with patch("omo_manager.omo_task_edit.subprocess.run", return_value=None):
+            with patch("omo_manager.omo_task_edit.subprocess.run", return_value=None) as send:
                 exit_code = run(
                     Args(
                         root,
@@ -538,9 +538,38 @@ class TaskEditTests(unittest.TestCase):
 
             self.assertEqual(0, exit_code)
             self.assertEqual(
-                task_frontmatter() + "already tracked\n(pending marker cleared line=10: existing-owner-item: already tracked on owner task)\n(human ack sent for pending marker clear line=10: existing-owner-item: already tracked on owner task)\n",
+                task_frontmatter() + "already tracked\n(pending marker cleared line=10: existing-owner-item: already tracked on owner task)\n",
                 source.read_text(encoding="utf-8"),
             )
+            send.assert_not_called()
+
+    def test_pending_marker_clear_duplicate_does_not_email_human(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            text = task_frontmatter() + "(pending)\nalready handled\n"
+            task.write_text(text, encoding="utf-8")
+            pending_line = text.splitlines().index("(pending)") + 1
+
+            with patch("omo_manager.omo_task_edit.subprocess.run", return_value=None) as send:
+                exit_code = run(
+                    Args(
+                        root,
+                        Path("task.md"),
+                        "pending-marker-clear",
+                        comment="already handled elsewhere",
+                        line=pending_line,
+                        ack_human=True,
+                        clear_kind="duplicate",
+                    )
+                )
+
+            self.assertEqual(0, exit_code)
+            self.assertEqual(
+                task_frontmatter() + "already handled\n(pending marker cleared line=10: duplicate: already handled elsewhere)\n",
+                task.read_text(encoding="utf-8"),
+            )
+            send.assert_not_called()
 
     def test_pending_marker_clear_existing_owner_item_rejects_missing_item(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
