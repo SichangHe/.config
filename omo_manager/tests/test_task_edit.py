@@ -571,6 +571,159 @@ class TaskEditTests(unittest.TestCase):
             )
             send.assert_not_called()
 
+    def test_source_pointer_dedupe_removes_only_bare_completed_source_pointers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            ref = "manager_mail/691.txt"
+            pointer = f"(record and delegate {ref})"
+            task.write_text(
+                task_frontmatter()
+                + f"{pointer}\n\n{pointer}\n"
+                + "(verified removed pending item: original reply sent)\n"
+                + f"\n{pointer}\n",
+                encoding="utf-8",
+            )
+
+            exit_code = run(
+                Args(
+                    root,
+                    Path("task.md"),
+                    "source-pointer-dedupe",
+                    source_ref=ref,
+                    evidence="original reply and pause routing are complete",
+                )
+            )
+
+            self.assertEqual(0, exit_code)
+            updated = task.read_text(encoding="utf-8")
+            self.assertNotIn(pointer, updated)
+            self.assertIn("(verified removed pending item: original reply sent)", updated)
+            self.assertIn("deduped 3 bare source pointer(s) for manager_mail/691.txt", updated)
+
+    def test_source_pointer_dedupe_refuses_live_pending_source_pointer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            ref = "manager_mail/691.txt"
+            text = task_frontmatter() + f"(pending)\n(record and delegate {ref})\n"
+            task.write_text(text, encoding="utf-8")
+            stderr = io.StringIO()
+
+            with redirect_stderr(stderr):
+                exit_code = run(
+                    Args(
+                        root,
+                        Path("task.md"),
+                        "source-pointer-dedupe",
+                        source_ref=ref,
+                        evidence="would be unsafe",
+                    )
+                )
+
+            self.assertEqual(2, exit_code)
+            self.assertEqual(text, task.read_text(encoding="utf-8"))
+            self.assertIn("inside a live `(pending)` block", stderr.getvalue())
+
+    def test_source_pointer_dedupe_refuses_a_single_bare_pointer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            ref = "manager_mail/691.txt"
+            text = task_frontmatter() + f"(record and delegate {ref})\n"
+            task.write_text(text, encoding="utf-8")
+            stderr = io.StringIO()
+
+            with redirect_stderr(stderr):
+                exit_code = run(
+                    Args(
+                        root,
+                        Path("task.md"),
+                        "source-pointer-dedupe",
+                        source_ref=ref,
+                        evidence="would be unsafe",
+                    )
+                )
+
+            self.assertEqual(2, exit_code)
+            self.assertEqual(text, task.read_text(encoding="utf-8"))
+            self.assertIn("single bare source pointer", stderr.getvalue())
+
+    def test_source_pointer_dedupe_ignores_quoted_and_fenced_copies(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            ref = "manager_mail/691.txt"
+            pointer = f"(record and delegate {ref})"
+            text = task_frontmatter() + f"{pointer}\n> {pointer}\n```text\n{pointer}\n```\n"
+            task.write_text(text, encoding="utf-8")
+            stderr = io.StringIO()
+
+            with redirect_stderr(stderr):
+                exit_code = run(
+                    Args(
+                        root,
+                        Path("task.md"),
+                        "source-pointer-dedupe",
+                        source_ref=ref,
+                        evidence="would be unsafe",
+                    )
+                )
+
+            self.assertEqual(2, exit_code)
+            self.assertEqual(text, task.read_text(encoding="utf-8"))
+            self.assertIn("single bare source pointer", stderr.getvalue())
+
+    def test_source_pointer_dedupe_refuses_pointer_later_in_live_pending_block(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            ref = "manager_mail/691.txt"
+            pointer = f"(record and delegate {ref})"
+            text = task_frontmatter() + f"(pending)\nrequest body\n\n{pointer}\n{pointer}\n"
+            task.write_text(text, encoding="utf-8")
+            stderr = io.StringIO()
+
+            with redirect_stderr(stderr):
+                exit_code = run(
+                    Args(
+                        root,
+                        Path("task.md"),
+                        "source-pointer-dedupe",
+                        source_ref=ref,
+                        evidence="would be unsafe",
+                    )
+                )
+
+            self.assertEqual(2, exit_code)
+            self.assertEqual(text, task.read_text(encoding="utf-8"))
+            self.assertIn("inside a live `(pending)` block", stderr.getvalue())
+
+    def test_source_pointer_dedupe_refuses_whitespace_wrapped_pending_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            ref = "manager_mail/691.txt"
+            pointer = f"(record and delegate {ref})"
+            text = task_frontmatter() + f"  (pending)  \n{pointer}\n{pointer}\n"
+            task.write_text(text, encoding="utf-8")
+            stderr = io.StringIO()
+
+            with redirect_stderr(stderr):
+                exit_code = run(
+                    Args(
+                        root,
+                        Path("task.md"),
+                        "source-pointer-dedupe",
+                        source_ref=ref,
+                        evidence="would be unsafe",
+                    )
+                )
+
+            self.assertEqual(2, exit_code)
+            self.assertEqual(text, task.read_text(encoding="utf-8"))
+            self.assertIn("inside a live `(pending)` block", stderr.getvalue())
+
     def test_pending_marker_clear_existing_owner_item_rejects_missing_item(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

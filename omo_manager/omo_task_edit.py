@@ -70,6 +70,7 @@ class Args:
     on_task: Path | None = None
     on_item_id: str = ""
     task_files: tuple[Path, ...] = ()
+    source_ref: str = ""
 
 
 @dataclass(frozen=True)
@@ -101,6 +102,7 @@ class ParsedArgs(argparse.Namespace):
     item_id: str = ""
     on_task: Path | None = None
     on_item_id: str = ""
+    source_ref: str = ""
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -157,6 +159,16 @@ def parse_args(argv: list[str]) -> Args:
     _ = marker_clear_parser.add_argument("--clear-kind", choices=sorted(CLEAR_KINDS), help="Semantic reason required for human-origin markers.")
     _ = marker_clear_parser.add_argument("--owner-task-file", type=Path, help="Active owner task file containing --owner-item; required for --clear-kind existing-owner-item.")
     _ = marker_clear_parser.add_argument("--owner-item", help="Exact existing pending item already tracking this request.")
+
+    source_dedupe_parser = subparsers.add_parser(
+        "source-pointer-dedupe",
+        help="Remove repeated bare human-source pointers after their request is already closed.",
+        description="Removes only exact bare `(record and delegate manager_mail/*.txt)` lines; live `(pending)` blocks are refused.",
+    )
+    source_dedupe_parser.set_defaults(command="source-pointer-dedupe")
+    _ = source_dedupe_parser.add_argument("task_file", type=Path)
+    _ = source_dedupe_parser.add_argument("--source-ref", required=True, help="Exact manager_mail/*.txt reference to remove.")
+    _ = source_dedupe_parser.add_argument("--evidence", required=True, help="One-line evidence that the referenced request is already complete or cancelled.")
 
     comment_parser = subparsers.add_parser("comment-add", aliases=["comment"], help="Append a parenthesized comment line to a task file.")
     comment_parser.set_defaults(command="comment-add")
@@ -254,6 +266,14 @@ def parse_args(argv: list[str]) -> Args:
             if parsed.owner_task_file is not None or parsed.owner_item:
                 parser.error("--owner-task-file and --owner-item are only valid with --clear-kind existing-owner-item.")
             return Args(root, parsed.task_file, command, comment=normalized_comment_message(parsed.comment), line=parsed.line, ack_human=parsed.ack_human, email_file=parsed.email_file, clear_kind=parsed.clear_kind)
+        if command == "source-pointer-dedupe":
+            return Args(
+                root,
+                parsed.task_file,
+                command,
+                evidence=normalized_comment_message(parsed.evidence),
+                source_ref=normalized_source_ref(parsed.source_ref),
+            )
         if command == "comment-add":
             message = parsed.message if parsed.message is not None else parsed.legacy_message
             if message is None:
@@ -268,6 +288,13 @@ def parse_args(argv: list[str]) -> Args:
 
 def canonical_command(command: str) -> str:
     return COMMAND_ALIASES.get(command, command)
+
+
+def normalized_source_ref(value: str) -> str:
+    ref = value.strip()
+    if not ref.startswith("manager_mail/") or not ref.endswith(".txt") or any(character.isspace() for character in ref):
+        raise argparse.ArgumentTypeError("--source-ref must be an exact manager_mail/*.txt reference.")
+    return ref
 
 
 def normalized_item(item: str) -> str:
@@ -582,6 +609,45 @@ def remove_pending_marker_line(text: str, line_number: int) -> str:
     return "".join(lines)
 
 
+def source_pointer_dedupe_record(source_ref: str, count: int, evidence: str) -> str:
+    return normalized_comment(f"deduped {count} bare source pointer(s) for {source_ref}: {evidence}")
+
+
+def dedupe_bare_source_pointers(text: str, source_ref: str, evidence: str) -> tuple[str, int]:
+    """Remove exact duplicate source pointers while refusing a live pending block."""
+    pointer = f"(record and delegate {source_ref})"
+    lines = text.splitlines(keepends=True)
+    remove_indices: list[int] = []
+    in_fence = False
+    in_pending_block = False
+    for index, line in enumerate(lines):
+        physical_line = line.rstrip("\r\n")
+        stripped_line = physical_line.strip()
+        if stripped_line.startswith(("```", "~~~")):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        if stripped_line == PENDING_MARKER:
+            in_pending_block = True
+            continue
+        if physical_line != pointer:
+            continue
+        if in_pending_block:
+            raise TaskFrontmatterError("refusing to remove a source pointer inside a live `(pending)` block.")
+        remove_indices.append(index)
+    if len(remove_indices) == 1:
+        raise TaskFrontmatterError("refusing to remove a single bare source pointer; use this command only for duplicated intake.")
+    if not remove_indices:
+        return text, 0
+    removal_set = set(remove_indices)
+    updated = "".join(line for index, line in enumerate(lines) if index not in removal_set)
+    record = source_pointer_dedupe_record(source_ref, len(remove_indices), evidence)
+    if comment_line_exists(updated, record):
+        return updated, len(remove_indices)
+    return append_comment_line(updated, record), len(remove_indices)
+
+
 def pending_block_lines(text: str, line_number: int) -> list[str]:
     lines = text.splitlines()
     if line_number < 1 or line_number > len(lines):
@@ -845,6 +911,14 @@ def run(args: Args) -> int:
                 send_marker_clear_ack_once(path, args, email_path)
             action = "removed" if changed else "already removed"
             print(f"{action} `(pending)` from {path.name}:{args.line}; no pending item added")
+            return 0
+        if command == "source-pointer-dedupe":
+            updated, count = dedupe_bare_source_pointers(text, args.source_ref, args.evidence)
+            if count == 0:
+                print(f"no bare source pointers found for {args.source_ref} in {path.name}")
+                return 0
+            write_if_changed(path, text, updated, before)
+            print(f"removed {count} bare source pointer(s) for {args.source_ref} from {path.name}")
             return 0
         if command == "comment-add":
             updated = append_comment(text, args.comment)
