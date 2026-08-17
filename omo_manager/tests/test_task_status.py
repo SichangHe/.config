@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import hashlib
 import os
 import subprocess
 import tempfile
@@ -19,6 +20,8 @@ from omo_manager.omo_task_status import replace_if_unchanged
 from omo_manager.omo_task_status import run
 from omo_manager.omo_task_status import stop_done_agent
 from omo_manager.omo_task_status import update_frontmatter_status
+from omo_manager.omo_task import move_human_pending_to_low_priority
+from omo_manager.omo_task import main as task_main
 from omo_manager.omo_task_status import Args as StatusArgs
 from omo_manager.omo_task_metadata import frontmatter_parts
 from omo_manager.omo_blocking import load_yaml_mapping, render_task, split_task_text, sync_generated_blocker
@@ -59,6 +62,102 @@ def task_frontmatter(
 
 
 class TaskStatusTests(unittest.TestCase):
+    def test_human_pending_low_priority_move_changes_only_owner_and_todo_section(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "coconut.md"
+            original = task_frontmatter(
+                status="blocked",
+                blocked_on="human decision",
+                runat="hvl:3",
+                managerat="vl:12",
+            ) + "paused body stays byte-for-byte\n"
+            path.write_text(original, encoding="utf-8")
+            todo = root / "TODO.md"
+            todo.write_text("current:\nother.md wl:2\n\nhuman pending:\ncoconut.md hvl:3 paused\n\nlow priority:\nother-low.md wl:4\n", encoding="utf-8")
+            move_human_pending_to_low_priority(
+                root,
+                path,
+                "vl:12",
+                "wl:30",
+                hashlib.sha256(original.encode()).hexdigest(),
+            )
+            self.assertEqual(original.replace("managerat: vl:12", "managerat: wl:30"), path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                "current:\nother.md wl:2\n\nhuman pending:\n\nlow priority:\ncoconut.md hvl:3 paused\nother-low.md wl:4\n",
+                todo.read_text(encoding="utf-8"),
+            )
+
+    def test_human_pending_low_priority_move_fails_closed_without_exact_preconditions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "coconut.md"
+            original = task_frontmatter(status="blocked", blocked_on="human decision", runat="hvl:3", managerat="vl:12") + "body\n"
+            path.write_text(original, encoding="utf-8")
+            todo = root / "TODO.md"
+            todo_original = "human pending:\ncoconut.md hvl:3\ncoconut.md hvl:3\n\nlow priority:\n"
+            todo.write_text(todo_original, encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "exactly one canonical"):
+                move_human_pending_to_low_priority(
+                    root,
+                    path,
+                    "vl:12",
+                    "wl:30",
+                    hashlib.sha256(original.encode()).hexdigest(),
+                )
+            self.assertEqual(original, path.read_text(encoding="utf-8"))
+            self.assertEqual(todo_original, todo.read_text(encoding="utf-8"))
+
+    def test_human_pending_low_priority_move_preserves_crlf_and_raw_sha(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "coconut.md"
+            original = task_frontmatter(status="blocked", blocked_on="human decision", runat="hvl:3", managerat="vl:12").replace("\n", "\r\n") + "body\r\n"
+            path.write_bytes(original.encode())
+            todo = root / "TODO.md"
+            todo_original = "human pending:\r\ncoconut.md hvl:3\r\n\r\nlow priority:\r\n"
+            todo.write_bytes(todo_original.encode())
+            self.assertEqual(
+                0,
+                task_main(
+                    [
+                        "--root", str(root), "--task-file", "coconut.md", "--move-human-pending-to-low-priority",
+                        "--old-manager-target", "vl:12", "--new-manager-target", "wl:30",
+                        "--expected-task-sha256", hashlib.sha256(original.encode()).hexdigest(),
+                    ]
+                ),
+            )
+            self.assertEqual(original.replace("managerat: vl:12", "managerat: wl:30"), path.read_bytes().decode())
+            self.assertEqual("human pending:\r\n\r\nlow priority:\r\ncoconut.md hvl:3\r\n", todo.read_bytes().decode())
+
+    def test_human_pending_low_priority_move_rejects_unterminated_destination_header(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "coconut.md"
+            original = task_frontmatter(status="blocked", blocked_on="human decision", runat="hvl:3", managerat="vl:12") + "body\n"
+            path.write_text(original, encoding="utf-8")
+            todo = root / "TODO.md"
+            todo_original = "human pending:\ncoconut.md hvl:3\n\nlow priority:"
+            todo.write_text(todo_original, encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "newline-terminated"):
+                move_human_pending_to_low_priority(root, path, "vl:12", "wl:30", hashlib.sha256(original.encode()).hexdigest())
+            self.assertEqual(original, path.read_text(encoding="utf-8"))
+            self.assertEqual(todo_original, todo.read_text(encoding="utf-8"))
+
+    def test_human_pending_low_priority_move_rejects_unterminated_source_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "coconut.md"
+            original = task_frontmatter(status="blocked", blocked_on="human decision", runat="hvl:3", managerat="vl:12") + "body\n"
+            path.write_text(original, encoding="utf-8")
+            todo = root / "TODO.md"
+            todo_original = "low priority:\nhuman pending:\ncoconut.md hvl:3"
+            todo.write_text(todo_original, encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "task row must be newline-terminated"):
+                move_human_pending_to_low_priority(root, path, "vl:12", "wl:30", hashlib.sha256(original.encode()).hexdigest())
+            self.assertEqual(original, path.read_text(encoding="utf-8"))
+            self.assertEqual(todo_original, todo.read_text(encoding="utf-8"))
+
     def test_stop_done_agent_treats_verified_missing_exact_pane_as_stopped(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
