@@ -19,10 +19,21 @@ class DirectTmuxDeliveryCallerTests(unittest.TestCase):
             captured["validated_target"] = target
             captured["validated_lines"] = n_lines
 
-        def fake_submit(target: str, message: str, options: object, _pending_guard: object = None, _success_event: object = None, _failure_fallback: object = None) -> Future[None]:
+        def fake_submit(
+            target: str,
+            message: str,
+            options: object,
+            _pending_guard: object = None,
+            _success_event: object = None,
+            _failure_fallback: object = None,
+            root: object = None,
+            delivery_id: str = "",
+        ) -> Future[None]:
             captured["target"] = target
             captured["message"] = message
             captured["options"] = options
+            captured["root"] = root
+            captured["delivery_id"] = delivery_id
             future: Future[None] = Future()
             future.set_result(None)
             return future
@@ -35,6 +46,8 @@ class DirectTmuxDeliveryCallerTests(unittest.TestCase):
         self.assertEqual("cfg:1.0", captured["target"])
         self.assertFalse(captured["options"].dry_run)
         self.assertEqual("hello\n", captured["message"])
+        self.assertIsNone(captured["root"])
+        self.assertEqual("", captured["delivery_id"])
 
     def test_pending_delivery_calls_sender_directly_after_marker_check(self) -> None:
         calls = []

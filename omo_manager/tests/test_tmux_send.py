@@ -764,15 +764,28 @@ class TmuxSendTests(unittest.TestCase):
 
         enter.assert_called_once_with("cfg:1.0")
 
-    def test_clear_existing_input_before_send_refuses_unverified_input(self) -> None:
+    def test_clear_existing_input_before_send_flushes_unverified_input(self) -> None:
         report = Report("stuck_input", ["› Continue task"], "Continue task", False, "compacting")
-        with patch("omo_manager.omo_tmux_send.inspect", return_value=report), patch("omo_manager.omo_tmux_send.subprocess.run") as run:
-            self.assertEqual("existing_input", clear_existing_input_before_send("cfg:1.0", options()))
-        run.assert_not_called()
+        with patch("omo_manager.omo_tmux_send.inspect", return_value=report), patch(
+            "omo_manager.omo_tmux_send.tail", return_value=["› Continue task", "  gpt-5.5"]
+        ), patch("omo_manager.omo_tmux_send.subprocess.run") as run:
+            self.assertEqual("existing_input", clear_existing_input_before_send("cfg:1.0", options(submit_verify_timeout_s=0.0)))
+        run.assert_called_once_with(["tmux", "send-keys", "-t", "cfg:1.0", "Enter"], timeout=5, check=True)
 
     def test_clear_existing_input_before_send_fails_closed_when_inspect_fails(self) -> None:
         with patch("omo_manager.omo_tmux_send.inspect", side_effect=RuntimeError("tmux unavailable")):
             self.assertEqual("inspect_failed", clear_existing_input_before_send("cfg:1.0", options()))
+
+    def test_clear_existing_input_rechecks_error_before_enter(self) -> None:
+        report = Report("stuck_input", ["› Continue task"], "Continue task", True)
+        lines = ["■ Error: different failure", "› Continue task", "  gpt-5.5"]
+        with patch("omo_manager.omo_tmux_send.inspect", return_value=report), patch(
+            "omo_manager.omo_tmux_send.tail", return_value=lines
+        ), patch("omo_manager.omo_tmux_send.subprocess.run") as run:
+            with self.assertRaisesRegex(RuntimeError, "different Codex error"):
+                clear_existing_input_before_send("cfg:1.0", options(), ("old failure",))
+
+        run.assert_not_called()
 
     def test_require_no_existing_input_rejects_real_input_before_paste(self) -> None:
         report = Report("running", ["• Working"], "queued worker message", False)
@@ -1304,18 +1317,33 @@ class TmuxSendTests(unittest.TestCase):
 
         cancel.assert_called_once_with("%42")
 
-    def test_run_tmux_stops_before_paste_when_existing_input_is_present(self) -> None:
+    def test_run_tmux_flushes_existing_input_before_paste(self) -> None:
         calls: list[list[str]] = []
 
         def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
             calls.append(command)
             return subprocess.CompletedProcess(command, 0)
 
-        with patch("omo_manager.omo_tmux_send.clear_existing_input_before_send", return_value="existing_input"), patch("omo_manager.omo_tmux_send.require_sendable_codex_target"), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
-            with self.assertRaisesRegex(RuntimeError, "target existing input blocks normal"):
-                run_tmux("cfg:1.0", "prompt\n", options())
+        reports = iter(
+            [
+                Report("ready", ["› old input", "  gpt-5.5"], "old input", False),
+                Report("running", ["• Working", "  gpt-5.5"], "", False),
+                Report("running", ["• Working", "  gpt-5.5"], "", False),
+            ]
+        )
+        with patch("omo_manager.omo_tmux_send.require_sendable_codex_target"), patch(
+            "omo_manager.omo_tmux_send.inspect", side_effect=lambda _args: next(reports)
+        ), patch("omo_manager.omo_tmux_send.verify_placeholder_paste", return_value=True), patch(
+            "omo_manager.omo_tmux_send.verify_submit"
+        ), patch(
+            "omo_manager.omo_tmux_send.tail", return_value=["• Working", "  gpt-5.5"]
+        ), patch(
+            "omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run
+        ):
+            run_tmux("cfg:1.0", "prompt\n", options())
 
-        self.assertFalse(any(command[:2] == ["tmux", "paste-buffer"] for command in calls))
+        self.assertTrue(any(command[:3] == ["tmux", "send-keys", "-t"] and command[-1] == "Enter" for command in calls))
+        self.assertTrue(any(command[:2] == ["tmux", "paste-buffer"] for command in calls))
 
     def test_run_tmux_stops_before_paste_when_callback_introduces_input(self) -> None:
         calls: list[list[str]] = []

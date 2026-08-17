@@ -941,12 +941,33 @@ def cancel_existing_codex_input(target: str, authorization: ExistingInputAuthori
     verify_authorized_existing_cancel(target, authorization, selected, capture.pane_id, preexisting_error)
 
 
-def clear_existing_input_before_send(target: str, _options: CodexSendOptions) -> str:
+def clear_existing_input_before_send(
+    target: str,
+    options: CodexSendOptions,
+    preexisting_error: tuple[str, ...] | None = None,
+) -> str:
     try:
         report = inspect(StatusArgs(target, 80))
     except Exception:
         return "inspect_failed"
-    return "existing_input" if is_real_input_text(report.input_text) else ""
+    if not is_real_input_text(report.input_text):
+        return ""
+    deadline_s = time.monotonic() + options.submit_verify_timeout_s
+    while True:
+        lines = revalidate_error_transition(target, 80, preexisting_error, "before existing-input flush")
+        if has_plan_prompt(lines) and not options.allow_plan_prompt_enter:
+            return "plan_prompt"
+        send_enter(target)
+        now_s = time.monotonic()
+        if now_s >= deadline_s:
+            return "existing_input"
+        time.sleep(min(0.25, max(0.05, deadline_s - now_s)))
+        try:
+            report = inspect(StatusArgs(target, 80))
+        except Exception:
+            return "inspect_failed"
+        if not is_real_input_text(report.input_text):
+            return ""
 
 
 def require_no_existing_input(target: str) -> None:
@@ -992,7 +1013,7 @@ def _run_tmux_payload(
                 _ = print(f"would send Enter to {target}")
             return
         preexisting_error = require_sendable_codex_target(target, inspect_lines_for_message(verification_message))
-        clear_result = clear_existing_input_before_send(target, options)
+        clear_result = clear_existing_input_before_send(target, options, preexisting_error)
         if clear_result:
             raise RuntimeError(f"target existing input blocks normal tmux paste: {clear_result}")
         preexisting_error = require_sendable_codex_target(target, inspect_lines_for_message(verification_message))
