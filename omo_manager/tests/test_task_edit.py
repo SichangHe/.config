@@ -699,6 +699,112 @@ class TaskEditTests(unittest.TestCase):
             self.assertEqual(text, task.read_text(encoding="utf-8"))
             self.assertIn("inside a live `(pending)` block", stderr.getvalue())
 
+    def test_source_pointer_dedupe_preserves_live_source_with_matching_active_item(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            ref = "manager_mail/691.txt"
+            pointer = f"(record and delegate {ref})"
+            item = f"Handle active request ({ref})"
+            text = task_frontmatter(pending_items=(item,)) + f"{pointer}\n{pointer}\n(pending)\nrequest body\n{pointer}\n"
+            task.write_text(text, encoding="utf-8")
+
+            exit_code = run(
+                Args(
+                    root,
+                    Path("task.md"),
+                    "source-pointer-dedupe",
+                    source_ref=ref,
+                    evidence="active item preserved",
+                    preserve_live_source=True,
+                )
+            )
+
+            self.assertEqual(0, exit_code)
+            updated = task.read_text(encoding="utf-8")
+            self.assertEqual(1, updated.count(pointer))
+            self.assertIn("(pending)\nrequest body\n" + pointer, updated)
+            self.assertIn(item, updated)
+
+    def test_source_pointer_dedupe_preserves_live_source_with_one_prior_bare_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            ref = "manager_mail/691.txt"
+            pointer = f"(record and delegate {ref})"
+            item = f"Handle active request ({ref})"
+            text = task_frontmatter(pending_items=(item,)) + f"{pointer}\n(pending)\n{pointer}\n"
+            task.write_text(text, encoding="utf-8")
+
+            exit_code = run(
+                Args(
+                    root,
+                    Path("task.md"),
+                    "source-pointer-dedupe",
+                    source_ref=ref,
+                    evidence="active item preserved",
+                    preserve_live_source=True,
+                )
+            )
+
+            self.assertEqual(0, exit_code)
+            updated = task.read_text(encoding="utf-8")
+            self.assertEqual(1, updated.count(pointer))
+            self.assertIn("(pending)\n" + pointer, updated)
+
+    def test_source_pointer_dedupe_preserve_live_source_requires_matching_active_item(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            ref = "manager_mail/691.txt"
+            pointer = f"(record and delegate {ref})"
+            text = task_frontmatter(pending_items=("different active item",)) + f"{pointer}\n{pointer}\n(pending)\n{pointer}\n"
+            task.write_text(text, encoding="utf-8")
+            stderr = io.StringIO()
+
+            with redirect_stderr(stderr):
+                exit_code = run(
+                    Args(
+                        root,
+                        Path("task.md"),
+                        "source-pointer-dedupe",
+                        source_ref=ref,
+                        evidence="would be unsafe",
+                        preserve_live_source=True,
+                    )
+                )
+
+            self.assertEqual(2, exit_code)
+            self.assertEqual(text, task.read_text(encoding="utf-8"))
+            self.assertIn("requires an active pending item", stderr.getvalue())
+
+    def test_source_pointer_dedupe_preserve_live_source_requires_live_pointer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            ref = "manager_mail/691.txt"
+            pointer = f"(record and delegate {ref})"
+            item = f"Handle active request ({ref})"
+            text = task_frontmatter(pending_items=(item,)) + f"{pointer}\n"
+            task.write_text(text, encoding="utf-8")
+            stderr = io.StringIO()
+
+            with redirect_stderr(stderr):
+                exit_code = run(
+                    Args(
+                        root,
+                        Path("task.md"),
+                        "source-pointer-dedupe",
+                        source_ref=ref,
+                        evidence="would be unsafe",
+                        preserve_live_source=True,
+                    )
+                )
+
+            self.assertEqual(2, exit_code)
+            self.assertEqual(text, task.read_text(encoding="utf-8"))
+            self.assertIn("requires an exact source pointer inside a live", stderr.getvalue())
+
     def test_source_pointer_dedupe_refuses_whitespace_wrapped_pending_marker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

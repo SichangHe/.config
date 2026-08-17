@@ -71,6 +71,7 @@ class Args:
     on_item_id: str = ""
     task_files: tuple[Path, ...] = ()
     source_ref: str = ""
+    preserve_live_source: bool = False
 
 
 @dataclass(frozen=True)
@@ -103,6 +104,7 @@ class ParsedArgs(argparse.Namespace):
     on_task: Path | None = None
     on_item_id: str = ""
     source_ref: str = ""
+    preserve_live_source: bool = False
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -169,6 +171,7 @@ def parse_args(argv: list[str]) -> Args:
     _ = source_dedupe_parser.add_argument("task_file", type=Path)
     _ = source_dedupe_parser.add_argument("--source-ref", required=True, help="Exact manager_mail/*.txt reference to remove.")
     _ = source_dedupe_parser.add_argument("--evidence", required=True, help="One-line evidence that the referenced request is already complete or cancelled.")
+    _ = source_dedupe_parser.add_argument("--preserve-live-source", action="store_true", help="Leave an exact source pointer in a live `(pending)` block intact; requires an active matching queue item.")
 
     comment_parser = subparsers.add_parser("comment-add", aliases=["comment"], help="Append a parenthesized comment line to a task file.")
     comment_parser.set_defaults(command="comment-add")
@@ -273,6 +276,7 @@ def parse_args(argv: list[str]) -> Args:
                 command,
                 evidence=normalized_comment_message(parsed.evidence),
                 source_ref=normalized_source_ref(parsed.source_ref),
+                preserve_live_source=parsed.preserve_live_source,
             )
         if command == "comment-add":
             message = parsed.message if parsed.message is not None else parsed.legacy_message
@@ -613,13 +617,14 @@ def source_pointer_dedupe_record(source_ref: str, count: int, evidence: str) -> 
     return normalized_comment(f"deduped {count} bare source pointer(s) for {source_ref}: {evidence}")
 
 
-def dedupe_bare_source_pointers(text: str, source_ref: str, evidence: str) -> tuple[str, int]:
+def dedupe_bare_source_pointers(text: str, source_ref: str, evidence: str, *, preserve_live_source: bool = False) -> tuple[str, int]:
     """Remove exact duplicate source pointers while refusing a live pending block."""
     pointer = f"(record and delegate {source_ref})"
     lines = text.splitlines(keepends=True)
     remove_indices: list[int] = []
     in_fence = False
     in_pending_block = False
+    preserved_live_pointer = False
     for index, line in enumerate(lines):
         physical_line = line.rstrip("\r\n")
         stripped_line = physical_line.strip()
@@ -634,9 +639,14 @@ def dedupe_bare_source_pointers(text: str, source_ref: str, evidence: str) -> tu
         if physical_line != pointer:
             continue
         if in_pending_block:
+            if preserve_live_source:
+                preserved_live_pointer = True
+                continue
             raise TaskFrontmatterError("refusing to remove a source pointer inside a live `(pending)` block.")
         remove_indices.append(index)
-    if len(remove_indices) == 1:
+    if preserve_live_source and not preserved_live_pointer:
+        raise TaskFrontmatterError("--preserve-live-source requires an exact source pointer inside a live `(pending)` block.")
+    if len(remove_indices) == 1 and not preserve_live_source:
         raise TaskFrontmatterError("refusing to remove a single bare source pointer; use this command only for duplicated intake.")
     if not remove_indices:
         return text, 0
@@ -913,7 +923,16 @@ def run(args: Args) -> int:
             print(f"{action} `(pending)` from {path.name}:{args.line}; no pending item added")
             return 0
         if command == "source-pointer-dedupe":
-            updated, count = dedupe_bare_source_pointers(text, args.source_ref, args.evidence)
+            if args.preserve_live_source:
+                metadata = require_metadata(text, args.root)
+                if metadata.status == "done" or not any(args.source_ref in item for item in metadata.pending_task_items):
+                    raise TaskFrontmatterError("--preserve-live-source requires an active pending item that cites --source-ref.")
+            updated, count = dedupe_bare_source_pointers(
+                text,
+                args.source_ref,
+                args.evidence,
+                preserve_live_source=args.preserve_live_source,
+            )
             if count == 0:
                 print(f"no bare source pointers found for {args.source_ref} in {path.name}")
                 return 0
