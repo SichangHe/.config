@@ -3,7 +3,7 @@
 - `cligate-quota-planning.md`
   - quota planning check before large OpenAI/Codex work
 - `live-model-switch.md`
-  - manual live-session model switching reference
+  - **start here to change a running Codex pane's model**; verified `/model` picker procedure and fail-closed checks
 - `main-manager-model-recovery.md`
   - fail-closed same-pane recovery for the fixed `wl:1` main manager
 - `manager-rotation.md`

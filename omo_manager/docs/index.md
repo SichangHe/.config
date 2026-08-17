@@ -3,7 +3,7 @@
 - `monthly-archive.md` TODO.md previous-task and manager work-log archive policy
 - `pb-agent.md` PB watcher and PB agent manager usage
 - `watchers/index.md` pending-marker delivery and maintenance watchers
-- `codex/index.md` Codex-specific helper references
+- `codex/index.md` Codex-specific helper references, including the live `/model` picker procedure
 - `routing/index.md` task, project, and submanager routing helpers
 - `../WORKER_DEFAULTS.md` default prompt additions for manager-launched workers
 - `../VL_WORKER_DEFAULTS.md` extra prompt additions for VL workers
