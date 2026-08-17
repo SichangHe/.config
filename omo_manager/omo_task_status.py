@@ -134,8 +134,8 @@ class ParsedArgs(argparse.Namespace):
     task_sha256: str = ""
     historical_commit: str = ""
     close_shared_target: bool = False
-    shared_target: str = ""
-    source_sha256: str = ""
+    shared_target: str | None = None
+    source_sha256: str | None = None
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -173,8 +173,8 @@ shutdown.""",
     _ = parser.add_argument("--task-sha256", default="", help="Exact current task digest required with --restore-terminal-target.")
     _ = parser.add_argument("--historical-commit", default="", help="Full Git commit containing the proven prior target; required with --restore-terminal-target.")
     _ = parser.add_argument("--close-shared-target", action="store_true", help="Close one explicitly proven manager record on a shared target using metadata and TODO files only; never accesses tmux.")
-    _ = parser.add_argument("--shared-target", default="", help="Exact shared manager target required with --close-shared-target.")
-    _ = parser.add_argument("--source-sha256", default="", help="Exact SHA-256 of the source task bytes required with --close-shared-target.")
+    _ = parser.add_argument("--shared-target", default=None, help="Exact shared manager target required with --close-shared-target.")
+    _ = parser.add_argument("--source-sha256", default=None, help="Exact SHA-256 of the source task bytes required with --close-shared-target.")
     _ = parser.add_argument("task_file", type=Path)
     _ = parser.add_argument("status", nargs="?", choices=sorted(TASK_FRONTMATTER_STATUSES))
     _ = parser.add_argument("--blocked-on", default="", help="Required when setting status to `blocked`; optional for `long_running`; removed for other statuses.")
@@ -187,6 +187,8 @@ shutdown.""",
         parser.error("--dirty-path-handoff requires --closure-repository.")
     if sum((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done, parsed.retire_blocked_target, parsed.reconcile_long_running_human_index, parsed.restore_terminal_target, parsed.close_shared_target)) > 1:
         parser.error("finish and recovery modes are mutually exclusive.")
+    if not parsed.close_shared_target and any((parsed.shared_target is not None, parsed.source_sha256 is not None)):
+        parser.error("--shared-target and --source-sha256 require --close-shared-target.")
     if parsed.retire_blocked_target:
         parser.error("--retire-blocked-target is disabled: preserve the historical target and resolve ownership without writing retired semantics.")
     if parsed.restore_terminal_target:
@@ -196,10 +198,12 @@ shutdown.""",
             parser.error("unrelated lifecycle, replacement, pane, and repository evidence is not valid with --restore-terminal-target.")
         return Args(parsed.root.resolve(), parsed.task_file, "", "", restore_terminal_target=True, historical_target=parsed.historical_target.strip(), task_sha256=parsed.task_sha256.strip(), historical_commit=parsed.historical_commit.strip())
     if parsed.close_shared_target:
+        shared_target = (parsed.shared_target or "").strip()
+        source_sha256 = (parsed.source_sha256 or "").strip()
         unrelated = (parsed.status, parsed.blocked_on, parsed.session_id, parsed.replacement_task, parsed.stale_target, parsed.replacement_target, parsed.stale_sha256, parsed.replacement_sha256, parsed.replacement_status, parsed.protected_target, parsed.stopped_evidence, parsed.replacement_pane_evidence, parsed.audit_output, parsed.pane_id, parsed.terminal_evidence, parsed.closure_repository, parsed.dirty_path_handoff, parsed.historical_target, parsed.task_sha256, parsed.historical_commit)
-        if any(unrelated) or TARGET_RE.fullmatch(parsed.shared_target.strip()) is None or SHA256_RE.fullmatch(parsed.source_sha256.strip()) is None:
+        if any(unrelated) or TARGET_RE.fullmatch(shared_target) is None or SHA256_RE.fullmatch(source_sha256) is None:
             parser.error("--close-shared-target requires exact --shared-target and lowercase --source-sha256, without lifecycle or repository evidence.")
-        return Args(parsed.root.resolve(), parsed.task_file, "done", "", close_shared_target=True, shared_target=parsed.shared_target.strip(), source_sha256=parsed.source_sha256.strip())
+        return Args(parsed.root.resolve(), parsed.task_file, "done", "", close_shared_target=True, shared_target=shared_target, source_sha256=source_sha256)
     if parsed.reconcile_long_running_human_index:
         if parsed.status not in {None, ""} or parsed.blocked_on:
             parser.error("--reconcile-long-running-human-index does not accept status or --blocked-on.")

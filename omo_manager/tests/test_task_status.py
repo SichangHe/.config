@@ -16,6 +16,7 @@ from omo_manager.omo_agent_status import TaskFrontmatterError, parse_task_metada
 from omo_manager.omo_task_status import DONE_REMINDER
 from omo_manager.omo_task_status import ensure_repository_closure_custody
 from omo_manager.omo_task_status import finish_shared_target_done
+from omo_manager.omo_task_status import main
 from omo_manager.omo_task_status import StopArgs
 from omo_manager.omo_task_status import parse_args
 from omo_manager.omo_task_status import reconcile_blocked_index
@@ -314,6 +315,21 @@ class TaskStatusTests(unittest.TestCase):
         self.assertTrue(parsed.restore_terminal_target)
         with self.assertRaises(SystemExit):
             parse_args(["--root", "/tmp/work", "--restore-terminal-target", "--historical-target", "wl:2", "--historical-commit", "b" * 40, "--task-sha256", "a" * 64, "--blocked-on", "human", "task.md"])
+
+    def test_parse_rejects_shared_target_evidence_without_closure_before_done_handling(self) -> None:
+        cases = (
+            ("shared target", ["--shared-target", "wl:2", "task.md", "done"]),
+            ("source SHA-256", ["--source-sha256", "a" * 64, "task.md", "done"]),
+            ("both", ["--shared-target", "wl:2", "--source-sha256", "a" * 64, "task.md", "done"]),
+            ("empty shared target", ["--shared-target", "", "task.md", "done"]),
+            ("empty source SHA-256", ["--source-sha256", "", "task.md", "done"]),
+            ("both empty", ["--shared-target", "", "--source-sha256", "", "task.md", "done"]),
+        )
+        for label, argv in cases:
+            with self.subTest(label=label), patch("omo_manager.omo_task_status.stop_done_agent") as stop_done_agent, redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    main(argv)
+                stop_done_agent.assert_not_called()
 
     def test_repository_closure_custody_accepts_clean_or_exact_dirty_handoff(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
