@@ -112,6 +112,7 @@ class Args:
     old_manager_target: str = ""
     new_manager_target: str = ""
     expected_task_sha256: str = ""
+    expected_pending_task_items: tuple[str, ...] = ()
     model: str = ""
     human_email_file: Path | None = None
     human_email_lines: tuple[int, int] | None = None
@@ -142,6 +143,7 @@ class ParsedArgs(argparse.Namespace):
     old_manager_target: str = ""
     new_manager_target: str = ""
     expected_task_sha256: str = ""
+    expected_pending_task_item: list[str] | None = None
     human_email_file: Path | None = None
     human_email_lines: tuple[int, int] | None = None
     resume_idle: bool = False
@@ -229,11 +231,18 @@ Ownership migration:
     _ = parser.add_argument(
         "--move-human-pending-to-low-priority",
         action="store_true",
-        help="Atomically move one exact blocked empty-queue task from TODO `human pending` to `low priority` while migrating its manager owner.",
+        help="Atomically move one exact blocked manager task from TODO `human pending` to `low priority` without changing its task file.",
     )
     _ = parser.add_argument("--old-manager-target", default="", help="Existing `managerat` value required by --migrate-manager-owner.")
     _ = parser.add_argument("--new-manager-target", default="", help="Replacement `managerat` value required by --migrate-manager-owner.")
     _ = parser.add_argument("--expected-task-sha256", default="", help="Required exact SHA-256 of the task before --move-human-pending-to-low-priority.")
+    _ = parser.add_argument(
+        "--expected-pending-task-item",
+        "--expected-pending-item",
+        action="append",
+        default=None,
+        help="Required exact pending queue item for --move-human-pending-to-low-priority; repeat in queue order.",
+    )
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     if not parsed.task_file.endswith(".md"):
         parser.error("--task-file must end with `.md`.")
@@ -245,17 +254,22 @@ Ownership migration:
     if (parsed.human_email_file is None) != (parsed.human_email_lines is None):
         parser.error("--human-email-file and --human-email-lines must be supplied together.")
     migration_mode = parsed.migrate_manager_owner or parsed.move_human_pending_to_low_priority
-    if not migration_mode and (parsed.old_manager_target or parsed.new_manager_target or parsed.expected_task_sha256):
+    if not migration_mode and (parsed.old_manager_target or parsed.new_manager_target or parsed.expected_task_sha256 or parsed.expected_pending_task_item):
         parser.error("ownership-migration options require a migration operation.")
     if parsed.migrate_manager_owner and parsed.move_human_pending_to_low_priority:
         parser.error("choose only one ownership migration operation.")
     if migration_mode:
-        if not parsed.old_manager_target or not parsed.new_manager_target:
+        if parsed.migrate_manager_owner and (not parsed.old_manager_target or not parsed.new_manager_target):
             parser.error("ownership migration requires --old-manager-target OLD and --new-manager-target NEW.")
-        if parsed.move_human_pending_to_low_priority and re.fullmatch(r"[0-9a-f]{64}", parsed.expected_task_sha256) is None:
-            parser.error("--move-human-pending-to-low-priority requires --expected-task-sha256 as 64 lowercase hex characters.")
-        if parsed.migrate_manager_owner and parsed.expected_task_sha256:
-            parser.error("--expected-task-sha256 is only valid with --move-human-pending-to-low-priority.")
+        if parsed.move_human_pending_to_low_priority:
+            if parsed.old_manager_target or parsed.new_manager_target:
+                parser.error("--move-human-pending-to-low-priority does not accept manager owner migration options.")
+            if re.fullmatch(r"[0-9a-f]{64}", parsed.expected_task_sha256) is None:
+                parser.error("--move-human-pending-to-low-priority requires --expected-task-sha256 as 64 lowercase hex characters.")
+            if not parsed.expected_pending_task_item or any(not item for item in parsed.expected_pending_task_item):
+                parser.error("--move-human-pending-to-low-priority requires a nonempty ordered --expected-pending-task-item queue.")
+        if parsed.migrate_manager_owner and (parsed.expected_task_sha256 or parsed.expected_pending_task_item):
+            parser.error("--expected-task-sha256 and --expected-pending-task-item are only valid with --move-human-pending-to-low-priority.")
         if any(
             (
                 parsed.tmux_session,
@@ -277,7 +291,7 @@ Ownership migration:
                 parsed.human_email_lines,
             )
         ):
-            parser.error("--migrate-manager-owner only accepts --root, --task-file, explicit old/new manager targets, and optional --dry-run.")
+            parser.error("the selected migration operation only accepts its documented bookkeeping options and optional --dry-run.")
     if not migration_mode and not parsed.tmux_session:
         parser.error("--tmux-session is required.")
     if parsed.tmux_session and TMUX_SESSION_RE.fullmatch(parsed.tmux_session) is None:
@@ -321,6 +335,7 @@ Ownership migration:
         parsed.old_manager_target,
         parsed.new_manager_target,
         parsed.expected_task_sha256,
+        tuple(parsed.expected_pending_task_item or ()),
         model=parsed.model,
         human_email_file=parsed.human_email_file,
         human_email_lines=parsed.human_email_lines,
@@ -464,13 +479,14 @@ def migrate_manager_owner(
             return
 
 
-def low_priority_todo_text(root: Path, path: Path, text: str) -> str:
+def low_priority_todo_text(root: Path, path: Path, text: str, expected_target: str) -> str:
     """Move exactly one canonical task row from `human pending` to `low priority`."""
     lines = text.splitlines(keepends=True)
     sections: dict[str, list[int]] = {"human pending": [], "low priority": []}
     section = ""
-    rows: list[tuple[int, str]] = []
-    aliases = {path.relative_to(root).as_posix(), str(path)}
+    rows: list[tuple[int, str, bool]] = []
+    task_ref = path.relative_to(root).as_posix()
+    canonical_row = re.compile(rf"^{re.escape(task_ref)}[ \t]+{re.escape(expected_target)}(?:[ \t]+.*)?$")
     for index, line in enumerate(lines):
         name = line.strip()
         if name.endswith(":") and name[:-1] in {"current", "human pending", "low priority", "previous"}:
@@ -479,16 +495,18 @@ def low_priority_todo_text(root: Path, path: Path, text: str) -> str:
                 sections[section].append(index)
             continue
         token = name.split(maxsplit=1)[0] if name else ""
-        if token in aliases:
-            rows.append((index, section))
+        candidate = Path(token)
+        candidate = candidate if candidate.is_absolute() else root / candidate
+        if candidate.resolve(strict=False) == path:
+            rows.append((index, section, canonical_row.fullmatch(name) is not None))
     if len(sections["human pending"]) != 1 or len(sections["low priority"]) != 1:
         raise ValueError("TODO must contain exactly one `human pending:` and one `low priority:` section.")
     low_header = sections["low priority"][0]
     if not lines[low_header].endswith(("\n", "\r")):
         raise ValueError("TODO `low priority:` header must be newline-terminated.")
-    if len(rows) != 1 or rows[0][1] != "human pending":
+    if len(rows) != 1 or rows[0][1] != "human pending" or not rows[0][2]:
         raise ValueError("TODO must contain exactly one canonical task row in `human pending:`.")
-    source, _ = rows[0]
+    source, _, _ = rows[0]
     moved = lines.pop(source)
     if not moved.endswith(("\n", "\r")):
         raise ValueError("TODO task row must be newline-terminated.")
@@ -525,21 +543,19 @@ def read_text_raw(path: Path) -> str:
 def move_human_pending_to_low_priority(
     root: Path,
     path: Path,
-    old_owner: str,
-    new_owner: str,
     expected_task_sha256: str,
+    expected_pending_task_items: tuple[str, ...],
     dry_run_only: bool = False,
 ) -> None:
-    """Transactionally rehome one exact paused task without consulting its pane."""
+    """Move one verified blocked manager index row without consulting its pane."""
     todo = root / "TODO.md"
     if not path.is_file() or not todo.is_file():
         raise ValueError("the task and TODO.md must both be existing regular files.")
-    if (old_owner, new_owner) != ("vl:12", "wl:30"):
-        raise ValueError("move requires managerat `vl:12` and replacement manager `wl:30`.")
+    if not expected_pending_task_items:
+        raise ValueError("move requires a nonempty exact pending queue.")
     with contextlib.ExitStack() as locks:
         for locked in sorted((path, todo), key=str):
             locks.enter_context(task_file_lock(locked))
-        task_before = path.stat()
         todo_before = todo.stat()
         task_text = read_text_raw(path)
         todo_text = read_text_raw(todo)
@@ -550,26 +566,19 @@ def move_human_pending_to_low_priority(
             metadata is None
             or metadata.version != TASK_FRONTMATTER_V1
             or metadata.status != "blocked"
-            or metadata.runat != "hvl:3"
-            or metadata.pending_task_items
+            or metadata.blocked_on != "human"
+            or metadata.runat != "vl_bugfind_mgr:0"
+            or metadata.managerat != "vlprograms:0"
+            or not metadata.is_manager
+            or metadata.pending_task_items != expected_pending_task_items
         ):
-            raise ValueError("move requires the exact v1 blocked `hvl:3` task with an empty pending queue.")
-        updated_task = manager_owner_migration_text(task_text, old_owner, new_owner, root)
-        updated_todo = low_priority_todo_text(root, path, todo_text)
+            raise ValueError("move requires the exact v1 blocked human manager record with the supplied nonempty pending queue.")
+        updated_todo = low_priority_todo_text(root, path, todo_text, metadata.runat)
         if dry_run_only:
-            print(f"dry-run: would move {path.name} from TODO human pending to low priority and managerat from {old_owner} to {new_owner}; no tmux pane changed.")
+            print(f"dry-run: would move {path.name} from TODO human pending to low priority without changing its task file or tmux panes.")
             return
         write_replace(todo, updated_todo, todo_before)
-        try:
-            write_replace(path, updated_task, task_before)
-        except Exception as exc:
-            try:
-                todo_after = todo.stat()
-                write_replace(todo, todo_text, todo_after)
-            except Exception as rollback_exc:
-                raise RuntimeError(f"task update failed and TODO rollback also failed: {rollback_exc}") from exc
-            raise
-    print(f"moved {path.name} from TODO human pending to low priority and managerat from {old_owner} to {new_owner}")
+    print(f"moved {path.name} from TODO human pending to low priority without changing its task file")
 
 
 def target(args: Args) -> str:
@@ -1728,14 +1737,11 @@ def main(argv: list[str]) -> int:
             migration_version = first_version(frontmatter_text(migration_text) or "")
             if migration_version == TASK_FRONTMATTER_V2 and not v2_enabled(args.root):
                 raise ValueError("v2 ownership migration is disabled until reviewed migration enablement is complete.")
-            if migration_version == TASK_FRONTMATTER_V1 and v2_enabled(args.root):
-                raise ValueError("v1 task writes are disabled after v2 enablement.")
             move_human_pending_to_low_priority(
                 args.root,
                 migration_path,
-                args.old_manager_target,
-                args.new_manager_target,
                 args.expected_task_sha256,
+                args.expected_pending_task_items,
                 args.dry_run,
             )
             return 0
