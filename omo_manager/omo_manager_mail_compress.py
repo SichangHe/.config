@@ -8,6 +8,7 @@ import csv
 import hashlib
 import io
 import imaplib
+import json
 import os
 import re
 import socket
@@ -30,8 +31,11 @@ from omo_manager.omo_email_config import configured_agent_mail, human_config_pat
 from omo_manager.omo_email_subject import TMUX_TARGET_RE, canonical_tmux_target, subject_tmux_target
 
 HEADER_FETCH = "(BODY.PEEK[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)])"
+HEADER_BATCH_FETCH = "(UID BODY.PEEK[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)])"
 FULL_FETCH = "(BODY.PEEK[])"
+FULL_BATCH_FETCH = "(UID BODY.PEEK[])"
 GMAIL_METADATA_FETCH = "(FLAGS X-GM-MSGID X-GM-THRID X-GM-LABELS)"
+GMAIL_METADATA_BATCH_FETCH = "(UID FLAGS X-GM-MSGID X-GM-THRID X-GM-LABELS)"
 TRASH_MAILBOX = "[Gmail]/Trash"
 CONFIG_PATH = human_config_path()
 DEFAULT_THREADS_PER_BATCH = 10
@@ -392,6 +396,23 @@ def manager_candidate_uids(client: imaplib.IMAP4_SSL, self_email: str) -> list[s
     return found
 
 
+def manager_unread_candidate_uids(client: imaplib.IMAP4_SSL, self_email: str) -> list[str]:
+    found: list[str] = []
+    seen: set[str] = set()
+    settings = configured_agent_mail()
+    criteria = ["UNSEEN", "FROM", f'"{self_email}"']
+    subject_tokens = ("",) if settings is not None else LEGACY_MANAGER_SUBJECT_TOKENS
+    for token in subject_tokens:
+        typ, data = imap_uid(client, "unread-manager-candidate-search", "search", None, *(criteria + (["SUBJECT", f'"{token}"'] if token else [])))
+        if typ != "OK":
+            raise RuntimeError(f"IMAP unread search failed: {typ}")
+        for uid in [raw.decode() for raw in data[0].split()] if data and data[0] else []:
+            if uid not in seen:
+                seen.add(uid)
+                found.append(uid)
+    return found
+
+
 def inbox_subset(client: imaplib.IMAP4_SSL, uids: list[str]) -> list[str]:
     if not uids:
         return []
@@ -534,6 +555,40 @@ def fetch_gmail_metadata(client: imaplib.IMAP4_SSL, uid: str) -> tuple[str, str,
     return metadata.gmail_msgid, metadata.gmail_thrid, metadata.flags, metadata.labels
 
 
+def fetch_gmail_metadata_records(client: imaplib.IMAP4_SSL, uids: list[str]) -> dict[str, GmailMetadata]:
+    """Fetch Gmail identity metadata for a fixed UID set in one request."""
+    if not uids:
+        return {}
+    typ, data = imap_uid(client, "gmail-metadata-batch-fetch", "fetch", ",".join(uids), GMAIL_METADATA_BATCH_FETCH)
+    if typ != "OK":
+        raise RuntimeError(f"IMAP Gmail metadata batch fetch failed: typ={typ}")
+    metadata_by_uid: dict[str, GmailMetadata] = {}
+    for item in data:
+        if isinstance(item, bytes):
+            response = item
+        elif isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], bytes):
+            response = item[0]
+        else:
+            continue
+        attributes = imap_fetch_attributes(response.decode("utf-8", errors="replace"))
+        uid = attributes.get("UID", "")
+        message_id = attributes.get("X-GM-MSGID", "")
+        thread_id = attributes.get("X-GM-THRID", "")
+        if not uid.isdecimal() or not message_id.isdecimal() or not thread_id.isdecimal():
+            continue
+        if uid in metadata_by_uid:
+            raise RuntimeError("IMAP Gmail metadata batch fetch returned duplicate UID")
+        metadata_by_uid[uid] = GmailMetadata(
+            message_id,
+            thread_id,
+            imap_list_value(attributes.get("FLAGS", "")),
+            imap_list_value(attributes.get("X-GM-LABELS", "")),
+        )
+    if set(metadata_by_uid) != set(uids):
+        raise RuntimeError("IMAP Gmail metadata batch fetch returned incomplete or duplicate UIDs")
+    return metadata_by_uid
+
+
 def gmail_extension_advertised(client: imaplib.IMAP4_SSL) -> bool:
     typ, data = imap_operation(client, "capability", client.capability)
     if typ != "OK":
@@ -560,8 +615,73 @@ def fetch_records(client: imaplib.IMAP4_SSL, uids: list[str], with_body: bool, w
     return [fetch_record(client, uid, with_body, with_metadata, n_fetch_attempts) for uid in uids]
 
 
+def fetch_header_records(client: imaplib.IMAP4_SSL, uids: list[str]) -> list[MailRecord]:
+    """Fetch a fixed header set in one read-only IMAP request.
+
+    Snapshot and identity preflight used to issue one network round-trip per
+    manager candidate before printing anything.  A large mailbox consequently
+    looked hung even though every individual request was healthy.  Requesting
+    UID in the response lets this batched fetch retain the exact caller order.
+    """
+    if not uids:
+        return []
+    typ, data = imap_uid(client, "manager-header-batch-fetch", "fetch", ",".join(uids), HEADER_BATCH_FETCH)
+    if typ != "OK":
+        raise RuntimeError(f"IMAP manager header batch fetch failed: typ={typ}")
+    records_by_uid: dict[str, MailRecord] = {}
+    for item in data:
+        if not isinstance(item, tuple) or len(item) != 2:
+            continue
+        metadata, payload = item
+        if not isinstance(metadata, bytes) or not isinstance(payload, bytes):
+            continue
+        match = re.search(rb"\bUID (\d+)\b", metadata)
+        if match is None:
+            continue
+        uid = match.group(1).decode()
+        msg = BytesParser(policy=policy.default).parsebytes(payload)
+        if uid in records_by_uid:
+            raise RuntimeError("IMAP manager header batch fetch returned duplicate UID")
+        records_by_uid[uid] = record_from_msg(uid, msg, raw_sha256=hashlib.sha256(payload).hexdigest())
+    if set(records_by_uid) != set(uids):
+        raise RuntimeError("IMAP manager header batch fetch returned incomplete or duplicate UIDs")
+    return [records_by_uid[uid] for uid in uids]
+
+
+def fetch_full_records_batched(client: imaplib.IMAP4_SSL, uids: list[str]) -> list[MailRecord]:
+    if not uids:
+        return []
+    typ, data = imap_uid(client, "full-message-batch-fetch", "fetch", ",".join(uids), FULL_BATCH_FETCH)
+    if typ != "OK":
+        raise RuntimeError(f"IMAP full message batch fetch failed: typ={typ}")
+    records: dict[str, MailRecord] = {}
+    for item in data:
+        if not isinstance(item, tuple) or len(item) != 2 or not isinstance(item[0], bytes) or not isinstance(item[1], bytes):
+            continue
+        match = re.search(rb"\bUID (\d+)\b", item[0])
+        if match is None:
+            continue
+        uid = match.group(1).decode()
+        if uid in records:
+            raise RuntimeError("IMAP full message batch fetch returned duplicate UID")
+        msg = BytesParser(policy=policy.default).parsebytes(item[1])
+        records[uid] = record_from_msg(uid, msg, message_text(msg), raw_sha256=hashlib.sha256(item[1]).hexdigest())
+    if set(records) != set(uids):
+        raise RuntimeError("IMAP full message batch fetch returned incomplete or duplicate UIDs")
+    metadata = fetch_gmail_metadata_records(client, uids)
+    return [replace(records[uid], gmail_msgid=metadata[uid].gmail_msgid, gmail_thrid=metadata[uid].gmail_thrid, flags=metadata[uid].flags, labels=metadata[uid].labels) for uid in uids]
+
+
 def accepted_manager_headers(client: imaplib.IMAP4_SSL, uids: list[str], sender_email: str, recipient_email: str) -> tuple[list[MailRecord], list[str]]:
-    records = fetch_records(client, uids, with_body=False)
+    try:
+        records = fetch_header_records(client, uids)
+    except RuntimeError as exc:
+        if str(exc) != "IMAP manager header batch fetch returned incomplete or duplicate UIDs":
+            raise
+        # Keep the read-only helper compatible with IMAP servers that do not
+        # include UID in a multi-message FETCH response.  Gmail includes it,
+        # so normal manager-mail snapshots use the single round-trip above.
+        records = fetch_records(client, uids, with_body=False)
     accepted = [record for record in records if is_manager_record(record, sender_email, recipient_email)]
     skipped = [record.uid for record in records if not is_manager_record(record, sender_email, recipient_email)]
     return accepted, skipped
@@ -680,9 +800,29 @@ def fetch_imap_thread_contexts(
     for record in records:
         source_ids_by_thread.setdefault(record.gmail_thrid, set()).add(record.gmail_msgid)
     select_mailbox(client, all_mailbox, readonly=True)
+    if not source_ids_by_thread:
+        return special_use, {}
+    thread_terms = [f"X-GM-THRID {thread}" for thread in sorted(source_ids_by_thread)]
+    search = thread_terms[0]
+    for term in thread_terms[1:]:
+        search = f"OR ({search}) ({term})"
+    try:
+        typ, data = imap_uid(client, "gmail-thread-union-search", "search", None, search)
+        if typ != "OK":
+            raise RuntimeError(f"IMAP Gmail thread union search failed: {typ}")
+        context_uids = [raw.decode() for raw in data[0].split()] if data and data[0] else []
+        if not context_uids:
+            raise RuntimeError("IMAP Gmail thread union search returned incomplete or duplicate UIDs")
+        all_context_records = fetch_full_records_batched(client, context_uids)
+    except RuntimeError as exc:
+        if "incomplete or duplicate UIDs" not in str(exc):
+            raise
+        all_context_records = []
+        for gmail_thrid in sorted(source_ids_by_thread):
+            all_context_records.extend(fetch_records(client, gmail_thread_uids(client, gmail_thrid), with_body=True, with_metadata=True))
     records_by_thread: dict[str, list[MailRecord]] = {}
     for gmail_thrid, source_ids in sorted(source_ids_by_thread.items()):
-        context_records = fetch_records(client, gmail_thread_uids(client, gmail_thrid), with_body=True, with_metadata=True)
+        context_records = [record for record in all_context_records if record.gmail_thrid == gmail_thrid]
         require_gmail_identities(context_records)
         context_ids = [record.gmail_msgid for record in context_records]
         if not context_records or len(context_ids) != len(set(context_ids)) or any(record.gmail_thrid != gmail_thrid for record in context_records) or not source_ids.issubset(context_ids):
@@ -796,11 +936,31 @@ def cmd_identity_preflight(_args: argparse.Namespace) -> int:
             if not gmail_extension:
                 raise RuntimeError("configured IMAP mailbox does not advertise Gmail identity support")
             uidvalidity = selected_uidvalidity(client)
-            source_records = [replace(record, source_uidvalidity=uidvalidity) for record in fetch_records(client, [header.uid for header in headers], with_body=True, with_metadata=True)]
+            try:
+                metadata_by_uid = fetch_gmail_metadata_records(client, [header.uid for header in headers])
+                source_records = [
+                    replace(
+                        header,
+                        gmail_msgid=metadata_by_uid[header.uid].gmail_msgid,
+                        gmail_thrid=metadata_by_uid[header.uid].gmail_thrid,
+                        flags=metadata_by_uid[header.uid].flags,
+                        labels=metadata_by_uid[header.uid].labels,
+                        source_uidvalidity=uidvalidity,
+                    )
+                    for header in headers
+                ]
+                _special_use, records_by_thread = fetch_imap_thread_contexts(client, source_records)
+            except RuntimeError as exc:
+                if str(exc) != "IMAP Gmail metadata batch fetch returned incomplete or duplicate UIDs":
+                    raise
+                # Compatibility fallback for servers that cannot return a
+                # multi-message Gmail metadata response.  The normal Gmail
+                # path above stays aggregate and avoids fetching every body.
+                source_records = [replace(record, source_uidvalidity=uidvalidity) for record in fetch_records(client, [header.uid for header in headers], with_body=True, with_metadata=True)]
+                _special_use, records_by_thread = fetch_imap_thread_contexts(client, source_records)
             require_gmail_identities(source_records)
             if len({record.gmail_msgid for record in source_records}) != len(source_records):
                 raise RuntimeError("configured IMAP mailbox returned duplicate Gmail message identities")
-            _special_use, records_by_thread = fetch_imap_thread_contexts(client, source_records)
         except (imaplib.IMAP4.error, RuntimeError) as exc:
             imap_failure = 1
             stage = exc.stage if isinstance(exc, ImapOperationError) else "identity-evidence"
@@ -833,6 +993,171 @@ def cmd_snapshot(_args: argparse.Namespace) -> int:
         if skipped:
             print(f"skipped_boundary_mismatch={len(skipped)}")
         print_records(records)
+    finally:
+        logout_mailbox(client)
+    return 0
+
+
+def validate_unread_summary_bounds(max_body_chars: int, max_threads: int, max_messages_per_thread: int) -> None:
+    if max_body_chars < 80 or max_body_chars > 5000:
+        raise RuntimeError("max body characters must be between 80 and 5000")
+    if max_threads < 1 or max_threads > 100:
+        raise RuntimeError("max threads must be between 1 and 100")
+    if max_messages_per_thread < 1 or max_messages_per_thread > 50:
+        raise RuntimeError("max messages per thread must be between 1 and 50")
+
+
+def bounded_clean_body(body: str, max_chars: int) -> str:
+    text = clean_body_text(body)
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 1].rstrip() + "…"
+
+
+def clean_body_text(body: str) -> str:
+    lines = []
+    for line in body.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(">"):
+            continue
+        lines.append(stripped)
+    return re.sub(r"\s+", " ", " ".join(lines)).strip()
+
+
+def stable_text_digest(values: list[str]) -> str:
+    digest = hashlib.sha256()
+    for value in values:
+        encoded = value.encode("utf-8")
+        digest.update(str(len(encoded)).encode())
+        digest.update(b":")
+        digest.update(encoded)
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def unread_records_with_metadata(client: imaplib.IMAP4_SSL, headers: list[MailRecord]) -> list[MailRecord]:
+    metadata_by_uid = fetch_gmail_metadata_records(client, [header.uid for header in headers])
+    records = [
+        replace(
+            header,
+            gmail_msgid=metadata_by_uid[header.uid].gmail_msgid,
+            gmail_thrid=metadata_by_uid[header.uid].gmail_thrid,
+            flags=metadata_by_uid[header.uid].flags,
+            labels=metadata_by_uid[header.uid].labels,
+        )
+        for header in headers
+    ]
+    missing_thread = [record.uid for record in records if not record.gmail_thrid]
+    if missing_thread:
+        raise RuntimeError(f"unread summary requires Gmail thread identities: uid={','.join(missing_thread)}")
+    return records
+
+
+def selected_unread_summary_headers(
+    records: list[MailRecord],
+    max_threads: int,
+    max_messages_per_thread: int,
+) -> tuple[list[tuple[list[MailRecord], list[MailRecord]]], int]:
+    validate_unread_summary_bounds(120, max_threads, max_messages_per_thread)
+    threads: dict[str, list[MailRecord]] = {}
+    for record in records:
+        threads.setdefault(record.gmail_thrid, []).append(record)
+    ordered_threads = sorted(
+        threads.values(),
+        key=lambda thread_records: max(int(record.uid) for record in thread_records if record.uid.isdecimal()),
+        reverse=True,
+    )
+    selected: list[tuple[list[MailRecord], list[MailRecord]]] = []
+    for thread_records in ordered_threads[:max_threads]:
+        ordered = sorted(thread_records, key=lambda record: int(record.uid) if record.uid.isdecimal() else -1)
+        selected.append((ordered, ordered[-max_messages_per_thread:]))
+    return selected, max(0, len(ordered_threads) - max_threads)
+
+
+def unread_thread_summaries(
+    header_threads: list[tuple[list[MailRecord], list[MailRecord]]],
+    body_records: dict[str, MailRecord],
+    max_body_chars: int,
+) -> list[dict[str, object]]:
+    validate_unread_summary_bounds(max_body_chars, max(1, len(header_threads)), 1)
+    summaries: list[dict[str, object]] = []
+    for all_headers, included_headers in header_threads:
+        included = [replace(header, body=body_records[header.uid].body, raw_sha256=body_records[header.uid].raw_sha256) for header in included_headers]
+        latest = all_headers[-1]
+        targets = [target for target in (subject_tmux_target(record.subject) for record in reversed(all_headers)) if target]
+        read_now_items: list[dict[str, str]] = []
+        read_now_parts: list[str] = []
+        remaining_chars = max_body_chars
+        for record in reversed(included):
+            prefix = f"UID {record.uid}: "
+            if remaining_chars <= len(prefix):
+                break
+            text_budget = remaining_chars - len(prefix)
+            text = bounded_clean_body(record.body, text_budget)
+            if not text:
+                continue
+            part = f"{prefix}{text}"
+            if read_now_parts and len(part) + 2 > remaining_chars:
+                break
+            if read_now_parts:
+                remaining_chars -= 2
+            read_now_parts.append(part)
+            read_now_items.append({"uid": record.uid, "subject": record.subject, "text": text})
+            remaining_chars -= len(part)
+        all_unread_uid_values = [record.uid for record in all_headers]
+        all_unread_subject_values = [record.subject for record in all_headers]
+        summaries.append(
+            {
+                "gmail_thread_id": latest.gmail_thrid,
+                "unread_count": len(all_headers),
+                "included_message_count": len(included),
+                "omitted_older_unread_count": max(0, len(all_headers) - len(included)),
+                "uids": [record.uid for record in included],
+                "all_unread_uid_sha256": stable_text_digest(all_unread_uid_values),
+                "latest_uid": latest.uid,
+                "latest_subject": latest.subject,
+                "latest_date": latest.date,
+                "latest_sender": latest.sender,
+                "latest_target": targets[0] if targets else "",
+                "subjects": [record.subject for record in included],
+                "all_unread_subject_sha256": stable_text_digest(all_unread_subject_values),
+                "read_now": "\n\n".join(read_now_parts),
+                "read_now_items": read_now_items,
+            }
+        )
+    return summaries
+
+
+def cmd_unread_summary(args: argparse.Namespace) -> int:
+    validate_unread_summary_bounds(args.max_body_chars, args.max_threads, args.max_messages_per_thread)
+    client, config = open_mailbox(readonly=True)
+    try:
+        sender_email, recipient_email = mail_boundary(config)
+        candidate_uids = manager_unread_candidate_uids(client, sender_email)
+        headers, skipped = accepted_manager_headers(client, candidate_uids, sender_email, recipient_email)
+        metadata_headers = unread_records_with_metadata(client, headers)
+        selected_threads, truncated = selected_unread_summary_headers(metadata_headers, args.max_threads, args.max_messages_per_thread)
+        selected_uids = [record.uid for _all_headers, included_headers in selected_threads for record in included_headers]
+        body_records = {record.uid: record for record in fetch_full_records_batched(client, selected_uids)}
+        if {record.uid for record in body_records.values() if is_manager_record(record, sender_email, recipient_email)} != set(selected_uids):
+            raise RuntimeError("unread summary boundary changed between header and body fetch")
+        summaries = unread_thread_summaries(selected_threads, body_records, args.max_body_chars)
+        result = {
+            "schema": "omo-manager-mail-unread-summary/v1",
+            "read_only": True,
+            "mailbox": "INBOX",
+            "source_uidvalidity": selected_uidvalidity(client),
+            "manager_sender": sender_email,
+            "human_recipient": recipient_email,
+            "candidate_unread_count": len(candidate_uids),
+            "accepted_unread_count": len(headers),
+            "fetched_body_count": len(selected_uids),
+            "skipped_boundary_mismatch": skipped,
+            "thread_count": len(summaries),
+            "truncated_thread_count": truncated,
+            "threads": summaries,
+        }
+        print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     finally:
         logout_mailbox(client)
     return 0
@@ -2630,6 +2955,11 @@ def parser() -> argparse.ArgumentParser:
     identity_preflight.set_defaults(func=cmd_identity_preflight)
     snapshot = sub.add_parser("snapshot", help="Print manager mail headers and UIDs.")
     snapshot.set_defaults(func=cmd_snapshot)
+    unread_summary = sub.add_parser("unread-summary", help="Print read-only JSON summaries of unread manager-human chains.")
+    unread_summary.add_argument("--max-threads", type=int, default=20, help="Maximum unread chains to print; 1..100.")
+    unread_summary.add_argument("--max-body-chars", type=int, default=1200, help="Maximum read-now text per chain; 80..5000.")
+    unread_summary.add_argument("--max-messages-per-thread", type=int, default=20, help="Maximum unread messages to fetch per chain; 1..50.")
+    unread_summary.set_defaults(func=cmd_unread_summary)
     inspect_explicit = sub.add_parser("inspect-explicit", help="Print exact live bindings and bodies for selected manager UIDs without creating evidence files.")
     inspect_explicit.add_argument("--uids", required=True, help="Comma or whitespace separated current INBOX UIDs.")
     inspect_explicit.add_argument("--task-id", required=True, help="Task identity assigned to every selected source.")

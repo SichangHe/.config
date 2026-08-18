@@ -4,6 +4,12 @@ Manager-mail compression does not require an evidence directory or persisted evi
 
 A threshold may start review; it never authorizes Trash. PB news, PB stock watch, and PB urgent mail remain excluded.
 
+## unread read-now summaries
+
+`omo_manager_mail_compress.py unread-summary` is the read-only Human-facing compression view for unread manager-human chains. It opens the configured human mailbox in read-only mode, searches only unread mail from the configured agent sender, verifies the same manager-mail boundary as cleanup, fetches full messages and Gmail thread identities, then prints one bounded JSON summary per unread Gmail thread. The command does not mark mail seen, send replacement mail, move messages, or authorize Trash.
+
+Each summary is intended to answer “what does the Human need to read now?” It includes the selected unread UID set, latest subject/date/sender, inferred tmux target when the subject has one, bounded subjects and `read_now` excerpts across selected unread messages with quoted reply text omitted, plus counts and SHA-256 digests for the complete unread UID/subject set when a long chain is capped. Missing Gmail thread identity is a hard failure because unread-chain compression needs stable chain grouping. Argument bounds are checked before any mailbox is opened.
+
 ## select current sources
 
 - start from a current read-only view of configured agent-to-human and legacy self-addressed manager mail in `INBOX`; a human must explicitly authorize other directions or mutation sources

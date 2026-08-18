@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import os
 import subprocess
 import tempfile
@@ -15,7 +16,10 @@ from unittest.mock import patch
 
 from omo_manager.omo_manager_mail_compress import (
     FULL_FETCH,
+    FULL_BATCH_FETCH,
     GMAIL_METADATA_FETCH,
+    GMAIL_METADATA_BATCH_FETCH,
+    HEADER_BATCH_FETCH,
     HEADER_FETCH,
     ImapOperationError,
     MailRecord,
@@ -29,6 +33,7 @@ from omo_manager.omo_manager_mail_compress import (
     cmd_inspect_explicit,
     cmd_locate_replacement,
     cmd_mark_seen,
+    cmd_unread_summary,
     cmd_trash_explicit,
     cmd_trash_superseded,
     direct_context_intact,
@@ -41,6 +46,7 @@ from omo_manager.omo_manager_mail_compress import (
     export_batches,
     fetch_msg_bytes,
     fetch_gmail_metadata,
+    fetch_header_records,
     fetch_direct_thread_contexts,
     imap_operation,
     imap_quoted,
@@ -53,6 +59,7 @@ from omo_manager.omo_manager_mail_compress import (
     parse_explicit_source,
     parse_route_resolutions,
     manager_candidate_uids,
+    manager_unread_candidate_uids,
     parse_uid_text,
     prepare_thread_disposition,
     record_from_msg,
@@ -62,6 +69,7 @@ from omo_manager.omo_manager_mail_compress import (
     frozen_thread_context,
     thread_context_digest,
     tsv_value,
+    unread_records_with_metadata,
     verify_post_move_imap,
     validate_task_terminal_dispositions,
     validate_scoped_records,
@@ -127,6 +135,13 @@ class Args:
         self.replacement_not_required = True
         self.task_id = "task-a"
         self.reviewer = "reviewer-2"
+
+
+class UnreadSummaryArgs:
+    def __init__(self, max_threads: int = 20, max_body_chars: int = 1200, max_messages_per_thread: int = 20) -> None:
+        self.max_threads = max_threads
+        self.max_body_chars = max_body_chars
+        self.max_messages_per_thread = max_messages_per_thread
 
 
 class ExportArgs:
@@ -673,16 +688,191 @@ with tempfile.TemporaryDirectory() as tmp:
             client.calls,
         )
 
+    def test_unread_candidate_uids_uses_unseen_and_exact_sender_in_split_mode(self) -> None:
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+
+        class Client:
+            calls: list[tuple[object, ...]] = []
+
+            def uid(self, command: str, *args: object) -> tuple[str, list[bytes]]:
+                self.calls.append((command, *args))
+                return "OK", [b"7 8 7"]
+
+        client = Client()
+        with patch("omo_manager.omo_manager_mail_compress.configured_agent_mail", return_value=Settings()):
+            self.assertEqual(["7", "8"], manager_unread_candidate_uids(client, "agent@example.test"))
+        self.assertEqual(
+            [("search", None, "UNSEEN", "FROM", '"agent@example.test"')],
+            client.calls,
+        )
+
+    def test_unread_summary_groups_read_only_threads_and_preserves_read_now_fields(self) -> None:
+        raw_old = self.raw_message("[wl:1] task", "first body\n> quoted old body")
+        raw_latest = self.raw_message("Re: [wl:1] task", "Decision needed now\n\n> prior context")
+        raw_other = self.raw_message("[wl:2] other", "other body")
+        client = FakeClient(
+            {
+                ("search", None, "UNSEEN", "FROM", '"agent@example.test"'): ("OK", [b"7 8 9"]),
+                ("fetch", "7,8,9", HEADER_BATCH_FETCH): (
+                    "OK",
+                    [
+                        (b"7 (UID 7 BODY[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)] {1}", raw_old),
+                        (b"8 (UID 8 BODY[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)] {1}", raw_latest),
+                        (
+                            b"9 (UID 9 BODY[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)] {1}",
+                            raw_other.replace(b"Agent <agent@example.test>", b"Other <other@example.test>"),
+                        ),
+                    ],
+                ),
+                ("fetch", "7,8", FULL_BATCH_FETCH): (
+                    "OK",
+                    [
+                        (b"7 (UID 7 BODY[] {1}", raw_old),
+                        (b"8 (UID 8 BODY[] {1}", raw_latest),
+                    ],
+                ),
+                ("fetch", "7,8", GMAIL_METADATA_BATCH_FETCH): (
+                    "OK",
+                    [
+                        b"7 (UID 7 FLAGS () X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\Inbox))",
+                        b"8 (UID 8 FLAGS () X-GM-MSGID 101 X-GM-THRID 200 X-GM-LABELS (\\Inbox))",
+                    ],
+                ),
+            }
+        )
+
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+
+        output = io.StringIO()
+        with (
+            patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {"user": "human@example.test"})),
+            patch("omo_manager.omo_manager_mail_compress.configured_agent_mail", return_value=Settings()),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(0, cmd_unread_summary(UnreadSummaryArgs(max_body_chars=120)))
+        summary = json.loads(output.getvalue())
+        self.assertEqual("omo-manager-mail-unread-summary/v1", summary["schema"])
+        self.assertTrue(summary["read_only"])
+        self.assertEqual("9", summary["source_uidvalidity"])
+        self.assertEqual(3, summary["candidate_unread_count"])
+        self.assertEqual(2, summary["accepted_unread_count"])
+        self.assertEqual(["9"], summary["skipped_boundary_mismatch"])
+        self.assertEqual(1, summary["thread_count"])
+        self.assertEqual(
+            {
+                "gmail_thread_id": "200",
+                "latest_uid": "8",
+                "unread_count": 2,
+                "included_message_count": 2,
+                "uids": ["7", "8"],
+                "latest_subject": "Re: [wl:1] task",
+                "latest_target": "wl:1",
+                "read_now": "UID 8: Decision needed now\n\nUID 7: first body",
+            },
+            {
+                key: summary["threads"][0][key]
+                for key in ("gmail_thread_id", "latest_uid", "unread_count", "included_message_count", "uids", "latest_subject", "latest_target", "read_now")
+            },
+        )
+        self.assertNotIn("quoted", summary["threads"][0]["read_now"])
+        self.assertLessEqual(len(summary["threads"][0]["read_now"]), 120)
+        self.assertTrue(client.logged_out)
+        self.assertEqual([], client.select_calls)
+        self.assertIn(("fetch", "7,8", GMAIL_METADATA_BATCH_FETCH), client.uid_calls)
+
+    def test_unread_summary_refuses_missing_thread_identity_and_invalid_bounds(self) -> None:
+        client = FakeClient({("fetch", "7", GMAIL_METADATA_BATCH_FETCH): ("OK", [b"7 (UID 7 FLAGS () X-GM-MSGID 100 X-GM-LABELS (\\Inbox))"])})
+        with self.assertRaisesRegex(RuntimeError, "incomplete or duplicate UIDs|requires Gmail thread identities"):
+            unread_records_with_metadata(client, [MailRecord("7", "", "", "", "subject", "")])  # type: ignore[arg-type]
+        with (
+            patch("omo_manager.omo_manager_mail_compress.open_mailbox", side_effect=AssertionError("mailbox opened")),
+            self.assertRaisesRegex(RuntimeError, "max threads"),
+        ):
+            cmd_unread_summary(UnreadSummaryArgs(max_threads=0))
+
+    def test_unread_summary_caps_thread_body_fetches_and_audits_omitted_messages(self) -> None:
+        raw_10 = self.raw_message("[wl:1] old", "old body")
+        raw_11 = self.raw_message("Re: [wl:1] middle", "middle body " * 30)
+        raw_12 = self.raw_message("Re: [wl:1] latest", "latest body " * 30)
+        client = FakeClient(
+            {
+                ("search", None, "UNSEEN", "FROM", '"agent@example.test"'): ("OK", [b"10 11 12"]),
+                ("fetch", "10,11,12", HEADER_BATCH_FETCH): (
+                    "OK",
+                    [
+                        (b"10 (UID 10 BODY[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)] {1}", raw_10),
+                        (b"11 (UID 11 BODY[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)] {1}", raw_11),
+                        (b"12 (UID 12 BODY[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)] {1}", raw_12),
+                    ],
+                ),
+                ("fetch", "10,11,12", GMAIL_METADATA_BATCH_FETCH): (
+                    "OK",
+                    [
+                        b"10 (UID 10 FLAGS () X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\Inbox))",
+                        b"11 (UID 11 FLAGS () X-GM-MSGID 101 X-GM-THRID 200 X-GM-LABELS (\\Inbox))",
+                        b"12 (UID 12 FLAGS () X-GM-MSGID 102 X-GM-THRID 200 X-GM-LABELS (\\Inbox))",
+                    ],
+                ),
+                ("fetch", "11,12", GMAIL_METADATA_BATCH_FETCH): (
+                    "OK",
+                    [
+                        b"11 (UID 11 FLAGS () X-GM-MSGID 101 X-GM-THRID 200 X-GM-LABELS (\\Inbox))",
+                        b"12 (UID 12 FLAGS () X-GM-MSGID 102 X-GM-THRID 200 X-GM-LABELS (\\Inbox))",
+                    ],
+                ),
+                ("fetch", "11,12", FULL_BATCH_FETCH): (
+                    "OK",
+                    [
+                        (b"11 (UID 11 BODY[] {1}", raw_11),
+                        (b"12 (UID 12 BODY[] {1}", raw_12),
+                    ],
+                ),
+                ("fetch", "10,11,12", FULL_BATCH_FETCH): ("BAD", [b"must not fetch every unread body"]),
+            }
+        )
+
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+
+        output = io.StringIO()
+        with (
+            patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {"user": "human@example.test"})),
+            patch("omo_manager.omo_manager_mail_compress.configured_agent_mail", return_value=Settings()),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(0, cmd_unread_summary(UnreadSummaryArgs(max_body_chars=80, max_messages_per_thread=2)))
+        thread = json.loads(output.getvalue())["threads"][0]
+        self.assertEqual(3, thread["unread_count"])
+        self.assertEqual(2, thread["included_message_count"])
+        self.assertEqual(1, thread["omitted_older_unread_count"])
+        self.assertEqual(["11", "12"], thread["uids"])
+        self.assertEqual(["Re: [wl:1] middle", "Re: [wl:1] latest"], thread["subjects"])
+        self.assertLessEqual(len(thread["read_now"]), 80)
+        self.assertTrue(thread["read_now"].startswith("UID 12: latest body"))
+        self.assertRegex(thread["all_unread_uid_sha256"], r"^[0-9a-f]{64}$")
+        self.assertIn(("fetch", "11,12", FULL_BATCH_FETCH), client.uid_calls)
+        self.assertNotIn(("fetch", "10,11,12", FULL_BATCH_FETCH), client.uid_calls)
+
     def test_snapshot_and_export_header_filter_keeps_pb_newsletter_only(self) -> None:
         def raw(subject: str) -> bytes:
             return (f"From: Agent <agent@example.test>\r\nTo: Human <human@example.test>\r\nSubject: {subject}\r\nMessage-ID: <one@example.test>\r\n\r\n").encode()
 
         client = FakeClient(
             {
-                ("fetch", "1", "(BODY.PEEK[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)])"): ("OK", [(b"header", raw("PB newsletter"))]),
-                ("fetch", "2", "(BODY.PEEK[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)])"): ("OK", [(b"header", raw("PB news"))]),
-                ("fetch", "3", "(BODY.PEEK[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)])"): ("OK", [(b"header", raw("PB stock watch"))]),
-                ("fetch", "4", "(BODY.PEEK[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)])"): ("OK", [(b"header", raw("PB urgent"))]),
+                ("fetch", "1,2,3,4", HEADER_BATCH_FETCH): (
+                    "OK",
+                    [
+                        (b"1 (UID 1 BODY[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)] {1}", raw("PB newsletter")),
+                        (b"2 (UID 2 BODY[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)] {1}", raw("PB news")),
+                        (b"3 (UID 3 BODY[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)] {1}", raw("PB stock watch")),
+                        (b"4 (UID 4 BODY[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)] {1}", raw("PB urgent")),
+                    ],
+                ),
             }
         )
 
@@ -695,6 +885,20 @@ with tempfile.TemporaryDirectory() as tmp:
 
         self.assertEqual(["1"], [record.uid for record in accepted])
         self.assertEqual(["2", "3", "4"], skipped)
+        self.assertEqual([("fetch", "1,2,3,4", HEADER_BATCH_FETCH)], client.uid_calls)
+
+    def test_snapshot_header_batch_rejects_missing_uid(self) -> None:
+        raw = b"From: Agent <agent@example.test>\r\nTo: Human <human@example.test>\r\nSubject: useful\r\nMessage-ID: <one@example.test>\r\n\r\n"
+        client = FakeClient(
+            {
+                ("fetch", "1,2", HEADER_BATCH_FETCH): (
+                    "OK",
+                    [(b"1 (UID 1 BODY[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)] {1}", raw)],
+                ),
+            }
+        )
+        with self.assertRaisesRegex(RuntimeError, "incomplete or duplicate UIDs"):
+            fetch_header_records(client, ["1", "2"])  # type: ignore[arg-type]
 
     def test_split_cleanup_rejects_wrong_human_mailbox(self) -> None:
         class Settings:
@@ -848,6 +1052,7 @@ with tempfile.TemporaryDirectory() as tmp:
         with (
             patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {"user": "human@example.test"})),
             patch("omo_manager.omo_manager_mail_compress.configured_agent_mail", return_value=Settings()),
+            patch("omo_manager.omo_manager_mail_compress.fetch_imap_thread_contexts", return_value=({}, {"200": []})),
             redirect_stdout(output),
         ):
             self.assertEqual(0, cmd_identity_preflight(Args()))
@@ -855,6 +1060,34 @@ with tempfile.TemporaryDirectory() as tmp:
         self.assertIn("unique_identity_count=1", output.getvalue())
         self.assertIn("complete_thread_count=1", output.getvalue())
         self.assertIn("gate=pass", output.getvalue())
+
+    def test_identity_preflight_batches_headers_and_gmail_metadata(self) -> None:
+        raw = self.raw_message("[worker:0] complete")
+        client = FakeClient(
+            {
+                ("search", None, "ALL"): ("OK", [b"7"]),
+                ("search", None, "FROM", '"agent@example.test"'): ("OK", [b"7"]),
+                ("fetch", "7", HEADER_BATCH_FETCH): ("OK", [(b"7 (UID 7 BODY[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)] {1}", raw)]),
+                ("fetch", "7", GMAIL_METADATA_BATCH_FETCH): ("OK", [(b"7 (UID 7 FLAGS () X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\Inbox))", b"")]),
+            }
+        )
+
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+
+        output = io.StringIO()
+        with (
+            patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {"user": "human@example.test"})),
+            patch("omo_manager.omo_manager_mail_compress.configured_agent_mail", return_value=Settings()),
+            patch("omo_manager.omo_manager_mail_compress.fetch_imap_thread_contexts", return_value=({}, {"200": []})),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(0, cmd_identity_preflight(Args()))
+        self.assertIn("gate=pass", output.getvalue())
+        self.assertIn(("fetch", "7", HEADER_BATCH_FETCH), client.uid_calls)
+        self.assertIn(("fetch", "7", GMAIL_METADATA_BATCH_FETCH), client.uid_calls)
+        self.assertNotIn(("fetch", "7", FULL_FETCH), client.uid_calls)
 
     def test_identity_preflight_fetch_timeout_names_stage_and_blocks(self) -> None:
         raw = self.raw_message("[worker:0] complete")
