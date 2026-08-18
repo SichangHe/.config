@@ -23,6 +23,7 @@ try:
     from omo_manager.omo_codex_status import (
         CODEX_EMPTY_INPUT_TEXTS,
         CODEX_RUNNING_EMPTY_INPUT_TEXTS,
+        CURSOR_AGENT_EMPTY_INPUT_TEXTS,
         SELECTED_MODEL_CAPACITY_RE,
         current_block,
         current_input_text,
@@ -30,9 +31,10 @@ try:
         exact_tail,
         file_search_overlay_input_text,
         has_codex_model_footer,
+        has_cursor_followups_overlay,
         has_plan_prompt,
         inspect,
-        pane_has_exact_codex_process,
+        pane_has_exact_managed_agent_process,
         status,
         tail,
         tail_pane_id,
@@ -45,6 +47,7 @@ except ModuleNotFoundError:
     from omo_codex_status import (
         CODEX_EMPTY_INPUT_TEXTS,
         CODEX_RUNNING_EMPTY_INPUT_TEXTS,
+        CURSOR_AGENT_EMPTY_INPUT_TEXTS,
         SELECTED_MODEL_CAPACITY_RE,
         current_block,
         current_input_text,
@@ -52,9 +55,10 @@ except ModuleNotFoundError:
         exact_tail,
         file_search_overlay_input_text,
         has_codex_model_footer,
+        has_cursor_followups_overlay,
         has_plan_prompt,
         inspect,
-        pane_has_exact_codex_process,
+        pane_has_exact_managed_agent_process,
         status,
         tail,
         tail_pane_id,
@@ -65,8 +69,8 @@ except ModuleNotFoundError:
     )
 
 
-CODEX_PLACEHOLDER_INPUT_TEXTS = CODEX_EMPTY_INPUT_TEXTS | CODEX_RUNNING_EMPTY_INPUT_TEXTS
-COLLAPSED_PASTE_RE = re.compile(r"\[Pasted Content [0-9]+ chars\]", re.IGNORECASE)
+CODEX_PLACEHOLDER_INPUT_TEXTS = CODEX_EMPTY_INPUT_TEXTS | CODEX_RUNNING_EMPTY_INPUT_TEXTS | CURSOR_AGENT_EMPTY_INPUT_TEXTS
+COLLAPSED_PASTE_RE = re.compile(r"\[Pasted (?:Content [0-9]+ chars|text #[0-9]+ \+[0-9]+ lines?)\]", re.IGNORECASE)
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 EXACT_CODEX_MODEL_FOOTER_RE = re.compile(r"  gpt-\S+(?: .*)?\Z")
 EXACT_CODEX_QUEUE_FOOTER_RE = re.compile(r"  tab to queue message +[0-9]+(?:\.[0-9]+)?% context left\Z")
@@ -510,7 +514,7 @@ def target_status(target: str, lines: list[str]) -> str:
     if current_status != "not_codex":
         return current_status
     pane_id = exact_pane_id(target)
-    if pane_id and pane_has_exact_codex_process(target, pane_id):
+    if pane_id and pane_has_exact_managed_agent_process(target, pane_id):
         return "running"
     return current_status
 
@@ -621,12 +625,24 @@ def wait_paste_visible(
                 raise RuntimeError(f"Codex paste not verified after {options.submit_verify_timeout_s:g}s: file search overlay did not transition")
             time.sleep(min(0.25, max(0.05, deadline_s - now_s)))
             continue
+        if has_cursor_followups_overlay(lines):
+            overlay_text = "\n".join(lines)
+            if all(probe in overlay_text for probe in probes) or has_collapsed_paste_text(overlay_text):
+                return
+            if not recovered_overlay:
+                send_enter(target)
+                recovered_overlay = True
+            now_s = time.monotonic()
+            if now_s >= deadline_s:
+                raise RuntimeError(f"Codex paste not verified after {options.submit_verify_timeout_s:g}s: Cursor follow-ups overlay did not transition")
+            time.sleep(min(0.25, max(0.05, deadline_s - now_s)))
+            continue
         last_status = target_status(target, lines)
         validate_error_transition(lines, preexisting_error, target, "before submit")
         input_text = current_input_text(lines)
         if is_real_input_text(input_text) and (all(probe in input_text for probe in probes) or has_collapsed_paste_text(input_text)):
             return
-        last_input = "" if input_text in CODEX_EMPTY_INPUT_TEXTS else input_text
+        last_input = "" if input_text in CODEX_PLACEHOLDER_INPUT_TEXTS else input_text
         now_s = time.monotonic()
         if now_s >= deadline_s:
             suffix = "input box has different text" if last_input else "prompt not visible in input"
@@ -705,6 +721,15 @@ def verify_submit(
         lines = tail(target, n_lines)
         last_status = target_status(target, lines)
         validate_error_transition(lines, preexisting_error, target, "after submit")
+        if has_cursor_followups_overlay(lines):
+            now_s = time.monotonic()
+            if now_s >= next_enter_s:
+                send_enter(target)
+                next_enter_s = now_s + max(options.enter_delay_s, 0.25)
+            if now_s >= deadline_s:
+                raise RuntimeError(f"Codex submit not verified after {options.submit_verify_timeout_s:g}s: Cursor follow-ups overlay still visible, status={last_status}")
+            time.sleep(min(0.25, max(0.05, min(deadline_s, next_enter_s) - now_s)))
+            continue
         input_text = current_input_text(lines)
         real_input_visible = is_real_input_text(input_text)
         prompt_still_present = real_input_visible and (any(probe in input_text for probe in probes) or has_collapsed_paste_text(input_text))
@@ -948,9 +973,10 @@ def clear_existing_input_before_send(
 ) -> str:
     try:
         report = inspect(StatusArgs(target, 80))
+        overlay = has_cursor_followups_overlay(tail(target, 80))
     except Exception:
         return "inspect_failed"
-    if not is_real_input_text(report.input_text):
+    if not is_real_input_text(report.input_text) and not overlay:
         return ""
     deadline_s = time.monotonic() + options.submit_verify_timeout_s
     while True:
@@ -960,13 +986,14 @@ def clear_existing_input_before_send(
         send_enter(target)
         now_s = time.monotonic()
         if now_s >= deadline_s:
-            return "existing_input"
+            return "followups_overlay" if overlay else "existing_input"
         time.sleep(min(0.25, max(0.05, deadline_s - now_s)))
         try:
             report = inspect(StatusArgs(target, 80))
+            overlay = has_cursor_followups_overlay(tail(target, 80))
         except Exception:
             return "inspect_failed"
-        if not is_real_input_text(report.input_text):
+        if not is_real_input_text(report.input_text) and not overlay:
             return ""
 
 
@@ -977,6 +1004,12 @@ def require_no_existing_input(target: str) -> None:
         raise RuntimeError(f"target input not inspected before tmux paste: {exc}") from exc
     if is_real_input_text(report.input_text):
         raise RuntimeError("target existing input appeared before tmux paste")
+    try:
+        overlay = has_cursor_followups_overlay(tail(target, 80))
+    except Exception as exc:
+        raise RuntimeError(f"target input not inspected before tmux paste: {exc}") from exc
+    if overlay:
+        raise RuntimeError("target Cursor follow-ups overlay appeared before tmux paste")
 
 
 def run_tmux(target: str, message: str, options: CodexSendOptions, *, before_paste: Callable[[], None] | None = None) -> None:

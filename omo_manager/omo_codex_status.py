@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Report Codex TUI status from one tmux window tail."""
+"""Report Codex or Cursor Agent TUI status from one tmux window tail."""
 from __future__ import annotations
 
 import argparse
@@ -66,6 +66,15 @@ CODEX_RUNNING_EMPTY_INPUT_TEXTS = {
     "Explain this codebase",
     "Implement {feature}",
 }
+CURSOR_AGENT_EMPTY_INPUT_TEXTS = {
+    "Add a follow-up",
+}
+CURSOR_AGENT_FOOTER_RE = re.compile(r"^\s*Cursor \S.+·\s*[0-9]+(?:\.[0-9]+)?%")
+CURSOR_AGENT_INPUT_PREFIX_RE = re.compile(r"^\s*→ ")
+CURSOR_AGENT_STOP_HINT_RE = re.compile(r"[ \t]+ctrl\+c to stop\s*$")
+CURSOR_AGENT_COMPOSER_BOTTOM_RE = re.compile(r"^\s*▀+\s*$")
+CURSOR_FOLLOWUPS_HEADER_RE = re.compile(r"┌─ follow-ups")
+CURSOR_FOLLOWUPS_SEND_NOW_RE = re.compile(r"enter send now", re.IGNORECASE)
 TMUX_TARGET_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*):(\d+)(?:\.(\d+))?$")
 TMUX_PANE_ID_RE = re.compile(r"^%[0-9]+$")
 
@@ -366,7 +375,49 @@ def report_output(lines: list[str], block: Block, report_status: str) -> list[st
     return block.lines
 
 
+def has_cursor_agent_footer(lines: list[str]) -> bool:
+    return any(CURSOR_AGENT_FOOTER_RE.search(line) is not None for line in lines[-8:])
+
+
+def cursor_agent_input_text(lines: list[str]) -> str:
+    if not has_cursor_agent_footer(lines):
+        return ""
+    prompt_idx = -1
+    for idx in range(len(lines) - 1, -1, -1):
+        if CURSOR_AGENT_INPUT_PREFIX_RE.match(lines[idx]) is None:
+            continue
+        if any(CURSOR_AGENT_FOOTER_RE.search(after) is not None for after in lines[idx + 1 :]):
+            prompt_idx = idx
+            break
+    if prompt_idx < 0:
+        return ""
+    end = prompt_idx + 1
+    while end < len(lines) and CURSOR_AGENT_COMPOSER_BOTTOM_RE.match(lines[end]) is None and CURSOR_AGENT_FOOTER_RE.search(lines[end]) is None:
+        end += 1
+    chunks: list[str] = []
+    for offset, raw in enumerate(lines[prompt_idx:end]):
+        stripped_hint = CURSOR_AGENT_STOP_HINT_RE.sub("", raw)
+        if offset == 0:
+            match = CURSOR_AGENT_INPUT_PREFIX_RE.match(stripped_hint)
+            if match is None:
+                return ""
+            chunks.append(stripped_hint[match.end() :].rstrip())
+            continue
+        chunks.append(stripped_hint.rstrip())
+    while chunks and not chunks[-1].strip():
+        chunks.pop()
+    return "\n".join(chunks).strip()
+
+
+def has_cursor_followups_overlay(lines: list[str]) -> bool:
+    if not has_cursor_agent_footer(lines):
+        return False
+    return any(CURSOR_FOLLOWUPS_HEADER_RE.search(line) is not None for line in lines) and any(CURSOR_FOLLOWUPS_SEND_NOW_RE.search(line) is not None for line in lines)
+
+
 def current_input_text(lines: list[str]) -> str:
+    if has_cursor_agent_footer(lines):
+        return cursor_agent_input_text(lines)
     body = lines[:-1] if has_codex_model_footer(lines) or has_queued_message_footer(lines) else lines[:]
     while body and not body[-1].strip():
         body.pop()
@@ -463,7 +514,8 @@ def has_idle_queued_input(lines: list[str], input_text: str) -> bool:
 
 
 def latest_output_before_input(lines: list[str]) -> list[str]:
-    input_indices = [idx for idx, line in enumerate(lines) if line.lstrip().startswith("›")]
+    cursor = has_cursor_agent_footer(lines)
+    input_indices = [idx for idx, line in enumerate(lines) if line.lstrip().startswith("›") or (cursor and CURSOR_AGENT_INPUT_PREFIX_RE.match(line) is not None)]
     if input_indices:
         latest_input_idx = input_indices[-1]
         previous_input_idx = input_indices[-2] if len(input_indices) > 1 else -1
@@ -571,7 +623,7 @@ def is_empty_input_text(lines: list[str], input_text: str) -> bool:
 
 
 def is_stock_placeholder_input_text(input_text: str) -> bool:
-    return input_text in CODEX_EMPTY_INPUT_TEXTS or input_text in CODEX_RUNNING_EMPTY_INPUT_TEXTS
+    return input_text in CODEX_EMPTY_INPUT_TEXTS or input_text in CODEX_RUNNING_EMPTY_INPUT_TEXTS or input_text in CURSOR_AGENT_EMPTY_INPUT_TEXTS
 
 
 def can_submit_stuck_input(lines: list[str]) -> bool:

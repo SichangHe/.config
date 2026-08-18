@@ -61,6 +61,38 @@ SELECTED_MODEL_CAPACITY_SCREEN = [
 ]
 
 
+def cursor_agent_lines(prompt: str = "Add a follow-up", *, running: bool = False) -> list[str]:
+    follow = f"  → {prompt}"
+    if running:
+        follow = f"{follow}    ctrl+c to stop"
+    lines = [
+        "previous output",
+        " ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄",
+        follow,
+        " ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
+    ]
+    if running:
+        lines.append("  1 task")
+    lines.extend(
+        [
+            "  Cursor Grok 4.6 Extra High · 28.2%                                                           Run Everything",
+            "  ~/.config · macos",
+        ]
+    )
+    return lines
+
+
+def cursor_agent_followups_lines(chip: str = "[Pasted text #8 +59 lines]", prompt: str = "Add a follow-up") -> list[str]:
+    return [
+        "previous output",
+        " ┌─ follow-ups ────────────────────────────────────────────┐",
+        f" │ ○ {chip}",
+        " │ enter send now · ↑ select/edit · esc cancel",
+        " └─────────────────────────────────────────────────────────┘",
+        *cursor_agent_lines(prompt, running=True)[1:],
+    ]
+
+
 def options(**kwargs: object) -> CodexSendOptions:
     values = {
         "enter_count": 1,
@@ -475,7 +507,7 @@ class TmuxSendTests(unittest.TestCase):
     def test_require_sendable_codex_target_rejects_not_codex_and_allows_error(self) -> None:
         with patch("omo_manager.omo_tmux_send.exact_tail", return_value=(True, ["fish prompt"])), patch(
             "omo_manager.omo_tmux_send.exact_pane_id", return_value="%20"
-        ), patch("omo_manager.omo_tmux_send.pane_has_exact_codex_process", return_value=False):
+        ), patch("omo_manager.omo_tmux_send.pane_has_exact_managed_agent_process", return_value=False):
             with self.assertRaisesRegex(RuntimeError, "not a Codex pane"):
                 require_sendable_codex_target("vl:20.0")
         lines = ["────", "■ Error: 429 Too Many Requests", "› Use /skills", "  gpt-5.5"]
@@ -491,13 +523,63 @@ class TmuxSendTests(unittest.TestCase):
         ]
         with patch("omo_manager.omo_tmux_send.exact_tail", return_value=(True, lines)), patch(
             "omo_manager.omo_tmux_send.exact_pane_id", return_value="%7"
-        ), patch("omo_manager.omo_tmux_send.pane_has_exact_codex_process", return_value=True):
+        ), patch("omo_manager.omo_tmux_send.pane_has_exact_managed_agent_process", return_value=True):
             self.assertIsNone(require_sendable_codex_target("vlcliimprove:0"))
+
+    def test_require_sendable_codex_target_accepts_live_cursor_agent_pane(self) -> None:
+        with patch("omo_manager.omo_tmux_send.exact_tail", return_value=(True, cursor_agent_lines())), patch(
+            "omo_manager.omo_tmux_send.exact_pane_id", return_value="%9"
+        ), patch("omo_manager.omo_tmux_send.pane_has_exact_managed_agent_process", return_value=True):
+            self.assertIsNone(require_sendable_codex_target("wl:1"))
+
+    def test_require_sendable_codex_target_rejects_cursor_tui_without_live_agent(self) -> None:
+        with patch("omo_manager.omo_tmux_send.exact_tail", return_value=(True, cursor_agent_lines())), patch(
+            "omo_manager.omo_tmux_send.exact_pane_id", return_value="%9"
+        ), patch("omo_manager.omo_tmux_send.pane_has_exact_managed_agent_process", return_value=False):
+            with self.assertRaisesRegex(RuntimeError, "not a Codex pane"):
+                require_sendable_codex_target("wl:1")
+
+    def test_wait_paste_visible_accepts_cursor_follow_up_composer(self) -> None:
+        message = "Handle pending watcher delivery"
+        with patch("omo_manager.omo_tmux_send.tail", return_value=cursor_agent_lines(message)), patch(
+            "omo_manager.omo_tmux_send.exact_pane_id", return_value="%9"
+        ), patch("omo_manager.omo_tmux_send.pane_has_exact_managed_agent_process", return_value=True):
+            wait_paste_visible("wl:1", message, options())
+
+    def test_wait_paste_visible_cursor_ignores_error_words_in_follow_up(self) -> None:
+        message = "Fix the pending watcher error handling"
+        lines = cursor_agent_lines(message)
+        lines[0] = "omo_task_edit.py: error: --owner-task-file is invalid."
+        with patch("omo_manager.omo_tmux_send.tail", return_value=lines), patch(
+            "omo_manager.omo_tmux_send.exact_pane_id", return_value="%9"
+        ), patch("omo_manager.omo_tmux_send.pane_has_exact_managed_agent_process", return_value=True):
+            wait_paste_visible("wl:1", message, options(), ("omo_task_edit.py: error: --owner-task-file is invalid.",))
+
+    def test_verify_submit_accepts_cursor_follow_up_placeholder_after_send(self) -> None:
+        with patch("omo_manager.omo_tmux_send.tail", return_value=cursor_agent_lines()), patch(
+            "omo_manager.omo_tmux_send.exact_pane_id", return_value="%9"
+        ), patch("omo_manager.omo_tmux_send.pane_has_exact_managed_agent_process", return_value=True):
+            verify_submit("wl:1", "Handle pending watcher delivery\n", options())
+
+    def test_verify_submit_retries_enter_for_cursor_collapsed_paste(self) -> None:
+        tails = iter(
+            [
+                cursor_agent_lines("[Pasted text #4 +13 lines]"),
+                cursor_agent_lines(),
+            ]
+        )
+        with patch("omo_manager.omo_tmux_send.tail", side_effect=lambda *_: next(tails)), patch(
+            "omo_manager.omo_tmux_send.exact_pane_id", return_value="%9"
+        ), patch("omo_manager.omo_tmux_send.pane_has_exact_managed_agent_process", return_value=True), patch(
+            "omo_manager.omo_tmux_send.send_enter"
+        ) as enter, patch("omo_manager.omo_tmux_send.time.sleep"):
+            verify_submit("wl:1", "Pending was not pushed because tmux send treated the live Cursor manager pane as not a Codex pane.\n", options())
+        enter.assert_called_once_with("wl:1")
 
     def test_validate_transition_accepts_live_codex_with_obscured_footer(self) -> None:
         lines = ["• Queued follow-up inputs", "› Explain this codebase", "  esc again to edit previous message"]
         with patch("omo_manager.omo_tmux_send.exact_pane_id", return_value="%7"), patch(
-            "omo_manager.omo_tmux_send.pane_has_exact_codex_process", return_value=True
+            "omo_manager.omo_tmux_send.pane_has_exact_managed_agent_process", return_value=True
         ):
             validate_error_transition(lines, None, "vlcliimprove:0", "after submit")
 
@@ -505,7 +587,7 @@ class TmuxSendTests(unittest.TestCase):
         lines = ["• Queued follow-up inputs", "› Explain this codebase", "  esc again to edit previous message"]
         with patch("omo_manager.omo_tmux_send.tail", return_value=lines), patch(
             "omo_manager.omo_tmux_send.exact_pane_id", return_value="%7"
-        ), patch("omo_manager.omo_tmux_send.pane_has_exact_codex_process", return_value=True), patch(
+        ), patch("omo_manager.omo_tmux_send.pane_has_exact_managed_agent_process", return_value=True), patch(
             "omo_manager.omo_tmux_send.current_input_text", return_value="Explain this codebase"
         ):
             verify_submit("vlcliimprove:0", "repair delivery", options())
@@ -515,7 +597,7 @@ class TmuxSendTests(unittest.TestCase):
         authorization = ExistingInputAuthorization("0" * 64)
         with patch("omo_manager.omo_tmux_send.tail_pane_id", return_value=lines), patch(
             "omo_manager.omo_tmux_send.exact_pane_id", return_value="%7"
-        ), patch("omo_manager.omo_tmux_send.pane_has_exact_codex_process", return_value=True), patch(
+        ), patch("omo_manager.omo_tmux_send.pane_has_exact_managed_agent_process", return_value=True), patch(
             "omo_manager.omo_tmux_send.current_input_text", return_value="Explain this codebase"
         ):
             verify_authorized_existing_submit("vlcliimprove:0", authorization, options(), "%7", None)
@@ -689,6 +771,12 @@ class TmuxSendTests(unittest.TestCase):
         with patch("omo_manager.omo_tmux_send.tail", return_value=lines):
             wait_paste_visible("cfg:1.0", "line one\nline two\n", options())
 
+    def test_wait_paste_visible_accepts_cursor_collapsed_pasted_text(self) -> None:
+        with patch("omo_manager.omo_tmux_send.tail", return_value=cursor_agent_lines("[Pasted text #4 +13 lines]")), patch(
+            "omo_manager.omo_tmux_send.exact_pane_id", return_value="%9"
+        ), patch("omo_manager.omo_tmux_send.pane_has_exact_managed_agent_process", return_value=True):
+            wait_paste_visible("wl:1", "Pending was not pushed because tmux send treated the live Cursor manager pane as not a Codex pane.\n", options())
+
     def test_wait_paste_visible_recovers_matching_file_search_overlay_with_enter(self) -> None:
         message = "Manager notice includes Find and fix a bug in @filename"
         overlay = [
@@ -792,6 +880,30 @@ class TmuxSendTests(unittest.TestCase):
         with patch("omo_manager.omo_tmux_send.inspect", return_value=report):
             with self.assertRaisesRegex(RuntimeError, "existing input appeared"):
                 require_no_existing_input("cfg:1.0")
+
+    def test_require_no_existing_input_rejects_cursor_followups_overlay(self) -> None:
+        report = Report("running", cursor_agent_followups_lines(), "Add a follow-up", False)
+        with patch("omo_manager.omo_tmux_send.inspect", return_value=report), patch(
+            "omo_manager.omo_tmux_send.tail", return_value=cursor_agent_followups_lines()
+        ):
+            with self.assertRaisesRegex(RuntimeError, "follow-ups overlay"):
+                require_no_existing_input("wl:1")
+
+    def test_wait_paste_visible_accepts_cursor_followups_collapsed_chip(self) -> None:
+        with patch("omo_manager.omo_tmux_send.tail", return_value=cursor_agent_followups_lines()), patch(
+            "omo_manager.omo_tmux_send.exact_pane_id", return_value="%9"
+        ), patch("omo_manager.omo_tmux_send.pane_has_exact_managed_agent_process", return_value=True):
+            wait_paste_visible("wl:1", "Pending was not pushed because tmux send treated the live Cursor manager pane as not a Codex pane.\n", options())
+
+    def test_verify_submit_sends_enter_for_cursor_followups_overlay(self) -> None:
+        tails = iter([cursor_agent_followups_lines(), cursor_agent_lines(running=True)])
+        with patch("omo_manager.omo_tmux_send.tail", side_effect=lambda *_: next(tails)), patch(
+            "omo_manager.omo_tmux_send.exact_pane_id", return_value="%9"
+        ), patch("omo_manager.omo_tmux_send.pane_has_exact_managed_agent_process", return_value=True), patch(
+            "omo_manager.omo_tmux_send.send_enter"
+        ) as enter, patch("omo_manager.omo_tmux_send.time.sleep"):
+            verify_submit("wl:1", "Pending was not pushed because tmux send treated the live Cursor manager pane as not a Codex pane.\n", options())
+        enter.assert_called_once_with("wl:1")
 
     def test_existing_input_authorization_reads_exact_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

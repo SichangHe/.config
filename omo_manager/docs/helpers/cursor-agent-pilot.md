@@ -20,6 +20,7 @@
   - the launcher starts `agent --force --sandbox disabled --trust --workspace DIR --model MODEL-EFFORT`
   - the normal task file records `tool: cursor`
   - watcher status treats an exact live `agent` process as running
+  - `omo_tmux_send.py` and `omo_pending_watch.py` deliver to that live pane through the Cursor follow-up composer; they no longer reject it as not a Codex pane
   - task closure uses the normal lifecycle path, but skips Codex-only `/status` probing because Cursor Agent has no compatible `/status` output
 
 - pilot boundary

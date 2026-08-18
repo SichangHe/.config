@@ -2,8 +2,29 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from omo_manager.omo_codex_status import Args, PlanPromptRecovery, Report, can_submit_stuck_input, current_block, current_input_text, dismiss_plan_prompt_if_present, dismiss_skills_menu_if_present, exact_pane_id, final_assistant_output, has_active_skills_menu, has_compacting_indicator, has_resume_paused_goal_prompt, has_terminal_enter_prompt_after_codex_footer, has_waiting_subagent_prompt, inspect, interrupt_waiting_subagent_if_present, last_output, report_from_lines, status, submit_stuck_input_if_present, tail, tail_pane_id, visible_error_lines
+from omo_manager.omo_codex_status import Args, PlanPromptRecovery, Report, can_submit_stuck_input, current_block, current_input_text, dismiss_plan_prompt_if_present, dismiss_skills_menu_if_present, exact_pane_id, final_assistant_output, has_active_skills_menu, has_compacting_indicator, has_cursor_followups_overlay, has_resume_paused_goal_prompt, has_terminal_enter_prompt_after_codex_footer, has_waiting_subagent_prompt, inspect, interrupt_waiting_subagent_if_present, last_output, report_from_lines, status, submit_stuck_input_if_present, tail, tail_pane_id, visible_error_lines
 from omo_manager.omo_tmux_send import error_signature, exact_capacity_error
+
+
+def cursor_agent_status_lines(prompt: str = 'Add a follow-up', *, running: bool = False) -> list[str]:
+    follow = f'  → {prompt}'
+    if running:
+        follow = f'{follow}                                                                                            ctrl+c to stop'
+    lines = [
+        'previous output',
+        ' ▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄',
+        follow,
+        ' ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀',
+    ]
+    if running:
+        lines.append('  1 task')
+    lines.extend(
+        [
+            '  Cursor Grok 4.6 Extra High · 77.7% · 9 files edited                                                          Run Everything',
+            '  /ssd1/sichangheagent/work_logs · main',
+        ]
+    )
+    return lines
 
 
 class CodexStatusTests(unittest.TestCase):
@@ -111,6 +132,52 @@ class CodexStatusTests(unittest.TestCase):
                     report = inspect(Args('cur:1', 80))
                 self.assertEqual('running', report.status)
                 self.assertFalse(report.can_submit_input)
+
+    def test_current_input_text_reads_cursor_follow_up_composer(self) -> None:
+        self.assertEqual('Add a follow-up', current_input_text(cursor_agent_status_lines()))
+        self.assertEqual('Add a follow-up', current_input_text(cursor_agent_status_lines(running=True)))
+        self.assertEqual('Handle pending watcher delivery', current_input_text(cursor_agent_status_lines('Handle pending watcher delivery')))
+        self.assertEqual('', current_input_text(['  → Add a follow-up', 'shell prompt']))
+
+    def test_has_cursor_followups_overlay_requires_header_and_send_now(self) -> None:
+        overlay = [
+            'previous output',
+            ' ┌─ follow-ups ────────────────────────────────────────────┐',
+            ' │ ○ [Pasted text #8 +59 lines]',
+            ' │ enter send now · ↑ select/edit · esc cancel',
+            ' └─────────────────────────────────────────────────────────┘',
+            *cursor_agent_status_lines(running=True)[1:],
+        ]
+        self.assertTrue(has_cursor_followups_overlay(overlay))
+        self.assertFalse(has_cursor_followups_overlay(cursor_agent_status_lines(running=True)))
+        self.assertFalse(has_cursor_followups_overlay(['┌─ follow-ups', 'enter send now', 'shell']))
+
+    def test_inspect_live_cursor_agent_reads_follow_up_placeholder(self) -> None:
+        lines = cursor_agent_status_lines()
+        process = subprocess.CompletedProcess(['tmux'], 0, '%9\tagent\t"exec agent --force"\n', '')
+        with patch('omo_manager.omo_codex_status.exact_tail', return_value=(True, lines)), patch(
+            'omo_manager.omo_codex_status.exact_pane_id', return_value='%9'
+        ), patch('omo_manager.omo_codex_status.subprocess.run', return_value=process):
+            report = inspect(Args('wl:1', 80))
+        self.assertEqual('running', report.status)
+        self.assertEqual('Add a follow-up', report.input_text)
+        self.assertFalse(report.can_submit_input)
+
+    def test_inspect_cursor_tui_without_agent_process_stays_not_codex(self) -> None:
+        process = subprocess.CompletedProcess(['tmux'], 0, '%9\tzsh\tzsh\n', '')
+        with patch('omo_manager.omo_codex_status.exact_tail', return_value=(True, cursor_agent_status_lines())), patch(
+            'omo_manager.omo_codex_status.exact_pane_id', return_value='%9'
+        ), patch('omo_manager.omo_codex_status.subprocess.run', return_value=process):
+            report = inspect(Args('wl:1', 80))
+        self.assertEqual('not_codex', report.status)
+
+    def test_cursor_follow_up_error_words_are_not_codex_errors(self) -> None:
+        history = cursor_agent_status_lines()
+        history[0] = 'omo_task_edit.py: error: --owner-task-file is invalid.'
+        pasted = cursor_agent_status_lines('Fix the pending watcher error handling')
+        pasted[0] = 'omo_task_edit.py: error: --owner-task-file is invalid.'
+        self.assertEqual(error_signature(history), error_signature(pasted))
+        self.assertEqual((), error_signature(cursor_agent_status_lines('Fix the pending watcher error handling')))
 
     def test_inspect_does_not_broaden_shell_editor_or_similar_launcher(self) -> None:
         cases = (
