@@ -89,6 +89,14 @@ CODEX_SESSION_ID_RE = re.compile(r"\b(?:codex\s+session|session_id)\b[^.\n]{0,12
 STOPPED_RECORD_RE = re.compile(r"\b(?:preserved|record-only|stopped)\b", re.IGNORECASE)
 RESUME_RE = re.compile(r"\bresum(?:e|able|ed|ing)\b", re.IGNORECASE)
 CLOSED_CODEX_RECORD_RE = re.compile(r"\bmanager closed Codex agent\b[^\n]*\btmux target\s+`?([^`;\s]+)`?", re.IGNORECASE)
+DIRECT_HUMAN_SHUTDOWN_PAUSE_RE = re.compile(
+    r"\Apaused by direct human shutdown instruction routed to [A-Za-z0-9_./-]+\.md; non-human pane (?P<target>[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?) closed and (?:task record|pending queue) preserved for explicit resume(?:;.*)?\Z",
+    re.IGNORECASE,
+)
+HUMAN_TOKEN_QUOTA_PAUSE_RE = re.compile(
+    r"\Ahuman token-quota pause from manager_mail/85c5dff58359-729\.txt: keep all VL paths closed until explicit resume\Z",
+    re.IGNORECASE,
+)
 TARGET_SESSION_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*):")
 LOOSE_TARGET_RE = re.compile(r"\b([a-z][A-Za-z0-9_-]*)\s+(\d+)\b")
 PORT_RE = re.compile(r"\bport [`']?(\d{2,5})[`']?")
@@ -526,6 +534,39 @@ def is_intentionally_stopped_human_blocked_worker(root: Path, task: TaskLine, st
         return False
     task_path = resolve_task_path(root, task.task_file)
     return task_path is not None and bool(pending_task_items(task_path, root)) and has_closed_codex_evidence(task_path, state.target)
+
+
+def is_direct_human_shutdown_pause(root: Path, task: TaskLine, state: TaskState) -> bool:
+    """Return whether an exact direct-human shutdown preserves a closed task for resume."""
+
+    match = DIRECT_HUMAN_SHUTDOWN_PAUSE_RE.fullmatch(state.reason)
+    if (
+        state.status != "blocked"
+        or match is None
+        or target_session(state.target).startswith("h")
+        or not same_tmux_target(match.group("target"), state.target)
+        or target_resolves_exactly(state.target)
+    ):
+        return False
+    task_path = resolve_task_path(root, task.task_file)
+    return task_path is not None and has_closed_codex_evidence(task_path, state.target)
+
+
+def is_human_token_quota_pause(root: Path, task: TaskLine, state: TaskState) -> bool:
+    """Return whether a source-bound VL quota pause preserves a closed manager."""
+
+    if (
+        state.status != "blocked"
+        or task.task_file != "vl_rebuild_mgr.md"
+        or task.section != "todo:previous"
+        or not state.is_manager
+        or HUMAN_TOKEN_QUOTA_PAUSE_RE.fullmatch(state.reason) is None
+        or target_session(state.target).startswith("h")
+        or target_resolves_exactly(state.target)
+    ):
+        return False
+    task_path = resolve_task_path(root, task.task_file)
+    return task_path is not None and has_closed_codex_evidence(task_path, state.target)
 
 
 def canonical_target(target: str) -> str:
@@ -1027,6 +1068,10 @@ def add_blocked_idle_vl_row(root: Path, task: TaskLine, role: str, rows: list[St
         if is_explicit_human_pending_wait(root, task, state) and idle_status in {"missing", "not_codex"} and " output=" not in classified.evidence:
             return
         if is_intentionally_stopped_human_blocked_worker(root, task, state) and idle_status in {"missing", "not_codex"} and " output=" not in classified.evidence:
+            return
+        if is_direct_human_shutdown_pause(root, task, state) and idle_status in {"missing", "not_codex"} and " output=" not in classified.evidence:
+            return
+        if is_human_token_quota_pause(root, task, state) and idle_status in {"missing", "not_codex"} and " output=" not in classified.evidence:
             return
         quiet_dependency = blocked_dependencies_are_active(root, task, state) and idle_status == "ready"
         quiet_resumable = blocked_resumable_dependencies_are_active(root, task, state) and idle_status in {"missing", "not_codex"} and " output=" not in classified.evidence and not target_resolves_exactly(target)
