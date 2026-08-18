@@ -7,9 +7,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+import omo_manager.omo_codex_stop as codex_stop
 from omo_manager.omo_codex_status import Report
 from omo_manager.omo_codex_stop import (
     Args,
+    LOCAL_ENV_PATH,
+    close_authorized_human_pane,
     close_note,
     close_exited_codex_shell,
     close_tmux_target,
@@ -50,6 +53,9 @@ class CodexStopTests(unittest.TestCase):
             self.assertEqual("%caller", current_pane_id())
         tmux.assert_not_called()
 
+    def test_manager_config_path_is_resolved_from_the_implementation_not_path_wrapper(self) -> None:
+        self.assertEqual(Path(codex_stop.__file__).resolve().with_name("local.env"), LOCAL_ENV_PATH)
+
     def test_close_exited_codex_shell_closes_only_unchanged_proven_shell(self) -> None:
         session_id = "11111111-2222-3333-4444-555555555555"
         transcript = f'{{"accepted":true,"receipt":"specific-token"}}\nConversation interrupted\nTo continue this session, run codex resume {session_id}\n$ '
@@ -63,7 +69,37 @@ class CodexStopTests(unittest.TestCase):
         ):
             close_exited_codex_shell("cfg:1", "%42", session_id, "specific-token")
 
-        close.assert_called_once_with("%42")
+        self.assertEqual("%42", close.call_args.args[0])
+
+    def test_close_authorized_human_pane_kills_only_the_exact_pane(self) -> None:
+        with (
+            patch("omo_manager.omo_codex_stop.current_command", return_value="zsh"),
+            patch("omo_manager.omo_codex_stop.tmux") as tmux,
+        ):
+            close_authorized_human_pane("%42", lambda: True)
+        tmux.assert_called_once_with(["kill-pane", "-t", "%42"], check=True)
+
+    def test_close_authorized_human_pane_refuses_to_report_success_before_shell_exit(self) -> None:
+        with (
+            patch("omo_manager.omo_codex_stop.current_command", return_value="codex"),
+            patch("omo_manager.omo_codex_stop.tmux") as tmux,
+            self.assertRaisesRegex(RuntimeError, "did not exit to a shell"),
+        ):
+            close_authorized_human_pane("%42", lambda: True)
+        tmux.assert_not_called()
+
+    def test_status_fallback_does_not_submit_after_human_pane_identity_changes(self) -> None:
+        before = "ready\n"
+        still_input = f"{before}› /status\n"
+        identity = iter((True, True, False))
+        with (
+            patch("omo_manager.omo_codex_stop.capture", side_effect=[before, still_input]),
+            patch("omo_manager.omo_codex_stop.paste_text"),
+            patch("omo_manager.omo_codex_stop.tmux") as tmux,
+            self.assertRaisesRegex(RuntimeError, "fallback status submission"),
+        ):
+            query_status_session_id("%42", 10, 0.1, lambda: next(identity))
+        self.assertEqual(["send-keys", "-t", "%42", "Enter"], tmux.call_args.args[0])
 
     def test_close_exited_codex_shell_rejects_ambiguous_or_changed_state(self) -> None:
         session_id = "11111111-2222-3333-4444-555555555555"
@@ -440,6 +476,110 @@ class CodexStopTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "human-owned"):
                 stop(Args("human:1.0", 0.0, 10, False, False))
         pane_id.assert_not_called()
+
+    def test_stop_allows_one_pinned_human_pane_only_with_bound_direct_authority(self) -> None:
+        authority = b"Subject: close task.md\n\nclose hwork:1 and leave every other pane alone\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "task.md").write_text("---\nrunat: hwork:1\n---\n", encoding="utf-8")
+            with (
+                patch("omo_manager.omo_codex_stop.read_human_close_authorization", return_value=authority) as read_authority,
+                patch("omo_manager.omo_codex_stop.pane_id", return_value="%42"),
+                patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%caller"),
+                patch("omo_manager.omo_codex_stop.target_session_name", return_value="hwork"),
+                patch("omo_manager.omo_codex_stop.pane_target", return_value="hwork:1.0"),
+                patch("omo_manager.omo_codex_stop.query_status_session_id", return_value=("", "")),
+                patch("omo_manager.omo_codex_stop.send_exit_keys"),
+                patch("omo_manager.omo_codex_stop.wait_shell"),
+                patch("omo_manager.omo_codex_stop.capture", return_value=""),
+                patch("omo_manager.omo_codex_stop.close_authorized_human_pane") as close,
+            ):
+                self.assertEqual(
+                    "",
+                    stop(
+                        Args(
+                            "%42",
+                            0.0,
+                            10,
+                            False,
+                            False,
+                            root,
+                            "task.md",
+                            True,
+                            0.0,
+                            "manager_mail/test.txt",
+                            "a" * 64,
+                            "hwork:1",
+                        )
+                    ),
+                )
+        self.assertEqual(
+            [(("manager_mail/test.txt", "a" * 64), {}), (("manager_mail/test.txt", "a" * 64), {})],
+            [(call.args, call.kwargs) for call in read_authority.call_args_list],
+        )
+        self.assertEqual("%42", close.call_args.args[0])
+
+    def test_stop_rejects_human_authority_that_does_not_bind_exact_task_and_target_before_tmux(self) -> None:
+        authority = b"Subject: task.md.old\n\nclose hwork:1\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "task.md").write_text("---\nrunat: hwork:1\n---\n", encoding="utf-8")
+            with (
+                patch("omo_manager.omo_codex_stop.read_human_close_authorization", return_value=authority),
+                patch("omo_manager.omo_codex_stop.pane_id") as pane_id,
+                self.assertRaisesRegex(RuntimeError, "does not name the exact task file"),
+            ):
+                stop(
+                    Args(
+                        "hwork:1",
+                        0.0,
+                        10,
+                        False,
+                        False,
+                        root,
+                        "task.md",
+                        True,
+                        0.0,
+                        "manager_mail/test.txt",
+                        "a" * 64,
+                    )
+                )
+        pane_id.assert_not_called()
+
+    def test_stop_refuses_pinned_human_pane_that_moves_before_interrupt(self) -> None:
+        authority = b"Subject: close task.md\n\nclose hwork:1\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "task.md").write_text("---\nrunat: hwork:1\n---\n", encoding="utf-8")
+            with (
+                patch("omo_manager.omo_codex_stop.read_human_close_authorization", return_value=authority),
+                patch("omo_manager.omo_codex_stop.pane_id", return_value="%42"),
+                patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%caller"),
+                patch("omo_manager.omo_codex_stop.target_session_name", return_value="hwork"),
+                patch("omo_manager.omo_codex_stop.pane_target", side_effect=["hwork:1.0", "hother:9.0"]),
+                patch("omo_manager.omo_codex_stop.query_status_session_id", return_value=("", "")),
+                patch("omo_manager.omo_codex_stop.send_exit_keys") as interrupt,
+                patch("omo_manager.omo_codex_stop.close_tmux_target") as close,
+                self.assertRaisesRegex(RuntimeError, "disappeared before interrupt"),
+            ):
+                stop(
+                    Args(
+                        "%42",
+                        0.0,
+                        10,
+                        False,
+                        False,
+                        root,
+                        "task.md",
+                        True,
+                        0.0,
+                        "manager_mail/test.txt",
+                        "a" * 64,
+                        "hwork:1",
+                    )
+                )
+        interrupt.assert_not_called()
+        close.assert_not_called()
 
     def test_stop_rejects_non_codex_process_before_status_probe_or_interrupt(self) -> None:
         with (

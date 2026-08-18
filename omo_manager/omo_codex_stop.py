@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
+import stat
 import subprocess
 import sys
 import time
@@ -28,6 +30,15 @@ DEFAULT_ROOT = Path(os.environ.get("OMO_WORK_LOGS_ROOT", Path.home() / "work_log
 DEFAULT_RESUME_TOOL = "pcodx"
 RESUME_TOOLS = {"codex", "pcodx", "cursor"}
 STOPPABLE_CODEX_STATUSES = {"error", "ready", "running", "stuck_input", "waiting_subagent"}
+# PATH exposes this helper through a symlink in ~/.config/bin. Resolve the
+# implementation location so both direct and package execution use the same
+# owner-controlled manager configuration beside this source file.
+LOCAL_ENV_PATH = Path(__file__).resolve().with_name("local.env")
+HUMAN_CLOSE_SOURCE_RE = re.compile(r"manager_mail/[A-Za-z0-9_.-]+\.txt\Z")
+SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
+HUMAN_CLOSE_DIRECTIVE_RE = re.compile(
+    r"(?im)^\s*close\s+([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)(?=$|[\s,.;:])"
+)
 UUID_RE = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 RESUME_RE = re.compile(rf"(?i)\bcodex\s+resume\s+(?:--[\w-]+\s+)*({UUID_RE})\b")
 EXIT_RESUME_RE = re.compile(
@@ -47,6 +58,11 @@ class Args:
     task_file: str = ""
     no_feedback: bool = False
     feedback_wait_s: float = 180.0
+    human_close_authorization_source: str = ""
+    human_close_authorization_sha256: str = ""
+    # Internal lifecycle handoff: preserve the symbolic human target while
+    # stopping its already-pinned numeric pane id.
+    human_close_authorized_target: str = ""
 
 
 class ParsedArgs(argparse.Namespace):
@@ -59,16 +75,20 @@ class ParsedArgs(argparse.Namespace):
     task_file: str = ""
     no_feedback: bool = False
     feedback_wait_s: float = 180.0
+    human_close_authorization_source: str = ""
+    human_close_authorization_sha256: str = ""
 
 
 def parse_args(argv: list[str]) -> Args:
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""This is the lower-level stop helper used by
+epilog="""This is the lower-level stop helper used by
 `omo_task_status.py TASK.md done`. Use it directly only for a non-task pane;
-normal task closure goes through `omo_task_status.py`. Restart a running task
-in place with `omo_codex_start.py --restart-running`.""",
+normal task closure goes through `omo_task_status.py`. The sole exception is
+an exact `h*` task target with hash-bound human-close authority; it requires
+`--task-file` and `--no-feedback`. Restart a running task in place with
+`omo_codex_start.py --restart-running`.""",
     )
     _ = parser.add_argument("--target", required=True, help="tmux pane/window target, e.g. `cfg:2.0`.")
     _ = parser.add_argument("--wait-s", type=float, default=10.0)
@@ -79,6 +99,8 @@ in place with `omo_codex_start.py --restart-running`.""",
     _ = parser.add_argument("--task-file", default="", help="Append a durable close note to this task markdown file.")
     _ = parser.add_argument("--no-feedback", action="store_true", help="Skip the default idle-worker feedback request.")
     _ = parser.add_argument("--feedback-wait-s", type=float, default=180.0, help="Seconds to wait for feedback response before closing.")
+    _ = parser.add_argument("--human-close-authorization-source", default="", help="Exact trusted manager_mail/<id>.txt record that directly authorizes closing this human-owned task target.")
+    _ = parser.add_argument("--human-close-authorization-sha256", default="", help="Lowercase SHA-256 of the exact human-close authorization record.")
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     if parsed.wait_s < 0:
         parser.error("--wait-s must be non-negative.")
@@ -88,6 +110,13 @@ in place with `omo_codex_start.py --restart-running`.""",
         parser.error("--task-file must end with `.md`.")
     if parsed.feedback_wait_s < 0:
         parser.error("--feedback-wait-s must be non-negative.")
+    authority_values = (parsed.human_close_authorization_source.strip(), parsed.human_close_authorization_sha256.strip())
+    if any(authority_values) and (not all(authority_values) or not is_human_owned_target(parsed.target)):
+        parser.error("human-close authorization requires both source and digest and an explicit human-owned h* target.")
+    if authority_values[0] and HUMAN_CLOSE_SOURCE_RE.fullmatch(authority_values[0]) is None:
+        parser.error("human-close authorization source must be manager_mail/<safe-name>.txt.")
+    if authority_values[1] and SHA256_RE.fullmatch(authority_values[1]) is None:
+        parser.error("human-close authorization digest must be a lowercase SHA-256 value.")
     return Args(
         parsed.target,
         parsed.wait_s,
@@ -98,6 +127,8 @@ in place with `omo_codex_start.py --restart-running`.""",
         parsed.task_file,
         parsed.no_feedback,
         parsed.feedback_wait_s,
+        authority_values[0],
+        authority_values[1],
     )
 
 
@@ -212,6 +243,124 @@ def task_path(root: Path, task_file: str) -> Path:
 
 def task_ref(root: Path, task_file: str) -> str:
     return task_path(root, task_file).relative_to(root.resolve()).as_posix()
+
+
+def configured_mail_root() -> Path:
+    """Return the configured manager-mail directory only from safe local config."""
+
+    try:
+        info = LOCAL_ENV_PATH.lstat()
+        payload = LOCAL_ENV_PATH.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise RuntimeError("trusted manager-mail configuration is unavailable") from exc
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != os.getuid()
+        or stat.S_IMODE(info.st_mode) & 0o022
+    ):
+        raise RuntimeError("trusted manager-mail configuration is unsafe")
+    matches = re.findall(r'^export OMO_WORK_LOGS_ROOT="([^"\n]+)"$', payload, flags=re.MULTILINE)
+    if len(matches) != 1 or not Path(matches[0]).is_absolute():
+        raise RuntimeError("trusted manager-mail root is not configured exactly once")
+    return Path(matches[0]) / "manager_mail"
+
+
+def require_nonsymlink_directory(path: Path) -> Path:
+    """Validate each component of a trusted absolute directory without links."""
+
+    if not path.is_absolute():
+        raise RuntimeError("trusted manager-mail root is not absolute")
+    current = Path(path.anchor)
+    for part in path.parts[1:]:
+        current /= part
+        try:
+            info = current.lstat()
+        except OSError as exc:
+            raise RuntimeError("trusted manager-mail root is unavailable") from exc
+        if not stat.S_ISDIR(info.st_mode):
+            raise RuntimeError("trusted manager-mail root contains a non-directory component")
+    return current
+
+
+def read_human_close_authorization(source: str, expected_sha256: str) -> bytes:
+    """Read one exact owner-private human authority record without following links."""
+
+    if HUMAN_CLOSE_SOURCE_RE.fullmatch(source) is None or SHA256_RE.fullmatch(expected_sha256) is None:
+        raise RuntimeError("human-close authorization identity is invalid")
+    mail_root = require_nonsymlink_directory(configured_mail_root())
+    mail_info = mail_root.stat()
+    if mail_info.st_uid != os.getuid() or stat.S_IMODE(mail_info.st_mode) & 0o077:
+        raise RuntimeError("trusted manager-mail root is not owner-private")
+    path = mail_root / source.removeprefix("manager_mail/")
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as exc:
+        raise RuntimeError("human-close authorization source is unavailable") from exc
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o022:
+            raise RuntimeError("human-close authorization source is unsafe")
+        with os.fdopen(os.dup(fd), "rb") as stream:
+            payload = stream.read()
+    finally:
+        os.close(fd)
+    if hashlib.sha256(payload).hexdigest() != expected_sha256:
+        raise RuntimeError("human-close authorization source bytes do not match the supplied SHA-256")
+    return payload
+
+
+def task_frontmatter_runat(task_text: str) -> str:
+    """Return the sole frontmatter runat value, rejecting ambiguous task binding."""
+
+    lines = task_text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        raise RuntimeError("human-close task must have frontmatter")
+    try:
+        end = next(index for index, line in enumerate(lines[1:], start=1) if line.strip() == "---")
+    except StopIteration as exc:
+        raise RuntimeError("human-close task frontmatter is unterminated") from exc
+    runats = [line.partition(":")[2].strip() for line in lines[1:end] if line.partition(":")[0].strip() == "runat"]
+    if len(runats) != 1 or not runats[0]:
+        raise RuntimeError("human-close task must bind exactly one frontmatter runat target")
+    return runats[0]
+
+
+def human_authorized_target(args: Args) -> str:
+    """Return the one symbolic h* target being authorized, if any."""
+
+    return args.human_close_authorized_target or (args.target if is_human_owned_target(args.target) else "")
+
+
+def validate_human_close_authorization(args: Args) -> None:
+    """Fail closed unless private human authority names this exact task and h* target."""
+
+    target = human_authorized_target(args)
+    if not target:
+        return
+    if not is_human_owned_target(target):
+        raise RuntimeError("human-close authorization target must be an explicit human-owned h* target")
+    source = args.human_close_authorization_source
+    digest = args.human_close_authorization_sha256
+    if not source or not digest:
+        raise RuntimeError("refusing to stop human-owned target without exact human-close authorization")
+    if not args.task_file:
+        raise RuntimeError("human-close authorization requires the exact task file")
+    task = task_path(args.root, args.task_file)
+    task_reference = task_ref(args.root, args.task_file)
+    task_text = task.read_text(encoding="utf-8")
+    if task_frontmatter_runat(task_text) != target:
+        raise RuntimeError("human-close task frontmatter does not bind the exact requested target")
+    payload = read_human_close_authorization(source, digest)
+    target_bytes = target.encode("utf-8")
+    authority_text = payload.decode("utf-8", errors="replace")
+    subject_lines = [line[len("Subject:") :].strip() for line in authority_text.splitlines() if line.startswith("Subject:")]
+    task_token = re.compile(rf"(?<![A-Za-z0-9_./-]){re.escape(task_reference)}(?![A-Za-z0-9_./-])")
+    if len(subject_lines) != 1 or task_token.search(subject_lines[0]) is None:
+        raise RuntimeError("human-close authorization subject does not name the exact task file")
+    body = authority_text.partition("\n\n")[2]
+    directives = HUMAN_CLOSE_DIRECTIVE_RE.findall(body)
+    if directives != [target] or target_bytes not in payload:
+        raise RuntimeError("human-close authorization does not contain one exact direct close instruction for the target")
 
 
 def target_aliases(target: str) -> set[str]:
@@ -415,9 +564,18 @@ def input_has_status_prompt(text: str) -> bool:
     return any(line.lstrip().startswith("› ") and "/status" in line for line in text.splitlines()[-20:])
 
 
-def query_status_session_id(target: str, n_lines: int, wait_s: float) -> tuple[str, str]:
+def query_status_session_id(
+    target: str,
+    n_lines: int,
+    wait_s: float,
+    identity_is_current: callable | None = None,
+) -> tuple[str, str]:
+    if identity_is_current is not None and not identity_is_current():
+        raise RuntimeError("tmux pane identity changed before status query")
     before = capture(target, n_lines)
     paste_text(target, "/status")
+    if identity_is_current is not None and not identity_is_current():
+        raise RuntimeError("tmux pane identity changed before status submission")
     _ = tmux(["send-keys", "-t", target, "Enter"], check=True)
     deadline_s = time.monotonic() + wait_s
     after = before
@@ -428,14 +586,18 @@ def query_status_session_id(target: str, n_lines: int, wait_s: float) -> tuple[s
         if session_id:
             return session_id, after
         if not fallback_sent and input_has_status_prompt(after):
+            if identity_is_current is not None and not identity_is_current():
+                raise RuntimeError("tmux pane identity changed before fallback status submission")
             _ = tmux(["send-keys", "-t", target, "Enter"], check=True)
             fallback_sent = True
         time.sleep(0.25)
     return "", after
 
 
-def send_exit_keys(target: str) -> None:
+def send_exit_keys(target: str, identity_is_current: callable | None = None) -> None:
     for _attempt in range(EXIT_INTERRUPT_ATTEMPTS):
+        if identity_is_current is not None and not identity_is_current():
+            raise RuntimeError("tmux pane identity changed before interrupt")
         _ = tmux(["send-keys", "-t", target, "C-c"], check=True)
         time.sleep(EXIT_INTERRUPT_DELAY_S)
         if current_command(target) in SHELL_COMMANDS:
@@ -449,6 +611,18 @@ def close_tmux_target(target: str) -> None:
         _ = tmux(["kill-window", "-t", target], check=True)
     else:
         _ = tmux(["kill-pane", "-t", target], check=True)
+
+
+def close_authorized_human_pane(target: str, identity_is_current: callable) -> None:
+    """Close only the exact authorized pane, never its whole human window."""
+
+    if not identity_is_current():
+        raise RuntimeError("tmux pane identity changed before authorized human-pane close")
+    if current_command(target) not in SHELL_COMMANDS:
+        raise RuntimeError("authorized human pane did not exit to a shell before close")
+    if not identity_is_current():
+        raise RuntimeError("tmux pane identity changed immediately before authorized human-pane close")
+    _ = tmux(["kill-pane", "-t", target], check=True)
 
 
 def close_exited_codex_shell(target: str, expected_pane_id: str, session_id: str, terminal_evidence: str, n_lines: int = 2000) -> None:
@@ -542,8 +716,12 @@ def maybe_request_feedback(args: Args) -> None:
 
 
 def stop(args: Args) -> str:
-    if is_human_owned_target(args.target):
-        raise RuntimeError(f"refusing to stop human-owned target: {args.target}")
+    authorized_target = human_authorized_target(args)
+    human_authorized = bool(authorized_target)
+    if human_authorized:
+        validate_human_close_authorization(args)
+        if not args.no_feedback:
+            raise RuntimeError("human-close authorization requires --no-feedback; do not send unrequested input to a human-owned pane")
     target_pane = pane_id(args.target)
     if not target_pane:
         raise RuntimeError(f"tmux target not found: {args.target}")
@@ -551,9 +729,21 @@ def stop(args: Args) -> str:
         raise RuntimeError(f"refusing to stop the current pane: {args.target}")
     if args.task_file:
         _ = task_path(args.root, args.task_file)
-    if is_human_owned_target(target_session_name(target_pane)):
+    resolved_session = target_session_name(target_pane)
+    if is_human_owned_target(resolved_session) and (not human_authorized or resolved_session != authorized_target.partition(":")[0]):
         raise RuntimeError(f"refusing to stop human-owned target: {args.target}")
     numeric_target = pane_target(target_pane)
+    if human_authorized and numeric_target not in target_aliases(authorized_target):
+        raise RuntimeError("human-close target no longer resolves to the exact authorized tmux pane")
+    def identity_is_current() -> bool:
+        if pane_id(target_pane) != target_pane or pane_target(target_pane) != numeric_target:
+            return False
+        if human_authorized:
+            return (
+                target_session_name(target_pane) == authorized_target.partition(":")[0]
+                and numeric_target in target_aliases(authorized_target)
+            )
+        return True
     report = inspect(StatusArgs(numeric_target, 80)) if numeric_target else None
     if report is None or report.status not in STOPPABLE_CODEX_STATUSES:
         actual = report.status if report is not None else "missing"
@@ -563,17 +753,32 @@ def stop(args: Args) -> str:
         print(f"would send Ctrl-C to {resolved_args.target}")
         return ""
     maybe_request_feedback(resolved_args)
+    if human_authorized:
+        # Re-read both durable authority bindings after the pane is pinned and
+        # immediately before the first human-pane input.
+        validate_human_close_authorization(args)
+    identity_check = identity_is_current if human_authorized else None
     if task_tool(args) == "cursor":
         before_close = capture(resolved_args.target, resolved_args.lines)
         session_id = ""
-    else:
+    elif identity_check is None:
         session_id, before_close = query_status_session_id(resolved_args.target, resolved_args.lines, resolved_args.wait_s)
-    if pane_id(resolved_args.target) != target_pane:
+    else:
+        session_id, before_close = query_status_session_id(resolved_args.target, resolved_args.lines, resolved_args.wait_s, identity_check)
+    if (human_authorized and not identity_is_current()) or (not human_authorized and pane_id(resolved_args.target) != target_pane):
         raise RuntimeError(f"tmux target disappeared before interrupt: {args.target}")
-    send_exit_keys(resolved_args.target)
+    if identity_check is None:
+        send_exit_keys(resolved_args.target)
+    else:
+        send_exit_keys(resolved_args.target, identity_check)
     _ = wait_shell(resolved_args.target, time.monotonic() + resolved_args.wait_s)
     after = capture(resolved_args.target, resolved_args.lines)
-    close_tmux_target(resolved_args.target)
+    if human_authorized and not identity_is_current():
+        raise RuntimeError("tmux pane identity changed before close")
+    if human_authorized:
+        close_authorized_human_pane(resolved_args.target, identity_is_current)
+    else:
+        close_tmux_target(resolved_args.target)
     return session_id or extract_exit_resume_id(before_close, after)
 
 
