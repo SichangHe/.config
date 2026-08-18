@@ -13,6 +13,7 @@ This directory is non-authoritative helper documentation. Manager operating inst
 - `omo_task_status.py` updates task frontmatter `status`; reissuing unchanged `running`, human-blocked, or done state safely reconciles one stale TODO row
 - `tmux-send.md` safe tmux paste and async delivery through `omo_tmux_send.py`
 - `cursor-agent-pilot.md` Cursor Agent one-shot helper and default managed-worker launch
+- `experiment-record.md` packages caller-supplied experiment files into a hashed record directory
 
 Related topic branches:
 - `../mail/index.md`
