@@ -96,12 +96,29 @@ class CodexStatusTests(unittest.TestCase):
         self.assertEqual('running', report.status)
         self.assertFalse(report.can_submit_input)
 
+    def test_inspect_keeps_active_cursor_agent_running_without_codex_footer(self) -> None:
+        lines = ['Cursor Agent is working']
+        cases = (
+            '%7\tagent\t"export OMO_AGENT_TMUX_TARGET=cur:1 && exec agent --workspace /tmp --model gpt-5-medium"\n',
+            '%7\tagent\t\n',
+        )
+        for tmux_output in cases:
+            with self.subTest(tmux_output=tmux_output):
+                process = subprocess.CompletedProcess(['tmux'], 0, tmux_output, '')
+                with patch('omo_manager.omo_codex_status.exact_tail', return_value=(True, lines)), patch(
+                    'omo_manager.omo_codex_status.exact_pane_id', return_value='%7'
+                ), patch('omo_manager.omo_codex_status.subprocess.run', return_value=process):
+                    report = inspect(Args('cur:1', 80))
+                self.assertEqual('running', report.status)
+                self.assertFalse(report.can_submit_input)
+
     def test_inspect_does_not_broaden_shell_editor_or_similar_launcher(self) -> None:
         cases = (
             ('zsh', 'zsh'),
             ('vim', 'vim README.md'),
             ('bunx', 'bunx @example/codex'),
             ('bunx', 'bunx @openai/codex-lookalike'),
+            ('node', 'node /tmp/agent.js'),
         )
         for current_command, start_command in cases:
             with self.subTest(current_command=current_command, start_command=start_command):

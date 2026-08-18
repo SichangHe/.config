@@ -26,7 +26,7 @@ EXIT_INTERRUPT_DELAY_S = 0.75
 EXIT_INTERRUPT_ATTEMPTS = 4
 DEFAULT_ROOT = Path(os.environ.get("OMO_WORK_LOGS_ROOT", Path.home() / "work_logs"))
 DEFAULT_RESUME_TOOL = "pcodx"
-RESUME_TOOLS = {"codex", "pcodx"}
+RESUME_TOOLS = {"codex", "pcodx", "cursor"}
 STOPPABLE_CODEX_STATUSES = {"error", "ready", "running", "stuck_input", "waiting_subagent"}
 UUID_RE = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 RESUME_RE = re.compile(rf"(?i)\bcodex\s+resume\s+(?:--[\w-]+\s+)*({UUID_RE})\b")
@@ -265,6 +265,25 @@ def top_runat_tool(text: str) -> str:
         _, tool = entry
         return tool
     return ""
+
+
+def frontmatter_tool(text: str) -> str:
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return ""
+    for line in lines[1:]:
+        if line.strip() == "---":
+            return ""
+        key, sep, value = line.partition(":")
+        if sep and key.strip() == "tool":
+            return value.strip()
+    return ""
+
+
+def task_tool(args: Args) -> str:
+    if not args.task_file or args.dry_run:
+        return ""
+    return frontmatter_tool(task_path(args.root, args.task_file).read_text(encoding="utf-8"))
 
 
 def resume_cmd(args: Args, session_id: str) -> str:
@@ -544,7 +563,11 @@ def stop(args: Args) -> str:
         print(f"would send Ctrl-C to {resolved_args.target}")
         return ""
     maybe_request_feedback(resolved_args)
-    session_id, before_close = query_status_session_id(resolved_args.target, resolved_args.lines, resolved_args.wait_s)
+    if task_tool(args) == "cursor":
+        before_close = capture(resolved_args.target, resolved_args.lines)
+        session_id = ""
+    else:
+        session_id, before_close = query_status_session_id(resolved_args.target, resolved_args.lines, resolved_args.wait_s)
     if pane_id(resolved_args.target) != target_pane:
         raise RuntimeError(f"tmux target disappeared before interrupt: {args.target}")
     send_exit_keys(resolved_args.target)

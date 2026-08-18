@@ -40,6 +40,7 @@ PCODX_WRAPPER = HELPER_DIR / "pcodx"
 COMMAND_BY_TOOL = {
     "codex": ("bunx", "@openai/codex", "--dangerously-bypass-approvals-and-sandbox"),
     "pcodx": (str(PCODX_WRAPPER),),
+    "cursor": ("agent", "--force", "--sandbox", "disabled", "--trust"),
 }
 DEFAULT_TOOL = "codex"
 TASK_FRONTMATTER_VERSION = "v1.0.0"
@@ -247,7 +248,7 @@ Ownership migration:
     if parsed.pane:
         parser.error("pane selection is no longer supported; pane 0 is implied.")
     if parsed.tool not in COMMAND_BY_TOOL:
-        parser.error("only --tool codex or --tool pcodx is supported.")
+        parser.error("only --tool codex, --tool pcodx, or --tool cursor is supported.")
     tool_explicit = any(arg == "--tool" or arg.startswith("--tool=") for arg in argv)
     if (parsed.human_email_file is None) != (parsed.human_email_lines is None):
         parser.error("--human-email-file and --human-email-lines must be supplied together.")
@@ -301,6 +302,8 @@ Ownership migration:
     raw_model_flag_error = codex_flags_model_error(tuple(parsed.codex_flag or ()))
     if raw_model_flag_error:
         parser.error(raw_model_flag_error)
+    if parsed.tool == "cursor" and parsed.codex_flag:
+        parser.error("--codex-flag is only valid for Codex tools.")
     prelaunch_source = parsed.prelaunch_source.resolve() if parsed.prelaunch_source is not None else None
     return Args(
         parsed.root.resolve(),
@@ -1043,6 +1046,21 @@ def codex_cmd(
         args = list(COMMAND_BY_TOOL[tool])
     except KeyError as exc:
         raise ValueError(f"unsupported tool: {tool}") from exc
+    if tool == "cursor":
+        if codex_flags:
+            raise ValueError("codex flags are not valid for Cursor Agent CLI.")
+        if workdir is not None:
+            args.extend(("--workspace", str(workdir)))
+        if model:
+            cursor_model = f"{model}-{reasoning_effort}" if reasoning_effort else model
+            args.extend(("--model", cursor_model))
+        args.extend(codex_flags)
+        if session_id:
+            args.extend(("--resume", session_id))
+        parts = [shlex.quote(arg) for arg in args]
+        if include_prompt:
+            parts.append(prompt_input(prompt_file, vl_agent, manager_file, human_instruction_file))
+        return " ".join(parts)
     if model:
         args.extend(("--model", model))
     if reasoning_effort:
@@ -1216,6 +1234,8 @@ def wait_command_started(
             active_status = status(captured, block)
             active_command = current_command(inspection_target)
             trust_attributed = trust_allowed and not baseline_has_trust_prompt and active_command in CODEX_LAUNCH_PANE_COMMANDS
+            if active_command == "agent":
+                return CODEX_LAUNCH_STARTED
             if (
                 trust_attributed
                 and active_status == "not_codex"
@@ -1242,6 +1262,8 @@ def wait_command_started(
             active_status = status(lines, block)
             active_command = current_command(inspection_target)
             trust_attributed = trust_allowed and not baseline_has_trust_prompt and active_command in CODEX_LAUNCH_PANE_COMMANDS
+            if active_command == "agent":
+                return CODEX_LAUNCH_STARTED
             if trust_attributed and active_status == "not_codex" and has_codex_trust_prompt(block.lines):
                 last_status = "directory trust confirmation still visible"
                 if not trust_confirmed:
@@ -1563,7 +1585,7 @@ def capture_pane(pane_id: str, n_lines: int = 80, *, require: bool = False) -> l
 
 
 def validate_existing_target_runtime(args: Args) -> str:
-    """Require registration-only mode to name an exact live Codex pane."""
+    """Require registration-only mode to name an exact live managed pane."""
 
     if args.workdir is not None:
         return ""
@@ -1578,9 +1600,11 @@ def validate_existing_target_runtime(args: Args) -> str:
     lines = capture_pane(pane_id)
     if exact_pane_id(tmux_target) != pane_id:
         raise ValueError(f"existing target `{tmux_target}` changed while it was being inspected; retry or use --workdir to launch a new worker.")
+    if effective_tool(args) == "cursor" and current_command(pane_id) == "agent":
+        return pane_id
     target_status = status(lines, current_block(lines))
     if target_status not in {"ready", "running"}:
-        raise ValueError(f"existing-target mode requires a ready or running Codex pane at `{tmux_target}`, got {target_status}; use --workdir to launch a new worker.")
+        raise ValueError(f"existing-target mode requires a ready or running managed agent pane at `{tmux_target}`, got {target_status}; use --workdir to launch a new worker.")
     return pane_id
 
 
@@ -1631,6 +1655,8 @@ def validate_inputs(args: Args) -> str:
         raise ValueError(raw_model_flag_error)
     if args.tool != "pcodx" and any("mcp_servers." in flag for flag in args.codex_flags):
         raise ValueError("MCP server config requires --tool pcodx.")
+    if args.tool == "cursor" and args.codex_flags:
+        raise ValueError("--codex-flag is only valid for Codex tools.")
     if args.workdir is not None and args.prompt_file is None and is_vl_agent(args.task_file, target(args)) and not args.resume_idle:
         raise ValueError("VL launches require --prompt-file so the end-goal and reviewer guidance has task-local context.")
     if args.workdir is not None and is_vl_agent(args.task_file, target(args)) and not is_vl_submanager_task_file(args.task_file) and not args.manager_target:

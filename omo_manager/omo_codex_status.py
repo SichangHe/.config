@@ -163,11 +163,11 @@ def exact_tail(target: str, n_lines: int) -> tuple[bool, list[str]]:
     return (True, lines) if exact_pane_id(target) == pane_id else (False, [])
 
 
-def pane_has_exact_codex_process(target: str, pane_id: str) -> bool:
-    """Confirm that an exact pane is still running a known Codex launcher."""
+def exact_pane_process(target: str, pane_id: str) -> tuple[str, list[str]] | None:
+    """Return the exact pane command and parsed start command."""
 
     if TMUX_PANE_ID_RE.fullmatch(pane_id) is None:
-        return False
+        return None
     out = subprocess.run(
         ["tmux", "display-message", "-p", "-t", pane_id, "#{pane_id}\t#{pane_current_command}\t#{pane_start_command}"],
         capture_output=True,
@@ -176,22 +176,46 @@ def pane_has_exact_codex_process(target: str, pane_id: str) -> bool:
         check=False,
     )
     if out.returncode != 0 or exact_pane_id(target) != pane_id:
-        return False
-    resolved_id, separator, process = out.stdout.strip().partition("\t")
+        return None
+    resolved_id, separator, process = out.stdout.rstrip("\r\n").partition("\t")
     current_command, separator, start_command = process.partition("\t")
     if resolved_id != pane_id or not separator:
-        return False
+        return None
     try:
         start_tokens = shlex.split(start_command)
         if len(start_tokens) == 1 and start_tokens[0] != start_command:
             start_tokens = shlex.split(start_tokens[0])
     except ValueError:
-        return False
+        return None
     if "exec" in start_tokens:
         start_tokens = start_tokens[start_tokens.index("exec") + 1 :]
+    return current_command, start_tokens
+
+
+def pane_has_exact_codex_process(target: str, pane_id: str) -> bool:
+    """Confirm that an exact pane is still running a known Codex launcher."""
+
+    process = exact_pane_process(target, pane_id)
+    if process is None:
+        return False
+    current_command, start_tokens = process
     if current_command == "codex":
         return bool(start_tokens and os.path.basename(start_tokens[0]) == "codex")
     return current_command in {"bunx", "npx"} and len(start_tokens) >= 2 and os.path.basename(start_tokens[0]) == current_command and start_tokens[1] == "@openai/codex"
+
+
+def pane_has_exact_cursor_process(target: str, pane_id: str) -> bool:
+    """Confirm that an exact pane is still running Cursor Agent CLI."""
+
+    process = exact_pane_process(target, pane_id)
+    if process is None:
+        return False
+    current_command, start_tokens = process
+    return current_command == "agent" and (not start_tokens or os.path.basename(start_tokens[0]) == "agent")
+
+
+def pane_has_exact_managed_agent_process(target: str, pane_id: str) -> bool:
+    return pane_has_exact_codex_process(target, pane_id) or pane_has_exact_cursor_process(target, pane_id)
 
 
 def has_codex_model_footer(lines: list[str]) -> bool:
@@ -806,7 +830,7 @@ def inspect(args: Args, *, detect_waiting_subagent: bool = False) -> Report:
     report = report_from_lines(lines, detect_waiting_subagent=detect_waiting_subagent)
     if report.status == "not_codex":
         pane_id = exact_pane_id(args.target)
-        if pane_id and pane_has_exact_codex_process(args.target, pane_id):
+        if pane_id and pane_has_exact_managed_agent_process(args.target, pane_id):
             return Report("running", report.lines, report.input_text, False, "")
     return report
 

@@ -1022,6 +1022,19 @@ class OmoTaskTests(unittest.TestCase):
             f"{PCODX_WRAPPER} --model 'model name' --config 'model_reasoning_effort=\"xhigh\"' --profile deep-review",
         ))
 
+    def test_cursor_cmd_uses_agent_cli_model_effort_and_workspace(self) -> None:
+        command = codex_cmd(
+            model="gpt-5.6-terra",
+            reasoning_effort="medium",
+            prompt_file=Path("/tmp/prompt.md"),
+            tool="cursor",
+            workdir=Path("/work/tree"),
+        )
+        self.assertTrue(command.startswith("agent --force --sandbox disabled --trust --workspace /work/tree --model gpt-5.6-terra-medium"))
+        self.assertIn("$(cat --", command)
+        with self.assertRaisesRegex(ValueError, "codex flags"):
+            codex_cmd(tool="cursor", codex_flags=("--profile", "x"))
+
     def test_codex_cmd_resume_carries_explicit_model_and_effort(self) -> None:
         self.assertTrue(codex_cmd("abc def", reasoning_effort="max", model="gpt-5.6-terra").startswith(
             "bunx @openai/codex --dangerously-bypass-approvals-and-sandbox --model gpt-5.6-terra --config 'model_reasoning_effort=\"max\"' resume 'abc def'",
@@ -2261,6 +2274,24 @@ class OmoTaskTests(unittest.TestCase):
             launch_marker = wait_command_started_mock.call_args.kwargs["launch_marker"]
             self.assertRegex(launch_marker, r"^\[omo:[0-9a-f]{32}\]$")
 
+    def test_start_codex_can_launch_cursor_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            prompt = Path(tmp) / "prompt.md"
+            prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
+            args = Args(Path(tmp), "x.md", "cur", "", "cursor", Path(tmp), "x", prompt, False, False, "", "medium", (), model="gpt-5.6-terra")
+            with (
+                patch("omo_manager.omo_task.exact_pane_id", return_value="%7"),
+                patch("omo_manager.omo_task.capture_pane", return_value=[]),
+                patch("omo_manager.omo_task.tmux") as tmux,
+                patch("omo_manager.omo_task.wait_command_started"),
+            ):
+                start_codex("cur:7", args)
+            command = tmux.call_args_list[0].args[0][3]
+            self.assertIn("exec agent --force --sandbox disabled --trust", command)
+            self.assertIn("--workspace", command)
+            self.assertIn("--model gpt-5.6-terra-medium", command)
+            self.assertNotIn("model_reasoning_effort", command)
+
     def test_start_codex_resume_idle_submits_no_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             args = Args(Path(tmp), "x.md", "hvl", "9", "codex", Path(tmp), "x", None, False, False, "abc", "", (), resume_idle=True)
@@ -3025,6 +3056,17 @@ class OmoTaskTests(unittest.TestCase):
 
             with patch("omo_manager.omo_task.exact_pane_id", return_value="%2"), patch("omo_manager.omo_task.capture_pane", return_value=["ready"]), patch(
                 "omo_manager.omo_task.status", return_value="ready"
+            ):
+                self.assertEqual("%2", validate_existing_target_runtime(args))
+
+    def test_existing_target_mode_accepts_cursor_agent_process(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = Args(root, "x.md", "cur", "2", "cursor", None, "", None, False, False, "", "", ())
+            with (
+                patch("omo_manager.omo_task.exact_pane_id", return_value="%2"),
+                patch("omo_manager.omo_task.capture_pane", return_value=["Cursor Agent"]),
+                patch("omo_manager.omo_task.current_command", return_value="agent"),
             ):
                 self.assertEqual("%2", validate_existing_target_runtime(args))
 

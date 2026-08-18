@@ -1,23 +1,29 @@
 # Cursor Agent pilot
 
 - purpose
-  - let managers try Cursor Agent on a few bounded tasks before managed-worker integration
+  - let managers try Cursor Agent either as a one-shot helper or as a managed tmux worker
   - keep Codex as the default managed worker
 
-- command
+- one-shot command
   - `amh_cursor_agent.py --workspace DIR --prompt-file FILE --model gpt-5.6-terra --reasoning-effort low --timeout-s 1800`
   - use `--resume SESSION_UUID` with the `session_id` returned by an earlier result
   - list locally available Cursor models with `agent models`
 
-- behavior
+- one-shot behavior
   - runs Cursor Agent in noninteractive print mode with tools enabled, workspace trust accepted, and sandbox disabled
   - combines the model family and effort as Cursor's model identifier, such as `gpt-5.6-terra-low`
   - returns one `amh-cursor-agent/v1` JSON result with `ok`, and includes `result`, `session_id`, and Cursor's original result on success
   - returns the same JSON schema with `ok: false` for a missing CLI, timeout, process failure, or malformed/incomplete Cursor result
 
+- managed worker command
+  - use `omo_task.py --tool cursor --workdir DIR --model MODEL --reasoning-effort EFFORT --prompt-file FILE ...`
+  - the launcher starts `agent --force --sandbox disabled --trust --workspace DIR --model MODEL-EFFORT`
+  - the normal task file records `tool: cursor`
+  - watcher status treats an exact live `agent` process as running
+  - task closure uses the normal lifecycle path, but skips Codex-only `/status` probing because Cursor Agent has no compatible `/status` output
+
 - pilot boundary
-  - this is a one-shot task runner whose result returns to the calling manager
   - Cursor receives full command approval with its sandbox disabled, matching unrestricted Codex workers; `--workspace` selects context but does not contain filesystem or network access
-  - it does not create a task record or tmux worker
-  - do not pass `--tool agent` to `omo_task.py`; status, verified delivery, stop, and same-pane recovery are still Codex-specific
-  - use the pilot for a few bounded tasks and compare its output with normal Codex work before deciding whether full managed-worker support is worthwhile
+  - `amh_cursor_agent.py` is still one-shot and does not create a task record or tmux worker
+  - `omo_task.py --tool cursor` is the managed path when the task needs watcher visibility and lifecycle closure
+  - Cursor managed workers do not yet have Codex-equivalent session-id capture, capacity recovery, or same-pane resume support

@@ -454,6 +454,30 @@ class CodexStopTests(unittest.TestCase):
         query.assert_not_called()
         interrupt.assert_not_called()
 
+    def test_stop_cursor_agent_does_not_send_codex_status_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "task.md").write_text(
+                "---\nversion: v1.0.0\nstatus: done\nrunat: cur:1\ntool: cursor\nmanagerat: mgr:1\nis_manager: false\npending_task_items: []\n---\nbody\n",
+                encoding="utf-8",
+            )
+            with (
+                patch("omo_manager.omo_codex_stop.pane_id", return_value="%1"),
+                patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%2"),
+                patch("omo_manager.omo_codex_stop.target_session_name", return_value="cur"),
+                patch("omo_manager.omo_codex_stop.pane_target", return_value="cur:1.0"),
+                patch("omo_manager.omo_codex_stop.inspect", return_value=Report("running", ["Cursor Agent"])),
+                patch("omo_manager.omo_codex_stop.query_status_session_id") as query,
+                patch("omo_manager.omo_codex_stop.send_exit_keys") as interrupt,
+                patch("omo_manager.omo_codex_stop.wait_shell"),
+                patch("omo_manager.omo_codex_stop.capture", return_value=""),
+                patch("omo_manager.omo_codex_stop.close_tmux_target") as close,
+            ):
+                self.assertEqual("", stop(Args("cur:1", 0.0, 10, False, False, root, "task.md", True, 0.0)))
+        query.assert_not_called()
+        interrupt.assert_called_once_with("%1")
+        close.assert_called_once_with("%1")
+
     def test_stop_rejects_human_owned_target_resolved_from_pane_id(self) -> None:
         with (
             patch("omo_manager.omo_codex_stop.pane_id", return_value="%42"),
