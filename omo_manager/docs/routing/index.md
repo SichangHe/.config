@@ -14,3 +14,5 @@
   - draft structured metadata contract for task Markdown files
 - `task-launch.md`
   - task file creation and worker launch helper reference
+- `ops-manager-cursor-replace.md`
+  - pinned same-pane Codex-to-Cursor replacement for `ops_manager.md` at `wl:3`

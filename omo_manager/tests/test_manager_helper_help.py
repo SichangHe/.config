@@ -76,6 +76,17 @@ class ManagerHelperHelpTests(unittest.TestCase):
         self.assertIn("infers routing from the producer pane", report_help)
         self.assertIn("do not pass task-file, root, manager-target", report_help)
 
+    def test_ops_manager_cursor_replace_help_owns_pin_and_fail_closed_details(self) -> None:
+        replace_help = helper_help("omo_ops_manager_cursor_replace.py")
+        self.assertIn("ops_manager.md", replace_help)
+        self.assertIn("wl:3", replace_help)
+        self.assertIn("managerat: wl:18", replace_help)
+        self.assertIn("h*", replace_help)
+        self.assertIn("does not launch a replacement pane", replace_help)
+        self.assertIn("pending queue", replace_help)
+        self.assertIn("dirty unknown", replace_help)
+        self.assertIn("16-16", replace_help)
+
 
 if __name__ == "__main__":
     _ = unittest.main()
