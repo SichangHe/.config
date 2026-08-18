@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Create/link a markdown task and optionally start a Codex tmux window."""
+"""Create/link a markdown task and optionally start a worker tmux window."""
+
 from __future__ import annotations
 
 import argparse
@@ -42,7 +43,7 @@ COMMAND_BY_TOOL = {
     "pcodx": (str(PCODX_WRAPPER),),
     "cursor": ("agent", "--force", "--sandbox", "disabled", "--trust"),
 }
-DEFAULT_TOOL = "codex"
+DEFAULT_TOOL = "cursor"
 TASK_FRONTMATTER_VERSION = "v1.0.0"
 TMUX_TARGET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?$")
 TMUX_SESSION_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
@@ -78,6 +79,8 @@ def infer_work_log_root(path: Path) -> Path:
         if (candidate / "TODO.md").is_file():
             return candidate
     raise ValueError("manager-owner migration requires --root when no ancestor TODO.md identifies the work-log root.")
+
+
 MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$")
 LINE_RANGE_RE = re.compile(r"^([1-9]\d*)-([1-9]\d*)$")
 HUMAN_INSTRUCTION_CLOSE = "</human_instruction>"
@@ -104,6 +107,7 @@ HUMAN_LAUNCH_ROLE_TARGET_RE = re.compile(
     flags=re.IGNORECASE,
 )
 DEFAULT_LONG_RUNNING_BLOCKED_ON = "persistent manager role"
+AMH_AGENT_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,255}$")
 
 
 @dataclass(frozen=True)
@@ -133,6 +137,8 @@ class Args:
     human_email_lines: tuple[int, int] | None = None
     human_email_text: str | None = None
     resume_idle: bool = False
+    amh_caller_agent: str = ""
+    require_existing_tmux_session: bool = False
 
 
 class ParsedArgs(argparse.Namespace):
@@ -159,6 +165,8 @@ class ParsedArgs(argparse.Namespace):
     human_email_file: Path | None = None
     human_email_lines: tuple[int, int] | None = None
     resume_idle: bool = False
+    amh_caller_agent: str = ""
+    require_existing_tmux_session: bool = False
 
 
 @dataclass(frozen=True)
@@ -198,21 +206,23 @@ def parse_args(argv: list[str]) -> Args:
         epilog="""Launch behavior:
   With --workdir, create or update task frontmatter, link the task in TODO.md
   unless --no-link is passed, open a tmux window with its normal shell, and
-  start Codex there. --prompt-file becomes Codex's initial prompt argument.
-  Every new launch requires --model and --reasoning-effort; model selection in
-  --codex-flag is rejected. Pass --is-manager for manager launches.
-  WORKER_DEFAULTS.md is injected into every prompt, followed by MANAGER.md for
-  manager launches. Do not repeat instructions to read those files.
-  For a launch caused by email, pass --human-email-file and the exact relevant
-  --human-email-lines. Keep --prompt-file narrowly task-specific.
-  Keep --task-file as manager-side bookkeeping and out of worker prompts.
+  start Cursor Agent there unless --tool codex or --tool pcodx is requested.
+  This does not stop already running Codex panes. --prompt-file becomes the
+  worker's initial prompt argument. Every new launch requires --model and
+  --reasoning-effort; model selection in --codex-flag is rejected. Pass
+  --is-manager for manager launches. WORKER_DEFAULTS.md is injected into every
+  prompt, followed by MANAGER.md for manager launches. Do not repeat
+  instructions to read those files. For a launch caused by email, pass
+  --human-email-file and the exact relevant --human-email-lines. Keep
+  --prompt-file narrowly task-specific. Keep --task-file as manager-side
+  bookkeeping and out of worker prompts.
 
 Model guidance:
-  gpt-5.6-sol medium is the default; use max for hard tasks and ultra only for
+  For Codex, gpt-5.6-sol medium is the default; use max for hard tasks and ultra only for
   very hard tasks. Use gpt-5.6-sol low for submanagers, gpt-5.6-terra medium for
   easier routine tasks, and gpt-5.6-luna xhigh for trivial minimal tasks. Terra
   and Luna are unreliable decision makers.
-  For --tool cursor, use model cursor-grok-4.6 with reasoning effort xhigh; the
+  For Cursor Agent, use model cursor-grok-4.6 with reasoning effort xhigh; the
   launcher passes that to Cursor as cursor-grok-4.6-xhigh.
 
 Ownership migration:
@@ -223,7 +233,7 @@ Ownership migration:
     _ = parser.add_argument("--tmux-session", default="")
     _ = parser.add_argument("--tmux-window", default="")
     _ = parser.add_argument("--pane", default="", help=argparse.SUPPRESS)
-    _ = parser.add_argument("--tool", default=DEFAULT_TOOL)
+    _ = parser.add_argument("--tool", default=DEFAULT_TOOL, help="Worker CLI. Defaults to cursor; pass codex or pcodx to request those tools.")
     _ = parser.add_argument("--workdir", type=Path)
     _ = parser.add_argument("--window-name", default="")
     _ = parser.add_argument("--prompt-file", type=Path)
@@ -240,6 +250,16 @@ Ownership migration:
     _ = parser.add_argument("--human-email-file", type=Path, help="Email source file under ROOT/manager_mail; requires --human-email-lines.")
     _ = parser.add_argument("--human-email-lines", type=line_range, metavar="START-END", help="Inclusive email line range; requires --human-email-file.")
     _ = parser.add_argument(
+        "--amh-caller-agent",
+        default="",
+        help="Optional AMH stable agent id to export as AMH_CALLER=agent:<id> for this launched Codex process.",
+    )
+    _ = parser.add_argument(
+        "--require-existing-tmux-session",
+        action="store_true",
+        help="Fail a launch if the named tmux session is absent instead of creating it.",
+    )
+    _ = parser.add_argument(
         "--migrate-manager-owner", action="store_true", help="Atomically migrate only `managerat` on one existing task; requires explicit old and new targets and performs no launch or TODO action."
     )
     _ = parser.add_argument("--old-manager-target", default="", help="Existing `managerat` value required by --migrate-manager-owner.")
@@ -252,6 +272,7 @@ Ownership migration:
     if parsed.tool not in COMMAND_BY_TOOL:
         parser.error("only --tool codex, --tool pcodx, or --tool cursor is supported.")
     tool_explicit = any(arg == "--tool" or arg.startswith("--tool=") for arg in argv)
+    amh_caller_agent_explicit = any(arg == "--amh-caller-agent" or arg.startswith("--amh-caller-agent=") for arg in argv)
     if (parsed.human_email_file is None) != (parsed.human_email_lines is None):
         parser.error("--human-email-file and --human-email-lines must be supplied together.")
     if not parsed.migrate_manager_owner and (parsed.old_manager_target or parsed.new_manager_target):
@@ -278,6 +299,8 @@ Ownership migration:
                 parsed.is_manager,
                 parsed.human_email_file,
                 parsed.human_email_lines,
+                parsed.amh_caller_agent,
+                parsed.require_existing_tmux_session,
             )
         ):
             parser.error("--migrate-manager-owner only accepts --root, --task-file, explicit old/new manager targets, and optional --dry-run.")
@@ -293,6 +316,10 @@ Ownership migration:
         parser.error("--resume-idle does not accept --prompt-file.")
     if parsed.resume_idle and parsed.human_email_file is not None:
         parser.error("--resume-idle does not accept human email instructions.")
+    if amh_caller_agent_explicit and AMH_AGENT_ID_RE.fullmatch(parsed.amh_caller_agent) is None:
+        parser.error("--amh-caller-agent must be a nonempty ASCII AMH agent id using only letters, numbers, `.`, `_`, or `-`.")
+    if parsed.amh_caller_agent and parsed.workdir is None:
+        parser.error("--amh-caller-agent is only valid for a launched worker with --workdir.")
     if parsed.human_email_file is not None and parsed.workdir is None:
         parser.error("--human-email-file and --human-email-lines require --workdir.")
     if parsed.human_email_file is not None and parsed.prompt_file is None:
@@ -332,6 +359,8 @@ Ownership migration:
         human_email_file=parsed.human_email_file,
         human_email_lines=parsed.human_email_lines,
         resume_idle=parsed.resume_idle,
+        amh_caller_agent=parsed.amh_caller_agent,
+        require_existing_tmux_session=parsed.require_existing_tmux_session,
     )
 
 
@@ -552,9 +581,7 @@ def validate_launch_session(args: Args) -> str:
 
     session_name = resolved_launch_session_name(args.tmux_session)
     if session_name.startswith("h") and not human_authorized_launch_session(args, session_name):
-        raise ValueError(
-            "launches in human-owned `h*` tmux sessions require an authoritative direct launch request naming that exact session."
-        )
+        raise ValueError("launches in human-owned `h*` tmux sessions require an authoritative direct launch request naming that exact session.")
     return session_name
 
 
@@ -571,6 +598,8 @@ def launch_session(args: Args) -> LaunchSession:
     if result.returncode == 0 and not session_details.strip():
         session_missing = tmux(["has-session", "-t", exact_session_target]).returncode != 0
     if session_missing:
+        if args.require_existing_tmux_session:
+            raise ValueError(f"tmux session `{session_name}` must already exist.")
         if args.tmux_window:
             raise ValueError(f"cannot create missing tmux session `{session_name}` at requested --tmux-window {args.tmux_window}.")
         return LaunchSession(session_name, f"={session_name}", True)
@@ -581,13 +610,9 @@ def launch_session(args: Args) -> LaunchSession:
     try:
         same_workdir = os.path.samefile(args.workdir, session_workdir)
     except OSError as error:
-        raise ValueError(
-            f"cannot verify that --workdir `{args.workdir}` matches tmux session `{session_name}` session_path `{session_workdir}`: {error}"
-        ) from error
+        raise ValueError(f"cannot verify that --workdir `{args.workdir}` matches tmux session `{session_name}` session_path `{session_workdir}`: {error}") from error
     if not same_workdir:
-        raise ValueError(
-            f"--workdir `{args.workdir}` does not match tmux session `{session_name}` session_path `{session_workdir}`; both must identify the same directory."
-        )
+        raise ValueError(f"--workdir `{args.workdir}` does not match tmux session `{session_name}` session_path `{session_workdir}`; both must identify the same directory.")
     return LaunchSession(session_name, session_id, False)
 
 
@@ -656,7 +681,7 @@ def managerat_line_error(line: str) -> str:
 
 def managerat_value(text: str) -> str:
     lines = text.splitlines()
-    for line in lines[:first_non_metadata_index(lines)]:
+    for line in lines[: first_non_metadata_index(lines)]:
         parts = line.strip().split()
         if len(parts) == 2 and parts[0] == "managerat:":
             return parts[1]
@@ -665,7 +690,7 @@ def managerat_value(text: str) -> str:
 
 def validate_managerat_metadata(text: str) -> None:
     lines = text.splitlines()
-    for line in lines[:first_non_metadata_index(lines)]:
+    for line in lines[: first_non_metadata_index(lines)]:
         if error := managerat_line_error(line):
             raise ValueError(error)
 
@@ -874,9 +899,7 @@ def replace_frontmatter_fields(text: str, updates: dict[str, str], remove: set[s
 def launched_frontmatter_text(existing: str, args: Args, tmux_target: str) -> str:
     metadata = parse_task_metadata(existing, args.root)
     is_manager = args.is_manager or (metadata is not None and metadata.is_manager)
-    is_long_running = is_manager or (
-        metadata is not None and (metadata.status == "long_running" or metadata.resume_status == "long_running")
-    )
+    is_long_running = is_manager or (metadata is not None and (metadata.status == "long_running" or metadata.resume_status == "long_running"))
     if metadata is not None and metadata.version == V2_VERSION:
         frontmatter, body = split_task_text(existing)
         values = load_yaml_mapping(frontmatter)
@@ -1082,8 +1105,18 @@ def shell_cmd(command: str) -> str:
     return "bash -lc " + shlex.quote(command)
 
 
-def worker_command(command: str, tmux_target: str, prelaunch_source: Path | None = None, launch_marker: str = "") -> str:
+def worker_command(
+    command: str,
+    tmux_target: str,
+    prelaunch_source: Path | None = None,
+    launch_marker: str = "",
+    amh_caller_agent: str = "",
+) -> str:
     exports = {"OMO_AGENT_TMUX_TARGET": tmux_target}
+    if amh_caller_agent:
+        if AMH_AGENT_ID_RE.fullmatch(amh_caller_agent) is None:
+            raise ValueError("AMH caller agent id is invalid.")
+        exports["AMH_CALLER"] = f"agent:{amh_caller_agent}"
     export_text = " ".join(f"{key}={shlex.quote(value)}" for key, value in exports.items())
     marker = f" && printf '%s\\n' {shlex.quote(launch_marker)}" if launch_marker else ""
     launch = f"export {export_text}{marker} && exec {command}"
@@ -1238,11 +1271,7 @@ def wait_command_started(
             trust_attributed = trust_allowed and not baseline_has_trust_prompt and active_command in CODEX_LAUNCH_PANE_COMMANDS
             if active_command == "agent":
                 return CODEX_LAUNCH_STARTED
-            if (
-                trust_attributed
-                and active_status == "not_codex"
-                and has_codex_trust_prompt(block.lines)
-            ):
+            if trust_attributed and active_status == "not_codex" and has_codex_trust_prompt(block.lines):
                 last_status = "directory trust confirmation still visible"
                 if not trust_confirmed:
                     send_launch_enter(target, pane_id, require_codex_launch=True)
@@ -1399,7 +1428,15 @@ def start_codex(target: str, args: Args) -> None:
             launch_marker = new_launch_marker()
             if not marker_is_fresh(launch_marker, baseline_lines):
                 raise RuntimeError("new Codex launch marker was already present in the pane baseline.")
-            shell_launch = shell_cmd(worker_command(command, target, args.prelaunch_source, launch_marker))
+            shell_launch = shell_cmd(
+                worker_command(
+                    command,
+                    target,
+                    args.prelaunch_source,
+                    launch_marker,
+                    args.amh_caller_agent,
+                )
+            )
             require_same_launch_pane(target, pane_id)
             _ = tmux(["send-keys", "-t", pane_id, shell_launch, "Enter"], check=True)
             if wait_command_started(target, launch_marker=launch_marker, pane_id=pane_id, baseline_lines=baseline_lines) != CODEX_LAUNCH_UPDATED:
@@ -1562,7 +1599,22 @@ def dry_run(args: Args) -> None:
             not args.resume_idle,
             args.workdir,
         )
-        launch = ["tmux", "send-keys", "-t", launch_target, shell_cmd(worker_command(launch_command, launch_target, args.prelaunch_source, CODEX_LAUNCH_MARKER_DRY_RUN)), "Enter"]
+        launch = [
+            "tmux",
+            "send-keys",
+            "-t",
+            launch_target,
+            shell_cmd(
+                worker_command(
+                    launch_command,
+                    launch_target,
+                    args.prelaunch_source,
+                    CODEX_LAUNCH_MARKER_DRY_RUN,
+                    args.amh_caller_agent,
+                )
+            ),
+            "Enter",
+        ]
         print("tmux: " + " ".join(shlex.quote(part) for part in launch))
 
 
@@ -1602,8 +1654,10 @@ def validate_existing_target_runtime(args: Args) -> str:
     lines = capture_pane(pane_id)
     if exact_pane_id(tmux_target) != pane_id:
         raise ValueError(f"existing target `{tmux_target}` changed while it was being inspected; retry or use --workdir to launch a new worker.")
-    if effective_tool(args) == "cursor" and current_command(pane_id) == "agent":
-        return pane_id
+    if effective_tool(args) == "cursor":
+        if current_command(pane_id) == "agent":
+            return pane_id
+        raise ValueError(f"existing-target mode requires a live Cursor Agent process at `{tmux_target}` for `--tool cursor`; use `--tool codex` for a Codex pane or `--workdir` to launch a new worker.")
     target_status = status(lines, current_block(lines))
     if target_status not in {"ready", "running"}:
         raise ValueError(f"existing-target mode requires a ready or running managed agent pane at `{tmux_target}`, got {target_status}; use --workdir to launch a new worker.")
@@ -1627,6 +1681,11 @@ def validate_inputs(args: Args) -> str:
         raise ValueError("--resume-idle does not accept --prompt-file.")
     if invalid_model := model_error(args.model):
         raise ValueError(invalid_model)
+    if args.amh_caller_agent:
+        if AMH_AGENT_ID_RE.fullmatch(args.amh_caller_agent) is None:
+            raise ValueError("--amh-caller-agent must be a nonempty ASCII AMH agent id using only letters, numbers, `.`, `_`, or `-`.")
+        if args.workdir is None:
+            raise ValueError("--amh-caller-agent is only valid for a launched worker with --workdir.")
     if (args.human_email_file is None) != (args.human_email_lines is None):
         raise ValueError("--human-email-file and --human-email-lines must be supplied together.")
     if args.human_email_file is not None and args.workdir is None:

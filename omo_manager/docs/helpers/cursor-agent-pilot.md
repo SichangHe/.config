@@ -2,7 +2,7 @@
 
 - purpose
   - let managers try Cursor Agent either as a one-shot helper or as a managed tmux worker
-  - keep Codex as the default managed worker
+  - new managed workers default to Cursor Agent; pass `--tool codex` for Codex
 
 - one-shot command
   - `amh_cursor_agent.py --workspace DIR --prompt-file FILE --model gpt-5.6-terra --reasoning-effort low --timeout-s 1800`
@@ -16,7 +16,7 @@
   - returns the same JSON schema with `ok: false` for a missing CLI, timeout, process failure, or malformed/incomplete Cursor result
 
 - managed worker command
-  - use `omo_task.py --tool cursor --workdir DIR --model MODEL --reasoning-effort EFFORT --prompt-file FILE ...`
+  - use `omo_task.py --workdir DIR --model MODEL --reasoning-effort EFFORT --prompt-file FILE ...`; `--tool cursor` is the default and may be omitted
   - the launcher starts `agent --force --sandbox disabled --trust --workspace DIR --model MODEL-EFFORT`
   - the normal task file records `tool: cursor`
   - watcher status treats an exact live `agent` process as running
