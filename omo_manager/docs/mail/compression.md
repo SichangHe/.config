@@ -10,6 +10,10 @@ A threshold may start review; it never authorizes Trash. PB news, PB stock watch
 
 Each summary is intended to answer “what does the Human need to read now?” It includes the selected unread UID set, latest subject/date/sender, inferred tmux target when the subject has one, bounded subjects and `read_now` excerpts across selected unread messages with quoted reply text omitted, plus counts and SHA-256 digests for the complete unread UID/subject set when a long chain is capped. Missing Gmail thread identity is a hard failure because unread-chain compression needs stable chain grouping. Argument bounds are checked before any mailbox is opened.
 
+## read-only current view
+
+`snapshot` and `identity-preflight` are the read-only current-view helpers. They select `INBOX` read-only for candidate discovery, which searches only `FROM` the configured agent sender and does not freeze with IMAP `SEARCH ALL`. `identity-preflight` then requires Gmail All Mail and Sent special-use mailboxes, selects All Mail read-only, and confirms each source thread with nested `X-GM-THRID` OR searches (live-verified batches of 32) plus Gmail identity metadata. It does not use `X-GM-RAW thrid:`, does not group INBOX identities alone, and does not fetch thread bodies. Inspect/export still load All Mail plus Trash full-message context. Duplicate UID responses fail closed. These commands do not mark mail seen, send, move, expunge, or mutate `\All`.
+
 ## select current sources
 
 - start from a current read-only view of configured agent-to-human and legacy self-addressed manager mail in `INBOX`; a human must explicitly authorize other directions or mutation sources

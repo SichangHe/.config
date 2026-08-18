@@ -39,6 +39,8 @@ GMAIL_METADATA_BATCH_FETCH = "(UID FLAGS X-GM-MSGID X-GM-THRID X-GM-LABELS)"
 TRASH_MAILBOX = "[Gmail]/Trash"
 CONFIG_PATH = human_config_path()
 DEFAULT_THREADS_PER_BATCH = 10
+GMAIL_IDENTITY_UID_BATCH = 40
+GMAIL_THREAD_OR_BATCH = 32
 EXPORT_FULL_FETCH_ATTEMPTS = 2
 IMAP_OPERATION_TIMEOUT_S = 45.0
 T = TypeVar("T")
@@ -376,17 +378,25 @@ def load_config() -> dict[str, str]:
 
 
 def manager_candidate_uids(client: imaplib.IMAP4_SSL, self_email: str) -> list[str]:
+    """Return current INBOX UIDs from the configured agent sender.
+
+    Live Gmail times out a mailbox-wide `SEARCH ALL` freeze, so the freeze set
+    is the sender search. Split-account mode uses that one search. Legacy
+    self-addressed mode intersects subject-token searches with it.
+    """
     found: list[str] = []
     seen: set[str] = set()
-    typ, data = imap_uid(client, "fixed-start-search", "search", None, "ALL")
-    if typ != "OK":
-        raise RuntimeError(f"IMAP fixed-start search failed: {typ}")
-    frozen = {raw.decode() for raw in data[0].split()} if data and data[0] else set()
     settings = configured_agent_mail()
     criteria = ["FROM", f'"{self_email}"']
-    subject_tokens = ("",) if settings is not None else LEGACY_MANAGER_SUBJECT_TOKENS
-    for token in subject_tokens:
-        typ, data = imap_uid(client, "manager-candidate-search", "search", None, *(criteria + (["SUBJECT", f'"{token}"'] if token else [])))
+    typ, data = imap_uid(client, "manager-sender-search", "search", None, *criteria)
+    if typ != "OK":
+        raise RuntimeError(f"IMAP search failed: {typ}")
+    sender_uids = [raw.decode() for raw in data[0].split()] if data and data[0] else []
+    if settings is not None:
+        return list(dict.fromkeys(sender_uids))
+    frozen = set(sender_uids)
+    for token in LEGACY_MANAGER_SUBJECT_TOKENS:
+        typ, data = imap_uid(client, "manager-candidate-search", "search", None, *(criteria + ["SUBJECT", f'"{token}"']))
         if typ != "OK":
             raise RuntimeError(f"IMAP search failed: {typ}")
         for uid in [raw.decode() for raw in data[0].split()] if data and data[0] else []:
@@ -764,7 +774,39 @@ def gmail_thread_uids(client: imaplib.IMAP4_SSL, gmail_thrid: str) -> list[str]:
     typ, data = imap_uid(client, f"gmail-thread-search thread={gmail_thrid}", "search", None, "X-GM-THRID", gmail_thrid)
     if typ != "OK":
         raise RuntimeError(f"IMAP Gmail thread search failed: {typ}")
-    return [raw.decode() for raw in data[0].split()] if data and data[0] else []
+    uids = [raw.decode() for raw in data[0].split()] if data and data[0] else []
+    if any(not uid.isdecimal() for uid in uids) or len(uids) != len(set(uids)):
+        raise RuntimeError("IMAP Gmail thread search returned incomplete or duplicate UIDs")
+    return uids
+
+
+def gmail_thrid_or_query(thrids: list[str]) -> str:
+    """Return one nested IMAP OR search-key of `X-GM-THRID` keys."""
+    if not thrids or any(not thrid.isdecimal() for thrid in thrids):
+        raise RuntimeError("Gmail thread identity was missing or malformed")
+    query = f"X-GM-THRID {thrids[0]}"
+    for thrid in thrids[1:]:
+        query = f"(OR ({query}) X-GM-THRID {thrid})"
+    return query
+
+
+def gmail_thread_uids_union(client: imaplib.IMAP4_SSL, thrids: list[str]) -> list[str]:
+    """Search already-selected All Mail for every listed thread in one nested OR.
+
+    Live Gmail accepts this parenthesized form and returns the same UID set as
+    one `X-GM-THRID <id>` search per thread. `X-GM-RAW thrid:` is not equivalent.
+    """
+    if not thrids:
+        return []
+    if len(thrids) == 1:
+        return gmail_thread_uids(client, thrids[0])
+    typ, data = imap_uid(client, f"gmail-thread-or-search n={len(thrids)}", "search", None, gmail_thrid_or_query(thrids))
+    if typ != "OK":
+        raise RuntimeError(f"IMAP Gmail thread search failed: {typ}")
+    uids = [raw.decode() for raw in data[0].split()] if data and data[0] else []
+    if any(not uid.isdecimal() for uid in uids) or len(uids) != len(set(uids)):
+        raise RuntimeError("IMAP Gmail thread search returned incomplete or duplicate UIDs")
+    return uids
 
 
 def gmail_message_uids(client: imaplib.IMAP4_SSL, gmail_msgid: str) -> list[str]:
@@ -782,11 +824,13 @@ def require_gmail_identities(records: list[MailRecord]) -> None:
         raise RuntimeError(f"Gmail identity metadata missing for {len(missing)} source messages")
 
 
-def fetch_imap_thread_contexts(
+def discover_gmail_thread_member_uids(
     client: imaplib.IMAP4_SSL,
     records: list[MailRecord],
-) -> tuple[dict[str, str], dict[str, list[MailRecord]]]:
-    """Fetch complete Gmail thread context through the configured IMAP session."""
+    *,
+    report: bool = False,
+) -> tuple[dict[str, str], list[str]]:
+    """Locate each source thread in All Mail after requiring the Sent special-use mailbox."""
     require_gmail_identities(records)
     if len({record.gmail_msgid for record in records}) != len(records):
         raise RuntimeError("configured IMAP mailbox returned duplicate Gmail message identities")
@@ -801,33 +845,107 @@ def fetch_imap_thread_contexts(
         source_ids_by_thread.setdefault(record.gmail_thrid, set()).add(record.gmail_msgid)
     select_mailbox(client, all_mailbox, readonly=True)
     if not source_ids_by_thread:
-        return special_use, {}
-    thread_terms = [f"X-GM-THRID {thread}" for thread in sorted(source_ids_by_thread)]
-    search = thread_terms[0]
-    for term in thread_terms[1:]:
-        search = f"OR ({search}) ({term})"
-    try:
-        typ, data = imap_uid(client, "gmail-thread-union-search", "search", None, search)
-        if typ != "OK":
-            raise RuntimeError(f"IMAP Gmail thread union search failed: {typ}")
-        context_uids = [raw.decode() for raw in data[0].split()] if data and data[0] else []
-        if not context_uids:
-            raise RuntimeError("IMAP Gmail thread union search returned incomplete or duplicate UIDs")
-        all_context_records = fetch_full_records_batched(client, context_uids)
-    except RuntimeError as exc:
-        if "incomplete or duplicate UIDs" not in str(exc):
-            raise
-        all_context_records = []
-        for gmail_thrid in sorted(source_ids_by_thread):
-            all_context_records.extend(fetch_records(client, gmail_thread_uids(client, gmail_thrid), with_body=True, with_metadata=True))
-    records_by_thread: dict[str, list[MailRecord]] = {}
-    for gmail_thrid, source_ids in sorted(source_ids_by_thread.items()):
-        context_records = [record for record in all_context_records if record.gmail_thrid == gmail_thrid]
-        require_gmail_identities(context_records)
-        context_ids = [record.gmail_msgid for record in context_records]
-        if not context_records or len(context_ids) != len(set(context_ids)) or any(record.gmail_thrid != gmail_thrid for record in context_records) or not source_ids.issubset(context_ids):
+        return special_use, []
+    seen_uids: set[str] = set()
+    all_uids: list[str] = []
+    thrids = sorted(source_ids_by_thread)
+    n_threads = len(thrids)
+    for start in range(0, n_threads, GMAIL_THREAD_OR_BATCH):
+        batch = thrids[start : start + GMAIL_THREAD_OR_BATCH]
+        if report:
+            print(f"identity_preflight thread_search={start + len(batch)}/{n_threads}", file=sys.stderr)
+        try:
+            batch_uids = gmail_thread_uids_union(client, batch)
+        except RuntimeError as exc:
+            if not str(exc).startswith("IMAP Gmail thread search failed:"):
+                raise
+            batch_uids = []
+            for gmail_thrid in batch:
+                thread_uids = gmail_thread_uids(client, gmail_thrid)
+                if not thread_uids:
+                    raise RuntimeError("Gmail thread context was incomplete or changed during discovery")
+                if seen_uids.intersection(thread_uids):
+                    raise RuntimeError("IMAP Gmail thread search returned duplicate UID")
+                seen_uids.update(thread_uids)
+                batch_uids.extend(thread_uids)
+            all_uids.extend(batch_uids)
+            continue
+        if not batch_uids:
             raise RuntimeError("Gmail thread context was incomplete or changed during discovery")
-        records_by_thread[gmail_thrid] = context_records
+        if seen_uids.intersection(batch_uids):
+            raise RuntimeError("IMAP Gmail thread search returned duplicate UID")
+        seen_uids.update(batch_uids)
+        all_uids.extend(batch_uids)
+    return special_use, all_uids
+
+
+def complete_gmail_thread_identities(client: imaplib.IMAP4_SSL, records: list[MailRecord]) -> dict[str, list[GmailMetadata]]:
+    """Verify All Mail thread membership from Gmail identities after discovering Sent."""
+    source_ids_by_thread: dict[str, set[str]] = {}
+    for record in records:
+        source_ids_by_thread.setdefault(record.gmail_thrid, set()).add(record.gmail_msgid)
+    _special_use, all_uids = discover_gmail_thread_member_uids(client, records, report=True)
+    identities_by_uid: dict[str, GmailMetadata] = {}
+    for start in range(0, len(all_uids), GMAIL_IDENTITY_UID_BATCH):
+        chunk = all_uids[start : start + GMAIL_IDENTITY_UID_BATCH]
+        try:
+            identities_by_uid.update(fetch_gmail_metadata_records(client, chunk))
+        except RuntimeError as exc:
+            if str(exc) != "IMAP Gmail metadata batch fetch returned incomplete or duplicate UIDs":
+                raise
+            for uid in chunk:
+                identities_by_uid[uid] = fetch_gmail_metadata_detail(client, uid)
+    records_by_thread: dict[str, list[GmailMetadata]] = {}
+    for uid in all_uids:
+        item = identities_by_uid[uid]
+        records_by_thread.setdefault(item.gmail_thrid, []).append(item)
+    if set(records_by_thread) != set(source_ids_by_thread):
+        raise RuntimeError("Gmail thread context was incomplete or changed during discovery")
+    for gmail_thrid, source_ids in source_ids_by_thread.items():
+        identities = records_by_thread[gmail_thrid]
+        context_ids = [item.gmail_msgid for item in identities]
+        if (
+            not identities
+            or any(not item.gmail_msgid.isdecimal() or not item.gmail_thrid.isdecimal() for item in identities)
+            or len(context_ids) != len(set(context_ids))
+            or any(item.gmail_thrid != gmail_thrid for item in identities)
+            or not source_ids.issubset(context_ids)
+        ):
+            raise RuntimeError("Gmail thread context was incomplete or changed during discovery")
+    return records_by_thread
+
+
+def fetch_imap_thread_contexts(
+    client: imaplib.IMAP4_SSL,
+    records: list[MailRecord],
+) -> tuple[dict[str, str], dict[str, list[MailRecord]]]:
+    """Fetch complete Gmail thread context through the configured IMAP session.
+
+    Live Gmail accepts a nested `X-GM-THRID` OR search for a bounded thread
+    batch, so each source thread is located that way in All Mail after Sent is
+    discovered. Duplicate UID responses fail closed.
+    """
+    special_use, all_uids = discover_gmail_thread_member_uids(client, records)
+    try:
+        all_context_records = fetch_full_records_batched(client, all_uids)
+    except RuntimeError as exc:
+        if str(exc) != "IMAP full message batch fetch returned incomplete or duplicate UIDs":
+            raise
+        all_context_records = fetch_records(client, all_uids, with_body=True, with_metadata=True)
+    source_ids_by_thread: dict[str, set[str]] = {}
+    for record in records:
+        source_ids_by_thread.setdefault(record.gmail_thrid, set()).add(record.gmail_msgid)
+    records_by_thread: dict[str, list[MailRecord]] = {}
+    for record in all_context_records:
+        records_by_thread.setdefault(record.gmail_thrid, []).append(record)
+    if set(records_by_thread) != set(source_ids_by_thread):
+        raise RuntimeError("Gmail thread context was incomplete or changed during discovery")
+    for gmail_thrid, source_ids in source_ids_by_thread.items():
+        context_records = records_by_thread[gmail_thrid]
+        require_gmail_identities(context_records)
+        context_ids = [item.gmail_msgid for item in context_records]
+        if not context_records or len(context_ids) != len(set(context_ids)) or any(item.gmail_thrid != gmail_thrid for item in context_records) or not source_ids.issubset(context_ids):
+            raise RuntimeError("Gmail thread context was incomplete or changed during discovery")
     return special_use, records_by_thread
 
 
@@ -928,7 +1046,7 @@ def cmd_identity_preflight(_args: argparse.Namespace) -> int:
         headers, skipped = accepted_manager_headers(client, manager_candidate_uids(client, sender_email), sender_email, recipient_email)
         uidvalidity = ""
         source_records: list[MailRecord] = []
-        records_by_thread: dict[str, list[MailRecord]] = {}
+        records_by_thread: dict[str, list[GmailMetadata]] = {}
         gmail_extension = 0
         imap_failure = 0
         try:
@@ -949,15 +1067,12 @@ def cmd_identity_preflight(_args: argparse.Namespace) -> int:
                     )
                     for header in headers
                 ]
-                _special_use, records_by_thread = fetch_imap_thread_contexts(client, source_records)
+                records_by_thread = complete_gmail_thread_identities(client, source_records)
             except RuntimeError as exc:
                 if str(exc) != "IMAP Gmail metadata batch fetch returned incomplete or duplicate UIDs":
                     raise
-                # Compatibility fallback for servers that cannot return a
-                # multi-message Gmail metadata response.  The normal Gmail
-                # path above stays aggregate and avoids fetching every body.
                 source_records = [replace(record, source_uidvalidity=uidvalidity) for record in fetch_records(client, [header.uid for header in headers], with_body=True, with_metadata=True)]
-                _special_use, records_by_thread = fetch_imap_thread_contexts(client, source_records)
+                records_by_thread = complete_gmail_thread_identities(client, source_records)
             require_gmail_identities(source_records)
             if len({record.gmail_msgid for record in source_records}) != len(source_records):
                 raise RuntimeError("configured IMAP mailbox returned duplicate Gmail message identities")

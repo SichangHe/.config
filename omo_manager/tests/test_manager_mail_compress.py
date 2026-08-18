@@ -31,6 +31,7 @@ from omo_manager.omo_manager_mail_compress import (
     cmd_export,
     cmd_identity_preflight,
     cmd_inspect_explicit,
+    cmd_snapshot,
     cmd_locate_replacement,
     cmd_mark_seen,
     cmd_unread_summary,
@@ -48,6 +49,9 @@ from omo_manager.omo_manager_mail_compress import (
     fetch_gmail_metadata,
     fetch_header_records,
     fetch_direct_thread_contexts,
+    fetch_imap_thread_contexts,
+    discover_gmail_thread_member_uids,
+    gmail_thrid_or_query,
     imap_operation,
     imap_quoted,
     intent_reconciliation_evidence,
@@ -658,13 +662,13 @@ with tempfile.TemporaryDirectory() as tmp:
 
             def uid(self, command: str, *args: object) -> tuple[str, list[bytes]]:
                 self.calls.append((command, *args))
-                return "OK", [b"7" if args == (None, "ALL") else b"7 8"]
+                return "OK", [b"7 8"]
 
         client = Client()
         with patch("omo_manager.omo_manager_mail_compress.configured_agent_mail", return_value=Settings()):
-            self.assertEqual(["7"], manager_candidate_uids(client, "agent@example.test"))
+            self.assertEqual(["7", "8"], manager_candidate_uids(client, "agent@example.test"))
         self.assertEqual(
-            [("search", None, "ALL"), ("search", None, "FROM", '"agent@example.test"')],
+            [("search", None, "FROM", '"agent@example.test"')],
             client.calls,
         )
 
@@ -681,7 +685,7 @@ with tempfile.TemporaryDirectory() as tmp:
             self.assertEqual(["7"], manager_candidate_uids(client, "me@example.test"))
         self.assertEqual(
             [
-                ("search", None, "ALL"),
+                ("search", None, "FROM", '"me@example.test"'),
                 ("search", None, "FROM", '"me@example.test"', "SUBJECT", '"[a]"'),
                 ("search", None, "FROM", '"me@example.test"', "SUBJECT", '"[omo_manager]"'),
             ],
@@ -1031,15 +1035,11 @@ with tempfile.TemporaryDirectory() as tmp:
         raw = self.raw_message("[worker:0] complete")
         client = FakeClient(
             {
-                ("search", None, "ALL"): ("OK", [b"7"]),
                 ("search", None, "FROM", '"agent@example.test"'): ("OK", [b"7"]),
-                ("fetch", "7", HEADER_FETCH): ("OK", [(b"header", raw)]),
-                ("fetch", "7", FULL_FETCH): ("OK", [(b"message", raw)]),
-                ("fetch", "7", GMAIL_METADATA_FETCH): self.gmail_metadata("7"),
+                ("fetch", "7", HEADER_BATCH_FETCH): ("OK", [(b"7 (UID 7 BODY[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)] {1}", raw)]),
+                ("fetch", "7", GMAIL_METADATA_BATCH_FETCH): ("OK", [b"7 (UID 7 FLAGS () X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\Inbox))"]),
                 ("search", None, "X-GM-THRID", "200"): ("OK", [b"70"]),
-                ("search", None, "X-GM-MSGID", "100"): ("OK", [b"70"]),
-                ("fetch", "70", FULL_FETCH): ("OK", [(b"message", raw)]),
-                ("fetch", "70", GMAIL_METADATA_FETCH): self.gmail_metadata("70"),
+                ("fetch", "70", GMAIL_METADATA_BATCH_FETCH): ("OK", [b"70 (UID 70 FLAGS () X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\All))"]),
             },
             self.gmail_mailboxes(),
         )
@@ -1052,7 +1052,6 @@ with tempfile.TemporaryDirectory() as tmp:
         with (
             patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {"user": "human@example.test"})),
             patch("omo_manager.omo_manager_mail_compress.configured_agent_mail", return_value=Settings()),
-            patch("omo_manager.omo_manager_mail_compress.fetch_imap_thread_contexts", return_value=({}, {"200": []})),
             redirect_stdout(output),
         ):
             self.assertEqual(0, cmd_identity_preflight(Args()))
@@ -1065,10 +1064,40 @@ with tempfile.TemporaryDirectory() as tmp:
         raw = self.raw_message("[worker:0] complete")
         client = FakeClient(
             {
-                ("search", None, "ALL"): ("OK", [b"7"]),
                 ("search", None, "FROM", '"agent@example.test"'): ("OK", [b"7"]),
                 ("fetch", "7", HEADER_BATCH_FETCH): ("OK", [(b"7 (UID 7 BODY[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)] {1}", raw)]),
                 ("fetch", "7", GMAIL_METADATA_BATCH_FETCH): ("OK", [(b"7 (UID 7 FLAGS () X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\Inbox))", b"")]),
+                ("search", None, "X-GM-THRID", "200"): ("OK", [b"70"]),
+                ("fetch", "70", GMAIL_METADATA_BATCH_FETCH): ("OK", [b"70 (UID 70 FLAGS () X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\All))"]),
+            },
+            self.gmail_mailboxes(),
+        )
+
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+
+        output = io.StringIO()
+        with (
+            patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {"user": "human@example.test"})),
+            patch("omo_manager.omo_manager_mail_compress.configured_agent_mail", return_value=Settings()),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(0, cmd_identity_preflight(Args()))
+        self.assertIn("gate=pass", output.getvalue())
+        self.assertIn(("fetch", "7", HEADER_BATCH_FETCH), client.uid_calls)
+        self.assertIn(("fetch", "7", GMAIL_METADATA_BATCH_FETCH), client.uid_calls)
+        self.assertIn(("fetch", "70", GMAIL_METADATA_BATCH_FETCH), client.uid_calls)
+        self.assertNotIn(("fetch", "7", FULL_FETCH), client.uid_calls)
+        self.assertNotIn(("fetch", "70", FULL_FETCH), client.uid_calls)
+        self.assertNotIn(("fetch", "70", FULL_BATCH_FETCH), client.uid_calls)
+
+    def test_snapshot_uses_sender_search_and_batched_headers(self) -> None:
+        raw = self.raw_message("[worker:0] complete")
+        client = FakeClient(
+            {
+                ("search", None, "FROM", '"agent@example.test"'): ("OK", [b"7"]),
+                ("fetch", "7", HEADER_BATCH_FETCH): ("OK", [(b"7 (UID 7 BODY[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)] {1}", raw)]),
             }
         )
 
@@ -1080,14 +1109,367 @@ with tempfile.TemporaryDirectory() as tmp:
         with (
             patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {"user": "human@example.test"})),
             patch("omo_manager.omo_manager_mail_compress.configured_agent_mail", return_value=Settings()),
-            patch("omo_manager.omo_manager_mail_compress.fetch_imap_thread_contexts", return_value=({}, {"200": []})),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(0, cmd_snapshot(Args()))
+        self.assertIn("manager_candidate_count=1", output.getvalue())
+        self.assertIn(("search", None, "FROM", '"agent@example.test"'), client.uid_calls)
+        self.assertNotIn(("search", None, "ALL"), client.uid_calls)
+        self.assertIn(("fetch", "7", HEADER_BATCH_FETCH), client.uid_calls)
+        self.assertFalse(any(isinstance(arg, str) and arg.startswith("OR") for call in client.uid_calls for arg in call))
+        self.assertFalse(any(call[0].casefold() in {"copy", "move", "store", "expunge"} for call in client.uid_calls))
+
+    def test_identity_preflight_searches_each_thread_without_union_syntax(self) -> None:
+        raw_a = self.raw_message("[worker:0] a")
+        raw_b = self.raw_message("[worker:1] b")
+        or_query = gmail_thrid_or_query(["200", "201"])
+        client = FakeClient(
+            {
+                ("search", None, "FROM", '"agent@example.test"'): ("OK", [b"7 8"]),
+                ("fetch", "7,8", HEADER_BATCH_FETCH): (
+                    "OK",
+                    [
+                        (b"7 (UID 7 BODY[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)] {1}", raw_a),
+                        (b"8 (UID 8 BODY[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)] {1}", raw_b),
+                    ],
+                ),
+                ("fetch", "7,8", GMAIL_METADATA_BATCH_FETCH): (
+                    "OK",
+                    [
+                        b"7 (UID 7 FLAGS () X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\Inbox))",
+                        b"8 (UID 8 FLAGS () X-GM-MSGID 101 X-GM-THRID 201 X-GM-LABELS (\\Inbox))",
+                    ],
+                ),
+                ("search", None, or_query): ("OK", [b"70 71"]),
+                ("fetch", "70,71", GMAIL_METADATA_BATCH_FETCH): (
+                    "OK",
+                    [
+                        b"70 (UID 70 FLAGS () X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\All))",
+                        b"71 (UID 71 FLAGS () X-GM-MSGID 101 X-GM-THRID 201 X-GM-LABELS (\\All))",
+                    ],
+                ),
+            },
+            self.gmail_mailboxes(),
+        )
+
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+
+        output = io.StringIO()
+        with (
+            patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {"user": "human@example.test"})),
+            patch("omo_manager.omo_manager_mail_compress.configured_agent_mail", return_value=Settings()),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(0, cmd_identity_preflight(Args()))
+        self.assertIn("complete_thread_count=2", output.getvalue())
+        self.assertIn("gate=pass", output.getvalue())
+        self.assertIn(("search", None, or_query), client.uid_calls)
+        self.assertNotIn(("search", None, "X-GM-THRID", "200"), client.uid_calls)
+        self.assertNotIn(("search", None, "X-GM-THRID", "201"), client.uid_calls)
+        self.assertFalse(any(arg == "X-GM-RAW" for call in client.uid_calls for arg in call))
+        self.assertNotIn(("search", None, "ALL"), client.uid_calls)
+        self.assertIn(("fetch", "70,71", GMAIL_METADATA_BATCH_FETCH), client.uid_calls)
+        self.assertEqual(1, client.uid_calls.count(("fetch", "70,71", GMAIL_METADATA_BATCH_FETCH)))
+        self.assertNotIn(("fetch", "70", FULL_BATCH_FETCH), client.uid_calls)
+        self.assertNotIn(("fetch", "71", FULL_BATCH_FETCH), client.uid_calls)
+        self.assertIn(('"[Gmail]/All Mail"', True), client.select_calls)
+        self.assertNotIn(('"[Gmail]/Sent Mail"', True), client.select_calls)
+        self.assertTrue(all(readonly for _mailbox, readonly in client.select_calls))
+        self.assertFalse(any(call[0].casefold() in {"copy", "move", "store", "expunge"} for call in client.uid_calls))
+
+    def test_identity_preflight_requires_all_mail_and_sent(self) -> None:
+        raw = self.raw_message("[worker:0] a")
+        inbox = {
+            ("search", None, "FROM", '"agent@example.test"'): ("OK", [b"7"]),
+            ("fetch", "7", HEADER_BATCH_FETCH): ("OK", [(b"7 (UID 7 BODY[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)] {1}", raw)]),
+            ("fetch", "7", GMAIL_METADATA_BATCH_FETCH): ("OK", [b"7 (UID 7 FLAGS () X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\Inbox))"]),
+            ("search", None, "X-GM-THRID", "200"): ("OK", [b"70"]),
+            ("fetch", "70", GMAIL_METADATA_BATCH_FETCH): ("OK", [b"70 (UID 70 FLAGS () X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\All))"]),
+        }
+
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+
+        for mailboxes in (
+            [b'(\\HasNoChildren \\All) "/" "[Gmail]/All Mail"'],
+            [b'(\\HasNoChildren \\Sent) "/" "[Gmail]/Sent Mail"'],
+        ):
+            client = FakeClient(inbox, mailboxes)
+            output = io.StringIO()
+            with (
+                patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {"user": "human@example.test"})),
+                patch("omo_manager.omo_manager_mail_compress.configured_agent_mail", return_value=Settings()),
+                redirect_stdout(output),
+            ):
+                self.assertEqual(1, cmd_identity_preflight(Args()))
+            self.assertIn("gate=block", output.getvalue())
+            self.assertFalse(any(call[0].casefold() in {"copy", "move", "store", "expunge"} for call in client.uid_calls))
+
+    def test_identity_preflight_blocks_when_source_msgid_absent_from_all_mail_thread(self) -> None:
+        raw = self.raw_message("[worker:0] a")
+        client = FakeClient(
+            {
+                ("search", None, "FROM", '"agent@example.test"'): ("OK", [b"7"]),
+                ("fetch", "7", HEADER_BATCH_FETCH): ("OK", [(b"7 (UID 7 BODY[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)] {1}", raw)]),
+                ("fetch", "7", GMAIL_METADATA_BATCH_FETCH): ("OK", [b"7 (UID 7 FLAGS () X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\Inbox))"]),
+                ("search", None, "X-GM-THRID", "200"): ("OK", [b"70"]),
+                ("fetch", "70", GMAIL_METADATA_BATCH_FETCH): ("OK", [b"70 (UID 70 FLAGS () X-GM-MSGID 999 X-GM-THRID 200 X-GM-LABELS (\\All))"]),
+            },
+            self.gmail_mailboxes(),
+        )
+
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+
+        output = io.StringIO()
+        with (
+            patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {"user": "human@example.test"})),
+            patch("omo_manager.omo_manager_mail_compress.configured_agent_mail", return_value=Settings()),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(1, cmd_identity_preflight(Args()))
+        self.assertIn("gate=block", output.getvalue())
+        self.assertIn(('"[Gmail]/All Mail"', True), client.select_calls)
+
+    def test_identity_preflight_falls_back_from_nested_or_to_per_thread(self) -> None:
+        raw = self.raw_message("[worker:0] a")
+        raw_b = self.raw_message("[worker:1] b")
+        or_query = gmail_thrid_or_query(["200", "201"])
+        client = FakeClient(
+            {
+                ("search", None, "FROM", '"agent@example.test"'): ("OK", [b"7 8"]),
+                ("fetch", "7,8", HEADER_BATCH_FETCH): (
+                    "OK",
+                    [
+                        (b"7 (UID 7 BODY[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)] {1}", raw),
+                        (b"8 (UID 8 BODY[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)] {1}", raw_b),
+                    ],
+                ),
+                ("fetch", "7,8", GMAIL_METADATA_BATCH_FETCH): (
+                    "OK",
+                    [
+                        b"7 (UID 7 FLAGS () X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\Inbox))",
+                        b"8 (UID 8 FLAGS () X-GM-MSGID 101 X-GM-THRID 201 X-GM-LABELS (\\Inbox))",
+                    ],
+                ),
+                ("search", None, or_query): ("NO", [b"parse"]),
+                ("search", None, "X-GM-THRID", "200"): ("OK", [b"70"]),
+                ("search", None, "X-GM-THRID", "201"): ("OK", [b"71"]),
+                ("fetch", "70,71", GMAIL_METADATA_BATCH_FETCH): (
+                    "OK",
+                    [
+                        b"70 (UID 70 FLAGS () X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\All))",
+                        b"71 (UID 71 FLAGS () X-GM-MSGID 101 X-GM-THRID 201 X-GM-LABELS (\\All))",
+                    ],
+                ),
+            },
+            self.gmail_mailboxes(),
+        )
+
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+
+        output = io.StringIO()
+        with (
+            patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {"user": "human@example.test"})),
+            patch("omo_manager.omo_manager_mail_compress.configured_agent_mail", return_value=Settings()),
             redirect_stdout(output),
         ):
             self.assertEqual(0, cmd_identity_preflight(Args()))
         self.assertIn("gate=pass", output.getvalue())
-        self.assertIn(("fetch", "7", HEADER_BATCH_FETCH), client.uid_calls)
-        self.assertIn(("fetch", "7", GMAIL_METADATA_BATCH_FETCH), client.uid_calls)
-        self.assertNotIn(("fetch", "7", FULL_FETCH), client.uid_calls)
+        self.assertIn(("search", None, or_query), client.uid_calls)
+        self.assertIn(("search", None, "X-GM-THRID", "200"), client.uid_calls)
+        self.assertIn(("search", None, "X-GM-THRID", "201"), client.uid_calls)
+        self.assertIn(('"[Gmail]/All Mail"', True), client.select_calls)
+
+    def test_discover_spans_or_batches(self) -> None:
+        records = [
+            MailRecord("7", "date", "agent", "human", "s", "msg-a", gmail_msgid="100", gmail_thrid="200", raw_sha256="a" * 64),
+            MailRecord("8", "date", "agent", "human", "s", "msg-b", gmail_msgid="101", gmail_thrid="201", raw_sha256="b" * 64),
+            MailRecord("9", "date", "agent", "human", "s", "msg-c", gmail_msgid="102", gmail_thrid="202", raw_sha256="c" * 64),
+        ]
+        or_query = gmail_thrid_or_query(["200", "201"])
+        client = FakeClient(
+            {
+                ("search", None, or_query): ("OK", [b"70 71"]),
+                ("search", None, "X-GM-THRID", "202"): ("OK", [b"72"]),
+            },
+            self.gmail_mailboxes(),
+        )
+        with patch("omo_manager.omo_manager_mail_compress.GMAIL_THREAD_OR_BATCH", 2):
+            _special_use, uids = discover_gmail_thread_member_uids(client, records)
+        self.assertEqual(["70", "71", "72"], uids)
+        self.assertIn(("search", None, or_query), client.uid_calls)
+        self.assertIn(("search", None, "X-GM-THRID", "202"), client.uid_calls)
+        self.assertNotIn(("search", None, "X-GM-THRID", "200"), client.uid_calls)
+        self.assertNotIn(("search", None, "X-GM-THRID", "201"), client.uid_calls)
+        self.assertFalse(any(arg == "X-GM-RAW" for call in client.uid_calls for arg in call))
+        self.assertIn(('"[Gmail]/All Mail"', True), client.select_calls)
+        self.assertNotIn(('"[Gmail]/Sent Mail"', True), client.select_calls)
+
+    def test_discover_rejects_duplicate_uid_across_or_batches(self) -> None:
+        records = [
+            MailRecord("7", "date", "agent", "human", "s", "msg-a", gmail_msgid="100", gmail_thrid="200", raw_sha256="a" * 64),
+            MailRecord("8", "date", "agent", "human", "s", "msg-b", gmail_msgid="101", gmail_thrid="201", raw_sha256="b" * 64),
+            MailRecord("9", "date", "agent", "human", "s", "msg-c", gmail_msgid="102", gmail_thrid="202", raw_sha256="c" * 64),
+        ]
+        client = FakeClient(
+            {
+                ("search", None, gmail_thrid_or_query(["200", "201"])): ("OK", [b"70 71"]),
+                ("search", None, "X-GM-THRID", "202"): ("OK", [b"70"]),
+            },
+            self.gmail_mailboxes(),
+        )
+        with (
+            patch("omo_manager.omo_manager_mail_compress.GMAIL_THREAD_OR_BATCH", 2),
+            self.assertRaisesRegex(RuntimeError, "duplicate UID"),
+        ):
+            discover_gmail_thread_member_uids(client, records)
+
+    def test_identity_preflight_blocks_extra_thrid_in_union(self) -> None:
+        raw_a = self.raw_message("[worker:0] a")
+        raw_b = self.raw_message("[worker:1] b")
+        or_query = gmail_thrid_or_query(["200", "201"])
+        client = FakeClient(
+            {
+                ("search", None, "FROM", '"agent@example.test"'): ("OK", [b"7 8"]),
+                ("fetch", "7,8", HEADER_BATCH_FETCH): (
+                    "OK",
+                    [
+                        (b"7 (UID 7 BODY[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)] {1}", raw_a),
+                        (b"8 (UID 8 BODY[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)] {1}", raw_b),
+                    ],
+                ),
+                ("fetch", "7,8", GMAIL_METADATA_BATCH_FETCH): (
+                    "OK",
+                    [
+                        b"7 (UID 7 FLAGS () X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\Inbox))",
+                        b"8 (UID 8 FLAGS () X-GM-MSGID 101 X-GM-THRID 201 X-GM-LABELS (\\Inbox))",
+                    ],
+                ),
+                ("search", None, or_query): ("OK", [b"70 71 72"]),
+                ("fetch", "70,71,72", GMAIL_METADATA_BATCH_FETCH): (
+                    "OK",
+                    [
+                        b"70 (UID 70 FLAGS () X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\All))",
+                        b"71 (UID 71 FLAGS () X-GM-MSGID 101 X-GM-THRID 201 X-GM-LABELS (\\All))",
+                        b"72 (UID 72 FLAGS () X-GM-MSGID 999 X-GM-THRID 999 X-GM-LABELS (\\All))",
+                    ],
+                ),
+            },
+            self.gmail_mailboxes(),
+        )
+
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+
+        output = io.StringIO()
+        with (
+            patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {"user": "human@example.test"})),
+            patch("omo_manager.omo_manager_mail_compress.configured_agent_mail", return_value=Settings()),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(1, cmd_identity_preflight(Args()))
+        self.assertIn("gate=block", output.getvalue())
+        self.assertFalse(any(call[0].casefold() in {"copy", "move", "store", "expunge"} for call in client.uid_calls))
+
+    def test_thread_context_rejects_duplicate_uid_across_threads(self) -> None:
+        records = [
+            MailRecord("7", "date", "agent", "human", "s", "msg-a", gmail_msgid="100", gmail_thrid="200", raw_sha256="a" * 64),
+            MailRecord("8", "date", "agent", "human", "s", "msg-b", gmail_msgid="101", gmail_thrid="201", raw_sha256="b" * 64),
+        ]
+        client = FakeClient(
+            {
+                ("search", None, gmail_thrid_or_query(["200", "201"])): ("NO", [b"parse"]),
+                ("search", None, "X-GM-THRID", "200"): ("OK", [b"70"]),
+                ("search", None, "X-GM-THRID", "201"): ("OK", [b"70"]),
+            },
+            self.gmail_mailboxes(),
+        )
+        with self.assertRaisesRegex(RuntimeError, "duplicate UID"):
+            fetch_imap_thread_contexts(client, records)
+        self.assertFalse(any(call[0].casefold() in {"copy", "move", "store", "expunge"} for call in client.uid_calls))
+
+    def test_thread_search_rejects_duplicate_uid_in_one_response(self) -> None:
+        records = [
+            MailRecord("7", "date", "agent", "human", "s", "msg-a", gmail_msgid="100", gmail_thrid="200", raw_sha256="a" * 64),
+        ]
+        client = FakeClient(
+            {("search", None, "X-GM-THRID", "200"): ("OK", [b"70 70"])},
+            self.gmail_mailboxes(),
+        )
+        with self.assertRaisesRegex(RuntimeError, "incomplete or duplicate UIDs"):
+            fetch_imap_thread_contexts(client, records)
+
+    def test_identity_preflight_falls_back_from_all_mail_metadata_batch(self) -> None:
+        raw = self.raw_message("[worker:0] a")
+        client = FakeClient(
+            {
+                ("search", None, "FROM", '"agent@example.test"'): ("OK", [b"7"]),
+                ("fetch", "7", HEADER_BATCH_FETCH): ("OK", [(b"7 (UID 7 BODY[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)] {1}", raw)]),
+                ("fetch", "7", GMAIL_METADATA_BATCH_FETCH): ("OK", [b"7 (UID 7 FLAGS () X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\Inbox))"]),
+                ("search", None, "X-GM-THRID", "200"): ("OK", [b"70 71"]),
+                ("fetch", "70", GMAIL_METADATA_BATCH_FETCH): ("OK", [b"70 (UID 70 FLAGS () X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\All))"]),
+                ("fetch", "71", GMAIL_METADATA_BATCH_FETCH): ("OK", [b""]),
+                ("fetch", "71", GMAIL_METADATA_FETCH): self.gmail_metadata("71", gmail_msgid="102", labels=r"\All"),
+            },
+            self.gmail_mailboxes(),
+        )
+
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+
+        output = io.StringIO()
+        with (
+            patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {"user": "human@example.test"})),
+            patch("omo_manager.omo_manager_mail_compress.configured_agent_mail", return_value=Settings()),
+            patch("omo_manager.omo_manager_mail_compress.GMAIL_IDENTITY_UID_BATCH", 1),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(0, cmd_identity_preflight(Args()))
+        self.assertIn("gate=pass", output.getvalue())
+        self.assertIn(("fetch", "70", GMAIL_METADATA_BATCH_FETCH), client.uid_calls)
+        self.assertIn(("fetch", "71", GMAIL_METADATA_BATCH_FETCH), client.uid_calls)
+        self.assertIn(("fetch", "71", GMAIL_METADATA_FETCH), client.uid_calls)
+        self.assertNotIn(("fetch", "71", FULL_FETCH), client.uid_calls)
+        self.assertIn(('"[Gmail]/All Mail"', True), client.select_calls)
+
+    def test_identity_preflight_blocks_malformed_fallback_msgid(self) -> None:
+        raw = self.raw_message("[worker:0] a")
+        client = FakeClient(
+            {
+                ("search", None, "FROM", '"agent@example.test"'): ("OK", [b"7"]),
+                ("fetch", "7", HEADER_BATCH_FETCH): ("OK", [(b"7 (UID 7 BODY[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)] {1}", raw)]),
+                ("fetch", "7", GMAIL_METADATA_BATCH_FETCH): ("OK", [b"7 (UID 7 FLAGS () X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\Inbox))"]),
+                ("search", None, "X-GM-THRID", "200"): ("OK", [b"70 71"]),
+                ("fetch", "70", GMAIL_METADATA_BATCH_FETCH): ("OK", [b"70 (UID 70 FLAGS () X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\All))"]),
+                ("fetch", "71", GMAIL_METADATA_BATCH_FETCH): ("OK", [b""]),
+                ("fetch", "71", GMAIL_METADATA_FETCH): self.gmail_metadata("71", gmail_msgid="not-a-number", labels=r"\All"),
+            },
+            self.gmail_mailboxes(),
+        )
+
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+
+        output = io.StringIO()
+        with (
+            patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {"user": "human@example.test"})),
+            patch("omo_manager.omo_manager_mail_compress.configured_agent_mail", return_value=Settings()),
+            patch("omo_manager.omo_manager_mail_compress.GMAIL_IDENTITY_UID_BATCH", 1),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(1, cmd_identity_preflight(Args()))
+        self.assertIn("gate=block", output.getvalue())
+        self.assertFalse(any(call[0].casefold() in {"copy", "move", "store", "expunge"} for call in client.uid_calls))
 
     def test_identity_preflight_fetch_timeout_names_stage_and_blocks(self) -> None:
         raw = self.raw_message("[worker:0] complete")
@@ -1099,20 +1481,23 @@ with tempfile.TemporaryDirectory() as tmp:
             def close(self) -> None:
                 pass
 
-        class BlockingFetchClient(FakeClient):
+        mailboxes = self.gmail_mailboxes()
+
+        class BlockingThreadSearchClient(FakeClient):
             def __init__(self) -> None:
                 super().__init__(
                     {
-                        ("search", None, "ALL"): ("OK", [b"7"]),
                         ("search", None, "FROM", '"agent@example.test"'): ("OK", [b"7"]),
-                        ("fetch", "7", HEADER_FETCH): ("OK", [(b"header", raw)]),
-                    }
+                        ("fetch", "7", HEADER_BATCH_FETCH): ("OK", [(b"7 (UID 7 BODY[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)] {1}", raw)]),
+                        ("fetch", "7", GMAIL_METADATA_BATCH_FETCH): ("OK", [b"7 (UID 7 FLAGS () X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\Inbox))"]),
+                    },
+                    mailboxes,
                 )
                 self.sock = BlockingSocket()
                 self.release = threading.Event()
 
             def uid(self, *args: str) -> tuple[str, list[bytes | tuple[bytes, bytes]]]:
-                if args == ("fetch", "7", FULL_FETCH):
+                if args == ("search", None, "X-GM-THRID", "200"):
                     self.uid_calls.append(args)
                     self.release.wait()
                     raise OSError("stub remains blocked past socket close")
@@ -1122,7 +1507,7 @@ with tempfile.TemporaryDirectory() as tmp:
             agent_address = "agent@example.test"
             human_address = "human@example.test"
 
-        client = BlockingFetchClient()
+        client = BlockingThreadSearchClient()
         output = io.StringIO()
         errors = io.StringIO()
         with (
@@ -1136,8 +1521,8 @@ with tempfile.TemporaryDirectory() as tmp:
 
         client.release.set()
         self.assertIn("gate=block", output.getvalue())
-        self.assertIn("failed_stage=message-fetch uid=7", errors.getvalue())
-        self.assertEqual(1, client.uid_calls.count(("fetch", "7", FULL_FETCH)))
+        self.assertIn("failed_stage=gmail-thread-search thread=200", errors.getvalue())
+        self.assertEqual(1, client.uid_calls.count(("search", None, "X-GM-THRID", "200")))
         self.assertFalse(any(call[0].casefold() in {"copy", "move", "store", "expunge"} for call in client.uid_calls))
 
     def test_export_writes_gmail_context_and_special_mailboxes(self) -> None:
@@ -1190,7 +1575,7 @@ with tempfile.TemporaryDirectory() as tmp:
         client = FakeClient(
             {
                 ("search", None, "ALL"): ("OK", [b"7"]),
-                ("search", None, "FROM", '"agent@example.test"'): ("OK", [b"7 8"]),
+                ("search", None, "FROM", '"agent@example.test"'): ("OK", [b"7"]),
                 ("fetch", "7", HEADER_FETCH): ("OK", [(b"header", raw)]),
                 ("fetch", "7", FULL_FETCH): [("OK", [b""]), ("OK", [(b"message", raw)])],
                 ("fetch", "7", GMAIL_METADATA_FETCH): self.gmail_metadata("7"),
@@ -1213,7 +1598,7 @@ with tempfile.TemporaryDirectory() as tmp:
             out_dir = Path(tmp) / "export"
             self.assertEqual(0, cmd_export(ExportArgs(out_dir)))
             self.assertTrue((out_dir / "manifest.tsv").exists())
-        self.assertEqual(1, client.uid_calls.count(("search", None, "ALL")))
+        self.assertNotIn(("search", None, "ALL"), client.uid_calls)
         self.assertEqual(2, client.uid_calls.count(("fetch", "7", FULL_FETCH)))
         self.assertFalse(any(call[:2] == ("fetch", "8") for call in client.uid_calls))
         self.assertFalse(any(call[0].casefold() in {"copy", "move", "store", "expunge"} for call in client.uid_calls))
@@ -1246,7 +1631,7 @@ with tempfile.TemporaryDirectory() as tmp:
             receipt = self.export_receipt(out_dir)
             self.assertIn("\texport-failure\tfetch-fixed-start-sources\tRuntimeError\tnone\n", receipt)
             self.assertNotIn("uid=7", receipt)
-        self.assertEqual(1, client.uid_calls.count(("search", None, "ALL")))
+        self.assertNotIn(("search", None, "ALL"), client.uid_calls)
         self.assertEqual(2, client.uid_calls.count(("fetch", "7", FULL_FETCH)))
         self.assertFalse(any(call[0].casefold() in {"copy", "move", "store", "expunge"} for call in client.uid_calls))
 

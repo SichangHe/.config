@@ -8,6 +8,7 @@
 - `compression.md`
   - canonical no-persisted-evidence, independently reviewed execution procedure for every manager-human cleanup run
   - optionally replace superseded mail with a verified topic summary before Trash
+  - read-only `snapshot` and `identity-preflight` current-view helpers
 - `email-idle-watcher.md`
   - ingest human email into durable manager pending blocks
 - `digest-and-email.md`
