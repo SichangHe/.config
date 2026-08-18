@@ -44,7 +44,7 @@ TASK_NAME = "ops_manager.md"
 REQUIRED_TARGET = "wl:3"
 REQUIRED_MANAGERAT = "wl:18"
 AUTHORITY_RELATIVE = "manager_mail/85c5dff58359-741.txt"
-AUTHORITY_LINES = (16, 16)
+AUTHORITY_LINES = (17, 17)
 AUTHORITY_TEXT = "Replace wl:3 with Cursor"
 CURSOR_MODEL = "cursor-grok-4.6"
 CURSOR_EFFORT = "xhigh"
@@ -134,7 +134,7 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--task-file", required=True, help="Must be ops_manager.md; confirmation of the pinned manager task.")
     _ = parser.add_argument("--target", required=True, help="Must be wl:3 or wl:3.0; confirmation of the pinned run target. Human-owned h* targets are refused.")
     _ = parser.add_argument("--authority-file", type=Path, required=True, help="Must be manager_mail/85c5dff58359-741.txt under --root.")
-    _ = parser.add_argument("--authority-lines", type=parse_line_range, required=True, help="Must be 16-16, the exact approved human source line.")
+    _ = parser.add_argument("--authority-lines", type=parse_line_range, required=True, help="Must be 17-17, the exact approved human source line.")
     _ = parser.add_argument("--state-dir", type=Path, default=default_state_dir())
     _ = parser.add_argument("--startup-timeout-s", type=float, default=45.0)
     _ = parser.add_argument("--poll-interval-s", type=float, default=0.5)
@@ -147,7 +147,7 @@ def parse_args(argv: list[str]) -> Args:
     if not same_tmux_target(parsed.target, REQUIRED_TARGET):
         parser.error("this helper is pinned to wl:3")
     if parsed.authority_lines != AUTHORITY_LINES:
-        parser.error("authority lines must be the exact approved 16-16 range")
+        parser.error("authority lines must be the exact approved 17-17 range")
     authority_file = parsed.authority_file
     if not authority_file.is_absolute() and authority_file.as_posix() != AUTHORITY_RELATIVE:
         parser.error("authority file must be manager_mail/85c5dff58359-741.txt")

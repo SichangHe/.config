@@ -11,6 +11,7 @@ from omo_manager.omo_codex_start import Pane
 from omo_manager.omo_codex_status import Report
 from omo_manager.omo_manager_rotate import PaneIdentity, ProcessInfo
 from omo_manager.omo_ops_manager_cursor_replace import (
+    AUTHORITY_LINES,
     AUTHORITY_RELATIVE,
     AUTHORITY_TEXT,
     CONTINUATION,
@@ -51,7 +52,7 @@ def child_text(runat: str = "cfg:1") -> str:
 
 
 def authority_bytes() -> str:
-    return "".join(f"line {index}\n" for index in range(1, 16)) + f"{AUTHORITY_TEXT}\n"
+    return "".join(f"line {index}\n" for index in range(1, AUTHORITY_LINES[0])) + f"{AUTHORITY_TEXT}\n"
 
 
 def init_git(root: Path) -> None:
@@ -84,7 +85,7 @@ def write_ops_root(root: Path, *, pending_marker: bool = False) -> Path:
 
 
 def helper_args(root: Path, state_dir: Path, *, dry_run: bool = False) -> Args:
-    return Args(root, TASK_NAME, REQUIRED_TARGET, Path(AUTHORITY_RELATIVE), (16, 16), state_dir, 0.2, 0.01, dry_run)
+    return Args(root, TASK_NAME, REQUIRED_TARGET, Path(AUTHORITY_RELATIVE), AUTHORITY_LINES, state_dir, 0.2, 0.01, dry_run)
 
 
 def pane_for(root: Path, pid: int = 100) -> Pane:
@@ -113,7 +114,7 @@ class OpsManagerCursorReplaceTests(unittest.TestCase):
                     "--task-file": TASK_NAME,
                     "--target": "wl:3",
                     "--authority-file": AUTHORITY_RELATIVE,
-                    "--authority-lines": "16-16",
+                    "--authority-lines": "17-17",
                 }
                 values.update(updates)
                 parts: list[str] = []
@@ -130,7 +131,9 @@ class OpsManagerCursorReplaceTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 parse_args(argv(**{"--task-file": "other.md"}))
             with self.assertRaises(SystemExit):
-                parse_args(argv(**{"--authority-lines": "16-17"}))
+                parse_args(argv(**{"--authority-lines": "16-16"}))
+            with self.assertRaises(SystemExit):
+                parse_args(argv(**{"--authority-lines": "17-18"}))
             with self.assertRaises(SystemExit):
                 parse_args(argv(**{"--target": "wl:18"}))
 
