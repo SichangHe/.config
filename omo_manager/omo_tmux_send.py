@@ -34,6 +34,7 @@ try:
         has_cursor_followups_overlay,
         has_plan_prompt,
         inspect,
+        is_cursor_agent_capture,
         pane_has_exact_managed_agent_process,
         status,
         tail,
@@ -58,6 +59,7 @@ except ModuleNotFoundError:
         has_cursor_followups_overlay,
         has_plan_prompt,
         inspect,
+        is_cursor_agent_capture,
         pane_has_exact_managed_agent_process,
         status,
         tail,
@@ -504,6 +506,8 @@ def inspect_lines_for_message(message: str) -> int:
 
 
 def error_signature(lines: list[str]) -> tuple[str, ...]:
+    if is_cursor_agent_capture(lines):
+        return ()
     return tuple(visible_error_lines(current_block(lines).lines))
 
 
@@ -511,6 +515,11 @@ def target_status(target: str, lines: list[str]) -> str:
     """Classify a capture while retaining the exact live-process fallback."""
 
     current_status = status(lines, current_block(lines))
+    if is_cursor_agent_capture(lines):
+        pane_id = exact_pane_id(target)
+        if not (pane_id and pane_has_exact_managed_agent_process(target, pane_id)):
+            return "not_codex"
+        return current_status
     if current_status != "not_codex":
         return current_status
     pane_id = exact_pane_id(target)

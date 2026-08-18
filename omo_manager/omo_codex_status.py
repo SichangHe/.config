@@ -73,6 +73,7 @@ CURSOR_AGENT_FOOTER_RE = re.compile(r"^\s*Cursor \S.+·\s*[0-9]+(?:\.[0-9]+)?%")
 CURSOR_AGENT_INPUT_PREFIX_RE = re.compile(r"^\s*→ ")
 CURSOR_AGENT_STOP_HINT_RE = re.compile(r"[ \t]+ctrl\+c to stop\s*$")
 CURSOR_AGENT_COMPOSER_BOTTOM_RE = re.compile(r"^\s*▀+\s*$")
+CURSOR_AGENT_TASK_COUNT_RE = re.compile(r"^\s*[1-9]\d* tasks?\s*$")
 CURSOR_FOLLOWUPS_HEADER_RE = re.compile(r"┌─ follow-ups")
 CURSOR_FOLLOWUPS_SEND_NOW_RE = re.compile(r"enter send now", re.IGNORECASE)
 TMUX_TARGET_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*):(\d+)(?:\.(\d+))?$")
@@ -379,6 +380,25 @@ def has_cursor_agent_footer(lines: list[str]) -> bool:
     return any(CURSOR_AGENT_FOOTER_RE.search(line) is not None for line in lines[-8:])
 
 
+def is_cursor_agent_capture(lines: list[str]) -> bool:
+    return has_cursor_agent_footer(lines) and not has_codex_model_footer(lines)
+
+
+def has_cursor_agent_running_indicator(lines: list[str]) -> bool:
+    if not has_cursor_agent_footer(lines):
+        return False
+    if any(
+        CURSOR_AGENT_INPUT_PREFIX_RE.match(line) is not None and CURSOR_AGENT_STOP_HINT_RE.search(line) is not None
+        for line in lines[-12:]
+    ):
+        return True
+    footer_idx = next((idx for idx in range(len(lines) - 1, -1, -1) if CURSOR_AGENT_FOOTER_RE.search(lines[idx]) is not None), -1)
+    bottom_idx = next((idx for idx in range(footer_idx - 1, -1, -1) if CURSOR_AGENT_COMPOSER_BOTTOM_RE.match(lines[idx]) is not None), -1) if footer_idx > 0 else -1
+    return bottom_idx >= 0 and footer_idx > bottom_idx and any(
+        CURSOR_AGENT_TASK_COUNT_RE.fullmatch(lines[idx]) is not None for idx in range(bottom_idx + 1, footer_idx)
+    )
+
+
 def cursor_agent_input_text(lines: list[str]) -> str:
     if not has_cursor_agent_footer(lines):
         return ""
@@ -416,7 +436,7 @@ def has_cursor_followups_overlay(lines: list[str]) -> bool:
 
 
 def current_input_text(lines: list[str]) -> str:
-    if has_cursor_agent_footer(lines):
+    if is_cursor_agent_capture(lines):
         return cursor_agent_input_text(lines)
     body = lines[:-1] if has_codex_model_footer(lines) or has_queued_message_footer(lines) else lines[:]
     while body and not body[-1].strip():
@@ -514,7 +534,7 @@ def has_idle_queued_input(lines: list[str], input_text: str) -> bool:
 
 
 def latest_output_before_input(lines: list[str]) -> list[str]:
-    cursor = has_cursor_agent_footer(lines)
+    cursor = is_cursor_agent_capture(lines)
     input_indices = [idx for idx, line in enumerate(lines) if line.lstrip().startswith("›") or (cursor and CURSOR_AGENT_INPUT_PREFIX_RE.match(line) is not None)]
     if input_indices:
         latest_input_idx = input_indices[-1]
@@ -638,8 +658,14 @@ def can_submit_stuck_input(lines: list[str]) -> bool:
         return bool(input_text and not is_empty_input_text(lines, input_text))
     if has_queued_running_input(lines) or has_compacting_indicator(lines):
         return False
+    if has_cursor_followups_overlay(lines):
+        return True
     input_text = current_input_text(lines)
-    return bool((has_codex_model_footer(lines) or has_idle_queued_input(lines, input_text)) and input_text and not is_empty_input_text(lines, input_text))
+    return bool(
+        (has_codex_model_footer(lines) or has_cursor_agent_footer(lines) or has_idle_queued_input(lines, input_text))
+        and input_text
+        and not is_empty_input_text(lines, input_text)
+    )
 
 
 def stuck_input_blocker(lines: list[str], input_text: str) -> str:
@@ -655,7 +681,7 @@ def stuck_input_blocker(lines: list[str], input_text: str) -> str:
         if is_empty_input_text(lines, input_text):
             return "placeholder_input"
         return ""
-    if not has_codex_model_footer(lines) and not has_idle_queued_input(lines, input_text):
+    if not has_codex_model_footer(lines) and not has_cursor_agent_footer(lines) and not has_idle_queued_input(lines, input_text):
         return "no_codex_footer"
     if has_compacting_indicator(lines):
         return "compacting"
@@ -828,6 +854,15 @@ def status(lines: list[str], block: Block, *, detect_waiting_subagent: bool = Fa
         return "stuck_input"
     if detect_waiting_subagent and has_waiting_subagent_prompt(lines):
         return "waiting_subagent"
+    if is_cursor_agent_capture(lines):
+        if has_cursor_followups_overlay(lines[-40:]):
+            return "stuck_input"
+        input_text = current_input_text(lines)
+        if input_text and not is_stock_placeholder_input_text(input_text):
+            return "stuck_input"
+        if has_cursor_agent_running_indicator(lines):
+            return "running"
+        return "ready"
     if not has_codex_model_footer(lines):
         if has_terminal_enter_prompt_after_codex_footer(lines):
             return "stuck_input"
@@ -880,6 +915,11 @@ def inspect(args: Args, *, detect_waiting_subagent: bool = False) -> Report:
     if not exists:
         return Report("missing", [])
     report = report_from_lines(lines, detect_waiting_subagent=detect_waiting_subagent)
+    if is_cursor_agent_capture(lines):
+        pane_id = exact_pane_id(args.target)
+        if not (pane_id and pane_has_exact_managed_agent_process(args.target, pane_id)):
+            return Report("not_codex", report.lines, report.input_text, False, "")
+        return report
     if report.status == "not_codex":
         pane_id = exact_pane_id(args.target)
         if pane_id and pane_has_exact_managed_agent_process(args.target, pane_id):

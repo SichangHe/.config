@@ -89,6 +89,29 @@ class DirectTmuxDeliveryCallerTests(unittest.TestCase):
         self.assertEqual(1, status)
         send.assert_not_called()
 
+    def test_pending_delivery_keeps_marker_when_cursor_target_rejected_before_paste(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch(
+            "omo_manager.omo_pending_watch.require_sendable_codex_target",
+            side_effect=RuntimeError("target is not a Codex pane: pbw:0.0"),
+        ) as require, patch("omo_manager.omo_pending_watch.submit_send") as submit, patch(
+            "omo_manager.omo_pending_watch.record_terminal_delivery_failure", return_value=None
+        ):
+            root = Path(tmp)
+            task = root / "task.md"
+            task.write_text("(pending)\nretry this Cursor delivery\n", encoding="utf-8")
+            status = omo_pending_watch.send_delivery_text(
+                "pending delivery",
+                "pending: file=task.md line=1",
+                "pbw:0.0",
+                root=root,
+                pending_file=Path("task.md"),
+                pending_line=1,
+            )
+            self.assertEqual(1, status)
+            require.assert_called()
+            submit.assert_not_called()
+            self.assertTrue(task.read_text(encoding="utf-8").startswith("(pending)"))
+
     def test_email_push_calls_sender_directly_after_marker_check(self) -> None:
         calls = []
 

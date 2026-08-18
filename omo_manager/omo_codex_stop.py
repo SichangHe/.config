@@ -16,11 +16,11 @@ from pathlib import Path
 
 try:
     from omo_manager.omo_codex_status import Args as StatusArgs
-    from omo_manager.omo_codex_status import current_block, exact_pane_id, inspect, status, tail, tail_pane_id
+    from omo_manager.omo_codex_status import current_block, exact_pane_id, inspect, is_cursor_agent_capture, status, tail, tail_pane_id
     from omo_manager.omo_task_lock import task_file_lock
 except ModuleNotFoundError:
     from omo_codex_status import Args as StatusArgs
-    from omo_codex_status import current_block, exact_pane_id, inspect, status, tail, tail_pane_id
+    from omo_codex_status import current_block, exact_pane_id, inspect, is_cursor_agent_capture, status, tail, tail_pane_id
     from omo_task_lock import task_file_lock  # pyright: ignore[reportImplicitRelativeImport]
 
 SHELL_COMMANDS = {"bash", "dash", "fish", "sh", "zsh"}
@@ -674,6 +674,8 @@ def close_exited_codex_shell(target: str, expected_pane_id: str, session_id: str
 
 def codex_status(target: str) -> str:
     lines = tail_pane_id(target, 80) if re.fullmatch(r"%[0-9]+", target) else tail(target, 80)
+    if is_cursor_agent_capture(lines):
+        return "not_codex"
     return status(lines, current_block(lines))
 
 

@@ -729,6 +729,17 @@ class CodexStopTests(unittest.TestCase):
             maybe_request_feedback(Args("cfg:1.0", 0.0, 10, False, False, task_file="task.md"))
         paste_text.assert_not_called()
 
+    def test_maybe_request_feedback_skips_cursor_agent_composer(self) -> None:
+        lines = [
+            "  → Add a follow-up",
+            " ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
+            "  Cursor Grok 4.6 Low · 51.3%",
+            "  /tmp · main",
+        ]
+        with patch("omo_manager.omo_codex_stop.tail", return_value=lines), patch("omo_manager.omo_codex_stop.paste_text") as paste_text:
+            maybe_request_feedback(Args("cfg:1.0", 0.0, 10, False, False, task_file="task.md", feedback_wait_s=1.0))
+        paste_text.assert_not_called()
+
     def test_feedback_prompt_names_task_file_and_report_path(self) -> None:
         text = feedback_prompt("task.md")
         self.assertIn("REPORT_FILE=$(omo_report.sh --alloc-message-file)", text)

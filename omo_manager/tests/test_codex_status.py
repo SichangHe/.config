@@ -159,9 +159,19 @@ class CodexStatusTests(unittest.TestCase):
             'omo_manager.omo_codex_status.exact_pane_id', return_value='%9'
         ), patch('omo_manager.omo_codex_status.subprocess.run', return_value=process):
             report = inspect(Args('wl:1', 80))
-        self.assertEqual('running', report.status)
+        self.assertEqual('ready', report.status)
         self.assertEqual('Add a follow-up', report.input_text)
         self.assertFalse(report.can_submit_input)
+
+    def test_inspect_running_cursor_agent_keeps_running_with_follow_up_placeholder(self) -> None:
+        lines = cursor_agent_status_lines(running=True)
+        process = subprocess.CompletedProcess(['tmux'], 0, '%9\tagent\t"exec agent --force"\n', '')
+        with patch('omo_manager.omo_codex_status.exact_tail', return_value=(True, lines)), patch(
+            'omo_manager.omo_codex_status.exact_pane_id', return_value='%9'
+        ), patch('omo_manager.omo_codex_status.subprocess.run', return_value=process):
+            report = inspect(Args('wl:1', 80))
+        self.assertEqual('running', report.status)
+        self.assertEqual('Add a follow-up', report.input_text)
 
     def test_inspect_cursor_tui_without_agent_process_stays_not_codex(self) -> None:
         process = subprocess.CompletedProcess(['tmux'], 0, '%9\tzsh\tzsh\n', '')
@@ -171,11 +181,35 @@ class CodexStatusTests(unittest.TestCase):
             report = inspect(Args('wl:1', 80))
         self.assertEqual('not_codex', report.status)
 
-    def test_cursor_follow_up_error_words_are_not_codex_errors(self) -> None:
+    def test_status_classifies_cursor_follow_up_composer_like_codex(self) -> None:
+        self.assertEqual('ready', report_from_lines(cursor_agent_status_lines()).status)
+        self.assertEqual('running', report_from_lines(cursor_agent_status_lines(running=True)).status)
+        stuck = report_from_lines(cursor_agent_status_lines('Handle pending watcher delivery'))
+        self.assertEqual('stuck_input', stuck.status)
+        self.assertEqual('Handle pending watcher delivery', stuck.input_text)
+        self.assertTrue(stuck.can_submit_input)
+        overlay = [
+            'previous output',
+            ' ┌─ follow-ups ────────────────────────────────────────────┐',
+            ' │ ○ [Pasted text #8 +59 lines]',
+            ' │ enter send now · ↑ select/edit · esc cancel',
+            ' └─────────────────────────────────────────────────────────┘',
+            *cursor_agent_status_lines(running=True)[1:],
+        ]
+        self.assertEqual('stuck_input', report_from_lines(overlay).status)
+        history = [' ┌─ follow-ups', 'enter send now', '3 tasks', *(['old output'] * 50), *cursor_agent_status_lines()]
+        self.assertEqual('ready', report_from_lines(history).status)
+        self.assertEqual('ready', report_from_lines(['3 tasks', *cursor_agent_status_lines()]).status)
+        quoted = ['quoted:   Cursor Grok 4.6 Low · 51.3%', '› Use /skills to list available skills', '  gpt-5.5']
+        self.assertEqual('ready', report_from_lines(quoted).status)
+        self.assertNotEqual((), error_signature(['■ Error: 429', *quoted]))
+
+    def test_cursor_transcript_failures_are_not_codex_errors(self) -> None:
         history = cursor_agent_status_lines()
         history[0] = 'omo_task_edit.py: error: --owner-task-file is invalid.'
         pasted = cursor_agent_status_lines('Fix the pending watcher error handling')
         pasted[0] = 'omo_task_edit.py: error: --owner-task-file is invalid.'
+        self.assertEqual((), error_signature(history))
         self.assertEqual(error_signature(history), error_signature(pasted))
         self.assertEqual((), error_signature(cursor_agent_status_lines('Fix the pending watcher error handling')))
 

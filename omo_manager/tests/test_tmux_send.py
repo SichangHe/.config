@@ -532,6 +532,15 @@ class TmuxSendTests(unittest.TestCase):
         ), patch("omo_manager.omo_tmux_send.pane_has_exact_managed_agent_process", return_value=True):
             self.assertIsNone(require_sendable_codex_target("wl:1"))
 
+    def test_require_sendable_codex_target_accepts_cursor_transcript_with_failed_words(self) -> None:
+        lines = cursor_agent_lines("queued wake prompt")
+        lines[0] = "blocker: pb-agent-items report failed with omo_report_receipt.py: transaction"
+        with patch("omo_manager.omo_tmux_send.exact_tail", return_value=(True, lines)), patch(
+            "omo_manager.omo_tmux_send.exact_pane_id", return_value="%9"
+        ), patch("omo_manager.omo_tmux_send.pane_has_exact_managed_agent_process", return_value=True):
+            self.assertIsNone(require_sendable_codex_target("pbw:0.0"))
+            validate_error_transition(lines, None, "pbw:0.0", "before submit")
+
     def test_require_sendable_codex_target_rejects_cursor_tui_without_live_agent(self) -> None:
         with patch("omo_manager.omo_tmux_send.exact_tail", return_value=(True, cursor_agent_lines())), patch(
             "omo_manager.omo_tmux_send.exact_pane_id", return_value="%9"
