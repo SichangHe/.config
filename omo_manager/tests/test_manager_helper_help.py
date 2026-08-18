@@ -39,7 +39,11 @@ class ManagerHelperHelpTests(unittest.TestCase):
         self.assertIn("--prompt-file becomes Codex's initial prompt argument", launch_help)
         self.assertIn("WORKER_DEFAULTS.md", launch_help)
         self.assertIn("gpt-5.6-sol medium is the default", launch_help)
+        self.assertIn("cursor-grok-4.6-xhigh", launch_help)
         self.assertIn("Keep --task-file as manager-side bookkeeping", launch_help)
+
+        cursor_help = helper_help("amh_cursor_agent.py")
+        self.assertIn("cursor-grok-4.6-xhigh", cursor_help)
 
         status_help = helper_help("omo_task_status.py")
         self.assertIn("live `(pending)` marker", status_help)

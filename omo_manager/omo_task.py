@@ -212,6 +212,8 @@ Model guidance:
   very hard tasks. Use gpt-5.6-sol low for submanagers, gpt-5.6-terra medium for
   easier routine tasks, and gpt-5.6-luna xhigh for trivial minimal tasks. Terra
   and Luna are unreliable decision makers.
+  For --tool cursor, use model cursor-grok-4.6 with reasoning effort xhigh; the
+  launcher passes that to Cursor as cursor-grok-4.6-xhigh.
 
 Ownership migration:
   omo_task.py --root ROOT --task-file TASK.md --migrate-manager-owner --old-manager-target OLD --new-manager-target NEW [--dry-run]""",
