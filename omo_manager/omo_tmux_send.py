@@ -510,7 +510,7 @@ def inspect_lines_for_message(message: str) -> int:
 def error_signature(lines: list[str]) -> tuple[str, ...]:
     if is_cursor_agent_capture(lines):
         return tuple(cursor_usage_limit_lines(lines))
-    return tuple(visible_error_lines(current_block(lines).lines))
+    return tuple(visible_error_lines(current_block(lines).lines, allow_cursor_quota=False))
 
 
 def target_status(target: str, lines: list[str]) -> str:
@@ -587,7 +587,7 @@ def exact_capacity_error(lines: list[str]) -> bool:
 
 
 def only_exact_capacity_warning(lines: list[str]) -> bool:
-    errors = visible_error_lines(current_block(lines).lines)
+    errors = visible_error_lines(current_block(lines).lines, allow_cursor_quota=False)
     return bool(errors) and SELECTED_MODEL_CAPACITY_RE.fullmatch(errors[-1]) is not None
 
 

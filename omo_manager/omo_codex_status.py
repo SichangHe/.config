@@ -622,8 +622,8 @@ def ignorable_codex_apps_transport_lines(lines: list[str]) -> set[int]:
     return ignored
 
 
-def visible_error_lines(lines: list[str], include_unmarked: bool = True) -> list[str]:
-    if is_cursor_agent_capture(lines):
+def visible_error_lines(lines: list[str], include_unmarked: bool = True, *, allow_cursor_quota: bool = True) -> list[str]:
+    if allow_cursor_quota and is_cursor_agent_capture(lines):
         return cursor_usage_limit_lines(lines)
     found: list[str] = []
     output = latest_output_before_input(lines)
@@ -909,7 +909,7 @@ def status(lines: list[str], block: Block, *, detect_waiting_subagent: bool = Fa
     if has_queued_running_input(lines):
         return "running"
     input_text = current_input_text(lines)
-    if visible_error_lines(block.lines or lines[-20:], include_unmarked=False):
+    if visible_error_lines(block.lines or lines[-20:], include_unmarked=False, allow_cursor_quota=False):
         return "error"
     if has_plan_prompt(lines):
         return "stuck_input"
@@ -923,7 +923,7 @@ def status(lines: list[str], block: Block, *, detect_waiting_subagent: bool = Fa
         return "running"
     if block.has_footer or any(READY_RE.match(line) is not None or INPUT_RE.match(line) is not None for line in lines[-10:]):
         return "ready"
-    if visible_error_lines(block.lines or lines[-20:]):
+    if visible_error_lines(block.lines or lines[-20:], allow_cursor_quota=False):
         return "error"
     return "running"
 

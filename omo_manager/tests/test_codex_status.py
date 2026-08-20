@@ -268,6 +268,17 @@ class CodexStatusTests(unittest.TestCase):
         self.assertEqual('ready', report_from_lines(lines).status)
         self.assertEqual([], visible_error_lines(lines, include_unmarked=False))
 
+    def test_stale_cursor_usage_scrollback_without_separator_does_not_error_current_codex_pane(self) -> None:
+        lines = [
+            *cursor_agent_status_lines(),
+            '  Error: Increase limits for faster responses',
+            "  You're out of usage. Switch to Auto, or ask your admin to increase your limit to continue.",
+            '› Use /skills to list available skills',
+            '  gpt-5.5',
+        ]
+
+        self.assertEqual('ready', report_from_lines(lines).status)
+
     def test_cursor_transcript_failures_are_not_codex_errors(self) -> None:
         history = cursor_agent_status_lines()
         history[0] = 'omo_task_edit.py: error: --owner-task-file is invalid.'
