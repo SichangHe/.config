@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from omo_manager.omo_agent_status import Args, TaskFrontmatterError, classify_task, format_problem_summary, format_summary, load_local_env, load_task_state, main, parse_task_lines, parse_task_metadata, persistent_blocked_task_lines, registry_prune, report_output_evidence, session_records
 from omo_manager.omo_agent_status import SessionRecord, StatusRow, TaskLine
-from omo_manager.omo_codex_status import Args as CodexStatusArgs, PlanPromptRecovery, Report
+from omo_manager.omo_codex_status import Args as CodexStatusArgs, PlanPromptRecovery, Report, report_from_lines
 
 
 def task_frontmatter(status: str, runat: str = "cfg:1", managerat: str = "mgr:1", *, is_manager: bool = False, pending_items: tuple[str, ...] = (), blocked_on: str = "") -> str:
@@ -713,6 +713,47 @@ resolved_task_items: []
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             unstick.assert_not_called()
             self.assertEqual("", out.getvalue())
+
+    def test_codex_status_treats_ask_codex_prompt_as_empty_ready_input(self) -> None:
+        pane = [
+            '─ Worked for 34m 12s ─',
+            '',
+            '',
+            '› Ask Codex to do anything',
+            '',
+            '  gpt-5.5 xhigh · /work · 1.74M used · Context 86% used',
+        ]
+
+        report = report_from_lines(pane)
+
+        self.assertEqual("ready", report.status)
+        self.assertEqual("Ask Codex to do anything", report.input_text)
+        self.assertFalse(report.can_submit_input)
+
+    def test_problems_only_reports_blocked_idle_for_blocked_ask_codex_placeholder(self) -> None:
+        pane = [
+            '─ Worked for 34m 12s ─',
+            '',
+            '',
+            '› Ask Codex to do anything',
+            '',
+            '  gpt-5.5 xhigh · /work · 1.74M used · Context 86% used',
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[{"task_file":"role.md","tmux_target":"cfg:1.0","started_at_s":1}]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nrole.md cfg 1\n", encoding="utf-8")
+            _ = (root / "role.md").write_text(task_frontmatter("blocked", runat="cfg:1", blocked_on="helper receipt stall"), encoding="utf-8")
+            out = StringIO()
+            with patch("omo_manager.omo_codex_status.exact_tail", return_value=(True, pane)), patch("omo_manager.omo_agent_status.submit_stuck_input_if_present") as unstick, redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+
+            unstick.assert_not_called()
+            text = out.getvalue()
+            self.assertIn("agent-problems: blocked_idle=1", text)
+            self.assertIn("blocked_idle: task=role.md", text)
+            self.assertNotIn("stuck_input", text)
 
     def test_problems_only_stays_quiet_for_queued_input_footer_during_work(self) -> None:
         pane = [

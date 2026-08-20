@@ -59,6 +59,7 @@ WAITING_FOR_SUBAGENT_RE = re.compile(r"^• Waiting for [0-9a-fA-F][0-9a-fA-F-]{
 WORKING_INTERRUPT_RE = re.compile(r"^• Working \([^)]* • esc to interrupt\)$")
 QUEUED_AFTER_TOOL_CALL_RE = re.compile(r"^• Messages to be submitted after next tool call \(press esc to interrupt and send immediately\)$")
 CODEX_EMPTY_INPUT_TEXTS = {
+    "Ask Codex to do anything",
     "Use /skills to list available skills",
     "Find and fix a bug in @filename",
     "Summarize recent commits",
