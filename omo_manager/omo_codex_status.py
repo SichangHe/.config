@@ -22,6 +22,10 @@ SELECTED_MODEL_CAPACITY_RE = re.compile(
     r"^\s*(?:(?:⚠\ufe0f?\s*)?Selected model is at capacity\. Please try a different model\.|■\s*\{\"detail\":\"The '[A-Za-z0-9][A-Za-z0-9._-]*' model is not supported when using Codex with a ChatGPT account\.\"\})\s*$"
 )
 CONTENT_HIDDEN_RE = re.compile(r"^\s*ⓘ\s+This content can(?:not|['’]t) be shown[.!?]?\s*$", re.IGNORECASE)
+CURSOR_USAGE_LIMIT_RE = re.compile(
+    r"^\s*(?:Error:\s+Increase limits for faster responses|You're out of usage\. Switch to Auto, or ask your admin to increase your limit to continue\.)\s*$",
+    re.IGNORECASE,
+)
 UNRELATED_FATAL_LINE_RE = re.compile(r"^\s*(?:(?:[A-Za-z][\w-]*\s+)?failed\b|error\b|exception\b|fatal\b|panic\b|traceback\b)", re.I)
 WAKE_EXECUTION_BUDGET_REFUSAL_RE = re.compile(
     r"^\s*(?:•\s*)?I (?:can(?:not|[’']t)|am unable to) safely (?:complete|handle|execute) (?:(?:another|the|this|a) )?wake prompt (?:in|within) the remaining execution (?:budget|time)(?: available)?[.!]?\s*$",
@@ -552,6 +556,18 @@ def has_selected_model_capacity_warning(lines: list[str]) -> bool:
     return any(SELECTED_MODEL_CAPACITY_RE.search(line) is not None for line in latest_output_before_input(lines))
 
 
+def cursor_usage_limit_lines(lines: list[str]) -> list[str]:
+    if not has_cursor_agent_footer(lines):
+        return []
+    footer_idx = next((idx for idx in range(len(lines) - 1, -1, -1) if CURSOR_AGENT_FOOTER_RE.search(lines[idx]) is not None), -1)
+    if footer_idx < 0:
+        return []
+    bottom_idx = next((idx for idx in range(footer_idx - 1, -1, -1) if CURSOR_AGENT_COMPOSER_BOTTOM_RE.match(lines[idx]) is not None), -1)
+    if bottom_idx < 0:
+        return []
+    return [line.strip() for line in lines[bottom_idx + 1 :] if CURSOR_USAGE_LIMIT_RE.search(line) is not None]
+
+
 def ignorable_codex_apps_transport_lines(lines: list[str]) -> set[int]:
     """Return complete wrapped `codex_apps` no-account warning lines."""
 
@@ -607,6 +623,8 @@ def ignorable_codex_apps_transport_lines(lines: list[str]) -> set[int]:
 
 
 def visible_error_lines(lines: list[str], include_unmarked: bool = True) -> list[str]:
+    if is_cursor_agent_capture(lines):
+        return cursor_usage_limit_lines(lines)
     found: list[str] = []
     output = latest_output_before_input(lines)
     ignorable_transport = ignorable_codex_apps_transport_lines(output)
@@ -614,8 +632,15 @@ def visible_error_lines(lines: list[str], include_unmarked: bool = True) -> list
         if index in ignorable_transport:
             continue
         marked = VISIBLE_ERROR_MARKER_RE.search(line) is not None
-        if CONTENT_HIDDEN_RE.search(line) is not None or SELECTED_MODEL_CAPACITY_RE.search(line) is not None or WAKE_EXECUTION_BUDGET_REFUSAL_RE.search(line) is not None or (ERROR_RE.search(line) is not None and (include_unmarked or marked)):
-            found.append(line.strip())
+        if (
+            CONTENT_HIDDEN_RE.search(line) is not None
+            or SELECTED_MODEL_CAPACITY_RE.search(line) is not None
+            or WAKE_EXECUTION_BUDGET_REFUSAL_RE.search(line) is not None
+            or (ERROR_RE.search(line) is not None and (include_unmarked or marked))
+        ):
+            stripped = line.strip()
+            if stripped not in found:
+                found.append(stripped)
     return found
 
 
@@ -855,6 +880,8 @@ def status(lines: list[str], block: Block, *, detect_waiting_subagent: bool = Fa
     if detect_waiting_subagent and has_waiting_subagent_prompt(lines):
         return "waiting_subagent"
     if is_cursor_agent_capture(lines):
+        if cursor_usage_limit_lines(lines[-40:]):
+            return "error"
         if has_cursor_followups_overlay(lines[-40:]):
             return "stuck_input"
         input_text = current_input_text(lines)

@@ -27,6 +27,7 @@ try:
         SELECTED_MODEL_CAPACITY_RE,
         current_block,
         current_input_text,
+        cursor_usage_limit_lines,
         exact_pane_id,
         exact_tail,
         file_search_overlay_input_text,
@@ -52,6 +53,7 @@ except ModuleNotFoundError:
         SELECTED_MODEL_CAPACITY_RE,
         current_block,
         current_input_text,
+        cursor_usage_limit_lines,
         exact_pane_id,
         exact_tail,
         file_search_overlay_input_text,
@@ -507,7 +509,7 @@ def inspect_lines_for_message(message: str) -> int:
 
 def error_signature(lines: list[str]) -> tuple[str, ...]:
     if is_cursor_agent_capture(lines):
-        return ()
+        return tuple(cursor_usage_limit_lines(lines))
     return tuple(visible_error_lines(current_block(lines).lines))
 
 

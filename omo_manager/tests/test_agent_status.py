@@ -2929,6 +2929,34 @@ resolved_task_items: []
             self.assertIn("agent-problems: error=1", text)
             self.assertIn("error: task=blocked.md evidence=target=vl:7 role=blocked_idle task_status=blocked", text)
 
+    def test_problems_only_reports_cursor_usage_limit_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nworker.md amhrev 4\n", encoding="utf-8")
+            _ = (root / "worker.md").write_text(task_frontmatter("running", runat="amhrev:4", managerat="wl:1", pending_items=("finish review",)), encoding="utf-8")
+            out = StringIO()
+            report = Report(
+                "error",
+                [
+                    "Error: Increase limits for faster responses",
+                    "You're out of usage. Switch to Auto, or ask your admin to increase your limit to continue.",
+                ],
+            )
+
+            def fake_inspect(args: object, **_: object) -> Report:
+                return Report("ready", ["manager ready"]) if getattr(args, "target") == "wl:1" else report
+
+            with patch("omo_manager.omo_agent_status.inspect", side_effect=fake_inspect), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "wl:1"]))
+
+            text = out.getvalue()
+            self.assertIn("agent-problems: error=1", text)
+            self.assertIn("error: task=worker.md evidence=target=amhrev:4 task_status=running", text)
+            self.assertIn("Increase limits for faster responses", text)
+            self.assertIn("out of usage", text)
+
     def test_problems_only_reports_same_task_stale_registry_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -82,6 +82,24 @@ def cursor_agent_lines(prompt: str = "Add a follow-up", *, running: bool = False
     return lines
 
 
+def cursor_usage_limit_lines() -> list[str]:
+    lines = cursor_agent_lines()
+    footer = lines.pop()
+    workdir = lines.pop()
+    lines.extend(
+        [
+            "  124 files edited",
+            workdir,
+            "",
+            "  Error: Increase limits for faster responses",
+            "  You're out of usage. Switch to Auto, or ask your admin to increase your limit to continue.",
+            "",
+            footer,
+        ]
+    )
+    return lines
+
+
 def cursor_agent_followups_lines(chip: str = "[Pasted text #8 +59 lines]", prompt: str = "Add a follow-up") -> list[str]:
     return [
         "previous output",
@@ -531,6 +549,18 @@ class TmuxSendTests(unittest.TestCase):
             "omo_manager.omo_tmux_send.exact_pane_id", return_value="%9"
         ), patch("omo_manager.omo_tmux_send.pane_has_exact_managed_agent_process", return_value=True):
             self.assertIsNone(require_sendable_codex_target("wl:1"))
+
+    def test_require_sendable_codex_target_returns_cursor_usage_limit_signature(self) -> None:
+        with patch("omo_manager.omo_tmux_send.exact_tail", return_value=(True, cursor_usage_limit_lines())), patch(
+            "omo_manager.omo_tmux_send.exact_pane_id", return_value="%9"
+        ), patch("omo_manager.omo_tmux_send.pane_has_exact_managed_agent_process", return_value=True):
+            self.assertEqual(
+                (
+                    "Error: Increase limits for faster responses",
+                    "You're out of usage. Switch to Auto, or ask your admin to increase your limit to continue.",
+                ),
+                require_sendable_codex_target("wl:1"),
+            )
 
     def test_require_sendable_codex_target_accepts_cursor_transcript_with_failed_words(self) -> None:
         lines = cursor_agent_lines("queued wake prompt")

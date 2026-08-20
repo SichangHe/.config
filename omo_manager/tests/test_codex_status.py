@@ -204,6 +204,70 @@ class CodexStatusTests(unittest.TestCase):
         self.assertEqual('ready', report_from_lines(quoted).status)
         self.assertNotEqual((), error_signature(['■ Error: 429', *quoted]))
 
+    def test_status_classifies_cursor_usage_limit_as_error(self) -> None:
+        lines = cursor_agent_status_lines()
+        footer = lines.pop()
+        workdir = lines.pop()
+        lines.extend(
+            [
+                '  124 files edited',
+                workdir,
+                '',
+                '  Error: Increase limits for faster responses',
+                "  You're out of usage. Switch to Auto, or ask your admin to increase your limit to continue.",
+                '',
+                footer,
+            ]
+        )
+
+        report = report_from_lines(lines)
+
+        self.assertEqual('error', report.status)
+        self.assertEqual(
+            [
+                'Error: Increase limits for faster responses',
+                "You're out of usage. Switch to Auto, or ask your admin to increase your limit to continue.",
+            ],
+            visible_error_lines(lines),
+        )
+
+    def test_status_ignores_stale_cursor_usage_limit_before_current_screen(self) -> None:
+        lines = [
+            '  Error: Increase limits for faster responses',
+            "  You're out of usage. Switch to Auto, or ask your admin to increase your limit to continue.",
+            '',
+            *cursor_agent_status_lines(),
+        ]
+
+        report = report_from_lines(lines)
+
+        self.assertEqual('ready', report.status)
+        self.assertEqual([], visible_error_lines(lines))
+
+    def test_unmarked_cursor_usage_words_do_not_broaden_codex_errors(self) -> None:
+        lines = [
+            'Error: Increase limits for faster responses',
+            "You're out of usage. Switch to Auto, or ask your admin to increase your limit to continue.",
+            '› Use /skills to list available skills',
+            '  gpt-5.5',
+        ]
+
+        self.assertEqual('ready', report_from_lines(lines).status)
+        self.assertEqual([], visible_error_lines(lines, include_unmarked=False))
+
+    def test_stale_cursor_usage_scrollback_does_not_error_current_codex_pane(self) -> None:
+        lines = [
+            *cursor_agent_status_lines(),
+            '  Error: Increase limits for faster responses',
+            "  You're out of usage. Switch to Auto, or ask your admin to increase your limit to continue.",
+            '────',
+            '› Use /skills to list available skills',
+            '  gpt-5.5',
+        ]
+
+        self.assertEqual('ready', report_from_lines(lines).status)
+        self.assertEqual([], visible_error_lines(lines, include_unmarked=False))
+
     def test_cursor_transcript_failures_are_not_codex_errors(self) -> None:
         history = cursor_agent_status_lines()
         history[0] = 'omo_task_edit.py: error: --owner-task-file is invalid.'
