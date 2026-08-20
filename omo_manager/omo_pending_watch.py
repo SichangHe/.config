@@ -624,7 +624,6 @@ class DeliverySuccessEvent:
     failure_seen_now_keys: tuple[str, ...] = ()
     failure_seen_delays_s: tuple[tuple[str, float], ...] = ()
     failure_seen_deadlines_s: tuple[tuple[str, float], ...] = ()
-    capacity_advisory_removals: tuple[tuple[str, str], ...] = ()
     capacity_alerts: tuple[tuple[ProblemRow, int, str, AgentProblemGuard], ...] = ()
     blocked_idle_lines: tuple[tuple[str, str], ...] = ()
     dependency_replacements: tuple[tuple[str, str], ...] = ()
@@ -659,8 +658,6 @@ class DeliveryFailureFallback:
 
 
 DELIVERY_SUCCESS_EVENTS: SimpleQueue[DeliverySuccessEvent] = SimpleQueue()
-CAPACITY_ADVISORY_DISCOVERIES: SimpleQueue[tuple[str, str]] = SimpleQueue()
-CAPACITY_ADVISORY_PENDING: set[tuple[str, str]] = set()
 PENDING_SENDS: set[Future[None]] = set()
 PENDING_SEND_HANDLERS: dict[Future[None], Callable[[Future[None]], None]] = {}
 PENDING_SENDS_LOCK = Lock()
@@ -1047,7 +1044,7 @@ def drain_delivery_successes(args: Args, seen: dict[str, float], now_wall_s: flo
         try:
             event = DELIVERY_SUCCESS_EVENTS.get_nowait()
         except Empty:
-            return retry_capacity_advisory(args, seen, now_wall_s) or changed
+            return changed
         seen_at_s = event.seen_at_s or now_wall_s
         durable_ok = True
         clear_ok = True
@@ -1086,9 +1083,6 @@ def drain_delivery_successes(args: Args, seen: dict[str, float], now_wall_s: flo
                 changed = True
         for key, value in event.seen_values:
             remember_seen(seen, key, value)
-            changed = True
-        for key in event.capacity_advisory_removals:
-            CAPACITY_ADVISORY_PENDING.discard(key)
             changed = True
         for row, attempts, detail, guard in event.capacity_alerts:
             if not agent_problem_guard_current(guard):
@@ -4483,81 +4477,11 @@ def clear_resolved_capacity_state(args: Args, seen: dict[str, float], active_pre
     return changed
 
 
-def capacity_model_for_target(target: str) -> str:
-    for line in reversed(codex_tail(target, 80)):
-        match = re.match(r"^\s+(gpt-[^\s·]+)", line)
-        if match is not None:
-            return match.group(1)
-    return "unknown"
-
-
-def capacity_models(targets: Sequence[str]) -> tuple[str, ...]:
-    return tuple(sorted({capacity_model_for_target(target) for target in targets}))
-
-
-def capacity_advisory_text(targets: Sequence[str]) -> str:
-    return capacity_advisory_text_for_models(capacity_models(targets))
-
-
-def capacity_advisory_text_for_models(models: Sequence[str]) -> str:
-    return (
-        f"Capacity advisory: models currently capacity-limited: {', '.join(models)}. "
-        "Prioritize work using other models for now."
-    )
-
-
-def capacity_advisory_seen_key(args: Args, models: Sequence[str]) -> str:
-    digest = hashlib.sha256("\n".join(models).encode()).hexdigest()[:16]
-    return f"capacity-advisory-models:{args.root}:{digest}"
-
-
-def retry_capacity_advisory(args: Args, seen: dict[str, float], now_wall_s: float) -> bool:
-    while True:
-        try:
-            CAPACITY_ADVISORY_PENDING.add(CAPACITY_ADVISORY_DISCOVERIES.get_nowait())
-        except Empty:
-            break
-    models = tuple(sorted(model for root, model in CAPACITY_ADVISORY_PENDING if root == str(args.root)))
-    if not models or not args.manager_target:
-        return False
-    key = capacity_advisory_seen_key(args, models)
-    pending = tuple((str(args.root), model) for model in models)
-    inflight_key = f"{key}:inflight"
-    if key in seen and now_wall_s - seen_get(seen, key, now_s=now_wall_s) < args.agent_problem_repeat_s:
-        if inflight_key not in seen:
-            CAPACITY_ADVISORY_PENDING.difference_update(pending)
-        return False
-    next_key = f"{key}:next"
-    if inflight_key in seen or now_wall_s < seen.get(next_key, 0.0):
-        return False
-    event = DeliverySuccessEvent(
-        seen_keys=(key,),
-        seen_removals=(inflight_key, next_key),
-        failure_seen_removals=(key, inflight_key),
-        failure_seen_values=((next_key, now_wall_s + args.agent_problem_interval_s),),
-        capacity_advisory_removals=pending,
-        seen_at_s=now_wall_s,
-    )
-    seen[inflight_key] = now_wall_s
-    status = push_manager_text(args, capacity_advisory_text_for_models(models), event)
-    if not delivery_accepted(status):
-        seen.pop(inflight_key, None)
-        seen[next_key] = now_wall_s + args.agent_problem_interval_s
-        return False
-    remember_seen(seen, key, now_wall_s)
-    if status == 0:
-        seen.pop(inflight_key, None)
-        CAPACITY_ADVISORY_PENDING.difference_update(pending)
-    return True
-
-
 def run_capacity_resume(target: str, options: CodexSendOptions, guard: AgentProblemGuard) -> bool:
     def before_paste() -> None:
         if not agent_problem_guard_current(guard):
             raise RuntimeError("selected-model-capacity problem resolved or changed before tmux paste")
 
-    model = capacity_model_for_target(target)
-    CAPACITY_ADVISORY_DISCOVERIES.put((str(guard.root or ""), model))
     return verified_send_capacity_resume(target, options, before_paste=before_paste)
 
 
@@ -4762,9 +4686,6 @@ def handle_capacity_problems(args: Args, seen: dict[str, float], output: str, no
     capacity_lines = [(line, row) for line in lines[1:] if (row := capacity_problem_row(line)) is not None]
     active_prefixes = {capacity_state_prefix(args, row.target, line) for line, row in capacity_lines}
     changed = clear_resolved_capacity_state(args, seen, active_prefixes)
-    if args.dry_run and capacity_lines:
-        CAPACITY_ADVISORY_PENDING.update((str(args.root), model) for model in capacity_models([row.target for _line, row in capacity_lines]))
-        changed = retry_capacity_advisory(args, seen, now_wall_s) or changed
     for line, row in capacity_lines:
         prefix = capacity_state_prefix(args, row.target, line)
         attempts = capacity_attempt_count(args, seen, row.target, now_wall_s, line)
