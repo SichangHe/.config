@@ -469,7 +469,9 @@ legacy_supervisor_process() {
   [ "${argv[1]:-}" = -c ] || return 1
   [ "${argv[3]:-}" = "$name-watch-supervisor" ] || return 1
   launch_pid_file="${argv[4]:-}"
-  if [ -n "${argv[5]:-}" ] && [ "$launch_pid_file" = "$state_dir/.$name-supervisor.${argv[5]}.pid" ]; then
+  if [ -n "${argv[5]:-}" ] \
+    && [ "$launch_pid_file" != "$script_path" ] \
+    && { [ "$name" = email ] || [ "$launch_pid_file" = "$state_dir/.$name-supervisor.${argv[5]}.pid" ]; }; then
     if [ "${argv[6]:-}" = "$script_path" ]; then
       script_index=6
     elif [ "${argv[6]:-}" = uv ] \
@@ -494,7 +496,11 @@ legacy_supervisor_process() {
   fi
   [ "${argv[script_index + 1]:-}" = --root ] || return 1
   same_resolved_path "${argv[script_index + 2]:-}" "$root_arg" || return 1
-  [ -z "$state_arg" ] || cmdline_has_arg_pair "$pid" --state-dir "$state_arg"
+  if [ "$name" = email ]; then
+    cmdline_has_resolved_path_arg_pair "$pid" --mail-dir "$mail_dir" || return 1
+  elif [ -n "$state_arg" ]; then
+    cmdline_has_arg_pair "$pid" --state-dir "$state_arg"
+  fi
 }
 
 stop_legacy_supervisors() {
