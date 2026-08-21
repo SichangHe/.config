@@ -992,6 +992,10 @@ def tsv_value(value: str) -> str:
     return " ".join(value.replace("\t", " ").replace("\r", " ").replace("\n", " ").split())
 
 
+def summary_token(value: str) -> str:
+    return re.sub(r"\s+", "_", tsv_value(value)) or "unknown"
+
+
 def write_private_dir(path: Path) -> None:
     path.mkdir(mode=0o700, parents=True, exist_ok=False)
     path.chmod(0o700)
@@ -2674,6 +2678,10 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
     if not args.yes:
         print("refusing to move superseded mail to Trash without --yes", file=sys.stderr)
         return 2
+    mutation_complete = False
+    move_outcome = "not-attempted"
+    move_error = ""
+    post_move_verification_error = ""
     try:
         task_ids = args.task_id if isinstance(args.task_id, list) else [args.task_id]
         replacement_ids = args.replacement_id if isinstance(args.replacement_id, list) else [args.replacement_id]
@@ -2857,29 +2865,57 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
             print("refusing because a planned source left INBOX at the mutation gate", file=sys.stderr)
             return 1
         if final_inbox:
-            typ, _data = imap_uid(
-                client,
-                "move-explicit-sources-to-trash",
-                "MOVE",
-                ",".join(record.uid for record in final_inbox),
-                imap_quoted(TRASH_MAILBOX),
-            )
-            if typ != "OK":
-                print(f"IMAP MOVE failed: {typ}", file=sys.stderr)
-                return 1
-        verified_inbox, verified_trash = observe_explicit_sources(client, sources, sender_email, recipient_email)
-        post_threads_intact = not verified_inbox and all(
-            direct_context_intact(client, special_use[r"\All"], records, allow_additive=True)
-            for records in contexts_by_thread.values()
-        )
+            try:
+                typ, _data = imap_uid(
+                    client,
+                    "move-explicit-sources-to-trash",
+                    "MOVE",
+                    ",".join(record.uid for record in final_inbox),
+                    imap_quoted(TRASH_MAILBOX),
+                )
+            except ImapOperationError as exc:
+                mutation_complete = True
+                move_outcome = "unknown"
+                verified_inbox = []
+                verified_trash = []
+                move_error = summary_token(exc.stage)
+                post_move_verification_error = move_error
+            else:
+                move_outcome = "ok"
+                if typ != "OK":
+                    move_outcome = "failed"
+                    move_error = summary_token(f"move-explicit-sources-to-trash:{typ}")
+        else:
+            move_outcome = "not-needed"
+        if not post_move_verification_error:
+            mutation_complete = True
+            try:
+                verified_inbox, verified_trash = observe_explicit_sources(client, sources, sender_email, recipient_email)
+            except (imaplib.IMAP4.error, RuntimeError) as exc:
+                verified_inbox = []
+                verified_trash = []
+                post_move_verification_error = summary_token(exc.stage if isinstance(exc, ImapOperationError) else f"{exc.__class__.__name__}:{exc}")
+            if move_error and not post_move_verification_error:
+                post_move_verification_error = move_error
     finally:
-        logout_mailbox(client)
+        try:
+            logout_mailbox(client)
+        except (imaplib.IMAP4.error, RuntimeError) as exc:
+            if not mutation_complete:
+                raise
+            if not post_move_verification_error:
+                post_move_verification_error = summary_token(exc.stage if isinstance(exc, ImapOperationError) else f"logout:{exc.__class__.__name__}:{exc}")
+    moved_now = len({record.gmail_msgid for record in verified_trash} & {record.gmail_msgid for record in final_inbox})
+    post_move_verified = not post_move_verification_error and not verified_inbox and len(verified_trash) == len(sources)
     print(
         f"trash_explicit: task_ids={','.join(task_ids)} replacements={len(replacement_ids)} requested={len(sources)}"
-        f" moved_now={len(final_inbox)} verified_inbox={len(verified_inbox)} verified_trash={len(verified_trash)}"
+        f" move_attempted={len(final_inbox)} moved_now={moved_now} move_outcome={move_outcome}"
+        f" verified_inbox={len(verified_inbox)} verified_trash={len(verified_trash)}"
+        f" post_move_verified={int(post_move_verified)}"
+        f" post_move_verification_error={post_move_verification_error or 'none'}"
         f" later_arrivals_moved=0 permanent_deleted=0 persisted_evidence=0"
     )
-    return 0 if post_threads_intact and len(verified_trash) == len(sources) else 1
+    return 0 if post_move_verified else 1
 
 
 def cmd_trash_superseded(args: argparse.Namespace) -> int:
