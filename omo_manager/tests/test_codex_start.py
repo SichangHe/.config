@@ -51,6 +51,7 @@ from omo_manager.omo_codex_start import (
     respawn_codex,
     skip_codex_update_prompt,
     start,
+    task_path,
     validate_task,
     wait_resume_cwd_recovery,
 )
@@ -220,7 +221,9 @@ class CodexStartTests(unittest.TestCase):
         frontmatter = yaml.safe_dump({key: value for key, value in fields.items() if value is not None}, sort_keys=False)
         frontmatter = frontmatter.replace("pending_task_items:\n- ", "pending_task_items:\n  - ")
         text = "---\n" + frontmatter + "---\n\nGoal.\n"
-        (root / task_file).write_text(text, encoding="utf-8")
+        path = root / task_file
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
         (root / "TODO.md").write_text(f"current:\n\n{task_file} {runat}\n", encoding="utf-8")
 
     def write_human_restart_authority(self, root: Path) -> Path:
@@ -317,6 +320,30 @@ class CodexStartTests(unittest.TestCase):
             with patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane):
                 with self.assertRaisesRegex(StartError, "TODO `current`"):
                     validate_task(self.args(root), pane)
+
+    def test_validate_task_accepts_relative_subdirectory_task_file(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root, task_file="202607/worker.md")
+            pane = Pane("cfg:2.0", "%2", "@2", "zsh", root)
+            with patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane):
+                binding = validate_task(self.args(root, task_file="202607/worker.md"), pane)
+            self.assertEqual("cfg:2", binding.runat)
+
+    def test_task_path_rejects_paths_outside_root(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root, tempfile.TemporaryDirectory() as raw_external:
+            root = Path(raw_root)
+            external = Path(raw_external)
+            (external / "worker.md").write_text("outside", encoding="utf-8")
+            (root / "linked").symlink_to(external, target_is_directory=True)
+            cases = (
+                "../outside.md",
+                str(external / "worker.md"),
+                "linked/worker.md",
+            )
+            for value in cases:
+                with self.subTest(value=value), self.assertRaisesRegex(StartError, "under --root"):
+                    task_path(root, value)
 
     def test_current_todo_entries_excludes_other_sections(self) -> None:
         text = "current:\nactive.md cfg:1\nhuman pending:\nhuman.md cfg:2\nprevious:\nold.md cfg:3\n"

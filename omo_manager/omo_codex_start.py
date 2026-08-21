@@ -510,10 +510,15 @@ def resolve_pane(target: str) -> Pane:
 
 
 def task_path(root: Path, task_file: str) -> Path:
-    path = (root / task_file).resolve()
-    if not path.is_relative_to(root) or path.parent != root:
-        raise StartError("--task-file must name one file directly under --root.")
+    root_path = root.resolve()
+    path = (root_path / task_file).resolve()
+    if path == root_path or not path.is_relative_to(root_path):
+        raise StartError("--task-file must name one file under --root.")
     return path
+
+
+def task_ref(root: Path, path: Path) -> str:
+    return path.relative_to(root.resolve()).as_posix()
 
 
 def current_todo_entries(text: str) -> set[str]:
@@ -562,7 +567,7 @@ def validate_task(args: Args, pane: Pane) -> TaskBinding:
     if resolve_pane(metadata.runat).pane_id != pane.pane_id:
         raise StartError(f"task `runat` {metadata.runat} does not identify target {pane.target}.")
     todo = args.root / "TODO.md"
-    expected = f"{path.name} {metadata.runat}"
+    expected = f"{task_ref(args.root, path)} {metadata.runat}"
     if not todo.is_file() or expected not in current_todo_entries(todo.read_text(encoding="utf-8")):
         raise StartError(f"TODO `current` does not contain exact task entry: {expected}")
     return TaskBinding(
