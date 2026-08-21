@@ -13,6 +13,7 @@ import os
 import re
 import signal
 import socket
+import stat
 import sys
 import threading
 from dataclasses import dataclass, replace
@@ -28,7 +29,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from omo_manager.email_idle_watcher import LEGACY_MANAGER_SUBJECT_TOKENS, is_mail_cleanup_excluded_subject, message_text, parse_env_config
-from omo_manager.omo_email_config import configured_agent_mail, human_config_path
+from omo_manager.omo_email_config import configured_agent_mail, human_config_path, parse_env_file
 from omo_manager.omo_email_subject import TMUX_TARGET_RE, canonical_tmux_target, subject_tmux_target
 
 HEADER_FETCH = "(BODY.PEEK[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)])"
@@ -40,6 +41,16 @@ GMAIL_METADATA_BATCH_FETCH = "(UID FLAGS X-GM-MSGID X-GM-THRID X-GM-LABELS)"
 TRASH_MAILBOX = "[Gmail]/Trash"
 CONFIG_PATH = human_config_path()
 DEFAULT_THREADS_PER_BATCH = 10
+DEFAULT_WORK_LOGS_ROOT = Path.home() / "work_logs"
+TRUSTED_LOCAL_ENV_PATH = Path(__file__).resolve().with_name("local.env")
+LOCAL_ENV_PATH = TRUSTED_LOCAL_ENV_PATH
+SOURCE_815_APPROVAL_FILE = "85c5dff58359-815.txt"
+SOURCE_815_APPROVAL_QUOTE = "This is not an email I did not read. Anyway, just remove it"
+SOURCE_815_APPROVAL_QUOTE_SHA256 = hashlib.sha256(SOURCE_815_APPROVAL_QUOTE.encode("utf-8")).hexdigest()
+SOURCE_815_APPROVAL_SHA256 = "0e6c0fad72ea98b04749c6cd0294ba3a168411c757d049be5c78a29307867bf2"
+SOURCE_815_SOURCE_BINDING = "17338:1874072255391401971:1873525670359176908:11ad6ed3f1b029318d15b5b45f78b270aa8e774203687571e1ad2e615faea755"
+SOURCE_815_TASK_ID = "manager-rewrite-owner-transfer"
+SOURCE_815_EXACT_REMOVAL_EXCEPTION = "source-815-human-approved-exact-removal"
 GMAIL_IDENTITY_UID_BATCH = 40
 GMAIL_THREAD_OR_BATCH = 32
 EXPORT_FULL_FETCH_ATTEMPTS = 2
@@ -113,6 +124,14 @@ class ReviewedScope:
     reviewer: str
     provenance: str
     sha256: str
+
+
+@dataclass(frozen=True)
+class ExactRemovalEvidence:
+    exception: str
+    approval_sha256: str
+    approval_quote_sha256: str
+    approval_source_binding: str
 
 
 def parse_explicit_source(value: str, *, with_task: bool = False) -> ScopedSource:
@@ -1827,6 +1846,116 @@ def require_scoped_task(source_dir: Path, rows: list[dict[str, str]], task_id: s
         raise RuntimeError("task identity does not match independently reviewed scope")
 
 
+def configured_work_logs_root() -> Path:
+    """Return the trusted work-log root from the manager local-env file only."""
+    local_root = parse_env_file(LOCAL_ENV_PATH).get("OMO_WORK_LOGS_ROOT", "").strip()
+    if local_root:
+        return Path(local_root).expanduser()
+    return DEFAULT_WORK_LOGS_ROOT
+
+
+def read_owner_only_regular_file(path: Path, error_prefix: str) -> tuple[Path, bytes]:
+    try:
+        path_stat = path.lstat()
+    except OSError as exc:
+        raise RuntimeError(f"{error_prefix} is unreadable") from exc
+    if stat.S_ISLNK(path_stat.st_mode) or not stat.S_ISREG(path_stat.st_mode) or path_stat.st_uid != os.geteuid() or path_stat.st_mode & 0o077:
+        raise RuntimeError(f"{error_prefix} must be a regular owner-only file")
+    try:
+        resolved = path.resolve(strict=True)
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as exc:
+        raise RuntimeError(f"{error_prefix} is unreadable") from exc
+    close_fd = True
+    try:
+        fd_stat = os.fstat(fd)
+        if not stat.S_ISREG(fd_stat.st_mode) or fd_stat.st_uid != os.geteuid() or fd_stat.st_mode & 0o077:
+            raise RuntimeError(f"{error_prefix} must be a regular owner-only file")
+        with os.fdopen(fd, "rb") as handle:
+            close_fd = False
+            return resolved, handle.read()
+    except Exception:
+        if close_fd:
+            os.close(fd)
+        raise
+
+
+def require_human_approved_exact_removal(
+    source_dir: Path,
+    requested: list[str],
+    task_id: str,
+    replacement_not_required: bool,
+    reason_file: Path,
+    approval_file: Path | None,
+    approval_quote: str | None,
+) -> ExactRemovalEvidence:
+    source_map = export_source_map(source_dir, requested)
+    if not replacement_not_required:
+        raise RuntimeError("human-approved exact removal requires --replacement-not-required")
+    mapping = scoped_task_map(source_dir)
+    if len(requested) != 1 or set(mapping) != set(requested) or any(value != task_id for value in mapping.values()):
+        raise RuntimeError("human-approved exact removal requires one reviewed scoped source for this task")
+    if task_id != SOURCE_815_TASK_ID:
+        raise RuntimeError("human-approved exact removal is bound to source-815 task identity")
+    if approval_file is None or not approval_quote or tsv_value(approval_quote) != approval_quote:
+        raise RuntimeError("human-approved exact removal requires an approval file and exact one-line quote")
+    if approval_quote != SOURCE_815_APPROVAL_QUOTE:
+        raise RuntimeError("human-approved exact removal quote does not match source-815 approval")
+    approval_arg = approval_file.expanduser()
+    if not approval_arg.is_absolute():
+        raise RuntimeError("human-approved exact removal requires an absolute regular manager_mail approval file")
+    try:
+        work_logs_root_arg = configured_work_logs_root()
+        work_logs_root_stat = work_logs_root_arg.lstat()
+        if stat.S_ISLNK(work_logs_root_stat.st_mode):
+            raise RuntimeError("human-approved exact removal work-log root must not be a symlink")
+        work_logs_root = work_logs_root_arg.resolve(strict=True)
+        mail_root_arg = work_logs_root / "manager_mail"
+        mail_root_stat = mail_root_arg.lstat()
+        mail_root = mail_root_arg.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise RuntimeError("human-approved exact removal work-log root is unreadable") from exc
+    if stat.S_ISLNK(mail_root_stat.st_mode) or not stat.S_ISDIR(mail_root_stat.st_mode) or mail_root_stat.st_uid != os.geteuid() or mail_root_stat.st_mode & 0o077:
+        raise RuntimeError("human-approved exact removal manager_mail root must be an owner-only directory")
+    if approval_arg.parent != mail_root_arg or approval_arg.parent.resolve(strict=False) != mail_root or approval_arg.name != SOURCE_815_APPROVAL_FILE:
+        raise RuntimeError("human-approved exact removal approval file is not the trusted source-815 manager mail")
+    try:
+        approval_path, approval_bytes = read_owner_only_regular_file(approval_arg, "human-approved exact removal approval file")
+        approval_text = approval_bytes.decode("utf-8")
+        reason_text = reason_file.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise RuntimeError("human-approved exact removal approval evidence is unreadable") from exc
+    approval_sha256 = hashlib.sha256(approval_bytes).hexdigest()
+    source = source_map[requested[0]]
+    source_binding = f"{requested[0]}:{source['gmail_msgid']}:{source['gmail_thrid']}:{source['raw_sha256']}"
+    if approval_sha256 != SOURCE_815_APPROVAL_SHA256 or source_binding != SOURCE_815_SOURCE_BINDING:
+        raise RuntimeError("human-approved exact removal evidence is not bound to source-815 identity")
+    if (
+        approval_quote not in approval_text
+        or approval_quote not in reason_text
+        or str(approval_path) not in reason_text
+        or approval_sha256 not in reason_text
+        or source_binding not in reason_text
+    ):
+        raise RuntimeError("human-approved exact removal evidence does not bind the exact approval quote")
+    scope_rows = read_tsv(source_dir / "scope.tsv", {"provenance"})
+    if len(scope_rows) != 1:
+        raise RuntimeError("human-approved exact removal requires one scoped approval provenance")
+    provenance_path = Path(scope_rows[0]["provenance"]).expanduser()
+    try:
+        resolved_provenance = provenance_path.resolve(strict=True)
+    except OSError as exc:
+        raise RuntimeError("human-approved exact removal scope provenance is unreadable") from exc
+    if not provenance_path.is_absolute() or resolved_provenance != approval_path:
+        raise RuntimeError("human-approved exact removal scope provenance does not match approval file")
+    return ExactRemovalEvidence(
+        exception=SOURCE_815_EXACT_REMOVAL_EXCEPTION,
+        approval_sha256=approval_sha256,
+        approval_quote_sha256=SOURCE_815_APPROVAL_QUOTE_SHA256,
+        approval_source_binding=source_binding,
+    )
+
+
 def disposition_text(
     rows: list[dict[str, str]],
     batch_id: str,
@@ -1837,11 +1966,27 @@ def disposition_text(
     replacement: str,
     task_id: str,
     reviewer: str,
+    exact_removal: ExactRemovalEvidence | None = None,
 ) -> str:
     output = io.StringIO()
     writer = csv.DictWriter(
         output,
-        fieldnames=("batch_id", "owner", "reviewer", "gmail_thrid", "uid", "disposition", "reason_sha256", "task_evidence_sha256", "replacement", "task_id"),
+        fieldnames=(
+            "batch_id",
+            "owner",
+            "reviewer",
+            "gmail_thrid",
+            "uid",
+            "disposition",
+            "reason_sha256",
+            "task_evidence_sha256",
+            "replacement",
+            "task_id",
+            "exact_removal_exception",
+            "exact_removal_approval_sha256",
+            "exact_removal_quote_sha256",
+            "exact_removal_source_binding",
+        ),
         delimiter="\t",
         lineterminator="\n",
     )
@@ -1859,6 +2004,10 @@ def disposition_text(
                 "task_evidence_sha256": task_evidence_sha256,
                 "replacement": replacement,
                 "task_id": task_id,
+                "exact_removal_exception": exact_removal.exception if exact_removal is not None else "",
+                "exact_removal_approval_sha256": exact_removal.approval_sha256 if exact_removal is not None else "",
+                "exact_removal_quote_sha256": exact_removal.approval_quote_sha256 if exact_removal is not None else "",
+                "exact_removal_source_binding": exact_removal.approval_source_binding if exact_removal is not None else "",
             }
         )
     return output.getvalue()
@@ -1875,6 +2024,7 @@ def prepare_thread_disposition(
     replacement: str,
     task_id: str = "test-task",
     reviewer: str = "independent-reviewer",
+    exact_removal: ExactRemovalEvidence | None = None,
 ) -> tuple[list[dict[str, str]], str, bool]:
     if not task_id or tsv_value(task_id) != task_id:
         raise RuntimeError("task identity must be one nonempty line")
@@ -1898,6 +2048,7 @@ def prepare_thread_disposition(
         replacement,
         task_id,
         reviewer,
+        exact_removal,
     )
     outcome_path = source_dir / "outcomes" / f"{gmail_thrid}.tsv"
     if outcome_path.exists():
@@ -1990,6 +2141,31 @@ def intent_reconciliation_evidence(source_dir: Path, gmail_thrid: str) -> tuple[
         raise RuntimeError("immutable intent does not cover the claimed fixed-start thread exactly once")
     source_map = export_source_map(source_dir, intended_uids)
     return evidence, rows, source_map
+
+
+def is_source_815_exact_removal_row(row: dict[str, str]) -> bool:
+    approved_uid, _separator, _rest = SOURCE_815_SOURCE_BINDING.partition(":")
+    return (
+        row.get("disposition", "") == "trashed"
+        and row.get("uid", "") == approved_uid
+        and row.get("replacement", "") == "not-required"
+        and row.get("task_id", "") == SOURCE_815_TASK_ID
+        and row.get("exact_removal_exception", "") == SOURCE_815_EXACT_REMOVAL_EXCEPTION
+        and row.get("exact_removal_approval_sha256", "") == SOURCE_815_APPROVAL_SHA256
+        and row.get("exact_removal_quote_sha256", "") == SOURCE_815_APPROVAL_QUOTE_SHA256
+        and row.get("exact_removal_source_binding", "") == SOURCE_815_SOURCE_BINDING
+    )
+
+
+def is_source_815_exact_removal_intent(rows: list[dict[str, str]], source_map: dict[str, dict[str, str]]) -> bool:
+    if len(rows) != 1 or not is_source_815_exact_removal_row(rows[0]):
+        return False
+    row = rows[0]
+    source = source_map.get(row["uid"])
+    if source is None:
+        return False
+    source_binding = f"{row['uid']}:{source['gmail_msgid']}:{source['gmail_thrid']}:{source['raw_sha256']}"
+    return source_binding == row.get("exact_removal_source_binding", "")
 
 
 def record_matches_reconciliation_location(record: MailRecord, source: dict[str, str], _location: str) -> bool:
@@ -2198,7 +2374,10 @@ def cmd_reconcile_intent(args: argparse.Namespace) -> int:
         final_observed = observe_reconciliation_locations(client, source_map)
         require_reconciliation_locations(rows, source_map, final_observed, sender_email, recipient_email)
         final_trash_records = [final_observed["Trash"][row["uid"]] for row in rows if row["disposition"] == "trashed"]
-        if not reconciliation_thread_unchanged(client, expected_mailboxes[r"\All"], args.source_dir, args.gmail_thrid, final_trash_records):
+        if is_source_815_exact_removal_intent(rows, source_map):
+            if len(final_trash_records) != 1:
+                raise RuntimeError("source-815 exact removal recovery did not verify the exact Trash source")
+        elif not reconciliation_thread_unchanged(client, expected_mailboxes[r"\All"], args.source_dir, args.gmail_thrid, final_trash_records):
             raise RuntimeError("complete Gmail thread context changed")
     finally:
         logout_mailbox(client)
@@ -2316,6 +2495,10 @@ def cmd_verify_run(args: argparse.Namespace) -> int:
     disposition_uids = [row["uid"] for row in dispositions]
     if len(disposition_uids) != len(set(disposition_uids)) or set(disposition_uids) != set(manifest_uids):
         raise RuntimeError("fixed-start sources are not each classified exactly once")
+    disposition_source_map = export_source_map(args.source_dir, disposition_uids)
+    for row in dispositions:
+        if row.get("exact_removal_exception", "") and not is_source_815_exact_removal_intent([row], disposition_source_map):
+            raise RuntimeError(f"terminal disposition has invalid exact-removal source binding: {row['gmail_thrid']}")
     expected_batch = {row["uid"]: (row["batch_id"], row["gmail_thrid"]) for row in batches}
     for row in dispositions:
         if expected_batch[row["uid"]] != (row["batch_id"], row["gmail_thrid"]):
@@ -2350,6 +2533,11 @@ def validate_task_terminal_dispositions(dispositions: list[dict[str, str]]) -> N
     for row in dispositions:
         by_task.setdefault(row["task_id"], []).append(row)
     for task_id, rows in by_task.items():
+        exact_removal_rows = [row for row in rows if row.get("exact_removal_exception", "")]
+        if exact_removal_rows:
+            if len(rows) != 1 or len(exact_removal_rows) != 1 or not is_source_815_exact_removal_row(rows[0]):
+                raise RuntimeError(f"task has invalid exact-removal exception evidence: {task_id}")
+            continue
         retained_uids = {row["uid"] for row in rows if row["disposition"] == "retained"}
         replacement_values = {row["replacement"] for row in rows if row["replacement"] not in {"not-required", "not-required-retained"}}
         if any(not re.fullmatch(r"<[^<>\s]+>", value) for value in replacement_values):
@@ -3112,6 +3300,20 @@ def cmd_trash_superseded(args: argparse.Namespace) -> int:
             raise RuntimeError("replacement identity must be one line")
         if args.replacement_id and not re.fullmatch(r"<[^<>\s]+>", args.replacement_id):
             raise RuntimeError("replacement identity must be a syntactically valid Message-ID")
+        human_approved_exact_removal = bool(getattr(args, "human_approved_exact_removal", False))
+        exact_removal = None
+        if human_approved_exact_removal:
+            exact_removal = require_human_approved_exact_removal(
+                source_dir,
+                requested,
+                args.task_id,
+                args.replacement_not_required,
+                args.reason_file,
+                getattr(args, "human_approval_file", None),
+                getattr(args, "human_approval_quote", None),
+            )
+        elif getattr(args, "human_approval_file", None) is not None or getattr(args, "human_approval_quote", None):
+            raise RuntimeError("human approval evidence requires --human-approved-exact-removal")
         _thread_rows, outcome_evidence, recovery_needed = prepare_thread_disposition(
             source_dir,
             args.batch_id,
@@ -3123,6 +3325,7 @@ def cmd_trash_superseded(args: argparse.Namespace) -> int:
             replacement,
             args.task_id,
             args.reviewer,
+            exact_removal,
         )
         if recovery_needed:
             raise RuntimeError("Trash disposition cannot replace a different existing intent")
@@ -3174,7 +3377,7 @@ def cmd_trash_superseded(args: argparse.Namespace) -> int:
         if any(not record_matches_source_map(record, source_map[record.uid]) for record in records):
             print("refusing because source identity or content changed", file=sys.stderr)
             return 1
-        thread_unchanged = reconciliation_thread_unchanged(
+        thread_unchanged = True if human_approved_exact_removal else reconciliation_thread_unchanged(
             client,
             expected_mailboxes[r"\All"],
             source_dir,
@@ -3205,7 +3408,7 @@ def cmd_trash_superseded(args: argparse.Namespace) -> int:
             except RuntimeError as exc:
                 print(str(exc), file=sys.stderr)
                 return 1
-        thread_unchanged = reconciliation_thread_unchanged(
+        thread_unchanged = True if human_approved_exact_removal else reconciliation_thread_unchanged(
             client,
             expected_mailboxes[r"\All"],
             source_dir,
@@ -3235,7 +3438,7 @@ def cmd_trash_superseded(args: argparse.Namespace) -> int:
         if remaining or post_move.verified_message_count != len(requested) or not post_move.complete:
             post_thread_unchanged = False
         else:
-            post_thread_unchanged = reconciliation_thread_unchanged(
+            post_thread_unchanged = True if human_approved_exact_removal else reconciliation_thread_unchanged(
                 client,
                 expected_mailboxes[r"\All"],
                 source_dir,
@@ -3327,6 +3530,9 @@ def parser() -> argparse.ArgumentParser:
     trash.add_argument("--task-evidence-file", type=Path, required=True)
     trash.add_argument("--task-id", required=True, help="Immutable task identity shared by every fixed-start message for the task.")
     trash.add_argument("--reviewer", required=True, help="Independent reviewer identity; must differ from --owner.")
+    trash.add_argument("--human-approved-exact-removal", action="store_true", help="Move one reviewed scoped message without full-thread supersession proof after explicit Human approval.")
+    trash.add_argument("--human-approval-file", type=Path, help="Absolute manager_mail approval file required with --human-approved-exact-removal.")
+    trash.add_argument("--human-approval-quote", help="Exact one-line Human quote required with --human-approved-exact-removal.")
     trash.add_argument("--yes", action="store_true")
     replacement = trash.add_mutually_exclusive_group(required=True)
     replacement.add_argument("--replacement-message-id", dest="replacement_id", default="")

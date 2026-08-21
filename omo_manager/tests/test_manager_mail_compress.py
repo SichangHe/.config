@@ -23,8 +23,14 @@ from omo_manager.omo_manager_mail_compress import (
     GMAIL_METADATA_BATCH_FETCH,
     HEADER_BATCH_FETCH,
     HEADER_FETCH,
+    ExactRemovalEvidence,
     ImapOperationError,
     MailRecord,
+    SOURCE_815_APPROVAL_FILE,
+    SOURCE_815_APPROVAL_QUOTE,
+    SOURCE_815_APPROVAL_QUOTE_SHA256,
+    SOURCE_815_EXACT_REMOVAL_EXCEPTION,
+    SOURCE_815_TASK_ID,
     accepted_manager_headers,
     claim_batch,
     cmd_reconcile_intent,
@@ -141,6 +147,9 @@ class Args:
         self.replacement_not_required = True
         self.task_id = "task-a"
         self.reviewer = "reviewer-2"
+        self.human_approved_exact_removal = False
+        self.human_approval_file: Path | None = None
+        self.human_approval_quote: str | None = None
 
 
 class UnreadSummaryArgs:
@@ -507,6 +516,97 @@ with tempfile.TemporaryDirectory() as tmp:
         uid_file = parent / "superseded-uids.txt"
         uid_file.write_text(f"{record.uid}\n", encoding="utf-8")
         return uid_file
+
+    @staticmethod
+    def write_human_approval(parent: Path, quote: str = SOURCE_815_APPROVAL_QUOTE) -> Path:
+        approval_dir = parent / "manager_mail"
+        approval_dir.mkdir(mode=0o700)
+        approval_file = approval_dir / SOURCE_815_APPROVAL_FILE
+        approval_file.write_text(
+            f"{quote}\n"
+            "If moved, only this exact email would be moved to recoverable Gmail Trash.\n"
+            "Reply option: explicit approval to move this exact email to recoverable Gmail Trash.\n"
+            "from: sichangheagent@gmail.com\n"
+            "date: Thu, Aug 20, 2026, 12:36 p.m. PDT\n"
+            "subject: Re: [wl:1] What happened to the rewrite of our manager orchestrating tool set\n",
+            encoding="utf-8",
+        )
+        approval_file.chmod(0o600)
+        return approval_file
+
+    @staticmethod
+    def write_local_env_root(parent: Path) -> Path:
+        local_env = parent / "local.env"
+        local_env.write_text(f'export OMO_WORK_LOGS_ROOT="{parent}"\n', encoding="utf-8")
+        local_env.chmod(0o600)
+        return local_env
+
+    @staticmethod
+    def write_human_approval_scope(source_dir: Path, records: list[MailRecord], approval_file: Path, task_id: str = SOURCE_815_TASK_ID, provenance: str | None = None, quote: str = SOURCE_815_APPROVAL_QUOTE) -> None:
+        provenance_value = str(approval_file.resolve()) if provenance is None else provenance
+        scope_tasks = "uid\ttask_id\tgmail_msgid\tgmail_thrid\traw_sha256\n" + "".join(
+            f"{record.uid}\t{task_id}\t{record.gmail_msgid}\t{record.gmail_thrid}\t{record.raw_sha256}\n" for record in records
+        )
+        scope_tasks_digest = hashlib.sha256(scope_tasks.encode()).hexdigest()
+        scope_sha = hashlib.sha256(f"{provenance_value}\n{scope_tasks_digest}\n".encode()).hexdigest()
+        thread_digest = thread_context_digest(records)
+        manifest_header = "uid\tsource_mailbox\tuidvalidity\tdate\tgmail_msgid\tgmail_thrid\tmsgid_sha256\traw_sha256\tflags\tlabels\tthread_context_sha256\tscope_tasks_sha256\tscope_sha256\tscope_preparer\tscope_reviewer\tscope_provenance\tbody_bytes\tsubject\n"
+        manifest_rows = "".join(
+            f"{record.uid}\tINBOX\t9\t{record.date}\t{record.gmail_msgid}\t{record.gmail_thrid}\t{record.msgid_sha256}\t{record.raw_sha256}\t{tsv_value(record.flags)}\t{tsv_value(record.labels)}\t{thread_digest}\t{scope_tasks_digest}\t{scope_sha}\towner\treviewer\t{provenance_value}\t{record.body_bytes}\t{record.subject}\n"
+            for record in records
+        )
+        (source_dir / "scope-tasks.tsv").write_text(scope_tasks, encoding="utf-8")
+        (source_dir / "scope.tsv").write_text(
+            "scope_sha256\tscope_tasks_sha256\tpreparer\treviewer\tprovenance\n"
+            f"{scope_sha}\t{scope_tasks_digest}\towner\treviewer\t{provenance_value}\n",
+            encoding="utf-8",
+        )
+        (source_dir / "manifest.tsv").write_text(manifest_header + manifest_rows, encoding="utf-8")
+        (source_dir / "batches.tsv").write_text(export_batches(records, 10), encoding="utf-8")
+        approval_sha256 = hashlib.sha256(approval_file.read_bytes()).hexdigest()
+        source_binding = f"{records[0].uid}:{records[0].gmail_msgid}:{records[0].gmail_thrid}:{records[0].raw_sha256}"
+        (source_dir / "reason.txt").write_text(f"{approval_file.resolve()}\n{approval_sha256}\n{source_binding}\n{quote}\n", encoding="utf-8")
+        (source_dir / "scope-tasks.tsv").chmod(0o600)
+        (source_dir / "scope.tsv").chmod(0o600)
+
+    @staticmethod
+    def source_815_test_binding(record: MailRecord) -> str:
+        return f"{record.uid}:{record.gmail_msgid}:{record.gmail_thrid}:{record.raw_sha256}"
+
+    def assert_human_approved_exact_removal_rejected_before_mailbox(
+        self,
+        record: MailRecord,
+        *,
+        source_binding: str | None = None,
+        task_id: str = SOURCE_815_TASK_ID,
+        quote: str = SOURCE_815_APPROVAL_QUOTE,
+        approval_sha256: str | None = None,
+        approval_file_name: str = SOURCE_815_APPROVAL_FILE,
+        local_root: Path | None = None,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) if local_root is None else local_root
+            source_dir = Path(tmp) / "export"
+            uid_file = self.write_source_map(source_dir, record)
+            approval_file = self.write_human_approval(root, quote=quote)
+            if approval_file.name != approval_file_name:
+                renamed = approval_file.with_name(approval_file_name)
+                approval_file.rename(renamed)
+                approval_file = renamed
+            self.write_human_approval_scope(source_dir, [record], approval_file, task_id=task_id, quote=quote)
+            local_env = self.write_local_env_root(root)
+            args = Args(uid_file=uid_file, yes=True)
+            args.task_id = task_id
+            args.human_approved_exact_removal = True
+            args.human_approval_file = approval_file.resolve()
+            args.human_approval_quote = quote
+            with (
+                patch("omo_manager.omo_manager_mail_compress.LOCAL_ENV_PATH", local_env),
+                patch("omo_manager.omo_manager_mail_compress.SOURCE_815_APPROVAL_SHA256", approval_sha256 or hashlib.sha256(approval_file.read_bytes()).hexdigest()),
+                patch("omo_manager.omo_manager_mail_compress.SOURCE_815_SOURCE_BINDING", source_binding or self.source_815_test_binding(record)),
+                patch("omo_manager.omo_manager_mail_compress.open_mailbox", side_effect=AssertionError("mailbox must not open")),
+            ):
+                self.assertEqual(2, cmd_trash_superseded(args))
 
     def test_frozen_thread_context_preserves_legacy_outer_label_quotes(self) -> None:
         digest = "1cd8aa8dc65a86f86fc2d10193aafd1262f3aa865b83364819a2a78f1c9e1e8c"
@@ -2002,6 +2102,7 @@ with tempfile.TemporaryDirectory() as tmp:
                 patch("omo_manager.omo_manager_mail_compress.mail_boundary", return_value=("agent@example.test", "human@example.test")),
             ):
                 self.assertEqual(0, cmd_reconcile_intent(ReconcileArgs(source_dir)))
+                self.assertEqual(0, cmd_verify_run(VerifyArgs(source_dir)))
             self.assertTrue((source_dir / "outcomes" / "200.tsv").exists())
         self.assertTrue(all(readonly for _mailbox, readonly in client.select_calls))
         self.assertEqual(('"[Gmail]/All Mail"', True), client.select_calls[-1])
@@ -2072,6 +2173,52 @@ with tempfile.TemporaryDirectory() as tmp:
                 patch("omo_manager.omo_manager_mail_compress.mail_boundary", return_value=("agent@example.test", "human@example.test")),
             ):
                 self.assertEqual(0, cmd_reconcile_intent(ReconcileArgs(source_dir)))
+        self.assertTrue(all(readonly for _mailbox, readonly in client.select_calls))
+        self.assertFalse(any(call[0].casefold() in {"copy", "move", "store", "expunge"} for call in client.uid_calls))
+
+    def test_reconcile_source_815_exact_removal_intent_uses_exact_trash_evidence(self) -> None:
+        raw = self.raw_message("[worker:0] complete")
+        record = MailRecord("7", "date", "Agent <agent@example.test>", "Human <human@example.test>", "[worker:0] complete", hashlib.sha256(b"<one@example.test>").hexdigest()[:12], "body\n", "100", "200", "", r"\Inbox", hashlib.sha256(raw).hexdigest())
+        client = FakeClient(
+            {
+                ("search", None, "X-GM-MSGID", "100"): [("OK", [b""]), ("OK", [b"70"]), ("OK", [b""]), ("OK", [b"70"])],
+                ("fetch", "70", FULL_FETCH): [("OK", [(b"message", raw)]), ("OK", [(b"message", raw)])],
+                ("fetch", "70", GMAIL_METADATA_FETCH): [self.gmail_metadata("70", labels=r"\Trash"), self.gmail_metadata("70", labels=r"\Trash")],
+            },
+            self.gmail_mailboxes(),
+        )
+        approval_sha256 = "a" * 64
+        exact_removal = ExactRemovalEvidence(
+            exception=SOURCE_815_EXACT_REMOVAL_EXCEPTION,
+            approval_sha256=approval_sha256,
+            approval_quote_sha256=SOURCE_815_APPROVAL_QUOTE_SHA256,
+            approval_source_binding=self.source_815_test_binding(record),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            source_dir = Path(tmp) / "export"
+            self.write_source_map(source_dir, record)
+            prepare_thread_disposition(
+                source_dir,
+                "batch-0001",
+                "reviewer-1",
+                "200",
+                {"7"},
+                source_dir / "reason.txt",
+                source_dir / "task-evidence.txt",
+                "not-required",
+                SOURCE_815_TASK_ID,
+                "reviewer-2",
+                exact_removal,
+            )
+            with (
+                patch("omo_manager.omo_manager_mail_compress.SOURCE_815_APPROVAL_SHA256", approval_sha256),
+                patch("omo_manager.omo_manager_mail_compress.SOURCE_815_SOURCE_BINDING", self.source_815_test_binding(record)),
+                patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {"user": "human@example.test"})),
+                patch("omo_manager.omo_manager_mail_compress.mail_boundary", return_value=("agent@example.test", "human@example.test")),
+                patch("omo_manager.omo_manager_mail_compress.reconciliation_thread_unchanged", side_effect=AssertionError("source-815 recovery should use exact evidence")),
+            ):
+                self.assertEqual(0, cmd_reconcile_intent(ReconcileArgs(source_dir)))
+            self.assertTrue((source_dir / "outcomes" / "200.tsv").exists())
         self.assertTrue(all(readonly for _mailbox, readonly in client.select_calls))
         self.assertFalse(any(call[0].casefold() in {"copy", "move", "store", "expunge"} for call in client.uid_calls))
 
@@ -4247,6 +4394,320 @@ with tempfile.TemporaryDirectory() as tmp:
                 self.assertEqual(1, cmd_trash_superseded(Args(uid_file=uid_file, yes=True)))
             self.assertFalse((source_dir / "outcomes" / "200.tsv").exists())
         self.assertFalse(any(call[0].casefold() == "move" for call in client.uid_calls))
+
+    def test_trash_superseded_human_approved_exact_removal_skips_thread_revalidation(self) -> None:
+        raw = self.raw_message("[worker:0] complete")
+        record = MailRecord("7", "date", "Agent <agent@example.test>", "Human <human@example.test>", "[worker:0] complete", hashlib.sha256(b"<one@example.test>").hexdigest()[:12], "body\n", "100", "200", "", r"\Inbox", hashlib.sha256(raw).hexdigest())
+        client = FakeClient(
+            {
+                ("search", None, "UID", "7"): [("OK", [b"7"]), ("OK", [b"7"]), ("OK", [b"7"]), ("OK", [b""])],
+                ("fetch", "7", FULL_FETCH): [("OK", [(b"message", raw)]), ("OK", [(b"message", raw)])],
+                ("fetch", "7", GMAIL_METADATA_FETCH): [
+                    self.gmail_metadata("7"),
+                    self.gmail_metadata("7"),
+                ],
+                ("MOVE", "7", '"[Gmail]/Trash"'): ("OK", [b""]),
+                ("search", None, "X-GM-MSGID", "100"): ("OK", [b"70"]),
+                ("fetch", "70", FULL_FETCH): ("OK", [(b"message", raw)]),
+                ("fetch", "70", GMAIL_METADATA_FETCH): self.gmail_metadata("70", labels=r"\Trash"),
+            },
+            self.gmail_mailboxes(),
+        )
+
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            source_dir = Path(tmp) / "export"
+            uid_file = self.write_source_map(source_dir, record)
+            approval_file = self.write_human_approval(Path(tmp))
+            self.write_human_approval_scope(source_dir, [record], approval_file)
+            approval_sha256 = hashlib.sha256(approval_file.read_bytes()).hexdigest()
+            local_env = self.write_local_env_root(Path(tmp))
+            args = Args(uid_file=uid_file, yes=True)
+            args.task_id = SOURCE_815_TASK_ID
+            args.human_approved_exact_removal = True
+            args.human_approval_file = approval_file.resolve()
+            args.human_approval_quote = SOURCE_815_APPROVAL_QUOTE
+            with (
+                patch("omo_manager.omo_manager_mail_compress.LOCAL_ENV_PATH", local_env),
+                patch("omo_manager.omo_manager_mail_compress.SOURCE_815_APPROVAL_SHA256", approval_sha256),
+                patch("omo_manager.omo_manager_mail_compress.SOURCE_815_SOURCE_BINDING", self.source_815_test_binding(record)),
+                patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {"user": "human@example.test"})),
+                patch("omo_manager.omo_manager_mail_compress.configured_agent_mail", return_value=Settings()),
+                patch("omo_manager.omo_manager_mail_compress.reconciliation_thread_unchanged", side_effect=AssertionError("thread revalidation should be skipped")),
+            ):
+                self.assertEqual(0, cmd_trash_superseded(args))
+            self.assertTrue((source_dir / "outcomes" / "200.tsv").exists())
+        self.assertIn(("MOVE", "7", '"[Gmail]/Trash"'), client.uid_calls)
+
+    def test_trash_superseded_human_approved_exact_removal_requires_scope(self) -> None:
+        raw = self.raw_message("[worker:0] complete")
+        record = MailRecord("7", "date", "Agent <agent@example.test>", "Human <human@example.test>", "[worker:0] complete", hashlib.sha256(b"<one@example.test>").hexdigest()[:12], "body\n", "100", "200", "", r"\Inbox", hashlib.sha256(raw).hexdigest())
+        with tempfile.TemporaryDirectory() as tmp:
+            source_dir = Path(tmp) / "export"
+            uid_file = self.write_source_map(source_dir, record)
+            args = Args(uid_file=uid_file, yes=True)
+            args.task_id = SOURCE_815_TASK_ID
+            args.human_approved_exact_removal = True
+            self.assertEqual(2, cmd_trash_superseded(args))
+
+    def test_trash_superseded_human_approved_exact_removal_rejects_ordinary_provenance(self) -> None:
+        raw = self.raw_message("[worker:0] complete")
+        record = MailRecord("7", "date", "Agent <agent@example.test>", "Human <human@example.test>", "[worker:0] complete", hashlib.sha256(b"<one@example.test>").hexdigest()[:12], "body\n", "100", "200", "", r"\Inbox", hashlib.sha256(raw).hexdigest())
+        with tempfile.TemporaryDirectory() as tmp:
+            source_dir = Path(tmp) / "export"
+            uid_file = self.write_source_map(source_dir, record)
+            approval_file = self.write_human_approval(Path(tmp))
+            ordinary_file = Path(tmp) / "ordinary.txt"
+            ordinary_file.write_text("ordinary provenance\n", encoding="utf-8")
+            ordinary_file.chmod(0o600)
+            self.write_human_approval_scope(source_dir, [record], approval_file, provenance=str(ordinary_file.resolve()))
+            approval_sha256 = hashlib.sha256(approval_file.read_bytes()).hexdigest()
+            local_env = self.write_local_env_root(Path(tmp))
+            args = Args(uid_file=uid_file, yes=True)
+            args.task_id = SOURCE_815_TASK_ID
+            args.human_approved_exact_removal = True
+            args.human_approval_file = approval_file.resolve()
+            args.human_approval_quote = SOURCE_815_APPROVAL_QUOTE
+            with (
+                patch("omo_manager.omo_manager_mail_compress.LOCAL_ENV_PATH", local_env),
+                patch("omo_manager.omo_manager_mail_compress.SOURCE_815_APPROVAL_SHA256", approval_sha256),
+                patch("omo_manager.omo_manager_mail_compress.SOURCE_815_SOURCE_BINDING", self.source_815_test_binding(record)),
+            ):
+                self.assertEqual(2, cmd_trash_superseded(args))
+
+    def test_trash_superseded_human_approved_exact_removal_rejects_multiple_sources(self) -> None:
+        raw = self.raw_message("[worker:0] complete")
+        other_raw = self.raw_message("[worker:0] complete", "other").replace(b"<one@example.test>", b"<two@example.test>")
+        first = MailRecord("7", "date", "Agent <agent@example.test>", "Human <human@example.test>", "[worker:0] complete", hashlib.sha256(b"<one@example.test>").hexdigest()[:12], "body\n", "100", "200", "", r"\Inbox", hashlib.sha256(raw).hexdigest())
+        second = MailRecord("8", "date", "Agent <agent@example.test>", "Human <human@example.test>", "[worker:0] complete", hashlib.sha256(b"<two@example.test>").hexdigest()[:12], "other\n", "101", "200", "", r"\Inbox", hashlib.sha256(other_raw).hexdigest())
+        with tempfile.TemporaryDirectory() as tmp:
+            source_dir = Path(tmp) / "export"
+            uid_file = self.write_source_map(source_dir, first, [first, second])
+            uid_file.write_text("7\n8\n", encoding="utf-8")
+            approval_file = self.write_human_approval(Path(tmp))
+            self.write_human_approval_scope(source_dir, [first, second], approval_file)
+            args = Args(uid_file=uid_file, yes=True)
+            args.task_id = SOURCE_815_TASK_ID
+            args.human_approved_exact_removal = True
+            args.human_approval_file = approval_file.resolve()
+            args.human_approval_quote = SOURCE_815_APPROVAL_QUOTE
+            self.assertEqual(2, cmd_trash_superseded(args))
+
+    def test_trash_superseded_human_approved_exact_removal_rejects_replacement_id(self) -> None:
+        raw = self.raw_message("[worker:0] complete")
+        record = MailRecord("7", "date", "Agent <agent@example.test>", "Human <human@example.test>", "[worker:0] complete", hashlib.sha256(b"<one@example.test>").hexdigest()[:12], "body\n", "100", "200", "", r"\Inbox", hashlib.sha256(raw).hexdigest())
+        with tempfile.TemporaryDirectory() as tmp:
+            source_dir = Path(tmp) / "export"
+            uid_file = self.write_source_map(source_dir, record)
+            approval_file = self.write_human_approval(Path(tmp))
+            self.write_human_approval_scope(source_dir, [record], approval_file)
+            args = Args(uid_file=uid_file, yes=True)
+            args.task_id = SOURCE_815_TASK_ID
+            args.human_approved_exact_removal = True
+            args.human_approval_file = approval_file.resolve()
+            args.human_approval_quote = SOURCE_815_APPROVAL_QUOTE
+            args.replacement_id = "<replacement@example.test>"
+            args.replacement_not_required = False
+            self.assertEqual(2, cmd_trash_superseded(args))
+
+    def test_trash_superseded_human_approved_exact_removal_rejects_wrong_task_before_mailbox(self) -> None:
+        raw = self.raw_message("[worker:0] complete")
+        record = MailRecord("7", "date", "Agent <agent@example.test>", "Human <human@example.test>", "[worker:0] complete", hashlib.sha256(b"<one@example.test>").hexdigest()[:12], "body\n", "100", "200", "", r"\Inbox", hashlib.sha256(raw).hexdigest())
+        self.assert_human_approved_exact_removal_rejected_before_mailbox(record, task_id="other-task")
+
+    def test_trash_superseded_human_approved_exact_removal_rejects_wrong_quote_before_mailbox(self) -> None:
+        raw = self.raw_message("[worker:0] complete")
+        record = MailRecord("7", "date", "Agent <agent@example.test>", "Human <human@example.test>", "[worker:0] complete", hashlib.sha256(b"<one@example.test>").hexdigest()[:12], "body\n", "100", "200", "", r"\Inbox", hashlib.sha256(raw).hexdigest())
+        self.assert_human_approved_exact_removal_rejected_before_mailbox(record, quote="Move something else")
+
+    def test_trash_superseded_human_approved_exact_removal_rejects_wrong_hash_before_mailbox(self) -> None:
+        raw = self.raw_message("[worker:0] complete")
+        record = MailRecord("7", "date", "Agent <agent@example.test>", "Human <human@example.test>", "[worker:0] complete", hashlib.sha256(b"<one@example.test>").hexdigest()[:12], "body\n", "100", "200", "", r"\Inbox", hashlib.sha256(raw).hexdigest())
+        self.assert_human_approved_exact_removal_rejected_before_mailbox(record, approval_sha256="0" * 64)
+
+    def test_trash_superseded_human_approved_exact_removal_rejects_wrong_source_binding_before_mailbox(self) -> None:
+        raw = self.raw_message("[worker:0] complete")
+        record = MailRecord("7", "date", "Agent <agent@example.test>", "Human <human@example.test>", "[worker:0] complete", hashlib.sha256(b"<one@example.test>").hexdigest()[:12], "body\n", "100", "200", "", r"\Inbox", hashlib.sha256(raw).hexdigest())
+        wrong_bindings = {
+            "uid": f"8:{record.gmail_msgid}:{record.gmail_thrid}:{record.raw_sha256}",
+            "gmail_msgid": f"{record.uid}:101:{record.gmail_thrid}:{record.raw_sha256}",
+            "gmail_thrid": f"{record.uid}:{record.gmail_msgid}:201:{record.raw_sha256}",
+            "raw_sha256": f"{record.uid}:{record.gmail_msgid}:{record.gmail_thrid}:{'0' * 64}",
+        }
+        for field, source_binding in wrong_bindings.items():
+            with self.subTest(field=field):
+                self.assert_human_approved_exact_removal_rejected_before_mailbox(record, source_binding=source_binding)
+
+    def test_trash_superseded_human_approved_exact_removal_rejects_symlinked_manager_mail_root(self) -> None:
+        raw = self.raw_message("[worker:0] complete")
+        record = MailRecord("7", "date", "Agent <agent@example.test>", "Human <human@example.test>", "[worker:0] complete", hashlib.sha256(b"<one@example.test>").hexdigest()[:12], "body\n", "100", "200", "", r"\Inbox", hashlib.sha256(raw).hexdigest())
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "root"
+            root.mkdir()
+            actual = Path(tmp) / "actual_manager_mail"
+            actual.mkdir(mode=0o700)
+            (root / "manager_mail").symlink_to(actual, target_is_directory=True)
+            approval_file = actual / SOURCE_815_APPROVAL_FILE
+            approval_file.write_text(SOURCE_815_APPROVAL_QUOTE + "\n", encoding="utf-8")
+            approval_file.chmod(0o600)
+            source_dir = Path(tmp) / "export"
+            uid_file = self.write_source_map(source_dir, record)
+            self.write_human_approval_scope(source_dir, [record], approval_file)
+            local_env = self.write_local_env_root(root)
+            args = Args(uid_file=uid_file, yes=True)
+            args.task_id = SOURCE_815_TASK_ID
+            args.human_approved_exact_removal = True
+            args.human_approval_file = approval_file.resolve()
+            args.human_approval_quote = SOURCE_815_APPROVAL_QUOTE
+            with (
+                patch("omo_manager.omo_manager_mail_compress.LOCAL_ENV_PATH", local_env),
+                patch("omo_manager.omo_manager_mail_compress.SOURCE_815_APPROVAL_SHA256", hashlib.sha256(approval_file.read_bytes()).hexdigest()),
+                patch("omo_manager.omo_manager_mail_compress.SOURCE_815_SOURCE_BINDING", self.source_815_test_binding(record)),
+                patch("omo_manager.omo_manager_mail_compress.open_mailbox", side_effect=AssertionError("mailbox must not open")),
+            ):
+                self.assertEqual(2, cmd_trash_superseded(args))
+
+    def test_trash_superseded_human_approved_exact_removal_rejects_env_root_alias(self) -> None:
+        raw = self.raw_message("[worker:0] complete")
+        record = MailRecord("7", "date", "Agent <agent@example.test>", "Human <human@example.test>", "[worker:0] complete", hashlib.sha256(b"<one@example.test>").hexdigest()[:12], "body\n", "100", "200", "", r"\Inbox", hashlib.sha256(raw).hexdigest())
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "root"
+            alias = Path(tmp) / "alias"
+            root.mkdir()
+            alias.symlink_to(root, target_is_directory=True)
+            approval_file = self.write_human_approval(root)
+            source_dir = Path(tmp) / "export"
+            uid_file = self.write_source_map(source_dir, record)
+            self.write_human_approval_scope(source_dir, [record], approval_file)
+            local_env = self.write_local_env_root(alias)
+            args = Args(uid_file=uid_file, yes=True)
+            args.task_id = SOURCE_815_TASK_ID
+            args.human_approved_exact_removal = True
+            args.human_approval_file = approval_file.resolve()
+            args.human_approval_quote = SOURCE_815_APPROVAL_QUOTE
+            with (
+                patch("omo_manager.omo_manager_mail_compress.LOCAL_ENV_PATH", local_env),
+                patch("omo_manager.omo_manager_mail_compress.SOURCE_815_APPROVAL_SHA256", hashlib.sha256(approval_file.read_bytes()).hexdigest()),
+                patch("omo_manager.omo_manager_mail_compress.SOURCE_815_SOURCE_BINDING", self.source_815_test_binding(record)),
+                patch("omo_manager.omo_manager_mail_compress.open_mailbox", side_effect=AssertionError("mailbox must not open")),
+            ):
+                self.assertEqual(2, cmd_trash_superseded(args))
+
+    def test_trash_superseded_human_approved_exact_removal_ignores_env_root_override(self) -> None:
+        raw = self.raw_message("[worker:0] complete")
+        record = MailRecord("7", "date", "Agent <agent@example.test>", "Human <human@example.test>", "[worker:0] complete", hashlib.sha256(b"<one@example.test>").hexdigest()[:12], "body\n", "100", "200", "", r"\Inbox", hashlib.sha256(raw).hexdigest())
+        with tempfile.TemporaryDirectory() as tmp:
+            trusted_root = Path(tmp) / "trusted"
+            trusted_root.mkdir()
+            attacker_root = Path(tmp) / "attacker"
+            attacker_root.mkdir()
+            approval_file = self.write_human_approval(attacker_root)
+            source_dir = Path(tmp) / "export"
+            uid_file = self.write_source_map(source_dir, record)
+            self.write_human_approval_scope(source_dir, [record], approval_file)
+            local_env = self.write_local_env_root(trusted_root)
+            args = Args(uid_file=uid_file, yes=True)
+            args.task_id = SOURCE_815_TASK_ID
+            args.human_approved_exact_removal = True
+            args.human_approval_file = approval_file.resolve()
+            args.human_approval_quote = SOURCE_815_APPROVAL_QUOTE
+            with (
+                patch.dict(os.environ, {"OMO_WORK_LOGS_ROOT": str(attacker_root)}),
+                patch("omo_manager.omo_manager_mail_compress.LOCAL_ENV_PATH", local_env),
+                patch("omo_manager.omo_manager_mail_compress.SOURCE_815_APPROVAL_SHA256", hashlib.sha256(approval_file.read_bytes()).hexdigest()),
+                patch("omo_manager.omo_manager_mail_compress.SOURCE_815_SOURCE_BINDING", self.source_815_test_binding(record)),
+                patch("omo_manager.omo_manager_mail_compress.open_mailbox", side_effect=AssertionError("mailbox must not open")),
+            ):
+                self.assertEqual(2, cmd_trash_superseded(args))
+
+    def test_trash_superseded_human_approved_exact_removal_rejects_source_drift(self) -> None:
+        raw = self.raw_message("[worker:0] complete")
+        changed_raw = self.raw_message("[worker:0] changed")
+        record = MailRecord("7", "date", "Agent <agent@example.test>", "Human <human@example.test>", "[worker:0] complete", hashlib.sha256(b"<one@example.test>").hexdigest()[:12], "body\n", "100", "200", "", r"\Inbox", hashlib.sha256(raw).hexdigest())
+        client = FakeClient(
+            {
+                ("search", None, "UID", "7"): ("OK", [b"7"]),
+                ("fetch", "7", FULL_FETCH): ("OK", [(b"message", changed_raw)]),
+                ("fetch", "7", GMAIL_METADATA_FETCH): self.gmail_metadata("7"),
+            },
+            self.gmail_mailboxes(),
+        )
+
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            source_dir = Path(tmp) / "export"
+            uid_file = self.write_source_map(source_dir, record)
+            approval_file = self.write_human_approval(Path(tmp))
+            self.write_human_approval_scope(source_dir, [record], approval_file)
+            approval_sha256 = hashlib.sha256(approval_file.read_bytes()).hexdigest()
+            local_env = self.write_local_env_root(Path(tmp))
+            args = Args(uid_file=uid_file, yes=True)
+            args.task_id = SOURCE_815_TASK_ID
+            args.human_approved_exact_removal = True
+            args.human_approval_file = approval_file.resolve()
+            args.human_approval_quote = SOURCE_815_APPROVAL_QUOTE
+            with (
+                patch("omo_manager.omo_manager_mail_compress.LOCAL_ENV_PATH", local_env),
+                patch("omo_manager.omo_manager_mail_compress.SOURCE_815_APPROVAL_SHA256", approval_sha256),
+                patch("omo_manager.omo_manager_mail_compress.SOURCE_815_SOURCE_BINDING", self.source_815_test_binding(record)),
+                patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {"user": "human@example.test"})),
+                patch("omo_manager.omo_manager_mail_compress.configured_agent_mail", return_value=Settings()),
+                patch("omo_manager.omo_manager_mail_compress.reconciliation_thread_unchanged", side_effect=AssertionError("thread revalidation should be skipped")),
+            ):
+                self.assertEqual(1, cmd_trash_superseded(args))
+            self.assertFalse((source_dir / "outcomes" / "200.tsv").exists())
+        self.assertFalse(any(call[0].casefold() == "move" for call in client.uid_calls))
+
+    def test_trash_superseded_human_approved_exact_removal_rejects_failed_trash_verification(self) -> None:
+        raw = self.raw_message("[worker:0] complete")
+        record = MailRecord("7", "date", "Agent <agent@example.test>", "Human <human@example.test>", "[worker:0] complete", hashlib.sha256(b"<one@example.test>").hexdigest()[:12], "body\n", "100", "200", "", r"\Inbox", hashlib.sha256(raw).hexdigest())
+        client = FakeClient(
+            {
+                ("search", None, "UID", "7"): [("OK", [b"7"]), ("OK", [b"7"]), ("OK", [b"7"]), ("OK", [b""])],
+                ("fetch", "7", FULL_FETCH): [("OK", [(b"message", raw)]), ("OK", [(b"message", raw)])],
+                ("fetch", "7", GMAIL_METADATA_FETCH): [
+                    self.gmail_metadata("7"),
+                    self.gmail_metadata("7"),
+                ],
+                ("MOVE", "7", '"[Gmail]/Trash"'): ("OK", [b""]),
+                ("search", None, "X-GM-MSGID", "100"): ("OK", [b""]),
+            },
+            self.gmail_mailboxes(),
+        )
+
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            source_dir = Path(tmp) / "export"
+            uid_file = self.write_source_map(source_dir, record)
+            approval_file = self.write_human_approval(Path(tmp))
+            self.write_human_approval_scope(source_dir, [record], approval_file)
+            approval_sha256 = hashlib.sha256(approval_file.read_bytes()).hexdigest()
+            local_env = self.write_local_env_root(Path(tmp))
+            args = Args(uid_file=uid_file, yes=True)
+            args.task_id = SOURCE_815_TASK_ID
+            args.human_approved_exact_removal = True
+            args.human_approval_file = approval_file.resolve()
+            args.human_approval_quote = SOURCE_815_APPROVAL_QUOTE
+            with (
+                patch("omo_manager.omo_manager_mail_compress.LOCAL_ENV_PATH", local_env),
+                patch("omo_manager.omo_manager_mail_compress.SOURCE_815_APPROVAL_SHA256", approval_sha256),
+                patch("omo_manager.omo_manager_mail_compress.SOURCE_815_SOURCE_BINDING", self.source_815_test_binding(record)),
+                patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {"user": "human@example.test"})),
+                patch("omo_manager.omo_manager_mail_compress.configured_agent_mail", return_value=Settings()),
+                patch("omo_manager.omo_manager_mail_compress.reconciliation_thread_unchanged", side_effect=AssertionError("thread revalidation should be skipped")),
+            ):
+                self.assertEqual(1, cmd_trash_superseded(args))
+            self.assertFalse((source_dir / "outcomes" / "200.tsv").exists())
+        self.assertIn(("MOVE", "7", '"[Gmail]/Trash"'), client.uid_calls)
 
     def test_trash_superseded_all_already_trashed_still_rejects_changed_thread(self) -> None:
         raw = self.raw_message("[worker:0] complete")
