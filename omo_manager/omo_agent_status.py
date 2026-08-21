@@ -94,7 +94,7 @@ DIRECT_HUMAN_SHUTDOWN_PAUSE_RE = re.compile(
     re.IGNORECASE,
 )
 HUMAN_TOKEN_QUOTA_PAUSE_RE = re.compile(
-    r"\Ahuman token-quota pause from manager_mail/85c5dff58359-729\.txt: keep all VL paths closed until explicit resume\Z",
+    r"\Ahuman token-quota pause from 202607/manager_mail/85c5dff58359-729\.txt: keep all VL paths closed until explicit resume\Z",
 )
 TARGET_SESSION_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*):")
 LOOSE_TARGET_RE = re.compile(r"\b([a-z][A-Za-z0-9_-]*)\s+(\d+)\b")
@@ -562,7 +562,6 @@ def is_human_token_quota_pause(root: Path, task: TaskLine, state: TaskState) -> 
         or HUMAN_TOKEN_QUOTA_PAUSE_RE.fullmatch(state.reason) is None
         or not state.target
         or target_session(state.target).startswith("h")
-        or target_resolves_exactly(state.target)
     ):
         return False
     return resolve_task_path(root, task.task_file) is not None
@@ -1070,7 +1069,7 @@ def add_blocked_idle_vl_row(root: Path, task: TaskLine, role: str, rows: list[St
             return
         if is_direct_human_shutdown_pause(root, task, state) and idle_status in {"missing", "not_codex"} and " output=" not in classified.evidence:
             return
-        if is_human_token_quota_pause(root, task, state) and idle_status in {"missing", "not_codex"} and " output=" not in classified.evidence:
+        if is_human_token_quota_pause(root, task, state) and idle_status in {"missing", "not_codex"}:
             return
         quiet_dependency = blocked_dependencies_are_active(root, task, state) and idle_status == "ready"
         quiet_resumable = blocked_resumable_dependencies_are_active(root, task, state) and idle_status in {"missing", "not_codex"} and " output=" not in classified.evidence and not target_resolves_exactly(target)

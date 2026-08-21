@@ -2324,7 +2324,7 @@ resolved_task_items: []
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("low priority:\nvl_build_mgr.md vl_build_mgr:0\n", encoding="utf-8")
-            blocker = "human token-quota pause from manager_mail/85c5dff58359-729.txt: keep all VL paths closed until explicit resume"
+            blocker = "human token-quota pause from 202607/manager_mail/85c5dff58359-729.txt: keep all VL paths closed until explicit resume"
             _ = (root / "vl_build_mgr.md").write_text(
                 task_frontmatter("blocked", runat="vl_build_mgr:0", managerat="vlprograms:0", is_manager=True, blocked_on=blocker),
                 encoding="utf-8",
@@ -2334,37 +2334,37 @@ resolved_task_items: []
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             self.assertEqual("", out.getvalue())
 
-    def test_problems_only_retains_source_bound_human_token_quota_pause_with_visible_output(self) -> None:
+    def test_problems_only_skips_source_bound_human_token_quota_pause_with_visible_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("low priority:\nvl_build_mgr.md vl_build_mgr:0\n", encoding="utf-8")
-            blocker = "human token-quota pause from manager_mail/85c5dff58359-729.txt: keep all VL paths closed until explicit resume"
+            blocker = "human token-quota pause from 202607/manager_mail/85c5dff58359-729.txt: keep all VL paths closed until explicit resume"
             _ = (root / "vl_build_mgr.md").write_text(
                 task_frontmatter("blocked", runat="vl_build_mgr:0", managerat="vlprograms:0", is_manager=True, blocked_on=blocker),
                 encoding="utf-8",
             )
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("not_codex", ["shell prompt"])), patch("omo_manager.omo_agent_status.target_resolves_exactly", return_value=False), redirect_stdout(out):
-                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
-            self.assertIn("not_codex: task=vl_build_mgr.md", out.getvalue())
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertEqual("", out.getvalue())
 
-    def test_problems_only_retains_source_bound_human_token_quota_pause_with_live_target(self) -> None:
+    def test_problems_only_skips_source_bound_human_token_quota_pause_with_live_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("low priority:\nvl_build_mgr.md vl_build_mgr:0\n", encoding="utf-8")
-            blocker = "human token-quota pause from manager_mail/85c5dff58359-729.txt: keep all VL paths closed until explicit resume"
+            blocker = "human token-quota pause from 202607/manager_mail/85c5dff58359-729.txt: keep all VL paths closed until explicit resume"
             _ = (root / "vl_build_mgr.md").write_text(
                 task_frontmatter("blocked", runat="vl_build_mgr:0", managerat="vlprograms:0", is_manager=True, blocked_on=blocker),
                 encoding="utf-8",
             )
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("not_codex", [])), patch("omo_manager.omo_agent_status.target_resolves_exactly", return_value=True), redirect_stdout(out):
-                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
-            self.assertIn("not_codex: task=vl_build_mgr.md", out.getvalue())
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertEqual("", out.getvalue())
 
     def test_problems_only_retains_unbound_human_token_quota_pause(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2389,24 +2389,26 @@ resolved_task_items: []
 
     def test_problems_only_retains_out_of_scope_human_token_quota_pause(self) -> None:
         cases = (
-            ("current", "vl_build_mgr.md", "human token-quota pause from manager_mail/85c5dff58359-729.txt: keep all VL paths closed until explicit resume"),
-            ("human pending", "vl_build_mgr.md", "human token-quota pause from manager_mail/85c5dff58359-729.txt: keep all VL paths closed until explicit resume"),
-            ("low priority", "other_vl_mgr.md", "human token-quota pause from manager_mail/85c5dff58359-729.txt: keep all VL paths closed until explicit resume"),
-            ("low priority", "vl_build_mgr.md", "human token-quota pause from manager_mail/85c5dff58359-728.txt: keep all VL paths closed until explicit resume"),
-            ("low priority", "vl_build_mgr.md", "Human token-quota pause from manager_mail/85c5dff58359-729.txt: keep all VL paths closed until explicit resume"),
+            ("current", "vl_build_mgr.md", True, "human token-quota pause from 202607/manager_mail/85c5dff58359-729.txt: keep all VL paths closed until explicit resume"),
+            ("human pending", "vl_build_mgr.md", True, "human token-quota pause from 202607/manager_mail/85c5dff58359-729.txt: keep all VL paths closed until explicit resume"),
+            ("low priority", "other_vl_mgr.md", True, "human token-quota pause from 202607/manager_mail/85c5dff58359-729.txt: keep all VL paths closed until explicit resume"),
+            ("low priority", "vl_build_mgr.md", True, "human token-quota pause from 202607/manager_mail/85c5dff58359-728.txt: keep all VL paths closed until explicit resume"),
+            ("low priority", "vl_build_mgr.md", True, "Human token-quota pause from 202607/manager_mail/85c5dff58359-729.txt: keep all VL paths closed until explicit resume"),
+            ("low priority", "vl_build_mgr.md", True, "human token-quota pause from manager_mail/85c5dff58359-729.txt: keep all VL paths closed until explicit resume"),
+            ("low priority", "vl_build_mgr.md", False, "human token-quota pause from 202607/manager_mail/85c5dff58359-729.txt: keep all VL paths closed until explicit resume"),
         )
-        for section, task_file, blocker in cases:
-            with self.subTest(section=section, task_file=task_file, blocker=blocker), tempfile.TemporaryDirectory() as tmp:
+        for section, task_file, is_manager, blocker in cases:
+            with self.subTest(section=section, task_file=task_file, is_manager=is_manager, blocker=blocker), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 registry = root / "sessions.json"
                 _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
                 _ = (root / "TODO.md").write_text(f"{section}:\n{task_file} vl_build_mgr:0\n", encoding="utf-8")
                 _ = (root / task_file).write_text(
-                    task_frontmatter("blocked", runat="vl_build_mgr:0", managerat="vlprograms:0", is_manager=True, blocked_on=blocker),
+                    task_frontmatter("blocked", runat="vl_build_mgr:0", managerat="vlprograms:0", is_manager=is_manager, blocked_on=blocker),
                     encoding="utf-8",
                 )
                 out = StringIO()
-                with patch("omo_manager.omo_agent_status.inspect", return_value=Report("not_codex", ["shell prompt"])), redirect_stdout(out):
+                with patch("omo_manager.omo_agent_status.inspect", return_value=Report("not_codex", [])), patch("omo_manager.omo_agent_status.target_resolves_exactly", return_value=False), redirect_stdout(out):
                     self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
                 self.assertIn(f"not_codex: task={task_file}", out.getvalue())
 
@@ -2416,15 +2418,46 @@ resolved_task_items: []
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("low priority:\nvl_build_mgr.md hvl:1\n", encoding="utf-8")
-            blocker = "human token-quota pause from manager_mail/85c5dff58359-729.txt: keep all VL paths closed until explicit resume"
+            blocker = "human token-quota pause from 202607/manager_mail/85c5dff58359-729.txt: keep all VL paths closed until explicit resume"
             _ = (root / "vl_build_mgr.md").write_text(
                 task_frontmatter("blocked", runat="retired", managerat="vlprograms:0", is_manager=True, blocked_on=blocker),
                 encoding="utf-8",
             )
             out = StringIO()
-            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("not_codex", ["shell prompt"])), redirect_stdout(out):
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("not_codex", [])), redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             self.assertIn("not_codex: task=vl_build_mgr.md", out.getvalue())
+
+    def test_problems_only_retains_source_bound_quota_pause_with_human_frontmatter_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("low priority:\nvl_build_mgr.md vl_build_mgr:0\n", encoding="utf-8")
+            blocker = "human token-quota pause from 202607/manager_mail/85c5dff58359-729.txt: keep all VL paths closed until explicit resume"
+            _ = (root / "vl_build_mgr.md").write_text(
+                task_frontmatter("blocked", runat="hvl:1", managerat="vlprograms:0", is_manager=True, blocked_on=blocker),
+                encoding="utf-8",
+            )
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("not_codex", [])), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertIn("not_codex: task=vl_build_mgr.md", out.getvalue())
+
+    def test_problems_only_retains_running_vl_build_manager_alert(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("low priority:\nvl_build_mgr.md vl_build_mgr:0\n", encoding="utf-8")
+            _ = (root / "vl_build_mgr.md").write_text(
+                task_frontmatter("running", runat="vl_build_mgr:0", managerat="vlprograms:0", is_manager=True),
+                encoding="utf-8",
+            )
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("missing", [])), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertIn("missing: task=vl_build_mgr.md", out.getvalue())
 
     def test_problems_only_retains_incomplete_or_live_required_stopped_worker_evidence(self) -> None:
         cases = {
