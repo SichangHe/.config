@@ -18,7 +18,7 @@ AMH_AGENT_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,255}$")
 AMH_SUBJECT_TAG_RE = re.compile(r"^\s*(?:re:\s*)*\[([A-Za-z0-9._-]{1,128})\](?:\s+|$)", re.IGNORECASE)
 MAIN_MANAGER_AGENT_ID = "main-manager"
 MAIN_MANAGER_SUBJECT_TAG = "main"
-DEFAULT_MODEL = os.environ.get("OMO_AMH_CODEX_MODEL", "gpt-5.6-terra")
+DEFAULT_MODEL = os.environ.get("OMO_AMH_CODEX_MODEL", "gpt-5.5")
 DEFAULT_REASONING_EFFORT = os.environ.get("OMO_AMH_CODEX_REASONING_EFFORT", "low")
 DEFAULT_TMUX_SESSION = os.environ.get("OMO_AMH_TMUX_SESSION", "amh")
 DEFAULT_WORKDIR = Path(os.environ.get("OMO_AMH_WORKDIR", "/ssd1/sichangheagent/amh"))
@@ -39,6 +39,15 @@ class RouteStatus:
     exact_subject: str
     exact_payload: bytes
     payload_sha256: str
+    agent_spec: dict[str, object] | None
+
+    @property
+    def amh_runner_agent(self) -> str:
+        return self.destination_agent_id
+
+    @property
+    def amh_caller(self) -> str:
+        return f"agent:{self.amh_runner_agent}"
 
 
 def route_id_from_operation(operation_id: str) -> str:
@@ -109,6 +118,7 @@ def load_route_status(amh_executable: Path, runtime_root: Path, route_id: str) -
         raise RuntimeError("AMH route exact payload is not valid base64") from exc
     if hashlib.sha256(exact_payload).hexdigest() != payload_sha256:
         raise RuntimeError("AMH route exact payload digest mismatch")
+    agent_spec = require_optional_object(route, "agent_spec")
     return RouteStatus(
         route_id=route_id,
         operation_id=operation_id,
@@ -123,6 +133,7 @@ def load_route_status(amh_executable: Path, runtime_root: Path, route_id: str) -
         exact_subject=exact_subject,
         exact_payload=exact_payload,
         payload_sha256=payload_sha256,
+        agent_spec=agent_spec,
     )
 
 
@@ -141,6 +152,17 @@ def require_object(value: object, key: str) -> dict[str, object]:
     result = value.get(key)
     if not isinstance(result, dict):
         raise RuntimeError(f"AMH route field {key} is required")
+    return result
+
+
+def require_optional_object(value: object, key: str) -> dict[str, object] | None:
+    if not isinstance(value, dict):
+        raise RuntimeError("AMH route is not an object")
+    if key not in value:
+        return None
+    result = value[key]
+    if not isinstance(result, dict):
+        raise RuntimeError(f"AMH route field {key} must be an object")
     return result
 
 
@@ -184,6 +206,9 @@ def write_prompt(path: Path, route: RouteStatus) -> None:
     except UnicodeDecodeError:
         request_block = "The Human request is not valid UTF-8. Use the authoritative base64 payload below."
     reply_subject = sentinel_safe_json_text(f"Re: {route.exact_subject}")
+    agent_spec_line = ""
+    if route.agent_spec is not None:
+        agent_spec_line = "\nAMH agent spec JSON: " + json.dumps(route.agent_spec, ensure_ascii=False, sort_keys=True, separators=(",", ":")).replace("<", "\\u003c")
     text = "".join(
         [
             "You are an AMH-owned Codex worker for one explicitly AMH-routed Human email.\n\nAMH route id: ",
@@ -194,6 +219,10 @@ def write_prompt(path: Path, route: RouteStatus) -> None:
             route.source_id,
             "\nAMH responsible agent id: ",
             route.destination_agent_id,
+            "\nAMH runner agent id: ",
+            route.amh_runner_agent,
+            "\nAMH caller: ",
+            route.amh_caller,
             "\nAMH provider: ",
             sentinel_safe_json_text(route.provider),
             "\nAMH provider account id: ",
@@ -210,6 +239,7 @@ def write_prompt(path: Path, route: RouteStatus) -> None:
             str(len(route.exact_payload)),
             "\nAMH exact payload sha256: ",
             route.payload_sha256,
+            agent_spec_line,
             "\nAMH exact payload base64: ",
             exact_payload_base64,
             "\n\nHandle exactly the Human request represented by those exact payload bytes. When you need to reply to the Human, use the current direct email practice: write a one-line subject file containing exactly ",
@@ -227,6 +257,10 @@ def write_prompt(path: Path, route: RouteStatus) -> None:
 
 def receipt_path(state_dir: Path, route_id: str) -> Path:
     return state_dir / "amh-route-launches" / route_id / "launch-receipt.json"
+
+
+def binding_path(state_dir: Path, route_id: str) -> Path:
+    return state_dir / "amh-route-launches" / route_id / "lifecycle-binding.json"
 
 
 def launch_lock_path(state_dir: Path, route_id: str) -> Path:
@@ -248,24 +282,115 @@ def prompt_path(state_dir: Path, route_id: str) -> Path:
     return state_dir / "amh-route-launches" / route_id / "prompt.md"
 
 
+def binding_payload(route: RouteStatus, prompt_sha256: str) -> dict[str, object]:
+    return {
+        "schema": "omo-amh-lifecycle-binding/v1",
+        "route_id": route.route_id,
+        "operation_id": route.operation_id,
+        "source_id": route.source_id,
+        "request_id": route.request_id,
+        "destination_agent_id": route.destination_agent_id,
+        "amh_runner_agent": route.amh_runner_agent,
+        "amh_caller": route.amh_caller,
+        "prompt_sha256": prompt_sha256,
+        **({"agent_spec": route.agent_spec} if route.agent_spec is not None else {}),
+    }
+
+
+def valid_binding_payload(payload: object, route_id: str, operation_id: str, prompt_sha256: str) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    runner = payload.get("amh_runner_agent")
+    return (
+        payload.get("schema") == "omo-amh-lifecycle-binding/v1"
+        and payload.get("route_id") == route_id
+        and payload.get("operation_id") == operation_id
+        and isinstance(payload.get("source_id"), str)
+        and bool(payload.get("source_id"))
+        and isinstance(payload.get("request_id"), str)
+        and bool(payload.get("request_id"))
+        and isinstance(runner, str)
+        and AMH_AGENT_ID_RE.fullmatch(runner) is not None
+        and payload.get("destination_agent_id") == runner
+        and payload.get("amh_caller") == f"agent:{runner}"
+        and payload.get("prompt_sha256") == prompt_sha256
+        and ("agent_spec" not in payload or isinstance(payload.get("agent_spec"), dict))
+    )
+
+
+def write_binding(path: Path, route: RouteStatus, prompt_sha256: str) -> None:
+    payload = binding_payload(route, prompt_sha256)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix="lifecycle-binding-", suffix=".json", dir=path.parent)
+    try:
+        os.chmod(tmp_name, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
+            handle.write("\n")
+        os.replace(tmp_name, path)
+    except Exception:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
+
+
+def load_valid_binding_payload(path: Path, route_id: str, operation_id: str, prompt_sha256: str) -> dict[str, object] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not valid_binding_payload(payload, route_id, operation_id, prompt_sha256):
+        return None
+    assert isinstance(payload, dict)
+    return payload
+
+
+def valid_binding_file(path: Path, route_id: str, operation_id: str, prompt_sha256: str) -> bool:
+    return load_valid_binding_payload(path, route_id, operation_id, prompt_sha256) is not None
+
+
+def receipt_matches_binding(payload: dict[str, object], binding_payload: dict[str, object]) -> bool:
+    if payload.get("source_id") != binding_payload.get("source_id") or payload.get("request_id") != binding_payload.get("request_id"):
+        return False
+    if payload.get("destination_agent_id") != binding_payload.get("destination_agent_id"):
+        return False
+    if payload.get("amh_runner_agent") != binding_payload.get("amh_runner_agent") or payload.get("amh_caller") != binding_payload.get("amh_caller"):
+        return False
+    return payload.get("agent_spec") == binding_payload.get("agent_spec")
+
+
 def completed_receipt_is_valid(path: Path, state_dir: Path, root: Path, route_id: str, operation_id: str) -> bool:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict):
         return False
     expected_task_file = f"amh_{safe_task_suffix(route_id)}.md"
     prompt = prompt_path(state_dir, route_id)
     if not prompt.is_file() or not (root / expected_task_file).is_file():
         return False
     prompt_sha256 = hashlib.sha256(prompt.read_bytes()).hexdigest()
+    binding = binding_path(state_dir, route_id)
+    binding_data = load_valid_binding_payload(binding, route_id, operation_id, prompt_sha256)
+    if binding_data is None:
+        return False
+    try:
+        binding_sha256 = hashlib.sha256(binding.read_bytes()).hexdigest()
+    except OSError:
+        return False
+    runner = payload.get("amh_runner_agent")
     return (
-        isinstance(payload, dict)
-        and payload.get("schema") == "omo-amh-route-launch/v1"
+        payload.get("schema") == "omo-amh-route-launch/v1"
         and payload.get("status") == "launched"
         and payload.get("route_id") == route_id
         and payload.get("operation_id") == operation_id
+        and receipt_matches_binding(payload, binding_data)
         and isinstance(payload.get("destination_agent_id"), str)
         and AMH_AGENT_ID_RE.fullmatch(payload.get("destination_agent_id") or "") is not None
+        and isinstance(runner, str)
+        and AMH_AGENT_ID_RE.fullmatch(runner) is not None
+        and payload.get("destination_agent_id") == runner
+        and payload.get("amh_caller") == f"agent:{runner}"
         and payload.get("provider") == "gmail"
         and isinstance(payload.get("account_id"), str)
         and bool(payload.get("account_id"))
@@ -279,6 +404,7 @@ def completed_receipt_is_valid(path: Path, state_dir: Path, root: Path, route_id
         and bool(payload.get("exact_subject"))
         and payload.get("task_file") == expected_task_file
         and payload.get("prompt_sha256") == prompt_sha256
+        and payload.get("binding_sha256") == binding_sha256
     )
 
 
@@ -314,6 +440,11 @@ def launch_route(args: argparse.Namespace) -> int:
             raise RuntimeError("AMH tmux session must already exist")
         prompt = prompt_path(args.state_dir, route_id)
         write_prompt(prompt, route)
+        prompt_sha256 = hashlib.sha256(prompt.read_bytes()).hexdigest()
+        binding = binding_path(args.state_dir, route_id)
+        write_binding(binding, route, prompt_sha256)
+        if not valid_binding_file(binding, route_id, args.operation_id, prompt_sha256):
+            raise RuntimeError("AMH lifecycle binding evidence is invalid")
         task_file = f"amh_{safe_task_suffix(route_id)}.md"
         window_name = Path(task_file).stem
         command = [
@@ -340,7 +471,7 @@ def launch_route(args: argparse.Namespace) -> int:
             "--manager-target",
             args.manager_target,
             "--amh-caller-agent",
-            route.destination_agent_id,
+            route.amh_runner_agent,
             "--require-existing-tmux-session",
         ]
         if args.dry_run:
@@ -366,6 +497,8 @@ def launch_route(args: argparse.Namespace) -> int:
             "source_id": route.source_id,
             "request_id": route.request_id,
             "destination_agent_id": route.destination_agent_id,
+            "amh_runner_agent": route.amh_runner_agent,
+            "amh_caller": route.amh_caller,
             "provider": route.provider,
             "account_id": route.account_id,
             "sender_identity": route.sender_identity,
@@ -375,7 +508,9 @@ def launch_route(args: argparse.Namespace) -> int:
             "task_file": task_file,
             "tmux_session": args.tmux_session,
             "workdir": os.fspath(args.workdir),
-            "prompt_sha256": hashlib.sha256(prompt.read_bytes()).hexdigest(),
+            "prompt_sha256": prompt_sha256,
+            "binding_sha256": hashlib.sha256(binding.read_bytes()).hexdigest(),
+            **({"agent_spec": route.agent_spec} if route.agent_spec is not None else {}),
             "omo_task_stdout": result.stdout,
         }
         fd, tmp_name = tempfile.mkstemp(prefix="launch-receipt-", suffix=".json", dir=receipt.parent)

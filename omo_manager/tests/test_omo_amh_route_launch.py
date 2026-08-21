@@ -28,6 +28,32 @@ class AmhRouteLaunchTests(unittest.TestCase):
             "exact_subject": "[pb] AMH route",
         }
 
+    def write_binding(
+        self,
+        state: Path,
+        route_id: str,
+        operation_id: str,
+        prompt: Path,
+        *,
+        agent_spec: dict[str, object] | None = None,
+    ) -> str:
+        binding = launcher.binding_path(state, route_id)
+        binding.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "schema": "omo-amh-lifecycle-binding/v1",
+            "route_id": route_id,
+            "operation_id": operation_id,
+            "source_id": "source-1",
+            "request_id": "request-1",
+            "destination_agent_id": "pb",
+            "amh_runner_agent": "pb",
+            "amh_caller": "agent:pb",
+            "prompt_sha256": hashlib.sha256(prompt.read_bytes()).hexdigest(),
+            **({"agent_spec": agent_spec} if agent_spec is not None else {}),
+        }
+        binding.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+        return hashlib.sha256(binding.read_bytes()).hexdigest()
+
     def test_launch_validates_ready_route_and_invokes_configured_omo_task(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "work_logs"
@@ -63,6 +89,7 @@ class AmhRouteLaunchTests(unittest.TestCase):
                                     "source_id": "source-1",
                                     "request_id": "request-1",
                                     "destination_agent_id": "pb",
+                                    "agent_spec": {"kind": "mail-worker", "stable": True},
                                     "source_metadata": self.source_metadata(),
                                     "exact_payload": base64.b64encode(payload).decode(),
                                     "payload_sha256": hashlib.sha256(payload).hexdigest(),
@@ -107,12 +134,15 @@ class AmhRouteLaunchTests(unittest.TestCase):
             self.assertEqual("pb", omo_task[omo_task.index("--amh-caller-agent") + 1])
             self.assertIn("--require-existing-tmux-session", omo_task)
             self.assertNotIn("--is-manager", omo_task)
-            self.assertEqual("gpt-5.6-terra", omo_task[omo_task.index("--model") + 1])
+            self.assertEqual("gpt-5.5", omo_task[omo_task.index("--model") + 1])
             self.assertEqual("low", omo_task[omo_task.index("--reasoning-effort") + 1])
             prompt = launcher.prompt_path(state, route_id)
             self.assertEqual(0o600, prompt.stat().st_mode & 0o777)
             prompt_text = prompt.read_text(encoding="utf-8")
             self.assertIn('AMH provider: "gmail"', prompt_text)
+            self.assertIn("AMH runner agent id: pb", prompt_text)
+            self.assertIn("AMH caller: agent:pb", prompt_text)
+            self.assertIn('AMH agent spec JSON: {"kind":"mail-worker","stable":true}', prompt_text)
             self.assertIn('AMH provider thread id: "thread-1"', prompt_text)
             self.assertIn('AMH original email subject JSON string: "[pb] AMH route"', prompt_text)
             self.assertIn('subject file containing exactly "Re: [pb] AMH route"', prompt_text)
@@ -123,8 +153,14 @@ class AmhRouteLaunchTests(unittest.TestCase):
             self.assertEqual(route_id, receipt["route_id"])
             self.assertEqual("launched", receipt["status"])
             self.assertEqual("pb", receipt["destination_agent_id"])
+            self.assertEqual("pb", receipt["amh_runner_agent"])
+            self.assertEqual("agent:pb", receipt["amh_caller"])
+            self.assertEqual({"kind": "mail-worker", "stable": True}, receipt["agent_spec"])
             self.assertEqual("human@example.test", receipt["sender_identity"])
             self.assertEqual("thread-1", receipt["provider_thread_id"])
+            binding = json.loads(launcher.binding_path(state, route_id).read_text(encoding="utf-8"))
+            self.assertEqual("pb", binding["amh_runner_agent"])
+            self.assertEqual("agent:pb", binding["amh_caller"])
 
     def test_existing_receipt_is_idempotent_and_does_not_relaunch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -137,6 +173,7 @@ class AmhRouteLaunchTests(unittest.TestCase):
             root.mkdir()
             task_file = root / f"amh_{launcher.safe_task_suffix(route_id)}.md"
             task_file.write_text("task\n", encoding="utf-8")
+            binding_sha256 = self.write_binding(state, route_id, "op-replay", prompt)
             receipt = launcher.receipt_path(state, route_id)
             receipt.write_text(
                 json.dumps(
@@ -145,7 +182,11 @@ class AmhRouteLaunchTests(unittest.TestCase):
                         "status": "launched",
                         "route_id": route_id,
                         "operation_id": "op-replay",
+                        "source_id": "source-1",
+                        "request_id": "request-1",
                         "destination_agent_id": "pb",
+                        "amh_runner_agent": "pb",
+                        "amh_caller": "agent:pb",
                         "provider": "gmail",
                         "account_id": "agent@example.test",
                         "sender_identity": "human@example.test",
@@ -154,6 +195,7 @@ class AmhRouteLaunchTests(unittest.TestCase):
                         "exact_subject": "[pb] AMH route",
                         "task_file": f"amh_{launcher.safe_task_suffix(route_id)}.md",
                         "prompt_sha256": hashlib.sha256(prompt.read_bytes()).hexdigest(),
+                        "binding_sha256": binding_sha256,
                     }
                 )
                 + "\n",
@@ -196,6 +238,7 @@ class AmhRouteLaunchTests(unittest.TestCase):
                 prompt.parent.mkdir(parents=True, exist_ok=True)
                 prompt.write_text("prompt\n", encoding="utf-8")
                 task_file.write_text("task\n", encoding="utf-8")
+                binding_sha256 = self.write_binding(state, route_id, operation_id, prompt)
                 receipt.write_text(
                     json.dumps(
                         {
@@ -203,7 +246,11 @@ class AmhRouteLaunchTests(unittest.TestCase):
                             "status": "launched",
                             "route_id": route_id,
                             "operation_id": operation_id,
+                            "source_id": "source-1",
+                            "request_id": "request-1",
                             "destination_agent_id": "pb",
+                            "amh_runner_agent": "pb",
+                            "amh_caller": "agent:pb",
                             "provider": "gmail",
                             "account_id": "agent@example.test",
                             "sender_identity": "human@example.test",
@@ -212,6 +259,7 @@ class AmhRouteLaunchTests(unittest.TestCase):
                             "exact_subject": "[pb] AMH route",
                             "task_file": f"amh_{launcher.safe_task_suffix(route_id)}.md",
                             "prompt_sha256": hashlib.sha256(prompt.read_bytes()).hexdigest(),
+                            "binding_sha256": binding_sha256,
                         }
                     )
                     + "\n",
@@ -262,6 +310,92 @@ class AmhRouteLaunchTests(unittest.TestCase):
                     str(Path(tmp) / "runtime"),
                     "--operation-id",
                     "op-invalid-receipt",
+                    "--manager-target",
+                    "amhrev:0",
+                ]
+            )
+            with patch.object(subprocess, "run", side_effect=AssertionError("must not relaunch")):
+                with self.assertRaisesRegex(RuntimeError, "invalid or incomplete"):
+                    launcher.launch_route(args)
+
+    def test_non_object_existing_receipt_refuses_before_relaunch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "state"
+            route_id = launcher.route_id_from_operation("op-non-object-receipt")
+            receipt = launcher.receipt_path(state, route_id)
+            receipt.parent.mkdir(parents=True)
+            receipt.write_text("[]\n", encoding="utf-8")
+            args = launcher.parser().parse_args(
+                [
+                    "--root",
+                    str(Path(tmp) / "work_logs"),
+                    "--state-dir",
+                    str(state),
+                    "--amh-executable",
+                    str(Path(tmp) / "amh"),
+                    "--amh-runtime-root",
+                    str(Path(tmp) / "runtime"),
+                    "--operation-id",
+                    "op-non-object-receipt",
+                    "--manager-target",
+                    "amhrev:0",
+                ]
+            )
+            with patch.object(subprocess, "run", side_effect=AssertionError("must not relaunch")):
+                with self.assertRaisesRegex(RuntimeError, "invalid or incomplete"):
+                    launcher.launch_route(args)
+
+    def test_existing_receipt_must_match_lifecycle_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "state"
+            route_id = launcher.route_id_from_operation("op-binding-mismatch")
+            prompt = launcher.prompt_path(state, route_id)
+            prompt.parent.mkdir(parents=True)
+            prompt.write_text("prompt\n", encoding="utf-8")
+            root = Path(tmp) / "work_logs"
+            root.mkdir()
+            task_file = root / f"amh_{launcher.safe_task_suffix(route_id)}.md"
+            task_file.write_text("task\n", encoding="utf-8")
+            binding_sha256 = self.write_binding(state, route_id, "op-binding-mismatch", prompt)
+            receipt = launcher.receipt_path(state, route_id)
+            receipt.write_text(
+                json.dumps(
+                    {
+                        "schema": "omo-amh-route-launch/v1",
+                        "status": "launched",
+                        "route_id": route_id,
+                        "operation_id": "op-binding-mismatch",
+                        "source_id": "source-1",
+                        "request_id": "request-1",
+                        "destination_agent_id": "other",
+                        "amh_runner_agent": "other",
+                        "amh_caller": "agent:other",
+                        "provider": "gmail",
+                        "account_id": "agent@example.test",
+                        "sender_identity": "human@example.test",
+                        "provider_message_id": "message-1",
+                        "provider_thread_id": "thread-1",
+                        "exact_subject": "[pb] AMH route",
+                        "task_file": f"amh_{launcher.safe_task_suffix(route_id)}.md",
+                        "prompt_sha256": hashlib.sha256(prompt.read_bytes()).hexdigest(),
+                        "binding_sha256": binding_sha256,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            args = launcher.parser().parse_args(
+                [
+                    "--root",
+                    str(root),
+                    "--state-dir",
+                    str(state),
+                    "--amh-executable",
+                    str(Path(tmp) / "amh"),
+                    "--amh-runtime-root",
+                    str(Path(tmp) / "runtime"),
+                    "--operation-id",
+                    "op-binding-mismatch",
                     "--manager-target",
                     "amhrev:0",
                 ]
@@ -711,6 +845,7 @@ class AmhRouteLaunchTests(unittest.TestCase):
                 exact_subject="[pb] AMH route",
                 exact_payload=payload,
                 payload_sha256=hashlib.sha256(payload).hexdigest(),
+                agent_spec=None,
             )
             prompt = Path(tmp) / "prompt.md"
             launcher.write_prompt(prompt, route)
@@ -735,6 +870,7 @@ class AmhRouteLaunchTests(unittest.TestCase):
                 exact_subject="[pb] AMH route",
                 exact_payload=payload,
                 payload_sha256=hashlib.sha256(payload).hexdigest(),
+                agent_spec=None,
             )
             prompt = Path(tmp) / "prompt.md"
             launcher.write_prompt(prompt, route)
