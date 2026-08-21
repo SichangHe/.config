@@ -2318,20 +2318,19 @@ resolved_task_items: []
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             self.assertIn("not_codex: task=cpt_strategy.md", out.getvalue())
 
-    def test_problems_only_skips_source_bound_human_token_quota_pause_under_previous(self) -> None:
+    def test_problems_only_skips_source_bound_human_token_quota_pause_under_low_priority(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
-            _ = (root / "TODO.md").write_text("previous:\nvl_rebuild_mgr.md wl:30\n", encoding="utf-8")
+            _ = (root / "TODO.md").write_text("low priority:\nvl_build_mgr.md vl_build_mgr:0\n", encoding="utf-8")
             blocker = "human token-quota pause from manager_mail/85c5dff58359-729.txt: keep all VL paths closed until explicit resume"
-            _ = (root / "vl_rebuild_mgr.md").write_text(
-                task_frontmatter("blocked", runat="wl:30", managerat="wl:18", is_manager=True, blocked_on=blocker, pending_items=("Preserve this queue until explicit resume.",))
-                + "(manager closed Codex agent after human shutdown; tmux target `wl:30`.)\n",
+            _ = (root / "vl_build_mgr.md").write_text(
+                task_frontmatter("blocked", runat="vl_build_mgr:0", managerat="vlprograms:0", is_manager=True, blocked_on=blocker),
                 encoding="utf-8",
             )
             out = StringIO()
-            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("missing", [])), patch("omo_manager.omo_agent_status.target_resolves_exactly", return_value=False), redirect_stdout(out):
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("not_codex", ["shell prompt"])), redirect_stdout(out):
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             self.assertEqual("", out.getvalue())
 
@@ -2340,46 +2339,43 @@ resolved_task_items: []
             root = Path(tmp)
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
-            _ = (root / "TODO.md").write_text("previous:\nvl_rebuild_mgr.md wl:30\n", encoding="utf-8")
-            _ = (root / "vl_rebuild_mgr.md").write_text(
+            _ = (root / "TODO.md").write_text("low priority:\nvl_build_mgr.md vl_build_mgr:0\n", encoding="utf-8")
+            _ = (root / "vl_build_mgr.md").write_text(
                 task_frontmatter(
                     "blocked",
-                    runat="wl:30",
-                    managerat="wl:18",
+                    runat="vl_build_mgr:0",
+                    managerat="vlprograms:0",
                     is_manager=True,
                     blocked_on="human token-quota pause: keep all VL paths closed until explicit resume",
-                    pending_items=("Preserve this queue until explicit resume.",),
-                )
-                + "(manager closed Codex agent after human shutdown; tmux target `wl:30`.)\n",
+                ),
                 encoding="utf-8",
             )
             out = StringIO()
-            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("missing", [])), redirect_stdout(out):
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("not_codex", ["shell prompt"])), redirect_stdout(out):
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
-            self.assertIn("missing: task=vl_rebuild_mgr.md", out.getvalue())
+            self.assertIn("not_codex: task=vl_build_mgr.md", out.getvalue())
 
     def test_problems_only_retains_out_of_scope_human_token_quota_pause(self) -> None:
         cases = (
-            ("current", "vl_rebuild_mgr.md", "human token-quota pause from manager_mail/85c5dff58359-729.txt: keep all VL paths closed until explicit resume"),
-            ("human pending", "vl_rebuild_mgr.md", "human token-quota pause from manager_mail/85c5dff58359-729.txt: keep all VL paths closed until explicit resume"),
-            ("previous", "other_vl_mgr.md", "human token-quota pause from manager_mail/85c5dff58359-729.txt: keep all VL paths closed until explicit resume"),
-            ("previous", "vl_rebuild_mgr.md", "human token-quota pause from manager_mail/85c5dff58359-728.txt: keep all VL paths closed until explicit resume"),
+            ("current", "vl_build_mgr.md", "human token-quota pause from manager_mail/85c5dff58359-729.txt: keep all VL paths closed until explicit resume"),
+            ("human pending", "vl_build_mgr.md", "human token-quota pause from manager_mail/85c5dff58359-729.txt: keep all VL paths closed until explicit resume"),
+            ("low priority", "other_vl_mgr.md", "human token-quota pause from manager_mail/85c5dff58359-729.txt: keep all VL paths closed until explicit resume"),
+            ("low priority", "vl_build_mgr.md", "human token-quota pause from manager_mail/85c5dff58359-728.txt: keep all VL paths closed until explicit resume"),
         )
         for section, task_file, blocker in cases:
             with self.subTest(section=section, task_file=task_file, blocker=blocker), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 registry = root / "sessions.json"
                 _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
-                _ = (root / "TODO.md").write_text(f"{section}:\n{task_file} wl:30\n", encoding="utf-8")
+                _ = (root / "TODO.md").write_text(f"{section}:\n{task_file} vl_build_mgr:0\n", encoding="utf-8")
                 _ = (root / task_file).write_text(
-                    task_frontmatter("blocked", runat="wl:30", managerat="wl:18", is_manager=True, blocked_on=blocker, pending_items=("Preserve this queue until explicit resume.",))
-                    + "(manager closed Codex agent after human shutdown; tmux target `wl:30`.)\n",
+                    task_frontmatter("blocked", runat="vl_build_mgr:0", managerat="vlprograms:0", is_manager=True, blocked_on=blocker),
                     encoding="utf-8",
                 )
                 out = StringIO()
-                with patch("omo_manager.omo_agent_status.inspect", return_value=Report("missing", [])), patch("omo_manager.omo_agent_status.target_resolves_exactly", return_value=False), redirect_stdout(out):
+                with patch("omo_manager.omo_agent_status.inspect", return_value=Report("not_codex", ["shell prompt"])), redirect_stdout(out):
                     self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
-                self.assertIn(f"missing: task={task_file}", out.getvalue())
+                self.assertIn(f"not_codex: task={task_file}", out.getvalue())
 
     def test_problems_only_retains_incomplete_or_live_required_stopped_worker_evidence(self) -> None:
         cases = {

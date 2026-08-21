@@ -553,20 +553,18 @@ def is_direct_human_shutdown_pause(root: Path, task: TaskLine, state: TaskState)
 
 
 def is_human_token_quota_pause(root: Path, task: TaskLine, state: TaskState) -> bool:
-    """Return whether a source-bound VL quota pause preserves a closed manager."""
+    """Return whether a source-bound VL quota pause preserves a parked manager."""
 
     if (
         state.status != "blocked"
-        or task.task_file != "vl_rebuild_mgr.md"
-        or task.section != "todo:previous"
+        or task.task_file != "vl_build_mgr.md"
+        or task.section != "todo:low priority"
         or not state.is_manager
         or HUMAN_TOKEN_QUOTA_PAUSE_RE.fullmatch(state.reason) is None
         or target_session(state.target).startswith("h")
-        or target_resolves_exactly(state.target)
     ):
         return False
-    task_path = resolve_task_path(root, task.task_file)
-    return task_path is not None and has_closed_codex_evidence(task_path, state.target)
+    return resolve_task_path(root, task.task_file) is not None
 
 
 def canonical_target(target: str) -> str:
@@ -1071,7 +1069,7 @@ def add_blocked_idle_vl_row(root: Path, task: TaskLine, role: str, rows: list[St
             return
         if is_direct_human_shutdown_pause(root, task, state) and idle_status in {"missing", "not_codex"} and " output=" not in classified.evidence:
             return
-        if is_human_token_quota_pause(root, task, state) and idle_status in {"missing", "not_codex"} and " output=" not in classified.evidence:
+        if is_human_token_quota_pause(root, task, state) and idle_status in {"missing", "not_codex"}:
             return
         quiet_dependency = blocked_dependencies_are_active(root, task, state) and idle_status == "ready"
         quiet_resumable = blocked_resumable_dependencies_are_active(root, task, state) and idle_status in {"missing", "not_codex"} and " output=" not in classified.evidence and not target_resolves_exactly(target)
