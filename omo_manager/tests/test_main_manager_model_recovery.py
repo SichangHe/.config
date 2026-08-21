@@ -124,23 +124,31 @@ class MainManagerModelRecoveryTests(unittest.TestCase):
                 ]
             )
             self.assertEqual("gpt-5.6-terra", parsed.model)
-            with redirect_stderr(StringIO()), self.assertRaises(SystemExit):
-                parse_args(
-                    [
-                        "--root",
-                        str(root),
-                        "--model",
-                        FAILED_MODEL,
-                        "--authority-file",
-                        "manager_mail/authority.txt",
-                        "--authority-lines",
-                        "3-3",
-                        "--authority-envelope",
-                        str(root / "authority-envelope.md"),
-                        "--handoff-output",
-                        str(root / "state" / "handoff.txt"),
-                    ]
-                )
+            for rejected in (FAILED_MODEL, "gpt-5.6"):
+                with self.subTest(rejected=rejected), redirect_stderr(StringIO()), self.assertRaises(SystemExit):
+                    parse_args(
+                        [
+                            "--root",
+                            str(root),
+                            "--model",
+                            rejected,
+                            "--authority-file",
+                            "manager_mail/authority.txt",
+                            "--authority-lines",
+                            "3-3",
+                            "--authority-envelope",
+                            str(root / "authority-envelope.md"),
+                            "--handoff-output",
+                            str(root / "state" / "handoff.txt"),
+                        ]
+                    )
+
+    def test_recover_rejects_programmatic_bare_gpt_5_6_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = replace(self.args(root), model="gpt-5.6")
+            with self.assertRaisesRegex(RecoveryError, "use gpt-5.6-sol, gpt-5.6-terra, or gpt-5.6-luna"):
+                recover(args)
 
     def test_authority_requires_one_exact_human_instruction_envelope(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

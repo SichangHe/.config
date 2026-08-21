@@ -156,6 +156,8 @@ def parse_args(argv: list[str]) -> Args:
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     if MODEL_RE.fullmatch(parsed.model) is None:
         parser.error("--model contains unsupported characters")
+    if parsed.model == "gpt-5.6":
+        parser.error("--model gpt-5.6 is not a supported Codex model id; use gpt-5.6-sol, gpt-5.6-terra, or gpt-5.6-luna.")
     if parsed.model == FAILED_MODEL:
         parser.error(f"--model must differ from unavailable {FAILED_MODEL}")
     for name in ("startup_timeout_s", "model_probe_timeout_s"):
@@ -664,6 +666,8 @@ def verify_continuity(args: Args, expected: Binding, authority: Authority, sessi
 
 
 def recover(args: Args) -> str:
+    if args.model == "gpt-5.6":
+        raise RecoveryError("--model gpt-5.6 is not a supported Codex model id; use gpt-5.6-sol, gpt-5.6-terra, or gpt-5.6-luna.")
     authority = read_authority(args)
     binding = bind(args)
     probe_model(args.model, binding.launch.reasoning_effort, args.model_probe_timeout_s)

@@ -1192,6 +1192,18 @@ class OmoTaskTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "nonempty model identifier"):
             validate_inputs(args)
 
+    def test_bare_gpt_5_6_model_is_rejected(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()) as stderr, self.assertRaises(SystemExit):
+            parse_args(["--task-file", "x.md", "--tmux-session", "cfg", "--model", "gpt-5.6"])
+        self.assertIn("use gpt-5.6-sol, gpt-5.6-terra, or gpt-5.6-luna", stderr.getvalue())
+        args = Args(Path("/tmp"), "x.md", "cfg", "2", "codex", None, "", None, False, False, "", "", (), model="gpt-5.6")
+        with self.assertRaisesRegex(ValueError, "use gpt-5.6-sol, gpt-5.6-terra, or gpt-5.6-luna"):
+            validate_inputs(args)
+        for model in ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"):
+            with self.subTest(model=model):
+                parsed = parse_args(["--task-file", "x.md", "--tmux-session", "cfg", "--model", model])
+                self.assertEqual(model, parsed.model)
+
     def test_validate_inputs_rejects_worker_launch_in_human_session(self) -> None:
         args = parse_args(
             [

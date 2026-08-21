@@ -185,6 +185,8 @@ def codex_flags_model_error(codex_flags: tuple[str, ...]) -> str:
 def model_error(model: str) -> str:
     if model and MODEL_RE.fullmatch(model) is None:
         return "--model must be a nonempty model identifier containing only letters, numbers, `.`, `_`, `:`, `/`, or `-`."
+    if model == "gpt-5.6":
+        return "--model gpt-5.6 is not a supported Codex model id; use gpt-5.6-sol, gpt-5.6-terra, or gpt-5.6-luna."
     return ""
 
 

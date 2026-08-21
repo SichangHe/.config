@@ -301,6 +301,8 @@ def parse_args(argv: list[str]) -> Args:
     parsed = parser.parse_args(argv)
     if parsed.model and MODEL_RE.fullmatch(parsed.model) is None:
         parser.error("--model contains unsupported characters.")
+    if parsed.model == "gpt-5.6":
+        parser.error("--model gpt-5.6 is not a supported Codex model id; use gpt-5.6-sol, gpt-5.6-terra, or gpt-5.6-luna.")
     if parsed.session_id and UUID_RE.fullmatch(parsed.session_id) is None:
         parser.error("--session-id must be a Codex UUID.")
     modes = (
@@ -778,6 +780,8 @@ def launch_command(
     tool: str = "codex",
     pcodx_env: Mapping[str, str] | None = None,
 ) -> str:
+    if args.model == "gpt-5.6":
+        raise StartError("--model gpt-5.6 is not a supported Codex model id; use gpt-5.6-sol, gpt-5.6-terra, or gpt-5.6-luna.")
     executable = CODEX_LAUNCH_COMMAND if tool == "codex" else PCODX_LAUNCH_COMMAND
     codex = [executable]
     if tool == "codex":

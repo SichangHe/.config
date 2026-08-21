@@ -744,6 +744,12 @@ class CodexStartTests(unittest.TestCase):
         command = launch_command(self.args(root, session_id="", prompt_file=prompt_path), pane, prompt_path, "[marker]")
         self.assertIn("\"$(cat -- '/tmp/prompt with spaces.txt')\"", command)
 
+    def test_launch_command_rejects_programmatic_bare_gpt_5_6_model(self) -> None:
+        root = Path("/tmp/work")
+        pane = Pane("cfg:2.0", "%2", "@2", "zsh", root)
+        with self.assertRaisesRegex(StartError, "use gpt-5.6-sol, gpt-5.6-terra, or gpt-5.6-luna"):
+            launch_command(replace(self.args(root), model="gpt-5.6"), pane, None, "[marker]")
+
     def test_restart_running_needs_no_session_or_shell_confirmation(self) -> None:
         args = parse_args(
             [
@@ -760,6 +766,22 @@ class CodexStartTests(unittest.TestCase):
         )
         self.assertTrue(args.restart_running)
         self.assertEqual("", args.session_id)
+
+    def test_bare_gpt_5_6_model_is_rejected(self) -> None:
+        with self.assertRaises(SystemExit):
+            parse_args(
+                [
+                    "--task-file",
+                    "worker.md",
+                    "--target",
+                    "cfg:2",
+                    "--model",
+                    "gpt-5.6",
+                    "--reasoning-effort",
+                    "max",
+                    "--restart-running",
+                ]
+            )
 
     def test_update_prompt_recovery_requires_session_without_shell_confirmation(self) -> None:
         common = [
