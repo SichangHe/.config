@@ -24,6 +24,7 @@ from email.utils import getaddresses, parsedate_to_datetime
 from email.utils import parseaddr
 from email.message import Message
 from email.parser import BytesParser
+from enum import Enum
 from pathlib import Path
 from typing import Callable
 from urllib.parse import urlparse
@@ -90,6 +91,23 @@ _configured_auth_servers = tuple(
     if value.strip()
 )
 TRUSTED_AUTH_SERVERS = _configured_auth_servers or ("mx.google.com",)
+GMAIL_METADATA_FETCH = "(X-GM-MSGID X-GM-THRID X-GM-LABELS)"
+GMAIL_MSGID_RE = re.compile(rb"X-GM-MSGID (\d+)")
+GMAIL_THRID_RE = re.compile(rb"X-GM-THRID (\d+)")
+AMH_SUBJECT_TAG_RE = re.compile(r"^\s*(?:re:\s*)*\[([A-Za-z0-9._-]{1,128})\](?:\s+|$)", re.IGNORECASE)
+RESERVED_AMH_SUBJECT_TAGS = frozenset({"a", "omo", "omo_manager"})
+MAIN_MANAGER_AGENT_ID = "main-manager"
+MAIN_MANAGER_SUBJECT_TAG = "main"
+AMH_AGENT_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,255}$")
+DEFAULT_AMH_WORKDIR = Path(os.environ.get("OMO_AMH_WORKDIR", "/ssd1/sichangheagent/amh"))
+DEFAULT_AMH_BRIDGE_ROOT = Path(os.environ.get("OMO_AMH_BRIDGE_ROOT", "/ssd1/sichangheagent/agent_managers"))
+DEFAULT_AMH_EXECUTABLE = Path(os.environ.get("OMO_AMH_EXECUTABLE", "/ssd1/sichangheagent/agent_managers/target/debug/amh"))
+DEFAULT_AMH_RUNTIME_ROOT = Path(
+    os.environ.get(
+        "OMO_AMH_RUNTIME_ROOT",
+        Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "omo-manager" / "amh-runtime",
+    )
+)
 DEFAULT_RECOVERY_DEBOUNCE_S = int(os.environ.get("OMO_MANAGER_RECOVERY_DEBOUNCE_S", "900"))
 DEFAULT_IDLE_WAIT_S = float(os.environ.get("OMO_MANAGER_EMAIL_IDLE_WAIT_S", "60"))
 DEFAULT_IDLE_RESPONSE_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_EMAIL_IDLE_RESPONSE_TIMEOUT_S", "10"))
@@ -1649,6 +1667,247 @@ def maybe_handle_split_manager_mail_thresholds(args: Args, settings: AgentMailSe
         return False
 
 
+class AmhRouteDisposition(Enum):
+    FALLBACK = "fallback"
+    HOLD = "hold"
+    ADVANCED = "advanced"
+    SKIP = "skip"
+
+
+def amh_mailbox_account(args: Args) -> str:
+    return args.inbox_identity.split("\0", 1)[0].strip()
+
+
+def amh_committed_messages_path(args: Args) -> Path:
+    account = amh_mailbox_account(args)
+    mailbox_id = hashlib.sha256(account.casefold().encode()).hexdigest()[:12]
+    return args.state_dir / f"amh-committed-messages-{mailbox_id}.tsv"
+
+
+def load_amh_committed_rows(args: Args) -> list[tuple[str, str, str]]:
+    path = amh_committed_messages_path(args)
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    rows: list[tuple[str, str, str]] = []
+    for line in lines:
+        if not line.strip():
+            continue
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        rows.append((parts[0], parts[1], parts[2]))
+    return rows
+
+
+def amh_committed_operation(args: Args, *, message_id: str | None = None, uid: str | None = None) -> str | None:
+    for recorded_message_id, operation_id, recorded_uid in load_amh_committed_rows(args):
+        if message_id and recorded_message_id == message_id:
+            return operation_id
+        if uid and recorded_uid == uid:
+            return operation_id
+    return None
+
+
+def record_amh_committed_message(args: Args, uid: str, message_id: str, operation_id: str) -> None:
+    if amh_committed_operation(args, message_id=message_id) == operation_id:
+        return
+    path = amh_committed_messages_path(args)
+    existing = path.read_text(encoding="utf-8") if path.is_file() else ""
+    write_private_state(path, existing + f"{message_id}\t{operation_id}\t{uid}\n")
+
+
+def amh_subject_candidate(subject: str) -> bool:
+    return bool(amh_subject_agent_id(subject))
+
+
+def amh_subject_agent_id(subject: str) -> str:
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in subject) or subject.splitlines() != [subject]:
+        return ""
+    match = AMH_SUBJECT_TAG_RE.match(subject)
+    if match is None:
+        return ""
+    if match.group(1).casefold() in RESERVED_AMH_SUBJECT_TAGS:
+        return ""
+    remainder = subject[match.end() :]
+    if re.match(r"^\s*\[[^\]]+\]", remainder) is not None:
+        return ""
+    agent_id = match.group(1)
+    return "main-manager" if agent_id.casefold() == "main" else agent_id
+
+
+def exact_decoded_prompt(msg: Message) -> bytes:
+    if msg.is_multipart():
+        for part in msg.walk():
+            if part.get_content_type() == "text/plain" and not part.get_filename():
+                payload = part.get_payload(decode=True)
+                if isinstance(payload, bytes):
+                    return payload
+        return b""
+    payload = msg.get_payload(decode=True)
+    return payload if isinstance(payload, bytes) else b""
+
+
+def fetch_blob(msg_data: list[object]) -> bytes:
+    blob = b""
+    for item in msg_data:
+        if isinstance(item, tuple):
+            part = item[0]
+            if isinstance(part, bytes):
+                blob += part
+        elif isinstance(item, bytes):
+            blob += item
+    return blob
+
+
+def parse_gmail_metadata(msg_data: list[object]) -> tuple[str | None, str | None]:
+    blob = fetch_blob(msg_data)
+    msgid = GMAIL_MSGID_RE.search(blob)
+    thrid = GMAIL_THRID_RE.search(blob)
+    return (
+        msgid.group(1).decode() if msgid else None,
+        thrid.group(1).decode() if thrid else None,
+    )
+
+
+def fetch_gmail_metadata(client: imaplib.IMAP4_SSL, uid: str) -> tuple[str, str | None] | None:
+    typ, msg_data = client.uid("fetch", uid, GMAIL_METADATA_FETCH)
+    if typ != "OK" or not msg_data:
+        return None
+    message_id, thread_id = parse_gmail_metadata(msg_data)
+    if not message_id:
+        return None
+    if not thread_id:
+        return (message_id, None)
+    return (message_id, thread_id)
+
+
+def load_amh_bridge_modules() -> tuple[object, object]:
+    root = os.fspath(DEFAULT_AMH_BRIDGE_ROOT)
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    from tools import amh_email_ingress, amh_email_watcher_bridge
+
+    return amh_email_watcher_bridge, amh_email_ingress
+
+
+def amh_agent_status_is_supported(agent_id: str) -> bool:
+    if not agent_id or AMH_AGENT_ID_RE.fullmatch(agent_id) is None:
+        return False
+    executable = DEFAULT_AMH_EXECUTABLE
+    if not executable.is_file():
+        return False
+    runtime_root = DEFAULT_AMH_RUNTIME_ROOT if DEFAULT_AMH_RUNTIME_ROOT.is_absolute() else DEFAULT_AMH_RUNTIME_ROOT.resolve()
+    result = subprocess.run(
+        [os.fspath(executable), "--runtime-root", os.fspath(runtime_root), "agent", "status", agent_id],
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def launch_amh_worker_for_route(args: Args, operation_id: str) -> None:
+    launcher = Path(__file__).with_name("omo_amh_route_launch.py")
+    result = subprocess.run(
+        [
+            sys.executable,
+            os.fspath(launcher),
+            "--root",
+            os.fspath(args.root),
+            "--state-dir",
+            os.fspath(args.state_dir),
+            "--amh-executable",
+            os.fspath(DEFAULT_AMH_EXECUTABLE),
+            "--amh-runtime-root",
+            os.fspath(DEFAULT_AMH_RUNTIME_ROOT),
+            "--operation-id",
+            operation_id,
+            "--manager-target",
+            args.manager_target,
+            "--workdir",
+            os.fspath(DEFAULT_AMH_WORKDIR),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "AMH route launch failed")
+
+
+def try_route_amh_message(client: imaplib.IMAP4_SSL, args: Args, uid: str, msg: Message, raw_mime: bytes) -> AmhRouteDisposition:
+    subject = str(msg.get("Subject", ""))
+    subject_agent_id = amh_subject_agent_id(subject)
+    if not subject_agent_id:
+        return AmhRouteDisposition.FALLBACK
+    metadata = fetch_gmail_metadata(client, uid)
+    committed_by_uid = amh_committed_operation(args, uid=uid)
+    if metadata is None:
+        return AmhRouteDisposition.HOLD if committed_by_uid else AmhRouteDisposition.SKIP
+    message_id, thread_id = metadata
+    committed = amh_committed_operation(args, message_id=message_id) or committed_by_uid
+    if not thread_id:
+        return AmhRouteDisposition.HOLD if committed else AmhRouteDisposition.FALLBACK
+    if not args.manager_target:
+        return AmhRouteDisposition.HOLD if committed else AmhRouteDisposition.FALLBACK
+    loaded = load_amh_bridge_modules()
+    if not loaded:
+        return AmhRouteDisposition.HOLD if committed else AmhRouteDisposition.SKIP
+    bridge, ingress = loaded
+    decision = bridge.route_from_watcher_subject(subject, enabled_agent_ids=frozenset({subject_agent_id}))
+    if not decision.routes_to_amh:
+        return AmhRouteDisposition.HOLD if committed else AmhRouteDisposition.FALLBACK
+    agent_id = getattr(decision.route, "agent_id", None)
+    if agent_id is not None and not amh_agent_status_is_supported(agent_id):
+        return AmhRouteDisposition.HOLD if committed else AmhRouteDisposition.FALLBACK
+    identity = ingress.ProviderMessageIdentity(
+        provider="gmail",
+        account_id=amh_mailbox_account(args) or args.self_email,
+        message_id=message_id,
+        thread_id=thread_id,
+    )
+    ids = ingress.derive_replay_ids(identity)
+    runtime_root = DEFAULT_AMH_RUNTIME_ROOT if DEFAULT_AMH_RUNTIME_ROOT.is_absolute() else DEFAULT_AMH_RUNTIME_ROOT.resolve()
+    staging_directory = (args.state_dir / "amh-email-staging").resolve()
+    staging_directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    message = bridge.WatcherMessage(
+        identity=identity,
+        sender_identity=parseaddr(str(msg.get("From", "")))[1] or str(msg.get("From", "")),
+        configured_human_sender=args.self_email,
+        route=decision.route,
+        raw_mime=raw_mime,
+        decoded_prompt=exact_decoded_prompt(msg),
+        decoded_subject=subject.encode("utf-8"),
+        amh_runtime_root=runtime_root,
+    )
+    config = bridge.BridgeConfig(
+        amh_executable=DEFAULT_AMH_EXECUTABLE if DEFAULT_AMH_EXECUTABLE.is_absolute() else DEFAULT_AMH_EXECUTABLE.resolve(),
+        staging_directory=staging_directory,
+    )
+
+    def persist_cursor() -> None:
+        record_amh_committed_message(args, uid, message_id, ids.operation_id)
+        launch_amh_worker_for_route(args, ids.operation_id)
+
+    def mark_seen_callback() -> bool:
+        return mark_seen(client, uid)
+
+    outcome = bridge.bridge_watcher_message(
+        message,
+        config=config,
+        persist_cursor=persist_cursor,
+        mark_seen=mark_seen_callback,
+        ownership=bridge.SideBySideOwner.AMH,
+    )
+    if isinstance(outcome, bridge.MailboxAdvanced):
+        return AmhRouteDisposition.ADVANCED
+    return AmhRouteDisposition.HOLD
+
+
 def mark_seen(client: imaplib.IMAP4_SSL, uid: str) -> bool:
     try:
         typ, _data = client.uid("store", uid, "+FLAGS", r"(\Seen)")
@@ -1805,6 +2064,23 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
             logging.info("email candidate ignored as manager-authored echo: uid=%s subject=%r", uid, subject)
             ignored_uids.add(uid)
             ignored_changed = True
+            continue
+        raw_mime = msg_data[0][1]
+        amh_result = try_route_amh_message(client, args, uid, msg, raw_mime if isinstance(raw_mime, bytes) else b"")
+        if amh_result is AmhRouteDisposition.HOLD:
+            logging.info("email AMH route held for replay: uid=%s subject=%r", uid, subject)
+            handled = True
+            continue
+        if amh_result is AmhRouteDisposition.ADVANCED:
+            logging.info("email AMH route advanced: uid=%s subject=%r", uid, subject)
+            unaccepted_pending_uids.discard(uid)
+            unaccepted_changed = True
+            processed_uids.add(uid)
+            processed_changed = True
+            handled = True
+            continue
+        if amh_result is AmhRouteDisposition.SKIP:
+            logging.warning("email AMH metadata unavailable; leaving unread: uid=%s subject=%r", uid, subject)
             continue
         body_text = message_text(msg)
         txt_path = write_mail(args, uid, msg, sender, subject)
