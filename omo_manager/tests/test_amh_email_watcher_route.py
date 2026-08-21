@@ -2395,11 +2395,10 @@ class AmhEmailWatcherRouteTests(unittest.TestCase):
             ),
         )
 
-    def test_live_mailbox_exact_sender_rejects_duplicate_identity_headers(self) -> None:
+    def test_live_mailbox_exact_sender_rejects_duplicate_from_or_sender_headers(self) -> None:
         for header_name, duplicate_line in (
             ("From", "From: Human <stevensichanghe@gmail.com>\r\n"),
             ("Sender", "Sender: Human <stevensichanghe@gmail.com>\r\n"),
-            ("Return-Path", "Return-Path: <stevensichanghe@gmail.com>\r\n"),
         ):
             with self.subTest(header_name=header_name):
                 raw = (
@@ -2420,6 +2419,44 @@ class AmhEmailWatcherRouteTests(unittest.TestCase):
                         require_transport_identity=True,
                     )
                 )
+
+    def test_live_mailbox_exact_sender_accepts_duplicate_matching_return_path(self) -> None:
+        raw = (
+            b"From: Human <stevensichanghe@gmail.com>\r\n"
+            b"Return-Path: <stevensichanghe@gmail.com>\r\n"
+            b"Return-Path: <stevensichanghe@gmail.com>\r\n"
+            b"Authentication-Results: mx.google.com; spf=pass smtp.mailfrom=stevensichanghe@gmail.com\r\n"
+            b"\r\n"
+            + watcher.AMH_LIVE_MAILBOX_EMAIL1_APPROVAL_TEXT.encode("utf-8")
+            + b"\n"
+        )
+        msg = BytesParser(policy=policy.default).parsebytes(raw)
+        self.assertTrue(
+            watcher.exact_human_sender(
+                msg,
+                "stevensichanghe@gmail.com",
+                require_transport_identity=True,
+            )
+        )
+
+    def test_live_mailbox_exact_sender_rejects_mismatched_return_path(self) -> None:
+        raw = (
+            b"From: Human <stevensichanghe@gmail.com>\r\n"
+            b"Return-Path: <stevensichanghe@gmail.com>\r\n"
+            b"Return-Path: <sichangheagent@gmail.com>\r\n"
+            b"Authentication-Results: mx.google.com; spf=pass smtp.mailfrom=stevensichanghe@gmail.com\r\n"
+            b"\r\n"
+            + watcher.AMH_LIVE_MAILBOX_EMAIL1_APPROVAL_TEXT.encode("utf-8")
+            + b"\n"
+        )
+        msg = BytesParser(policy=policy.default).parsebytes(raw)
+        self.assertFalse(
+            watcher.exact_human_sender(
+                msg,
+                "stevensichanghe@gmail.com",
+                require_transport_identity=True,
+            )
+        )
 
     def test_split_email_watcher_refuses_live_receipt_without_provider_trust(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

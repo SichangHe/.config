@@ -358,8 +358,8 @@ def exact_human_sender(msg: Message, human_email: str, require_transport_identit
         return True
     return_path_headers = [str(value) for value in msg.get_all("Return-Path", [])]
     return (
-        len(return_path_headers) == 1
-        and from_self(return_path_headers[0], human_email)
+        bool(return_path_headers)
+        and all(from_self(header, human_email) for header in return_path_headers)
         and gmail_spf_authenticated_sender(msg, human_email)
     )
 
