@@ -2324,7 +2324,7 @@ resolved_task_items: []
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("low priority:\nvl_build_mgr.md vl_build_mgr:0\n", encoding="utf-8")
-            blocker = "human token-quota pause from manager_mail/85c5dff58359-729.txt: keep all VL paths closed until explicit resume"
+            blocker = "human token-quota pause from 202607/manager_mail/85c5dff58359-729.txt: keep all VL paths closed until explicit resume"
             _ = (root / "vl_build_mgr.md").write_text(
                 task_frontmatter("blocked", runat="vl_build_mgr:0", managerat="vlprograms:0", is_manager=True, blocked_on=blocker),
                 encoding="utf-8",
@@ -2340,7 +2340,7 @@ resolved_task_items: []
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("low priority:\nvl_build_mgr.md vl_build_mgr:0\n", encoding="utf-8")
-            blocker = "human token-quota pause from manager_mail/85c5dff58359-729.txt: keep all VL paths closed until explicit resume"
+            blocker = "human token-quota pause from 202607/manager_mail/85c5dff58359-729.txt: keep all VL paths closed until explicit resume"
             _ = (root / "vl_build_mgr.md").write_text(
                 task_frontmatter("blocked", runat="vl_build_mgr:0", managerat="vlprograms:0", is_manager=True, blocked_on=blocker),
                 encoding="utf-8",
@@ -2356,7 +2356,7 @@ resolved_task_items: []
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("low priority:\nvl_build_mgr.md vl_build_mgr:0\n", encoding="utf-8")
-            blocker = "human token-quota pause from manager_mail/85c5dff58359-729.txt: keep all VL paths closed until explicit resume"
+            blocker = "human token-quota pause from 202607/manager_mail/85c5dff58359-729.txt: keep all VL paths closed until explicit resume"
             _ = (root / "vl_build_mgr.md").write_text(
                 task_frontmatter("blocked", runat="vl_build_mgr:0", managerat="vlprograms:0", is_manager=True, blocked_on=blocker),
                 encoding="utf-8",
@@ -2389,12 +2389,13 @@ resolved_task_items: []
 
     def test_problems_only_retains_out_of_scope_human_token_quota_pause(self) -> None:
         cases = (
-            ("current", "vl_build_mgr.md", True, "human token-quota pause from manager_mail/85c5dff58359-729.txt: keep all VL paths closed until explicit resume"),
-            ("human pending", "vl_build_mgr.md", True, "human token-quota pause from manager_mail/85c5dff58359-729.txt: keep all VL paths closed until explicit resume"),
-            ("low priority", "other_vl_mgr.md", True, "human token-quota pause from manager_mail/85c5dff58359-729.txt: keep all VL paths closed until explicit resume"),
-            ("low priority", "vl_build_mgr.md", True, "human token-quota pause from manager_mail/85c5dff58359-728.txt: keep all VL paths closed until explicit resume"),
-            ("low priority", "vl_build_mgr.md", True, "Human token-quota pause from manager_mail/85c5dff58359-729.txt: keep all VL paths closed until explicit resume"),
-            ("low priority", "vl_build_mgr.md", False, "human token-quota pause from manager_mail/85c5dff58359-729.txt: keep all VL paths closed until explicit resume"),
+            ("current", "vl_build_mgr.md", True, "human token-quota pause from 202607/manager_mail/85c5dff58359-729.txt: keep all VL paths closed until explicit resume"),
+            ("human pending", "vl_build_mgr.md", True, "human token-quota pause from 202607/manager_mail/85c5dff58359-729.txt: keep all VL paths closed until explicit resume"),
+            ("low priority", "other_vl_mgr.md", True, "human token-quota pause from 202607/manager_mail/85c5dff58359-729.txt: keep all VL paths closed until explicit resume"),
+            ("low priority", "vl_build_mgr.md", True, "human token-quota pause from 202607/manager_mail/85c5dff58359-728.txt: keep all VL paths closed until explicit resume"),
+            ("low priority", "vl_build_mgr.md", True, "Human token-quota pause from 202607/manager_mail/85c5dff58359-729.txt: keep all VL paths closed until explicit resume"),
+            ("low priority", "vl_build_mgr.md", True, "human token-quota pause from manager_mail/85c5dff58359-729.txt: keep all VL paths closed until explicit resume"),
+            ("low priority", "vl_build_mgr.md", False, "human token-quota pause from 202607/manager_mail/85c5dff58359-729.txt: keep all VL paths closed until explicit resume"),
         )
         for section, task_file, is_manager, blocker in cases:
             with self.subTest(section=section, task_file=task_file, is_manager=is_manager, blocker=blocker), tempfile.TemporaryDirectory() as tmp:
@@ -2417,7 +2418,7 @@ resolved_task_items: []
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("low priority:\nvl_build_mgr.md hvl:1\n", encoding="utf-8")
-            blocker = "human token-quota pause from manager_mail/85c5dff58359-729.txt: keep all VL paths closed until explicit resume"
+            blocker = "human token-quota pause from 202607/manager_mail/85c5dff58359-729.txt: keep all VL paths closed until explicit resume"
             _ = (root / "vl_build_mgr.md").write_text(
                 task_frontmatter("blocked", runat="retired", managerat="vlprograms:0", is_manager=True, blocked_on=blocker),
                 encoding="utf-8",
@@ -2433,7 +2434,7 @@ resolved_task_items: []
             registry = root / "sessions.json"
             _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
             _ = (root / "TODO.md").write_text("low priority:\nvl_build_mgr.md vl_build_mgr:0\n", encoding="utf-8")
-            blocker = "human token-quota pause from manager_mail/85c5dff58359-729.txt: keep all VL paths closed until explicit resume"
+            blocker = "human token-quota pause from 202607/manager_mail/85c5dff58359-729.txt: keep all VL paths closed until explicit resume"
             _ = (root / "vl_build_mgr.md").write_text(
                 task_frontmatter("blocked", runat="hvl:1", managerat="vlprograms:0", is_manager=True, blocked_on=blocker),
                 encoding="utf-8",

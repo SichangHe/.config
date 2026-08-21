@@ -94,7 +94,7 @@ DIRECT_HUMAN_SHUTDOWN_PAUSE_RE = re.compile(
     re.IGNORECASE,
 )
 HUMAN_TOKEN_QUOTA_PAUSE_RE = re.compile(
-    r"\Ahuman token-quota pause from manager_mail/85c5dff58359-729\.txt: keep all VL paths closed until explicit resume\Z",
+    r"\Ahuman token-quota pause from 202607/manager_mail/85c5dff58359-729\.txt: keep all VL paths closed until explicit resume\Z",
 )
 TARGET_SESSION_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*):")
 LOOSE_TARGET_RE = re.compile(r"\b([a-z][A-Za-z0-9_-]*)\s+(\d+)\b")
