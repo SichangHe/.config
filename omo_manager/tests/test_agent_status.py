@@ -2334,7 +2334,7 @@ resolved_task_items: []
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             self.assertEqual("", out.getvalue())
 
-    def test_problems_only_retains_source_bound_human_token_quota_pause_with_visible_output(self) -> None:
+    def test_problems_only_skips_source_bound_human_token_quota_pause_with_visible_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             registry = root / "sessions.json"
@@ -2347,10 +2347,10 @@ resolved_task_items: []
             )
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("not_codex", ["shell prompt"])), patch("omo_manager.omo_agent_status.target_resolves_exactly", return_value=False), redirect_stdout(out):
-                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
-            self.assertIn("not_codex: task=vl_build_mgr.md", out.getvalue())
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertEqual("", out.getvalue())
 
-    def test_problems_only_retains_source_bound_human_token_quota_pause_with_live_target(self) -> None:
+    def test_problems_only_skips_source_bound_human_token_quota_pause_with_live_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             registry = root / "sessions.json"
@@ -2363,8 +2363,8 @@ resolved_task_items: []
             )
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("not_codex", [])), patch("omo_manager.omo_agent_status.target_resolves_exactly", return_value=True), redirect_stdout(out):
-                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
-            self.assertIn("not_codex: task=vl_build_mgr.md", out.getvalue())
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertEqual("", out.getvalue())
 
     def test_problems_only_retains_unbound_human_token_quota_pause(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
