@@ -4,9 +4,11 @@ import hashlib
 import io
 import json
 import os
+import signal
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
@@ -1007,6 +1009,57 @@ with tempfile.TemporaryDirectory() as tmp:
         self.assertEqual(1, len(clients))
         self.assertEqual(0.01, clients[0].timeout)
         self.assertTrue(clients[0].shutdown_called.is_set())
+
+    def test_connect_interrupt_closes_accepted_client_before_handoff(self) -> None:
+        class Client:
+            def __init__(self) -> None:
+                self.shutdown_calls = 0
+
+            def shutdown(self) -> None:
+                self.shutdown_calls += 1
+
+        class SyncThread:
+            def __init__(self, target: object, name: str, daemon: bool) -> None:
+                self.target = target
+                self.name = name
+                self.daemon = daemon
+
+            def start(self) -> None:
+                self.target()  # type: ignore[operator]
+
+        class InterruptingCondition:
+            def __enter__(self) -> object:
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def notify(self) -> None:
+                return None
+
+            def wait_for(self, _predicate: object, timeout: float) -> bool:
+                raise KeyboardInterrupt
+
+        client = Client()
+
+        with (
+            patch("omo_manager.omo_manager_mail_compress.imaplib.IMAP4_SSL", return_value=client),
+            patch("omo_manager.omo_manager_mail_compress.threading.Thread", SyncThread),
+            patch("omo_manager.omo_manager_mail_compress.threading.Condition", InterruptingCondition),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            connect_mailbox("imap.example.test")
+        self.assertEqual(1, client.shutdown_calls)
+
+    def test_connect_observer_receives_client_before_handoff(self) -> None:
+        class Client:
+            pass
+
+        client = Client()
+        observed: list[Client] = []
+        with patch("omo_manager.omo_manager_mail_compress.imaplib.IMAP4_SSL", return_value=client):
+            self.assertIs(client, connect_mailbox("imap.example.test", observed.append))
+        self.assertEqual([client], observed)
 
     def test_replacement_timeout_does_not_restore_mailbox_on_dead_client(self) -> None:
         client = FakeClient({})
@@ -2982,6 +3035,512 @@ with tempfile.TemporaryDirectory() as tmp:
         self.assertIn("move_outcome=unknown", output.getvalue())
         self.assertIn("post_move_verified=0", output.getvalue())
         self.assertIn("post_move_verification_error=move-explicit-sources-to-trash", output.getvalue())
+
+    def test_trash_explicit_pre_move_imap_failure_returns_terminal_summary(self) -> None:
+        raw_sha256 = "a" * 64
+        source = MailRecord(
+            "7",
+            "",
+            "Agent <agent@example.test>",
+            "Human <human@example.test>",
+            "[worker:0] complete",
+            "msg-a",
+            gmail_msgid="100",
+            gmail_thrid="200",
+            raw_sha256=raw_sha256,
+        )
+        args = type(
+            "DirectArgs",
+            (),
+            {
+                "yes": True,
+                "source": [f"7:100:200:{raw_sha256}"],
+                "context": [f"100:200:{raw_sha256}"],
+                "replacement_id": ["<replacement@example.test>"],
+                "task_id": ["task-a"],
+                "preparer": "owner-a",
+                "reviewer": "reviewer-b",
+                "task_source": ["1:100"],
+                "source_uidvalidity": "1",
+            },
+        )()
+        client = FakeClient({})
+
+        with (
+            patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {})),
+            patch("omo_manager.omo_manager_mail_compress.mail_boundary", return_value=("agent@example.test", "human@example.test")),
+            patch("omo_manager.omo_manager_mail_compress.selected_uidvalidity", return_value="1"),
+            patch("omo_manager.omo_manager_mail_compress.mailbox_exists", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.special_use_mailboxes", return_value={r"\All": "[Gmail]/All Mail", r"\Sent": "[Gmail]/Sent Mail"}),
+            patch("omo_manager.omo_manager_mail_compress.observe_explicit_sources", return_value=([source], [])),
+            patch("omo_manager.omo_manager_mail_compress.replacement_exists", return_value=True),
+            patch(
+                "omo_manager.omo_manager_mail_compress.replacement_gmail_msgid",
+                side_effect=ImapOperationError("replacement-gmail-identity-search", "IMAP operation timed out"),
+            ),
+            patch("omo_manager.omo_manager_mail_compress.imap_uid") as imap_uid_mock,
+            redirect_stdout(io.StringIO()) as output,
+        ):
+            self.assertEqual(1, cmd_trash_explicit(args))
+        imap_uid_mock.assert_not_called()
+        self.assertIn("move_attempted=0", output.getvalue())
+        self.assertIn("move_outcome=not-attempted", output.getvalue())
+        self.assertIn("post_move_verified=0", output.getvalue())
+        self.assertIn("post_move_verification_error=replacement-gmail-identity-search", output.getvalue())
+
+    def test_trash_explicit_pre_move_runtime_timeout_returns_terminal_summary(self) -> None:
+        raw_sha256 = "a" * 64
+        source = MailRecord(
+            "7",
+            "",
+            "Agent <agent@example.test>",
+            "Human <human@example.test>",
+            "[worker:0] complete",
+            "msg-a",
+            gmail_msgid="100",
+            gmail_thrid="200",
+            raw_sha256=raw_sha256,
+        )
+        args = type(
+            "DirectArgs",
+            (),
+            {
+                "yes": True,
+                "source": [f"7:100:200:{raw_sha256}"],
+                "context": [f"100:200:{raw_sha256}"],
+                "replacement_id": ["<replacement@example.test>"],
+                "task_id": ["task-a"],
+                "preparer": "owner-a",
+                "reviewer": "reviewer-b",
+                "task_source": ["1:100"],
+                "source_uidvalidity": "1",
+            },
+        )()
+        client = FakeClient({})
+
+        def slow_context(*_args: object, **_kwargs: object) -> bool:
+            time.sleep(1)
+            return True
+
+        with (
+            patch("omo_manager.omo_manager_mail_compress.TRASH_EXPLICIT_PRE_MOVE_TIMEOUT_S", 0.01),
+            patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {})),
+            patch("omo_manager.omo_manager_mail_compress.mail_boundary", return_value=("agent@example.test", "human@example.test")),
+            patch("omo_manager.omo_manager_mail_compress.selected_uidvalidity", return_value="1"),
+            patch("omo_manager.omo_manager_mail_compress.mailbox_exists", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.special_use_mailboxes", return_value={r"\All": "[Gmail]/All Mail", r"\Sent": "[Gmail]/Sent Mail"}),
+            patch("omo_manager.omo_manager_mail_compress.observe_explicit_sources", return_value=([source], [])),
+            patch("omo_manager.omo_manager_mail_compress.replacement_exists", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.replacement_gmail_msgid", return_value="999"),
+            patch("omo_manager.omo_manager_mail_compress.replacement_subject", return_value="[worker:0] replacement"),
+            patch("omo_manager.omo_manager_mail_compress.fetch_direct_thread_contexts", return_value={"200": [source]}),
+            patch("omo_manager.omo_manager_mail_compress.direct_context_intact", side_effect=slow_context),
+            patch("omo_manager.omo_manager_mail_compress.select_mailbox"),
+            patch("omo_manager.omo_manager_mail_compress.imap_uid") as imap_uid_mock,
+            redirect_stdout(io.StringIO()) as output,
+        ):
+            self.assertEqual(1, cmd_trash_explicit(args))
+        imap_uid_mock.assert_not_called()
+        self.assertTrue(getattr(client, "_omo_operation_timed_out", False))
+        self.assertIn("move_attempted=0", output.getvalue())
+        self.assertIn("move_outcome=not-attempted", output.getvalue())
+        self.assertIn("post_move_verified=0", output.getvalue())
+        self.assertIn("post_move_verification_error=direct-context-intact", output.getvalue())
+
+    def test_trash_explicit_late_pre_move_timeout_reports_no_move_attempt(self) -> None:
+        raw_sha256 = "a" * 64
+        source = MailRecord(
+            "7",
+            "",
+            "Agent <agent@example.test>",
+            "Human <human@example.test>",
+            "[worker:0] complete",
+            "msg-a",
+            gmail_msgid="100",
+            gmail_thrid="200",
+            raw_sha256=raw_sha256,
+        )
+        args = type(
+            "DirectArgs",
+            (),
+            {
+                "yes": True,
+                "source": [f"7:100:200:{raw_sha256}"],
+                "context": [f"100:200:{raw_sha256}"],
+                "replacement_id": ["<replacement@example.test>"],
+                "task_id": ["task-a"],
+                "preparer": "owner-a",
+                "reviewer": "reviewer-b",
+                "task_source": ["1:100"],
+                "source_uidvalidity": "1",
+            },
+        )()
+        client = FakeClient({})
+
+        replacement_calls = 0
+
+        def replacement_exists(*_args: object, **_kwargs: object) -> bool:
+            nonlocal replacement_calls
+            replacement_calls += 1
+            if replacement_calls == 2:
+                time.sleep(1)
+            return True
+
+        with (
+            patch("omo_manager.omo_manager_mail_compress.TRASH_EXPLICIT_PRE_MOVE_TIMEOUT_S", 0.01),
+            patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {})),
+            patch("omo_manager.omo_manager_mail_compress.mail_boundary", return_value=("agent@example.test", "human@example.test")),
+            patch("omo_manager.omo_manager_mail_compress.selected_uidvalidity", return_value="1"),
+            patch("omo_manager.omo_manager_mail_compress.mailbox_exists", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.special_use_mailboxes", return_value={r"\All": "[Gmail]/All Mail", r"\Sent": "[Gmail]/Sent Mail"}),
+            patch("omo_manager.omo_manager_mail_compress.observe_explicit_sources", return_value=([source], [])),
+            patch("omo_manager.omo_manager_mail_compress.replacement_exists", side_effect=replacement_exists),
+            patch("omo_manager.omo_manager_mail_compress.replacement_gmail_msgid", return_value="999"),
+            patch("omo_manager.omo_manager_mail_compress.replacement_subject", return_value="[worker:0] replacement"),
+            patch("omo_manager.omo_manager_mail_compress.fetch_direct_thread_contexts", return_value={"200": [source]}),
+            patch("omo_manager.omo_manager_mail_compress.direct_context_intact", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.select_mailbox"),
+            patch("omo_manager.omo_manager_mail_compress.inbox_subset", return_value=["7"]),
+            patch("omo_manager.omo_manager_mail_compress.imap_uid") as imap_uid_mock,
+            redirect_stdout(io.StringIO()) as output,
+        ):
+            self.assertEqual(1, cmd_trash_explicit(args))
+        imap_uid_mock.assert_not_called()
+        self.assertIn("move_attempted=0", output.getvalue())
+        self.assertIn("move_outcome=not-attempted", output.getvalue())
+        self.assertIn("post_move_verification_error=replacement-exists-final", output.getvalue())
+
+    def test_trash_explicit_refuses_when_process_alarm_is_active(self) -> None:
+        raw_sha256 = "a" * 64
+        args = type(
+            "DirectArgs",
+            (),
+            {
+                "yes": True,
+                "source": [f"7:100:200:{raw_sha256}"],
+                "context": [f"100:200:{raw_sha256}"],
+                "replacement_id": ["<replacement@example.test>"],
+                "task_id": ["task-a"],
+                "preparer": "owner-a",
+                "reviewer": "reviewer-b",
+                "task_source": ["1:100"],
+                "source_uidvalidity": "1",
+            },
+        )()
+        old_handler = signal.getsignal(signal.SIGALRM)
+        try:
+            signal.signal(signal.SIGALRM, lambda _signum, _frame: None)
+            signal.setitimer(signal.ITIMER_REAL, 30)
+            with (
+                patch("omo_manager.omo_manager_mail_compress.open_mailbox") as open_mock,
+                redirect_stdout(io.StringIO()) as output,
+            ):
+                self.assertEqual(1, cmd_trash_explicit(args))
+            open_mock.assert_not_called()
+            self.assertIn("move_attempted=0", output.getvalue())
+            self.assertIn("move_outcome=not-attempted", output.getvalue())
+            self.assertIn("post_move_verification_error=arm-pre-move-timer", output.getvalue())
+            self.assertGreater(signal.getitimer(signal.ITIMER_REAL)[0], 0)
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, old_handler)
+
+    def test_trash_explicit_open_mailbox_timeout_closes_late_connect_client(self) -> None:
+        raw_sha256 = "a" * 64
+        args = type(
+            "DirectArgs",
+            (),
+            {
+                "yes": True,
+                "source": [f"7:100:200:{raw_sha256}"],
+                "context": [f"100:200:{raw_sha256}"],
+                "replacement_id": ["<replacement@example.test>"],
+                "task_id": ["task-a"],
+                "preparer": "owner-a",
+                "reviewer": "reviewer-b",
+                "task_source": ["1:100"],
+                "source_uidvalidity": "1",
+            },
+        )()
+        clients: list[object] = []
+
+        class LateClient:
+            def __init__(self, _host: str, timeout: float) -> None:
+                time.sleep(0.05)
+                self.timeout = timeout
+                self.shutdown_calls = 0
+                clients.append(self)
+
+            def shutdown(self) -> None:
+                self.shutdown_calls += 1
+
+        with (
+            patch("omo_manager.omo_manager_mail_compress.TRASH_EXPLICIT_PRE_MOVE_TIMEOUT_S", 0.01),
+            patch("omo_manager.omo_manager_mail_compress.load_config", return_value={"host": "imap.example.test", "user": "u", "password": "p"}),
+            patch("omo_manager.omo_manager_mail_compress.imaplib.IMAP4_SSL", LateClient),
+            redirect_stdout(io.StringIO()) as output,
+        ):
+            self.assertEqual(1, cmd_trash_explicit(args))
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline and not clients:
+            time.sleep(0.01)
+        self.assertEqual(1, len(clients))
+        self.assertEqual(1, getattr(clients[0], "shutdown_calls"))
+        self.assertIn("move_attempted=0", output.getvalue())
+        self.assertIn("post_move_verification_error=open-mailbox", output.getvalue())
+
+    def test_trash_explicit_uidvalidity_refusal_returns_terminal_summary(self) -> None:
+        raw_sha256 = "a" * 64
+        args = type(
+            "DirectArgs",
+            (),
+            {
+                "yes": True,
+                "source": [f"7:100:200:{raw_sha256}"],
+                "context": [f"100:200:{raw_sha256}"],
+                "replacement_id": ["<replacement@example.test>"],
+                "task_id": ["task-a"],
+                "preparer": "owner-a",
+                "reviewer": "reviewer-b",
+                "task_source": ["1:100"],
+                "source_uidvalidity": "2",
+            },
+        )()
+        client = FakeClient({})
+        with (
+            patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {})),
+            patch("omo_manager.omo_manager_mail_compress.mail_boundary", return_value=("agent@example.test", "human@example.test")),
+            patch("omo_manager.omo_manager_mail_compress.selected_uidvalidity", return_value="1"),
+            patch("omo_manager.omo_manager_mail_compress.select_mailbox"),
+            redirect_stdout(io.StringIO()) as output,
+            redirect_stderr(io.StringIO()) as error,
+        ):
+            self.assertEqual(1, cmd_trash_explicit(args))
+        self.assertIn("refusing because inspected INBOX UIDVALIDITY changed", error.getvalue())
+        self.assertIn("move_attempted=0", output.getvalue())
+        self.assertIn("move_outcome=not-attempted", output.getvalue())
+        self.assertIn("post_move_verification_error=selected-uidvalidity", output.getvalue())
+
+    def test_trash_explicit_timer_setup_failure_restores_signal_handler(self) -> None:
+        raw_sha256 = "a" * 64
+        args = type(
+            "DirectArgs",
+            (),
+            {
+                "yes": True,
+                "source": [f"7:100:200:{raw_sha256}"],
+                "context": [f"100:200:{raw_sha256}"],
+                "replacement_id": ["<replacement@example.test>"],
+                "task_id": ["task-a"],
+                "preparer": "owner-a",
+                "reviewer": "reviewer-b",
+                "task_source": ["1:100"],
+                "source_uidvalidity": "1",
+            },
+        )()
+        old_handler = signal.getsignal(signal.SIGALRM)
+        marker = object()
+
+        def handler(_signum: int, _frame: object) -> None:
+            return None
+
+        def fail_setitimer(*_args: object) -> tuple[float, float]:
+            raise RuntimeError("setitimer failed")
+
+        try:
+            signal.signal(signal.SIGALRM, handler)
+            with (
+                patch("omo_manager.omo_manager_mail_compress.signal.setitimer", side_effect=fail_setitimer),
+                patch("omo_manager.omo_manager_mail_compress.open_mailbox") as open_mock,
+                redirect_stdout(io.StringIO()) as output,
+            ):
+                self.assertEqual(1, cmd_trash_explicit(args))
+            open_mock.assert_not_called()
+            self.assertIs(handler, signal.getsignal(signal.SIGALRM))
+            self.assertIsNot(marker, signal.getsignal(signal.SIGALRM))
+            self.assertIn("post_move_verification_error=arm-pre-move-timer", output.getvalue())
+        finally:
+            signal.signal(signal.SIGALRM, old_handler)
+
+    def test_trash_explicit_timer_disarm_failure_restores_handler_and_retries(self) -> None:
+        from omo_manager import omo_manager_mail_compress as mail_compress
+
+        old_handler = signal.getsignal(signal.SIGALRM)
+        calls = 0
+
+        def original_handler(_signum: int, _frame: object) -> None:
+            return None
+
+        real_setitimer = signal.setitimer
+
+        def flaky_setitimer(*args: object) -> tuple[float, float]:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError("disarm failed")
+            return real_setitimer(*args)
+
+        try:
+            signal.signal(signal.SIGALRM, original_handler)
+            with patch("omo_manager.omo_manager_mail_compress.signal.setitimer", side_effect=flaky_setitimer):
+                disarm = mail_compress.arm_trash_explicit_pre_move_timer(lambda: "stage-a", lambda: None)
+                with self.assertRaisesRegex(RuntimeError, "disarm failed"):
+                    disarm()
+                self.assertIs(original_handler, signal.getsignal(signal.SIGALRM))
+                disarm()
+            self.assertIs(original_handler, signal.getsignal(signal.SIGALRM))
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, old_handler)
+
+    def test_trash_explicit_refuses_timer_from_non_main_thread(self) -> None:
+        raw_sha256 = "a" * 64
+        args = type(
+            "DirectArgs",
+            (),
+            {
+                "yes": True,
+                "source": [f"7:100:200:{raw_sha256}"],
+                "context": [f"100:200:{raw_sha256}"],
+                "replacement_id": ["<replacement@example.test>"],
+                "task_id": ["task-a"],
+                "preparer": "owner-a",
+                "reviewer": "reviewer-b",
+                "task_source": ["1:100"],
+                "source_uidvalidity": "1",
+            },
+        )()
+        output = io.StringIO()
+        result: list[int] = []
+
+        def run() -> None:
+            with (
+                patch("omo_manager.omo_manager_mail_compress.open_mailbox") as open_mock,
+                redirect_stdout(output),
+            ):
+                result.append(cmd_trash_explicit(args))
+                open_mock.assert_not_called()
+
+        thread = threading.Thread(target=run)
+        thread.start()
+        thread.join()
+        self.assertEqual([1], result)
+        self.assertIn("post_move_verification_error=arm-pre-move-timer", output.getvalue())
+
+    def test_trash_explicit_replacement_subject_timeout_aborts_client(self) -> None:
+        raw_sha256 = "a" * 64
+        source = MailRecord(
+            "7",
+            "",
+            "Agent <agent@example.test>",
+            "Human <human@example.test>",
+            "[worker:0] complete",
+            "msg-a",
+            gmail_msgid="100",
+            gmail_thrid="200",
+            raw_sha256=raw_sha256,
+        )
+        args = type(
+            "DirectArgs",
+            (),
+            {
+                "yes": True,
+                "source": [f"7:100:200:{raw_sha256}"],
+                "context": [f"100:200:{raw_sha256}"],
+                "replacement_id": ["<replacement@example.test>"],
+                "task_id": ["task-a"],
+                "preparer": "owner-a",
+                "reviewer": "reviewer-b",
+                "task_source": ["1:100"],
+                "source_uidvalidity": "1",
+            },
+        )()
+        client = FakeClient({})
+
+        def slow_subject(*_args: object, **_kwargs: object) -> str:
+            time.sleep(1)
+            return "[worker:0] replacement"
+
+        with (
+            patch("omo_manager.omo_manager_mail_compress.TRASH_EXPLICIT_PRE_MOVE_TIMEOUT_S", 0.01),
+            patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {})),
+            patch("omo_manager.omo_manager_mail_compress.mail_boundary", return_value=("agent@example.test", "human@example.test")),
+            patch("omo_manager.omo_manager_mail_compress.selected_uidvalidity", return_value="1"),
+            patch("omo_manager.omo_manager_mail_compress.mailbox_exists", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.special_use_mailboxes", return_value={r"\All": "[Gmail]/All Mail", r"\Sent": "[Gmail]/Sent Mail"}),
+            patch("omo_manager.omo_manager_mail_compress.observe_explicit_sources", return_value=([source], [])),
+            patch("omo_manager.omo_manager_mail_compress.replacement_exists", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.replacement_gmail_msgid", return_value="999"),
+            patch("omo_manager.omo_manager_mail_compress.replacement_subject", side_effect=slow_subject),
+            patch("omo_manager.omo_manager_mail_compress.fetch_direct_thread_contexts", return_value={"200": [source]}),
+            patch("omo_manager.omo_manager_mail_compress.select_mailbox"),
+            patch("omo_manager.omo_manager_mail_compress.imap_uid") as imap_uid_mock,
+            redirect_stdout(io.StringIO()) as output,
+        ):
+            self.assertEqual(1, cmd_trash_explicit(args))
+        imap_uid_mock.assert_not_called()
+        self.assertTrue(getattr(client, "_omo_operation_timed_out", False))
+        self.assertIn("move_attempted=0", output.getvalue())
+        self.assertIn("post_move_verification_error=replacement-subject", output.getvalue())
+
+    def test_trash_explicit_replacement_subject_timeout_skips_restore_select(self) -> None:
+        raw_sha256 = "a" * 64
+        source = MailRecord(
+            "7",
+            "",
+            "Agent <agent@example.test>",
+            "Human <human@example.test>",
+            "[worker:0] complete",
+            "msg-a",
+            gmail_msgid="100",
+            gmail_thrid="200",
+            raw_sha256=raw_sha256,
+        )
+        args = type(
+            "DirectArgs",
+            (),
+            {
+                "yes": True,
+                "source": [f"7:100:200:{raw_sha256}"],
+                "context": [f"100:200:{raw_sha256}"],
+                "replacement_id": ["<replacement@example.test>"],
+                "task_id": ["task-a"],
+                "preparer": "owner-a",
+                "reviewer": "reviewer-b",
+                "task_source": ["1:100"],
+                "source_uidvalidity": "1",
+            },
+        )()
+        client = FakeClient({})
+        select_log: list[tuple[str, bool]] = []
+
+        def select_mailbox(_client: FakeClient, mailbox: str, readonly: bool) -> None:
+            select_log.append((mailbox, readonly))
+
+        def timed_out_subject_search(*_args: object, **_kwargs: object) -> tuple[str, list[bytes]]:
+            time.sleep(1)
+            return "OK", [b"1"]
+
+        with (
+            patch("omo_manager.omo_manager_mail_compress.TRASH_EXPLICIT_PRE_MOVE_TIMEOUT_S", 0.01),
+            patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {})),
+            patch("omo_manager.omo_manager_mail_compress.mail_boundary", return_value=("agent@example.test", "human@example.test")),
+            patch("omo_manager.omo_manager_mail_compress.selected_uidvalidity", return_value="1"),
+            patch("omo_manager.omo_manager_mail_compress.mailbox_exists", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.special_use_mailboxes", return_value={r"\All": "[Gmail]/All Mail", r"\Sent": "[Gmail]/Sent Mail"}),
+            patch("omo_manager.omo_manager_mail_compress.observe_explicit_sources", return_value=([source], [])),
+            patch("omo_manager.omo_manager_mail_compress.replacement_exists", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.replacement_gmail_msgid", return_value="999"),
+            patch("omo_manager.omo_manager_mail_compress.fetch_direct_thread_contexts", return_value={"200": [source]}),
+            patch("omo_manager.omo_manager_mail_compress.select_mailbox", side_effect=select_mailbox),
+            patch("omo_manager.omo_manager_mail_compress.imap_uid", side_effect=timed_out_subject_search) as imap_uid_mock,
+            redirect_stdout(io.StringIO()) as output,
+        ):
+            self.assertEqual(1, cmd_trash_explicit(args))
+        imap_uid_mock.assert_called_once()
+        self.assertTrue(getattr(client, "_omo_operation_timed_out", False))
+        self.assertEqual(("[Gmail]/All Mail", True), select_log[-1])
+        self.assertIn("post_move_verification_error=replacement-subject", output.getvalue())
 
     def test_trash_explicit_non_ok_move_verifies_sources_and_returns_summary(self) -> None:
         raw_sha256 = "a" * 64

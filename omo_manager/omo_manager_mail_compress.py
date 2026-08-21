@@ -11,6 +11,7 @@ import imaplib
 import json
 import os
 import re
+import signal
 import socket
 import sys
 import threading
@@ -43,6 +44,7 @@ GMAIL_IDENTITY_UID_BATCH = 40
 GMAIL_THREAD_OR_BATCH = 32
 EXPORT_FULL_FETCH_ATTEMPTS = 2
 IMAP_OPERATION_TIMEOUT_S = 45.0
+TRASH_EXPLICIT_PRE_MOVE_TIMEOUT_S = 300.0
 T = TypeVar("T")
 
 
@@ -206,20 +208,6 @@ def imap_operation(client: imaplib.IMAP4_SSL, stage: str, operation: Callable[[]
     results: list[T] = []
     failures: list[BaseException] = []
 
-    def abort() -> None:
-        setattr(client, "_omo_operation_timed_out", True)
-        sock = getattr(client, "sock", None)
-        if sock is None:
-            return
-        try:
-            sock.shutdown(socket.SHUT_RDWR)
-        except (AttributeError, OSError):
-            pass
-        try:
-            sock.close()
-        except OSError:
-            pass
-
     def run() -> None:
         try:
             results.append(operation())
@@ -230,7 +218,7 @@ def imap_operation(client: imaplib.IMAP4_SSL, stage: str, operation: Callable[[]
     worker.start()
     worker.join(IMAP_OPERATION_TIMEOUT_S)
     if worker.is_alive():
-        abort()
+        abort_imap_client(client)
         raise ImapOperationError(stage, f"IMAP operation timed out: stage={stage} timeout_s={IMAP_OPERATION_TIMEOUT_S:g}")
     if failures:
         exc = failures[0]
@@ -250,7 +238,7 @@ def logout_mailbox(client: imaplib.IMAP4_SSL) -> None:
     imap_operation(client, "logout", client.logout)
 
 
-def connect_mailbox(host: str) -> imaplib.IMAP4_SSL:
+def connect_mailbox(host: str, connected: Callable[[imaplib.IMAP4_SSL], None] | None = None) -> imaplib.IMAP4_SSL:
     """Connect with an absolute deadline and close any client created after expiry."""
     clients: list[imaplib.IMAP4_SSL] = []
     failures: list[BaseException] = []
@@ -270,6 +258,8 @@ def connect_mailbox(host: str) -> imaplib.IMAP4_SSL:
             return
         with state_changed:
             if not expired:
+                if connected is not None:
+                    connected(client)
                 clients.append(client)
                 completed = True
                 state_changed.notify()
@@ -280,17 +270,29 @@ def connect_mailbox(host: str) -> imaplib.IMAP4_SSL:
             pass
 
     worker = threading.Thread(target=run, name="imap:connect", daemon=True)
-    worker.start()
-    with state_changed:
-        if not state_changed.wait_for(lambda: completed, timeout=IMAP_OPERATION_TIMEOUT_S):
+    try:
+        worker.start()
+        with state_changed:
+            if not state_changed.wait_for(lambda: completed, timeout=IMAP_OPERATION_TIMEOUT_S):
+                expired = True
+                raise ImapOperationError("connect", f"IMAP operation timed out: stage=connect timeout_s={IMAP_OPERATION_TIMEOUT_S:g}")
+        if failures:
+            exc = failures[0]
+            if isinstance(exc, (EOFError, OSError, imaplib.IMAP4.error)):
+                raise ImapOperationError("connect", f"IMAP operation failed: stage=connect error={exc}") from exc
+            raise exc
+        return clients[0]
+    except BaseException:
+        with state_changed:
             expired = True
-            raise ImapOperationError("connect", f"IMAP operation timed out: stage=connect timeout_s={IMAP_OPERATION_TIMEOUT_S:g}")
-    if failures:
-        exc = failures[0]
-        if isinstance(exc, (EOFError, OSError, imaplib.IMAP4.error)):
-            raise ImapOperationError("connect", f"IMAP operation failed: stage=connect error={exc}") from exc
-        raise exc
-    return clients[0]
+            accepted_clients = list(clients)
+            clients.clear()
+        for client in accepted_clients:
+            try:
+                client.shutdown()
+            except (AttributeError, OSError, imaplib.IMAP4.error):
+                pass
+        raise
 
 
 def parse_uid_text(text: str) -> list[str]:
@@ -707,15 +709,17 @@ def mail_boundary(config: dict[str, str]) -> tuple[str, str]:
     return split_settings.agent_address, split_settings.human_address
 
 
-def open_mailbox(readonly: bool) -> tuple[imaplib.IMAP4_SSL, dict[str, str]]:
+def open_mailbox(readonly: bool, connected: Callable[[imaplib.IMAP4_SSL], None] | None = None) -> tuple[imaplib.IMAP4_SSL, dict[str, str]]:
     config = load_config()
-    client = connect_mailbox(config["host"])
+    client = connect_mailbox(config["host"], connected)
     try:
         imap_operation(client, "login", lambda: client.login(config["user"], config["password"]))
         typ, _data = imap_operation(client, "select mailbox=INBOX", lambda: client.select("INBOX", readonly=readonly))
         if typ != "OK":
             raise RuntimeError(f"IMAP select INBOX failed: {typ}")
-    except Exception:
+    except Exception as exc:
+        if isinstance(exc, ImapOperationError):
+            abort_imap_client(client)
         try:
             logout_mailbox(client)
         except RuntimeError:
@@ -994,6 +998,90 @@ def tsv_value(value: str) -> str:
 
 def summary_token(value: str) -> str:
     return re.sub(r"\s+", "_", tsv_value(value)) or "unknown"
+
+
+def abort_imap_client(client: imaplib.IMAP4_SSL) -> None:
+    setattr(client, "_omo_operation_timed_out", True)
+    sock = getattr(client, "sock", None)
+    if sock is None:
+        return
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except (AttributeError, OSError):
+        pass
+    try:
+        sock.close()
+    except OSError:
+        pass
+
+
+def trash_explicit_summary(
+    task_ids: list[str],
+    replacement_ids: list[str],
+    sources: list[ScopedSource],
+    move_attempted: int,
+    final_inbox: list[MailRecord],
+    verified_inbox: list[MailRecord],
+    verified_trash: list[MailRecord],
+    move_outcome: str,
+    post_move_verification_error: str,
+) -> str:
+    moved_now = len({record.gmail_msgid for record in verified_trash} & {record.gmail_msgid for record in final_inbox})
+    post_move_verified = not post_move_verification_error and not verified_inbox and len(verified_trash) == len(sources)
+    return (
+        f"trash_explicit: task_ids={','.join(task_ids)} replacements={len(replacement_ids)} requested={len(sources)}"
+        f" move_attempted={move_attempted} moved_now={moved_now} move_outcome={move_outcome}"
+        f" verified_inbox={len(verified_inbox)} verified_trash={len(verified_trash)}"
+        f" post_move_verified={int(post_move_verified)}"
+        f" post_move_verification_error={post_move_verification_error or 'none'}"
+        f" later_arrivals_moved=0 permanent_deleted=0 persisted_evidence=0"
+    )
+
+
+def arm_trash_explicit_pre_move_timer(stage: Callable[[], str], client: Callable[[], imaplib.IMAP4_SSL | None]) -> Callable[[], None]:
+    if threading.current_thread() is not threading.main_thread():
+        raise ImapOperationError("arm-pre-move-timer", "trash-explicit pre-move timer requires the main thread")
+    try:
+        timer_id = signal.ITIMER_REAL
+        alarm_signal = signal.SIGALRM
+        set_timer = signal.setitimer
+        get_timer = signal.getitimer
+    except AttributeError as exc:
+        raise ImapOperationError("arm-pre-move-timer", "trash-explicit pre-move timer is unavailable") from exc
+    previous_timer = get_timer(timer_id)
+    if previous_timer[0] > 0 or previous_timer[1] > 0:
+        raise ImapOperationError("arm-pre-move-timer", "trash-explicit pre-move timer would replace an active alarm")
+    previous_handler = signal.getsignal(alarm_signal)
+
+    def timeout_handler(_signum: int, _frame: object) -> None:
+        current_stage = stage()
+        active_client = client()
+        if active_client is not None:
+            abort_imap_client(active_client)
+        raise ImapOperationError(
+            current_stage,
+            f"trash-explicit pre-move timed out: stage={current_stage} timeout_s={TRASH_EXPLICIT_PRE_MOVE_TIMEOUT_S:g}",
+        )
+
+    signal.signal(alarm_signal, timeout_handler)
+    try:
+        set_timer(timer_id, TRASH_EXPLICIT_PRE_MOVE_TIMEOUT_S)
+    except BaseException:
+        signal.signal(alarm_signal, previous_handler)
+        raise
+    active = True
+
+    def disarm_timer() -> None:
+        nonlocal active
+        if not active:
+            return
+        try:
+            set_timer(timer_id, previous_timer[0], previous_timer[1])
+        finally:
+            signal.signal(alarm_signal, previous_handler)
+        active = False
+
+    return disarm_timer
 
 
 def write_private_dir(path: Path) -> None:
@@ -2679,9 +2767,41 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
         print("refusing to move superseded mail to Trash without --yes", file=sys.stderr)
         return 2
     mutation_complete = False
+    pre_move_complete = False
+    move_attempted = 0
     move_outcome = "not-attempted"
     move_error = ""
     post_move_verification_error = ""
+    trash_stage = "parse-arguments"
+    pre_move_failure_summarized = False
+    task_ids: list[str] = []
+    replacement_ids: list[str] = []
+    sources: list[ScopedSource] = []
+    final_inbox: list[MailRecord] = []
+    verified_inbox: list[MailRecord] = []
+    verified_trash: list[MailRecord] = []
+
+    def set_trash_stage(stage: str) -> None:
+        nonlocal trash_stage
+        trash_stage = stage
+
+    def refuse_trash(reason: str) -> int:
+        print(reason, file=sys.stderr)
+        print(
+            trash_explicit_summary(
+                task_ids,
+                replacement_ids,
+                sources,
+                move_attempted,
+                final_inbox,
+                verified_inbox,
+                verified_trash,
+                move_outcome,
+                summary_token(trash_stage),
+            )
+        )
+        return 1
+
     try:
         task_ids = args.task_id if isinstance(args.task_id, list) else [args.task_id]
         replacement_ids = args.replacement_id if isinstance(args.replacement_id, list) else [args.replacement_id]
@@ -2738,38 +2858,53 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    client, config = open_mailbox(readonly=False)
+    def disarm_pre_move_timer() -> None:
+        return None
+
+    client: imaplib.IMAP4_SSL | None = None
+
+    def set_pending_client(pending_client: imaplib.IMAP4_SSL) -> None:
+        nonlocal client
+        client = pending_client
+
     try:
+        set_trash_stage("arm-pre-move-timer")
+        disarm_pre_move_timer = arm_trash_explicit_pre_move_timer(lambda: trash_stage, lambda: client)
+        set_trash_stage("open-mailbox")
+        client, config = open_mailbox(readonly=False, connected=set_pending_client)
+        set_trash_stage("mail-boundary")
         sender_email, recipient_email = mail_boundary(config)
+        set_trash_stage("select-inbox")
         select_mailbox(client, "INBOX", readonly=False)
+        set_trash_stage("selected-uidvalidity")
         expected_uidvalidity = selected_uidvalidity(client)
         if expected_uidvalidity != getattr(args, "source_uidvalidity", ""):
-            print("refusing because inspected INBOX UIDVALIDITY changed", file=sys.stderr)
-            return 1
+            return refuse_trash("refusing because inspected INBOX UIDVALIDITY changed")
+        set_trash_stage("trash-mailbox-exists")
         if not mailbox_exists(client, TRASH_MAILBOX):
-            print(f"refusing because mailbox is missing: {TRASH_MAILBOX}", file=sys.stderr)
-            return 1
+            return refuse_trash(f"refusing because mailbox is missing: {TRASH_MAILBOX}")
+        set_trash_stage("special-use-mailboxes")
         special_use = special_use_mailboxes(client)
         if not special_use.get(r"\All") or not special_use.get(r"\Sent"):
-            print("refusing because Gmail special-use mailboxes are missing", file=sys.stderr)
-            return 1
+            return refuse_trash("refusing because Gmail special-use mailboxes are missing")
+        set_trash_stage("observe-explicit-sources")
         inbox_records, trash_records = observe_explicit_sources(client, sources, sender_email, recipient_email)
+        set_trash_stage("replacement-exists")
         if any(
             not replacement_exists(client, special_use[r"\All"], replacement_id, sender_email, recipient_email)
             for replacement_id in replacement_ids
         ):
-            print("refusing because a recorded replacement was not found in the recipient mailbox", file=sys.stderr)
-            return 1
+            return refuse_trash("refusing because a recorded replacement was not found in the recipient mailbox")
+        set_trash_stage("replacement-gmail-identity")
         replacement_gmail_ids = [
             replacement_gmail_msgid(client, special_use[r"\All"], replacement_id)
             for replacement_id in replacement_ids
         ]
         if len(set(replacement_gmail_ids)) != len(replacement_gmail_ids):
-            print("refusing because replacement identities resolve to the same message", file=sys.stderr)
-            return 1
+            return refuse_trash("refusing because replacement identities resolve to the same message")
         if set(replacement_gmail_ids) & {source.gmail_msgid for source in sources}:
-            print("refusing because a replacement is one of the superseded sources", file=sys.stderr)
-            return 1
+            return refuse_trash("refusing because a replacement is one of the superseded sources")
+        set_trash_stage("fetch-direct-thread-context")
         context_records_by_thread = fetch_direct_thread_contexts(client, [*inbox_records, *trash_records])
         bound_context_records = [
             record
@@ -2778,6 +2913,7 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
             if record.gmail_msgid in context_ids
         ]
         try:
+            set_trash_stage("derive-original-targets")
             original_targets = (
                 [route_resolutions[task_id] for task_id in task_ids]
                 if route_resolutions
@@ -2789,82 +2925,91 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
                     set(replacement_gmail_ids),
                 )
             )
+            set_trash_stage("replacement-subject")
             replacement_subjects = [
                 replacement_subject(client, special_use[r"\All"], replacement_id, sender_email, recipient_email)
                 for replacement_id in replacement_ids
             ]
+        except ImapOperationError:
+            raise
         except RuntimeError as exc:
-            print(f"refusing because {exc}", file=sys.stderr)
-            return 1
+            return refuse_trash(f"refusing because {exc}")
+        set_trash_stage("special-use-mailboxes-recheck")
         if [subject_tmux_target(subject) for subject in replacement_subjects] != original_targets:
-            print("refusing because a replacement does not preserve its original sender tmux target", file=sys.stderr)
-            return 1
+            return refuse_trash("refusing because a replacement does not preserve its original sender tmux target")
         if special_use_mailboxes(client) != special_use:
-            print("refusing because special-use mailbox identity changed", file=sys.stderr)
-            return 1
+            return refuse_trash("refusing because special-use mailbox identity changed")
+        set_trash_stage("select-inbox-recheck")
         select_mailbox(client, "INBOX", readonly=False)
+        set_trash_stage("uidvalidity-recheck")
         if selected_uidvalidity(client) != expected_uidvalidity:
-            print("refusing because INBOX UIDVALIDITY changed", file=sys.stderr)
-            return 1
+            return refuse_trash("refusing because INBOX UIDVALIDITY changed")
         contexts_by_thread: dict[str, list[ScopedSource]] = {}
         for context in contexts:
             contexts_by_thread.setdefault(context.gmail_thrid, []).append(context)
+        set_trash_stage("direct-context-intact")
         if any(
             not direct_context_intact(client, special_use[r"\All"], records, allow_additive=False)
             for records in contexts_by_thread.values()
         ):
-            print("refusing because complete Gmail thread context changed", file=sys.stderr)
-            return 1
+            return refuse_trash("refusing because complete Gmail thread context changed")
+        set_trash_stage("select-inbox-before-subset")
         select_mailbox(client, "INBOX", readonly=False)
         inbox_uids = [record.uid for record in inbox_records]
+        set_trash_stage("inbox-subset-recheck")
         if set(inbox_subset(client, inbox_uids)) != set(inbox_uids):
-            print("refusing because a planned source moved during revalidation", file=sys.stderr)
-            return 1
+            return refuse_trash("refusing because a planned source moved during revalidation")
+        set_trash_stage("observe-explicit-sources-final")
         final_inbox, _final_trash = observe_explicit_sources(client, sources, sender_email, recipient_email)
         if {record.gmail_msgid for record in final_inbox} != {record.gmail_msgid for record in inbox_records}:
-            print("refusing because a planned source moved immediately before mutation", file=sys.stderr)
-            return 1
+            return refuse_trash("refusing because a planned source moved immediately before mutation")
+        set_trash_stage("replacement-exists-final")
         if any(
             not replacement_exists(client, special_use[r"\All"], replacement_id, sender_email, recipient_email)
             for replacement_id in replacement_ids
         ):
-            print("refusing because a replacement changed immediately before move", file=sys.stderr)
-            return 1
+            return refuse_trash("refusing because a replacement changed immediately before move")
+        set_trash_stage("replacement-gmail-identity-final")
         if [
             replacement_gmail_msgid(client, special_use[r"\All"], replacement_id)
             for replacement_id in replacement_ids
         ] != replacement_gmail_ids:
-            print("refusing because a replacement identity changed immediately before move", file=sys.stderr)
-            return 1
+            return refuse_trash("refusing because a replacement identity changed immediately before move")
         try:
+            set_trash_stage("replacement-subject-final")
             final_replacement_subjects = [
                 replacement_subject(client, special_use[r"\All"], replacement_id, sender_email, recipient_email)
                 for replacement_id in replacement_ids
             ]
+        except ImapOperationError:
+            raise
         except RuntimeError as exc:
-            print(f"refusing because {exc}", file=sys.stderr)
-            return 1
+            return refuse_trash(f"refusing because {exc}")
         if final_replacement_subjects != replacement_subjects or [subject_tmux_target(subject) for subject in final_replacement_subjects] != original_targets:
-            print("refusing because a replacement sender tmux target changed immediately before move", file=sys.stderr)
-            return 1
+            return refuse_trash("refusing because a replacement sender tmux target changed immediately before move")
+        set_trash_stage("select-inbox-mutation-gate")
         select_mailbox(client, "INBOX", readonly=False)
+        set_trash_stage("uidvalidity-mutation-gate")
         if selected_uidvalidity(client) != expected_uidvalidity:
-            print("refusing because INBOX UIDVALIDITY changed immediately before move", file=sys.stderr)
-            return 1
+            return refuse_trash("refusing because INBOX UIDVALIDITY changed immediately before move")
+        set_trash_stage("direct-context-intact-final")
         if any(
             not direct_context_intact(client, special_use[r"\All"], records, allow_additive=True)
             for records in contexts_by_thread.values()
         ):
-            print("refusing because complete Gmail thread context changed immediately before move", file=sys.stderr)
-            return 1
+            return refuse_trash("refusing because complete Gmail thread context changed immediately before move")
+        set_trash_stage("select-inbox-final")
         select_mailbox(client, "INBOX", readonly=False)
+        set_trash_stage("uidvalidity-final")
         if selected_uidvalidity(client) != expected_uidvalidity:
-            print("refusing because INBOX UIDVALIDITY changed at the mutation gate", file=sys.stderr)
-            return 1
+            return refuse_trash("refusing because INBOX UIDVALIDITY changed at the mutation gate")
+        set_trash_stage("inbox-subset-mutation-gate")
         if set(inbox_subset(client, [record.uid for record in final_inbox])) != {record.uid for record in final_inbox}:
-            print("refusing because a planned source left INBOX at the mutation gate", file=sys.stderr)
-            return 1
+            return refuse_trash("refusing because a planned source left INBOX at the mutation gate")
+        disarm_pre_move_timer()
+        pre_move_complete = True
         if final_inbox:
+            move_attempted = len(final_inbox)
             try:
                 typ, _data = imap_uid(
                     client,
@@ -2897,24 +3042,41 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
                 post_move_verification_error = summary_token(exc.stage if isinstance(exc, ImapOperationError) else f"{exc.__class__.__name__}:{exc}")
             if move_error and not post_move_verification_error:
                 post_move_verification_error = move_error
+    except (OSError, RuntimeError, imaplib.IMAP4.error) as exc:
+        pre_move_failure_summarized = True
+        if pre_move_complete:
+            raise
+        if client is not None and isinstance(exc, ImapOperationError) and "pre-move timed out" in str(exc):
+            abort_imap_client(client)
+        stage = exc.stage if isinstance(exc, ImapOperationError) else trash_stage
+        post_move_verification_error = summary_token(stage)
+        print(
+            trash_explicit_summary(
+                task_ids,
+                replacement_ids,
+                sources,
+                move_attempted,
+                final_inbox,
+                verified_inbox,
+                verified_trash,
+                move_outcome,
+                post_move_verification_error,
+            )
+        )
+        return 1
     finally:
+        if not pre_move_complete:
+            disarm_pre_move_timer()
         try:
-            logout_mailbox(client)
+            if client is not None:
+                logout_mailbox(client)
         except (imaplib.IMAP4.error, RuntimeError) as exc:
-            if not mutation_complete:
+            if not mutation_complete and not pre_move_failure_summarized:
                 raise
             if not post_move_verification_error:
                 post_move_verification_error = summary_token(exc.stage if isinstance(exc, ImapOperationError) else f"logout:{exc.__class__.__name__}:{exc}")
-    moved_now = len({record.gmail_msgid for record in verified_trash} & {record.gmail_msgid for record in final_inbox})
     post_move_verified = not post_move_verification_error and not verified_inbox and len(verified_trash) == len(sources)
-    print(
-        f"trash_explicit: task_ids={','.join(task_ids)} replacements={len(replacement_ids)} requested={len(sources)}"
-        f" move_attempted={len(final_inbox)} moved_now={moved_now} move_outcome={move_outcome}"
-        f" verified_inbox={len(verified_inbox)} verified_trash={len(verified_trash)}"
-        f" post_move_verified={int(post_move_verified)}"
-        f" post_move_verification_error={post_move_verification_error or 'none'}"
-        f" later_arrivals_moved=0 permanent_deleted=0 persisted_evidence=0"
-    )
+    print(trash_explicit_summary(task_ids, replacement_ids, sources, move_attempted, final_inbox, verified_inbox, verified_trash, move_outcome, post_move_verification_error))
     return 0 if post_move_verified else 1
 
 
