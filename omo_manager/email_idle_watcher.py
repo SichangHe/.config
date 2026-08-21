@@ -49,6 +49,11 @@ except ImportError:
         def parse_task_metadata(_text: str, _work_log_root: Path | None = None) -> object:
             return None
 
+        try:
+            from .omo_task_lock import task_file_lock
+        except ImportError:
+            from omo_task_lock import task_file_lock
+
 def default_state_dir() -> Path:
     return Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "omo-manager"
 
@@ -91,9 +96,42 @@ _configured_auth_servers = tuple(
     if value.strip()
 )
 TRUSTED_AUTH_SERVERS = _configured_auth_servers or ("mx.google.com",)
-GMAIL_METADATA_FETCH = "(X-GM-MSGID X-GM-THRID X-GM-LABELS)"
+GMAIL_METADATA_FETCH = "(X-GM-MSGID X-GM-THRID X-GM-LABELS INTERNALDATE)"
 GMAIL_MSGID_RE = re.compile(rb"X-GM-MSGID (\d+)")
 GMAIL_THRID_RE = re.compile(rb"X-GM-THRID (\d+)")
+GMAIL_INTERNALDATE_RE = re.compile(rb'INTERNALDATE "([^"]+)"')
+GMAIL_SENT_LABEL_RE = re.compile(rb"X-GM-LABELS \([^)]*\\Sent(?:\s|\))")
+AMH_LIVE_MAILBOX_APPROVAL_RECEIPT_SCHEMA = "amh-live-mailbox-authenticated-approval-receipt/v1"
+AMH_LIVE_MAILBOX_SENDER = "sichangheagent@gmail.com"
+AMH_LIVE_MAILBOX_RECIPIENT = "stevensichanghe@gmail.com"
+AMH_LIVE_MAILBOX_EMAIL1_SUBJECT = "Gmail threading test"
+AMH_LIVE_MAILBOX_EMAIL2_SUBJECT = f"Re: {AMH_LIVE_MAILBOX_EMAIL1_SUBJECT}"
+AMH_LIVE_MAILBOX_EMAIL1_APPROVAL_REQUEST_SUBJECT = "Approve Email 1 only: Gmail threading test"
+AMH_LIVE_MAILBOX_EMAIL1_APPROVAL_SUBJECT = f"Re: {AMH_LIVE_MAILBOX_EMAIL1_APPROVAL_REQUEST_SUBJECT}"
+AMH_LIVE_MAILBOX_EMAIL2_APPROVAL_REQUEST_SUBJECT = "Approve Email 2 Gmail threading reply test"
+AMH_LIVE_MAILBOX_EMAIL2_APPROVAL_SUBJECT = f"Re: {AMH_LIVE_MAILBOX_EMAIL2_APPROVAL_REQUEST_SUBJECT}"
+AMH_LIVE_MAILBOX_EMAIL1_APPROVAL_REQUEST_MESSAGE_ID = "<gmail-threading-approval-email1@test.local>"
+AMH_LIVE_MAILBOX_EMAIL2_APPROVAL_REQUEST_MESSAGE_ID = "<gmail-threading-approval-email2@test.local>"
+AMH_LIVE_MAILBOX_EMAIL1_APPROVAL_DEADLINE_UNIX_MS = 1787412600000
+AMH_LIVE_MAILBOX_EMAIL1_MESSAGE_ID = "<gmail-threading-test-1@test.local>"
+AMH_LIVE_MAILBOX_EMAIL2_MESSAGE_ID = "<gmail-threading-test-2@test.local>"
+AMH_LIVE_MAILBOX_EMAIL1_BODY_SHA256 = "c0918fab9b4aa68b38d9db195820b1523fa2d2127e1b0303c3116567b0d5f6c2"
+AMH_LIVE_MAILBOX_EMAIL2_BODY_SHA256 = "56f6fc624cb982a2e0bcaa926fee777a396983af7428716b484193affdd5c217"
+AMH_LIVE_MAILBOX_EMAIL1_ARTIFACT_SHA256 = "3fb59bde88d467177e17165d22a2506dca2975d9547024bf6f3829b50f1736f2"
+AMH_LIVE_MAILBOX_EMAIL2_ARTIFACT_SHA256 = "4ccfeea60c6634b2882a23a34ca8ff1cb2fb880fa1be3dc58f61f9816aa72d9d"
+AMH_LIVE_MAILBOX_PACKET_ROOT = Path("/shagent/amh_work_logs/amh-live-mailbox-parity-20260821")
+AMH_LIVE_MAILBOX_APPROVAL_MAIL_DIR = Path("/ssd1/sichangheagent/work_logs/202607/manager_mail")
+AMH_LIVE_MAILBOX_APPROVAL_STATE_DIR = default_state_dir()
+AMH_LIVE_MAILBOX_PROVIDER_AUTHENTICATION = "trusted-gmail-auth-results"
+TRUST_LIVE_MAILBOX_AUTH_RESULTS = os.environ.get("OMO_MANAGER_TRUST_LIVE_MAILBOX_AUTH_RESULTS", "").lower() in {"1", "true", "yes"}
+AMH_LIVE_MAILBOX_WORKER_CALLER = "agent:mailbox-parity-worker"
+AMH_LIVE_MAILBOX_EMAIL1_APPROVAL_TEXT = "Approved GT-20260821-EMAIL1."
+AMH_LIVE_MAILBOX_EMAIL2_APPROVAL_RE = re.compile(
+    r"Approved: send Email 2 only for Gmail threading test "
+    r"from sichangheagent@gmail\.com to stevensichanghe@gmail\.com using "
+    r"Email 1 Message-ID: (<[^>\r\n]+>)\. Approval code GT-20260821-EMAIL2\."
+)
+AMH_LIVE_MAILBOX_RECEIPT_TTL_MS = 30 * 60 * 1000
 AMH_SUBJECT_TAG_RE = re.compile(r"^\s*(?:re:\s*)*\[([A-Za-z0-9._-]{1,128})\](?:\s+|$)", re.IGNORECASE)
 RESERVED_AMH_SUBJECT_TAGS = frozenset({"a", "omo", "omo_manager"})
 MAIN_MANAGER_AGENT_ID = "main-manager"
@@ -175,6 +213,8 @@ class Args:
     inbox_identity: str = ""
     manager_mail_recipient: str = ""
     manager_mail_subject_tags: bool = True
+    live_mailbox_approval_only: bool = False
+    live_mailbox_stage: str = "email1"
 
 
 class ParsedArgs(argparse.Namespace):
@@ -194,6 +234,8 @@ class ParsedArgs(argparse.Namespace):
     unread_compression_threshold: int = DEFAULT_MANAGER_UNREAD_COMPRESSION_THRESHOLD
     recent_cleanup_threshold: int = DEFAULT_MANAGER_RECENT_CLEANUP_THRESHOLD
     recent_cleanup_window_s: float = DEFAULT_MANAGER_RECENT_CLEANUP_WINDOW_S
+    live_mailbox_approval_only: bool = False
+    live_mailbox_stage: str = "email1"
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -213,8 +255,12 @@ def parse_args(argv: list[str]) -> Args:
     parser.add_argument("--unread-compression-threshold", type=int, default=DEFAULT_MANAGER_UNREAD_COMPRESSION_THRESHOLD, help="Queue manager-sent unread mail compression when unread manager mail exceeds this count; set <=0 to disable")
     parser.add_argument("--recent-cleanup-threshold", type=int, default=DEFAULT_MANAGER_RECENT_CLEANUP_THRESHOLD, help="Queue manager-human cleanup when recent manager mail exceeds this count; set <=0 to disable")
     parser.add_argument("--recent-cleanup-window-s", type=float, default=DEFAULT_MANAGER_RECENT_CLEANUP_WINDOW_S, help="Recent manager-human cleanup threshold window")
+    parser.add_argument("--live-mailbox-approval-only", action="store_true", help="One-shot scan only for AMH live-mailbox approval replies in the pinned approval thread")
+    parser.add_argument("--live-mailbox-stage", choices=("email1", "email2"), default="email1", help="Pinned live-mailbox approval stage to collect")
     parser.add_argument("--once", action="store_true")
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
+    if parsed.live_mailbox_approval_only and not parsed.once:
+        parser.error("--live-mailbox-approval-only requires --once")
     root = parsed.root
     manager_file = parsed.manager_file
     if manager_file is not None and not manager_file.is_absolute():
@@ -238,6 +284,8 @@ def parse_args(argv: list[str]) -> Args:
         parsed.recent_cleanup_threshold,
         parsed.recent_cleanup_window_s,
         mail_thresholds=True,
+        live_mailbox_approval_only=parsed.live_mailbox_approval_only,
+        live_mailbox_stage=parsed.live_mailbox_stage,
     )
 
 
@@ -298,22 +346,29 @@ def from_self(sender: str, self_email: str) -> bool:
 
 def exact_human_sender(msg: Message, human_email: str, require_transport_identity: bool) -> bool:
     """Validate the visible sender and, in split mode, Gmail's transport sender."""
-    if not from_self(str(msg.get("From", "")), human_email):
+    from_headers = [str(value) for value in msg.get_all("From", [])]
+    if len(from_headers) != 1 or not from_self(from_headers[0], human_email):
         return False
-    sender_header = str(msg.get("Sender", ""))
-    if sender_header and not from_self(sender_header, human_email):
+    sender_headers = [str(value) for value in msg.get_all("Sender", [])]
+    if len(sender_headers) > 1:
+        return False
+    if len(sender_headers) == 1 and not from_self(sender_headers[0], human_email):
         return False
     if not require_transport_identity:
         return True
-    return_path = str(msg.get("Return-Path", ""))
-    return from_self(return_path, human_email) and gmail_spf_authenticated_sender(msg, human_email)
+    return_path_headers = [str(value) for value in msg.get_all("Return-Path", [])]
+    return (
+        len(return_path_headers) == 1
+        and from_self(return_path_headers[0], human_email)
+        and gmail_spf_authenticated_sender(msg, human_email)
+    )
 
 
 def gmail_spf_authenticated_sender(msg: Message, sender_email: str) -> bool:
     """Require Gmail's top authentication result to pass SPF for the exact sender."""
     escaped_sender = re.escape(sender_email.casefold())
     headers = msg.get_all("Authentication-Results", [])
-    if not headers:
+    if len(headers) != 1:
         return False
     parts = str(headers[0]).split(";")
     if parts[0].strip().casefold() not in TRUSTED_AUTH_SERVERS:
@@ -1428,6 +1483,49 @@ def search_processed_sender_uids(client: imaplib.IMAP4_SSL, sender_email: str, u
     return candidate_uids
 
 
+def search_live_mailbox_approval_uids(
+    client: imaplib.IMAP4_SSL,
+    *,
+    sender_email: str,
+    subject: str,
+    request_message_id: str,
+    processed_uids: set[str],
+) -> set[bytes]:
+    """Find only replies bound to the pinned live-mailbox approval request."""
+    candidate_uids: set[bytes] = set()
+    for header_name in ("In-Reply-To", "References"):
+        typ, data = client.uid(
+            "search",
+            "UNSEEN",
+            "FROM",
+            f'"{sender_email}"',
+            "SUBJECT",
+            f'"{subject}"',
+            "HEADER",
+            header_name,
+            request_message_id,
+        )
+        if typ == "OK" and data and data[0]:
+            candidate_uids.update(data[0].split())
+        if processed_uids:
+            typ, data = client.uid(
+                "search",
+                None,
+                "UID",
+                uid_search_range(processed_uids),
+                "FROM",
+                f'"{sender_email}"',
+                "SUBJECT",
+                f'"{subject}"',
+                "HEADER",
+                header_name,
+                request_message_id,
+            )
+            if typ == "OK" and data and data[0]:
+                candidate_uids.update(data[0].split())
+    return candidate_uids
+
+
 def decode_search_uids(data: list[object]) -> list[str]:
     if not data or not data[0]:
         return []
@@ -1674,6 +1772,24 @@ class AmhRouteDisposition(Enum):
     SKIP = "skip"
 
 
+class LiveMailboxApprovalDisposition(Enum):
+    STORED = "stored"
+    HARD_REJECT = "hard_reject"
+    RETRY = "retry"
+
+
+class LiveMailboxApprovalReconnectRequired(RuntimeError):
+    """Raised when approval handling cannot safely continue on the selected mailbox."""
+
+
+@dataclass(frozen=True)
+class LiveMailboxApprovalReceiptResult:
+    disposition: LiveMailboxApprovalDisposition
+    path: Path | None = None
+    reason: str = ""
+    requires_reconnect: bool = False
+
+
 def amh_mailbox_account(args: Args) -> str:
     return args.inbox_identity.split("\0", 1)[0].strip()
 
@@ -1761,26 +1877,602 @@ def fetch_blob(msg_data: list[object]) -> bytes:
     return blob
 
 
-def parse_gmail_metadata(msg_data: list[object]) -> tuple[str | None, str | None]:
+def gmail_internaldate_unix_ms(value: bytes) -> str | None:
+    try:
+        parsed = parsedate_to_datetime(value.decode("ascii"))
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return str(int(parsed.timestamp() * 1000))
+
+
+def parse_gmail_metadata(msg_data: list[object]) -> tuple[str | None, str | None, str | None]:
     blob = fetch_blob(msg_data)
     msgid = GMAIL_MSGID_RE.search(blob)
     thrid = GMAIL_THRID_RE.search(blob)
+    internaldate = GMAIL_INTERNALDATE_RE.search(blob)
     return (
         msgid.group(1).decode() if msgid else None,
         thrid.group(1).decode() if thrid else None,
+        gmail_internaldate_unix_ms(internaldate.group(1)) if internaldate else None,
     )
 
 
-def fetch_gmail_metadata(client: imaplib.IMAP4_SSL, uid: str) -> tuple[str, str | None] | None:
+def fetch_gmail_metadata(client: imaplib.IMAP4_SSL, uid: str) -> tuple[str, str | None, str | None] | None:
     typ, msg_data = client.uid("fetch", uid, GMAIL_METADATA_FETCH)
     if typ != "OK" or not msg_data:
         return None
-    message_id, thread_id = parse_gmail_metadata(msg_data)
+    message_id, thread_id, internaldate_unix_ms = parse_gmail_metadata(msg_data)
     if not message_id:
         return None
     if not thread_id:
-        return (message_id, None)
-    return (message_id, thread_id)
+        return (message_id, None, internaldate_unix_ms)
+    return (message_id, thread_id, internaldate_unix_ms)
+
+
+def fetch_gmail_metadata_for_message_id(
+    client: imaplib.IMAP4_SSL,
+    message_id: str,
+) -> tuple[str, str, str, str] | None:
+    result: tuple[str, str, str, str] | None = None
+    try:
+        try:
+            typ_select, _select_data = client.select('"[Gmail]/All Mail"', readonly=True)
+            if typ_select == "OK":
+                typ, uid_data = client.uid("search", None, "HEADER", "Message-ID", message_id)
+                uid_tokens = (
+                    b" ".join(item for item in uid_data if isinstance(item, bytes)).split()
+                    if typ == "OK" and uid_data
+                    else []
+                )
+                if len(uid_tokens) == 1:
+                    try:
+                        uid = uid_tokens[0].decode("ascii")
+                    except UnicodeDecodeError:
+                        uid = ""
+                    if uid:
+                        typ_labels, label_data = client.uid("fetch", uid, "(X-GM-LABELS)")
+                        metadata = fetch_gmail_metadata(client, uid)
+                        if (
+                            typ_labels == "OK"
+                            and GMAIL_SENT_LABEL_RE.search(fetch_blob(label_data))
+                            and metadata is not None
+                        ):
+                            gmail_message_id, gmail_thread_id, gmail_internaldate_unix_ms = metadata
+                            if (
+                                uid.isdigit()
+                                and gmail_message_id.isdigit()
+                                and gmail_thread_id
+                                and gmail_thread_id.isdigit()
+                                and gmail_internaldate_unix_ms
+                            ):
+                                result = (
+                                    uid,
+                                    gmail_message_id,
+                                    gmail_thread_id,
+                                    gmail_internaldate_unix_ms,
+                                )
+        except imaplib.IMAP4.error:
+            result = None
+    finally:
+        try:
+            typ_restore, _restore_data = client.select("INBOX")
+        except imaplib.IMAP4.error:
+            typ_restore = "NO"
+        if typ_restore != "OK":
+            raise LiveMailboxApprovalReconnectRequired(
+                "failed to restore INBOX after approval-request Gmail metadata lookup"
+            )
+    return result
+
+
+def live_mailbox_approval_receipts_dir(args: Args) -> Path:
+    return args.state_dir / "amh-live-mailbox-approval-receipts"
+
+
+def _sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _live_mailbox_command_lines(body: str) -> list[str]:
+    normalized = body.replace("\r\n", "\n").replace("\r", "\n")
+    if normalized.endswith("\n"):
+        normalized = normalized[:-1]
+    if normalized == "":
+        return []
+    return normalized.split("\n")
+
+
+def _live_mailbox_stage(body: str) -> tuple[str, str, str] | None:
+    commands = _live_mailbox_command_lines(body)
+    if len(commands) != 1:
+        return None
+    command = commands[0]
+    if command == AMH_LIVE_MAILBOX_EMAIL1_APPROVAL_TEXT:
+        return "email1", AMH_LIVE_MAILBOX_EMAIL1_APPROVAL_TEXT, ""
+    match = AMH_LIVE_MAILBOX_EMAIL2_APPROVAL_RE.fullmatch(command)
+    if match is None:
+        return None
+    observed = match.group(1)
+    approval_text = (
+        "Approved: send Email 2 only for Gmail threading test "
+        "from sichangheagent@gmail.com to stevensichanghe@gmail.com using "
+        f"Email 1 Message-ID: {observed}. Approval code GT-20260821-EMAIL2."
+    )
+    return "email2", approval_text, observed
+
+
+def _live_mailbox_approval_subject(stage: str) -> str:
+    if stage == "email1":
+        return AMH_LIVE_MAILBOX_EMAIL1_APPROVAL_SUBJECT
+    return AMH_LIVE_MAILBOX_EMAIL2_APPROVAL_SUBJECT
+
+
+def _live_mailbox_approval_request_message_id(stage: str) -> str:
+    if stage == "email1":
+        return AMH_LIVE_MAILBOX_EMAIL1_APPROVAL_REQUEST_MESSAGE_ID
+    return AMH_LIVE_MAILBOX_EMAIL2_APPROVAL_REQUEST_MESSAGE_ID
+
+
+def _message_id_tokens(values: list[str]) -> set[str]:
+    tokens: set[str] = set()
+    for value in values:
+        tokens.update(re.findall(r"<[^<>\s]+>", str(value)))
+    return tokens
+
+
+def _live_mailbox_reply_binds_request(msg: Message, request_message_id: str) -> bool:
+    in_reply_to = _message_id_tokens([str(value) for value in msg.get_all("In-Reply-To", [])])
+    references = _message_id_tokens([str(value) for value in msg.get_all("References", [])])
+    return request_message_id in in_reply_to and request_message_id in references
+
+
+def _live_mailbox_reply_has_exact_recipients(msg: Message) -> bool:
+    to_addresses = [
+        address.casefold()
+        for _display, address in getaddresses([str(value) for value in msg.get_all("To", [])])
+        if address
+    ]
+    if to_addresses != [AMH_LIVE_MAILBOX_SENDER.casefold()]:
+        return False
+    return not msg.get_all("Cc", []) and not msg.get_all("Bcc", [])
+
+
+def _live_mailbox_approval_body_container_ok(msg: Message, expected_approval_text: str) -> bool:
+    del expected_approval_text
+    if msg.is_multipart():
+        return False
+    if msg.get_content_type() != "text/plain":
+        return False
+    return (
+        msg.get_filename() is None
+        and msg.get_content_disposition() is None
+        and not msg.get_all("Content-Disposition", [])
+    )
+
+
+def live_mailbox_approval_thread_candidate(msg: Message) -> bool:
+    subject_values = [str(value) for value in msg.get_all("Subject", [])]
+    if len(subject_values) != 1:
+        return False
+    for stage_name in ("email1", "email2"):
+        if subject_values[0] != _live_mailbox_approval_subject(stage_name):
+            continue
+        if _live_mailbox_reply_binds_request(
+            msg,
+            _live_mailbox_approval_request_message_id(stage_name),
+        ):
+            return True
+    return False
+
+
+def _live_mailbox_stage_fields(stage: str) -> dict[str, str]:
+    if stage == "email1":
+        return {
+            "artifact": str(AMH_LIVE_MAILBOX_PACKET_ROOT / "email-1.eml"),
+            "artifact_sha256": AMH_LIVE_MAILBOX_EMAIL1_ARTIFACT_SHA256,
+            "body_sha256": AMH_LIVE_MAILBOX_EMAIL1_BODY_SHA256,
+            "message_id": AMH_LIVE_MAILBOX_EMAIL1_MESSAGE_ID,
+            "subject": AMH_LIVE_MAILBOX_EMAIL1_SUBJECT,
+        }
+    return {
+        "artifact": str(AMH_LIVE_MAILBOX_PACKET_ROOT / "email-2.eml"),
+        "artifact_sha256": AMH_LIVE_MAILBOX_EMAIL2_ARTIFACT_SHA256,
+        "body_sha256": AMH_LIVE_MAILBOX_EMAIL2_BODY_SHA256,
+        "message_id": AMH_LIVE_MAILBOX_EMAIL2_MESSAGE_ID,
+        "subject": AMH_LIVE_MAILBOX_EMAIL2_SUBJECT,
+    }
+
+
+def _live_mailbox_receipt_values(receipt: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for line in receipt.read_text(encoding="utf-8").splitlines():
+        if not line or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key] = value
+    return values
+
+
+def _live_mailbox_receipt_matches(
+    values: dict[str, str],
+    *,
+    stage: str,
+    request_message_id: str,
+) -> bool:
+    return (
+        values.get("schema") == AMH_LIVE_MAILBOX_APPROVAL_RECEIPT_SCHEMA
+        and values.get("stage") == stage
+        and values.get("approval_request_message_id") == request_message_id
+    )
+
+
+def live_mailbox_existing_receipt(
+    args: Args,
+    *,
+    stage: str,
+    request_message_id: str,
+) -> bool | None:
+    receipts = live_mailbox_approval_receipts_dir(args)
+    if not receipts.exists():
+        return False
+    for receipt in receipts.glob("*.receipt"):
+        try:
+            values = _live_mailbox_receipt_values(receipt)
+        except (OSError, UnicodeDecodeError):
+            return None
+        if _live_mailbox_receipt_matches(
+            values,
+            stage=stage,
+            request_message_id=request_message_id,
+        ) and values.get("receipt_finalized") == "true":
+            return True
+    return False
+
+
+def maybe_write_live_mailbox_approval_receipt(
+    client: imaplib.IMAP4_SSL,
+    args: Args,
+    uid: str,
+    msg: Message,
+    raw_mime: bytes,
+    txt_path: Path,
+    body_text: str,
+) -> Path | None:
+    result = live_mailbox_approval_receipt_result(
+        client,
+        args,
+        uid,
+        msg,
+        raw_mime,
+        txt_path,
+        body_text,
+    )
+    return result.path
+
+
+def live_mailbox_approval_receipt_result(
+    client: imaplib.IMAP4_SSL,
+    args: Args,
+    uid: str,
+    msg: Message,
+    raw_mime: bytes,
+    txt_path: Path,
+    body_text: str,
+) -> LiveMailboxApprovalReceiptResult:
+    stage = _live_mailbox_stage(body_text)
+    if stage is None:
+        return LiveMailboxApprovalReceiptResult(
+            LiveMailboxApprovalDisposition.HARD_REJECT,
+            reason="approval body does not contain exactly one recognized command",
+        )
+    stage_name, approval_text, observed_message_id = stage
+    if not _live_mailbox_approval_body_container_ok(msg, approval_text):
+        return LiveMailboxApprovalReceiptResult(
+            LiveMailboxApprovalDisposition.HARD_REJECT,
+            reason="approval MIME container is not single-part text/plain",
+        )
+    if not TRUST_LIVE_MAILBOX_AUTH_RESULTS:
+        return LiveMailboxApprovalReceiptResult(
+            LiveMailboxApprovalDisposition.RETRY,
+            reason="trusted Gmail Authentication-Results gate is disabled",
+        )
+    if not args.inbox_identity:
+        return LiveMailboxApprovalReceiptResult(
+            LiveMailboxApprovalDisposition.RETRY,
+            reason="mailbox UID identity is missing",
+        )
+    if args.self_email.casefold() != AMH_LIVE_MAILBOX_RECIPIENT.casefold():
+        return LiveMailboxApprovalReceiptResult(
+            LiveMailboxApprovalDisposition.RETRY,
+            reason="Human sender configuration does not match pinned recipient",
+        )
+    if amh_mailbox_account(args).casefold() != AMH_LIVE_MAILBOX_SENDER.casefold():
+        return LiveMailboxApprovalReceiptResult(
+            LiveMailboxApprovalDisposition.RETRY,
+            reason="IMAP account does not match pinned sender mailbox",
+        )
+    if args.mail_dir.resolve(strict=False) != AMH_LIVE_MAILBOX_APPROVAL_MAIL_DIR.resolve(strict=False):
+        return LiveMailboxApprovalReceiptResult(
+            LiveMailboxApprovalDisposition.RETRY,
+            reason="approval mail directory is not the pinned manager_mail root",
+        )
+    if args.state_dir.resolve(strict=False) != AMH_LIVE_MAILBOX_APPROVAL_STATE_DIR.resolve(strict=False):
+        return LiveMailboxApprovalReceiptResult(
+            LiveMailboxApprovalDisposition.RETRY,
+            reason="approval state directory is not the pinned state root",
+        )
+    if not exact_human_sender(msg, args.self_email, require_transport_identity=True):
+        return LiveMailboxApprovalReceiptResult(
+            LiveMailboxApprovalDisposition.HARD_REJECT,
+            reason="sender is not exactly authenticated Human",
+        )
+    if not _live_mailbox_reply_has_exact_recipients(msg):
+        return LiveMailboxApprovalReceiptResult(
+            LiveMailboxApprovalDisposition.HARD_REJECT,
+            reason="approval reply recipients are not exactly pinned",
+        )
+    metadata = fetch_gmail_metadata(client, uid)
+    if metadata is None:
+        return LiveMailboxApprovalReceiptResult(
+            LiveMailboxApprovalDisposition.RETRY,
+            reason="approval Gmail metadata fetch failed",
+        )
+    gmail_message_id, gmail_thread_id, gmail_internaldate_unix_ms = metadata
+    if (
+        not uid.isdigit()
+        or not gmail_thread_id
+        or not gmail_thread_id.isdigit()
+        or not gmail_internaldate_unix_ms
+    ):
+        return LiveMailboxApprovalReceiptResult(
+            LiveMailboxApprovalDisposition.RETRY,
+            reason="approval Gmail metadata is incomplete",
+        )
+    subject_values = [str(value) for value in msg.get_all("Subject", [])]
+    if subject_values != [_live_mailbox_approval_subject(stage_name)]:
+        return LiveMailboxApprovalReceiptResult(
+            LiveMailboxApprovalDisposition.HARD_REJECT,
+            reason="approval subject is not pinned",
+        )
+    request_message_id = _live_mailbox_approval_request_message_id(stage_name)
+    if not _live_mailbox_reply_binds_request(msg, request_message_id):
+        return LiveMailboxApprovalReceiptResult(
+            LiveMailboxApprovalDisposition.HARD_REJECT,
+            reason="approval reply is not bound to the pinned request",
+        )
+    existing_receipt = live_mailbox_existing_receipt(
+        args,
+        stage=stage_name,
+        request_message_id=request_message_id,
+    )
+    if existing_receipt is None:
+        return LiveMailboxApprovalReceiptResult(
+            LiveMailboxApprovalDisposition.RETRY,
+            reason="approval receipt scan failed",
+        )
+    if existing_receipt:
+        return LiveMailboxApprovalReceiptResult(
+            LiveMailboxApprovalDisposition.HARD_REJECT,
+            reason="approval receipt already exists",
+        )
+    now_ms = int(time.time() * 1000)
+    if stage_name == "email1":
+        if now_ms >= AMH_LIVE_MAILBOX_EMAIL1_APPROVAL_DEADLINE_UNIX_MS:
+            return LiveMailboxApprovalReceiptResult(
+                LiveMailboxApprovalDisposition.HARD_REJECT,
+                reason="approval was processed after the deadline",
+            )
+        if int(gmail_internaldate_unix_ms) >= AMH_LIVE_MAILBOX_EMAIL1_APPROVAL_DEADLINE_UNIX_MS:
+            return LiveMailboxApprovalReceiptResult(
+                LiveMailboxApprovalDisposition.HARD_REJECT,
+                reason="approval arrived after the deadline",
+            )
+    try:
+        request_metadata = fetch_gmail_metadata_for_message_id(client, request_message_id)
+    except LiveMailboxApprovalReconnectRequired as exc:
+        return LiveMailboxApprovalReceiptResult(
+            LiveMailboxApprovalDisposition.RETRY,
+            reason=str(exc),
+            requires_reconnect=True,
+        )
+    if request_metadata is None:
+        return LiveMailboxApprovalReceiptResult(
+            LiveMailboxApprovalDisposition.RETRY,
+            reason="approval-request Gmail metadata fetch failed",
+        )
+    (
+        request_uid,
+        request_gmail_message_id,
+        request_gmail_thread_id,
+        request_gmail_internaldate_unix_ms,
+    ) = request_metadata
+    if request_gmail_thread_id != gmail_thread_id:
+        return LiveMailboxApprovalReceiptResult(
+            LiveMailboxApprovalDisposition.HARD_REJECT,
+            reason="approval reply is not in the approval-request Gmail thread",
+        )
+    stage_fields = _live_mailbox_stage_fields(stage_name)
+    try:
+        source_sha256 = hashlib.sha256(txt_path.read_bytes()).hexdigest()
+    except OSError:
+        return LiveMailboxApprovalReceiptResult(
+            LiveMailboxApprovalDisposition.RETRY,
+            reason="approval source file read failed",
+        )
+    raw_mime_sha256 = hashlib.sha256(raw_mime).hexdigest()
+    body_sha256 = _sha256_text(body_text)
+    lines = [
+        f"schema={AMH_LIVE_MAILBOX_APPROVAL_RECEIPT_SCHEMA}",
+        "source=external-email-watcher",
+        f"stage={stage_name}",
+        f"mail_from={AMH_LIVE_MAILBOX_SENDER}",
+        f"rcpt_to={AMH_LIVE_MAILBOX_RECIPIENT}",
+        f"artifact={stage_fields['artifact']}",
+        f"artifact_sha256={stage_fields['artifact_sha256']}",
+        f"body_sha256={stage_fields['body_sha256']}",
+        f"message_id={stage_fields['message_id']}",
+        "command_boundary=amh-live-mailbox-dispatch",
+        f"approval_source={txt_path}",
+        f"approval_source_sha256={source_sha256}",
+        f"approval_text_sha256={_sha256_text(approval_text)}",
+        f"approval_subject={subject_values[0]}",
+        f"approval_request_message_id={request_message_id}",
+        f"approval_request_gmail_uid={request_uid}",
+        f"approval_request_gmail_message_id={request_gmail_message_id}",
+        f"approval_request_gmail_thread_id={request_gmail_thread_id}",
+        f"approval_request_gmail_internaldate_unix_ms={request_gmail_internaldate_unix_ms}",
+        f"approval_in_reply_to={request_message_id}",
+        f"approval_references_contains={request_message_id}",
+        f"approval_body_sha256={body_sha256}",
+        f"approval_deadline_unix_ms={AMH_LIVE_MAILBOX_EMAIL1_APPROVAL_DEADLINE_UNIX_MS if stage_name == 'email1' else ''}",
+        f"human_sender={AMH_LIVE_MAILBOX_RECIPIENT}",
+        f"imap_account={amh_mailbox_account(args)}",
+        "authenticated_sender=true",
+        f"provider_authentication={AMH_LIVE_MAILBOX_PROVIDER_AUTHENTICATION}",
+        f"gmail_uid={uid}",
+        f"gmail_message_id={gmail_message_id}",
+        f"gmail_thread_id={gmail_thread_id}",
+        f"gmail_internaldate_unix_ms={gmail_internaldate_unix_ms}",
+        f"raw_mime_sha256={raw_mime_sha256}",
+        f"approval_created_unix_ms={now_ms}",
+        f"expires_unix_ms={now_ms + AMH_LIVE_MAILBOX_RECEIPT_TTL_MS}",
+        "receipt_finalized=true",
+    ]
+    if stage_name == "email2":
+        lines.extend(
+            [
+                f"observed_email1_message_id={observed_message_id}",
+                f"expected_amh_caller={AMH_LIVE_MAILBOX_WORKER_CALLER}",
+            ]
+        )
+    payload = "\n".join(lines) + "\n"
+    receipts = live_mailbox_approval_receipts_dir(args)
+    try:
+        receipts.mkdir(mode=0o700, parents=True, exist_ok=True)
+        receipts.chmod(0o700)
+    except OSError:
+        return LiveMailboxApprovalReceiptResult(
+            LiveMailboxApprovalDisposition.RETRY,
+            reason="approval receipt directory setup failed",
+        )
+    receipt_id = hashlib.sha256(
+        f"{args.inbox_identity}\0{stage_name}\0{request_message_id}".encode()
+    ).hexdigest()
+    path = receipts / f"{receipt_id}.receipt"
+    tmp_path = receipts / f".{receipt_id}.{os.getpid()}.tmp"
+    if path.exists():
+        try:
+            existing_values = _live_mailbox_receipt_values(path)
+        except (OSError, UnicodeDecodeError):
+            return LiveMailboxApprovalReceiptResult(
+                LiveMailboxApprovalDisposition.RETRY,
+                reason="approval receipt path read failed",
+            )
+        if _live_mailbox_receipt_matches(
+            existing_values,
+            stage=stage_name,
+            request_message_id=request_message_id,
+        ):
+            if existing_values.get("receipt_finalized") == "true":
+                return LiveMailboxApprovalReceiptResult(
+                    LiveMailboxApprovalDisposition.HARD_REJECT,
+                    reason="approval receipt path already exists",
+                )
+            try:
+                path.unlink()
+            except OSError:
+                return LiveMailboxApprovalReceiptResult(
+                    LiveMailboxApprovalDisposition.RETRY,
+                    reason="unfinalized approval receipt cleanup failed",
+                )
+        else:
+            return LiveMailboxApprovalReceiptResult(
+                LiveMailboxApprovalDisposition.RETRY,
+                reason="approval receipt path is occupied",
+            )
+    try:
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except (OSError, UnicodeDecodeError):
+            pass
+        if not path.exists():
+            return LiveMailboxApprovalReceiptResult(
+                LiveMailboxApprovalDisposition.RETRY,
+                reason="approval receipt temporary path already exists",
+            )
+        return LiveMailboxApprovalReceiptResult(
+            LiveMailboxApprovalDisposition.HARD_REJECT,
+            reason="approval receipt path already exists",
+        )
+    try:
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                fd = -1
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+        finally:
+            if fd != -1:
+                os.close(fd)
+        fsync_directory(receipts)
+        try:
+            os.link(tmp_path, path)
+        except FileExistsError:
+            try:
+                existing_values = _live_mailbox_receipt_values(path)
+            except (OSError, UnicodeDecodeError):
+                return LiveMailboxApprovalReceiptResult(
+                    LiveMailboxApprovalDisposition.RETRY,
+                    reason="approval receipt path read failed",
+                )
+            if _live_mailbox_receipt_matches(
+                existing_values,
+                stage=stage_name,
+                request_message_id=request_message_id,
+            ) and existing_values.get("receipt_finalized") == "true":
+                return LiveMailboxApprovalReceiptResult(
+                    LiveMailboxApprovalDisposition.HARD_REJECT,
+                    reason="approval receipt path already exists",
+                )
+            return LiveMailboxApprovalReceiptResult(
+                LiveMailboxApprovalDisposition.RETRY,
+                reason="approval receipt path is occupied",
+            )
+        fsync_directory(receipts)
+    except OSError:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except (OSError, UnicodeDecodeError):
+            pass
+        try:
+            if path.exists():
+                values = _live_mailbox_receipt_values(path)
+                if _live_mailbox_receipt_matches(
+                    values,
+                    stage=stage_name,
+                    request_message_id=request_message_id,
+                ):
+                    path.unlink(missing_ok=True)
+                    fsync_directory(receipts)
+        except OSError:
+            pass
+        return LiveMailboxApprovalReceiptResult(
+            LiveMailboxApprovalDisposition.RETRY,
+            reason="approval receipt write failed",
+        )
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return LiveMailboxApprovalReceiptResult(
+        LiveMailboxApprovalDisposition.STORED,
+        path=path,
+    )
 
 
 def load_amh_bridge_modules() -> tuple[object, object]:
@@ -1848,7 +2540,7 @@ def try_route_amh_message(client: imaplib.IMAP4_SSL, args: Args, uid: str, msg: 
     committed_by_uid = amh_committed_operation(args, uid=uid)
     if metadata is None:
         return AmhRouteDisposition.HOLD if committed_by_uid else AmhRouteDisposition.SKIP
-    message_id, thread_id = metadata
+    message_id, thread_id, _internaldate_unix_ms = metadata
     committed = amh_committed_operation(args, message_id=message_id) or committed_by_uid
     if not thread_id:
         return AmhRouteDisposition.HOLD if committed else AmhRouteDisposition.FALLBACK
@@ -1961,6 +2653,104 @@ def mark_seen_after_human_intake(client: imaplib.IMAP4_SSL, uid: str, args: Args
     return mark_seen(client, uid)
 
 
+def live_mailbox_approval_processed_uids_path(args: Args) -> Path:
+    return email_uid_state_path(args, "amh-live-mailbox-approval-processed-uids")
+
+
+def handle_live_mailbox_approval_replies(client: imaplib.IMAP4_SSL, args: Args) -> bool:
+    processed_path = live_mailbox_approval_processed_uids_path(args)
+    processed_uids = load_processed_uids(processed_path)
+    processed_changed = False
+    handled = False
+    subject = _live_mailbox_approval_subject(args.live_mailbox_stage)
+    request_message_id = _live_mailbox_approval_request_message_id(args.live_mailbox_stage)
+    candidate_uids = search_live_mailbox_approval_uids(
+        client,
+        sender_email=args.self_email,
+        subject=subject,
+        request_message_id=request_message_id,
+        processed_uids=processed_uids,
+    )
+    if not candidate_uids:
+        logging.info(
+            "email AMH live mailbox approval scan complete: n=0 stage=%s subject=%r",
+            args.live_mailbox_stage,
+            subject,
+        )
+        return False
+    logging.info(
+        "email AMH live mailbox approval candidates found: n=%s uids=%s stage=%s subject=%r",
+        len(candidate_uids),
+        ",".join(uid.decode() for uid in sorted(candidate_uids, key=lambda value: int(value))),
+        args.live_mailbox_stage,
+        subject,
+    )
+    for raw_uid in sorted(candidate_uids, key=lambda value: int(value)):
+        uid = raw_uid.decode()
+        if uid in processed_uids:
+            continue
+        typ_msg, msg_data = client.uid("fetch", uid, "(BODY.PEEK[])")
+        if typ_msg != "OK" or not msg_data or not isinstance(msg_data[0], tuple):
+            logging.error("email AMH live mailbox approval fetch failed: uid=%s typ=%s", uid, typ_msg)
+            continue
+        raw_mime = msg_data[0][1]
+        if not isinstance(raw_mime, bytes):
+            logging.error("email AMH live mailbox approval fetch returned non-bytes MIME: uid=%s", uid)
+            continue
+        msg = BytesParser(policy=policy.default).parsebytes(raw_mime)
+        sender = str(msg.get("From", ""))
+        if not exact_human_sender(msg, args.self_email, require_transport_identity=bool(args.inbox_identity)):
+            logging.warning(
+                "email AMH live mailbox approval candidate rejected after fetch: uid=%s from_self=%s",
+                uid,
+                from_self(sender, args.self_email),
+            )
+            if mark_seen_after_human_intake(client, uid, args, msg):
+                processed_uids.add(uid)
+                processed_changed = True
+                handled = True
+            continue
+        body_text = message_text(msg)
+        txt_path = write_mail(args, uid, msg, sender, str(msg.get("Subject", "")))
+        receipt_result = live_mailbox_approval_receipt_result(
+            client,
+            args,
+            uid,
+            msg,
+            raw_mime,
+            txt_path,
+            body_text,
+        )
+        if receipt_result.disposition is LiveMailboxApprovalDisposition.RETRY:
+            logging.warning(
+                "email AMH live mailbox approval candidate left unread for retry: uid=%s reason=%s",
+                uid,
+                receipt_result.reason,
+            )
+            if receipt_result.requires_reconnect:
+                raise LiveMailboxApprovalReconnectRequired(receipt_result.reason)
+            continue
+        if receipt_result.path is not None:
+            logging.info(
+                "email AMH live mailbox approval receipt stored: uid=%s path=%s",
+                uid,
+                receipt_result.path,
+            )
+        else:
+            logging.warning(
+                "email AMH live mailbox approval candidate hard-rejected: uid=%s reason=%s",
+                uid,
+                receipt_result.reason,
+            )
+        if mark_seen_after_human_intake(client, uid, args, msg, txt_path):
+            processed_uids.add(uid)
+            processed_changed = True
+            handled = True
+    if processed_changed:
+        save_processed_uids(processed_path, processed_uids)
+    return handled or processed_changed
+
+
 def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
     processed_path = processed_uids_path(args)
     processed_uids = load_processed_uids(processed_path)
@@ -1994,10 +2784,10 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
             ):
                 unaccepted_pending_uids.discard(uid)
                 unaccepted_changed = True
-                processed_uids.add(uid)
-                processed_changed = True
-                mark_seen_after_human_intake(client, uid, args, txt_path=expected_txt_path)
-                handled = True
+                if mark_seen_after_human_intake(client, uid, args, txt_path=expected_txt_path):
+                    processed_uids.add(uid)
+                    processed_changed = True
+                    handled = True
             else:
                 unaccepted_pending_uids.add(uid)
                 unaccepted_changed = True
@@ -2009,10 +2799,10 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
             logging.info("email unaccepted uid already has consumed source; accepting: uid=%s root=%s", uid, args.root)
             unaccepted_pending_uids.discard(uid)
             unaccepted_changed = True
-            processed_uids.add(uid)
-            processed_changed = True
-            mark_seen_after_human_intake(client, uid, args, txt_path=expected_txt_path)
-            handled = True
+            if mark_seen_after_human_intake(client, uid, args, txt_path=expected_txt_path):
+                processed_uids.add(uid)
+                processed_changed = True
+                handled = True
             continue
         if uid in processed_uids:
             if uid not in unaccepted_pending_uids:
@@ -2032,10 +2822,10 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
             ):
                 unaccepted_pending_uids.discard(uid)
                 unaccepted_changed = True
-                processed_uids.add(uid)
-                processed_changed = True
-                mark_seen_after_human_intake(client, uid, args, txt_path=expected_txt_path)
-                handled = True
+                if mark_seen_after_human_intake(client, uid, args, txt_path=expected_txt_path):
+                    processed_uids.add(uid)
+                    processed_changed = True
+                    handled = True
             else:
                 unaccepted_pending_uids.add(uid)
                 unaccepted_changed = True
@@ -2044,10 +2834,10 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
             logging.info("email uid already has acknowledged or routed source; accepting without duplicate pending: uid=%s root=%s", uid, args.root)
             unaccepted_pending_uids.discard(uid)
             unaccepted_changed = True
-            processed_uids.add(uid)
-            processed_changed = True
-            mark_seen_after_human_intake(client, uid, args, txt_path=expected_txt_path)
-            handled = True
+            if mark_seen_after_human_intake(client, uid, args, txt_path=expected_txt_path):
+                processed_uids.add(uid)
+                processed_changed = True
+                handled = True
             continue
         typ_msg, msg_data = client.uid("fetch", uid, "(BODY.PEEK[])")
         if typ_msg != "OK" or not msg_data or not isinstance(msg_data[0], tuple):
@@ -2066,6 +2856,48 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
             ignored_changed = True
             continue
         raw_mime = msg_data[0][1]
+        body_text = message_text(msg)
+        if (
+            args.live_mailbox_approval_only
+            and isinstance(raw_mime, bytes)
+            and live_mailbox_approval_thread_candidate(msg)
+        ):
+            txt_path = write_mail(args, uid, msg, sender, subject)
+            receipt_result = live_mailbox_approval_receipt_result(
+                client,
+                args,
+                uid,
+                msg,
+                raw_mime,
+                txt_path,
+                body_text,
+            )
+            if receipt_result.disposition is LiveMailboxApprovalDisposition.RETRY:
+                logging.warning(
+                    "email AMH live mailbox approval candidate left unread for retry: uid=%s reason=%s",
+                    uid,
+                    receipt_result.reason,
+                )
+                if receipt_result.requires_reconnect:
+                    raise LiveMailboxApprovalReconnectRequired(receipt_result.reason)
+                continue
+            if receipt_result.path is not None:
+                logging.info(
+                    "email AMH live mailbox approval receipt stored: uid=%s path=%s",
+                    uid,
+                    receipt_result.path,
+                )
+            else:
+                logging.warning(
+                    "email AMH live mailbox approval candidate hard-rejected: uid=%s reason=%s",
+                    uid,
+                    receipt_result.reason,
+                )
+            if mark_seen_after_human_intake(client, uid, args, msg, txt_path):
+                processed_uids.add(uid)
+                processed_changed = True
+                handled = True
+            continue
         amh_result = try_route_amh_message(client, args, uid, msg, raw_mime if isinstance(raw_mime, bytes) else b"")
         if amh_result is AmhRouteDisposition.HOLD:
             logging.info("email AMH route held for replay: uid=%s subject=%r", uid, subject)
@@ -2082,7 +2914,6 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
         if amh_result is AmhRouteDisposition.SKIP:
             logging.warning("email AMH metadata unavailable; leaving unread: uid=%s subject=%r", uid, subject)
             continue
-        body_text = message_text(msg)
         txt_path = write_mail(args, uid, msg, sender, subject)
         logging.info("email stored: uid=%s path=%s subject=%r", uid, source_ref(args.root, txt_path), subject)
         if is_recovery_subject(subject):
@@ -2090,10 +2921,10 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
                 handle_recovery_email(args, uid, txt_path)
             else:
                 append_recovery_record(args.root, txt_path, "recovery email recorded; restart refused because sender authentication did not pass", manager_file)
-            processed_uids.add(uid)
-            processed_changed = True
-            mark_seen_after_human_intake(client, uid, args, msg)
-            handled = True
+            if mark_seen_after_human_intake(client, uid, args, msg):
+                processed_uids.add(uid)
+                processed_changed = True
+                handled = True
         else:
             route = email_route(args, subject, body_text)
             route_args = replace(args, manager_file=route.manager_file, manager_target=route.manager_target)
@@ -2105,10 +2936,10 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
             if route.pending_watcher_delivery or push_email_ref(route_args, pending_line):
                 unaccepted_pending_uids.discard(uid)
                 unaccepted_changed = True
-                processed_uids.add(uid)
-                processed_changed = True
-                mark_seen_after_human_intake(client, uid, args, msg)
-                handled = True
+                if mark_seen_after_human_intake(client, uid, args, msg):
+                    processed_uids.add(uid)
+                    processed_changed = True
+                    handled = True
             else:
                 unaccepted_pending_uids.add(uid)
                 unaccepted_changed = True
@@ -2217,7 +3048,7 @@ def main(argv: list[str]) -> int:
         print(f"email_idle_watcher: missing config keys {sorted(missing)} in {CONFIG_PATH}", file=sys.stderr)
         return 1
     accepted_human = split_settings.human_address if split_settings is not None else config["user"]
-    safe_args = Args(args.root, args.manager_url, args.mail_dir, args.state_dir, args.manager_file, args.once, accepted_human, args.recovery_debounce_s, args.restart_script, args.idle_wait_s, args.manager_target, args.imap_timeout_s, args.pull_interval_s, args.idle_exit_after_s, args.unread_compression_threshold, args.recent_cleanup_threshold, args.recent_cleanup_window_s, mail_thresholds=split_settings is None, inbox_identity=config["user"] if split_settings is not None else "")
+    safe_args = Args(args.root, args.manager_url, args.mail_dir, args.state_dir, args.manager_file, args.once, accepted_human, args.recovery_debounce_s, args.restart_script, args.idle_wait_s, args.manager_target, args.imap_timeout_s, args.pull_interval_s, args.idle_exit_after_s, args.unread_compression_threshold, args.recent_cleanup_threshold, args.recent_cleanup_window_s, mail_thresholds=split_settings is None, inbox_identity=config["user"] if split_settings is not None else "", live_mailbox_approval_only=args.live_mailbox_approval_only, live_mailbox_stage=args.live_mailbox_stage)
     logging.info("email watcher starting: root=%s mail_dir=%s state_dir=%s manager_target=%s manager_url=%s idle_wait_s=%s imap_timeout_s=%s pull_interval_s=%s idle_exit_after_s=%s unread_compression_threshold=%s recent_cleanup_threshold=%s recent_cleanup_window_s=%s", safe_args.root, safe_args.mail_dir, safe_args.state_dir, safe_args.manager_target or "unset", safe_args.manager_url or "unset", safe_args.idle_wait_s, safe_args.imap_timeout_s, safe_args.pull_interval_s, safe_args.idle_exit_after_s, safe_args.unread_compression_threshold, safe_args.recent_cleanup_threshold, int(safe_args.recent_cleanup_window_s))
     while True:
         try:
@@ -2227,6 +3058,10 @@ def main(argv: list[str]) -> int:
                 runtime_args = replace(safe_args, inbox_identity=mailbox_state_identity(client, config["user"])) if split_settings is not None else safe_args
                 logging.info("email watcher connected and selected INBOX")
                 threshold_check = (lambda: maybe_handle_split_manager_mail_thresholds(runtime_args, split_settings)) if split_settings is not None else None
+                if runtime_args.live_mailbox_approval_only:
+                    handle_live_mailbox_approval_replies(client, runtime_args)
+                    wait_email_pushes()
+                    return 0
                 if runtime_args.once:
                     handle_unseen(client, runtime_args)
                     if threshold_check is not None:
