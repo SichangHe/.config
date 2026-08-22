@@ -1189,7 +1189,7 @@ resolved_task_items: []
                     self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
                 stop_done_agent.assert_not_called()
 
-    def test_cli_blocked_reconciliation_rejects_mismatched_authoritative_blocker(self) -> None:
+    def test_cli_blocked_reconciliation_updates_changed_blocker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             path = root / "task.md"
@@ -1199,7 +1199,28 @@ resolved_task_items: []
             todo_text = "current:\ntask.md wl:2\n\nhuman pending:\n"
             todo.write_text(todo_text, encoding="utf-8")
 
-            with redirect_stderr(io.StringIO()):
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(0, run(StatusArgs(root, Path("task.md"), "blocked", "different human reason")))
+
+            self.assertEqual(original_task.replace("blocked_on: human", "blocked_on: different human reason"), path.read_text(encoding="utf-8"))
+            self.assertEqual("current:\n\nhuman pending:\ntask.md wl:2\n", todo.read_text(encoding="utf-8"))
+
+    def test_cli_blocked_reconciliation_rolls_back_todo_when_blocker_update_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            original_task = task_frontmatter(status="blocked", blocked_on="human") + "body\n"
+            path.write_text(original_task, encoding="utf-8")
+            todo = root / "TODO.md"
+            todo_text = "current:\ntask.md wl:2\n\nhuman pending:\n"
+            todo.write_text(todo_text, encoding="utf-8")
+
+            def fail_task_replace(target: Path, text: str, before: os.stat_result) -> None:
+                if target == path:
+                    raise OSError("task replace failed")
+                replace_if_unchanged_locked(target, text, before)
+
+            with patch("omo_manager.omo_task_status.replace_if_unchanged_locked", side_effect=fail_task_replace), redirect_stderr(io.StringIO()):
                 self.assertEqual(2, run(StatusArgs(root, Path("task.md"), "blocked", "different human reason")))
 
             self.assertEqual(original_task, path.read_text(encoding="utf-8"))
@@ -1485,9 +1506,27 @@ resolved_task_items: []
             path.write_text(task_frontmatter(status="blocked", blocked_on="different") + "body\n", encoding="utf-8")
 
             with self.assertRaisesRegex(TaskFrontmatterError, "task changed or no longer matches"):
-                reconcile_blocked_index(root, path, original_task, before, "human")
+                reconcile_blocked_index(root, path, original_task, original_task, before)
 
             self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+
+    def test_cli_blocked_reconciliation_combines_blocker_and_row_updates_when_task_is_todo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            todo = root / "TODO.md"
+            original = task_frontmatter(status="blocked", blocked_on="human") + "current:\nTODO.md wl:2\n\nhuman pending:\n"
+            todo.write_text(original, encoding="utf-8")
+
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(0, run(StatusArgs(root, Path("TODO.md"), "blocked", "different human reason")))
+
+            self.assertEqual(
+                original.replace("blocked_on: human", "blocked_on: different human reason").replace(
+                    "current:\nTODO.md wl:2\n\nhuman pending:\n",
+                    "current:\n\nhuman pending:\nTODO.md wl:2\n",
+                ),
+                todo.read_text(encoding="utf-8"),
+            )
 
     def test_cli_retires_blocked_human_target_without_tmux_action(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
