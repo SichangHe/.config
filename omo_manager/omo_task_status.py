@@ -1334,7 +1334,7 @@ def reconcile_blocked_todo_text(root: Path, path: Path, text: str, runat: str) -
 
 def reconcile_done_todo_text(root: Path, path: Path, text: str, runat: str) -> str:
     """Move the sole TODO row for a done task into `previous`, or fail closed."""
-    return reconcile_todo_text(root, path, text, runat, "previous", ("current", "human pending"))
+    return reconcile_todo_text(root, path, text, runat, "previous", ("current", "human pending", "low priority"))
 
 
 def reconcile_shared_done_todo_text(root: Path, path: Path, text: str, shared_target: str) -> str:

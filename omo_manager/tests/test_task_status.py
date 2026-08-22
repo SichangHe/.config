@@ -1256,6 +1256,33 @@ resolved_task_items: []
             stop_agent.assert_not_called()
             record_close_call.assert_not_called()
 
+    def test_cli_done_reissue_moves_low_priority_row_without_task_or_pane_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "vl_paper_intake14.md"
+            original_task = task_frontmatter(status="done", runat="vl:2", managerat="wl:30") + "close history stays\n"
+            path.write_text(original_task, encoding="utf-8")
+            todo = root / "TODO.md"
+            todo.write_text("current:\n\nlow priority:\nvl_paper_intake14.md vl:2\n\nhuman pending:\n\nprevious:\n", encoding="utf-8")
+
+            with (
+                patch("omo_manager.omo_task_status.exact_pane_id", return_value=""),
+                patch("omo_manager.omo_task_status.stop_done_agent") as stop_done_agent,
+                patch("omo_manager.omo_task_status.stop") as stop_agent,
+                patch("omo_manager.omo_task_status.record_close") as record_close_call,
+                redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(0, run(StatusArgs(root, Path("vl_paper_intake14.md"), "done", "")))
+
+            self.assertEqual(original_task, path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                "current:\n\nlow priority:\n\nhuman pending:\n\nprevious:\nvl_paper_intake14.md vl:2\n",
+                todo.read_text(encoding="utf-8"),
+            )
+            stop_done_agent.assert_not_called()
+            stop_agent.assert_not_called()
+            record_close_call.assert_not_called()
+
     def test_cli_done_reissue_fails_closed_for_invalid_todo_or_task_state(self) -> None:
         cases = {
             "absent TODO": None,
@@ -1268,7 +1295,6 @@ resolved_task_items: []
             "malformed task suffix": "current:\nother.md wl:3\n\nhuman pending:\ntask.mdx wl:2\n\nprevious:\n",
             "blocked annotation": "current:\nother.md wl:3\n\nhuman pending:\ntask.md wl:2 (blocked: stale)\n\nprevious:\n",
             "done annotation": "current:\nother.md wl:3\n\nhuman pending:\ntask.md wl:2 (done)\n\nprevious:\n",
-            "wrong section": "current:\nother.md wl:3\n\nhuman pending:\n\nlow priority:\ntask.md wl:2\n\nprevious:\n",
             "already previous": "current:\nother.md wl:3\n\nhuman pending:\n\nprevious:\ntask.md wl:2\n",
             "duplicate destination": "current:\nother.md wl:3\n\nhuman pending:\ntask.md wl:2\n\nprevious:\n\nprevious:\n",
             "mixed-case duplicate destination": "current:\nother.md wl:3\n\nhuman pending:\ntask.md wl:2\n\nprevious:\n\nPrevious:\n",
