@@ -1259,7 +1259,8 @@ class OmoTaskTests(unittest.TestCase):
             root = Path(tmp)
             mail = root / "manager_mail"
             mail.mkdir()
-            (mail / "request.txt").write_text("Please launch my direct agent in hreview now.\n", encoding="utf-8")
+            request = "No, I’m asking you to launch an agent at hreview:5 for me, NOW!!\n"
+            (mail / "request.txt").write_text(request, encoding="utf-8")
             (root / "x.md").write_text(
                 "---\nversion: v1.0.0\nstatus: blocked\nblocked_on: awaiting relaunch\nrunat: old:1\ntool: codex\n"
                 "managerat: mgr:1\nis_manager: false\npending_task_items: []\n---\n"
@@ -1291,7 +1292,7 @@ class OmoTaskTests(unittest.TestCase):
                 "omo_manager.omo_task.subprocess.run",
                 return_value=subprocess.CompletedProcess(["tmux"], 0, "hreview\n", ""),
             ):
-                self.assertEqual("Please launch my direct agent in hreview now.\n", validate_inputs(args))
+                self.assertEqual(request, validate_inputs(args))
 
     def test_validate_inputs_allows_alternative_explicit_agent_request(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1384,6 +1385,7 @@ class OmoTaskTests(unittest.TestCase):
         for excerpt in (
             "hreview is unavailable.\n",
             "Do not launch hreview.\n",
+            "No, do not launch an agent at hreview.\n",
             "> Please launch hreview.\n",
             "Please launch no worker in hreview.\n",
             "Please launch hreview, but do not start anything there.\n",
@@ -3015,6 +3017,70 @@ class OmoTaskTests(unittest.TestCase):
             self.assertIn("export OMO_AGENT_TMUX_TARGET=cfg:DRYRUN", out.getvalue())
             self.assertFalse((root / "x.md").exists())
             self.assertFalse((root / "TODO.md").exists())
+
+    def test_main_dry_run_plans_authorized_hwl_launch_with_sanitized_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mail = root / "manager_mail"
+            mail.mkdir()
+            (mail / "request.txt").write_text("No, I’m asking you to launch an agent at hwl:5 for me, NOW!!\n", encoding="utf-8")
+            prompt = root / "prompt.md"
+            sanitized_prompt = (
+                "You are the direct-human issue-revision companion requested for `hwl:5`.\n\n"
+                "- accompany the human while revising the DW issue drafts\n"
+                "- speak directly with the human in this pane\n"
+                "- do not report to a manager unless explicitly asked\n"
+                "- do not touch other `h*` sessions or use PCODX\n"
+                "- use `/ssd1/sichangheagent/work_logs/dw_github_issues_755/` for the issue drafts\n\n"
+                "Start by briefly telling the human you are ready to help revise the issues.\n"
+            )
+            self.assertNotIn("<human_instruction", sanitized_prompt.casefold())
+            prompt.write_text(sanitized_prompt, encoding="utf-8")
+            self.assertEqual(sanitized_prompt, prompt.read_text(encoding="utf-8"))
+            out = io.StringIO()
+            with (
+                patch(
+                    "omo_manager.omo_task.subprocess.run",
+                    return_value=subprocess.CompletedProcess(["tmux"], 0, "hwl\n", ""),
+                ),
+                patch("omo_manager.omo_task.launch_session", return_value=LaunchSession("hwl", "$1", False)),
+                contextlib.redirect_stdout(out),
+            ):
+                self.assertEqual(
+                    0,
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "--task-file",
+                            "hwl5_issue_reviser.md",
+                            "--tmux-session",
+                            "hwl",
+                            "--tmux-window",
+                            "5",
+                            "--workdir",
+                            str(root),
+                            "--tool",
+                            "codex",
+                            "--model",
+                            "gpt-5.6-sol",
+                            "--reasoning-effort",
+                            "medium",
+                            "--manager-target",
+                            "wl:1",
+                            "--prompt-file",
+                            str(prompt),
+                            "--human-email-file",
+                            "manager_mail/request.txt",
+                            "--human-email-lines",
+                            "1-1",
+                            "--dry-run",
+                        ]
+                    ),
+                )
+            self.assertIn("tmux new-window", out.getvalue())
+            self.assertIn("-t hwl:5", out.getvalue())
+            self.assertFalse((root / "hwl5_issue_reviser.md").exists())
 
     def test_missing_session_dry_run_prints_new_session_plan_without_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -87,9 +87,9 @@ HUMAN_INSTRUCTION_CLOSE = "</human_instruction>"
 HUMAN_INSTRUCTION_OPEN = "<human_instruction"
 MANAGER_DELEGATION_CLOSE = "</manager_delegation>"
 HUMAN_LAUNCH_REQUEST_RE = re.compile(
-    r"^\s*(?:(?:please|just)\s+)?(?:"
+    r"^\s*(?:(?:no|yes|well)\s*,\s*)?(?:(?:please|just)\s+)?(?:"
     r"(?:launch|create|start|open|spawn)\b|"
-    r"(?:give\s+me|set\s+up|i\s+(?:want|need|would\s+like))\b.*\b(?:agent|manager|worker)\b"
+    r"(?:give\s+me|set\s+up|i\s+(?:want|need|would\s+like)|i(?:\s+am|['’]m)\s+asking\s+you\s+to)\b.*\b(?:agent|manager|worker)\b"
     r")",
     flags=re.IGNORECASE,
 )
@@ -101,6 +101,7 @@ HUMAN_LAUNCH_NEGATION_RE = re.compile(
     r"\b(?:no|not|never|without|cannot|cant|dont|wont|wouldnt|shouldnt|couldnt|mustnt|isnt|arent|wasnt|werent|doesnt|didnt|havent|hasnt|hadnt|neednt|shant|[a-z]+n['‘’ʼ＇]t)\b",
     flags=re.IGNORECASE,
 )
+HUMAN_LAUNCH_DISCOURSE_NEGATION_RE = re.compile(r"^\s*no\s*,\s*", flags=re.IGNORECASE)
 HUMAN_LAUNCH_ROLE_RE = re.compile(r"\b(?:agent|manager|worker|window|pane|session)\b", flags=re.IGNORECASE)
 HUMAN_LAUNCH_ROLE_TARGET_RE = re.compile(
     r"\b(?:in|into|at)\s+[`'\"]?([A-Za-z0-9_](?:[A-Za-z0-9_.-]*[A-Za-z0-9_-])?)",
@@ -566,7 +567,8 @@ def human_authorized_launch_session(args: Args, session_name: str) -> bool:
     excerpt = human_email_excerpt(args)
     session_re = re.compile(rf"(?<![A-Za-z0-9_.-]){re.escape(session_name)}(?=$|[^A-Za-z0-9_-])")
     for line in excerpt.splitlines():
-        if HUMAN_LAUNCH_REQUEST_RE.match(line) is None or HUMAN_LAUNCH_NEGATION_RE.search(line) is not None or session_re.search(line) is None:
+        negation_text = HUMAN_LAUNCH_DISCOURSE_NEGATION_RE.sub("", line, count=1)
+        if HUMAN_LAUNCH_REQUEST_RE.match(line) is None or HUMAN_LAUNCH_NEGATION_RE.search(negation_text) is not None or session_re.search(line) is None:
             continue
         role = HUMAN_LAUNCH_ROLE_RE.search(line)
         role_target = HUMAN_LAUNCH_ROLE_TARGET_RE.search(line, role.end()) if role is not None else None
