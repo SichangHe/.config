@@ -97,6 +97,7 @@ class Args:
     terminal_evidence: str = ""
     retire_blocked_target: bool = False
     reconcile_long_running_human_index: bool = False
+    reconcile_blocked_index: bool = False
     closure_repository: Path | None = None
     dirty_path_handoff: Path | None = None
     restore_terminal_target: bool = False
@@ -138,6 +139,7 @@ class ParsedArgs(argparse.Namespace):
     terminal_evidence: str = ""
     retire_blocked_target: bool = False
     reconcile_long_running_human_index: bool = False
+    reconcile_blocked_index: bool = False
     closure_repository: Path | None = None
     dirty_path_handoff: Path | None = None
     restore_terminal_target: bool = False
@@ -171,6 +173,7 @@ shutdown.""",
     _ = parser.add_argument("--recover-exited-shell-done", action="store_true", help="Close and finish one blocked worker whose completed Codex session exited to an unchanged shell.")
     _ = parser.add_argument("--retire-blocked-target", action="store_true", help="Atomically retire one blocked human-pending worker target that conflicts with one live lifecycle owner; performs no tmux action.")
     _ = parser.add_argument("--reconcile-long-running-human-index", action="store_true", help="Move one unchanged long_running task with exact human blocker from TODO current to human pending without changing task or pane state.")
+    _ = parser.add_argument("--reconcile-blocked-index", action="store_true", help="Move one digest-bound v1 blocked worker with an open queue from TODO previous to human pending without changing task or pane state.")
     _ = parser.add_argument("--session-id", default="", help="Session id captured by the prior close, if available.")
     _ = parser.add_argument("--replacement-task", type=Path, help="Active replacement task file; required with --finish-replaced-done.")
     _ = parser.add_argument("--stale-target", help="Exact stopped target recorded by the stale task; required with --finish-replaced-done.")
@@ -216,13 +219,13 @@ shutdown.""",
         parser.error("--closure-repository must be an explicit absolute Git worktree root.")
     if parsed.dirty_path_handoff is not None and parsed.closure_repository is None:
         parser.error("--dirty-path-handoff requires --closure-repository.")
-    if sum((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done, parsed.retire_blocked_target, parsed.reconcile_long_running_human_index, parsed.restore_terminal_target, parsed.close_shared_target, parsed.close_retired_done, parsed.normalize_retired_todo, parsed.normalize_low_priority_current)) > 1:
+    if sum((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done, parsed.retire_blocked_target, parsed.reconcile_long_running_human_index, parsed.reconcile_blocked_index, parsed.restore_terminal_target, parsed.close_shared_target, parsed.close_retired_done, parsed.normalize_retired_todo, parsed.normalize_low_priority_current)) > 1:
         parser.error("finish and recovery modes are mutually exclusive.")
     if (parsed.active_target or parsed.manager_target) and not parsed.normalize_low_priority_current:
         parser.error("--active-target and --manager-target are only valid with --normalize-low-priority-current.")
     if any(human_close_authority) and (
         parsed.status != "done"
-        or any((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done, parsed.retire_blocked_target, parsed.reconcile_long_running_human_index, parsed.restore_terminal_target, parsed.close_shared_target, parsed.close_retired_done, parsed.normalize_retired_todo, parsed.normalize_low_priority_current))
+        or any((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done, parsed.retire_blocked_target, parsed.reconcile_long_running_human_index, parsed.reconcile_blocked_index, parsed.restore_terminal_target, parsed.close_shared_target, parsed.close_retired_done, parsed.normalize_retired_todo, parsed.normalize_low_priority_current))
     ):
         parser.error("human-close authorization is valid only for a normal done transition.")
     if parsed.retire_blocked_target:
@@ -263,6 +266,11 @@ shutdown.""",
         if any((parsed.session_id, parsed.replacement_task, parsed.stale_target, parsed.replacement_target, parsed.stale_sha256, parsed.replacement_sha256, parsed.replacement_status, parsed.protected_target, parsed.stopped_evidence, parsed.replacement_pane_evidence, parsed.audit_output, parsed.pane_id, parsed.terminal_evidence)):
             parser.error("unrelated lifecycle evidence is not valid with --reconcile-long-running-human-index.")
         return Args(parsed.root.resolve(), parsed.task_file, "", "", reconcile_long_running_human_index=True)
+    if parsed.reconcile_blocked_index:
+        unrelated = (parsed.status, parsed.blocked_on, parsed.session_id, parsed.replacement_task, parsed.stale_target, parsed.replacement_target, parsed.stale_sha256, parsed.replacement_sha256, parsed.replacement_status, parsed.protected_target, parsed.stopped_evidence, parsed.replacement_pane_evidence, parsed.audit_output, parsed.pane_id, parsed.terminal_evidence, parsed.closure_repository, parsed.dirty_path_handoff, parsed.historical_target, parsed.task_sha256, parsed.historical_commit, parsed.shared_target, parsed.active_target, parsed.manager_target)
+        if any(unrelated) or SHA256_RE.fullmatch(parsed.source_sha256.strip()) is None:
+            parser.error("--reconcile-blocked-index requires only lowercase --source-sha256 for one exact blocked source task.")
+        return Args(parsed.root.resolve(), parsed.task_file, "", "", reconcile_blocked_index=True, source_sha256=parsed.source_sha256.strip())
     if parsed.recover_exited_shell_done:
         if parsed.status not in {None, "", "done"}:
             parser.error("--recover-exited-shell-done only supports status `done`.")
@@ -1526,6 +1534,49 @@ def reconcile_blocked_index(root: Path, path: Path, text: str, updated: str, bef
             raise
 
 
+def reconcile_previous_blocked_index(args: Args, path: Path, text: str, before: os.stat_result) -> None:
+    """Move one unchanged blocked worker with open work from `previous` to `human pending`."""
+
+    todo = args.root / "TODO.md"
+    if not todo.is_file():
+        raise TaskFrontmatterError("TODO.md is not a regular file.")
+    if path == todo:
+        raise TaskFrontmatterError("blocked index reconciliation requires a task file distinct from TODO.md.")
+    with ExitStack() as locks:
+        for locked_path in sorted({path, todo}, key=lambda candidate: str(candidate)):
+            locks.enter_context(task_file_lock(locked_path))
+        current_before = path.stat()
+        current_text = path.read_text(encoding="utf-8")
+        metadata = parse_task_metadata(current_text, args.root)
+        if not same_file_state(before, current_before) or current_text != text or hashlib.sha256(current_text.encode()).hexdigest() != args.source_sha256:
+            raise TaskFrontmatterError("blocked index source bytes changed or do not match --source-sha256.")
+        if metadata is None or metadata.version == V2_VERSION or metadata.status != "blocked" or metadata.is_manager:
+            raise TaskFrontmatterError("blocked index reconciliation requires one unchanged v1 blocked worker.")
+        if not metadata.pending_task_items or has_pending_marker(current_text):
+            raise TaskFrontmatterError("blocked index reconciliation requires a nonempty queue and no live pending marker.")
+        if metadata.blocked_on.startswith((DONE_CLOSE_IN_PROGRESS, CLOSE_FAILED_PREFIX, BOOKKEEPING_FAILED_PREFIX)):
+            raise TaskFrontmatterError("blocked index reconciliation rejects incomplete or failed closure state.")
+        if TARGET_RE.fullmatch(metadata.runat) is None or metadata.runat.partition(":")[0].startswith("h"):
+            raise TaskFrontmatterError("blocked index reconciliation requires a non-human live worker target.")
+        todo_before = todo.stat()
+        todo_text = todo.read_text(encoding="utf-8")
+        headers = {"current": 0, "human pending": 0, "previous": 0}
+        invalid_headers = 0
+        for line in todo_text.splitlines():
+            stripped = line.strip()
+            folded = stripped.casefold()
+            if folded.endswith(":") and folded[:-1] in headers:
+                section = folded[:-1]
+                headers[section] += 1
+                invalid_headers += stripped != f"{section}:"
+        if headers != {"current": 1, "human pending": 1, "previous": 1} or invalid_headers:
+            raise TaskFrontmatterError("blocked index reconciliation requires exactly one canonical current, human pending, and previous TODO section.")
+        updated_todo = reconcile_todo_text(args.root, path, todo_text, metadata.runat, "human pending", ("previous",))
+        if updated_todo == todo_text:
+            raise TaskFrontmatterError("blocked index reconciliation requires the sole TODO row to move from previous to human pending.")
+        replace_if_unchanged_locked(todo, updated_todo, todo_before)
+
+
 def reconcile_long_running_human_index(root: Path, path: Path, text: str, before: os.stat_result) -> None:
     """Move an unchanged long_running human-blocked task from current to human pending."""
 
@@ -1948,6 +1999,8 @@ def run(args: Args) -> int:
             normalize_retired_todo(args, path, text, before)
         elif args.normalize_low_priority_current:
             normalize_low_priority_current(args, path, text, before)
+        elif args.reconcile_blocked_index:
+            reconcile_previous_blocked_index(args, path, text, before)
         elif args.retire_blocked_target:
             retire_blocked_target(args, path, text, before)
         elif args.reconcile_long_running_human_index:

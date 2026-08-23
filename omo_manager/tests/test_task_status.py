@@ -1536,6 +1536,87 @@ resolved_task_items: []
 
             self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
 
+    def test_cli_blocked_reconciliation_moves_previous_row_to_human_pending(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "task.md"
+            task_text = task_frontmatter(status="blocked", blocked_on="dependency", pending_items=("evaluate",)) + "body\n"
+            path.write_text(task_text, encoding="utf-8")
+            todo = root / "TODO.md"
+            todo.write_text("current:\nother.md wl:3\n\nhuman pending:\nwaiting.md wl:4\n\nprevious:\ntask.md wl:2\n", encoding="utf-8")
+
+            args = StatusArgs(root, Path("task.md"), "", "", reconcile_blocked_index=True, source_sha256=hashlib.sha256(task_text.encode()).hexdigest())
+            with patch("omo_manager.omo_task_status.stop") as stop_agent, redirect_stdout(io.StringIO()):
+                self.assertEqual(0, run(args))
+
+            self.assertEqual(task_text, path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                "current:\nother.md wl:3\n\nhuman pending:\ntask.md wl:2\nwaiting.md wl:4\n\nprevious:\n",
+                todo.read_text(encoding="utf-8"),
+            )
+            stop_agent.assert_not_called()
+
+    def test_blocked_previous_reconciliation_rejects_ineligible_records(self) -> None:
+        cases = {
+            "empty queue": task_frontmatter(status="blocked", blocked_on="dependency"),
+            "manager": task_frontmatter(status="blocked", blocked_on="dependency", is_manager=True, pending_items=("evaluate",)),
+            "failed closure": task_frontmatter(status="blocked", blocked_on="done_close_failed: stop failed", pending_items=("evaluate",)),
+            "human target": task_frontmatter(status="blocked", blocked_on="dependency", runat="hwork:1", pending_items=("evaluate",)),
+            "retired target": task_frontmatter(status="blocked", blocked_on="dependency", runat="retired", pending_items=("evaluate",)),
+            "v2": v2_task().replace("status: running", "status: blocked").replace("pending_task_items: []", "pending_task_items:\n  - evaluate"),
+        }
+        for name, task_text in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                path = root / "task.md"
+                path.write_text(task_text, encoding="utf-8")
+                todo_text = "current:\n\nhuman pending:\n\nprevious:\ntask.md wl:2\n"
+                (root / "TODO.md").write_text(todo_text, encoding="utf-8")
+                if name == "v2":
+                    (root / ENABLE_FILE).write_text("version: v2.0.0\nenabled: true\n", encoding="utf-8")
+                args = StatusArgs(root, Path("task.md"), "", "", reconcile_blocked_index=True, source_sha256=hashlib.sha256(task_text.encode()).hexdigest())
+
+                with patch("omo_manager.omo_task_status.stop") as stop_agent, patch("omo_manager.omo_task_status.blocking_request") as blocking_request, redirect_stderr(io.StringIO()):
+                    self.assertEqual(2, run(args))
+
+                self.assertEqual(task_text, path.read_text(encoding="utf-8"))
+                self.assertEqual(todo_text, (root / "TODO.md").read_text(encoding="utf-8"))
+                stop_agent.assert_not_called()
+                blocking_request.assert_not_called()
+
+    def test_blocked_previous_reconciliation_rejects_ambiguous_todo(self) -> None:
+        cases = {
+            "duplicate row": "current:\ntask.md wl:2\n\nhuman pending:\n\nprevious:\ntask.md wl:2\n",
+            "duplicate previous": "current:\n\nhuman pending:\n\nprevious:\ntask.md wl:2\n\nprevious:\n",
+            "wrong target": "current:\n\nhuman pending:\n\nprevious:\ntask.md wl:3\n",
+        }
+        for name, todo_text in cases.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                path = root / "task.md"
+                task_text = task_frontmatter(status="blocked", blocked_on="dependency", pending_items=("evaluate",))
+                path.write_text(task_text, encoding="utf-8")
+                (root / "TODO.md").write_text(todo_text, encoding="utf-8")
+                args = StatusArgs(root, Path("task.md"), "", "", reconcile_blocked_index=True, source_sha256=hashlib.sha256(task_text.encode()).hexdigest())
+
+                with redirect_stderr(io.StringIO()):
+                    self.assertEqual(2, run(args))
+
+                self.assertEqual(todo_text, (root / "TODO.md").read_text(encoding="utf-8"))
+
+    def test_blocked_previous_reconciliation_rejects_todo_as_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            todo = root / "TODO.md"
+            text = task_frontmatter(status="blocked", blocked_on="dependency", pending_items=("evaluate",)) + "current:\n\nhuman pending:\n\nprevious:\nTODO.md wl:2\n"
+            todo.write_text(text, encoding="utf-8")
+            args = StatusArgs(root, Path("TODO.md"), "", "", reconcile_blocked_index=True, source_sha256=hashlib.sha256(text.encode()).hexdigest())
+
+            with redirect_stderr(io.StringIO()):
+                self.assertEqual(2, run(args))
+
+            self.assertEqual(text, todo.read_text(encoding="utf-8"))
+
     def test_cli_blocked_reconciliation_combines_blocker_and_row_updates_when_task_is_todo(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
