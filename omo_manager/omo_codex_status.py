@@ -138,13 +138,16 @@ def exact_pane_id(target: str) -> str:
         return ""
     session, window, pane = match.group(1), match.group(2), match.group(3) or "0"
     canonical = f"{session}:{int(window)}.{int(pane)}"
-    out = subprocess.run(
-        ["tmux", "display-message", "-p", "-t", canonical, "#{session_name}:#{window_index}.#{pane_index}\t#{pane_id}"],
-        capture_output=True,
-        text=True,
-        timeout=5,
-        check=False,
-    )
+    try:
+        out = subprocess.run(
+            ["tmux", "display-message", "-p", "-t", canonical, "#{session_name}:#{window_index}.#{pane_index}\t#{pane_id}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
     if out.returncode != 0:
         return ""
     resolved, separator, pane_id = out.stdout.strip().partition("\t")
@@ -154,7 +157,12 @@ def exact_pane_id(target: str) -> str:
 def tail_pane_id(pane_id: str, n_lines: int) -> list[str]:
     if TMUX_PANE_ID_RE.fullmatch(pane_id) is None:
         return []
-    out = subprocess.run(["tmux", "capture-pane", "-p", "-t", pane_id, "-S", f"-{n_lines}"], capture_output=True, text=True, timeout=5, check=False)
+    try:
+        out = subprocess.run(
+            ["tmux", "capture-pane", "-p", "-t", pane_id, "-S", f"-{n_lines}"], capture_output=True, text=True, timeout=5, check=False
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
     if out.returncode != 0:
         return []
     lines = [line.rstrip() for line in (out.stdout or "").splitlines()]
@@ -183,13 +191,16 @@ def exact_pane_process(target: str, pane_id: str) -> tuple[str, list[str]] | Non
 
     if TMUX_PANE_ID_RE.fullmatch(pane_id) is None:
         return None
-    out = subprocess.run(
-        ["tmux", "display-message", "-p", "-t", pane_id, "#{pane_id}\t#{pane_current_command}\t#{pane_start_command}"],
-        capture_output=True,
-        text=True,
-        timeout=5,
-        check=False,
-    )
+    try:
+        out = subprocess.run(
+            ["tmux", "display-message", "-p", "-t", pane_id, "#{pane_id}\t#{pane_current_command}\t#{pane_start_command}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
     if out.returncode != 0 or exact_pane_id(target) != pane_id:
         return None
     resolved_id, separator, process = out.stdout.rstrip("\r\n").partition("\t")

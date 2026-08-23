@@ -100,6 +100,15 @@ class CodexStatusTests(unittest.TestCase):
             report = inspect(Args('cfg:404', 80))
         self.assertEqual('missing', report.status)
 
+    def test_inspect_reports_missing_when_tmux_lookup_times_out(self) -> None:
+        with patch("omo_manager.omo_codex_status.subprocess.run", side_effect=subprocess.TimeoutExpired(["tmux"], 5)):
+            report = inspect(Args("cfg:404", 80))
+        self.assertEqual("missing", report.status)
+
+    def test_tail_pane_id_returns_empty_when_tmux_capture_times_out(self) -> None:
+        with patch("omo_manager.omo_codex_status.subprocess.run", side_effect=subprocess.TimeoutExpired(["tmux"], 5)):
+            self.assertEqual([], tail_pane_id("%1", 80))
+
     def test_inspect_keeps_active_bunx_codex_running_when_queue_overlay_hides_footer(self) -> None:
         lines = [
             '• Queued follow-up inputs',
