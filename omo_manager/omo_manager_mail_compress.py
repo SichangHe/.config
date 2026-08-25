@@ -620,6 +620,16 @@ def fetch_gmail_metadata_records(client: imaplib.IMAP4_SSL, uids: list[str]) -> 
     return metadata_by_uid
 
 
+def fetch_gmail_metadata_records_compatible(client: imaplib.IMAP4_SSL, uids: list[str]) -> dict[str, GmailMetadata]:
+    """Fetch Gmail metadata in batch, with a per-UID fallback for incomplete IMAP replies."""
+    try:
+        return fetch_gmail_metadata_records(client, uids)
+    except RuntimeError as exc:
+        if str(exc) != "IMAP Gmail metadata batch fetch returned incomplete or duplicate UIDs":
+            raise
+        return {uid: fetch_gmail_metadata_detail(client, uid) for uid in uids}
+
+
 def gmail_extension_advertised(client: imaplib.IMAP4_SSL) -> bool:
     typ, data = imap_operation(client, "capability", client.capability)
     if typ != "OK":
@@ -701,6 +711,19 @@ def fetch_full_records_batched(client: imaplib.IMAP4_SSL, uids: list[str]) -> li
         raise RuntimeError("IMAP full message batch fetch returned incomplete or duplicate UIDs")
     metadata = fetch_gmail_metadata_records(client, uids)
     return [replace(records[uid], gmail_msgid=metadata[uid].gmail_msgid, gmail_thrid=metadata[uid].gmail_thrid, flags=metadata[uid].flags, labels=metadata[uid].labels) for uid in uids]
+
+
+def fetch_full_records(client: imaplib.IMAP4_SSL, uids: list[str], n_fetch_attempts: int = 1) -> list[MailRecord]:
+    """Fetch full records in batches, with the bounded per-UID compatibility path."""
+    try:
+        return fetch_full_records_batched(client, uids)
+    except RuntimeError as exc:
+        if str(exc) not in {
+            "IMAP full message batch fetch returned incomplete or duplicate UIDs",
+            "IMAP Gmail metadata batch fetch returned incomplete or duplicate UIDs",
+        }:
+            raise
+        return fetch_records(client, uids, with_body=True, with_metadata=True, n_fetch_attempts=n_fetch_attempts)
 
 
 def accepted_manager_headers(client: imaplib.IMAP4_SSL, uids: list[str], sender_email: str, recipient_email: str) -> tuple[list[MailRecord], list[str]]:
@@ -949,12 +972,7 @@ def fetch_imap_thread_contexts(
     discovered. Duplicate UID responses fail closed.
     """
     special_use, all_uids = discover_gmail_thread_member_uids(client, records)
-    try:
-        all_context_records = fetch_full_records_batched(client, all_uids)
-    except RuntimeError as exc:
-        if str(exc) != "IMAP full message batch fetch returned incomplete or duplicate UIDs":
-            raise
-        all_context_records = fetch_records(client, all_uids, with_body=True, with_metadata=True)
+    all_context_records = fetch_full_records(client, all_uids)
     source_ids_by_thread: dict[str, set[str]] = {}
     for record in records:
         source_ids_by_thread.setdefault(record.gmail_thrid, set()).add(record.gmail_msgid)
@@ -980,7 +998,7 @@ def fetch_direct_thread_contexts(
     _special_use, records_by_thread = fetch_imap_thread_contexts(client, records)
     select_mailbox(client, TRASH_MAILBOX, readonly=True)
     for gmail_thrid, all_records in records_by_thread.items():
-        trash_records = fetch_records(client, gmail_thread_uids(client, gmail_thrid), with_body=True, with_metadata=True)
+        trash_records = fetch_full_records(client, gmail_thread_uids(client, gmail_thrid))
         require_gmail_identities(trash_records)
         if any(record.gmail_thrid != gmail_thrid for record in trash_records):
             raise RuntimeError("Gmail Trash thread context changed during discovery")
@@ -1262,7 +1280,7 @@ def stable_text_digest(values: list[str]) -> str:
 
 
 def unread_records_with_metadata(client: imaplib.IMAP4_SSL, headers: list[MailRecord]) -> list[MailRecord]:
-    metadata_by_uid = fetch_gmail_metadata_records(client, [header.uid for header in headers])
+    metadata_by_uid = fetch_gmail_metadata_records_compatible(client, [header.uid for header in headers])
     records = [
         replace(
             header,
@@ -1364,7 +1382,7 @@ def cmd_unread_summary(args: argparse.Namespace) -> int:
         metadata_headers = unread_records_with_metadata(client, headers)
         selected_threads, truncated = selected_unread_summary_headers(metadata_headers, args.max_threads, args.max_messages_per_thread)
         selected_uids = [record.uid for _all_headers, included_headers in selected_threads for record in included_headers]
-        body_records = {record.uid: record for record in fetch_full_records_batched(client, selected_uids)}
+        body_records = {record.uid: record for record in fetch_full_records(client, selected_uids)}
         if {record.uid for record in body_records.values() if is_manager_record(record, sender_email, recipient_email)} != set(selected_uids):
             raise RuntimeError("unread summary boundary changed between header and body fetch")
         summaries = unread_thread_summaries(selected_threads, body_records, args.max_body_chars)
@@ -2713,16 +2731,9 @@ def run_export(args: argparse.Namespace, set_stage: Callable[[str], None]) -> in
             raise RuntimeError("reviewed scope contains a boundary-mismatched or ambiguous identity")
         uidvalidity = selected_uidvalidity(client)
         set_stage("fetch-fixed-start-sources")
-        source_records = [
-            replace(record, source_uidvalidity=uidvalidity)
-            for record in fetch_records(
-                client,
-                [record.uid for record in header_records],
-                with_body=True,
-                with_metadata=True,
-                n_fetch_attempts=EXPORT_FULL_FETCH_ATTEMPTS,
-            )
-        ]
+        source_uids = [record.uid for record in header_records]
+        fetched_source_records = fetch_full_records(client, source_uids, EXPORT_FULL_FETCH_ATTEMPTS)
+        source_records = [replace(record, source_uidvalidity=uidvalidity) for record in fetched_source_records]
         if scope is not None:
             validate_scoped_records(scope, source_records)
         set_stage("fetch-thread-context")
@@ -2893,9 +2904,9 @@ def direct_context_intact(
         return False
     gmail_thrid = next(iter(gmail_thrids))
     select_mailbox(client, all_mailbox, readonly=True)
-    current = fetch_records(client, gmail_thread_uids(client, gmail_thrid), with_body=True, with_metadata=True)
+    current = fetch_full_records(client, gmail_thread_uids(client, gmail_thrid))
     select_mailbox(client, TRASH_MAILBOX, readonly=True)
-    trash_records = fetch_records(client, gmail_thread_uids(client, gmail_thrid), with_body=True, with_metadata=True)
+    trash_records = fetch_full_records(client, gmail_thread_uids(client, gmail_thrid))
     require_gmail_identities([*current, *trash_records])
     current_ids = {record.gmail_msgid for record in current}
     trash_ids = {record.gmail_msgid for record in trash_records}

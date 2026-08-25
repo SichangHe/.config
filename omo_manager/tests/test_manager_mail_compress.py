@@ -57,6 +57,7 @@ from omo_manager.omo_manager_mail_compress import (
     fetch_gmail_metadata,
     fetch_header_records,
     fetch_direct_thread_contexts,
+    fetch_full_records,
     fetch_imap_thread_contexts,
     discover_gmail_thread_member_uids,
     gmail_thrid_or_query,
@@ -240,6 +241,11 @@ class ManagerMailCompressTests(unittest.TestCase):
                 ("search", None, "ALL"): ("OK", [b"7 8"]),
                 ("search", None, "FROM", '"agent@example.test"'): ("OK", [b"7 8"]),
                 ("fetch", "7", HEADER_FETCH): ("OK", [(b"header", raw)]),
+                ("fetch", "7", FULL_BATCH_FETCH): ("OK", [(b"7 (UID 7 BODY[] {1}", raw)]),
+                ("fetch", "7", GMAIL_METADATA_BATCH_FETCH): (
+                    "OK",
+                    [b"7 (UID 7 FLAGS () X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\Inbox))"],
+                ),
                 ("fetch", "7", FULL_FETCH): ("OK", [(b"message", raw)]),
                 ("fetch", "7", GMAIL_METADATA_FETCH): self.gmail_metadata("7"),
                 ("search", None, "X-GM-THRID", "200"): ("OK", [b"70"]),
@@ -899,6 +905,54 @@ with tempfile.TemporaryDirectory() as tmp:
             self.assertRaisesRegex(RuntimeError, "max threads"),
         ):
             cmd_unread_summary(UnreadSummaryArgs(max_threads=0))
+
+    def test_unread_summary_falls_back_when_metadata_batch_is_incomplete(self) -> None:
+        raw_old = self.raw_message("[wl:1] task", "first body")
+        raw_latest = self.raw_message("Re: [wl:1] task", "Decision needed now")
+        client = FakeClient(
+            {
+                ("search", None, "UNSEEN", "FROM", '"agent@example.test"'): ("OK", [b"7 8"]),
+                ("fetch", "7,8", HEADER_BATCH_FETCH): (
+                    "OK",
+                    [
+                        (b"7 (UID 7 BODY[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)] {1}", raw_old),
+                        (b"8 (UID 8 BODY[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)] {1}", raw_latest),
+                    ],
+                ),
+                ("fetch", "7,8", GMAIL_METADATA_BATCH_FETCH): ("OK", [b""]),
+                ("fetch", "7", GMAIL_METADATA_FETCH): self.gmail_metadata("7", gmail_msgid="100", labels=r"\Inbox"),
+                ("fetch", "8", GMAIL_METADATA_FETCH): self.gmail_metadata("8", gmail_msgid="101", labels=r"\Inbox"),
+                ("fetch", "7,8", FULL_BATCH_FETCH): (
+                    "OK",
+                    [
+                        (b"7 (UID 7 BODY[] {1}", raw_old),
+                        (b"8 (UID 8 BODY[] {1}", raw_latest),
+                    ],
+                ),
+                ("fetch", "7", FULL_FETCH): ("OK", [(b"message", raw_old)]),
+                ("fetch", "8", FULL_FETCH): ("OK", [(b"message", raw_latest)]),
+            }
+        )
+
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+
+        output = io.StringIO()
+        with (
+            patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {"user": "human@example.test"})),
+            patch("omo_manager.omo_manager_mail_compress.configured_agent_mail", return_value=Settings()),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(0, cmd_unread_summary(UnreadSummaryArgs(max_body_chars=120)))
+        summary = json.loads(output.getvalue())
+        self.assertEqual(2, summary["accepted_unread_count"])
+        self.assertIn("Decision needed now", summary["threads"][0]["read_now"])
+        self.assertIn(("fetch", "7,8", GMAIL_METADATA_BATCH_FETCH), client.uid_calls)
+        self.assertIn(("fetch", "7", GMAIL_METADATA_FETCH), client.uid_calls)
+        self.assertIn(("fetch", "8", GMAIL_METADATA_FETCH), client.uid_calls)
+        self.assertIn(("fetch", "7", FULL_FETCH), client.uid_calls)
+        self.assertIn(("fetch", "8", FULL_FETCH), client.uid_calls)
 
     def test_unread_summary_caps_thread_body_fetches_and_audits_omitted_messages(self) -> None:
         raw_10 = self.raw_message("[wl:1] old", "old body")
@@ -1560,6 +1614,68 @@ with tempfile.TemporaryDirectory() as tmp:
         with self.assertRaisesRegex(RuntimeError, "incomplete or duplicate UIDs"):
             fetch_imap_thread_contexts(client, records)
 
+    def test_thread_context_falls_back_when_metadata_batch_is_incomplete(self) -> None:
+        raw = self.raw_message("[worker:0] a")
+        records = [MailRecord("7", "date", "agent", "human", "s", "msg-a", gmail_msgid="100", gmail_thrid="200", raw_sha256="a" * 64)]
+        client = FakeClient(
+            {
+                ("search", None, "X-GM-THRID", "200"): ("OK", [b"70"]),
+                ("fetch", "70", FULL_BATCH_FETCH): ("OK", [(b"70 (UID 70 BODY[] {1}", raw)]),
+                ("fetch", "70", GMAIL_METADATA_BATCH_FETCH): ("OK", [b""]),
+                ("fetch", "70", FULL_FETCH): ("OK", [(b"message", raw)]),
+                ("fetch", "70", GMAIL_METADATA_FETCH): self.gmail_metadata("70", labels=r"\All"),
+            },
+            self.gmail_mailboxes(),
+        )
+        _mailboxes, by_thread = fetch_imap_thread_contexts(client, records)
+        self.assertEqual(["100"], [record.gmail_msgid for record in by_thread["200"]])
+        self.assertIn(("fetch", "70", FULL_BATCH_FETCH), client.uid_calls)
+        self.assertIn(("fetch", "70", GMAIL_METADATA_BATCH_FETCH), client.uid_calls)
+        self.assertIn(("fetch", "70", FULL_FETCH), client.uid_calls)
+        self.assertIn(("fetch", "70", GMAIL_METADATA_FETCH), client.uid_calls)
+
+    def test_full_records_reject_duplicate_full_batch_uid(self) -> None:
+        raw = self.raw_message("[worker:0] a")
+        client = FakeClient(
+            {
+                ("fetch", "70", FULL_BATCH_FETCH): (
+                    "OK",
+                    [
+                        (b"70 (UID 70 BODY[] {1}", raw),
+                        (b"70 (UID 70 BODY[] {1}", raw),
+                    ],
+                ),
+            },
+            self.gmail_mailboxes(),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "duplicate UID"):
+            fetch_full_records(client, ["70"])
+        self.assertIn(("fetch", "70", FULL_BATCH_FETCH), client.uid_calls)
+        self.assertNotIn(("fetch", "70", FULL_FETCH), client.uid_calls)
+
+    def test_full_records_reject_duplicate_metadata_batch_uid(self) -> None:
+        raw = self.raw_message("[worker:0] a")
+        client = FakeClient(
+            {
+                ("fetch", "70", FULL_BATCH_FETCH): ("OK", [(b"70 (UID 70 BODY[] {1}", raw)]),
+                ("fetch", "70", GMAIL_METADATA_BATCH_FETCH): (
+                    "OK",
+                    [
+                        b"70 (UID 70 FLAGS () X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\All))",
+                        b"70 (UID 70 FLAGS () X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\All))",
+                    ],
+                ),
+            },
+            self.gmail_mailboxes(),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "duplicate UID"):
+            fetch_full_records(client, ["70"])
+        self.assertIn(("fetch", "70", FULL_BATCH_FETCH), client.uid_calls)
+        self.assertIn(("fetch", "70", GMAIL_METADATA_BATCH_FETCH), client.uid_calls)
+        self.assertNotIn(("fetch", "70", FULL_FETCH), client.uid_calls)
+
     def test_identity_preflight_falls_back_from_all_mail_metadata_batch(self) -> None:
         raw = self.raw_message("[worker:0] a")
         client = FakeClient(
@@ -1686,9 +1802,25 @@ with tempfile.TemporaryDirectory() as tmp:
                 ("search", None, "ALL"): ("OK", [b"7"]),
                 ("search", None, "FROM", '"agent@example.test"'): ("OK", [b"7"]),
                 ("fetch", "7", HEADER_FETCH): ("OK", [(b"header", raw)]),
+                ("fetch", "7", FULL_BATCH_FETCH): ("OK", [(b"7 (UID 7 BODY[] {1}", raw)]),
+                ("fetch", "7", GMAIL_METADATA_BATCH_FETCH): (
+                    "OK",
+                    [b"7 (UID 7 FLAGS () X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\Inbox))"],
+                ),
                 ("fetch", "7", FULL_FETCH): ("OK", [(b"message", raw)]),
                 ("fetch", "7", GMAIL_METADATA_FETCH): self.gmail_metadata("7"),
                 ("search", None, "X-GM-THRID", "200"): ("OK", [b"70 71"]),
+                ("fetch", "70,71", FULL_BATCH_FETCH): (
+                    "OK",
+                    [(b"70 (UID 70 BODY[] {1}", raw), (b"71 (UID 71 BODY[] {1}", other_raw)],
+                ),
+                ("fetch", "70,71", GMAIL_METADATA_BATCH_FETCH): (
+                    "OK",
+                    [
+                        b"70 (UID 70 FLAGS () X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\All))",
+                        b"71 (UID 71 FLAGS () X-GM-MSGID 101 X-GM-THRID 200 X-GM-LABELS (\\All))",
+                    ],
+                ),
                 ("fetch", "70", FULL_FETCH): ("OK", [(b"message", raw)]),
                 ("fetch", "70", GMAIL_METADATA_FETCH): self.gmail_metadata("70"),
                 ("fetch", "71", FULL_FETCH): ("OK", [(b"message", other_raw)]),
@@ -1722,6 +1854,45 @@ with tempfile.TemporaryDirectory() as tmp:
             self.assertIn("\tsuccess\tcomplete\tnone\tnone\n", receipt)
             self.assertNotIn(str(out_dir), receipt)
             self.assertIn(('"[Gmail]/All Mail"', True), client.select_calls)
+        self.assertIn(("fetch", "7", FULL_BATCH_FETCH), client.uid_calls)
+        self.assertIn(("fetch", "7", GMAIL_METADATA_BATCH_FETCH), client.uid_calls)
+        self.assertNotIn(("fetch", "7", FULL_FETCH), client.uid_calls)
+        self.assertNotIn(("fetch", "7", GMAIL_METADATA_FETCH), client.uid_calls)
+
+    def test_export_falls_back_when_metadata_batch_is_incomplete(self) -> None:
+        raw = self.raw_message("[worker:0] complete")
+        client = FakeClient(
+            {
+                ("search", None, "ALL"): ("OK", [b"7"]),
+                ("search", None, "FROM", '"agent@example.test"'): ("OK", [b"7"]),
+                ("fetch", "7", HEADER_FETCH): ("OK", [(b"header", raw)]),
+                ("fetch", "7", FULL_BATCH_FETCH): ("OK", [(b"7 (UID 7 BODY[] {1}", raw)]),
+                ("fetch", "7", GMAIL_METADATA_BATCH_FETCH): ("OK", [b""]),
+                ("fetch", "7", FULL_FETCH): ("OK", [(b"message", raw)]),
+                ("fetch", "7", GMAIL_METADATA_FETCH): self.gmail_metadata("7"),
+                ("search", None, "X-GM-THRID", "200"): ("OK", [b"70"]),
+                ("fetch", "70", FULL_FETCH): ("OK", [(b"message", raw)]),
+                ("fetch", "70", GMAIL_METADATA_FETCH): self.gmail_metadata("70"),
+            },
+            self.gmail_mailboxes(),
+        )
+
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {"user": "human@example.test"})),
+            patch("omo_manager.omo_manager_mail_compress.configured_agent_mail", return_value=Settings()),
+        ):
+            out_dir = Path(tmp) / "export"
+            self.assertEqual(0, cmd_export(ExportArgs(out_dir)))
+            self.assertTrue((out_dir / "manifest.tsv").exists())
+        self.assertIn(("fetch", "7", FULL_BATCH_FETCH), client.uid_calls)
+        self.assertIn(("fetch", "7", GMAIL_METADATA_BATCH_FETCH), client.uid_calls)
+        self.assertIn(("fetch", "7", FULL_FETCH), client.uid_calls)
+        self.assertIn(("fetch", "7", GMAIL_METADATA_FETCH), client.uid_calls)
 
     def test_export_retries_missing_full_fetch_for_only_the_frozen_uid(self) -> None:
         raw = self.raw_message("[worker:0] complete")
