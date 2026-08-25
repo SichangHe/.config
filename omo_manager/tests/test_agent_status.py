@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from omo_manager.omo_agent_status import Args, TaskFrontmatterError, active_task_targets, classify_task, format_problem_summary, format_summary, load_local_env, load_task_state, main, parse_task_lines, parse_task_metadata, persistent_blocked_task_lines, registry_prune, report_output_evidence, session_records
+from omo_manager.omo_agent_status import BLOCKED_DELIVERY_ITEMS
 from omo_manager.omo_agent_status import SessionRecord, StatusRow, TaskLine
 from omo_manager.omo_codex_status import Args as CodexStatusArgs, PlanPromptRecovery, Report, report_from_lines
 
@@ -3452,6 +3453,51 @@ resolved_task_items: []
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--no-auto-unstick"]))
 
             self.assertIn("blocked_idle: task=anvl_a59_packet_route_work.md", out.getvalue())
+
+    def test_problems_only_ignores_ready_exact_external_delivery_wait(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("low priority:\nvl_target_select27.md vl_build_mgr:4\n", encoding="utf-8")
+            blocker = "final STOP report SHA-256 a187a1c44d639453a5bbd7e8fd9029dd4100dabbf8b7a79464710471748b4f6e has only replay f8f58a97780162ec525554b264ee8240f51ab1e6dfcd5f69177cd8b9e49116be commitment; accepted delivery and exact consumed-closure attestation are absent, so the task contract requires retaining all six items"
+            _ = (root / "vl_target_select27.md").write_text(
+                task_frontmatter("blocked", runat="vl_build_mgr:4", managerat="vl_build_mgr:3", blocked_on=blocker, pending_items=BLOCKED_DELIVERY_ITEMS),
+                encoding="utf-8",
+            )
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["waiting"])), redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--no-auto-unstick"]))
+
+            self.assertEqual("", out.getvalue())
+
+    def test_problems_only_retains_changed_external_delivery_wait(self) -> None:
+        cases = (
+            ("other.md", "vl_build_mgr:4", 6, False, False, "low priority", Report("ready", ["waiting"])),
+            ("vl_target_select27.md", "vl_build_mgr:5", 6, False, False, "low priority", Report("ready", ["waiting"])),
+            ("vl_target_select27.md", "vl_build_mgr:4", BLOCKED_DELIVERY_ITEMS[:-1], False, False, "low priority", Report("ready", ["waiting"])),
+            ("vl_target_select27.md", "vl_build_mgr:4", (*BLOCKED_DELIVERY_ITEMS[:-1], "Changed sixth item."), False, False, "low priority", Report("ready", ["waiting"])),
+            ("vl_target_select27.md", "vl_build_mgr:4", 6, True, False, "low priority", Report("ready", ["waiting"])),
+            ("vl_target_select27.md", "vl_build_mgr:4", 6, False, False, "current", Report("ready", ["waiting"])),
+            ("vl_target_select27.md", "vl_build_mgr:4", 6, False, False, "low priority", Report("error", ["fatal"])),
+        )
+        blocker = "final STOP report SHA-256 a187a1c44d639453a5bbd7e8fd9029dd4100dabbf8b7a79464710471748b4f6e has only replay f8f58a97780162ec525554b264ee8240f51ab1e6dfcd5f69177cd8b9e49116be commitment; accepted delivery and exact consumed-closure attestation are absent, so the task contract requires retaining all six items"
+        normalized_cases = tuple((name, target, BLOCKED_DELIVERY_ITEMS if items == 6 else items, is_manager, pending_delivery, section, report) for name, target, items, is_manager, pending_delivery, section, report in cases)
+        for task_name, target, items, is_manager, pending_delivery, section, report in normalized_cases:
+            with self.subTest(task_name=task_name, target=target, n_items=len(items), is_manager=is_manager, section=section, report=report.status), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                registry = root / "sessions.json"
+                _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+                _ = (root / "TODO.md").write_text(f"{section}:\n{task_name} {target}\n", encoding="utf-8")
+                task_text = task_frontmatter("blocked", runat=target, blocked_on=blocker, is_manager=is_manager, pending_items=items)
+                if pending_delivery:
+                    task_text += "(pending)\n"
+                _ = (root / task_name).write_text(task_text, encoding="utf-8")
+                out = StringIO()
+                with patch("omo_manager.omo_agent_status.inspect", return_value=report), redirect_stdout(out):
+                    self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--no-auto-unstick"]))
+
+                self.assertIn(f"task={task_name}", out.getvalue())
 
     def test_problems_only_retains_actionable_protected_human_target_states(self) -> None:
         cases = (

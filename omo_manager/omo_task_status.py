@@ -173,7 +173,7 @@ shutdown.""",
     _ = parser.add_argument("--recover-exited-shell-done", action="store_true", help="Close and finish one blocked worker whose completed Codex session exited to an unchanged shell.")
     _ = parser.add_argument("--retire-blocked-target", action="store_true", help="Atomically retire one blocked human-pending worker target that conflicts with one live lifecycle owner; performs no tmux action.")
     _ = parser.add_argument("--reconcile-long-running-human-index", action="store_true", help="Move one unchanged long_running task with exact human blocker from TODO current to human pending without changing task or pane state.")
-    _ = parser.add_argument("--reconcile-blocked-index", action="store_true", help="Move one digest-bound v1 blocked worker with an open queue from TODO previous to human pending without changing task or pane state.")
+    _ = parser.add_argument("--reconcile-blocked-index", action="store_true", help="Move one digest-bound v1 blocked worker with an open queue from TODO previous or low priority to human pending without changing task or pane state.")
     _ = parser.add_argument("--session-id", default="", help="Session id captured by the prior close, if available.")
     _ = parser.add_argument("--replacement-task", type=Path, help="Active replacement task file; required with --finish-replaced-done.")
     _ = parser.add_argument("--stale-target", help="Exact stopped target recorded by the stale task; required with --finish-replaced-done.")
@@ -1535,7 +1535,7 @@ def reconcile_blocked_index(root: Path, path: Path, text: str, updated: str, bef
 
 
 def reconcile_previous_blocked_index(args: Args, path: Path, text: str, before: os.stat_result) -> None:
-    """Move one unchanged blocked worker with open work from `previous` to `human pending`."""
+    """Move one unchanged blocked worker with open work into `human pending`."""
 
     todo = args.root / "TODO.md"
     if not todo.is_file():
@@ -1560,8 +1560,10 @@ def reconcile_previous_blocked_index(args: Args, path: Path, text: str, before: 
             raise TaskFrontmatterError("blocked index reconciliation requires a non-human live worker target.")
         todo_before = todo.stat()
         todo_text = todo.read_text(encoding="utf-8")
-        headers = {"current": 0, "human pending": 0, "previous": 0}
+        headers = {"current": 0, "human pending": 0, "low priority": 0, "previous": 0}
         invalid_headers = 0
+        section = ""
+        task_sections: list[str] = []
         for line in todo_text.splitlines():
             stripped = line.strip()
             folded = stripped.casefold()
@@ -1569,11 +1571,15 @@ def reconcile_previous_blocked_index(args: Args, path: Path, text: str, before: 
                 section = folded[:-1]
                 headers[section] += 1
                 invalid_headers += stripped != f"{section}:"
-        if headers != {"current": 1, "human pending": 1, "previous": 1} or invalid_headers:
-            raise TaskFrontmatterError("blocked index reconciliation requires exactly one canonical current, human pending, and previous TODO section.")
-        updated_todo = reconcile_todo_text(args.root, path, todo_text, metadata.runat, "human pending", ("previous",))
+            elif path in todo_row_task_paths(args.root, line):
+                task_sections.append(section)
+        base_headers_valid = headers["current"] == headers["human pending"] == headers["previous"] == 1
+        low_priority_headers_valid = headers["low priority"] <= 1 and (task_sections != ["low priority"] or headers["low priority"] == 1)
+        if not base_headers_valid or not low_priority_headers_valid or invalid_headers:
+            raise TaskFrontmatterError("blocked index reconciliation requires one canonical current, human pending, and previous TODO section, plus one canonical low priority section when it contains the source row.")
+        updated_todo = reconcile_todo_text(args.root, path, todo_text, metadata.runat, "human pending", ("previous", "low priority"))
         if updated_todo == todo_text:
-            raise TaskFrontmatterError("blocked index reconciliation requires the sole TODO row to move from previous to human pending.")
+            raise TaskFrontmatterError("blocked index reconciliation requires the sole TODO row to move from previous or low priority to human pending.")
         replace_if_unchanged_locked(todo, updated_todo, todo_before)
 
 

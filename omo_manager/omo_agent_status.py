@@ -144,6 +144,17 @@ ABSENT_BIND_PATH_BLOCKER = "authoritative resolution of world-writable non-stick
 ABSENT_BIND_PATH_TASK = "anvl_a59_packet_route_work.md"
 ABSENT_BIND_PATH_TARGET = "a52work:2"
 ABSENT_BIND_PATH_WORKDIR = Path("/ssd1/sichangheagent/a52work")
+BLOCKED_DELIVERY_TASK = "vl_target_select27.md"
+BLOCKED_DELIVERY_TARGET = "vl_build_mgr:4"
+BLOCKED_DELIVERY_REASON = "final STOP report SHA-256 a187a1c44d639453a5bbd7e8fd9029dd4100dabbf8b7a79464710471748b4f6e has only replay f8f58a97780162ec525554b264ee8240f51ab1e6dfcd5f69177cd8b9e49116be commitment; accepted delivery and exact consumed-closure attestation are absent, so the task contract requires retaining all six items"
+BLOCKED_DELIVERY_ITEMS = (
+    "Create one independent planning-only standards-selection packet under /ssd1/sichangheagent/vl_artifacts/fresh_target_selection_2026-08-15_g, or preserve terminal STOP.",
+    "Read-only bounded freshness scan: inspect manager records/artifacts outside paused DNS fork; identify at least nine plausible standards tracks with evidence of prior use/selection/rejection vs unused; return exact paths and queries/results.",
+    "Read-only bounded task: propose exactly three genuinely separate unused standards tracks for a dependency-free Rust library+CLI and bounded Verus core; return authoritative primary URLs, exact standard material, feasibility notes.",
+    "Read-only review of /ssd1/sichangheagent/vl_artifacts/fresh_target_selection_2026-08-15_g pre-freeze STOP packet and GATE_STOP_INVENTORY.sha256",
+    "Read-only fresh closure audit of /ssd1/sichangheagent/vl_artifacts/fresh_target_selection_2026-08-15_g: verify exact inventory/hashes, authorization byte identity, nine actual query results, no candidates/candidate inventory/frozen verdict, planning-only scope, and modes; return PASS or substantive defects.",
+    "Rerun read-only review of corrected /ssd1/sichangheagent/vl_artifacts/fresh_target_selection_2026-08-15_g pre-freeze STOP packet and GATE_STOP_INVENTORY.sha256",
+)
 VAGUE_STOPPED_HUMAN_WAIT_RE = re.compile(
     r"\A(?:human|human\s+(?:approval|authorization|decision|discussion)|human[- ]pending|direct\s+human\s+discussion|waiting\s+(?:on|for)\s+(?:(?:a|the)\s+)?(?:human|person)(?:'s)?(?:\s+(?:action|answers?|approval|authorization|choice|confirmation|decision|discussion|feedback|follow-?up|guidance|input|repl(?:y|ies)|responses?|reviews?)|\s+to)?)\Z",
     re.IGNORECASE,
@@ -578,6 +589,24 @@ def is_intentionally_absent_bind_path_blocked_worker(root: Path, task: TaskLine,
 
 def absent_bind_path_workdir_exists() -> bool:
     return ABSENT_BIND_PATH_WORKDIR.exists()
+
+
+def is_blocked_external_delivery_wait(root: Path, task: TaskLine, state: TaskState) -> bool:
+    """Return whether the exact completed STOP report awaits external delivery evidence."""
+
+    if (
+        task.task_file != BLOCKED_DELIVERY_TASK
+        or task.section not in {"todo:human pending", "todo:low priority"}
+        or state.status != "blocked"
+        or state.reason != BLOCKED_DELIVERY_REASON
+        or state.is_manager
+        or state.target != BLOCKED_DELIVERY_TARGET
+        or not same_tmux_target(task.target, state.target)
+    ):
+        return False
+    task_path = resolve_task_path(root, task.task_file)
+    indexed = [linked for linked in parse_task_lines(root / "TODO.md") if resolve_task_path(root, linked.task_file) == task_path]
+    return task_path is not None and len(indexed) == 1 and tuple(pending_task_items(task_path, root)) == BLOCKED_DELIVERY_ITEMS and not task_has_pending_marker(task_path)
 
 
 def task_requires_live_target(root: Path, task: TaskLine, state: TaskState) -> bool:
@@ -1154,6 +1183,8 @@ def add_blocked_idle_vl_row(root: Path, task: TaskLine, role: str, rows: list[St
         if idle_status == "running" and not (is_historical_human_wait_candidate(root, task, state) or is_bind_path_blocked_worker_candidate(root, task, state)):
             return
         if is_recorded_human_wait(state) and idle_status == "ready" and not is_historical_human_wait_candidate(root, task, state):
+            return
+        if idle_status == "ready" and is_blocked_external_delivery_wait(root, task, state):
             return
         if is_explicit_human_pending_wait(root, task, state) and idle_status in {"missing", "not_codex"} and " output=" not in classified.evidence:
             return

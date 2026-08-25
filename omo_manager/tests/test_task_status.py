@@ -1556,6 +1556,33 @@ resolved_task_items: []
             )
             stop_agent.assert_not_called()
 
+    def test_cli_blocked_reconciliation_moves_low_priority_row_without_changing_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "vl_target_select27.md"
+            blocker = "final STOP report has only replay commitment; accepted delivery and exact consumed-closure attestation are absent"
+            task_text = task_frontmatter(
+                status="blocked",
+                blocked_on=blocker,
+                runat="vl_build_mgr:4",
+                managerat="vl_build_mgr:3",
+                pending_items=("completed item 1", "completed item 2", "completed item 3", "completed item 4", "completed item 5", "completed item 6"),
+            ) + "body\n"
+            path.write_text(task_text, encoding="utf-8")
+            todo = root / "TODO.md"
+            todo.write_text("current:\nother.md wl:3\n\nhuman pending:\nwaiting.md wl:4\n\nlow priority:\nvl_target_select27.md vl_build_mgr:4\n\nprevious:\n", encoding="utf-8")
+
+            args = StatusArgs(root, Path("vl_target_select27.md"), "", "", reconcile_blocked_index=True, source_sha256=hashlib.sha256(task_text.encode()).hexdigest())
+            with patch("omo_manager.omo_task_status.stop") as stop_agent, redirect_stdout(io.StringIO()):
+                self.assertEqual(0, run(args))
+
+            self.assertEqual(task_text, path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                "current:\nother.md wl:3\n\nhuman pending:\nvl_target_select27.md vl_build_mgr:4\nwaiting.md wl:4\n\nlow priority:\n\nprevious:\n",
+                todo.read_text(encoding="utf-8"),
+            )
+            stop_agent.assert_not_called()
+
     def test_blocked_previous_reconciliation_rejects_ineligible_records(self) -> None:
         cases = {
             "empty queue": task_frontmatter(status="blocked", blocked_on="dependency"),
@@ -1586,9 +1613,11 @@ resolved_task_items: []
 
     def test_blocked_previous_reconciliation_rejects_ambiguous_todo(self) -> None:
         cases = {
-            "duplicate row": "current:\ntask.md wl:2\n\nhuman pending:\n\nprevious:\ntask.md wl:2\n",
-            "duplicate previous": "current:\n\nhuman pending:\n\nprevious:\ntask.md wl:2\n\nprevious:\n",
-            "wrong target": "current:\n\nhuman pending:\n\nprevious:\ntask.md wl:3\n",
+            "duplicate row": "current:\ntask.md wl:2\n\nhuman pending:\n\nlow priority:\n\nprevious:\ntask.md wl:2\n",
+            "duplicate previous": "current:\n\nhuman pending:\n\nlow priority:\n\nprevious:\ntask.md wl:2\n\nprevious:\n",
+            "duplicate low priority": "current:\n\nhuman pending:\n\nlow priority:\ntask.md wl:2\n\nlow priority:\n\nprevious:\n",
+            "case variant low priority": "current:\n\nhuman pending:\n\nLOW PRIORITY:\ntask.md wl:2\n\nprevious:\n",
+            "wrong target": "current:\n\nhuman pending:\n\nlow priority:\n\nprevious:\ntask.md wl:3\n",
         }
         for name, todo_text in cases.items():
             with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
