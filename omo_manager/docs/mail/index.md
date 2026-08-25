@@ -3,11 +3,11 @@
 - `accounts.md`
   - separate agent communication mail from human mailbox cleanup
 - `cleanup.md`
-  - scope, authority, and classification rules for manager-human cleanup
-  - delegates execution to the reviewed current-mailbox cleanup procedure
+  - points all cleanup runs to `compression.md`
 - `compression.md`
-  - canonical no-persisted-evidence, independently reviewed execution procedure for every manager-human cleanup run
-  - optionally replace superseded mail with a verified topic summary before Trash
+  - canonical task-level compression procedure for every manager-human cleanup run
+  - minimizes the whole accepted manager Inbox while preserving protected reports and independent decisions
+  - replaces reviewed superseded mail with verified high-level overviews before recoverable Trash
   - read-only `snapshot` and `identity-preflight` current-view helpers
 - `email-idle-watcher.md`
   - ingest human email into durable manager pending blocks

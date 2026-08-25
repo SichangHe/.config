@@ -1,55 +1,77 @@
-# manager mail cleanup and compression
+# manager-mail compression
 
-Manager-mail compression does not require an evidence directory or persisted evidence artifacts. Select explicit source messages from a current read-only mailbox view, independently review the proposed task grouping, send and verify one self-contained replacement per task when needed, then move only superseded sources to recoverable Gmail Trash. Never expunge or permanently delete.
+These instructions govern future cleanup of manager-sent mail in the Human's Inbox. Use them for both threshold-triggered and Human-requested compression runs.
 
-A threshold may start review; it never authorizes Trash. PB news, PB stock watch, and PB urgent mail remain excluded.
+## outcome
 
-## unread read-now summaries
+- minimize the total accepted manager-sent Inbox to the smallest truthful human-readable set; aim near 20 and never stop merely because the count reached 30
+- use `snapshot`'s configured manager-mail boundary as the count denominator: every accepted Inbox message from the configured manager sender to the Human or accepted legacy self-addressed route; include overviews, retained sources, protected reports, and later arrivals
+- leave no more than 30 total accepted manager-sent Inbox messages unless preserving independently useful content makes that impossible
+- represent each actual task with one concise, self-contained overview
+- retain each distinct current question or decision that the Human can act on independently
+- retain protected recurring reports separately from task overviews only when they are accepted by the configured manager-mail boundary
+- identify a protected recurring series by its configured sender/recipient boundary and recurring report subject; require a non-empty complete body and expected report heading, order instances by numeric Gmail message identity, and retain the greatest verified instance; a greatest partial, conflicting, or ambiguous instance blocks cleanup of that series
+- PB news, PB stock watch, and PB urgent mail are excluded from this manager-mail compression workflow; handle them through their PB-specific digest paths instead of counting or moving them here
+- move only reviewed sources that a retained message or verified replacement fully supersedes to recoverable Gmail Trash
 
-`omo_manager_mail_compress.py unread-summary` is the read-only Human-facing compression view for unread manager-human chains. It opens the configured human mailbox in read-only mode, searches only unread mail from the configured agent sender, verifies the same manager-mail boundary as cleanup, fetches full messages and Gmail thread identities, then prints one bounded JSON summary per unread Gmail thread. The command does not mark mail seen, send replacement mail, move messages, or authorize Trash.
+## prepare a current view
 
-Each summary is intended to answer “what does the Human need to read now?” It includes the selected unread UID set, latest subject/date/sender, inferred tmux target when the subject has one, bounded subjects and `read_now` excerpts across selected unread messages with quoted reply text omitted, plus counts and SHA-256 digests for the complete unread UID/subject set when a long chain is capped. Missing Gmail thread identity is a hard failure because unread-chain compression needs stable chain grouping. Argument bounds are checked before any mailbox is opened.
+1. Run `snapshot`, `identity-preflight`, and `unread-summary` in read-only mode against the configured mailbox.
+2. Freeze an explicit starting source set from that live view. Treat a count threshold only as a reason to review mail.
+3. Inspect the complete message and thread context for every proposed source. Use current task and decision state only to determine what remains useful to the Human.
+4. Leave later arrivals outside the frozen set until they are separately inspected. Thread membership alone does not assign a later arrival to a group. Retain a new independent question or decision. Add every other relevant arrival to a newly frozen explicit source set and repeat binding and review, even when its facts are already present and the overview text stays unchanged.
 
-## read-only current view
+## design the human view
 
-`snapshot` and `identity-preflight` are the read-only current-view helpers. They select `INBOX` read-only for candidate discovery, which searches only `FROM` the configured agent sender and does not freeze with IMAP `SEARCH ALL`. `identity-preflight` then requires Gmail All Mail and Sent special-use mailboxes, selects All Mail read-only, and confirms each source thread with nested `X-GM-THRID` OR searches (live-verified batches of 32) plus Gmail identity metadata. It does not use `X-GM-RAW thrid:`, does not group INBOX identities alone, and does not fetch thread bodies. Inspect/export still load All Mail plus Trash full-message context. Duplicate UID responses fail closed. These commands do not mark mail seen, send, move, expunge, or mutate `\All`.
+1. Group messages only when they belong to one authoritative task identity and can share one current outcome, one set of limits, and one next Human action without requiring separate replies. A task group may span internal work streams, historical routes, threads, or repositories. When one source covers several tasks, bind it to every covered task and do not move it until each task has its own reviewed retained message or replacement. Keep tasks separate even when their subjects or implementation overlap.
+2. For each group, draft one high-level overview containing only:
+   - current outcome or state
+   - facts the Human needs now
+   - unresolved decision or next action, if any
+   - material limits or uncertainty
+3. Omit implementation history, routine acknowledgements, agent bookkeeping, paths, identifiers, hashes, and completed details unless the Human needs them to decide or act.
+4. Prefer a new overview over retaining the newest message when the newest message is partial, detailed, stale, or not self-contained.
+5. Retain a full memo only when the Human still needs its complete technical content and a concise overview cannot preserve that value. A self-contained retained full memo is the task's current message; do not add a duplicate overview. If separate sources for that task contain additional current facts, the replacement overview may point to the retained memo and include only those additional facts; record the resulting two-message full-memo exception.
+6. A question is independently actionable when the Human can answer it without answering the group's other questions and that answer can change work independently. Keep such questions separate. Put dependent subquestions and ordinary next steps inside the area's overview.
+7. Revise grouping and summaries until no remaining pair can be truthfully combined under the grouping test. If the resulting total still exceeds 30, retain the useful content, move no uncertain source, and report the exact consolidation blocker.
 
-## select current sources
+## independent review
 
-- start from a current read-only view of configured agent-to-human and legacy self-addressed manager mail in `INBOX`; a human must explicitly authorize other directions or mutation sources
-- explicitly select the source messages for the run; later arrivals and unselected messages remain outside the run
-- inspect complete thread context and authoritative task/TODO state for every selected source before proposing any grouping or disposition
-- keep mailbox bodies and identifiers private and use `OMO_HUMAN_EMAIL_CONFIG_PATH`
-- preserve each source task's original leading tmux subject target; `inspect-explicit` reports it as `selected_source_sender_tmux_target=` and `context_sender_tmux_target=`
+Before sending or moving mail, give a distinct reviewer the current read-only view, complete inspected context, proposed groups, summaries, retained messages, explicit source bindings, current route for each replacement, and later-arrival handling. The reviewer must confirm:
 
-## group and independently review
+- every useful fact, question, decision, limit, and uncertainty is present once
+- each overview is self-contained and useful without reading its sources
+- every selected source is fully superseded
+- retained full memos and separate questions genuinely need to remain separate
+- replacement routes and any route transitions are explicit and correct
+- the projected final Inbox is the smallest truthful set and is at most 30 messages, or the review names the exact useful content that prevents reaching 30
 
-- group selected sources by the actual task they concern, not by a generic filename, path list, subject similarity, Gmail label, or thread alone
-- have a reviewer distinct from the preparer independently review the proposed task/source grouping and every proposed disposition against a current read-only mailbox view
-- resolve disagreements without expanding the selected source set; if the grouping, task state, or safe disposition remains uncertain, stop and ask a focused human question
-- every task must end with exactly one useful, self-contained manager email; consolidate all distinct useful context into that message rather than leaving multiple partial messages
-- Gmail state signals—including unread, Important, starred, flagged, saved, read-later, categories, and all other flags or labels—are audit metadata, never retention or Trash criteria
+Resolve every material review issue and repeat the review on changed text or bindings.
 
-## replace, verify, then trash
+## replace, verify, and move
 
-- run `inspect-explicit --task-id TASK --uids '12,34'` on each proposed task group; its `source_uidvalidity=`, `source=`, and deduplicated `context=` values bind the matching `trash-explicit` arguments
-- give the inspection output and proposed replacement to a distinct reviewer; pass the preparer and reviewer identities to `trash-explicit`, which rejects identical identities
-- after sending a replacement, run `locate-replacement --subject EXACT_SUBJECT` and use its unique `message_id=` value as `trash-explicit --replacement-message-id`
-- after all replacements are delivered, rerun `inspect-explicit` for the unchanged source UID set and have the distinct reviewer confirm any changed thread context before using the fresh `context=` bindings
-- when one selected source contains multiple tasks, send and independently review one replacement per task, then repeat aligned `--task-id` and `--replacement-message-id` arguments and bind each 1-based task position to every source it covers with `--task-source TASK-INDEX:GMAIL-MSGID`; pass `--source-uidvalidity` from inspection so every replacement and shared source is revalidated before the move
-- finish one task at a time
-- when one selected source already provides the one useful, self-contained manager message for a task, retain it and do not send a replacement
-- when a replacement is needed, send exactly one self-contained replacement for the task and verify that exact message is uniquely present in the recipient mailbox before any source mutation; if delivery verification is delayed, look up the same message identity rather than sending a duplicate
-- send each replacement with `email_me.py --sender-tmux-target ORIGINAL_TARGET` plus `--subject-file` and `--message-file` as needed; this reuses the source task's tmux subject tag and thread instead of the compression worker's target
-- require the independently reviewed task grouping to identify one original target from its selected sources and current thread context; if the target is missing or conflicting, stop and resolve it without defaulting to the compression worker's target
-- `trash-explicit` independently derives that target from the live-bound sources and context, fetches each verified replacement subject, and blocks Trash unless every replacement preserves its task's target through the final mutation gate
-- for a verified route transition or multi-task source whose historical subject target is no longer authoritative for every task, have the distinct reviewer confirm both each exact task identity and its one authoritative current target, then repeat `--route-resolution 'TASK-ID=TARGET'` exactly once for every task in that `trash-explicit` operation
-- route resolution is an explicit reviewer-controlled override of historical subject targets; it is never inferred, never a partial mapping, and never the compression worker's default target; the verified replacement subject must match the resolved target at both the initial and final mutation gates
-- immediately before mutation, use a current read-only mailbox view to recheck the selected source identities, task grouping, disposition, and replacement; changed, missing, duplicate, or ambiguous mail blocks that task without affecting reviewed tasks
-- move only the explicitly selected, independently reviewed sources that the retained message or verified replacement supersedes, and move them only to recoverable `[Gmail]/Trash`
-- never expunge, permanently delete, or mutate `\All`
+1. Inspect each approved explicit source set with `inspect-explicit` and bind its source UIDVALIDITY, source identities, thread context, and original sender target.
+2. Resolve the authoritative current sender target from current task records and the manager hierarchy. Use the task's documented current owner and have the reviewer approve every transition from historical targets. A missing, conflicting, or inferred-only target blocks sending and movement for that group.
+3. Send each approved overview with a unique subject and the independently reviewed authoritative sender target. When an existing retained message already is the approved self-contained current message, send nothing; locate that exact retained message uniquely and use its identity as the superseding message.
+4. Locate the exact replacement uniquely with `locate-replacement`. Do not send a duplicate while delivery lookup is pending.
+5. Rebuild the read-only view and rerun `inspect-explicit` immediately before moving a group. Any source identity change requires a new frozen source set, complete regrouping, and repeated review. If the restaged facts still match the approved overview, reuse the uniquely located existing replacement. If any fact changes, freeze the already-sent overview as another source and apply the revised-replacement procedure in the next step.
+6. Inspect each later thread arrival by content. If it is independent, retain it and have the reviewer confirm that the existing replacement still fully supersedes only the restaged original sources. If its relevant facts are already present, add it to the newly frozen explicit source set and have the reviewer reconfirm the unchanged replacement and all bindings; retain it with an exact reason or move it only when that replacement fully supersedes it. If any later arrival or source drift changes the overview, freeze the already-sent overview as another source, draft one revised overview, review the revised source set and text, locate the revised replacement uniquely, and move the stale overview only when it is explicitly bound and fully superseded. Never send the same text twice.
+7. Run `trash-explicit` with the reviewed task/group identities, source bindings, context bindings, replacement identities, route resolution when needed, source UIDVALIDITY, and distinct preparer and reviewer identities.
+8. Move only explicitly bound, fully superseded sources to `[Gmail]/Trash`.
+9. Finish and verify one reviewed group at a time so drift in one group does not affect another.
 
 ## finish
 
-- use a current read-only mailbox view to verify that each completed task has exactly one useful, self-contained manager email and that only its superseded selected sources were moved to recoverable Trash
-- report concisely: topics, selected and trashed counts, retained or replacement messages, unresolved exceptions, verification status, and zero permanent deletions; omit private bodies and identifiers
+Build a final read-only `snapshot` using the same configured boundary and confirm:
+
+- the smallest truthful set remains and the total accepted manager-sent Inbox count is at most 30, or an exact preservation blocker is reported
+- every task has one current overview
+- every independent current question or decision remains visible
+- protected recurring reports accepted by the manager-mail boundary remain present
+- only approved superseded sources moved to recoverable Trash
+
+Treat a retained self-contained full memo as its task's current message when it already provides the needed human view. Count each protected current report separately from task overviews.
+
+Report the starting and final total accepted manager-sent Inbox counts, overview count, protected recurring count, separately retained question/decision count, full-memo exceptions, moved-to-Trash count, later-arrival handling, and unresolved blockers.
+
+Use the configured private mailbox path. Keep message bodies and identifiers out of reports. Do not mark messages read as cleanup. Do not expunge, permanently delete, mutate Gmail All Mail, or move unreviewed mail.
