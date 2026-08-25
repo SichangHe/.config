@@ -140,6 +140,10 @@ HUMAN_WAIT_RE = re.compile(
     re.IGNORECASE | re.VERBOSE,
 )
 CONCRETE_HUMAN_DECISION_RE = re.compile(r"\Ahuman decision:\s*\S.*\Z", re.IGNORECASE)
+ABSENT_BIND_PATH_BLOCKER = "authoritative resolution of world-writable non-sticky /ssd1 absolute-path rebind risk for Docker bind mounts"
+ABSENT_BIND_PATH_TASK = "anvl_a59_packet_route_work.md"
+ABSENT_BIND_PATH_TARGET = "a52work:2"
+ABSENT_BIND_PATH_WORKDIR = Path("/ssd1/sichangheagent/a52work")
 VAGUE_STOPPED_HUMAN_WAIT_RE = re.compile(
     r"\A(?:human|human\s+(?:approval|authorization|decision|discussion)|human[- ]pending|direct\s+human\s+discussion|waiting\s+(?:on|for)\s+(?:(?:a|the)\s+)?(?:human|person)(?:'s)?(?:\s+(?:action|answers?|approval|authorization|choice|confirmation|decision|discussion|feedback|follow-?up|guidance|input|repl(?:y|ies)|responses?|reviews?)|\s+to)?)\Z",
     re.IGNORECASE,
@@ -543,12 +547,46 @@ def is_intentionally_absent_historical_human_wait(root: Path, task: TaskLine, st
     return is_historical_human_wait_candidate(root, task, state) and not target_resolves_exactly(state.target)
 
 
+def is_bind_path_blocked_worker_candidate(root: Path, task: TaskLine, state: TaskState) -> bool:
+    """Return whether this is the exact unsafe bind-path worker record."""
+    if (
+        task.section not in {"todo:human pending", "todo:low priority"}
+        or task.task_file != ABSENT_BIND_PATH_TASK
+        or state.status != "blocked"
+        or state.reason != ABSENT_BIND_PATH_BLOCKER
+        or state.is_manager
+        or state.target != ABSENT_BIND_PATH_TARGET
+        or not same_tmux_target(task.target, state.target)
+    ):
+        return False
+    task_path = resolve_task_path(root, task.task_file)
+    indexed = [linked for linked in parse_task_lines(root / "TODO.md") if resolve_task_path(root, linked.task_file) == task_path]
+    if task_path is None or len(indexed) != 1 or task_has_pending_marker(task_path):
+        return False
+    try:
+        parts = frontmatter_parts(task_path.read_text(encoding="utf-8"))
+    except (OSError, TaskFrontmatterError):
+        return False
+    return parts is not None and "No second owner exists." in "\n".join(parts[1])
+
+
+def is_intentionally_absent_bind_path_blocked_worker(root: Path, task: TaskLine, state: TaskState) -> bool:
+    """Return whether the exact unsafe bind-path worker remains deliberately unlaunched."""
+
+    return is_bind_path_blocked_worker_candidate(root, task, state) and not target_resolves_exactly(state.target) and not absent_bind_path_workdir_exists()
+
+
+def absent_bind_path_workdir_exists() -> bool:
+    return ABSENT_BIND_PATH_WORKDIR.exists()
+
+
 def task_requires_live_target(root: Path, task: TaskLine, state: TaskState) -> bool:
     """Return whether the task's `runat` represents required live ownership."""
 
     return not (
         (task.section == "todo:human pending" and not task.target and state.status == "blocked" and is_recorded_human_wait(state))
         or is_intentionally_absent_historical_human_wait(root, task, state)
+        or is_intentionally_absent_bind_path_blocked_worker(root, task, state)
     )
 
 
@@ -1113,7 +1151,7 @@ def add_blocked_idle_vl_row(root: Path, task: TaskLine, role: str, rows: list[St
     if target:
         classified = classify_target(task.task_file, target, state.persistent_role, state.status, auto_unstick, role, unstick_by_target, auto_unstick_disabled_reason)
         idle_status = classified.status
-        if idle_status == "running":
+        if idle_status == "running" and not (is_historical_human_wait_candidate(root, task, state) or is_bind_path_blocked_worker_candidate(root, task, state)):
             return
         if is_recorded_human_wait(state) and idle_status == "ready" and not is_historical_human_wait_candidate(root, task, state):
             return

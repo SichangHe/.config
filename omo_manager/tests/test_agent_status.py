@@ -3330,6 +3330,129 @@ resolved_task_items: []
             self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
             self.assertEqual(task_text, task.read_text(encoding="utf-8"))
 
+    def test_problems_only_ignores_absent_unsafe_bind_path_worker_without_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            todo = root / "TODO.md"
+            todo_text = "human pending:\nanvl_a59_packet_route_work.md a52work:2\n"
+            _ = todo.write_text(todo_text, encoding="utf-8")
+            task = root / "anvl_a59_packet_route_work.md"
+            task_text = task_frontmatter(
+                "blocked",
+                runat="a52work:2",
+                managerat="vlcliimprove:0",
+                blocked_on="authoritative resolution of world-writable non-sticky /ssd1 absolute-path rebind risk for Docker bind mounts",
+                pending_items=("Preserve the reviewed implementation route.", "Preserve terminal review constraints."),
+            ) + "Task routing is repaired atomically. No second owner exists.\n"
+            _ = task.write_text(task_text, encoding="utf-8")
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.target_resolves_exactly", return_value=False), patch(
+                "omo_manager.omo_agent_status.absent_bind_path_workdir_exists", return_value=False
+            ), patch("omo_manager.omo_agent_status.inspect", return_value=Report("missing", [])) as inspect, redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--no-auto-unstick"]))
+                self.assertEqual(set(), active_task_targets(root))
+
+            self.assertEqual("", out.getvalue())
+            inspect.assert_not_called()
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+            self.assertEqual(task_text, task.read_text(encoding="utf-8"))
+
+    def test_problems_only_retains_changed_unsafe_bind_path_worker_evidence(self) -> None:
+        cases = (
+            ("current", "authoritative resolution of world-writable non-sticky /ssd1 absolute-path rebind risk for Docker bind mounts", False, False, "No second owner exists."),
+            ("low priority", "different blocker", False, False, "No second owner exists."),
+            ("low priority", "authoritative resolution of world-writable non-sticky /ssd1 absolute-path rebind risk for Docker bind mounts", True, False, "No second owner exists."),
+            ("low priority", "authoritative resolution of world-writable non-sticky /ssd1 absolute-path rebind risk for Docker bind mounts", False, True, "No second owner exists."),
+            ("low priority", "authoritative resolution of world-writable non-sticky /ssd1 absolute-path rebind risk for Docker bind mounts", False, False, "Replacement ownership is unknown."),
+        )
+        for section, blocker, target_exists, workdir_exists, ownership in cases:
+            with self.subTest(section=section, blocker=blocker, target_exists=target_exists, workdir_exists=workdir_exists, ownership=ownership), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                registry = root / "sessions.json"
+                _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+                _ = (root / "TODO.md").write_text(f"{section}:\nanvl_a59_packet_route_work.md a52work:2\n", encoding="utf-8")
+                _ = (root / "anvl_a59_packet_route_work.md").write_text(task_frontmatter("blocked", runat="a52work:2", blocked_on=blocker) + ownership + "\n", encoding="utf-8")
+                out = StringIO()
+                with patch("omo_manager.omo_agent_status.target_resolves_exactly", return_value=target_exists), patch(
+                    "omo_manager.omo_agent_status.absent_bind_path_workdir_exists", return_value=workdir_exists
+                ), patch("omo_manager.omo_agent_status.inspect", return_value=Report("missing", [])), redirect_stdout(out):
+                    self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--no-auto-unstick"]))
+
+                self.assertIn("missing: task=anvl_a59_packet_route_work.md", out.getvalue())
+
+    def test_problems_only_retains_same_named_nested_bind_path_record(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            nested = root / "other"
+            nested.mkdir()
+            _ = (root / "TODO.md").write_text("low priority:\nother/anvl_a59_packet_route_work.md a52work:2\n", encoding="utf-8")
+            _ = (nested / "anvl_a59_packet_route_work.md").write_text(
+                task_frontmatter(
+                    "blocked",
+                    runat="a52work:2",
+                    blocked_on="authoritative resolution of world-writable non-sticky /ssd1 absolute-path rebind risk for Docker bind mounts",
+                )
+                + "No second owner exists.\n",
+                encoding="utf-8",
+            )
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.target_resolves_exactly", return_value=False), patch(
+                "omo_manager.omo_agent_status.absent_bind_path_workdir_exists", return_value=False
+            ), patch("omo_manager.omo_agent_status.inspect", return_value=Report("missing", [])), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--no-auto-unstick"]))
+
+            self.assertIn("missing: task=other/anvl_a59_packet_route_work.md", out.getvalue())
+
+    def test_problems_only_retains_bind_path_record_with_ownership_only_in_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("low priority:\nanvl_a59_packet_route_work.md a52work:2\n", encoding="utf-8")
+            _ = (root / "anvl_a59_packet_route_work.md").write_text(
+                task_frontmatter(
+                    "blocked",
+                    runat="a52work:2",
+                    blocked_on="authoritative resolution of world-writable non-sticky /ssd1 absolute-path rebind risk for Docker bind mounts",
+                    pending_items=("Record that No second owner exists.",),
+                ),
+                encoding="utf-8",
+            )
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.target_resolves_exactly", return_value=False), patch(
+                "omo_manager.omo_agent_status.absent_bind_path_workdir_exists", return_value=False
+            ), patch("omo_manager.omo_agent_status.inspect", return_value=Report("missing", [])), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--no-auto-unstick"]))
+
+            self.assertIn("missing: task=anvl_a59_packet_route_work.md", out.getvalue())
+
+    def test_reused_bind_path_target_running_pane_is_actionable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("low priority:\nanvl_a59_packet_route_work.md a52work:2\n", encoding="utf-8")
+            _ = (root / "anvl_a59_packet_route_work.md").write_text(
+                task_frontmatter(
+                    "blocked",
+                    runat="a52work:2",
+                    blocked_on="authoritative resolution of world-writable non-sticky /ssd1 absolute-path rebind risk for Docker bind mounts",
+                )
+                + "No second owner exists.\n",
+                encoding="utf-8",
+            )
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.target_resolves_exactly", return_value=True), patch(
+                "omo_manager.omo_agent_status.absent_bind_path_workdir_exists", return_value=False
+            ), patch("omo_manager.omo_agent_status.inspect", return_value=Report("running", ["unrelated work"])), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--no-auto-unstick"]))
+
+            self.assertIn("blocked_idle: task=anvl_a59_packet_route_work.md", out.getvalue())
+
     def test_problems_only_retains_actionable_protected_human_target_states(self) -> None:
         cases = (
             ("running", "", (), "hvl:3", False, "low priority"),
