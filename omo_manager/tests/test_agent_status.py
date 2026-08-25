@@ -5,7 +5,7 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
-from omo_manager.omo_agent_status import Args, TaskFrontmatterError, classify_task, format_problem_summary, format_summary, load_local_env, load_task_state, main, parse_task_lines, parse_task_metadata, persistent_blocked_task_lines, registry_prune, report_output_evidence, session_records
+from omo_manager.omo_agent_status import Args, TaskFrontmatterError, active_task_targets, classify_task, format_problem_summary, format_summary, load_local_env, load_task_state, main, parse_task_lines, parse_task_metadata, persistent_blocked_task_lines, registry_prune, report_output_evidence, session_records
 from omo_manager.omo_agent_status import SessionRecord, StatusRow, TaskLine
 from omo_manager.omo_codex_status import Args as CodexStatusArgs, PlanPromptRecovery, Report, report_from_lines
 
@@ -3272,6 +3272,156 @@ resolved_task_items: []
 
             self.assertEqual("", out.getvalue())
             inspect.assert_not_called()
+
+    def test_problems_only_ignores_absent_low_priority_protected_human_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            todo = root / "TODO.md"
+            todo_text = "low priority:\nvl_contrib_eval_human_resume_11889.md hvl:3\n"
+            _ = todo.write_text(todo_text, encoding="utf-8")
+            task = root / "vl_contrib_eval_human_resume_11889.md"
+            task_text = task_frontmatter(
+                "blocked",
+                runat="hvl:3",
+                managerat="vlprograms:0",
+                blocked_on="human decision: authorize a private port, polish, and revalidation of the independently approved candidate, or keep it archived",
+            )
+            _ = task.write_text(task_text, encoding="utf-8")
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.target_resolves_exactly", return_value=False), patch(
+                "omo_manager.omo_agent_status.inspect", return_value=Report("missing", [])
+            ) as inspect, redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--no-auto-unstick"]))
+                self.assertEqual(set(), active_task_targets(root))
+
+            self.assertEqual("", out.getvalue())
+            inspect.assert_not_called()
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+            self.assertEqual(task_text, task.read_text(encoding="utf-8"))
+
+    def test_problems_only_ignores_absent_low_priority_exact_human_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            todo = root / "TODO.md"
+            todo_text = "low priority:\nvl_target_select27.md vl_build_mgr:4\n"
+            _ = todo.write_text(todo_text, encoding="utf-8")
+            task = root / "vl_target_select27.md"
+            task_text = task_frontmatter(
+                "blocked",
+                runat="vl_build_mgr:4",
+                managerat="vl_build_mgr:3",
+                blocked_on="human",
+                pending_items=("Preserve the completed STOP packet until the human decides.",),
+            )
+            _ = task.write_text(task_text, encoding="utf-8")
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.target_resolves_exactly", return_value=False), patch(
+                "omo_manager.omo_agent_status.inspect", return_value=Report("missing", [])
+            ) as inspect, redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--no-auto-unstick"]))
+                self.assertEqual(set(), active_task_targets(root))
+
+            self.assertEqual("", out.getvalue())
+            inspect.assert_not_called()
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+            self.assertEqual(task_text, task.read_text(encoding="utf-8"))
+
+    def test_problems_only_retains_actionable_protected_human_target_states(self) -> None:
+        cases = (
+            ("running", "", (), "hvl:3", False, "low priority"),
+            ("long_running", "persistent role", (), "hvl:3", False, "low priority"),
+            ("blocked", "human decision: authorize the private port", ("Apply the decision.",), "hvl:3", False, "low priority"),
+            ("blocked", "dependency unavailable", (), "hvl:3", False, "low priority"),
+            ("blocked", "human decision pending", (), "hvl:3", False, "low priority"),
+            ("blocked", "human decision:", (), "hvl:3", False, "low priority"),
+            ("blocked", "human decision: authorize the private port", (), "cfg:3", False, "low priority"),
+            ("blocked", "human decision: authorize the private port", (), "hvl:3", True, "low priority"),
+            ("blocked", "human decision: authorize the private port", (), "hvl:3", False, "current"),
+        )
+        for status, blocker, pending_items, target, target_exists, section in cases:
+            with self.subTest(status=status, blocker=blocker, pending_items=pending_items, target=target, target_exists=target_exists, section=section), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                registry = root / "sessions.json"
+                _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+                _ = (root / "TODO.md").write_text(f"{section}:\nreview.md {target}\n", encoding="utf-8")
+                _ = (root / "review.md").write_text(
+                    task_frontmatter(status, runat=target, blocked_on=blocker, pending_items=pending_items),
+                    encoding="utf-8",
+                )
+                out = StringIO()
+                with patch("omo_manager.omo_agent_status.target_resolves_exactly", return_value=target_exists), patch(
+                    "omo_manager.omo_agent_status.inspect", return_value=Report("missing", [])
+                ), redirect_stdout(out):
+                    self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--no-auto-unstick"]))
+                    self.assertEqual({target}, active_task_targets(root))
+
+                self.assertIn("missing: task=review.md", out.getvalue())
+
+    def test_historical_protected_target_does_not_hide_unrelated_agent_pane(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("low priority:\nreview.md hvl:3\n", encoding="utf-8")
+            _ = (root / "review.md").write_text(
+                task_frontmatter("blocked", runat="hvl:3", blocked_on="human decision: authorize the private port"),
+                encoding="utf-8",
+            )
+            out = StringIO()
+
+            def inspect_target(args: object) -> Report:
+                return Report("running", ["unrelated work"]) if getattr(args, "target") == "wl:31" else Report("missing", [])
+
+            with patch("omo_manager.omo_agent_status.target_resolves_exactly", return_value=False), patch(
+                "omo_manager.omo_agent_status.tmux_list_panes", return_value=["wl:31"]
+            ), patch("omo_manager.omo_agent_status.inspect", side_effect=inspect_target), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--no-auto-unstick"]))
+
+            text = out.getvalue()
+            self.assertIn("untracked_agent: task=tmux:wl:31", text)
+            self.assertNotIn("task=review.md", text)
+
+    def test_reused_historical_exact_human_target_is_actionable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("low priority:\nreview.md vl_build_mgr:4\n", encoding="utf-8")
+            _ = (root / "review.md").write_text(
+                task_frontmatter("blocked", runat="vl_build_mgr:4", blocked_on="human", pending_items=("Preserve the decision queue.",)),
+                encoding="utf-8",
+            )
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.target_resolves_exactly", return_value=True), patch(
+                "omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["unrelated agent"])
+            ), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--no-auto-unstick"]))
+                self.assertEqual({"vl_build_mgr:4"}, active_task_targets(root))
+
+            self.assertIn("blocked_idle: task=review.md", out.getvalue())
+
+    def test_problems_only_reports_conflicting_index_for_absent_protected_human_wait(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nreview.md hvl:3\n\nlow priority:\n./review.md hvl:3\n", encoding="utf-8")
+            _ = (root / "review.md").write_text(
+                task_frontmatter("blocked", runat="hvl:3", blocked_on="human decision: authorize the private port"),
+                encoding="utf-8",
+            )
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.target_resolves_exactly", return_value=False), patch(
+                "omo_manager.omo_agent_status.inspect", return_value=Report("missing", [])
+            ), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--no-auto-unstick"]))
+                self.assertEqual({"hvl:3"}, active_task_targets(root))
+
+            self.assertIn("missing: task=review.md", out.getvalue())
 
     def test_problems_only_reports_untracked_pane_reusing_historical_human_pending_runat(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

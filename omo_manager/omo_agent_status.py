@@ -139,6 +139,7 @@ HUMAN_WAIT_RE = re.compile(
     """,
     re.IGNORECASE | re.VERBOSE,
 )
+CONCRETE_HUMAN_DECISION_RE = re.compile(r"\Ahuman decision:\s*\S.*\Z", re.IGNORECASE)
 VAGUE_STOPPED_HUMAN_WAIT_RE = re.compile(
     r"\A(?:human|human\s+(?:approval|authorization|decision|discussion)|human[- ]pending|direct\s+human\s+discussion|waiting\s+(?:on|for)\s+(?:(?:a|the)\s+)?(?:human|person)(?:'s)?(?:\s+(?:action|answers?|approval|authorization|choice|confirmation|decision|discussion|feedback|follow-?up|guidance|input|repl(?:y|ies)|responses?|reviews?)|\s+to)?)\Z",
     re.IGNORECASE,
@@ -509,10 +510,43 @@ def is_recorded_human_wait(state: TaskState) -> bool:
     return HUMAN_WAIT_RE.search(state.reason) is not None
 
 
-def task_requires_live_target(task: TaskLine, state: TaskState) -> bool:
+def is_historical_human_wait_candidate(root: Path, task: TaskLine, state: TaskState) -> bool:
+    """Return whether a sole low-priority worker has a historical human gate."""
+
+    if (
+        task.section != "todo:low priority"
+        or state.status != "blocked"
+        or state.is_manager
+        or not state.target
+        or not same_tmux_target(task.target, state.target)
+    ):
+        return False
+    task_path = resolve_task_path(root, task.task_file)
+    indexed = [linked for linked in parse_task_lines(root / "TODO.md") if resolve_task_path(root, linked.task_file) == task_path]
+    if task_path is None or len(indexed) != 1 or task_has_pending_marker(task_path):
+        return False
+    exact_human = state.reason.strip().lower() == "human"
+    protected_concrete_human = (
+        target_session(state.target).startswith("h")
+        and CONCRETE_HUMAN_DECISION_RE.fullmatch(state.reason.strip()) is not None
+        and not pending_task_items(task_path, root)
+    )
+    return exact_human or protected_concrete_human
+
+
+def is_intentionally_absent_historical_human_wait(root: Path, task: TaskLine, state: TaskState) -> bool:
+    """Return whether a historical human-gated worker's target remains absent."""
+
+    return is_historical_human_wait_candidate(root, task, state) and not target_resolves_exactly(state.target)
+
+
+def task_requires_live_target(root: Path, task: TaskLine, state: TaskState) -> bool:
     """Return whether the task's `runat` represents required live ownership."""
 
-    return not (task.section == "todo:human pending" and not task.target and state.status == "blocked" and is_recorded_human_wait(state))
+    return not (
+        (task.section == "todo:human pending" and not task.target and state.status == "blocked" and is_recorded_human_wait(state))
+        or is_intentionally_absent_historical_human_wait(root, task, state)
+    )
 
 
 def task_file_requires_live_target(root: Path, task_file: str) -> bool:
@@ -521,7 +555,7 @@ def task_file_requires_live_target(root: Path, task_file: str) -> bool:
     path = resolve_task_path(root, task_file)
     tasks = [task for task in parse_task_lines(root / "TODO.md") if resolve_task_path(root, task.task_file) == path]
     state = scan_task_state(path, root) if path is not None else None
-    return state is None or not tasks or any(task_requires_live_target(task, state) for task in tasks)
+    return state is None or not tasks or any(task_requires_live_target(root, task, state) for task in tasks)
 
 
 def is_explicit_human_pending_wait(root: Path, task: TaskLine, state: TaskState) -> bool:
@@ -1061,7 +1095,7 @@ def add_blocked_idle_vl_row(root: Path, task: TaskLine, role: str, rows: list[St
         return
     if not task_owned_by_manager(root, task, manager_target, state_path):
         return
-    if not task_requires_live_target(task, state):
+    if not task_requires_live_target(root, task, state):
         return
     target = state.target or task.target
     if not target:
@@ -1078,7 +1112,7 @@ def add_blocked_idle_vl_row(root: Path, task: TaskLine, role: str, rows: list[St
         idle_status = classified.status
         if idle_status == "running":
             return
-        if is_recorded_human_wait(state) and idle_status == "ready":
+        if is_recorded_human_wait(state) and idle_status == "ready" and not is_historical_human_wait_candidate(root, task, state):
             return
         if is_explicit_human_pending_wait(root, task, state) and idle_status in {"missing", "not_codex"} and " output=" not in classified.evidence:
             return
@@ -1265,7 +1299,7 @@ def todo_unmanaged_task(root: Path, task: TaskLine) -> TaskLine | None:
     task_status = "unlinked"
     persistent_role = False
     if state is not None:
-        if not task_requires_live_target(task, state):
+        if not task_requires_live_target(root, task, state):
             return None
         target = target or state.target
         port = port if port is not None else state.port
@@ -1316,7 +1350,7 @@ def active_task_targets(root: Path, *, include_pending_delivery: bool = False) -
     for task in parse_task_lines(root / "TODO.md"):
         state_path = resolve_task_path(root, task.task_file)
         state = scan_task_state(state_path, root) if state_path is not None else None
-        if state is not None and state.status != "done" and state.target and task_requires_live_target(task, state) and (include_pending_delivery or not task_has_pending_marker(state_path)):
+        if state is not None and state.status != "done" and state.target and task_requires_live_target(root, task, state) and (include_pending_delivery or not task_has_pending_marker(state_path)):
             targets.add(state.target)
     return targets
 
