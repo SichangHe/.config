@@ -5,7 +5,7 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
-from omo_manager.omo_agent_status import Args, TaskFrontmatterError, active_task_targets, classify_task, format_problem_summary, format_summary, load_local_env, load_task_state, main, parse_task_lines, parse_task_metadata, persistent_blocked_task_lines, registry_prune, report_output_evidence, session_records
+from omo_manager.omo_agent_status import Args, TaskFrontmatterError, active_task_targets, classify_task, format_problem_summary, format_summary, is_durable_outstanding_human_question, load_local_env, load_task_state, main, parse_task_lines, parse_task_metadata, persistent_blocked_task_lines, registry_prune, report_output_evidence, scan_task_state, session_records
 from omo_manager.omo_agent_status import BLOCKED_DELIVERY_ITEMS
 from omo_manager.omo_agent_status import SessionRecord, StatusRow, TaskLine
 from omo_manager.omo_codex_status import Args as CodexStatusArgs, PlanPromptRecovery, Report, report_from_lines
@@ -2072,6 +2072,159 @@ resolved_task_items: []
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(out):
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "wl:17"]))
             self.assertEqual("", out.getvalue())
+
+    def test_problems_only_skips_ready_human_pending_task_with_one_durable_question(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("human pending:\nreview.md cfg 1\n", encoding="utf-8")
+            _ = (root / "review.md").write_text(
+                task_frontmatter(
+                    "blocked",
+                    runat="cfg:1",
+                    managerat="mgr:1",
+                    blocked_on="exact durable human source for commit or retain decision",
+                    pending_items=("Obtain an exact authoritative human source for commit or an explicit retain decision.",),
+                ),
+                encoding="utf-8",
+            )
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertEqual("", out.getvalue())
+
+    def test_durable_human_question_requires_correct_index_queue_and_blocker(self) -> None:
+        cases = (
+            ("current", "exact durable human source for approval", ("Obtain authoritative human approval.",), False, False),
+            ("human pending", "exact durable human source for approval", (), False, False),
+            ("human pending", "waiting on proof owner", ("Obtain authoritative human approval.",), False, False),
+            ("human pending", "exact durable human source for approval", ("Obtain authoritative human approval.", "Obtain human review."), False, False),
+            ("human pending", "exact durable human source for approval", ("Finish unrelated implementation.",), False, False),
+            ("human pending", "human approval after upstream proof arrives", ("Obtain human approval for branding.",), False, False),
+            ("human pending", "human approval for database deletion decision", ("Obtain human approval for database migration decision.",), False, False),
+            ("human pending", "approval of human-readable database deletion protocol", ("Obtain approval of human-readable database deletion protocol.",), False, False),
+            ("human pending", "human approval to delete production database", ("Obtain human approval to not delete production database.",), False, False),
+            ("human pending", "exact durable human source for approval", ("Obtain authoritative human approval.",), True, False),
+        )
+        for section, blocker, items, pending_marker, expected in cases:
+            with self.subTest(section=section, blocker=blocker, items=items, pending_marker=pending_marker), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                _ = (root / "TODO.md").write_text(f"{section}:\nreview.md cfg 1\n", encoding="utf-8")
+                body = "(pending)\n" if pending_marker else ""
+                _ = (root / "review.md").write_text(task_frontmatter("blocked", blocked_on=blocker, pending_items=items) + body, encoding="utf-8")
+                task = parse_task_lines(root / "TODO.md")[0]
+                state = scan_task_state(root / "review.md", root)
+                self.assertIsNotNone(state)
+                self.assertEqual(expected, is_durable_outstanding_human_question(root, task, state))
+
+    def test_problems_only_reports_non_human_gate_phrases(self) -> None:
+        for section, blocker, goal in (
+            ("human pending", "non-human approval for protocol", "Obtain non-human approval for protocol."),
+            ("human pending", "human-independent approval for protocol", "Obtain human-independent approval for protocol."),
+            ("current", "human approval after upstream proof arrives", "Obtain human approval after upstream proof arrives."),
+            ("human pending", "machine approval, not human decision", "Obtain machine approval, not human decision."),
+        ):
+            with self.subTest(blocker=blocker), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                registry = root / "sessions.json"
+                _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+                _ = (root / "TODO.md").write_text(f"{section}:\nreview.md cfg 1\n", encoding="utf-8")
+                _ = (root / "review.md").write_text(
+                    task_frontmatter("blocked", blocked_on=blocker, pending_items=(goal,)),
+                    encoding="utf-8",
+                )
+                out = StringIO()
+                with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(out):
+                    self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+                self.assertIn("blocked_idle: task=review.md", out.getvalue())
+
+    def test_durable_human_question_requires_matching_index_target(self) -> None:
+        for todo_target, expected in (("", False), ("cfg:2", False), ("cfg:1.0", True)):
+            with self.subTest(todo_target=todo_target), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                suffix = f" {todo_target}" if todo_target else ""
+                _ = (root / "TODO.md").write_text(f"human pending:\nreview.md{suffix}\n", encoding="utf-8")
+                _ = (root / "review.md").write_text(
+                    task_frontmatter("blocked", blocked_on="human source for commit decision", pending_items=("Obtain human source for commit decision.",)),
+                    encoding="utf-8",
+                )
+                task = parse_task_lines(root / "TODO.md")[0]
+                state = scan_task_state(root / "review.md", root)
+                self.assertIsNotNone(state)
+                self.assertEqual(expected, is_durable_outstanding_human_question(root, task, state))
+
+    def test_durable_human_question_rejects_duplicate_alias_links(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "TODO.md").write_text("human pending:\nreview.md cfg 1\n./review.md cfg 1\n", encoding="utf-8")
+            _ = (root / "review.md").write_text(
+                task_frontmatter("blocked", blocked_on="human source for commit decision", pending_items=("Obtain human source for commit decision.",)),
+                encoding="utf-8",
+            )
+            task = parse_task_lines(root / "TODO.md")[0]
+            state = scan_task_state(root / "review.md", root)
+            self.assertIsNotNone(state)
+            self.assertFalse(is_durable_outstanding_human_question(root, task, state))
+
+    def test_durable_human_question_requires_one_concrete_v2_human_blocker(self) -> None:
+        blockers = (
+            ("  - kind: human\n    reason: human source for commit decision", True),
+            ("  - kind: human\n    reason: human attention", False),
+            ("  - kind: human\n    reason: human source for commit decision\n  - kind: human\n    reason: human review for release decision", False),
+            ("  - kind: task\n    task: dependency.md\n    reason: human source for commit decision", False),
+        )
+        for blocker_rows, expected in blockers:
+            with self.subTest(blocker_rows=blocker_rows), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                _ = (root / "TODO.md").write_text("human pending:\nreview.md cfg 1\n", encoding="utf-8")
+                _ = (root / "review.md").write_text(
+                    f"""---
+version: v2.0.0
+task_id: task_019f0000-0000-7000-8000-000000000021
+status: blocked
+resume_status: running
+runat: cfg:1
+tool: codex
+managerat: mgr:1
+is_manager: false
+blocked_on:
+{blocker_rows}
+pending_task_items:
+  - id: pi_019f0000-0000-7000-8000-000000000022
+    text: Obtain human source for commit decision.
+    blocked_on: []
+    notices: []
+resolved_task_items: []
+---
+""",
+                    encoding="utf-8",
+                )
+                task = parse_task_lines(root / "TODO.md")[0]
+                state = scan_task_state(root / "review.md", root)
+                self.assertIsNotNone(state)
+                self.assertEqual(expected, is_durable_outstanding_human_question(root, task, state))
+
+    def test_durable_human_question_does_not_hide_non_ready_faults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("human pending:\nreview.md cfg 1\n", encoding="utf-8")
+            _ = (root / "review.md").write_text(
+                task_frontmatter(
+                    "blocked",
+                    blocked_on="exact durable human source for approval",
+                    pending_items=("Obtain authoritative human approval.",),
+                ),
+                encoding="utf-8",
+            )
+            for fault in ("error", "missing", "not_codex", "stuck_input"):
+                with self.subTest(fault=fault):
+                    out = StringIO()
+                    with patch("omo_manager.omo_agent_status.inspect", return_value=Report(fault, ["problem"])), redirect_stdout(out):
+                        self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+                    self.assertIn(f"{fault}: task=review.md", out.getvalue())
 
     def test_problems_only_skips_manager_ops_future_request_wait(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -32,6 +32,7 @@ from omo_manager.omo_codex_status import visible_error_lines
 from omo_manager.omo_task_metadata import RETIRED_RUNAT
 from omo_manager.omo_task_metadata import TASK_FRONTMATTER_STATUSES  # noqa: F401
 from omo_manager.omo_task_metadata import TARGET_RE
+from omo_manager.omo_task_metadata import HumanBlocker
 from omo_manager.omo_task_metadata import TaskFrontmatterError
 from omo_manager.omo_task_metadata import TaskMetadata
 from omo_manager.omo_task_metadata import frontmatter_parts
@@ -139,6 +140,15 @@ HUMAN_WAIT_RE = re.compile(
     """,
     re.IGNORECASE | re.VERBOSE,
 )
+HUMAN_QUESTION_GATE_RE = re.compile(
+    r"(?:\bhuman(?!-readable)\b[^.\n]{0,100}\b(?:answers?|approval|authority|authorization|choice|confirmation|decision|feedback|guidance|input|repl(?:y|ies)|responses?|reviews?|source)\b|\b(?:answers?|approval|authority|authorization|choice|confirmation|decision|feedback|guidance|input|repl(?:y|ies)|responses?|reviews?|source)\b[^.\n]{0,100}\bhuman(?!-readable)\b)",
+    re.IGNORECASE,
+)
+HUMAN_GATE_TERMS = {"answer", "answers", "approval", "authority", "authorization", "choice", "confirmation", "decision", "feedback", "guidance", "input", "reply", "replies", "response", "responses", "review", "reviews", "source"}
+HUMAN_GATE_BINDING_STOP_WORDS = HUMAN_GATE_TERMS | {"after", "authoritative", "before", "concrete", "durable", "exact", "explicit", "from", "human", "obtain", "requires", "requiring", "through", "waiting", "with", "without"}
+HUMAN_GATE_WORD_RE = re.compile(r"[a-z][a-z0-9_-]{3,}", re.IGNORECASE)
+NON_HUMAN_GATE_RE = re.compile(r"\b(?:non[- ]human|human[- ]independent|not\s+human)\b", re.IGNORECASE)
+NEGATED_GATE_RE = re.compile(r"\b(?:no|not|never|without)\b", re.IGNORECASE)
 CONCRETE_HUMAN_DECISION_RE = re.compile(r"\Ahuman decision:\s*\S.*\Z", re.IGNORECASE)
 ABSENT_BIND_PATH_BLOCKER = "authoritative resolution of world-writable non-sticky /ssd1 absolute-path rebind risk for Docker bind mounts"
 ABSENT_BIND_PATH_TASK = "anvl_a59_packet_route_work.md"
@@ -522,7 +532,46 @@ def quiet_closed_manager_not_codex(root: Path, task: TaskLine, row: StatusRow) -
 def is_recorded_human_wait(state: TaskState) -> bool:
     """Return whether a blocked task already records that it is waiting on the human."""
 
-    return HUMAN_WAIT_RE.search(state.reason) is not None
+    return HUMAN_WAIT_RE.search(state.reason) is not None and NON_HUMAN_GATE_RE.search(state.reason) is None
+
+
+def is_durable_outstanding_human_question(root: Path, task: TaskLine, state: TaskState) -> bool:
+    """Return whether one exact human question already accounts for a ready blocked pane."""
+
+    if task.section != "todo:human pending" or state.status != "blocked":
+        return False
+    task_path = resolve_task_path(root, task.task_file)
+    metadata = read_task_metadata(task_path, root)
+    indexed = [linked for linked in parse_task_lines(root / "TODO.md") if resolve_task_path(root, linked.task_file) == task_path]
+    if (
+        task_path is None
+        or metadata is None
+        or len(indexed) != 1
+        or indexed[0].section != "todo:human pending"
+        or not indexed[0].target
+        or not same_tmux_target(indexed[0].target, state.target)
+        or task_has_pending_marker(task_path)
+        or len(metadata.pending_task_items) != 1
+    ):
+        return False
+    if metadata.blockers:
+        if len(metadata.blockers) != 1 or not isinstance(metadata.blockers[0], HumanBlocker):
+            return False
+        blocker = metadata.blockers[0].reason
+    else:
+        blocker = state.reason
+    goal = metadata.pending_task_items[0]
+    if (
+        HUMAN_QUESTION_GATE_RE.search(blocker) is None
+        or HUMAN_QUESTION_GATE_RE.search(goal) is None
+        or NON_HUMAN_GATE_RE.search(blocker) is not None
+        or NON_HUMAN_GATE_RE.search(goal) is not None
+        or bool(NEGATED_GATE_RE.search(blocker)) != bool(NEGATED_GATE_RE.search(goal))
+    ):
+        return False
+    blocker_terms = {word.casefold() for word in HUMAN_GATE_WORD_RE.findall(blocker)} - HUMAN_GATE_BINDING_STOP_WORDS
+    goal_terms = {word.casefold() for word in HUMAN_GATE_WORD_RE.findall(goal)} - HUMAN_GATE_BINDING_STOP_WORDS
+    return bool(blocker_terms) and blocker_terms <= goal_terms
 
 
 def is_historical_human_wait_candidate(root: Path, task: TaskLine, state: TaskState) -> bool:
@@ -1182,7 +1231,14 @@ def add_blocked_idle_vl_row(root: Path, task: TaskLine, role: str, rows: list[St
         idle_status = classified.status
         if idle_status == "running" and not (is_historical_human_wait_candidate(root, task, state) or is_bind_path_blocked_worker_candidate(root, task, state)):
             return
-        if is_recorded_human_wait(state) and idle_status == "ready" and not is_historical_human_wait_candidate(root, task, state):
+        if (
+            is_recorded_human_wait(state)
+            and (HUMAN_QUESTION_GATE_RE.search(state.reason) is None or not pending_task_items(state_path, root))
+            and idle_status == "ready"
+            and not is_historical_human_wait_candidate(root, task, state)
+        ):
+            return
+        if idle_status == "ready" and is_durable_outstanding_human_question(root, task, state):
             return
         if idle_status == "ready" and is_blocked_external_delivery_wait(root, task, state):
             return
