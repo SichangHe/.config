@@ -23,6 +23,7 @@ from omo_manager.omo_manager_rotate import (
     execute_rotation,
     fresh_command,
     invocation_is_target,
+    is_codex_launch_argv,
     option_values,
     preflight,
     read_reservation,
@@ -45,6 +46,11 @@ def process(pid: int, ppid: int, *argv: str, state: str = "S") -> ProcessInfo:
 
 
 class ManagerRotateTests(unittest.TestCase):
+    def test_codex_launch_recognizes_latest_and_legacy_packages(self) -> None:
+        self.assertTrue(is_codex_launch_argv(("bunx", "@openai/codex@latest", "--model", "gpt-5.6-terra")))
+        self.assertTrue(is_codex_launch_argv(("bunx", "@openai/codex", "--model", "gpt-5.6-terra")))
+        self.assertFalse(is_codex_launch_argv(("bunx", "@openai/codex@next", "--model", "gpt-5.6-terra")))
+
     def args(
         self,
         root: Path,
@@ -211,7 +217,7 @@ class ManagerRotateTests(unittest.TestCase):
             Path("/home/sichangheagent/work_logs"),
             Path("/private/state"),
         )
-        self.assertIn("bunx @openai/codex --dangerously-bypass-approvals-and-sandbox", command)
+        self.assertIn("bunx @openai/codex@latest --dangerously-bypass-approvals-and-sandbox", command)
         self.assertIn("--model gpt-5.6-terra", command)
         self.assertIn('model_reasoning_effort="xhigh"', command)
         self.assertIn("OMO_AGENT_TMUX_TARGET=wl:1.0", command)

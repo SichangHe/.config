@@ -4,12 +4,12 @@
 
 The target must be numeric `SESSION:WINDOW` or `SESSION:WINDOW.PANE`. Window shorthand is accepted only when the exact window has one pane and that pane is index 0; it is canonicalized to `SESSION:WINDOW.0`. The helper compares tmux's resolved session, window, pane, pane ID, and window ID and rejects prefix or ambiguous resolution. It holds a private nonblocking rotation lock while it:
 
-1. finds exactly one live `bunx @openai/codex` launch argv below the pane PID;
+1. finds exactly one live supported Codex launch argv below the pane PID, accepting both `@openai/codex@latest` and an existing legacy `@openai/codex` process;
 2. validates and normally infers its explicit model and `model_reasoning_effort`;
 3. reads `~/.config/omo_manager/WORKER_DEFAULTS.md` and `ROOT/MANAGER.md`;
 4. captures the existing pane output and writes the prompt plus a JSON audit record under the private manager state directory;
 5. runs `tmux respawn-pane -k` against the resolved pane ID with the pane's existing working directory;
-6. starts `bunx @openai/codex --dangerously-bypass-approvals-and-sandbox` with explicit model, effort, and the composed initial prompt;
+6. starts `bunx @openai/codex@latest --dangerously-bypass-approvals-and-sandbox` with explicit model, effort, and the composed initial prompt;
 7. verifies the same pane/window identity and waits for `omo_codex_status.py` to report `running` or `ready`; and
 8. refreshes watchers with explicit `OMO_WORK_LOGS_ROOT`, `OMO_MANAGER_TMUX_TARGET`, and `OMO_MANAGER_STATE_DIR` values.
 

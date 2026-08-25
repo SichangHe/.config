@@ -17,6 +17,7 @@ FILE_SEARCH_RECOVERY_INTERVAL_S = 0.05
 COMPACTION_WAIT_LINES = 2000
 CODEX_RE = re.compile(r"  gpt-")
 CODEX_FOOTER_RE = re.compile(r"^  gpt-")
+SUPPORTED_CODEX_PACKAGES = {"@openai/codex", "@openai/codex@latest"}
 ERROR_RE = re.compile(r"\b(failed|panic|traceback|exception)\b|\berror\b(?!\s*=\s*\d)", re.IGNORECASE)
 SELECTED_MODEL_CAPACITY_RE = re.compile(
     r"^\s*(?:(?:⚠\ufe0f?\s*)?Selected model is at capacity\. Please try a different model\.|■\s*\{\"detail\":\"The '[A-Za-z0-9][A-Za-z0-9._-]*' model is not supported when using Codex with a ChatGPT account\.\"\})\s*$"
@@ -227,7 +228,7 @@ def pane_has_exact_codex_process(target: str, pane_id: str) -> bool:
     current_command, start_tokens = process
     if current_command == "codex":
         return bool(start_tokens and os.path.basename(start_tokens[0]) == "codex")
-    return current_command in {"bunx", "npx"} and len(start_tokens) >= 2 and os.path.basename(start_tokens[0]) == current_command and start_tokens[1] == "@openai/codex"
+    return current_command in {"bunx", "npx"} and len(start_tokens) >= 2 and os.path.basename(start_tokens[0]) == current_command and start_tokens[1] in SUPPORTED_CODEX_PACKAGES
 
 
 def pane_has_exact_cursor_process(target: str, pane_id: str) -> bool:

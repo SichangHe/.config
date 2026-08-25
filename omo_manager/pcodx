@@ -72,7 +72,7 @@ PCODX_DEVELOPER_INSTRUCTIONS_TOML=$(PCODX_DEVELOPER_INSTRUCTIONS="$PCODX_DEVELOP
 PCODX_LEDGER_PATH_TOML=$(PCODX_LEDGER_PATH="$PCODX_LEDGER_PATH" python3 -c 'import json, os; print(json.dumps(os.environ["PCODX_LEDGER_PATH"]))')
 PCODX_SESSION_ID_TOML=$(PCODX_SESSION_ID="$PCODX_SESSION_ID" python3 -c 'import json, os; print(json.dumps(os.environ["PCODX_SESSION_ID"]))')
 
-exec bunx @openai/codex \
+exec bunx @openai/codex@latest \
   --dangerously-bypass-approvals-and-sandbox \
   --config 'check_for_update_on_startup=false' \
   --config "developer_instructions=$PCODX_DEVELOPER_INSTRUCTIONS_TOML" \

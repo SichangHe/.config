@@ -32,7 +32,7 @@ from pathlib import Path
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from omo_manager.omo_codex_start import EFFORTS, MODEL_RE, SUPPORTED_CODEX_PROCESS_COMMANDS, Pane, StartError, resolve_pane, respawn_codex, wait_started
+from omo_manager.omo_codex_start import CODEX_PACKAGE, EFFORTS, MODEL_RE, SUPPORTED_CODEX_PROCESS_COMMANDS, Pane, StartError, resolve_pane, respawn_codex, wait_started
 from omo_manager.omo_codex_status import CODEX_FOOTER_RE, current_block, current_input_text, is_stock_placeholder_input_text, report_from_lines, visible_error_lines
 from omo_manager.omo_codex_stop import extract_new_status_session_id, input_has_status_prompt
 from omo_manager.omo_manager_rotate import LaunchMetadata, read_processes, select_launch_metadata
@@ -503,7 +503,7 @@ def probe_model(model: str, effort: str, timeout_s: float) -> None:
         schema.chmod(0o600)
         command = [
             "bunx",
-            "@openai/codex",
+            CODEX_PACKAGE,
             "exec",
             "--ephemeral",
             "--skip-git-repo-check",
@@ -539,7 +539,7 @@ def resume_command(binding: Binding, model: str, session_id: str, marker: str) -
     pane = binding.pane
     launch = [
         "bunx",
-        "@openai/codex",
+        CODEX_PACKAGE,
         "--dangerously-bypass-approvals-and-sandbox",
         "--model",
         model,

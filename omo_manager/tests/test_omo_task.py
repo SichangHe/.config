@@ -921,21 +921,21 @@ class OmoTaskTests(unittest.TestCase):
             self.assertIn("exit_status: FileNotFoundError: [Errno 2] tmux unavailable", text)
 
     def test_codex_cmd_resumes_quoted_session(self) -> None:
-        self.assertTrue(codex_cmd("abc", tool="codex").startswith("bunx @openai/codex --dangerously-bypass-approvals-and-sandbox resume abc "))
-        self.assertTrue(codex_cmd("abc def", tool="codex").startswith("bunx @openai/codex --dangerously-bypass-approvals-and-sandbox resume 'abc def' "))
+        self.assertTrue(codex_cmd("abc", tool="codex").startswith("bunx @openai/codex@latest --dangerously-bypass-approvals-and-sandbox resume abc "))
+        self.assertTrue(codex_cmd("abc def", tool="codex").startswith("bunx @openai/codex@latest --dangerously-bypass-approvals-and-sandbox resume 'abc def' "))
         self.assertTrue(codex_cmd("abc", tool="pcodx").startswith(f"{PCODX_WRAPPER} resume abc "))
         self.assertIn(str(DEFAULT_WORKER_INSTRUCTIONS), codex_cmd("abc", tool="pcodx"))
 
     def test_codex_cmd_can_resume_without_submitting_prompt(self) -> None:
         self.assertEqual(
-            "bunx @openai/codex --dangerously-bypass-approvals-and-sandbox resume abc",
+            "bunx @openai/codex@latest --dangerously-bypass-approvals-and-sandbox resume abc",
             codex_cmd("abc", include_prompt=False, tool="codex"),
         )
 
     def test_codex_cmd_resume_binds_requested_workdir_for_codex_only(self) -> None:
         workdir = Path("/tmp/current work")
         self.assertEqual(
-            "bunx @openai/codex --dangerously-bypass-approvals-and-sandbox --cd '/tmp/current work' resume abc",
+            "bunx @openai/codex@latest --dangerously-bypass-approvals-and-sandbox --cd '/tmp/current work' resume abc",
             codex_cmd("abc", include_prompt=False, workdir=workdir, tool="codex"),
         )
         self.assertNotIn("--cd", codex_cmd("abc", tool="pcodx", include_prompt=False, workdir=workdir))
@@ -981,7 +981,7 @@ class OmoTaskTests(unittest.TestCase):
     def test_codex_cmd_uses_prompt_argument_from_file(self) -> None:
         expected_paths = f"{DEFAULT_WORKER_INSTRUCTIONS} /tmp/prompt.md"
         self.assertEqual(
-            f'bunx @openai/codex --dangerously-bypass-approvals-and-sandbox "$(cat -- {expected_paths})"',
+            f'bunx @openai/codex@latest --dangerously-bypass-approvals-and-sandbox "$(cat -- {expected_paths})"',
             codex_cmd(prompt_file=Path("/tmp/prompt.md"), tool="codex"),
         )
 
@@ -991,7 +991,7 @@ class OmoTaskTests(unittest.TestCase):
     def test_codex_cmd_adds_vl_worker_defaults_only_for_vl_agents(self) -> None:
         self.assertNotIn(str(VL_WORKER_INSTRUCTIONS), codex_cmd(prompt_file=Path("/tmp/prompt.md")))
         self.assertEqual(
-            f'bunx @openai/codex --dangerously-bypass-approvals-and-sandbox "$(cat -- {DEFAULT_WORKER_INSTRUCTIONS} {VL_WORKER_INSTRUCTIONS} /tmp/prompt.md)"',
+            f'bunx @openai/codex@latest --dangerously-bypass-approvals-and-sandbox "$(cat -- {DEFAULT_WORKER_INSTRUCTIONS} {VL_WORKER_INSTRUCTIONS} /tmp/prompt.md)"',
             codex_cmd(prompt_file=Path("/tmp/prompt.md"), vl_agent=True, tool="codex"),
         )
 
@@ -1011,14 +1011,14 @@ class OmoTaskTests(unittest.TestCase):
     def test_codex_cmd_adds_reasoning_effort_and_extra_flags(self) -> None:
         self.assertTrue(
             codex_cmd(reasoning_effort="xhigh", codex_flags=("--profile", "deep-review"), tool="codex").startswith(
-                "bunx @openai/codex --dangerously-bypass-approvals-and-sandbox --config 'model_reasoning_effort=\"xhigh\"' --profile deep-review",
+                "bunx @openai/codex@latest --dangerously-bypass-approvals-and-sandbox --config 'model_reasoning_effort=\"xhigh\"' --profile deep-review",
             )
         )
 
     def test_codex_cmd_orders_and_quotes_explicit_model_and_effort(self) -> None:
         self.assertTrue(
             codex_cmd(model="model name", reasoning_effort="xhigh", codex_flags=("--profile", "deep-review"), tool="codex").startswith(
-                "bunx @openai/codex --dangerously-bypass-approvals-and-sandbox --model 'model name' --config 'model_reasoning_effort=\"xhigh\"' --profile deep-review",
+                "bunx @openai/codex@latest --dangerously-bypass-approvals-and-sandbox --model 'model name' --config 'model_reasoning_effort=\"xhigh\"' --profile deep-review",
             )
         )
         self.assertTrue(
@@ -1094,7 +1094,7 @@ class OmoTaskTests(unittest.TestCase):
     def test_codex_cmd_resume_carries_explicit_model_and_effort(self) -> None:
         self.assertTrue(
             codex_cmd("abc def", reasoning_effort="max", model="gpt-5.6-terra", tool="codex").startswith(
-                "bunx @openai/codex --dangerously-bypass-approvals-and-sandbox --model gpt-5.6-terra --config 'model_reasoning_effort=\"max\"' resume 'abc def'",
+                "bunx @openai/codex@latest --dangerously-bypass-approvals-and-sandbox --model gpt-5.6-terra --config 'model_reasoning_effort=\"max\"' resume 'abc def'",
             )
         )
         self.assertTrue(
@@ -2636,6 +2636,7 @@ class OmoTaskTests(unittest.TestCase):
     def test_has_live_codex_launch_requires_exact_package_argv(self) -> None:
         pane = ProcessInfo(100, 1, "S", ("zsh",))
         for argv, expected in (
+            (("/usr/bin/bunx", "@openai/codex@latest", "--model", "gpt-5.6-sol"), True),
             (("/usr/bin/bunx", "@openai/codex", "--model", "gpt-5.6-sol"), True),
             (("/usr/bin/bunx", "unrelated-package"), False),
         ):

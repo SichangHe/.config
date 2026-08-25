@@ -39,7 +39,7 @@ DEFAULT_WORKER_INSTRUCTIONS = HELPER_DIR / "WORKER_DEFAULTS.md"
 VL_WORKER_INSTRUCTIONS = HELPER_DIR / "VL_WORKER_DEFAULTS.md"
 PCODX_WRAPPER = HELPER_DIR / "pcodx"
 COMMAND_BY_TOOL = {
-    "codex": ("bunx", "@openai/codex", "--dangerously-bypass-approvals-and-sandbox"),
+    "codex": ("bunx", "@openai/codex@latest", "--dangerously-bypass-approvals-and-sandbox"),
     "pcodx": (str(PCODX_WRAPPER),),
     "cursor": ("agent", "--force", "--sandbox", "disabled", "--trust"),
 }

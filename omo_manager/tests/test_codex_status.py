@@ -116,15 +116,17 @@ class CodexStatusTests(unittest.TestCase):
             '› Explain this codebase',
             '  esc again to edit previous message',
         ]
-        process = subprocess.CompletedProcess(
-            ['tmux'], 0, '%7\tbunx\t"export OMO_AGENT_TMUX_TARGET=vlcliimprove:0.0 && exec bunx @openai/codex --model gpt-5.6-sol"\n', ''
-        )
-        with patch('omo_manager.omo_codex_status.exact_tail', return_value=(True, lines)), patch(
-            'omo_manager.omo_codex_status.exact_pane_id', return_value='%7'
-        ), patch('omo_manager.omo_codex_status.subprocess.run', return_value=process):
-            report = inspect(Args('vlcliimprove:0', 80))
-        self.assertEqual('running', report.status)
-        self.assertFalse(report.can_submit_input)
+        for package in ("@openai/codex@latest", "@openai/codex"):
+            with self.subTest(package=package):
+                process = subprocess.CompletedProcess(
+                    ['tmux'], 0, f'%7\tbunx\t"export OMO_AGENT_TMUX_TARGET=vlcliimprove:0.0 && exec bunx {package} --model gpt-5.6-sol"\n', ''
+                )
+                with patch('omo_manager.omo_codex_status.exact_tail', return_value=(True, lines)), patch(
+                    'omo_manager.omo_codex_status.exact_pane_id', return_value='%7'
+                ), patch('omo_manager.omo_codex_status.subprocess.run', return_value=process):
+                    report = inspect(Args('vlcliimprove:0', 80))
+                self.assertEqual('running', report.status)
+                self.assertFalse(report.can_submit_input)
 
     def test_inspect_keeps_active_cursor_agent_running_without_codex_footer(self) -> None:
         lines = ['Cursor Agent is working']

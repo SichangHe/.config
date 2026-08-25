@@ -80,6 +80,8 @@ RECOVERY_ISSUANCE_VERSION = "omo-codex-recovery-issuance-v1"
 DELIVERY_EVENT_DIRNAME = RECOVERY_EVENT_DIRNAME
 DELIVERY_EVENT_VERSION = "omo-pending-watch-delivery-event-v1"
 CODEX_LAUNCH_COMMAND = "bunx"
+CODEX_PACKAGE = "@openai/codex@latest"
+SUPPORTED_CODEX_PACKAGES = {"@openai/codex", CODEX_PACKAGE}
 SUPPORTED_CODEX_PROCESS_COMMANDS = {"bun", "codex"}
 ROTATION_AUDIT_MAX_BYTES = 64 * 1024
 RECONCILABLE_ROTATION_FAILURE_KIND = "post-respawn-new-session-id-capture-failed"
@@ -790,7 +792,7 @@ def launch_command(
     executable = CODEX_LAUNCH_COMMAND if tool == "codex" else PCODX_LAUNCH_COMMAND
     codex = [executable]
     if tool == "codex":
-        codex.append("@openai/codex")
+        codex.append(CODEX_PACKAGE)
     codex.extend(("--dangerously-bypass-approvals-and-sandbox", "--model", args.model, "--config", f'model_reasoning_effort="{args.reasoning_effort}"'))
     if tool == "codex":
         codex.extend(("--config", "check_for_update_on_startup=false"))
@@ -1993,7 +1995,7 @@ def require_resume_cwd_process(pane: Pane, session_id: str) -> Pane:
     if current.command != CODEX_LAUNCH_COMMAND:
         raise StartError(f"target {current.target} is running {current.command or 'unknown'}, not the Codex launcher.")
     argv = pane_process_argv(current)
-    if len(argv) < 2 or Path(argv[0]).name != CODEX_LAUNCH_COMMAND or argv[1] != "@openai/codex":
+    if len(argv) < 2 or Path(argv[0]).name != CODEX_LAUNCH_COMMAND or argv[1] not in SUPPORTED_CODEX_PACKAGES:
         raise StartError(f"target {current.target} process is not the supported Codex package invocation; no input was sent.")
     resumed_sessions = tuple(argv[index + 1] for index, arg in enumerate(argv[:-1]) if arg == "resume")
     if not resumed_sessions or resumed_sessions[-1] != session_id:

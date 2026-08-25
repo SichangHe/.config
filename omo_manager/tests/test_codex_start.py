@@ -361,6 +361,7 @@ class CodexStartTests(unittest.TestCase):
         root = Path("/tmp/work logs")
         pane = Pane("cfg:2.0", "%2", "@2", "zsh", root)
         command = launch_command(self.args(root), pane, None, "[marker]")
+        self.assertIn("bunx @openai/codex@latest", command)
         self.assertIn("OMO_AGENT_TMUX_TARGET=cfg:2.0", command)
         self.assertIn("--model gpt-5.6-terra", command)
         self.assertIn("model_reasoning_effort=", command)

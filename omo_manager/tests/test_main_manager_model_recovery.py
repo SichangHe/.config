@@ -27,6 +27,7 @@ from omo_manager.omo_main_manager_model_recovery import (
     probe_model,
     read_authority,
     recover,
+    resume_command,
     reserve_handoff,
     finish_handoff,
     require_fatal_state,
@@ -220,11 +221,16 @@ class MainManagerModelRecoveryTests(unittest.TestCase):
             probe_model("gpt-5.6-terra", "xhigh", 4.0)
 
         command = calls[0]
+        self.assertEqual(["bunx", "@openai/codex@latest"], command[:2])
         self.assertIn("--ephemeral", command)
         self.assertIn("--ignore-user-config", command)
         self.assertIn("--ignore-rules", command)
         self.assertEqual("read-only", command[command.index("--sandbox") + 1])
         self.assertEqual("gpt-5.6-terra", command[command.index("--model") + 1])
+
+    def test_resume_command_uses_latest_package(self) -> None:
+        command = resume_command(self.binding(Path("/tmp/work logs")), "gpt-5.6-terra", self.SESSION_ID, "[marker]")
+        self.assertIn("exec bunx @openai/codex@latest", command)
 
     def test_reserve_and_finish_handoff_keep_one_private_record(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

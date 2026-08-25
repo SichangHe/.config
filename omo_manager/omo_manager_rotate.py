@@ -36,6 +36,8 @@ HANDOFF_TIMEOUT_S = 10.0
 HANDOFF_LOCK_TIMEOUT_S = 10.0
 RESERVATION_NAME = "manager-rotation.handoff.json"
 TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
+CODEX_PACKAGE = "@openai/codex@latest"
+SUPPORTED_CODEX_PACKAGES = {"@openai/codex", CODEX_PACKAGE}
 
 
 class RotationError(RuntimeError):
@@ -241,16 +243,15 @@ def process_is_under(pid: int, ancestor_pid: int, processes: dict[int, ProcessIn
 
 
 def is_codex_launch_argv(argv: tuple[str, ...]) -> bool:
-    if len(argv) >= 2 and Path(argv[0]).name == "bunx" and argv[1] == "@openai/codex":
+    if len(argv) >= 2 and Path(argv[0]).name == "bunx" and argv[1] in SUPPORTED_CODEX_PACKAGES:
         return True
-    return len(argv) >= 3 and Path(argv[0]).name == "bun" and argv[1] in {"x", "bunx"} and argv[2] == "@openai/codex"
+    return len(argv) >= 3 and Path(argv[0]).name == "bun" and argv[1] in {"x", "bunx"} and argv[2] in SUPPORTED_CODEX_PACKAGES
 
 
 def option_values(argv: tuple[str, ...]) -> tuple[list[str], list[str]]:
-    try:
-        package_index = argv.index("@openai/codex")
-    except ValueError as exc:
-        raise RotationError("Codex launch argv is missing @openai/codex") from exc
+    package_index = next((index for index, arg in enumerate(argv) if arg in SUPPORTED_CODEX_PACKAGES), None)
+    if package_index is None:
+        raise RotationError("Codex launch argv is missing a supported @openai/codex package")
     models: list[str] = []
     efforts: list[str] = []
     index = package_index + 1
@@ -544,7 +545,7 @@ def clear_reservation(state_dir: Path, token: str) -> None:
 def fresh_command(metadata: LaunchMetadata, prompt_path: Path, target: str, root: Path, state_dir: Path) -> str:
     command = [
         "bunx",
-        "@openai/codex",
+        CODEX_PACKAGE,
         "--dangerously-bypass-approvals-and-sandbox",
         "--model",
         metadata.model,
