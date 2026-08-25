@@ -509,6 +509,21 @@ def is_recorded_human_wait(state: TaskState) -> bool:
     return HUMAN_WAIT_RE.search(state.reason) is not None
 
 
+def task_requires_live_target(task: TaskLine, state: TaskState) -> bool:
+    """Return whether the task's `runat` represents required live ownership."""
+
+    return not (task.section == "todo:human pending" and not task.target and state.status == "blocked" and is_recorded_human_wait(state))
+
+
+def task_file_requires_live_target(root: Path, task_file: str) -> bool:
+    """Return whether any authoritative TODO link requires the task's live target."""
+
+    path = resolve_task_path(root, task_file)
+    tasks = [task for task in parse_task_lines(root / "TODO.md") if resolve_task_path(root, task.task_file) == path]
+    state = scan_task_state(path, root) if path is not None else None
+    return state is None or not tasks or any(task_requires_live_target(task, state) for task in tasks)
+
+
 def is_explicit_human_pending_wait(root: Path, task: TaskLine, state: TaskState) -> bool:
     """Return whether the task is deliberately closed pending a human decision."""
 
@@ -1046,6 +1061,8 @@ def add_blocked_idle_vl_row(root: Path, task: TaskLine, role: str, rows: list[St
         return
     if not task_owned_by_manager(root, task, manager_target, state_path):
         return
+    if not task_requires_live_target(task, state):
+        return
     target = state.target or task.target
     if not target:
         return
@@ -1223,6 +1240,8 @@ def registry_unmanaged_problem_rows(
         target = canonical_target(record.target)
         if not target or target in seen_targets:
             continue
+        if not task_file_requires_live_target(args.root, record.task_file):
+            continue
         if task_has_pending_marker(resolve_task_path(args.root, record.task_file)):
             continue
         task = registry_unmanaged_task(record, args.root)
@@ -1246,6 +1265,8 @@ def todo_unmanaged_task(root: Path, task: TaskLine) -> TaskLine | None:
     task_status = "unlinked"
     persistent_role = False
     if state is not None:
+        if not task_requires_live_target(task, state):
+            return None
         target = target or state.target
         port = port if port is not None else state.port
         task_status = state.status
@@ -1295,7 +1316,7 @@ def active_task_targets(root: Path, *, include_pending_delivery: bool = False) -
     for task in parse_task_lines(root / "TODO.md"):
         state_path = resolve_task_path(root, task.task_file)
         state = scan_task_state(state_path, root) if state_path is not None else None
-        if state is not None and state.status != "done" and state.target and (include_pending_delivery or not task_has_pending_marker(state_path)):
+        if state is not None and state.status != "done" and state.target and task_requires_live_target(task, state) and (include_pending_delivery or not task_has_pending_marker(state_path)):
             targets.add(state.target)
     return targets
 
@@ -1512,7 +1533,7 @@ def main(argv: list[str]) -> int:
                 all_active_targets,
             )
             rows.extend(unmanaged_rows)
-            inspected_targets.update(record.target for record in records if record.target)
+            inspected_targets.update(record.target for record in records if record.target and task_file_requires_live_target(args.root, record.task_file))
             inspected_targets.update(row.target for row in unmanaged_rows if row.target)
             inspected_targets.update(all_active_targets)
             todo_rows = todo_unmanaged_problem_rows(task_args, inspected_targets, auto_unstick, unstick_by_target, auto_unstick_disabled_reason)

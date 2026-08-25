@@ -3256,6 +3256,78 @@ resolved_task_items: []
             self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
             self.assertEqual(completed_text, completed.read_text(encoding="utf-8"))
 
+    def test_problems_only_ignores_historical_runat_for_targetless_human_pending_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("human pending:\nreview.md\n", encoding="utf-8")
+            _ = (root / "review.md").write_text(
+                task_frontmatter("blocked", runat="wl:31", blocked_on="waiting on the human's decision about the release"),
+                encoding="utf-8",
+            )
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("missing", [])) as inspect, redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--no-auto-unstick"]))
+
+            self.assertEqual("", out.getvalue())
+            inspect.assert_not_called()
+
+    def test_problems_only_reports_untracked_pane_reusing_historical_human_pending_runat(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("human pending:\nreview.md\n", encoding="utf-8")
+            _ = (root / "review.md").write_text(
+                task_frontmatter("blocked", runat="wl:31", blocked_on="waiting on the human's decision about the release"),
+                encoding="utf-8",
+            )
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.tmux_list_panes", return_value=["wl:31.0"]), patch(
+                "omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["unrelated agent"])
+            ), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--no-auto-unstick"]))
+
+            text = out.getvalue()
+            self.assertIn("untracked_agent: task=tmux:wl:31", text)
+            self.assertNotIn("task=review.md", text)
+
+    def test_problems_only_ignores_aliased_registry_row_for_reused_historical_runat(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[{"task_file":"review.md","tmux_target":"wl:31.0","started_at_s":1}]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("human pending:\n./review.md\n", encoding="utf-8")
+            _ = (root / "review.md").write_text(
+                task_frontmatter("blocked", runat="wl:31", blocked_on="waiting on the human's decision about the release"),
+                encoding="utf-8",
+            )
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.tmux_list_panes", return_value=["wl:31.0"]), patch(
+                "omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["unrelated agent"])
+            ), redirect_stdout(out):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--no-auto-unstick"]))
+
+            text = out.getvalue()
+            self.assertIn("untracked_agent: task=tmux:wl:31", text)
+            self.assertNotIn("role=registry_unmanaged", text)
+            self.assertNotIn("task=./review.md", text)
+
+    def test_problems_only_keeps_missing_live_targetless_todo_task_visible(self) -> None:
+        for status in ("running", "long_running"):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                registry = root / "sessions.json"
+                _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+                _ = (root / "TODO.md").write_text("current:\nworker.md\n", encoding="utf-8")
+                _ = (root / "worker.md").write_text(task_frontmatter(status, runat="wl:32"), encoding="utf-8")
+                out = StringIO()
+                with patch("omo_manager.omo_agent_status.inspect", return_value=Report("missing", [])), redirect_stdout(out):
+                    self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--no-auto-unstick"]))
+
+                self.assertIn("missing: task=worker.md evidence=target=wl:32", out.getvalue())
+
     def test_problems_only_pending_active_target_suppresses_completed_todo_attribution(self) -> None:
         for active_target in ("wl:3", "wl:3.0"):
             with self.subTest(active_target=active_target), tempfile.TemporaryDirectory() as tmp:
