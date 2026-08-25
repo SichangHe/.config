@@ -9,6 +9,7 @@ import unittest
 from contextlib import nullcontext
 from contextlib import redirect_stderr
 from contextlib import redirect_stdout
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import DEFAULT
 from unittest.mock import patch
@@ -19,6 +20,9 @@ from omo_manager.omo_task_status import ensure_repository_closure_custody
 from omo_manager.omo_task_status import close_retired_done
 from omo_manager.omo_task_status import normalize_retired_todo
 from omo_manager.omo_task_status import normalize_low_priority_current
+from omo_manager.omo_task_status import park_audit_record
+from omo_manager.omo_task_status import park_target_pane_id
+from omo_manager.omo_task_status import park_unlinked
 from omo_manager.omo_task_status import finish_shared_target_done
 from omo_manager.omo_task_status import StopArgs
 from omo_manager.omo_task_status import parse_args
@@ -27,6 +31,7 @@ from omo_manager.omo_task_status import reconcile_done_index
 from omo_manager.omo_task_status import reconcile_running_index
 from omo_manager.omo_task_status import reconcile_long_running_human_index
 from omo_manager.omo_task_status import replace_if_unchanged_locked
+from omo_manager.omo_task_status import replace_private_audit
 from omo_manager.omo_task_status import reserve_private_audit
 from omo_manager.omo_task_status import restore_terminal_target
 from omo_manager.omo_task_status import run
@@ -34,6 +39,8 @@ from omo_manager.omo_task_status import stop_done_agent
 from omo_manager.omo_task_status import tracked_dirty_state
 from omo_manager.omo_task_status import update_frontmatter_status
 from omo_manager.omo_task_status import Args as StatusArgs
+from omo_manager.omo_codex_stop import write_bound_close_proof
+from omo_manager.omo_codex_stop import close_note
 from omo_manager.omo_task_metadata import frontmatter_parts
 from omo_manager.omo_blocking import ENABLE_FILE, load_yaml_mapping, render_task, split_task_text, sync_generated_blocker
 from omo_manager.tests.test_task_metadata_v2 import v2_task
@@ -73,6 +80,750 @@ def task_frontmatter(
 
 
 class TaskStatusTests(unittest.TestCase):
+    AUTHORITY_TEXT = (
+        "Subject: stop paused roles\n\n"
+        "As I said previously, the human has halted all work regarding VL. Agents\n"
+        "can make decisions by themselves. But the human would not do anything about\n"
+        "them. If an agent is paused, take it down and consider it closed and\n"
+        "instead put the pending item under the to do file without a linked agent.\n"
+    )
+
+    @staticmethod
+    def complete_guarded_park_stop(args: StopArgs, session_id: str = "session") -> str:
+        write_bound_close_proof(
+            Path(args.bound_close_proof_path),
+            Path(args.bound_close_audit_path),
+            args.bound_close_proof_secret,
+            args.bound_close_proof_commitment,
+        )
+        return session_id
+
+    def write_park_case(self, root: Path, *, runat: str = "vl:2", todo_text: str | None = None) -> tuple[Path, str, Path, str, StatusArgs]:
+        authority_dir = root / "manager_mail"
+        authority_dir.mkdir(mode=0o700)
+        authority = authority_dir / "halt.txt"
+        authority.write_text(self.AUTHORITY_TEXT, encoding="utf-8")
+        authority.chmod(0o600)
+        excerpt = "".join(self.AUTHORITY_TEXT.splitlines(keepends=True)[2:6])
+        envelope_text = (
+            '<human_instruction authoritative="true" source="manager_mail/halt.txt:3-6">\n'
+            f"{excerpt}</human_instruction>\n"
+        )
+        envelope = root / "vl_pause.md"
+        envelope.write_text(envelope_text, encoding="utf-8")
+        text = task_frontmatter(
+            status="blocked",
+            blocked_on="reviewed lifecycle helper cannot create targetless TODO custody while preserving historical runat",
+            pending_items=("preserve first item", "preserve second item"),
+            runat=runat,
+        ) + "existing evidence\n"
+        task = root / "vl_task.md"
+        task.write_text(text, encoding="utf-8")
+        original_todo = todo_text or (
+            f"current:\nother.md vl:9\n\n"
+            "low priority:\nslow.md vl:7\n\n"
+            f"human pending:\nvl_task.md {runat}\nwaiting.md vl:6\n\n"
+            "previous:\nold.md vl:8\n"
+        )
+        todo = root / "TODO.md"
+        todo.write_text(original_todo, encoding="utf-8")
+        audit_dir = root / "audit"
+        audit_dir.mkdir(mode=0o700)
+        args = StatusArgs(
+            root,
+            Path("vl_task.md"),
+            "",
+            "",
+            park_unlinked=True,
+            expected_task_sha256=hashlib.sha256(text.encode()).hexdigest(),
+            expected_todo_sha256=hashlib.sha256(original_todo.encode()).hexdigest(),
+            expected_pane_id="%42",
+            authority_file=Path("manager_mail/halt.txt"),
+            authority_lines=(3, 6),
+            authority_sha256=hashlib.sha256(self.AUTHORITY_TEXT.encode()).hexdigest(),
+            authority_envelope=Path("vl_pause.md"),
+            authority_envelope_sha256=hashlib.sha256(envelope_text.encode()).hexdigest(),
+            audit_output=(audit_dir / "park.yaml").resolve(),
+        )
+        return task, text, todo, original_todo, args
+
+    @staticmethod
+    def parked_low_priority_todo(todo_text: str, *, runat: str = "vl:2") -> str:
+        source = f"human pending:\nvl_task.md {runat}\n"
+        destination = "low priority:\n"
+        if todo_text.count(source) != 1 or todo_text.count(destination) != 1:
+            raise AssertionError("park fixture must have one exact source row and low-priority section")
+        return todo_text.replace(source, "human pending:\n", 1).replace(
+            destination,
+            "low priority:\nvl_task.md\n",
+            1,
+        )
+
+    def test_park_unlinked_stops_only_pinned_nonhuman_owner_and_preserves_task_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, text, todo, original_todo, args = self.write_park_case(root)
+            with (
+                patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=("%42", "")),
+                patch(
+                    "omo_manager.omo_task_status.stop",
+                    side_effect=lambda stop_args: self.complete_guarded_park_stop(
+                        stop_args, "01a03702-dd9a-79c2-a1c4-3508f4918350"
+                    ),
+                ) as stop_owner,
+                redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(0, run(args))
+            stop_owner.assert_called_once()
+            stop_args = stop_owner.call_args.args[0]
+            self.assertEqual("vl:2", stop_args.target)
+            self.assertEqual("vl:2", stop_args.bound_symbolic_target)
+            self.assertEqual("%42", stop_args.bound_pane_id)
+            self.assertTrue(stop_args.no_feedback)
+            self.assertEqual("vl_task.md", stop_args.task_file)
+            self.assertEqual(text, task.read_text(encoding="utf-8"))
+            self.assertEqual(self.parked_low_priority_todo(original_todo), todo.read_text(encoding="utf-8"))
+
+    def test_park_unlinked_moves_proven_prior_stop_from_previous_without_pane_input(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            todo_text = (
+                "current:\nother.md vl:9\n\nlow priority:\nslow.md vl:7\n\n"
+                "human pending:\nwaiting.md vl:6\n\nprevious:\nvl_task.md vl:2\nold.md vl:8\n"
+            )
+            task, text, todo, _original_todo, args = self.write_park_case(root, todo_text=todo_text)
+            session_id = "01a03a33-5aa7-7752-ba19-95d74a2910e3"
+            text = text.rstrip("\n") + close_note("vl:2", session_id)
+            task.write_text(text, encoding="utf-8")
+            args = replace(
+                args,
+                session_id=session_id,
+                expected_pane_id="",
+                expected_task_sha256=hashlib.sha256(text.encode()).hexdigest(),
+            )
+            with (
+                patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=("", "")),
+                patch("omo_manager.omo_task_status.stop") as stop_owner,
+            ):
+                self.assertEqual("", park_unlinked(args, task, text, task.stat()))
+            stop_owner.assert_not_called()
+            expected = todo_text.replace("low priority:\n", "low priority:\nvl_task.md\n", 1).replace(
+                "previous:\nvl_task.md vl:2\n",
+                "previous:\n",
+                1,
+            )
+            self.assertEqual(text, task.read_text(encoding="utf-8"))
+            self.assertEqual(expected, todo.read_text(encoding="utf-8"))
+            self.assertIn("state: complete", args.audit_output.read_text(encoding="utf-8"))
+
+    def test_park_unlinked_prior_stop_requires_exact_note_and_absent_target(self) -> None:
+        for case, expected in (("note", "exact structured close note"), ("live", "historical target live")):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                todo_text = "current:\n\nlow priority:\n\nhuman pending:\n\nprevious:\nvl_task.md vl:2\n"
+                task, text, todo, _original_todo, args = self.write_park_case(root, todo_text=todo_text)
+                session_id = "01a03a33-5aa7-7752-ba19-95d74a2910e3"
+                if case == "live":
+                    text = text.rstrip("\n") + close_note("vl:2", session_id)
+                    task.write_text(text, encoding="utf-8")
+                args = replace(
+                    args,
+                    session_id=session_id,
+                    expected_pane_id="",
+                    expected_task_sha256=hashlib.sha256(text.encode()).hexdigest(),
+                )
+                with (
+                    patch("omo_manager.omo_task_status.park_target_pane_id", return_value="%42"),
+                    patch("omo_manager.omo_task_status.stop") as stop_owner,
+                    self.assertRaisesRegex(TaskFrontmatterError, expected),
+                ):
+                    park_unlinked(args, task, text, task.stat())
+                stop_owner.assert_not_called()
+                self.assertEqual(text, task.read_text(encoding="utf-8"))
+                self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+
+    def test_park_unlinked_prior_stop_recovers_after_completion_audit_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            todo_text = "current:\n\nlow priority:\n\nhuman pending:\n\nprevious:\nvl_task.md vl:2\n"
+            task, text, todo, _original_todo, args = self.write_park_case(root, todo_text=todo_text)
+            session_id = "01a03a33-5aa7-7752-ba19-95d74a2910e3"
+            text = text.rstrip("\n") + close_note("vl:2", session_id)
+            task.write_text(text, encoding="utf-8")
+            args = replace(
+                args,
+                session_id=session_id,
+                expected_pane_id="",
+                expected_task_sha256=hashlib.sha256(text.encode()).hexdigest(),
+            )
+            with (
+                patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=("", "")),
+                patch("omo_manager.omo_task_status.replace_private_audit", side_effect=OSError("audit completion failed")),
+                self.assertRaisesRegex(OSError, "audit completion failed"),
+            ):
+                park_unlinked(args, task, text, task.stat())
+            parked = todo_text.replace("low priority:\n", "low priority:\nvl_task.md\n", 1).replace(
+                "previous:\nvl_task.md vl:2\n",
+                "previous:\n",
+                1,
+            )
+            self.assertEqual(parked, todo.read_text(encoding="utf-8"))
+            self.assertIn("state: prior-stop-prepared", args.audit_output.read_text(encoding="utf-8"))
+            retry_args = replace(args, expected_todo_sha256=hashlib.sha256(parked.encode()).hexdigest())
+            with patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=("", "")):
+                self.assertEqual("", park_unlinked(retry_args, task, text, task.stat()))
+            self.assertIn("state: complete", args.audit_output.read_text(encoding="utf-8"))
+
+    def test_park_unlinked_rejects_stale_task_todo_or_pane_before_stop(self) -> None:
+        for case, expected in (("task", "task bytes"), ("todo", "TODO bytes"), ("pane", "expected-pane-id")):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                task, text, todo, todo_text, args = self.write_park_case(root)
+                if case == "task":
+                    args = replace(args, expected_task_sha256="0" * 64)
+                elif case == "todo":
+                    args = replace(args, expected_todo_sha256="0" * 64)
+                with (
+                    patch("omo_manager.omo_task_status.park_target_pane_id", return_value="%41" if case == "pane" else "%42"),
+                    patch("omo_manager.omo_task_status.stop") as stop_owner,
+                    self.assertRaisesRegex(TaskFrontmatterError, expected),
+                ):
+                    park_unlinked(args, task, text, task.stat())
+                stop_owner.assert_not_called()
+                self.assertEqual(text, task.read_text(encoding="utf-8"))
+                self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+
+    def test_park_unlinked_rejects_preexisting_close_proof_before_reservation_or_pane_access(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, text, todo, todo_text, args = self.write_park_case(root)
+            proof = args.audit_output.with_name(f".{args.audit_output.name}.owner-stopped")
+            proof.write_text("stale\n", encoding="utf-8")
+            proof.chmod(0o600)
+            with (
+                patch("omo_manager.omo_task_status.park_target_pane_id") as pane_id,
+                patch("omo_manager.omo_task_status.stop") as stop_owner,
+                self.assertRaisesRegex(TaskFrontmatterError, "pre-existing close-proof artifact"),
+            ):
+                park_unlinked(args, task, text, task.stat())
+            pane_id.assert_not_called()
+            stop_owner.assert_not_called()
+            self.assertFalse(args.audit_output.exists())
+            self.assertEqual(text, task.read_text(encoding="utf-8"))
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+
+    def test_park_unlinked_preserves_concurrent_task_or_todo_change_after_stop(self) -> None:
+        for case in ("task", "todo"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                task, text, todo, todo_text, args = self.write_park_case(root)
+                changed = text + "concurrent task evidence\n" if case == "task" else todo_text + "concurrent TODO evidence\n"
+
+                def stop_owner(_args: StopArgs) -> str:
+                    (task if case == "task" else todo).write_text(changed, encoding="utf-8")
+                    return self.complete_guarded_park_stop(_args)
+
+                with (
+                    patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=("%42", "")),
+                    patch("omo_manager.omo_task_status.stop", side_effect=stop_owner),
+                    self.assertRaisesRegex(TaskFrontmatterError, "task changed" if case == "task" else "TODO changed"),
+                ):
+                    park_unlinked(args, task, text, task.stat())
+                self.assertEqual(changed, (task if case == "task" else todo).read_text(encoding="utf-8"))
+                self.assertEqual(todo_text if case == "task" else text, (todo if case == "task" else task).read_text(encoding="utf-8"))
+
+    def test_park_unlinked_stop_failure_never_infers_success_from_symbolic_disappearance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, text, todo, todo_text, args = self.write_park_case(root)
+            symbolic_live = True
+
+            def exact_symbolic(_target: str) -> str:
+                return "%42" if symbolic_live else ""
+
+            def fail_after_rebind(_args: StopArgs) -> str:
+                nonlocal symbolic_live
+                symbolic_live = False
+                raise RuntimeError("stop rejected after pane moved to h-owned session")
+
+            with (
+                patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=exact_symbolic) as pane_id,
+                patch("omo_manager.omo_task_status.stop", side_effect=fail_after_rebind),
+                self.assertRaisesRegex(RuntimeError, "moved to h-owned"),
+            ):
+                park_unlinked(args, task, text, task.stat())
+            self.assertEqual(1, pane_id.call_count)
+            self.assertEqual(text, task.read_text(encoding="utf-8"))
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+            self.assertIn("state: prepared", args.audit_output.read_text(encoding="utf-8"))
+
+    def test_park_target_snapshot_never_addresses_the_symbolic_target(self) -> None:
+        result = subprocess.CompletedProcess(
+            ["tmux"],
+            0,
+            "vl\t2\t0\t0\t%41\nvl\t2\t1\t1\t%42\nhvl\t2\t1\t1\t%99\n",
+            "",
+        )
+        with patch("omo_manager.omo_task_status.tmux", return_value=result) as tmux_call:
+            self.assertEqual("%42", park_target_pane_id("vl:2"))
+            self.assertEqual("%41", park_target_pane_id("vl:2.0"))
+        for call in tmux_call.call_args_list:
+            self.assertEqual("list-panes", call.args[0][0])
+            self.assertNotIn("-t", call.args[0])
+
+    def test_park_target_snapshot_rejects_failed_malformed_or_ambiguous_queries(self) -> None:
+        cases = (
+            subprocess.CompletedProcess(["tmux"], 1, "", "server unavailable"),
+            subprocess.CompletedProcess(["tmux"], 0, "truncated snapshot\n", ""),
+            subprocess.CompletedProcess(
+                ["tmux"],
+                0,
+                "vl\t2\t0\t1\t%41\nvl\t2\t1\t1\t%42\n",
+                "",
+            ),
+        )
+        for result in cases:
+            with self.subTest(result=result), patch("omo_manager.omo_task_status.tmux", return_value=result):
+                self.assertIsNone(park_target_pane_id("vl:2"))
+
+    def test_park_unlinked_prior_stop_rejects_invalid_tmux_snapshot_without_mutation(self) -> None:
+        cases = (
+            subprocess.CompletedProcess(["tmux"], 1, "", "server unavailable"),
+            subprocess.CompletedProcess(["tmux"], 0, "truncated snapshot\n", ""),
+            subprocess.CompletedProcess(
+                ["tmux"],
+                0,
+                "vl\t2\t0\t1\t%41\nvl\t2\t1\t1\t%42\n",
+                "",
+            ),
+        )
+        for result in cases:
+            with self.subTest(result=result), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                todo_text = "current:\n\nlow priority:\n\nhuman pending:\n\nprevious:\nvl_task.md vl:2\n"
+                task, text, todo, _original_todo, args = self.write_park_case(root, todo_text=todo_text)
+                session_id = "01a03a33-5aa7-7752-ba19-95d74a2910e3"
+                text = text.rstrip("\n") + close_note("vl:2", session_id)
+                task.write_text(text, encoding="utf-8")
+                args = replace(
+                    args,
+                    session_id=session_id,
+                    expected_pane_id="",
+                    expected_task_sha256=hashlib.sha256(text.encode()).hexdigest(),
+                )
+                with (
+                    patch("omo_manager.omo_task_status.tmux", return_value=result),
+                    self.assertRaisesRegex(TaskFrontmatterError, "unambiguous tmux target snapshot"),
+                ):
+                    park_unlinked(args, task, text, task.stat())
+                self.assertEqual(text, task.read_text(encoding="utf-8"))
+                self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+                self.assertFalse(args.audit_output.exists())
+
+    def test_park_unlinked_owner_stopped_recovery_rejects_invalid_tmux_snapshot(self) -> None:
+        cases = (
+            subprocess.CompletedProcess(["tmux"], 1, "", "server unavailable"),
+            subprocess.CompletedProcess(["tmux"], 0, "truncated snapshot\n", ""),
+            subprocess.CompletedProcess(
+                ["tmux"],
+                0,
+                "vl\t2\t0\t1\t%41\nvl\t2\t1\t1\t%42\n",
+                "",
+            ),
+        )
+        for result in cases:
+            with self.subTest(result=result), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                task, text, todo, todo_text, args = self.write_park_case(root)
+                with (
+                    patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=("%42", "")),
+                    patch("omo_manager.omo_task_status.stop", side_effect=self.complete_guarded_park_stop),
+                    patch("omo_manager.omo_task_status.replace_if_unchanged_locked", side_effect=OSError("TODO write failed")),
+                    self.assertRaisesRegex(OSError, "TODO write failed"),
+                ):
+                    park_unlinked(args, task, text, task.stat())
+                audit_before = args.audit_output.read_bytes()
+                with (
+                    patch("omo_manager.omo_task_status.tmux", return_value=result),
+                    self.assertRaisesRegex(TaskFrontmatterError, "unambiguous tmux target snapshot"),
+                ):
+                    park_unlinked(args, task, text, task.stat())
+                self.assertEqual(text, task.read_text(encoding="utf-8"))
+                self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+                self.assertEqual(audit_before, args.audit_output.read_bytes())
+
+    def test_park_unlinked_recovers_after_todo_write_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, text, todo, todo_text, args = self.write_park_case(root)
+            with (
+                patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=("%42", "")),
+                patch("omo_manager.omo_task_status.stop", side_effect=self.complete_guarded_park_stop) as stop_owner,
+                patch("omo_manager.omo_task_status.replace_if_unchanged_locked", side_effect=OSError("write failed")),
+                self.assertRaisesRegex(OSError, "write failed"),
+            ):
+                park_unlinked(args, task, text, task.stat())
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+            self.assertIn("state: owner-stopped", args.audit_output.read_text(encoding="utf-8"))
+            with (
+                patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=("", "")),
+                patch("omo_manager.omo_task_status.stop") as retry_stop,
+            ):
+                self.assertEqual("", park_unlinked(args, task, text, task.stat()))
+            stop_owner.assert_called_once()
+            retry_stop.assert_not_called()
+            self.assertEqual(self.parked_low_priority_todo(todo_text), todo.read_text(encoding="utf-8"))
+            self.assertIn("state: complete", args.audit_output.read_text(encoding="utf-8"))
+
+    def test_park_unlinked_recovers_when_first_audit_transition_fails_after_stop(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, text, todo, todo_text, args = self.write_park_case(root)
+            with (
+                patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=("%42", "")),
+                patch("omo_manager.omo_task_status.stop", side_effect=self.complete_guarded_park_stop),
+                patch("omo_manager.omo_task_status.replace_private_audit", side_effect=OSError("audit transition failed")),
+                self.assertRaisesRegex(OSError, "audit transition failed"),
+            ):
+                park_unlinked(args, task, text, task.stat())
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+            self.assertIn("state: prepared", args.audit_output.read_text(encoding="utf-8"))
+            proof = args.audit_output.with_name(f".{args.audit_output.name}.owner-stopped")
+            self.assertTrue(proof.is_file())
+            with patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""):
+                self.assertEqual("", park_unlinked(args, task, text, task.stat()))
+            self.assertEqual(self.parked_low_priority_todo(todo_text), todo.read_text(encoding="utf-8"))
+            self.assertIn("state: complete", args.audit_output.read_text(encoding="utf-8"))
+            self.assertFalse(proof.exists())
+
+    def test_park_unlinked_recovers_and_preserves_concurrent_todo_change_after_stop(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, text, todo, todo_text, args = self.write_park_case(root)
+            changed = todo_text + "concurrent TODO evidence\n"
+
+            def stop_owner(_args: StopArgs) -> str:
+                todo.write_text(changed, encoding="utf-8")
+                return self.complete_guarded_park_stop(_args)
+
+            with (
+                patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=("%42", "")),
+                patch("omo_manager.omo_task_status.stop", side_effect=stop_owner),
+                self.assertRaisesRegex(TaskFrontmatterError, "TODO changed"),
+            ):
+                park_unlinked(args, task, text, task.stat())
+            retry_args = replace(args, expected_todo_sha256=hashlib.sha256(changed.encode()).hexdigest())
+            with patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=("", "")):
+                self.assertEqual("", park_unlinked(retry_args, task, text, task.stat()))
+            self.assertEqual(self.parked_low_priority_todo(changed), todo.read_text(encoding="utf-8"))
+
+    def test_park_unlinked_recovers_when_completion_audit_write_fails_after_todo_update(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, text, todo, todo_text, args = self.write_park_case(root)
+            calls = 0
+
+            def fail_completion(audit_path: Path, expected: str, updated: str) -> None:
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise OSError("completion audit failed")
+                replace_private_audit(audit_path, expected, updated)
+
+            with (
+                patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=("%42", "")),
+                patch("omo_manager.omo_task_status.stop", side_effect=self.complete_guarded_park_stop),
+                patch("omo_manager.omo_task_status.replace_private_audit", side_effect=fail_completion),
+                self.assertRaisesRegex(OSError, "completion audit failed"),
+            ):
+                park_unlinked(args, task, text, task.stat())
+            parked_todo = self.parked_low_priority_todo(todo_text)
+            self.assertEqual(parked_todo, todo.read_text(encoding="utf-8"))
+            self.assertIn("state: owner-stopped", args.audit_output.read_text(encoding="utf-8"))
+            retry_args = replace(args, expected_todo_sha256=hashlib.sha256(parked_todo.encode()).hexdigest())
+            with patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=("", "")):
+                self.assertEqual("", park_unlinked(retry_args, task, text, task.stat()))
+            self.assertIn("state: complete", args.audit_output.read_text(encoding="utf-8"))
+
+    def test_park_unlinked_rejects_manager_or_unbound_authority_envelope(self) -> None:
+        for case, expected in (("manager", "non-manager"), ("envelope", "envelope")):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                task, text, todo, todo_text, args = self.write_park_case(root)
+                if case == "manager":
+                    text = text.replace("is_manager: false", "is_manager: true")
+                    task.write_text(text, encoding="utf-8")
+                    (root / "child.md").write_text(
+                        task_frontmatter(status="running", runat="vl-child:3", managerat="vl:2")
+                        + "child evidence\n",
+                        encoding="utf-8",
+                    )
+                    args = replace(args, expected_task_sha256=hashlib.sha256(text.encode()).hexdigest())
+                else:
+                    envelope = root / "vl_pause.md"
+                    changed_envelope = envelope.read_text(encoding="utf-8").replace('authoritative="true"', 'authoritative="false"')
+                    envelope.write_text(changed_envelope, encoding="utf-8")
+                    args = replace(args, authority_envelope_sha256=hashlib.sha256(changed_envelope.encode()).hexdigest())
+                with (
+                    patch("omo_manager.omo_task_status.park_target_pane_id") as pane_id,
+                    patch("omo_manager.omo_task_status.stop") as stop_owner,
+                    self.assertRaisesRegex(TaskFrontmatterError, expected),
+                ):
+                    park_unlinked(args, task, text, task.stat())
+                pane_id.assert_not_called()
+                stop_owner.assert_not_called()
+
+    def test_park_unlinked_authority_envelope_accepts_intake_newline_normalization(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, text, todo, todo_text, args = self.write_park_case(root)
+            authority = root / "manager_mail/halt.txt"
+            crlf_authority = authority.read_bytes().replace(b"\n", b"\r\n")
+            authority.write_bytes(crlf_authority)
+            args = replace(args, authority_sha256=hashlib.sha256(crlf_authority).hexdigest())
+            with (
+                patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=("%42", "")),
+                patch("omo_manager.omo_task_status.stop", side_effect=self.complete_guarded_park_stop),
+                redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(0, run(args))
+            self.assertEqual(text.encode(), task.read_bytes())
+            self.assertEqual(self.parked_low_priority_todo(todo_text), todo.read_text(encoding="utf-8"))
+
+    def test_park_unlinked_rejects_owner_stopped_audit_without_matching_close_proof(self) -> None:
+        for case in ("missing", "mismatched", "stale symlink"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                task, text, todo, todo_text, args = self.write_park_case(root)
+                secret = "a" * 64
+                commitment = hashlib.sha256(secret.encode()).hexdigest()
+                args.audit_output.write_text(
+                    park_audit_record(
+                        args,
+                        task,
+                        "vl:2",
+                        "manager_mail/halt.txt:3-6",
+                        "vl_pause.md",
+                        args.expected_todo_sha256,
+                        commitment,
+                        "owner-stopped",
+                    ),
+                    encoding="utf-8",
+                )
+                args.audit_output.chmod(0o600)
+                proof = args.audit_output.with_name(f".{args.audit_output.name}.owner-stopped")
+                if case == "mismatched":
+                    proof.write_text("b" * 64 + "\n", encoding="utf-8")
+                    proof.chmod(0o600)
+                elif case == "stale symlink":
+                    stale = root / "stale-proof"
+                    stale.write_text(secret + "\n", encoding="utf-8")
+                    stale.chmod(0o600)
+                    proof.symlink_to(stale)
+                with (
+                    patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""),
+                    patch("omo_manager.omo_task_status.stop") as stop_owner,
+                    self.assertRaisesRegex(TaskFrontmatterError, "guarded-close proof"),
+                ):
+                    park_unlinked(args, task, text, task.stat())
+                stop_owner.assert_not_called()
+                self.assertEqual(text, task.read_text(encoding="utf-8"))
+                self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+
+    def test_park_unlinked_recovers_owner_stopped_audit_with_matching_close_proof(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, text, todo, todo_text, args = self.write_park_case(root)
+            secret = "a" * 64
+            commitment = hashlib.sha256(secret.encode()).hexdigest()
+            args.audit_output.write_text(
+                park_audit_record(
+                    args,
+                    task,
+                    "vl:2",
+                    "manager_mail/halt.txt:3-6",
+                    "vl_pause.md",
+                    args.expected_todo_sha256,
+                    commitment,
+                    "owner-stopped",
+                ),
+                encoding="utf-8",
+            )
+            args.audit_output.chmod(0o600)
+            proof = args.audit_output.with_name(f".{args.audit_output.name}.owner-stopped")
+            proof.write_text(secret + "\n", encoding="utf-8")
+            proof.chmod(0o600)
+            with (
+                patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""),
+                patch("omo_manager.omo_task_status.stop") as stop_owner,
+            ):
+                self.assertEqual("", park_unlinked(args, task, text, task.stat()))
+            stop_owner.assert_not_called()
+            self.assertEqual(text, task.read_text(encoding="utf-8"))
+            self.assertEqual(self.parked_low_priority_todo(todo_text), todo.read_text(encoding="utf-8"))
+            self.assertIn("state: complete", args.audit_output.read_text(encoding="utf-8"))
+            self.assertFalse(proof.exists())
+
+    def test_park_unlinked_rejects_unsafe_or_wrong_authority_and_conflicting_owner(self) -> None:
+        for case, expected in (("digest", "authority source"), ("words", "authority envelope"), ("symlink", "direct file"), ("owner", "sole authoritative owner")):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                task, text, todo, todo_text, args = self.write_park_case(root)
+                authority = root / "manager_mail" / "halt.txt"
+                if case == "digest":
+                    args = replace(args, authority_sha256="0" * 64)
+                elif case == "words":
+                    replacement = "Subject: discussion\n\nDo not change any pane.\n"
+                    authority.write_text(replacement, encoding="utf-8")
+                    args = replace(args, authority_lines=(3, 3), authority_sha256=hashlib.sha256(replacement.encode()).hexdigest())
+                elif case == "symlink":
+                    replacement = root / "manager_mail" / "real.txt"
+                    authority.rename(replacement)
+                    authority.symlink_to(replacement.name)
+                else:
+                    (root / "owner.md").write_text(task_frontmatter(status="running", runat="vl:2") + "owner\n", encoding="utf-8")
+                with patch("omo_manager.omo_task_status.stop") as stop_owner, self.assertRaisesRegex(TaskFrontmatterError, expected):
+                    park_unlinked(args, task, text, task.stat())
+                stop_owner.assert_not_called()
+                self.assertEqual(text, task.read_text(encoding="utf-8"))
+                self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+
+    def test_park_unlinked_rejects_human_target_or_noncanonical_custody_without_pane_input(self) -> None:
+        cases = (
+            (
+                "human",
+                "current:\n\nlow priority:\n\nhuman pending:\nvl_task.md hvl:2\n\nprevious:\n",
+                "non-human",
+            ),
+            (
+                "current",
+                "current:\nvl_task.md vl:2\n\nlow priority:\n\nhuman pending:\n\nprevious:\n",
+                "human pending",
+            ),
+            (
+                "annotation",
+                "current:\n\nlow priority:\n\nhuman pending:\nvl_task.md vl:2 keep\n\nprevious:\n",
+                "canonical TODO row in human pending",
+            ),
+            (
+                "duplicate",
+                "current:\n\nlow priority:\n\nhuman pending:\nvl_task.md vl:2\nvl_task.md vl:2\n\nprevious:\n",
+                "exactly one task row",
+            ),
+            (
+                "source header whitespace",
+                "current:\n\nlow priority:\n\n human pending: \nvl_task.md vl:2\n\nprevious:\n",
+                "canonical TODO section headers",
+            ),
+        )
+        for case, todo_text, expected in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                runat = "hvl:2" if case == "human" else "vl:2"
+                task, text, todo, original_todo, args = self.write_park_case(root, runat=runat, todo_text=todo_text)
+                with patch("omo_manager.omo_task_status.stop") as stop_owner, self.assertRaisesRegex(TaskFrontmatterError, expected):
+                    park_unlinked(args, task, text, task.stat())
+                stop_owner.assert_not_called()
+                self.assertEqual(original_todo, todo.read_text(encoding="utf-8"))
+
+    def test_park_unlinked_rejects_ambiguous_low_priority_destination_without_pane_input(self) -> None:
+        cases = (
+            (
+                "missing destination",
+                "current:\n\nhuman pending:\nvl_task.md vl:2\n\nprevious:\n",
+                "low.priority",
+            ),
+            (
+                "duplicate destination",
+                "current:\n\nlow priority:\n\nlow priority:\n\nhuman pending:\nvl_task.md vl:2\n\nprevious:\n",
+                "low.priority",
+            ),
+            (
+                "already duplicated at destination",
+                "current:\n\nlow priority:\nvl_task.md\n\nhuman pending:\nvl_task.md vl:2\n\nprevious:\n",
+                "exactly one task row",
+            ),
+            (
+                "targetless source",
+                "current:\n\nlow priority:\n\nhuman pending:\nvl_task.md\n\nprevious:\n",
+                "canonical TODO row in human pending",
+            ),
+            (
+                "destination header whitespace",
+                "current:\n\n low priority:\n\nhuman pending:\nvl_task.md vl:2\n\nprevious:\n",
+                "canonical TODO section headers",
+            ),
+        )
+        for case, todo_text, expected in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                task, text, todo, original_todo, args = self.write_park_case(root, todo_text=todo_text)
+                with (
+                    patch("omo_manager.omo_task_status.exact_pane_id") as pane_id,
+                    patch("omo_manager.omo_task_status.stop") as stop_owner,
+                    self.assertRaisesRegex(TaskFrontmatterError, expected),
+                ):
+                    park_unlinked(args, task, text, task.stat())
+                pane_id.assert_not_called()
+                stop_owner.assert_not_called()
+                self.assertEqual(original_todo, todo.read_text(encoding="utf-8"))
+
+    def test_park_unlinked_parser_requires_complete_authority_and_stale_state_assertions(self) -> None:
+        complete = [
+            "--root",
+            "/tmp/work",
+            "--park-unlinked",
+            "--expected-task-sha256",
+            "a" * 64,
+            "--expected-todo-sha256",
+            "b" * 64,
+            "--expected-pane-id",
+            "%42",
+            "--authority-file",
+            "manager_mail/halt.txt",
+            "--authority-lines",
+            "3-6",
+            "--authority-sha256",
+            "c" * 64,
+            "--authority-envelope",
+            "vl_pause.md",
+            "--authority-envelope-sha256",
+            "d" * 64,
+            "--audit-output",
+            "/tmp/park-audit.yaml",
+            "task.md",
+        ]
+        args = parse_args(complete)
+        self.assertTrue(args.park_unlinked)
+        self.assertEqual((3, 6), args.authority_lines)
+        prior = complete.copy()
+        pane_option = prior.index("--expected-pane-id")
+        del prior[pane_option : pane_option + 2]
+        prior[pane_option:pane_option] = ["--session-id", "01a03a33-5aa7-7752-ba19-95d74a2910e3"]
+        prior_args = parse_args(prior)
+        self.assertEqual("", prior_args.expected_pane_id)
+        self.assertEqual("01a03a33-5aa7-7752-ba19-95d74a2910e3", prior_args.session_id)
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            parse_args(complete[:-2] + ["task.md"])
+        foreign_inputs = (
+            ("--stale-sha256", "e" * 64),
+            ("--replacement-sha256", "e" * 64),
+            ("--replacement-status", "running"),
+            ("--protected-target", "vl:9"),
+            ("--stopped-evidence", "evidence"),
+            ("--replacement-pane-evidence", "evidence"),
+            ("--pane-id", "%9"),
+            ("--terminal-evidence", "evidence"),
+            ("--task-sha256", "e" * 64),
+            ("--historical-commit", "e" * 40),
+            ("--source-sha256", "e" * 64),
+        )
+        for option, value in foreign_inputs:
+            with self.subTest(option=option), self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+                parse_args([*complete[:-1], option, value, "task.md"])
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            parse_args(["--expected-pane-id", "%42", "task.md", "blocked", "--blocked-on", "human"])
+
     def test_normal_done_parser_preserves_hash_bound_human_close_authority(self) -> None:
         args = parse_args(
             [

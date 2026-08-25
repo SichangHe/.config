@@ -1,3 +1,4 @@
+import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -7,6 +8,7 @@ from unittest.mock import patch
 
 from omo_manager.omo_agent_status import Args, TaskFrontmatterError, active_task_targets, classify_task, format_problem_summary, format_summary, is_durable_outstanding_human_question, load_local_env, load_task_state, main, parse_task_lines, parse_task_metadata, persistent_blocked_task_lines, registry_prune, report_output_evidence, scan_task_state, session_records
 from omo_manager.omo_agent_status import BLOCKED_DELIVERY_ITEMS
+from omo_manager.omo_agent_status import target_resolution_state
 from omo_manager.omo_agent_status import SessionRecord, StatusRow, TaskLine
 from omo_manager.omo_codex_status import Args as CodexStatusArgs, PlanPromptRecovery, Report, report_from_lines
 
@@ -3426,6 +3428,178 @@ resolved_task_items: []
 
             self.assertEqual("", out.getvalue())
             inspect.assert_not_called()
+
+    def test_problems_only_ignores_targetless_low_priority_custody(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text(
+                '{"sessions":[{"task_file":"parked.md","tmux_target":"vl:31.0","started_at_s":1}]}',
+                encoding="utf-8",
+            )
+            _ = (root / "TODO.md").write_text("low priority:\nparked.md\n", encoding="utf-8")
+            _ = (root / "parked.md").write_text(
+                task_frontmatter(
+                    "blocked",
+                    runat="vl:31",
+                    blocked_on="paused by an authoritative lifecycle decision",
+                    pending_items=("resume this work only when authorized",),
+                ),
+                encoding="utf-8",
+            )
+            out = StringIO()
+            with (
+                patch("omo_manager.omo_agent_status.target_resolution_state", return_value=False),
+                patch("omo_manager.omo_agent_status.target_resolves_exactly", return_value=False),
+                patch("omo_manager.omo_agent_status.inspect") as inspect,
+                patch("omo_manager.omo_agent_status.tmux_list_panes", return_value=[]),
+                redirect_stdout(out),
+            ):
+                self.assertEqual(
+                    0,
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "--registry",
+                            str(registry),
+                            "--problems-only",
+                            "--no-auto-unstick",
+                        ]
+                    ),
+                )
+            self.assertEqual("", out.getvalue())
+            inspect.assert_not_called()
+
+    def test_targetless_low_priority_custody_requires_all_boundaries(self) -> None:
+        for case in (
+            "linked",
+            "live",
+            "empty queue",
+            "manager",
+            "human",
+            "duplicate",
+            "suffix",
+            "annotation",
+            "extra task ref",
+            "unknown heading",
+            "duplicate header",
+            "noncanonical path",
+            "header whitespace",
+            "row whitespace",
+        ):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                registry = root / "sessions.json"
+                _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+                runat = "hvl:31" if case == "human" else "vl:31"
+                row = {
+                    "linked": "parked.md vl:31",
+                    "suffix": "parked.md note",
+                    "annotation": "parked.md (paused?)",
+                    "extra task ref": "parked.md other.md",
+                    "noncanonical path": "./parked.md",
+                }.get(case, "parked.md")
+                todo = f"low priority:\n{row}\n"
+                if case == "duplicate":
+                    todo += "previous:\nparked.md vl:31\n"
+                elif case == "unknown heading":
+                    todo = "low priority:\nnotes:\nparked.md\n"
+                elif case == "duplicate header":
+                    todo = "low priority:\nlow priority:\nparked.md\n"
+                elif case == "header whitespace":
+                    todo = " low priority:\nparked.md\n"
+                elif case == "row whitespace":
+                    todo = "low priority:\n parked.md \n"
+                _ = (root / "TODO.md").write_text(todo, encoding="utf-8")
+                _ = (root / "parked.md").write_text(
+                    task_frontmatter(
+                        "blocked",
+                        runat=runat,
+                        is_manager=case == "manager",
+                        blocked_on="paused",
+                        pending_items=() if case == "empty queue" else ("open work",),
+                    ),
+                    encoding="utf-8",
+                )
+                out = StringIO()
+                with (
+                    patch("omo_manager.omo_agent_status.target_resolution_state", return_value=case == "live"),
+                    patch("omo_manager.omo_agent_status.target_resolves_exactly", return_value=case == "live"),
+                    patch("omo_manager.omo_agent_status.inspect", return_value=Report("missing", [])),
+                    patch("omo_manager.omo_agent_status.tmux_list_panes", return_value=[]),
+                    redirect_stdout(out),
+                ):
+                    self.assertEqual(
+                        3,
+                        main(
+                            [
+                                "--root",
+                                str(root),
+                                "--registry",
+                                str(registry),
+                                "--problems-only",
+                                "--no-auto-unstick",
+                            ]
+                        ),
+                    )
+                self.assertIn(
+                    "missing: task=./parked.md" if case == "noncanonical path" else "missing: task=parked.md",
+                    out.getvalue(),
+                )
+
+    def test_targetless_low_priority_custody_keeps_alerts_when_tmux_state_is_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("low priority:\nparked.md\n", encoding="utf-8")
+            _ = (root / "parked.md").write_text(
+                task_frontmatter(
+                    "blocked",
+                    runat="vl:31",
+                    blocked_on="paused",
+                    pending_items=("open work",),
+                ),
+                encoding="utf-8",
+            )
+            out = StringIO()
+            with (
+                patch("omo_manager.omo_agent_status.target_resolution_state", return_value=None),
+                patch("omo_manager.omo_agent_status.target_resolves_exactly", return_value=False),
+                patch("omo_manager.omo_agent_status.inspect", return_value=Report("missing", [])),
+                patch("omo_manager.omo_agent_status.tmux_list_panes", return_value=[]),
+                redirect_stdout(out),
+            ):
+                self.assertEqual(
+                    3,
+                    main(
+                        [
+                            "--root",
+                            str(root),
+                            "--registry",
+                            str(registry),
+                            "--problems-only",
+                            "--no-auto-unstick",
+                        ]
+                    ),
+                )
+            self.assertIn("missing: task=parked.md", out.getvalue())
+
+    def test_target_resolution_state_rejects_failed_malformed_or_ambiguous_snapshots(self) -> None:
+        cases = (
+            subprocess.CompletedProcess(["tmux"], 1, "", "server unavailable"),
+            subprocess.CompletedProcess(["tmux"], 0, "truncated snapshot\n", ""),
+            subprocess.CompletedProcess(
+                ["tmux"],
+                0,
+                "vl\t31\t0\t1\t%41\nvl\t31\t1\t1\t%42\n",
+                "",
+            ),
+        )
+        for result in cases:
+            with self.subTest(result=result), patch("omo_manager.omo_agent_status.subprocess.run", return_value=result):
+                self.assertIsNone(target_resolution_state("vl:31"))
 
     def test_problems_only_ignores_absent_low_priority_protected_human_decision(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

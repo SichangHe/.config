@@ -1,6 +1,8 @@
 import contextlib
+import hashlib
 import io
 import os
+import subprocess
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -695,6 +697,225 @@ class CodexStopTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "disappeared before interrupt"):
                 stop(Args("cfg:1.0", 0.0, 10, False, False))
         interrupt.assert_not_called()
+
+    def test_stop_refuses_bound_nonhuman_target_rebind_before_input(self) -> None:
+        with (
+            patch("omo_manager.omo_codex_stop.pane_id", return_value="%42"),
+            patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%caller"),
+            patch(
+                "omo_manager.omo_codex_stop.guarded_tmux_read",
+                side_effect=(
+                    "%42\n",
+                    "vl\n",
+                    "vl:2.0\n",
+                    "› Use /skills to list available skills\n",
+                    RuntimeError("bound read rejected"),
+                ),
+            ),
+            patch("omo_manager.omo_codex_stop.report_from_lines", return_value=Report("ready", [])),
+            patch("omo_manager.omo_codex_stop.paste_text") as paste,
+            patch("omo_manager.omo_codex_stop.capture") as raw_capture,
+            patch("omo_manager.omo_codex_stop.current_command") as raw_command,
+            patch("omo_manager.omo_codex_stop.send_exit_keys") as interrupt,
+            patch("omo_manager.omo_codex_stop.close_bound_tmux_target") as close,
+            self.assertRaisesRegex(RuntimeError, "identity changed before status query"),
+        ):
+            stop(
+                Args(
+                    "vl:2",
+                    0.0,
+                    10,
+                    False,
+                    False,
+                    no_feedback=True,
+                    bound_symbolic_target="vl:2",
+                    bound_pane_id="%42",
+                )
+            )
+        paste.assert_not_called()
+        raw_capture.assert_not_called()
+        raw_command.assert_not_called()
+        interrupt.assert_not_called()
+        close.assert_not_called()
+
+    def test_bound_stop_rejects_rebind_during_first_resolution_without_raw_pane_access(self) -> None:
+        with (
+            patch(
+                "omo_manager.omo_codex_stop.guarded_tmux_read",
+                side_effect=RuntimeError("tmux symbolic target no longer owns exact pane"),
+            ) as guarded,
+            patch("omo_manager.omo_codex_stop.pane_id") as raw_pane_id,
+            patch("omo_manager.omo_codex_stop.inspect") as raw_inspect,
+            patch("omo_manager.omo_codex_stop.capture") as raw_capture,
+            patch("omo_manager.omo_codex_stop.current_command") as raw_command,
+            patch("omo_manager.omo_codex_stop.tmux") as raw_tmux,
+            self.assertRaisesRegex(RuntimeError, "no longer owns"),
+        ):
+            stop(
+                Args(
+                    "vl:2",
+                    0.0,
+                    10,
+                    False,
+                    False,
+                    no_feedback=True,
+                    bound_symbolic_target="vl:2",
+                    bound_pane_id="%42",
+                )
+            )
+        guarded.assert_called_once_with(
+            "vl:2", "%42", ["display-message", "-p", "-t", "vl:2", "#{pane_id}"]
+        )
+        raw_pane_id.assert_not_called()
+        raw_inspect.assert_not_called()
+        raw_capture.assert_not_called()
+        raw_command.assert_not_called()
+        raw_tmux.assert_not_called()
+
+    def test_guarded_tmux_command_checks_binding_in_same_server_queue(self) -> None:
+        def tmux_call(argv: list[str], check: bool = False) -> subprocess.CompletedProcess[str]:
+            self.assertFalse(check)
+            self.assertEqual(["if-shell", "-F", "-t", "vl:2"], argv[:4])
+            self.assertEqual(
+                "#{&&:#{==:#{pane_id},%42},#{&&:#{==:#{session_name},vl},#{==:#{window_index},2}}}",
+                argv[4],
+            )
+            self.assertIn("send-keys -t %42 C-c", argv[5])
+            token = argv[5].rsplit("display-message -p ", 1)[1]
+            return subprocess.CompletedProcess(argv, 0, token + "\n", "")
+
+        with patch("omo_manager.omo_codex_stop.tmux", side_effect=tmux_call):
+            codex_stop.guarded_tmux_command("vl:2", "%42", ["send-keys", "-t", "%42", "C-c"])
+
+    def test_guarded_tmux_command_rejects_stale_pane_id_without_accepting_mutation(self) -> None:
+        def stale_tmux(argv: list[str], check: bool = False) -> subprocess.CompletedProcess[str]:
+            self.assertFalse(check)
+            rejected = argv[6].rsplit("display-message -p ", 1)[1]
+            self.assertIn("#{==:#{pane_id},%42}", argv[4])
+            self.assertIn("kill-pane -t %42", argv[5])
+            return subprocess.CompletedProcess(argv, 0, rejected + "\n", "")
+
+        with (
+            patch("omo_manager.omo_codex_stop.tmux", side_effect=stale_tmux),
+            self.assertRaisesRegex(RuntimeError, "no longer owns"),
+        ):
+            codex_stop.guarded_tmux_command("vl:2", "%42", ["kill-pane", "-t", "%42"])
+
+    def test_bound_nonhuman_rebind_at_paste_stops_before_any_later_input(self) -> None:
+        with (
+            patch("omo_manager.omo_codex_stop.pane_id", return_value="%42"),
+            patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%caller"),
+            patch(
+                "omo_manager.omo_codex_stop.guarded_tmux_read",
+                side_effect=(
+                    "%42\n",
+                    "vl\n",
+                    "vl:2.0\n",
+                    "› Use /skills to list available skills\n",
+                    "%42\tvl:2.0\n",
+                    "› Use /skills to list available skills\n",
+                ),
+            ),
+            patch("omo_manager.omo_codex_stop.report_from_lines", return_value=Report("ready", [])),
+            patch("omo_manager.omo_codex_stop.guarded_paste_text", side_effect=RuntimeError("rebound at paste")),
+            patch("omo_manager.omo_codex_stop.send_exit_keys") as interrupt,
+            patch("omo_manager.omo_codex_stop.close_bound_tmux_target") as close,
+            self.assertRaisesRegex(RuntimeError, "rebound at paste"),
+        ):
+            stop(
+                Args(
+                    "vl:2",
+                    0.0,
+                    10,
+                    False,
+                    False,
+                    no_feedback=True,
+                    bound_symbolic_target="vl:2",
+                    bound_pane_id="%42",
+                )
+            )
+        interrupt.assert_not_called()
+        close.assert_not_called()
+
+    def test_bound_nonhuman_rebind_at_interrupt_never_sends_ctrl_c(self) -> None:
+        with (
+            patch("omo_manager.omo_codex_stop.guarded_tmux_command", side_effect=RuntimeError("rebound at interrupt")) as guarded,
+            patch("omo_manager.omo_codex_stop.tmux") as raw_tmux,
+            self.assertRaisesRegex(RuntimeError, "rebound at interrupt"),
+        ):
+            codex_stop.send_exit_keys("%42", lambda: True, ("vl:2", "%42"))
+        guarded.assert_called_once_with("vl:2", "%42", ["send-keys", "-t", "%42", "C-c"])
+        raw_tmux.assert_not_called()
+
+    def test_bound_nonhuman_close_with_sibling_always_guards_exact_kill_pane(self) -> None:
+        with (
+            patch("omo_manager.omo_codex_stop.guarded_current_command", return_value="zsh"),
+            patch("omo_manager.omo_codex_stop.window_panes") as window_panes,
+            patch("omo_manager.omo_codex_stop.guarded_tmux_sequence", side_effect=RuntimeError("rebound at close")) as guarded,
+            self.assertRaisesRegex(RuntimeError, "rebound at close"),
+        ):
+            codex_stop.close_bound_tmux_target("%42", lambda: True, "vl:2", "%42")
+        guarded.assert_called_once_with("vl:2", "%42", [["kill-pane", "-t", "%42"]])
+        window_panes.assert_not_called()
+
+    def test_bound_close_queues_capability_proof_only_after_exact_pane_kill(self) -> None:
+        secret = "a" * 64
+        commitment = hashlib.sha256(secret.encode()).hexdigest()
+        with tempfile.TemporaryDirectory() as tmp:
+            audit = Path(tmp) / "park.yaml"
+            proof = Path(tmp) / ".park.yaml.owner-stopped"
+            with (
+                patch("omo_manager.omo_codex_stop.guarded_current_command", return_value="zsh"),
+                patch("omo_manager.omo_codex_stop.guarded_tmux_sequence", return_value="") as guarded,
+            ):
+                codex_stop.close_bound_tmux_target(
+                    "%42", lambda: True, "vl:2", "%42", str(proof), str(audit), secret, commitment
+                )
+        commands = guarded.call_args.args[2]
+        self.assertEqual(["kill-pane", "-t", "%42"], commands[0])
+        self.assertEqual("run-shell", commands[1][0])
+        self.assertIn("--write-bound-close-proof", commands[1][1])
+        self.assertNotIn("kill-window", commands[1][1])
+
+    def test_close_proof_internal_mode_rejects_uncommitted_or_incomplete_capability(self) -> None:
+        secret = "a" * 64
+        commitment = hashlib.sha256(secret.encode()).hexdigest()
+        with tempfile.TemporaryDirectory() as tmp:
+            private = Path(tmp)
+            private.chmod(0o700)
+            audit = private / "park.yaml"
+            proof = private / ".park.yaml.owner-stopped"
+            audit.write_text(
+                "operation: park-unlinked\nstate: prepared\n"
+                f"close_proof_commitment: {'0' * 64}\n",
+                encoding="utf-8",
+            )
+            audit.chmod(0o600)
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(1, main(["--write-bound-close-proof", str(proof), str(audit), secret, commitment]))
+            self.assertFalse(proof.exists())
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                main(["--write-bound-close-proof", str(proof), commitment])
+            self.assertFalse(proof.exists())
+
+    def test_bound_rebind_rejects_capture_and_shell_poll_without_raw_pane_reads(self) -> None:
+        guard = ("vl:2", "%42")
+        with (
+            patch("omo_manager.omo_codex_stop.guarded_tmux_read", side_effect=RuntimeError("rebound")),
+            patch("omo_manager.omo_codex_stop.capture") as raw_capture,
+            patch("omo_manager.omo_codex_stop.current_command") as raw_command,
+            self.assertRaisesRegex(RuntimeError, "rebound"),
+        ):
+            codex_stop.guarded_capture("%42", 80, guard)
+        raw_capture.assert_not_called()
+        raw_command.assert_not_called()
+        with (
+            patch("omo_manager.omo_codex_stop.guarded_current_command", side_effect=RuntimeError("rebound")),
+            patch("omo_manager.omo_codex_stop.current_command") as raw_command,
+            self.assertRaisesRegex(RuntimeError, "rebound"),
+        ):
+            codex_stop.wait_shell("%42", 10.0, guard)
+        raw_command.assert_not_called()
 
     def test_stop_closes_pane_without_recovery_flag(self) -> None:
         session_id = "019e9ed9-6262-71c0-b4b3-72ffd4182e98"

@@ -636,6 +636,55 @@ def is_intentionally_absent_bind_path_blocked_worker(root: Path, task: TaskLine,
     return is_bind_path_blocked_worker_candidate(root, task, state) and not target_resolves_exactly(state.target) and not absent_bind_path_workdir_exists()
 
 
+def is_targetless_low_priority_custody(root: Path, task: TaskLine, state: TaskState) -> bool:
+    """Return whether TODO explicitly parks a blocked worker without an owner."""
+
+    if (
+        task.section != "todo:low priority"
+        or task.line != task.task_file
+        or task.target
+        or state.status != "blocked"
+        or state.is_manager
+        or not state.target
+        or target_session(state.target).startswith("h")
+        or target_resolution_state(state.target) is not False
+    ):
+        return False
+    task_path = resolve_task_path(root, task.task_file)
+    try:
+        canonical_ref = task_path.relative_to(root).as_posix() if task_path is not None else ""
+    except ValueError:
+        return False
+    if (
+        task_path is None
+        or task.task_file != canonical_ref
+        or task_has_pending_marker(task_path)
+        or not pending_task_items(task_path, root)
+    ):
+        return False
+    try:
+        lines = (root / "TODO.md").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    section = ""
+    low_priority_headers = 0
+    references = 0
+    canonical_row = False
+    known_sections = {"current", "human pending", "low priority", "previous"}
+    for line in lines:
+        stripped = line.strip()
+        if stripped.endswith(":"):
+            heading = stripped[:-1]
+            section = heading if heading in known_sections and line == f"{heading}:" else ""
+            if section == "low priority":
+                low_priority_headers += 1
+            continue
+        if any(resolve_task_path(root, match.group(1)) == task_path for match in TASK_RE.finditer(line)):
+            references += 1
+            canonical_row = canonical_row or (section == "low priority" and line == task.task_file)
+    return low_priority_headers == 1 and references == 1 and canonical_row
+
+
 def absent_bind_path_workdir_exists() -> bool:
     return ABSENT_BIND_PATH_WORKDIR.exists()
 
@@ -665,6 +714,7 @@ def task_requires_live_target(root: Path, task: TaskLine, state: TaskState) -> b
         (task.section == "todo:human pending" and not task.target and state.status == "blocked" and is_recorded_human_wait(state))
         or is_intentionally_absent_historical_human_wait(root, task, state)
         or is_intentionally_absent_bind_path_blocked_worker(root, task, state)
+        or is_targetless_low_priority_custody(root, task, state)
     )
 
 
@@ -746,6 +796,53 @@ def target_session(target: str) -> str:
 
 def target_resolves_exactly(target: str) -> bool:
     return bool(exact_pane_id(target))
+
+
+def target_resolution_state(target: str) -> bool | None:
+    """Return present/absent, or None when tmux cannot prove either state."""
+
+    match = re.fullmatch(r"([A-Za-z][A-Za-z0-9_-]*):(\d+)(?:\.(\d+))?", target)
+    if match is None:
+        return None
+    session, window, pane = match.groups()
+    try:
+        out = subprocess.run(
+            [
+                "tmux",
+                "list-panes",
+                "-a",
+                "-F",
+                "#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_active}\t#{pane_id}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    found = False
+    for line in out.stdout.splitlines():
+        fields = line.split("\t")
+        if (
+            len(fields) != 5
+            or re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", fields[0]) is None
+            or not fields[1].isdigit()
+            or not fields[2].isdigit()
+            or fields[3] not in {"0", "1"}
+            or re.fullmatch(r"%[0-9]+", fields[4]) is None
+        ):
+            return None
+        row_session, row_window, row_pane, row_active, _row_id = fields
+        if row_session == session and row_window == window and (
+            (pane is not None and row_pane == pane) or (pane is None and row_active == "1")
+        ):
+            if found:
+                return None
+            found = True
+    return found
 
 
 def section_name(line: str, current: str) -> str:
