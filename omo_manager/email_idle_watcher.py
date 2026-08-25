@@ -2126,8 +2126,8 @@ def live_mailbox_existing_receipt(
             values,
             stage=stage,
             request_message_id=request_message_id,
-        ) and values.get("receipt_finalized") == "true":
-            return True
+        ):
+            return True if values.get("receipt_finalized") == "true" else None
     return False
 
 
@@ -2380,13 +2380,10 @@ def live_mailbox_approval_receipt_result(
                     LiveMailboxApprovalDisposition.HARD_REJECT,
                     reason="approval receipt path already exists",
                 )
-            try:
-                path.unlink()
-            except OSError:
-                return LiveMailboxApprovalReceiptResult(
-                    LiveMailboxApprovalDisposition.RETRY,
-                    reason="unfinalized approval receipt cleanup failed",
-                )
+            return LiveMailboxApprovalReceiptResult(
+                LiveMailboxApprovalDisposition.RETRY,
+                reason="approval receipt path is unfinalized",
+            )
         else:
             return LiveMailboxApprovalReceiptResult(
                 LiveMailboxApprovalDisposition.RETRY,
@@ -2857,47 +2854,6 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
             continue
         raw_mime = msg_data[0][1]
         body_text = message_text(msg)
-        if (
-            args.live_mailbox_approval_only
-            and isinstance(raw_mime, bytes)
-            and live_mailbox_approval_thread_candidate(msg)
-        ):
-            txt_path = write_mail(args, uid, msg, sender, subject)
-            receipt_result = live_mailbox_approval_receipt_result(
-                client,
-                args,
-                uid,
-                msg,
-                raw_mime,
-                txt_path,
-                body_text,
-            )
-            if receipt_result.disposition is LiveMailboxApprovalDisposition.RETRY:
-                logging.warning(
-                    "email AMH live mailbox approval candidate left unread for retry: uid=%s reason=%s",
-                    uid,
-                    receipt_result.reason,
-                )
-                if receipt_result.requires_reconnect:
-                    raise LiveMailboxApprovalReconnectRequired(receipt_result.reason)
-                continue
-            if receipt_result.path is not None:
-                logging.info(
-                    "email AMH live mailbox approval receipt stored: uid=%s path=%s",
-                    uid,
-                    receipt_result.path,
-                )
-            else:
-                logging.warning(
-                    "email AMH live mailbox approval candidate hard-rejected: uid=%s reason=%s",
-                    uid,
-                    receipt_result.reason,
-                )
-            if mark_seen_after_human_intake(client, uid, args, msg, txt_path):
-                processed_uids.add(uid)
-                processed_changed = True
-                handled = True
-            continue
         amh_result = try_route_amh_message(client, args, uid, msg, raw_mime if isinstance(raw_mime, bytes) else b"")
         if amh_result is AmhRouteDisposition.HOLD:
             logging.info("email AMH route held for replay: uid=%s subject=%r", uid, subject)

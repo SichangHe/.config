@@ -743,6 +743,7 @@ class AmhEmailWatcherRouteTests(unittest.TestCase):
                     root / "manager_mail",
                 ),
                 patch.object(watcher, "AMH_LIVE_MAILBOX_APPROVAL_STATE_DIR", state),
+                patch.object(watcher.time, "time", return_value=1787412599.0),
                 patch.object(watcher, "fsync_directory", side_effect=fsync_receipts_second_time),
             ):
                 self.assertFalse(watcher.handle_live_mailbox_approval_replies(client, args))
@@ -849,6 +850,7 @@ class AmhEmailWatcherRouteTests(unittest.TestCase):
                     root / "manager_mail",
                 ),
                 patch.object(watcher, "AMH_LIVE_MAILBOX_APPROVAL_STATE_DIR", state),
+                patch.object(watcher.time, "time", return_value=1787412599.0),
                 patch.object(watcher, "fsync_directory", side_effect=fail_after_link),
             ):
                 self.assertFalse(watcher.handle_live_mailbox_approval_replies(client, args))
@@ -958,6 +960,7 @@ class AmhEmailWatcherRouteTests(unittest.TestCase):
                     root / "manager_mail",
                 ),
                 patch.object(watcher, "AMH_LIVE_MAILBOX_APPROVAL_STATE_DIR", state),
+                patch.object(watcher.time, "time", return_value=1787412599.0),
             ):
                 self.assertTrue(watcher.handle_live_mailbox_approval_replies(client, args))
             self.assertEqual(3, len(client.searches))
@@ -1210,6 +1213,7 @@ class AmhEmailWatcherRouteTests(unittest.TestCase):
                     root / "manager_mail",
                 ),
                 patch.object(watcher, "AMH_LIVE_MAILBOX_APPROVAL_STATE_DIR", state),
+                patch.object(watcher.time, "time", return_value=1787412599.0),
             ):
                 self.assertFalse(watcher.handle_live_mailbox_approval_replies(client, args))
             self.assertEqual([], client.stores)
@@ -1404,6 +1408,7 @@ class AmhEmailWatcherRouteTests(unittest.TestCase):
                     root / "manager_mail",
                 ),
                 patch.object(watcher, "AMH_LIVE_MAILBOX_APPROVAL_STATE_DIR", state),
+                patch.object(watcher.time, "time", return_value=1787412599.0),
             ):
                 with self.assertRaisesRegex(
                     watcher.LiveMailboxApprovalReconnectRequired,
@@ -2005,6 +2010,7 @@ class AmhEmailWatcherRouteTests(unittest.TestCase):
                     root / "manager_mail",
                 ),
                 patch.object(watcher, "AMH_LIVE_MAILBOX_APPROVAL_STATE_DIR", state),
+                patch.object(watcher.time, "time", return_value=1787412599.0),
             ):
                 client = Client()
                 self.assertFalse(watcher.handle_live_mailbox_approval_replies(client, args))
@@ -2194,6 +2200,7 @@ class AmhEmailWatcherRouteTests(unittest.TestCase):
                     root / "manager_mail",
                 ),
                 patch.object(watcher, "AMH_LIVE_MAILBOX_APPROVAL_STATE_DIR", state),
+                patch.object(watcher.time, "time", return_value=1787412599.0),
             ):
                 self.assertFalse(watcher.handle_live_mailbox_approval_replies(Client(), args))
             self.assertEqual(["incomplete concurrent receipt\n"], [existing.read_text(encoding="utf-8")])
