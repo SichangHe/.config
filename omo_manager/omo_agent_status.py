@@ -525,10 +525,13 @@ def is_historical_human_wait_candidate(root: Path, task: TaskLine, state: TaskSt
     indexed = [linked for linked in parse_task_lines(root / "TODO.md") if resolve_task_path(root, linked.task_file) == task_path]
     if task_path is None or len(indexed) != 1 or task_has_pending_marker(task_path):
         return False
-    exact_human = state.reason.strip().lower() == "human"
+    reason = state.reason.strip()
+    if len(reason) >= 2 and reason[0] == reason[-1] and reason[0] in {'"', "'"}:
+        reason = reason[1:-1].strip()
+    exact_human = reason.lower() == "human"
     protected_concrete_human = (
         target_session(state.target).startswith("h")
-        and CONCRETE_HUMAN_DECISION_RE.fullmatch(state.reason.strip()) is not None
+        and CONCRETE_HUMAN_DECISION_RE.fullmatch(reason) is not None
         and not pending_task_items(task_path, root)
     )
     return exact_human or protected_concrete_human

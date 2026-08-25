@@ -3286,7 +3286,7 @@ resolved_task_items: []
                 "blocked",
                 runat="hvl:3",
                 managerat="vlprograms:0",
-                blocked_on="human decision: authorize a private port, polish, and revalidation of the independently approved candidate, or keep it archived",
+                blocked_on='"human decision: authorize a private port, polish, and revalidation of the independently approved candidate, or keep it archived"',
             )
             _ = task.write_text(task_text, encoding="utf-8")
             out = StringIO()
