@@ -615,6 +615,19 @@ class CodexStatusTests(unittest.TestCase):
         self.assertEqual('running', status(lines, current_block(lines)))
         self.assertFalse(can_submit_stuck_input(lines))
 
+    def test_status_running_with_new_queued_input_marker(self) -> None:
+        lines = [
+            '• Working (1m 23s • esc to interrupt)',
+            '',
+            '» <agent_message from="manager:0">',
+            '  Continue the current task.',
+            '  </agent_message>',
+            '',
+            '  tab to queue message                                                                                    64% context left',
+        ]
+        self.assertEqual('running', status(lines, current_block(lines)))
+        self.assertFalse(can_submit_stuck_input(lines))
+
     def test_status_running_with_long_queued_input_footer_without_model_footer(self) -> None:
         lines = [
             '• Working (19m 47s • esc to interrupt)',

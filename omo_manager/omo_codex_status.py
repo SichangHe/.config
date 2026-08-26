@@ -35,8 +35,8 @@ WAKE_EXECUTION_BUDGET_REFUSAL_RE = re.compile(
 VISIBLE_ERROR_MARKER_RE = re.compile(r"^\s*(?:[■□▢▣▪▫◼◻▰▱▮▯]\s*|⚠\ufe0f?\s*)")
 SEP_RE = re.compile(r"^─+$")
 WORKED_RE = re.compile(r"^─ Worked for .+ ─+$")
-READY_RE = re.compile(r"^› Use /skills to list available skills$")
-INPUT_RE = re.compile(r"^› ")
+READY_RE = re.compile(r"^[›»] Use /skills to list available skills$")
+INPUT_RE = re.compile(r"^[›»] ")
 BUSY_RE = re.compile(r"^• (?:Working|Messages to be submitted after next tool call)\b")
 COMPACTING_RE = re.compile(r"^• Compacting\b", re.IGNORECASE)
 BACKGROUND_RUNNING_RE = re.compile(r"^• .*?\b(?:Waiting for background terminal|[1-9][0-9]* background terminals? running)\b")
@@ -460,7 +460,7 @@ def current_input_text(lines: list[str]) -> str:
         body.pop()
     for idx in range(len(body) - 1, -1, -1):
         line = body[idx].lstrip()
-        if line.startswith("›"):
+        if INPUT_RE.match(line) is not None:
             input_lines = body[idx:]
             if any(after.startswith(("• ", "│", "└", "├", "─")) for after in input_lines[1:]):
                 return ""
@@ -486,7 +486,7 @@ def file_search_overlay_input_text(lines: list[str]) -> str:
         return ""
     prompt_idx = -1
     for idx in range(no_matches[0] - 1, -1, -1):
-        if lines[idx].lstrip().startswith("›"):
+        if INPUT_RE.match(lines[idx].lstrip()) is not None:
             prompt_idx = idx
             break
     if prompt_idx < 0:
@@ -552,7 +552,7 @@ def has_idle_queued_input(lines: list[str], input_text: str) -> bool:
 
 def latest_output_before_input(lines: list[str]) -> list[str]:
     cursor = is_cursor_agent_capture(lines)
-    input_indices = [idx for idx, line in enumerate(lines) if line.lstrip().startswith("›") or (cursor and CURSOR_AGENT_INPUT_PREFIX_RE.match(line) is not None)]
+    input_indices = [idx for idx, line in enumerate(lines) if INPUT_RE.match(line.lstrip()) is not None or (cursor and CURSOR_AGENT_INPUT_PREFIX_RE.match(line) is not None)]
     if input_indices:
         latest_input_idx = input_indices[-1]
         previous_input_idx = input_indices[-2] if len(input_indices) > 1 else -1
@@ -661,7 +661,7 @@ def current_input_follows_running_indicator(lines: list[str]) -> bool:
     body = lines[:-1] if has_codex_model_footer(lines) else lines[:]
     input_idx = -1
     for idx in range(len(body) - 1, -1, -1):
-        if body[idx].lstrip().startswith("›"):
+        if INPUT_RE.match(body[idx].lstrip()) is not None:
             input_idx = idx
             break
     if input_idx < 0:
