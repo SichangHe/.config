@@ -6,7 +6,7 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
-from omo_manager.omo_agent_status import Args, TaskFrontmatterError, active_task_targets, classify_task, format_problem_summary, format_summary, is_durable_outstanding_human_question, load_local_env, load_task_state, main, parse_task_lines, parse_task_metadata, persistent_blocked_task_lines, registry_prune, report_output_evidence, scan_task_state, session_records
+from omo_manager.omo_agent_status import Args, TaskFrontmatterError, active_task_targets, classify_task, format_problem_summary, format_summary, is_authoritative_human_blocked_ready_task, load_local_env, load_task_state, main, parse_task_lines, parse_task_metadata, persistent_blocked_task_lines, registry_prune, report_output_evidence, scan_task_state, session_records
 from omo_manager.omo_agent_status import BLOCKED_DELIVERY_ITEMS
 from omo_manager.omo_agent_status import target_resolution_state
 from omo_manager.omo_agent_status import SessionRecord, StatusRow, TaskLine
@@ -2063,7 +2063,7 @@ resolved_task_items: []
             self.assertIn("reason=waiting on proof owner", text)
             self.assertIn("owner_target=wl:16", text)
 
-    def test_problems_only_skips_non_hvl_human_wait(self) -> None:
+    def test_problems_only_reports_human_wait_outside_human_pending(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             registry = root / "sessions.json"
@@ -2072,8 +2072,8 @@ resolved_task_items: []
             _ = (root / "worker.md").write_text(task_frontmatter("blocked", runat="cfg:1", managerat="wl:16", blocked_on="waiting on human response"), encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(out):
-                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "wl:17"]))
-            self.assertEqual("", out.getvalue())
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "wl:17"]))
+            self.assertIn("blocked_idle: task=worker.md", out.getvalue())
 
     def test_problems_only_skips_ready_human_pending_task_with_one_durable_question(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2096,17 +2096,41 @@ resolved_task_items: []
                 self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             self.assertEqual("", out.getvalue())
 
+    def test_problems_only_skips_ready_human_pending_task_with_multiple_globally_blocked_goals(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("human pending:\nmail_one_per_task.md opsmail0802:22\n", encoding="utf-8")
+            _ = (root / "mail_one_per_task.md").write_text(
+                task_frontmatter(
+                    "blocked",
+                    runat="opsmail0802:22",
+                    managerat="opsmail0802:1",
+                    blocked_on="human authorization for PB-specific consolidation, VL no-contact exception, and current-route replacements",
+                    pending_items=(
+                        "Execute the current mailbox-compression request.",
+                        "Redo the mailbox compression adequately.",
+                    ),
+                ),
+                encoding="utf-8",
+            )
+            out = StringIO()
+            with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["blocked completion evidence"])), redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertEqual("", out.getvalue())
+
     def test_durable_human_question_requires_correct_index_queue_and_blocker(self) -> None:
         cases = (
             ("current", "exact durable human source for approval", ("Obtain authoritative human approval.",), False, False),
-            ("human pending", "exact durable human source for approval", (), False, False),
+            ("human pending", "exact durable human source for approval", (), False, True),
             ("human pending", "waiting on proof owner", ("Obtain authoritative human approval.",), False, False),
-            ("human pending", "exact durable human source for approval", ("Obtain authoritative human approval.", "Obtain human review."), False, False),
-            ("human pending", "exact durable human source for approval", ("Finish unrelated implementation.",), False, False),
-            ("human pending", "human approval after upstream proof arrives", ("Obtain human approval for branding.",), False, False),
-            ("human pending", "human approval for database deletion decision", ("Obtain human approval for database migration decision.",), False, False),
+            ("human pending", "exact durable human source for approval", ("Obtain authoritative human approval.", "Obtain human review."), False, True),
+            ("human pending", "exact durable human source for approval", ("Finish unrelated implementation.",), False, True),
+            ("human pending", "human approval after upstream proof arrives", ("Obtain human approval for branding.",), False, True),
+            ("human pending", "human approval for database deletion decision", ("Obtain human approval for database migration decision.",), False, True),
             ("human pending", "approval of human-readable database deletion protocol", ("Obtain approval of human-readable database deletion protocol.",), False, False),
-            ("human pending", "human approval to delete production database", ("Obtain human approval to not delete production database.",), False, False),
+            ("human pending", "human approval to delete production database", ("Obtain human approval to not delete production database.",), False, True),
             ("human pending", "exact durable human source for approval", ("Obtain authoritative human approval.",), True, False),
         )
         for section, blocker, items, pending_marker, expected in cases:
@@ -2118,7 +2142,7 @@ resolved_task_items: []
                 task = parse_task_lines(root / "TODO.md")[0]
                 state = scan_task_state(root / "review.md", root)
                 self.assertIsNotNone(state)
-                self.assertEqual(expected, is_durable_outstanding_human_question(root, task, state))
+                self.assertEqual(expected, is_authoritative_human_blocked_ready_task(root, task, state))
 
     def test_problems_only_reports_non_human_gate_phrases(self) -> None:
         for section, blocker, goal in (
@@ -2154,7 +2178,7 @@ resolved_task_items: []
                 task = parse_task_lines(root / "TODO.md")[0]
                 state = scan_task_state(root / "review.md", root)
                 self.assertIsNotNone(state)
-                self.assertEqual(expected, is_durable_outstanding_human_question(root, task, state))
+                self.assertEqual(expected, is_authoritative_human_blocked_ready_task(root, task, state))
 
     def test_durable_human_question_rejects_duplicate_alias_links(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2167,13 +2191,13 @@ resolved_task_items: []
             task = parse_task_lines(root / "TODO.md")[0]
             state = scan_task_state(root / "review.md", root)
             self.assertIsNotNone(state)
-            self.assertFalse(is_durable_outstanding_human_question(root, task, state))
+            self.assertFalse(is_authoritative_human_blocked_ready_task(root, task, state))
 
     def test_durable_human_question_requires_one_concrete_v2_human_blocker(self) -> None:
         blockers = (
             ("  - kind: human\n    reason: human source for commit decision", True),
-            ("  - kind: human\n    reason: human attention", False),
-            ("  - kind: human\n    reason: human source for commit decision\n  - kind: human\n    reason: human review for release decision", False),
+            ("  - kind: human\n    reason: human attention", True),
+            ("  - kind: human\n    reason: human source for commit decision\n  - kind: human\n    reason: human review for release decision", True),
             ("  - kind: task\n    task: dependency.md\n    reason: human source for commit decision", False),
         )
         for blocker_rows, expected in blockers:
@@ -2205,7 +2229,47 @@ resolved_task_items: []
                 task = parse_task_lines(root / "TODO.md")[0]
                 state = scan_task_state(root / "review.md", root)
                 self.assertIsNotNone(state)
-                self.assertEqual(expected, is_durable_outstanding_human_question(root, task, state))
+                self.assertEqual(expected, is_authoritative_human_blocked_ready_task(root, task, state))
+
+    def test_authoritative_human_blocked_ready_task_rejects_live_v2_notice(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "TODO.md").write_text("human pending:\nreview.md cfg:1\n", encoding="utf-8")
+            _ = (root / "review.md").write_text(
+                """---
+version: v2.0.0
+task_id: task_019f0000-0000-7000-8000-000000000021
+status: blocked
+resume_status: running
+runat: cfg:1
+tool: codex
+managerat: mgr:1
+is_manager: false
+blocked_on:
+  - kind: human
+    reason: authorize release
+pending_task_items:
+  - id: pi_019f0000-0000-7000-8000-000000000022
+    text: Release the artifact.
+    blocked_on: []
+    notices:
+      - id: wake_019f0000-0000-7000-8000-000000000023
+        kind: ready
+        state: pending
+        recipient_task_id: task_019f0000-0000-7000-8000-000000000021
+        target_snapshot: cfg:1
+        attempt_count: 0
+        retry_after: null
+        escalated_at: null
+resolved_task_items: []
+---
+""",
+                encoding="utf-8",
+            )
+            task = parse_task_lines(root / "TODO.md")[0]
+            state = scan_task_state(root / "review.md", root)
+            self.assertIsNotNone(state)
+            self.assertFalse(is_authoritative_human_blocked_ready_task(root, task, state))
 
     def test_durable_human_question_does_not_hide_non_ready_faults(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2228,7 +2292,7 @@ resolved_task_items: []
                         self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
                     self.assertIn(f"{fault}: task=review.md", out.getvalue())
 
-    def test_problems_only_skips_manager_ops_future_request_wait(self) -> None:
+    def test_problems_only_reports_manager_ops_future_request_wait_outside_human_pending(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             registry = root / "sessions.json"
@@ -2237,8 +2301,8 @@ resolved_task_items: []
             _ = (root / "manager_ops_submanager_8653.md").write_text(task_frontmatter("blocked", runat="wl:16", managerat="wl:1", is_manager=True, blocked_on="waiting for future human or watcher manager-ops request"), encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(out):
-                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
-            self.assertEqual("", out.getvalue())
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertIn("blocked_idle: task=manager_ops_submanager_8653.md", out.getvalue())
 
     def test_problems_only_reports_error_for_manager_ops_future_request_wait(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2282,7 +2346,7 @@ resolved_task_items: []
             self.assertIn("blocked_idle: task=manager_ops_submanager_8653.md", text)
             self.assertIn("reason=waiting for future human or watcher manager-ops config", text)
 
-    def test_problems_only_skips_human_helper_direction_wait(self) -> None:
+    def test_problems_only_reports_human_helper_direction_wait_outside_human_pending(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             registry = root / "sessions.json"
@@ -2291,8 +2355,8 @@ resolved_task_items: []
             _ = (root / "helper_audit_agent_9580.md").write_text(task_frontmatter("blocked", runat="hcfg:1", managerat="wl:16", blocked_on="future human/helper audit direction"), encoding="utf-8")
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(out):
-                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "wl:16"]))
-            self.assertEqual("", out.getvalue())
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--manager-target", "wl:16"]))
+            self.assertIn("blocked_idle: task=helper_audit_agent_9580.md", out.getvalue())
 
     def test_problems_only_reports_error_for_human_helper_direction_wait(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2647,7 +2711,7 @@ resolved_task_items: []
                     self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
                 self.assertIn(f"{report.status}: task=worker.md", out.getvalue())
 
-    def test_problems_only_skips_ready_hvl_concrete_human_review_wait(self) -> None:
+    def test_problems_only_reports_ready_hvl_human_wait_outside_human_pending(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             registry = root / "sessions.json"
@@ -2659,10 +2723,10 @@ resolved_task_items: []
             )
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(out):
-                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
-            self.assertEqual("", out.getvalue())
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertIn("blocked_idle: task=docs.md", out.getvalue())
 
-    def test_problems_only_skips_ready_human_review_wait_with_stage_target(self) -> None:
+    def test_problems_only_reports_ready_stage_human_wait_outside_human_pending(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             registry = root / "sessions.json"
@@ -2674,10 +2738,10 @@ resolved_task_items: []
             )
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(out):
-                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
-            self.assertEqual("", out.getvalue())
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertIn("blocked_idle: task=stages.md", out.getvalue())
 
-    def test_problems_only_skips_ready_non_hvl_human_review_wait(self) -> None:
+    def test_problems_only_reports_ready_non_hvl_human_wait_outside_human_pending(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             registry = root / "sessions.json"
@@ -2689,8 +2753,8 @@ resolved_task_items: []
             )
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(out):
-                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
-            self.assertEqual("", out.getvalue())
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertIn("blocked_idle: task=worker.md", out.getvalue())
 
     def test_problems_only_reports_hvl_human_readable_review_wait(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2722,7 +2786,7 @@ resolved_task_items: []
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             self.assertIn("blocked_idle: task=vl_hvl_mgr_11264.md", out.getvalue())
 
-    def test_problems_only_skips_manager_human_facing_review_waits(self) -> None:
+    def test_problems_only_reports_manager_human_wait_outside_human_pending(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             registry = root / "sessions.json"
@@ -2734,10 +2798,10 @@ resolved_task_items: []
             )
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(out):
-                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
-            self.assertEqual("", out.getvalue())
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertIn("blocked_idle: task=vl_hvl_mgr_11264.md", out.getvalue())
 
-    def test_problems_only_skips_hvl_direct_human_discussion_wait(self) -> None:
+    def test_problems_only_reports_hvl_human_discussion_outside_human_pending(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             registry = root / "sessions.json"
@@ -2749,10 +2813,10 @@ resolved_task_items: []
             )
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(out):
-                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
-            self.assertEqual("", out.getvalue())
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertIn("blocked_idle: task=vl_fail_review_9758.md", out.getvalue())
 
-    def test_problems_only_skips_vl_human_pending_wait(self) -> None:
+    def test_problems_only_reports_vl_human_wait_outside_human_pending(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             registry = root / "sessions.json"
@@ -2764,8 +2828,8 @@ resolved_task_items: []
             )
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(out):
-                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
-            self.assertEqual("", out.getvalue())
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertIn("blocked_idle: task=vl_late_walk_8951.md", out.getvalue())
 
     def test_problems_only_skips_exact_human_wait(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2859,7 +2923,7 @@ resolved_task_items: []
                 self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
             self.assertIn("blocked_idle: task=review.md", out.getvalue())
 
-    def test_problems_only_skips_hvl_human_approval_wait(self) -> None:
+    def test_problems_only_reports_hvl_human_approval_outside_human_pending(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             registry = root / "sessions.json"
@@ -2871,10 +2935,10 @@ resolved_task_items: []
             )
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(out):
-                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
-            self.assertEqual("", out.getvalue())
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertIn("blocked_idle: task=vl_mini_trials_9748.md", out.getvalue())
 
-    def test_problems_only_skips_explicit_human_integration_decision_or_authorization(self) -> None:
+    def test_problems_only_reports_human_integration_wait_outside_human_pending(self) -> None:
         for blocker in (
             "human decision whether to integrate isolated reviewed branch into the live repository",
             "human authorization to integrate reviewed isolated commits, then approve migration and controlled watcher startup",
@@ -2890,10 +2954,10 @@ resolved_task_items: []
                 )
                 out = StringIO()
                 with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(out):
-                    self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
-                self.assertEqual("", out.getvalue())
+                    self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+                self.assertIn("blocked_idle: task=bidirectional_blocking.md", out.getvalue())
 
-    def test_problems_only_skips_hvl_review_waiting_variant(self) -> None:
+    def test_problems_only_reports_hvl_review_waiting_outside_human_pending(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             registry = root / "sessions.json"
@@ -2905,10 +2969,10 @@ resolved_task_items: []
             )
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(out):
-                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
-            self.assertEqual("", out.getvalue())
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertIn("blocked_idle: task=vl_hvl_mgr_11264.md", out.getvalue())
 
-    def test_problems_only_skips_hvl_review_wait_case_variant(self) -> None:
+    def test_problems_only_reports_hvl_review_case_variant_outside_human_pending(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             registry = root / "sessions.json"
@@ -2920,8 +2984,8 @@ resolved_task_items: []
             )
             out = StringIO()
             with patch("omo_manager.omo_agent_status.inspect", return_value=Report("ready", ["idle"])), redirect_stdout(out):
-                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
-            self.assertEqual("", out.getvalue())
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertIn("blocked_idle: task=vl_hvl_mgr_11264.md", out.getvalue())
 
     def test_problems_only_reports_error_for_human_review_wait(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

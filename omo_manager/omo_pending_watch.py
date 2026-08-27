@@ -46,7 +46,7 @@ from omo_manager.omo_agent_status import blocked_status_dependency_snapshot
 from omo_manager.omo_agent_status import effective_owner_target
 from omo_manager.omo_agent_status import is_main_manager_task_file
 from omo_manager.omo_agent_status import is_human_tmux_target
-from omo_manager.omo_agent_status import is_recorded_human_wait
+from omo_manager.omo_agent_status import is_authoritative_human_blocked_ready_task
 from omo_manager.omo_agent_status import parse_task_lines
 from omo_manager.omo_agent_status import read_task_metadata
 from omo_manager.omo_agent_status import resolve_task_path
@@ -61,6 +61,7 @@ from omo_manager.omo_blocking import v2_enabled
 from omo_manager.omo_blocking_actor import BlockingActor
 from omo_manager.omo_blocking_actor import request as blocking_request
 from omo_manager.omo_codex_status import Args as CodexStatusArgs
+from omo_manager.omo_codex_status import Report as CodexReport
 from omo_manager.omo_codex_status import SELECTED_MODEL_CAPACITY_RE
 from omo_manager.omo_codex_status import inspect as inspect_codex
 from omo_manager.omo_codex_status import exact_tail as exact_codex_tail
@@ -769,10 +770,14 @@ def send_executor() -> ThreadPoolExecutor:
 
 def agent_problem_evidence_current(guard: AgentProblemGuard) -> bool:
     if guard.root is not None and guard.dependency_task_file:
-        task = TaskLine(guard.dependency_task_file, "dependency-guard", "", "", None)
-        task_path = resolve_task_path(guard.root, guard.dependency_task_file)
-        state = scan_task_state(task_path, guard.root) if task_path is not None else None
-        current = state is not None and blocked_status_dependency_snapshot(guard.root, task, state) == guard.dependency_snapshot
+        if guard.dependency_snapshot.startswith("human:"):
+            current = blocked_report_snapshot_state(guard.root).get(guard.dependency_task_file)
+            current = current is not None and current[1] == guard.dependency_snapshot
+        else:
+            task = TaskLine(guard.dependency_task_file, "dependency-guard", "", "", None)
+            task_path = resolve_task_path(guard.root, guard.dependency_task_file)
+            state = scan_task_state(task_path, guard.root) if task_path is not None else None
+            current = state is not None and blocked_status_dependency_snapshot(guard.root, task, state) == guard.dependency_snapshot
         return current and (not guard.ready_target or inspect_codex(CodexStatusArgs(guard.ready_target, 80)).status == "ready")
     try:
         result = subprocess.run(guard.command, capture_output=True, text=True, timeout=DEFAULT_AGENT_PROBLEM_TIMEOUT_S, check=False)
@@ -5173,26 +5178,60 @@ def filter_manager_self_problem_output(output: str, manager_target: str = "") ->
     return filtered_problem_output(kept, suppress_message="omo_pending_watch: suppressed manager self-problem report")
 
 
-def recorded_human_wait_snapshot(status: str, target: str, owner_target: str, reason: str) -> str:
-    identity = "\0".join((status, target, owner_target, reason))
-    return f"human:{hashlib.sha256(identity.encode('utf-8')).hexdigest()}"
+def ready_report_evidence(report: CodexReport) -> str:
+    """Return a stable serialization of the visible ready-pane classification."""
 
-
-def line_matches_blocked_report_snapshot(line: str, snapshot: str) -> bool:
-    status = problem_line_status(line)
-    if status == "blocked_idle":
-        return True
-    if status != "missing" or not snapshot.startswith("human:"):
-        return False
-    return snapshot == recorded_human_wait_snapshot(
-        problem_line_value(line, "task_status"),
-        problem_line_target(line),
-        problem_line_owner_target(line),
-        problem_line_value(line, "reason"),
+    return json.dumps(
+        {
+            "status": report.status,
+            "lines": report.lines,
+            "input_text": report.input_text,
+            "can_submit_input": report.can_submit_input,
+            "input_blocker": report.input_blocker,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
     )
 
 
-def unchanged_dependency_blocked_idle_line(line: str, current: dict[str, tuple[TaskLine, str, str]], snapshots: dict[str, str]) -> bool:
+def recorded_human_wait_snapshot(
+    task_path: Path,
+    task: TaskLine,
+    status: str,
+    target: str,
+    owner_target: str,
+    reason: str,
+    pane_evidence: str,
+) -> str:
+    """Fingerprint exact custody, rendered state, and authoritative task evidence."""
+
+    try:
+        task_evidence = task_path.read_bytes()
+    except OSError:
+        return ""
+    identity = "\0".join((task.section, task.line, status, target, owner_target, reason, pane_evidence)).encode("utf-8")
+    digest = hashlib.sha256(identity + bytes(1) + task_evidence).hexdigest()
+    return f"human:{digest}"
+
+
+def line_matches_blocked_report_snapshot(root: Path, line: str, task: TaskLine, snapshot: str, owner_target: str) -> bool:
+    status = problem_line_status(line)
+    if not snapshot.startswith("human:"):
+        return status == "blocked_idle"
+    if status != "blocked_idle" or problem_line_value(line, "idle_status") != "ready":
+        return False
+    task_path = resolve_task_path(root, task.task_file)
+    state = scan_task_state(task_path, root) if task_path is not None else None
+    return bool(
+        state is not None
+        and state.status == problem_line_value(line, "task_status")
+        and same_tmux_target(state.target, problem_line_target(line))
+        and owner_target == problem_line_owner_target(line)
+        and state.reason == problem_line_value(line, "reason")
+    )
+
+
+def unchanged_dependency_blocked_idle_line(root: Path, line: str, current: dict[str, tuple[TaskLine, str, str]], snapshots: dict[str, str]) -> bool:
     """Return true only for a repeated blocked row with a stable task snapshot."""
 
     if problem_line_status(line) not in SNAPSHOT_SUPPRESSED_BLOCKED_STATUSES or problem_line_value(line, "task_status") != "blocked":
@@ -5201,7 +5240,7 @@ def unchanged_dependency_blocked_idle_line(line: str, current: dict[str, tuple[T
     if not task_file:
         return False
     current_snapshot = current.get(task_file)
-    return current_snapshot is not None and line_matches_blocked_report_snapshot(line, current_snapshot[1]) and snapshots.get(task_file) == current_snapshot[1]
+    return current_snapshot is not None and line_matches_blocked_report_snapshot(root, line, *current_snapshot) and snapshots.get(task_file) == current_snapshot[1]
 
 
 def filter_unchanged_dependency_blocked_idle_output(args: Args, output: str, snapshots: dict[str, str]) -> str | None:
@@ -5214,7 +5253,7 @@ def filter_unchanged_dependency_blocked_idle_output(args: Args, output: str, sna
     kept: list[str] = []
     suppressed = False
     for line in lines[1:]:
-        if unchanged_dependency_blocked_idle_line(line, current, snapshots):
+        if unchanged_dependency_blocked_idle_line(args.root, line, current, snapshots):
             suppressed = True
             continue
         if not line.startswith("manager-action: "):
@@ -5244,7 +5283,7 @@ def dependency_snapshot_replacements_for_problem_lines(root: Path, lines: tuple[
         if not task_file or task_file in seen_tasks:
             continue
         current_snapshot = current.get(task_file)
-        if current_snapshot is None or not line_matches_blocked_report_snapshot(line, current_snapshot[1]):
+        if current_snapshot is None or not line_matches_blocked_report_snapshot(root, line, *current_snapshot):
             continue
         seen_tasks.add(task_file)
         replacements.append((task_file, current_snapshot[1]))
@@ -5274,10 +5313,10 @@ def blocked_report_bypasses_target_repeat(root: Path, lines: tuple[str, ...], sn
             continue
         current_snapshot = current.get(task_file)
         if previous is None:
-            if current_snapshot is not None and current_snapshot[1].startswith("human:") and line_matches_blocked_report_snapshot(line, current_snapshot[1]):
+            if current_snapshot is not None and current_snapshot[1].startswith("human:") and line_matches_blocked_report_snapshot(root, line, *current_snapshot):
                 return True
             continue
-        if current_snapshot is None or current_snapshot[1] != previous or not line_matches_blocked_report_snapshot(line, current_snapshot[1]):
+        if current_snapshot is None or current_snapshot[1] != previous or not line_matches_blocked_report_snapshot(root, line, *current_snapshot):
             return True
     return False
 
@@ -5478,10 +5517,24 @@ def blocked_report_snapshot_state(root: Path) -> dict[str, tuple[TaskLine, str, 
         seen_files.add(task.task_file)
         task_path = resolve_task_path(root, task.task_file)
         state = scan_task_state(task_path, root) if task_path is not None else None
-        if state is None or state.status != "blocked" or not is_recorded_human_wait(state):
+        metadata = read_task_metadata(task_path, root)
+        if state is None or metadata is None or not is_authoritative_human_blocked_ready_task(root, task, state):
+            continue
+        report = inspect_codex(CodexStatusArgs(state.target, 80))
+        if report.status != "ready":
             continue
         owner_target = effective_owner_target(root, task, task_path)
-        snapshot = recorded_human_wait_snapshot(state.status, state.target, owner_target, state.reason)
+        snapshot = recorded_human_wait_snapshot(
+            task_path,
+            task,
+            state.status,
+            state.target,
+            owner_target,
+            state.reason,
+            ready_report_evidence(report),
+        )
+        if not snapshot:
+            continue
         snapshots[task.task_file] = (task, snapshot, owner_target)
     return snapshots
 
@@ -5496,16 +5549,19 @@ def maybe_push_dependency_transitions(
 
     changed = False
     delivery_seen = seen if seen is not None else {}
-    current = dependency_snapshot_state(args.root)
+    current = blocked_report_snapshot_state(args.root)
     for task_file in tuple(snapshots):
         if task_file not in current:
             snapshots.pop(task_file, None)
-    for task_file, (_task, snapshot, owner_target) in current.items():
+    for task_file, (task, snapshot, owner_target) in current.items():
         previous = snapshots.get(task_file)
         if previous is None:
             snapshots[task_file] = snapshot
             continue
         if previous == snapshot:
+            continue
+        if snapshot.startswith("human:") and task.section != "todo:human pending":
+            snapshots[task_file] = snapshot
             continue
         target = owner_target or args.manager_target
         if not target:
@@ -5516,11 +5572,14 @@ def maybe_push_dependency_transitions(
         state = scan_task_state(task_path, args.root) if task_path is not None else None
         if state is None:
             continue
+        human_wait = snapshot.startswith("human:")
         text = "\n".join(
             [
                 AGENT_PROBLEM_HEADER,
                 "",
-                "1 blocked dependency graph changed; inspect the current blocker list and leaf states:",
+                "1 human-blocked task evidence changed; inspect its current blocker, custody, and queue:"
+                if human_wait
+                else "1 blocked dependency graph changed; inspect the current blocker list and leaf states:",
                 f"{task_file} {state.target} <blocked_on>{html.escape(state.reason)}</blocked_on>",
             ]
         )

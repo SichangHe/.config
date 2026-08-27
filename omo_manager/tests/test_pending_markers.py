@@ -7514,7 +7514,7 @@ class PendingMarkerTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            _ = (root / "TODO.md").write_text("current:\nworker.md cfg:2\n", encoding="utf-8")
+            _ = (root / "TODO.md").write_text("human pending:\nworker.md cfg:2\n", encoding="utf-8")
             _ = (root / "worker.md").write_text(
                 task_frontmatter("blocked", runat="cfg:2", managerat="wl:1", blocked_on="waiting on human approval"),
                 encoding="utf-8",
@@ -7525,7 +7525,7 @@ class PendingMarkerTests(unittest.TestCase):
                 3,
                 "agent-problems: blocked_idle=1\n"
                 "manager-action: blocked_idle>0 inspect blocked agents, unblock if possible, or route the exact blocker\n"
-                "blocked_idle: task=worker.md evidence=target=cfg:2 task_status=blocked idle_status=ready reason=waiting_on_human owner_target=wl:1\n",
+                "blocked_idle: task=worker.md evidence=target=cfg:2 task_status=blocked idle_status=ready reason=waiting on human approval owner_target=wl:1\n",
                 "",
             )
             snapshots: dict[str, str] = {}
@@ -7533,14 +7533,122 @@ class PendingMarkerTests(unittest.TestCase):
             seen: dict[str, float] = {}
 
             out = StringIO()
-            with redirect_stdout(out):
+            with patch.object(watcher, "inspect_codex", return_value=watcher.CodexReport("ready", ["blocked evidence"])), redirect_stdout(out):
                 self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 1000.0, snapshots, reported_snapshots))
                 self.assertFalse(watcher.handle_agent_problem_result(args, seen, result, 1001.0, snapshots, reported_snapshots))
 
-            self.assertEqual(1, out.getvalue().count("worker.md cfg:2 <blocked_on>waiting_on_human</blocked_on>"))
+            self.assertEqual(1, out.getvalue().count("worker.md cfg:2 <blocked_on>waiting on human approval</blocked_on>"))
             self.assertIn("suppressed unchanged blocked dependency report", out.getvalue())
 
-    def test_agent_problem_check_realerts_missing_blocked_human_wait_after_condition_change(self) -> None:
+    def test_human_pending_snapshot_preserves_structured_blocker_and_notice_changes(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        human_task = """---
+version: v2.0.0
+task_id: task_019f0000-0000-7000-8000-000000000031
+status: blocked
+resume_status: running
+runat: cfg:2
+tool: codex
+managerat: wl:1
+is_manager: false
+blocked_on:
+  - kind: human
+    reason: authorize release
+pending_task_items:
+  - id: pi_019f0000-0000-7000-8000-000000000032
+    text: Release the artifact.
+    blocked_on: []
+    notices: NOTICES
+resolved_task_items: []
+---
+"""
+        result = (
+            "agent-problems: blocked_idle=1\n"
+            "manager-action: blocked_idle>0 inspect blocked agents, unblock if possible, or route the exact blocker\n"
+            "blocked_idle: task=worker.md evidence=target=cfg:2 task_status=blocked idle_status=ready reason=authorize release owner_target=wl:1\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "TODO.md").write_text("human pending:\nworker.md cfg:2\n", encoding="utf-8")
+            task_path = root / "worker.md"
+            _ = task_path.write_text(human_task.replace("NOTICES", "[]"), encoding="utf-8")
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1")
+            with patch.object(watcher, "inspect_codex", return_value=watcher.CodexReport("ready", ["blocked evidence"])):
+                baseline = watcher.blocked_report_snapshot_state(root)["worker.md"][1]
+                self.assertIsNone(watcher.filter_unchanged_dependency_blocked_idle_output(args, result, {"worker.md": baseline}))
+
+            _ = task_path.write_text(human_task.replace("kind: human\n    reason:", "kind: legacy\n    text:").replace("NOTICES", "[]"), encoding="utf-8")
+            self.assertEqual(result, watcher.filter_unchanged_dependency_blocked_idle_output(args, result, {"worker.md": baseline}))
+
+            live_notice = """
+      - id: wake_019f0000-0000-7000-8000-000000000033
+        kind: ready
+        state: pending
+        recipient_task_id: task_019f0000-0000-7000-8000-000000000031
+        target_snapshot: cfg:2
+        attempt_count: 0
+        retry_after: null
+        escalated_at: null"""
+            _ = task_path.write_text(human_task.replace("NOTICES", live_notice), encoding="utf-8")
+            self.assertEqual(result, watcher.filter_unchanged_dependency_blocked_idle_output(args, result, {"worker.md": baseline}))
+
+            _ = task_path.write_text(human_task.replace("NOTICES", "[]"), encoding="utf-8")
+            with patch.object(watcher, "inspect_codex", return_value=watcher.CodexReport("ready", ["new actionable evidence"])):
+                self.assertEqual(result, watcher.filter_unchanged_dependency_blocked_idle_output(args, result, {"worker.md": baseline}))
+
+    def test_human_pending_snapshot_alerts_on_blocker_and_queue_changes(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "TODO.md").write_text("human pending:\nworker.md cfg:2\n", encoding="utf-8")
+            _ = (root / "worker.md").write_text(
+                task_frontmatter(
+                    "blocked",
+                    runat="cfg:2",
+                    managerat="wl:1",
+                    blocked_on="human authorization for release",
+                    pending_items=("Prepare release.", "Publish release."),
+                ),
+                encoding="utf-8",
+            )
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1")
+            snapshots: dict[str, str] = {}
+            with patch.object(watcher, "inspect_codex", return_value=watcher.CodexReport("ready", ["blocked evidence"])):
+                self.assertFalse(watcher.maybe_push_dependency_transitions(args, snapshots, 1000.0))
+
+            _ = (root / "worker.md").write_text(
+                task_frontmatter(
+                    "blocked",
+                    runat="cfg:2",
+                    managerat="wl:1",
+                    blocked_on="human authorization for staged release",
+                    pending_items=("Prepare release.", "Publish release."),
+                ),
+                encoding="utf-8",
+            )
+            with patch.object(watcher, "inspect_codex", return_value=watcher.CodexReport("ready", ["blocked evidence"])), patch.object(watcher, "agent_problem_target_is_ready", return_value=True), patch.object(
+                watcher, "push_manager_text_to_target", return_value=0
+            ) as push:
+                self.assertTrue(watcher.maybe_push_dependency_transitions(args, snapshots, 1001.0))
+                self.assertFalse(watcher.maybe_push_dependency_transitions(args, snapshots, 1002.0))
+                self.assertIn("human-blocked task evidence changed", push.call_args.args[1])
+
+                _ = (root / "worker.md").write_text(
+                    task_frontmatter(
+                        "blocked",
+                        runat="cfg:2",
+                        managerat="wl:1",
+                        blocked_on="human authorization for staged release",
+                        pending_items=("Prepare release.", "Publish release.", "Verify release."),
+                    ),
+                    encoding="utf-8",
+                )
+                self.assertTrue(watcher.maybe_push_dependency_transitions(args, snapshots, 1003.0))
+            self.assertEqual(2, push.call_count)
+
+    def test_agent_problem_check_keeps_missing_human_wait_actionable_across_changes(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -7576,40 +7684,39 @@ class PendingMarkerTests(unittest.TestCase):
                 watcher, "push_manager_text_to_target", return_value=0
             ) as push, redirect_stdout(out):
                 self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 10000.0, snapshots, reported_snapshots))
-                self.assertFalse(watcher.handle_agent_problem_result(args, seen, result, 14000.0, snapshots, reported_snapshots))
+                self.assertTrue(watcher.handle_agent_problem_result(args, seen, result, 14000.0, snapshots, reported_snapshots))
                 self.assertIn(f"<blocked_on>{blocker}</blocked_on>", push.call_args_list[0].args[1])
-                self.assertIn("suppressed unchanged blocked dependency report", out.getvalue())
+                self.assertNotIn("suppressed unchanged blocked dependency report", out.getvalue())
 
                 mismatched_result = missing_result("blocked", "hwl:4", blocker)
-                original_snapshot = reported_snapshots[task_file]
-                self.assertTrue(watcher.handle_agent_problem_result(args, seen, mismatched_result, 14001.0, snapshots, reported_snapshots))
-                self.assertIn(f"{task_file} hwl:4", push.call_args_list[1].args[1])
-                self.assertEqual(original_snapshot, reported_snapshots[task_file])
+                self.assertTrue(watcher.handle_agent_problem_result(args, seen, mismatched_result, 18001.0, snapshots, reported_snapshots))
+                self.assertIn(f"{task_file} hwl:4", push.call_args_list[2].args[1])
+                self.assertNotIn(task_file, reported_snapshots)
 
                 changed_blocker = "human authorization for a replacement session is required"
                 write_task("blocked", "hwl:3", changed_blocker)
                 changed_blocker_result = missing_result("blocked", "hwl:3", changed_blocker)
-                self.assertTrue(watcher.handle_agent_problem_result(args, seen, changed_blocker_result, 14002.0, snapshots, reported_snapshots))
-                self.assertFalse(watcher.handle_agent_problem_result(args, seen, changed_blocker_result, 18002.0, snapshots, reported_snapshots))
+                self.assertTrue(watcher.handle_agent_problem_result(args, seen, changed_blocker_result, 22002.0, snapshots, reported_snapshots))
+                self.assertTrue(watcher.handle_agent_problem_result(args, seen, changed_blocker_result, 26002.0, snapshots, reported_snapshots))
 
                 write_task("blocked", "hwl:4", changed_blocker)
                 changed_target_result = missing_result("blocked", "hwl:4", changed_blocker)
-                self.assertTrue(watcher.handle_agent_problem_result(args, seen, changed_target_result, 18003.0, snapshots, reported_snapshots))
-                self.assertFalse(watcher.handle_agent_problem_result(args, seen, changed_target_result, 22003.0, snapshots, reported_snapshots))
+                self.assertTrue(watcher.handle_agent_problem_result(args, seen, changed_target_result, 30003.0, snapshots, reported_snapshots))
+                self.assertTrue(watcher.handle_agent_problem_result(args, seen, changed_target_result, 34003.0, snapshots, reported_snapshots))
 
                 changed_owner = "wl:4"
                 write_task("blocked", "hwl:4", changed_blocker, changed_owner)
                 changed_owner_result = missing_result("blocked", "hwl:4", changed_blocker, changed_owner)
-                self.assertTrue(watcher.handle_agent_problem_result(args, seen, changed_owner_result, 22004.0, snapshots, reported_snapshots))
-                self.assertFalse(watcher.handle_agent_problem_result(args, seen, changed_owner_result, 26004.0, snapshots, reported_snapshots))
+                self.assertTrue(watcher.handle_agent_problem_result(args, seen, changed_owner_result, 38004.0, snapshots, reported_snapshots))
+                self.assertTrue(watcher.handle_agent_problem_result(args, seen, changed_owner_result, 42004.0, snapshots, reported_snapshots))
 
                 write_task("running", "hwl:4", owner_target=changed_owner)
                 changed_status_result = missing_result("running", "hwl:4", "", changed_owner)
-                self.assertTrue(watcher.handle_agent_problem_result(args, seen, changed_status_result, 26005.0, snapshots, reported_snapshots))
-            self.assertEqual(6, push.call_count)
+                self.assertTrue(watcher.handle_agent_problem_result(args, seen, changed_status_result, 46005.0, snapshots, reported_snapshots))
+            self.assertEqual(10, push.call_count)
             self.assertNotIn(task_file, reported_snapshots)
 
-    def test_agent_problem_missing_block_snapshot_async_completion_is_compare_and_swap(self) -> None:
+    def test_agent_problem_ready_human_snapshot_async_completion_is_compare_and_swap(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -7622,7 +7729,7 @@ class PendingMarkerTests(unittest.TestCase):
             seen = {watcher.agent_problem_target_attempt_key(owner_target): 10000.0}
 
             def write_task(blocker: str) -> None:
-                _ = (root / "TODO.md").write_text(f"current:\n{task_file} {target}\n", encoding="utf-8")
+                _ = (root / "TODO.md").write_text(f"human pending:\n{task_file} {target}\n", encoding="utf-8")
                 _ = (root / task_file).write_text(
                     task_frontmatter("blocked", runat=target, managerat=owner_target, is_manager=True, blocked_on=blocker),
                     encoding="utf-8",
@@ -7632,14 +7739,15 @@ class PendingMarkerTests(unittest.TestCase):
                 return watcher.CommandOutput(
                     "agent-problems",
                     3,
-                    "agent-problems: missing=1\n"
-                    f"missing: task={task_file} evidence=target={target} role=blocked_idle task_status=blocked idle_status=missing reason={blocker} owner_target={owner_target}\n",
+                    "agent-problems: blocked_idle=1\n"
+                    f"blocked_idle: task={task_file} evidence=target={target} role=blocked_idle task_status=blocked idle_status=ready reason={blocker} owner_target={owner_target}\n",
                     "",
                 )
 
             first_blocker = "human authorization for the first replacement is required"
             write_task(first_blocker)
-            reported_snapshots = {task_file: watcher.blocked_report_snapshot_state(root)[task_file][1]}
+            with patch.object(watcher, "inspect_codex", return_value=watcher.CodexReport("ready", ["blocked evidence"])):
+                reported_snapshots = {task_file: watcher.blocked_report_snapshot_state(root)[task_file][1]}
             events: list[watcher.DeliverySuccessEvent] = []
 
             def capture_push(_args: object, _text: str, _target: str, event: watcher.DeliverySuccessEvent, **_kwargs: object) -> int:
@@ -7648,7 +7756,7 @@ class PendingMarkerTests(unittest.TestCase):
 
             second_blocker = "human authorization for the second replacement is required"
             third_blocker = "human authorization for the third replacement is required"
-            with patch.object(watcher, "inspect_codex", return_value=MagicMock(status="ready")), patch.object(
+            with patch.object(watcher, "inspect_codex", return_value=watcher.CodexReport("ready", ["blocked evidence"])), patch.object(
                 watcher, "push_manager_text_to_target", side_effect=capture_push
             ) as push:
                 write_task(second_blocker)

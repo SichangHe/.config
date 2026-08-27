@@ -144,11 +144,7 @@ HUMAN_QUESTION_GATE_RE = re.compile(
     r"(?:\bhuman(?!-readable)\b[^.\n]{0,100}\b(?:answers?|approval|authority|authorization|choice|confirmation|decision|feedback|guidance|input|repl(?:y|ies)|responses?|reviews?|source)\b|\b(?:answers?|approval|authority|authorization|choice|confirmation|decision|feedback|guidance|input|repl(?:y|ies)|responses?|reviews?|source)\b[^.\n]{0,100}\bhuman(?!-readable)\b)",
     re.IGNORECASE,
 )
-HUMAN_GATE_TERMS = {"answer", "answers", "approval", "authority", "authorization", "choice", "confirmation", "decision", "feedback", "guidance", "input", "reply", "replies", "response", "responses", "review", "reviews", "source"}
-HUMAN_GATE_BINDING_STOP_WORDS = HUMAN_GATE_TERMS | {"after", "authoritative", "before", "concrete", "durable", "exact", "explicit", "from", "human", "obtain", "requires", "requiring", "through", "waiting", "with", "without"}
-HUMAN_GATE_WORD_RE = re.compile(r"[a-z][a-z0-9_-]{3,}", re.IGNORECASE)
 NON_HUMAN_GATE_RE = re.compile(r"\b(?:non[- ]human|human[- ]independent|not\s+human)\b", re.IGNORECASE)
-NEGATED_GATE_RE = re.compile(r"\b(?:no|not|never|without)\b", re.IGNORECASE)
 CONCRETE_HUMAN_DECISION_RE = re.compile(r"\Ahuman decision:\s*\S.*\Z", re.IGNORECASE)
 ABSENT_BIND_PATH_BLOCKER = "authoritative resolution of world-writable non-sticky /ssd1 absolute-path rebind risk for Docker bind mounts"
 ABSENT_BIND_PATH_TASK = "anvl_a59_packet_route_work.md"
@@ -535,8 +531,8 @@ def is_recorded_human_wait(state: TaskState) -> bool:
     return HUMAN_WAIT_RE.search(state.reason) is not None and NON_HUMAN_GATE_RE.search(state.reason) is None
 
 
-def is_durable_outstanding_human_question(root: Path, task: TaskLine, state: TaskState) -> bool:
-    """Return whether one exact human question already accounts for a ready blocked pane."""
+def is_authoritative_human_blocked_ready_task(root: Path, task: TaskLine, state: TaskState) -> bool:
+    """Return whether authoritative task state makes a ready pane human-blocked."""
 
     if task.section != "todo:human pending" or state.status != "blocked":
         return False
@@ -551,27 +547,14 @@ def is_durable_outstanding_human_question(root: Path, task: TaskLine, state: Tas
         or not indexed[0].target
         or not same_tmux_target(indexed[0].target, state.target)
         or task_has_pending_marker(task_path)
-        or len(metadata.pending_task_items) != 1
     ):
         return False
     if metadata.blockers:
-        if len(metadata.blockers) != 1 or not isinstance(metadata.blockers[0], HumanBlocker):
+        if not all(isinstance(blocker, HumanBlocker) for blocker in metadata.blockers):
             return False
-        blocker = metadata.blockers[0].reason
-    else:
-        blocker = state.reason
-    goal = metadata.pending_task_items[0]
-    if (
-        HUMAN_QUESTION_GATE_RE.search(blocker) is None
-        or HUMAN_QUESTION_GATE_RE.search(goal) is None
-        or NON_HUMAN_GATE_RE.search(blocker) is not None
-        or NON_HUMAN_GATE_RE.search(goal) is not None
-        or bool(NEGATED_GATE_RE.search(blocker)) != bool(NEGATED_GATE_RE.search(goal))
-    ):
-        return False
-    blocker_terms = {word.casefold() for word in HUMAN_GATE_WORD_RE.findall(blocker)} - HUMAN_GATE_BINDING_STOP_WORDS
-    goal_terms = {word.casefold() for word in HUMAN_GATE_WORD_RE.findall(goal)} - HUMAN_GATE_BINDING_STOP_WORDS
-    return bool(blocker_terms) and blocker_terms <= goal_terms
+        return not any(notice.state in {"pending", "acked"} for item in metadata.pending_items for notice in item.notices)
+    exact_human = state.reason.strip().casefold() == "human"
+    return (exact_human or HUMAN_QUESTION_GATE_RE.search(state.reason) is not None) and NON_HUMAN_GATE_RE.search(state.reason) is None
 
 
 def is_historical_human_wait_candidate(root: Path, task: TaskLine, state: TaskState) -> bool:
@@ -1328,14 +1311,7 @@ def add_blocked_idle_vl_row(root: Path, task: TaskLine, role: str, rows: list[St
         idle_status = classified.status
         if idle_status == "running" and not (is_historical_human_wait_candidate(root, task, state) or is_bind_path_blocked_worker_candidate(root, task, state)):
             return
-        if (
-            is_recorded_human_wait(state)
-            and (HUMAN_QUESTION_GATE_RE.search(state.reason) is None or not pending_task_items(state_path, root))
-            and idle_status == "ready"
-            and not is_historical_human_wait_candidate(root, task, state)
-        ):
-            return
-        if idle_status == "ready" and is_durable_outstanding_human_question(root, task, state):
+        if idle_status == "ready" and is_authoritative_human_blocked_ready_task(root, task, state):
             return
         if idle_status == "ready" and is_blocked_external_delivery_wait(root, task, state):
             return
