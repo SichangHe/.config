@@ -43,6 +43,7 @@ SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 HUMAN_CLOSE_DIRECTIVE_RE = re.compile(
     r"(?im)^\s*close\s+([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)(?=$|[\s,.;:])"
 )
+HUMAN_CLOSE_REPLY_DIRECTIVE_RE = re.compile(r"(?im)^\s*cancel\s+this\s+task(?=$|[\s,.;:])")
 UUID_RE = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 RESUME_RE = re.compile(rf"(?i)\bcodex\s+resume\s+(?:--[\w-]+\s+)*({UUID_RE})\b")
 EXIT_RESUME_RE = re.compile(
@@ -343,6 +344,36 @@ def human_authorized_target(args: Args) -> str:
     return args.human_close_authorized_target or (args.target if is_human_owned_target(args.target) else "")
 
 
+def reply_authorizes_bound_task(subject: str, body: str, target: str) -> bool:
+    """Accept one direct task cancellation bound by quoted thread ownership."""
+
+    if re.match(r"(?i)^re\s*:", subject) is None:
+        return False
+    direct_body = "\n".join(line for line in body.splitlines() if not line.lstrip().startswith(">"))
+    if len(HUMAN_CLOSE_REPLY_DIRECTIVE_RE.findall(direct_body)) != 1 or HUMAN_CLOSE_DIRECTIVE_RE.search(direct_body) is not None:
+        return False
+    owner_binding = re.compile(
+        r"(?i)\bfrom the responsible\s+([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)"
+        r"(?=$|[\s,.;:])(?:(?!\bfrom the responsible\b).)*?\bowner\b"
+    )
+    affirmative_binding = re.compile(
+        r"(?i)This is a mailbox-compression summary of reports from the responsible\s+"
+        r"([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\s+EDA/C\+\+ owner\.\s+"
+        r"It does not change task ownership\.\s*"
+    )
+    quoted_lines: list[str] = []
+    for line in body.splitlines():
+        quoted = line.lstrip()
+        if not quoted.startswith(">"):
+            continue
+        while quoted.startswith(">"):
+            quoted = quoted[1:].lstrip()
+        quoted_lines.append(quoted)
+    bindings = [match.group(1) for line in quoted_lines for match in owner_binding.finditer(line)]
+    affirmative = [match.group(1) for line in quoted_lines if (match := affirmative_binding.fullmatch(line)) is not None]
+    return bindings == [target] and affirmative == [target]
+
+
 def validate_human_close_authorization(args: Args) -> None:
     """Fail closed unless private human authority names this exact task and h* target."""
 
@@ -367,11 +398,13 @@ def validate_human_close_authorization(args: Args) -> None:
     authority_text = payload.decode("utf-8", errors="replace")
     subject_lines = [line[len("Subject:") :].strip() for line in authority_text.splitlines() if line.startswith("Subject:")]
     task_token = re.compile(rf"(?<![A-Za-z0-9_./-]){re.escape(task_reference)}(?![A-Za-z0-9_./-])")
-    if len(subject_lines) != 1 or task_token.search(subject_lines[0]) is None:
-        raise RuntimeError("human-close authorization subject does not name the exact task file")
-    body = authority_text.partition("\n\n")[2]
+    body = authority_text.replace("\r\n", "\n").partition("\n\n")[2]
+    subject_names_task = len(subject_lines) == 1 and task_token.search(subject_lines[0]) is not None
+    reply_binds_task = len(subject_lines) == 1 and reply_authorizes_bound_task(subject_lines[0], body, target)
+    if not subject_names_task and not reply_binds_task:
+        raise RuntimeError("human-close authorization subject does not name the exact task file and reply does not bind it")
     directives = HUMAN_CLOSE_DIRECTIVE_RE.findall(body)
-    if directives != [target] or target_bytes not in payload:
+    if subject_names_task and (directives != [target] or target_bytes not in payload):
         raise RuntimeError("human-close authorization does not contain one exact direct close instruction for the target")
 
 

@@ -548,6 +548,140 @@ class CodexStopTests(unittest.TestCase):
                 )
         pane_id.assert_not_called()
 
+    def test_reply_human_authority_binds_task_through_quoted_exact_owner(self) -> None:
+        authority = (
+            b"Subject: Re: ESBMC pilot and threading question\n\n"
+            b"Cancel this task and consider them overall done\n\n"
+            b"> This is a mailbox-compression summary of reports from the responsible hwork:1 EDA/C++ owner. "
+            b"It does not change task ownership.\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "task.md").write_text("---\nrunat: hwork:1\n---\n", encoding="utf-8")
+            args = Args(
+                "hwork:1",
+                0.0,
+                10,
+                False,
+                False,
+                root,
+                "task.md",
+                True,
+                0.0,
+                "manager_mail/test.txt",
+                "a" * 64,
+            )
+            with patch("omo_manager.omo_codex_stop.read_human_close_authorization", return_value=authority):
+                codex_stop.validate_human_close_authorization(args)
+
+            crlf_authority = authority.replace(b"\n", b"\r\n")
+            with patch("omo_manager.omo_codex_stop.read_human_close_authorization", return_value=crlf_authority):
+                codex_stop.validate_human_close_authorization(args)
+
+    def test_reply_human_authority_rejects_ambiguous_or_wrong_thread_binding(self) -> None:
+        cases = (
+            b"> This is not from the responsible hwork:1 EDA/C++ owner.\n",
+            b"> Do not take this from the responsible hwork:1 EDA/C++ owner.\n",
+            (
+                b"> This is a mailbox-compression summary of reports from the responsible other:1 EDA/C++ owner. "
+                b"It does not change task ownership.\n"
+            ),
+            (
+                b"> This is a mailbox-compression summary of reports from the responsible hwork:1 EDA/C++ owner. "
+                b"It does not change task ownership.\n"
+                b"> This is a mailbox-compression summary of reports from the responsible hwork:1 EDA/C++ owner. "
+                b"It does not change task ownership.\n"
+            ),
+            (
+                b"> This is a mailbox-compression summary of reports from the responsible hwork:1 EDA/C++ owner. "
+                b"It does not change task ownership.\n"
+                b"> This is a mailbox-compression summary of reports from the responsible other:1 EDA/C++ owner. "
+                b"It does not change task ownership.\n"
+            ),
+            (
+                b"> This is a mailbox-compression summary of reports from the responsible other:1 EDA/C++ owner. "
+                b"It does not change task ownership. This is a mailbox-compression summary of reports from the responsible "
+                b"hwork:1 EDA/C++ owner. It does not change task ownership.\n"
+            ),
+            (
+                b"> This is a mailbox-compression summary of reports from the responsible hwork:1 EDA/C++ owner. "
+                b"It does not change task ownership.\n"
+                b">> This is a mailbox-compression summary of reports from the responsible other:1 EDA/C++ owner. "
+                b"It does not change task ownership.\n"
+            ),
+            (
+                b"> This is a mailbox-compression summary of reports from the responsible hwork:1 EDA/C++ owner. "
+                b"It does not change task ownership.\n"
+                b"> > This is a mailbox-compression summary of reports from the responsible other:1 EDA/C++ owner. "
+                b"It does not change task ownership.\n"
+            ),
+            (
+                b"This is a mailbox-compression summary of reports from the responsible hwork:1 EDA/C++ owner. "
+                b"It does not change task ownership.\n"
+            ),
+            (
+                b"close other:1\n"
+                b"> This is a mailbox-compression summary of reports from the responsible hwork:1 EDA/C++ owner. "
+                b"It does not change task ownership.\n"
+            ),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "task.md").write_text("---\nrunat: hwork:1\n---\n", encoding="utf-8")
+            args = Args(
+                "hwork:1",
+                0.0,
+                10,
+                False,
+                False,
+                root,
+                "task.md",
+                True,
+                0.0,
+                "manager_mail/test.txt",
+                "a" * 64,
+            )
+            for binding in cases:
+                authority = b"Subject: Re: thread\n\nCancel this task\n\n" + binding
+                with self.subTest(binding=binding), patch(
+                    "omo_manager.omo_codex_stop.read_human_close_authorization", return_value=authority
+                ), self.assertRaisesRegex(RuntimeError, "reply does not bind it"):
+                    codex_stop.validate_human_close_authorization(args)
+
+    def test_reply_human_authority_requires_one_direct_unquoted_cancellation(self) -> None:
+        direct_bodies = (
+            b"> Cancel this task\n",
+            b"Cancel this task\nCancel this task\n",
+            b"Close this task\n",
+            b"Please consider this task done\n",
+        )
+        binding = (
+            b"> This is a mailbox-compression summary of reports from the responsible hwork:1 EDA/C++ owner. "
+            b"It does not change task ownership.\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "task.md").write_text("---\nrunat: hwork:1\n---\n", encoding="utf-8")
+            args = Args(
+                "hwork:1",
+                0.0,
+                10,
+                False,
+                False,
+                root,
+                "task.md",
+                True,
+                0.0,
+                "manager_mail/test.txt",
+                "a" * 64,
+            )
+            for direct_body in direct_bodies:
+                authority = b"Subject: Re: thread\n\n" + direct_body + binding
+                with self.subTest(direct_body=direct_body), patch(
+                    "omo_manager.omo_codex_stop.read_human_close_authorization", return_value=authority
+                ), self.assertRaisesRegex(RuntimeError, "reply does not bind it"):
+                    codex_stop.validate_human_close_authorization(args)
+
     def test_stop_refuses_pinned_human_pane_that_moves_before_interrupt(self) -> None:
         authority = b"Subject: close task.md\n\nclose hwork:1\n"
         with tempfile.TemporaryDirectory() as tmp:
