@@ -456,10 +456,11 @@ def same_file_identity(left: os.stat_result, right: os.stat_result) -> bool:
     return left.st_dev == right.st_dev and left.st_ino == right.st_ino
 
 
-def atomic_replace_if_unchanged(path: Path, text: str, before: os.stat_result) -> None:
+def atomic_replace_if_unchanged(path: Path, text: str, before: os.stat_result, *, lock_held: bool = False) -> None:
     """Atomically replace `path` only if it still matches the state that was read."""
     tmp_path: Path | None = None
-    with task_file_lock(path):
+    lock_context = contextlib.nullcontext() if lock_held else task_file_lock(path)
+    with lock_context:
         try:
             with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", dir=path.parent, prefix=f".{path.name}.", delete=False) as handle:
                 tmp_path = Path(handle.name)

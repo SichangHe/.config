@@ -53,6 +53,12 @@ ALL other fields are required.
 
 `managerat` MUST be different from `runat`. In a worker task file, `managerat` is the manager that owns the task. In a manager task file, `runat` is the manager pane that receives pending blocks already written to that manager file. Every task's `runat` receives ordinary pending delivery. Its `managerat` receives manager-marked content, matched case-insensitively with surrounding punctuation ignored, and authenticated private reports produced by the task.
 
+Codex worker records may include `session_id`, a UUID captured from a guarded
+launch-time `/status` query. Fresh prompts are delivered only after this UUID is
+captured and bound to the task. It is not valid for `pcodx` records or human
+(`h*`) targets. Existing eligible idle workers can be reviewed with
+`omo_codex_session_migrate.py --root ROOT` (use `--apply` only after review).
+
 `runat` is a tmux target. Legacy `runat: retired` values remain readable only for historical compatibility; helpers must not create new retired targets. As a read-only exception, the manager status helper validates completed child records with `status: done` and `runat: retired` while checking whether their parent can close.
 
 `long_running` is active but suppresses ordinary ready/close reminders. Use it for managers and persistent human-facing interactive agents. A `long_running` task with `blocked_on` is waiting and does not receive pending-item reminders; without it, it does. Error, missing-pane, stuck-input, malformed-state, and launch-failure handling remains active.

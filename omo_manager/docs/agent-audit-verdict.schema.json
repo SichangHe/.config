@@ -1,0 +1,1 @@
+{"type":"object","additionalProperties":false,"required":["verdict","evidence","call_ids"],"properties":{"verdict":{"enum":["pass","problem","needs_evidence","inconclusive"]},"evidence":{"type":"string","maxLength":500},"call_ids":{"type":"array","maxItems":8,"items":{"type":"string","maxLength":128}}}}

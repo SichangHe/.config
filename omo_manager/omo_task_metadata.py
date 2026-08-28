@@ -20,9 +20,9 @@ TARGET_RE = re.compile(r"\b([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\b")
 ID_RE = re.compile(r"^(task|pi|wake)_([0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$")
 RFC3339_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$")
 V1_REQUIRED_FIELDS = {"version", "status", "runat", "tool", "managerat", "is_manager", "pending_task_items"}
-V1_ALLOWED_FIELDS = V1_REQUIRED_FIELDS | {"blocked_on"}
+V1_ALLOWED_FIELDS = V1_REQUIRED_FIELDS | {"blocked_on", "session_id"}
 V2_REQUIRED_FIELDS = V1_REQUIRED_FIELDS | {"task_id", "resolved_task_items"}
-V2_ALLOWED_FIELDS = V2_REQUIRED_FIELDS | {"blocked_on", "resume_status"}
+V2_ALLOWED_FIELDS = V2_REQUIRED_FIELDS | {"blocked_on", "resume_status", "session_id"}
 
 
 class TaskFrontmatterError(ValueError):
@@ -114,6 +114,7 @@ class TaskMetadata:
     resume_status: str = ""
     blockers: tuple[TaskBlockerEntry, ...] = ()
     resolved_task_items: tuple[ResolvedTaskItem, ...] = ()
+    session_id: str = ""
 
     @property
     def pending_task_items(self) -> tuple[str, ...]:
@@ -232,7 +233,8 @@ def parse_v1_metadata(lines: list[str]) -> TaskMetadata:
     pending_items = values["pending_task_items"]
     if not isinstance(pending_items, tuple):
         raise TaskFrontmatterError("`pending_task_items` must be a list.")
-    return TaskMetadata(*common, legacy_pending_items=pending_items, blocked_on=blocked_on)
+    session_id = optional_session_id(values)
+    return TaskMetadata(*common, legacy_pending_items=pending_items, blocked_on=blocked_on, session_id=session_id)
 
 
 def load_v2_mapping(source: str) -> dict[str, object]:
@@ -275,7 +277,21 @@ def parse_v2_metadata(source: str, work_log_root: Path | None = None) -> TaskMet
     elif "resume_status" in values:
         raise TaskFrontmatterError("`resume_status` must only exist when `status` is `blocked`.")
     blocker_summary = "; ".join(blocker_text(blocker) for blocker in blockers)
-    return TaskMetadata(*common, pending_items=pending_items, blocked_on=blocker_summary, task_id=task_id, resume_status=str(resume_status), blockers=blockers, resolved_task_items=resolved_items)
+    session_id = optional_session_id(values)
+    return TaskMetadata(*common, pending_items=pending_items, blocked_on=blocker_summary, task_id=task_id, resume_status=str(resume_status), blockers=blockers, resolved_task_items=resolved_items, session_id=session_id)
+
+
+def optional_session_id(values: Mapping[str, object]) -> str:
+    value = values.get("session_id", "")
+    if value == "":
+        return ""
+    if not isinstance(value, str):
+        raise TaskFrontmatterError("`session_id` must be a UUID text value.")
+    try:
+        UUID(value)
+    except ValueError as exc:
+        raise TaskFrontmatterError("`session_id` must be a valid UUID.") from exc
+    return value
 
 
 def validate_required(values: Mapping[str, object], required: set[str]) -> None:
@@ -308,6 +324,8 @@ def parse_common(values: Mapping[str, object], allowed: set[str]) -> tuple[str, 
     if canonical_target(runat) == canonical_target(managerat):
         raise TaskFrontmatterError("`managerat` must be different from `runat`.")
     tool = require_text(values["tool"], "tool")
+    if "session_id" in values and tool != "codex":
+        raise TaskFrontmatterError("`session_id` is only valid for ordinary Codex tasks.")
     is_manager = values["is_manager"]
     if not isinstance(is_manager, bool):
         raise TaskFrontmatterError("`is_manager` must be a boolean.")
