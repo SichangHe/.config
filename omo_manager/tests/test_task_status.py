@@ -19,6 +19,7 @@ from omo_manager.omo_agent_status import TaskFrontmatterError, parse_task_metada
 from omo_manager.omo_task_status import DONE_REMINDER
 from omo_manager.omo_task_status import ensure_repository_closure_custody
 from omo_manager.omo_task_status import close_retired_done
+from omo_manager.omo_task_status import close_missing_target
 from omo_manager.omo_task_status import normalize_retired_todo
 from omo_manager.omo_task_status import normalize_low_priority_current
 from omo_manager.omo_task_status import park_audit_record
@@ -33,6 +34,7 @@ from omo_manager.omo_task_status import reconcile_done_index
 from omo_manager.omo_task_status import reconcile_running_index
 from omo_manager.omo_task_status import reconcile_long_running_human_index
 from omo_manager.omo_task_status import reconcile_missing_target
+from omo_manager.omo_task_status import read_park_authority_envelope
 from omo_manager.omo_task_status import replace_if_unchanged_locked
 from omo_manager.omo_task_status import replace_private_audit
 from omo_manager.omo_task_status import reserve_private_audit
@@ -95,6 +97,330 @@ class TaskStatusTests(unittest.TestCase):
         "I don't see any task I am aware of that is not tracked, so just correct "
         "the task records as opposed to reinstating the agents.\n"
     )
+    CLOSE_MISSING_AUTHORITY_TEXT = (
+        "Subject: close missing records\n\n"
+        "As for the sessions without IDs, do whatever you need to do to make those\n"
+        "problems go away. So maybe just close them.\n\n"
+        "The seven records with missing tmux targets were ordered closed.\n"
+    )
+
+    def write_close_missing_case(
+        self,
+        root: Path,
+        *,
+        section: str = "human pending",
+        targetful: bool = True,
+        blocker: str = "direct human halt",
+        is_manager: bool = False,
+    ) -> tuple[Path, str, Path, str, StatusArgs]:
+        authority_dir = root / "manager_mail"
+        authority_dir.mkdir(mode=0o700)
+        authority = authority_dir / "close.txt"
+        authority.write_text(self.CLOSE_MISSING_AUTHORITY_TEXT, encoding="utf-8")
+        authority.chmod(0o600)
+        excerpt = "".join(self.CLOSE_MISSING_AUTHORITY_TEXT.splitlines(keepends=True)[2:6])
+        envelope = root / "request_task.md"
+        envelope_text = (
+            '<human_instruction authoritative="true" source="manager_mail/close.txt:3-6">\n'
+            f"{excerpt}</human_instruction>\n"
+        )
+        envelope.write_text(envelope_text, encoding="utf-8")
+        text = task_frontmatter(
+            status="blocked",
+            blocked_on=blocker,
+            pending_items=("preserve first", "preserve second"),
+            runat="vl:8",
+            is_manager=is_manager,
+        ) + "existing evidence\n"
+        task = root / "missing.md"
+        task.write_text(text, encoding="utf-8")
+        row = "missing.md vl:8" if targetful else "missing.md"
+        todo_text = (
+            f"current:\n{row if section == 'current' else ''}\n\n"
+            f"low priority:\n{row if section == 'low priority' else ''}\n\n"
+            f"human pending:\n{row if section == 'human pending' else ''}\n\n"
+            f"previous:\n{row if section == 'previous' else ''}\n"
+        )
+        todo = root / "TODO.md"
+        todo.write_text(todo_text, encoding="utf-8")
+        audit_dir = root / "audit"
+        audit_dir.mkdir(mode=0o700)
+        args = StatusArgs(
+            root,
+            Path("missing.md"),
+            "",
+            "",
+            close_missing_target=True,
+            missing_target="vl:8",
+            expected_task_sha256=hashlib.sha256(text.encode()).hexdigest(),
+            expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest(),
+            authority_file=Path("manager_mail/close.txt"),
+            authority_lines=(3, 6),
+            authority_sha256=hashlib.sha256(self.CLOSE_MISSING_AUTHORITY_TEXT.encode()).hexdigest(),
+            authority_envelope=Path("request_task.md"),
+            authority_envelope_sha256=hashlib.sha256(envelope_text.encode()).hexdigest(),
+            audit_output=(audit_dir / "close.yaml").resolve(),
+        )
+        return task, text, todo, todo_text, args
+
+    def test_close_missing_target_handles_all_canonical_sections_and_record_shapes(self) -> None:
+        shapes = (
+            ("human pending", False, "direct human halt", True),
+            ("low priority", True, "token quota", False),
+            ("low priority", False, "reviewed lifecycle helper limitation", True),
+            ("previous", True, "direct human halt", True),
+        )
+        for section, targetful, blocker, is_manager in shapes:
+            with self.subTest(section=section, targetful=targetful, blocker=blocker, is_manager=is_manager), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                task, text, todo, _todo_text, args = self.write_close_missing_case(
+                    root,
+                    section=section,
+                    targetful=targetful,
+                    blocker=blocker,
+                    is_manager=is_manager,
+                )
+                with (
+                    patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=("", "", "")) as inspect_target,
+                    patch("omo_manager.omo_task_status.stop", side_effect=AssertionError("tmux mutation")),
+                ):
+                    close_missing_target(args, task, text, task.stat())
+                self.assertEqual(3, inspect_target.call_count)
+                metadata = parse_task_metadata(task.read_text(), root)
+                assert metadata is not None
+                self.assertEqual("done", metadata.status)
+                self.assertEqual((), metadata.pending_task_items)
+                self.assertIn("prior queue preserved in owner-private audit", task.read_text())
+                previous = todo.read_text().partition("previous:\n")[2]
+                self.assertIn("missing.md\n", previous)
+                self.assertNotIn("missing.md vl:8", todo.read_text())
+                audit = yaml.safe_load(args.audit_output.read_text())
+                self.assertEqual("complete", audit["state"])
+                self.assertEqual(["preserve first", "preserve second"], audit["pending_task_items"])
+                self.assertEqual("token quota" if blocker == "token quota" else blocker, audit["blocked_on"])
+                self.assertEqual("request_task.md", audit["authority_envelope"])
+
+    def test_close_missing_target_rejects_live_unprovable_or_rebound_target_without_mutation(self) -> None:
+        resolutions = (("%42",), (None,), ("", "%42"), ("", "", "%42"))
+        for resolution in resolutions:
+            with self.subTest(resolution=resolution), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                task, text, todo, todo_text, args = self.write_close_missing_case(root)
+                with patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=resolution):
+                    with self.assertRaisesRegex(TaskFrontmatterError, "live|reappeared"):
+                        close_missing_target(args, task, text, task.stat())
+                self.assertEqual(text, task.read_text())
+                self.assertEqual(todo_text, todo.read_text())
+
+    def test_close_missing_target_rejects_drift_malformed_authority_and_ambiguous_todo(self) -> None:
+        for case in ("task_digest", "todo_digest", "authority", "negated_authority", "envelope", "duplicate", "current"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                task, text, todo, todo_text, args = self.write_close_missing_case(root)
+                if case == "task_digest":
+                    args = replace(args, expected_task_sha256="0" * 64)
+                elif case == "todo_digest":
+                    args = replace(args, expected_todo_sha256="0" * 64)
+                elif case == "authority":
+                    authority = root / "manager_mail/close.txt"
+                    malformed = self.CLOSE_MISSING_AUTHORITY_TEXT.replace("So maybe just close them.", "Review them.").replace("ordered closed", "need review")
+                    authority.write_text(malformed)
+                    authority.chmod(0o600)
+                    args = replace(args, authority_sha256=hashlib.sha256(malformed.encode()).hexdigest())
+                elif case == "negated_authority":
+                    authority = root / "manager_mail/close.txt"
+                    negated = self.CLOSE_MISSING_AUTHORITY_TEXT.replace(
+                        "So maybe just close them.",
+                        "So maybe just close them. Do not close the missing records.",
+                    )
+                    authority.write_text(negated)
+                    authority.chmod(0o600)
+                    envelope = root / "request_task.md"
+                    changed_envelope = envelope.read_text().replace(
+                        "So maybe just close them.",
+                        "So maybe just close them. Do not close the missing records.",
+                    )
+                    envelope.write_text(changed_envelope)
+                    args = replace(
+                        args,
+                        authority_sha256=hashlib.sha256(negated.encode()).hexdigest(),
+                        authority_envelope_sha256=hashlib.sha256(changed_envelope.encode()).hexdigest(),
+                    )
+                elif case == "envelope":
+                    envelope = root / "request_task.md"
+                    changed = envelope.read_text().replace("ordered closed", "need review")
+                    envelope.write_text(changed)
+                    args = replace(args, authority_envelope_sha256=hashlib.sha256(changed.encode()).hexdigest())
+                elif case == "current":
+                    changed = todo_text.replace("current:\n", "current:\nmissing.md vl:8\n", 1).replace(
+                        "human pending:\nmissing.md vl:8", "human pending:\n"
+                    )
+                    todo.write_text(changed)
+                    args = replace(args, expected_todo_sha256=hashlib.sha256(changed.encode()).hexdigest())
+                else:
+                    changed = todo_text.replace("previous:\n", "previous:\nmissing.md vl:8\n")
+                    todo.write_text(changed)
+                    args = replace(args, expected_todo_sha256=hashlib.sha256(changed.encode()).hexdigest())
+                with patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""):
+                    with self.assertRaises(TaskFrontmatterError):
+                        close_missing_target(args, task, task.read_text(), task.stat())
+                self.assertEqual(text, task.read_text())
+
+    def test_close_missing_target_rolls_back_todo_when_task_replace_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, text, todo, todo_text, args = self.write_close_missing_case(root, section="low priority")
+            real_replace = replace_if_unchanged_locked
+
+            def fail_task(path: Path, updated: str, before: os.stat_result) -> None:
+                if path == task:
+                    raise TaskFrontmatterError("injected task failure")
+                real_replace(path, updated, before)
+
+            with (
+                patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""),
+                patch("omo_manager.omo_task_status.replace_if_unchanged_locked", side_effect=fail_task),
+            ):
+                with self.assertRaisesRegex(TaskFrontmatterError, "injected task failure"):
+                    close_missing_target(args, task, text, task.stat())
+            self.assertEqual(text, task.read_text())
+            self.assertEqual(todo_text, todo.read_text())
+
+    def test_close_missing_target_detects_envelope_drift_before_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, text, todo, todo_text, args = self.write_close_missing_case(root)
+            envelope = root / "request_task.md"
+            original = envelope.read_text()
+            real_read = read_park_authority_envelope
+            reads = 0
+
+            def drift_after_first_read(call_args: StatusArgs, excerpt: str, locator: str) -> str:
+                nonlocal reads
+                reads += 1
+                result = real_read(call_args, excerpt, locator)
+                if reads == 1:
+                    envelope.write_text(original + "drift\n")
+                return result
+
+            with (
+                patch("omo_manager.omo_task_status.read_park_authority_envelope", side_effect=drift_after_first_read),
+                patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""),
+            ):
+                with self.assertRaisesRegex(TaskFrontmatterError, "authority envelope"):
+                    close_missing_target(args, task, text, task.stat())
+            self.assertEqual(text, task.read_text())
+            self.assertEqual(todo_text, todo.read_text())
+            self.assertFalse(args.audit_output.exists())
+
+    def test_close_missing_target_only_reads_tmux_inventory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, text, _todo, _todo_text, args = self.write_close_missing_case(root)
+            empty_inventory = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+            with (
+                patch("omo_manager.omo_task_status.tmux", return_value=empty_inventory) as tmux_call,
+                patch("omo_manager.omo_task_status.stop", side_effect=AssertionError("pane mutation")),
+                patch("omo_manager.omo_task_status.record_close", side_effect=AssertionError("close mutation")),
+            ):
+                close_missing_target(args, task, text, task.stat())
+            self.assertEqual(3, tmux_call.call_count)
+            expected = [
+                "list-panes",
+                "-a",
+                "-F",
+                "#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_active}\t#{pane_id}",
+            ]
+            self.assertTrue(all(call.args == (expected,) for call in tmux_call.call_args_list))
+
+    def test_close_missing_target_treats_prepared_audit_as_committed_when_finalization_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, text, todo, _todo_text, args = self.write_close_missing_case(root)
+            real_replace_audit = replace_private_audit
+
+            def fail_complete(path: Path, expected: str, updated: str) -> None:
+                if yaml.safe_load(updated)["state"] == "complete":
+                    raise TaskFrontmatterError("injected audit finalization failure")
+                real_replace_audit(path, expected, updated)
+
+            with (
+                patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""),
+                patch("omo_manager.omo_task_status.replace_private_audit", side_effect=fail_complete),
+            ):
+                close_missing_target(args, task, text, task.stat())
+            metadata = parse_task_metadata(task.read_text(), root)
+            assert metadata is not None
+            self.assertEqual("done", metadata.status)
+            self.assertIn("previous:\nmissing.md\n", todo.read_text())
+            self.assertEqual("prepared-or-committed", yaml.safe_load(args.audit_output.read_text())["state"])
+
+    def test_close_missing_target_accepts_crlf_authority_with_exact_digest_and_envelope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, text, _todo, _todo_text, args = self.write_close_missing_case(root)
+            authority = root / "manager_mail/close.txt"
+            crlf = authority.read_text().replace("\n", "\r\n")
+            authority.write_bytes(crlf.encode())
+            authority.chmod(0o600)
+            args = replace(args, authority_sha256=hashlib.sha256(crlf.encode()).hexdigest())
+            with patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""):
+                close_missing_target(args, task, text, task.stat())
+            metadata = parse_task_metadata(task.read_text(), root)
+            assert metadata is not None
+            self.assertEqual("done", metadata.status)
+            self.assertEqual("complete", yaml.safe_load(args.audit_output.read_text())["state"])
+
+    def test_close_missing_target_cli_requires_exact_direct_inputs(self) -> None:
+        args = parse_args(
+            [
+                "--root",
+                "/tmp/root",
+                "--close-missing-target",
+                "--missing-target",
+                "vl:8",
+                "--expected-task-sha256",
+                "1" * 64,
+                "--expected-todo-sha256",
+                "2" * 64,
+                "--authority-file",
+                "manager_mail/request.txt",
+                "--authority-lines",
+                "3-4",
+                "--authority-sha256",
+                "3" * 64,
+                "--authority-envelope",
+                "task.md",
+                "--authority-envelope-sha256",
+                "4" * 64,
+                "--audit-output",
+                "/tmp/audit.yaml",
+                "missing.md",
+            ]
+        )
+        self.assertTrue(args.close_missing_target)
+        self.assertEqual("vl:8", args.missing_target)
+        with self.assertRaises(SystemExit):
+            parse_args(
+                [
+                    "--close-missing-target",
+                    "--missing-target",
+                    "vl:8",
+                    "--expected-task-sha256",
+                    "1" * 64,
+                    "--expected-todo-sha256",
+                    "2" * 64,
+                    "--authority-file",
+                    "manager_mail/request.txt",
+                    "--authority-lines",
+                    "3-4",
+                    "--authority-sha256",
+                    "3" * 64,
+                    "--audit-output",
+                    "/tmp/audit.yaml",
+                    "missing.md",
+                ]
+            )
 
     def write_missing_target_case(self, root: Path, *, runat: str = "vl:8", is_manager: bool = False) -> tuple[Path, str, Path, str, StatusArgs]:
         authority_dir = root / "manager_mail"
