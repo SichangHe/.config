@@ -30,6 +30,7 @@ startup_prompt=1
 refresh_watchers=1
 dry_run=0
 force_port=0
+allow_new_tmux_session=0
 lock_fd=9
 
 usage() {
@@ -48,6 +49,8 @@ Options:
   --no-startup-prompt     Do not submit the post-restart work-log MANAGER.md prompt
   --no-refresh-watchers   Do not run omo_manager_setup_watchers.sh after health succeeds
   --force-port            Kill any non-manager listener still occupying the manager port after Ctrl-C
+  --allow-new-tmux-session
+                           Create the named session only when reuse is genuinely unsuitable
   --dry-run               Print planned actions without changing tmux/processes/watchers
   -h, --help              Show this help
 
@@ -76,6 +79,7 @@ while [ "$#" -gt 0 ]; do
     --no-startup-prompt) startup_prompt=0; shift ;;
     --no-refresh-watchers) refresh_watchers=0; shift ;;
     --force-port) force_port=1; shift ;;
+    --allow-new-tmux-session) allow_new_tmux_session=1; shift ;;
     --dry-run) dry_run=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
@@ -90,15 +94,43 @@ if [[ "${tmux_target%%:*}" == h* ]]; then
   echo "manager restart refuses human-owned h* tmux targets" >&2
   exit 1
 fi
+created_session_id=""
+created_session_name=""
+cleanup_created_session() {
+  if [[ "$created_session_id" =~ ^\$[0-9]+$ && "$created_session_name" =~ ^[A-Za-z][A-Za-z0-9_-]*$ ]]; then
+    tmux if-shell -t "$created_session_id" -F "#{&&:#{==:#{session_id},$created_session_id},#{==:#{session_name},$created_session_name}}" \
+      "kill-session -t '$created_session_id'" '' 2>/dev/null || true
+  fi
+}
 if ! tmux has-session -t "=${tmux_target%%:*}:" 2>/dev/null; then
-  echo "tmux session not found: ${tmux_target%%:*}; manager restart requires an existing session" >&2
-  exit 1
+  if [ "$allow_new_tmux_session" -ne 1 ]; then
+    echo "tmux session not found: ${tmux_target%%:*}; reuse an existing non-human session, or pass --allow-new-tmux-session only when a new session is genuinely needed" >&2
+    exit 1
+  fi
+  if [ "$dry_run" -eq 1 ]; then
+    echo "would explicitly create tmux session ${tmux_target%%:*} in $workdir; reuse an existing non-human session when practical"
+    exit 0
+  fi
+  echo "warning: explicitly creating tmux session ${tmux_target%%:*}; reuse an existing non-human session when practical" >&2
+  created_identity="$(tmux new-session -d -P -F '#{session_id} #{pane_id} #{session_name}:#{window_index}.#{pane_index}' -s "${tmux_target%%:*}" -n manager -c "$workdir")"
+  read -r created_session_id created_pane_id created_target <<<"$created_identity"
+  created_session_name="${created_target%%:*}"
+  requested_target="$tmux_target"
+  [[ "$requested_target" == *.* ]] || requested_target="${requested_target}.0"
+  if [[ ! "$created_session_id" =~ ^\$[0-9]+$ || ! "$created_pane_id" =~ ^%[0-9]+$ || "$created_target" != "$requested_target" ]]; then
+    cleanup_created_session
+    echo "new tmux session did not return the requested session and pane identity" >&2
+    exit 1
+  fi
+  tmux_target="$created_target"
+  tmux_pane_ref="$tmux_target"
 fi
 tmux_session_name="${tmux_target%%:*}"
 tmux_target_suffix="${tmux_target#*:}"
 tmux_identity="$(tmux display-message -p -t "=${tmux_session_name}:${tmux_target_suffix}" '#{session_id} #{pane_id} #{session_name}:#{window_index}.#{pane_index}' 2>/dev/null || true)"
 read -r tmux_session_id tmux_pane_id tmux_canonical_target <<<"$tmux_identity"
 if [[ ! "$tmux_session_id" =~ ^\$[0-9]+$ || ! "$tmux_pane_id" =~ ^%[0-9]+$ || "$tmux_canonical_target" != "$tmux_target" ]]; then
+  cleanup_created_session
   echo "tmux target not found exactly: $tmux_target" >&2
   exit 1
 fi

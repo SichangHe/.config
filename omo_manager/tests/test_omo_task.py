@@ -730,17 +730,212 @@ class OmoTaskTests(unittest.TestCase):
             wait_shell.assert_called_once_with("%7")
             start_codex_mock.assert_not_called()
 
-    def test_new_window_refuses_missing_named_session(self) -> None:
+    def test_new_window_creates_missing_named_session_with_reuse_guidance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = Args(
+                Path(tmp),
+                "x.md",
+                "newcfg",
+                "",
+                "codex",
+                Path(tmp),
+                "worker",
+                None,
+                False,
+                False,
+                "",
+                "",
+                (),
+                allow_new_tmux_session=True,
+            )
+            missing = subprocess.CompletedProcess(["tmux"], 1, "", "can't find session: newcfg")
+            created = subprocess.CompletedProcess(["tmux"], 0, "$8\tnewcfg:0\t%9\n", "")
+            stderr = io.StringIO()
+            with (
+                patch("omo_manager.omo_task.resolved_launch_session_name", return_value="newcfg"),
+                patch("omo_manager.omo_task.tmux", side_effect=[missing, created]) as tmux_mock,
+                patch("omo_manager.omo_task.wait_shell"),
+                contextlib.redirect_stderr(stderr),
+            ):
+                self.assertEqual("newcfg:0", new_window(args))
+            command = tmux_mock.call_args_list[1].args[0]
+            self.assertEqual(["new-session", "-d", "-P"], command[:3])
+            self.assertIn("reuse an existing non-human session", stderr.getvalue())
+
+    def test_missing_session_defaults_to_reuse_guidance(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             args = Args(Path(tmp), "x.md", "newcfg", "", "codex", Path(tmp), "worker", None, False, False, "", "", ())
             missing = subprocess.CompletedProcess(["tmux"], 1, "", "can't find session: newcfg")
             with (
                 patch("omo_manager.omo_task.resolved_launch_session_name", return_value="newcfg"),
                 patch("omo_manager.omo_task.tmux", return_value=missing) as tmux_mock,
-                self.assertRaisesRegex(ValueError, "must already exist"),
+                self.assertRaisesRegex(ValueError, "reuse an existing non-human session"),
             ):
                 _ = new_window(args)
             self.assertEqual(1, tmux_mock.call_count)
+
+    def test_human_launch_authority_does_not_authorize_missing_session_creation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = Args(
+                root,
+                "x.md",
+                "hreview",
+                "",
+                "codex",
+                root,
+                "worker",
+                None,
+                False,
+                False,
+                "",
+                "",
+                (),
+                human_email_file=Path("manager_mail/request.txt"),
+                human_email_lines=(1, 1),
+                human_email_text="Launch an agent in hreview.\n",
+                allow_new_tmux_session=True,
+            )
+            missing = subprocess.CompletedProcess(["tmux"], 1, "", "can't find session: hreview")
+            with (
+                patch("omo_manager.omo_task.resolved_launch_session_name", return_value="hreview"),
+                patch("omo_manager.omo_task.tmux", return_value=missing) as tmux_mock,
+                self.assertRaisesRegex(ValueError, "explicitly creating that exact session"),
+            ):
+                _ = new_window(args)
+            self.assertEqual(1, tmux_mock.call_count)
+
+    def test_human_session_creation_requires_exact_separate_imperative(self) -> None:
+        invalid_create_lines = (
+            "Open the hreview session transcript.",
+            "Create a report about session hreview.",
+            "Create tmux session hother.",
+            "Do not create tmux session hreview.",
+            "Create tmux session hreview after reviewing the transcript.",
+        )
+        for create_line in invalid_create_lines:
+            with self.subTest(create_line=create_line), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                args = Args(
+                    root,
+                    "x.md",
+                    "hreview",
+                    "",
+                    "codex",
+                    root,
+                    "worker",
+                    None,
+                    False,
+                    False,
+                    "",
+                    "",
+                    (),
+                    human_email_file=Path("manager_mail/request.txt"),
+                    human_email_lines=(1, 2),
+                    human_email_text=f"Launch an agent in hreview.\n{create_line}\n",
+                    allow_new_tmux_session=True,
+                )
+                missing = subprocess.CompletedProcess(["tmux"], 1, "", "can't find session: hreview")
+                with (
+                    patch("omo_manager.omo_task.resolved_launch_session_name", return_value="hreview"),
+                    patch("omo_manager.omo_task.tmux", return_value=missing),
+                    self.assertRaisesRegex(ValueError, "explicitly creating that exact session"),
+                ):
+                    _ = new_window(args)
+
+    def test_human_session_creation_accepts_separate_exact_imperatives(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = Args(
+                root,
+                "x.md",
+                "hreview",
+                "",
+                "codex",
+                root,
+                "worker",
+                None,
+                False,
+                False,
+                "",
+                "",
+                (),
+                human_email_file=Path("manager_mail/request.txt"),
+                human_email_lines=(1, 2),
+                human_email_text="Launch an agent in hreview.\nCreate a new tmux session named hreview.\n",
+                allow_new_tmux_session=True,
+            )
+            missing = subprocess.CompletedProcess(["tmux"], 1, "", "can't find session: hreview")
+            created = subprocess.CompletedProcess(["tmux"], 0, "$8\threview:0\t%9\n", "")
+            with (
+                patch("omo_manager.omo_task.resolved_launch_session_name", return_value="hreview"),
+                patch("omo_manager.omo_task.tmux", side_effect=[missing, created]),
+                patch("omo_manager.omo_task.wait_shell"),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                self.assertEqual("hreview:0", new_window(args))
+
+    def test_created_session_identity_mismatch_cleans_only_returned_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = Args(
+                Path(tmp),
+                "x.md",
+                "newcfg",
+                "",
+                "codex",
+                Path(tmp),
+                "worker",
+                None,
+                False,
+                False,
+                "",
+                "",
+                (),
+                allow_new_tmux_session=True,
+            )
+            missing = subprocess.CompletedProcess(["tmux"], 1, "", "can't find session")
+            mismatched = subprocess.CompletedProcess(["tmux"], 0, "$8\tother:0\t%9\n", "")
+            cleaned = subprocess.CompletedProcess(["tmux"], 0, "", "")
+            with (
+                patch("omo_manager.omo_task.resolved_launch_session_name", return_value="newcfg"),
+                patch("omo_manager.omo_task.tmux", side_effect=[missing, mismatched, cleaned]) as tmux_mock,
+                self.assertRaisesRegex(RuntimeError, "identity did not match"),
+            ):
+                _ = new_window(args)
+            cleanup = tmux_mock.call_args_list[2].args[0]
+            self.assertEqual(["if-shell", "-t", "$8", "-F"], cleanup[:4])
+            self.assertIn("#{session_name},newcfg", cleanup[4])
+            self.assertEqual("kill-session -t '$8'", cleanup[5])
+
+    def test_created_session_wait_failure_cleans_returned_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = Args(
+                Path(tmp),
+                "x.md",
+                "newcfg",
+                "",
+                "codex",
+                Path(tmp),
+                "worker",
+                None,
+                False,
+                False,
+                "",
+                "",
+                (),
+                allow_new_tmux_session=True,
+            )
+            missing = subprocess.CompletedProcess(["tmux"], 1, "", "can't find session")
+            created = subprocess.CompletedProcess(["tmux"], 0, "$8\tnewcfg:0\t%9\n", "")
+            cleaned = subprocess.CompletedProcess(["tmux"], 0, "", "")
+            with (
+                patch("omo_manager.omo_task.resolved_launch_session_name", return_value="newcfg"),
+                patch("omo_manager.omo_task.tmux", side_effect=[missing, created, cleaned]) as tmux_mock,
+                patch("omo_manager.omo_task.wait_shell", side_effect=RuntimeError("shell timeout")),
+                self.assertRaisesRegex(RuntimeError, "shell timeout"),
+            ):
+                _ = new_window(args)
+            self.assertEqual(["if-shell", "-t", "$8", "-F"], tmux_mock.call_args_list[2].args[0][:4])
 
     def test_require_existing_tmux_session_refuses_missing_session_creation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1134,6 +1329,21 @@ class OmoTaskTests(unittest.TestCase):
         self.assertEqual("max", args.reasoning_effort)
         required = parse_args([*base, "--model", "gpt-5.6-terra", "--reasoning-effort", "max", "--require-existing-tmux-session"])
         self.assertTrue(required.require_existing_tmux_session)
+        allowed = parse_args([*base, "--model", "gpt-5.6-terra", "--reasoning-effort", "max", "--allow-new-tmux-session"])
+        self.assertTrue(allowed.allow_new_tmux_session)
+        with contextlib.redirect_stderr(io.StringIO()) as stderr, self.assertRaises(SystemExit):
+            parse_args(
+                [
+                    *base,
+                    "--model",
+                    "gpt-5.6-terra",
+                    "--reasoning-effort",
+                    "max",
+                    "--require-existing-tmux-session",
+                    "--allow-new-tmux-session",
+                ]
+            )
+        self.assertIn("mutually exclusive", stderr.getvalue())
 
     def test_validate_inputs_requires_model_and_reasoning_for_launch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1435,6 +1645,19 @@ class OmoTaskTests(unittest.TestCase):
             self.assertRaisesRegex(RuntimeError, "changed before task registration"),
         ):
             verify_launch_window(LaunchWindow("cfg:9", "%9", "$1"))
+
+    def test_created_session_rebind_before_registration_cleans_exact_session(self) -> None:
+        replacement = subprocess.CompletedProcess(["tmux"], 0, "$2\t%88\n", "")
+        cleaned = subprocess.CompletedProcess(["tmux"], 0, "", "")
+        with (
+            patch("omo_manager.omo_task.tmux", side_effect=[replacement, cleaned]) as tmux_mock,
+            self.assertRaisesRegex(RuntimeError, "changed before task registration"),
+        ):
+            verify_launch_window(LaunchWindow("newcfg:0", "%9", "$8", True, "newcfg"))
+        cleanup = tmux_mock.call_args_list[1].args[0]
+        self.assertEqual(["if-shell", "-t", "$8", "-F"], cleanup[:4])
+        self.assertIn("#{session_name},newcfg", cleanup[4])
+        self.assertEqual("kill-session -t '$8'", cleanup[5])
 
     def test_new_window_rechecks_human_session_before_creation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3089,6 +3312,48 @@ class OmoTaskTests(unittest.TestCase):
             self.assertFalse((root / "x.md").exists())
             self.assertFalse((root / "TODO.md").exists())
             self.assertEqual(1, tmux_mock.call_count)
+
+    def test_explicit_session_creation_dry_run_renders_new_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            prompt = root / "prompt.md"
+            prompt.write_text(VALID_GOAL_TREE, encoding="utf-8")
+            out = io.StringIO()
+            missing = subprocess.CompletedProcess(["tmux"], 1, "", "can't find session: newcfg")
+            with (
+                patch("omo_manager.omo_task.resolved_launch_session_name", return_value="newcfg"),
+                patch("omo_manager.omo_task.tmux", return_value=missing),
+                contextlib.redirect_stdout(out),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                result = main(
+                    [
+                        "--root",
+                        str(root),
+                        "--task-file",
+                        "x.md",
+                        "--tmux-session",
+                        "newcfg",
+                        "--manager-target",
+                        "mgr:1",
+                        "--workdir",
+                        str(root),
+                        "--model",
+                        "gpt-5.6-terra",
+                        "--reasoning-effort",
+                        "medium",
+                        "--prompt-file",
+                        str(prompt),
+                        "--allow-new-tmux-session",
+                        "--dry-run",
+                    ]
+                )
+            self.assertEqual(0, result)
+            rendered = out.getvalue()
+            self.assertIn("tmux: tmux new-session -d -P", rendered)
+            self.assertNotIn("new-window", rendered)
+            self.assertFalse((root / "x.md").exists())
+            self.assertFalse((root / "TODO.md").exists())
 
     def test_main_dry_run_rejects_missing_goal_tree_before_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

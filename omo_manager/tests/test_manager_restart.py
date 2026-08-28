@@ -85,8 +85,39 @@ class ManagerRestartTests(unittest.TestCase):
                 env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"},
             )
             self.assertEqual(1, result.returncode)
-            self.assertIn("manager restart requires an existing session", result.stderr)
+            self.assertIn("reuse an existing non-human session", result.stderr)
             self.assertFalse(state_dir.exists())
+
+    def test_explicit_missing_session_creation_has_reuse_guidance_in_dry_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            tmux = fake_bin / "tmux"
+            tmux.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+            tmux.chmod(tmux.stat().st_mode | stat.S_IXUSR)
+            result = subprocess.run(
+                [
+                    str(SCRIPT),
+                    "--tmux-target",
+                    "needed:0.0",
+                    "--workdir",
+                    str(root),
+                    "--state-dir",
+                    str(root / "state"),
+                    "--allow-new-tmux-session",
+                    "--dry-run",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+                env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}", "OMO_MANAGER_LOCAL_ENV": str(root / "missing.env")},
+            )
+            self.assertEqual(0, result.returncode)
+            self.assertIn("would explicitly create tmux session needed", result.stdout)
+            self.assertIn("reuse an existing non-human session", result.stdout)
+            self.assertFalse((root / "state").exists())
 
     def test_target_is_required_without_default_session_creation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

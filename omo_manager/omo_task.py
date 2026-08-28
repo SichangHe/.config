@@ -140,6 +140,7 @@ class Args:
     resume_idle: bool = False
     amh_caller_agent: str = ""
     require_existing_tmux_session: bool = False
+    allow_new_tmux_session: bool = False
 
 
 @dataclass(frozen=True)
@@ -147,6 +148,8 @@ class LaunchWindow:
     target: str
     pane_id: str
     session_id: str
+    created_session: bool = False
+    session_name: str = ""
 
 
 class LaunchTarget(str):
@@ -154,11 +157,15 @@ class LaunchTarget(str):
 
     pane_id: str
     session_id: str
+    created_session: bool
+    session_name: str
 
-    def __new__(cls, target: str, pane_id: str, session_id: str) -> LaunchTarget:
+    def __new__(cls, target: str, pane_id: str, session_id: str, created_session: bool = False, session_name: str = "") -> LaunchTarget:
         value = super().__new__(cls, target)
         value.pane_id = pane_id
         value.session_id = session_id
+        value.created_session = created_session
+        value.session_name = session_name
         return value
 
 
@@ -188,12 +195,14 @@ class ParsedArgs(argparse.Namespace):
     resume_idle: bool = False
     amh_caller_agent: str = ""
     require_existing_tmux_session: bool = False
+    allow_new_tmux_session: bool = False
 
 
 @dataclass(frozen=True)
 class LaunchSession:
     name: str
     target: str
+    create: bool = False
 
 
 def codex_flags_model_error(codex_flags: tuple[str, ...]) -> str:
@@ -279,7 +288,12 @@ Ownership migration:
     _ = parser.add_argument(
         "--require-existing-tmux-session",
         action="store_true",
-        help="Compatibility flag; all launches require the named tmux session to exist.",
+        help="Refuse launch instead of creating the explicitly named tmux session when it is missing.",
+    )
+    _ = parser.add_argument(
+        "--allow-new-tmux-session",
+        action="store_true",
+        help="Explicitly allow creating the named session when reuse is genuinely unsuitable.",
     )
     _ = parser.add_argument(
         "--migrate-manager-owner", action="store_true", help="Atomically migrate only `managerat` on one existing task; requires explicit old and new targets and performs no launch or TODO action."
@@ -323,11 +337,14 @@ Ownership migration:
                 parsed.human_email_lines,
                 parsed.amh_caller_agent,
                 parsed.require_existing_tmux_session,
+                parsed.allow_new_tmux_session,
             )
         ):
             parser.error("--migrate-manager-owner only accepts --root, --task-file, explicit old/new manager targets, and optional --dry-run.")
     if not parsed.migrate_manager_owner and not parsed.tmux_session:
         parser.error("--tmux-session is required.")
+    if parsed.require_existing_tmux_session and parsed.allow_new_tmux_session:
+        parser.error("--require-existing-tmux-session and --allow-new-tmux-session are mutually exclusive.")
     if parsed.tmux_session and TMUX_SESSION_RE.fullmatch(parsed.tmux_session) is None:
         parser.error("--tmux-session must be an exact session name starting with a letter and containing only letters, numbers, `_`, or `-`.")
     if parsed.resume_idle and not parsed.session_id:
@@ -383,6 +400,7 @@ Ownership migration:
         resume_idle=parsed.resume_idle,
         amh_caller_agent=parsed.amh_caller_agent,
         require_existing_tmux_session=parsed.require_existing_tmux_session,
+        allow_new_tmux_session=parsed.allow_new_tmux_session,
     )
 
 
@@ -600,6 +618,22 @@ def human_authorized_launch_session(args: Args, session_name: str) -> bool:
     return False
 
 
+def human_authorized_create_session(args: Args, session_name: str) -> bool:
+    """Require a separate exact imperative creating the named `h*` session."""
+
+    if args.human_email_file is None or args.human_email_lines is None:
+        return False
+    create_re = re.compile(
+        rf"\s*(?:please\s+)?(?:create|make|set\s+up|start)\s+(?:(?:a|the)\s+)?(?:new\s+)?(?:tmux\s+)?session\s+(?:named\s+)?[`'\"]?{re.escape(session_name)}[`'\"]?\s*[.!]?\s*",
+        flags=re.IGNORECASE,
+    )
+    for line in human_email_excerpt(args).splitlines():
+        negation_text = HUMAN_LAUNCH_DISCOURSE_NEGATION_RE.sub("", line, count=1)
+        if HUMAN_LAUNCH_NEGATION_RE.search(negation_text) is None and create_re.fullmatch(line) is not None:
+            return True
+    return False
+
+
 def validate_launch_session(args: Args) -> str:
     """Resolve and authorize the tmux session used for a new window."""
 
@@ -610,7 +644,7 @@ def validate_launch_session(args: Args) -> str:
 
 
 def launch_session(args: Args) -> LaunchSession:
-    """Bind a worker launch to an existing tmux session without mutation."""
+    """Bind an existing session or prepare one explicitly named session for creation."""
 
     if args.workdir is None:
         raise ValueError("--workdir is required to launch a new worker.")
@@ -618,11 +652,26 @@ def launch_session(args: Args) -> LaunchSession:
     exact_session_target = f"={session_name}:"
     result = tmux(["display-message", "-p", "-t", exact_session_target, "#{session_id}"])
     if result.returncode != 0:
-        raise ValueError(f"tmux session `{session_name}` must already exist.")
+        if not args.allow_new_tmux_session:
+            raise ValueError(
+                f"tmux session `{session_name}` must already exist; reuse an existing non-human session, "
+                "or pass --allow-new-tmux-session only when a new session is genuinely needed."
+            )
+        if args.tmux_window:
+            raise ValueError(f"cannot create missing tmux session `{session_name}` at requested --tmux-window {args.tmux_window}.")
+        if session_name.startswith("h") and not human_authorized_create_session(args, session_name):
+            raise ValueError("creating a human-owned `h*` tmux session requires authoritative direct text explicitly creating that exact session.")
+        print(
+            f"warning: explicitly creating tmux session `{session_name}`; reuse an existing non-human session when practical.",
+            file=sys.stderr,
+        )
+        return LaunchSession(session_name, "", True)
+    if session_name.startswith("h") and not human_authorized_launch_session(args, session_name):
+        raise ValueError("launches in an existing human-owned `h*` tmux session require an authoritative direct launch request naming that exact session.")
     session_id = result.stdout.strip()
     if TMUX_SESSION_ID_RE.fullmatch(session_id) is None:
         raise RuntimeError(f"tmux session `{session_name}` did not report one usable session_id.")
-    return LaunchSession(session_name, session_id)
+    return LaunchSession(session_name, session_id, False)
 
 
 def is_vl_task_file(task_file: str) -> bool:
@@ -1329,9 +1378,32 @@ def wait_command_started(
     raise RuntimeError(f"Codex launch not verified after {timeout_s:g}s: pane command={last_command or 'unknown'}, status={last_status}")
 
 
-def new_window_command(args: Args) -> list[str]:
+def new_window_command(args: Args, create_session: bool = False) -> list[str]:
     name = args.window_name or Path(args.task_file).stem
+    if create_session:
+        return [
+            "new-session",
+            "-d",
+            "-P",
+            "-F",
+            "#{session_id}\t#{session_name}:#{window_index}\t#{pane_id}",
+            "-s",
+            args.tmux_session.lstrip("="),
+            "-n",
+            name,
+            "-c",
+            str(args.workdir),
+        ]
     return ["new-window", "-P", "-F", "#{session_id}\t#{session_name}:#{window_index}\t#{pane_id}", "-t", target(args), "-n", name, "-c", str(args.workdir)]
+
+
+def cleanup_created_session(session_id: str, session_name: str) -> None:
+    """Remove only the newly returned session while its exact identity still matches."""
+
+    if TMUX_SESSION_ID_RE.fullmatch(session_id) is None or TMUX_SESSION_RE.fullmatch(session_name) is None:
+        return
+    condition = f"#{{&&:#{{==:#{{session_id}},{session_id}}},#{{==:#{{session_name}},{session_name}}}}}"
+    _ = tmux(["if-shell", "-t", session_id, "-F", condition, f"kill-session -t {shlex.quote(session_id)}", ""])
 
 
 def launch_input_state(path: Path | None) -> str:
@@ -1464,7 +1536,9 @@ def new_window_bound(args: Args) -> LaunchWindow:
         return LaunchWindow(tmux_target, pane_id, "")
     session = launch_session(args)
     bound_args = replace(args, tmux_session=session.target)
-    command = new_window_command(bound_args)
+    if session.create:
+        bound_args = replace(args, tmux_session=session.name)
+    command = new_window_command(bound_args, session.create)
     try:
         out = tmux(command, check=True)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as error:
@@ -1474,13 +1548,31 @@ def new_window_bound(args: Args) -> LaunchWindow:
             raise RuntimeError(f"tmux {command[0]} failed; diagnostic retention failed: {evidence_error}") from error
         raise RuntimeError(f"tmux {command[0]} failed; diagnostic: {evidence}") from error
     fields = out.stdout.rstrip("\r\n").split("\t")
+    returned_session_id = fields[0] if fields else ""
     if len(fields) != 3:
+        if session.create:
+            cleanup_created_session(returned_session_id, session.name)
         raise RuntimeError("tmux new-window did not return bound session, target, and pane identity.")
     created_session_id, tmux_target, pane_id = fields
-    if created_session_id != session.target or TMUX_TARGET_RE.fullmatch(tmux_target) is None or re.fullmatch(r"%[0-9]+", pane_id) is None:
-        raise RuntimeError("tmux new-window identity did not match the bound existing session.")
-    wait_shell(pane_id)
-    return LaunchWindow(tmux_target, pane_id, created_session_id)
+    expected_session_id = created_session_id if session.create else session.target
+    expected_target = f"{session.name}:0" if session.create else ""
+    if (
+        TMUX_SESSION_ID_RE.fullmatch(created_session_id) is None
+        or created_session_id != expected_session_id
+        or TMUX_TARGET_RE.fullmatch(tmux_target) is None
+        or (expected_target and tmux_target != expected_target)
+        or re.fullmatch(r"%[0-9]+", pane_id) is None
+    ):
+        if session.create:
+            cleanup_created_session(created_session_id, session.name)
+        raise RuntimeError("tmux launch identity did not match the requested session and pane.")
+    try:
+        wait_shell(pane_id)
+    except Exception:
+        if session.create:
+            cleanup_created_session(created_session_id, session.name)
+        raise
+    return LaunchWindow(tmux_target, pane_id, created_session_id, session.create, session.name)
 
 
 def verify_launch_window(window: LaunchWindow) -> None:
@@ -1488,12 +1580,14 @@ def verify_launch_window(window: LaunchWindow) -> None:
 
     result = tmux(["display-message", "-p", "-t", f"={window.target}", "#{session_id}\t#{pane_id}"])
     if result.returncode != 0 or result.stdout.strip() != f"{window.session_id}\t{window.pane_id}":
+        if window.created_session:
+            cleanup_created_session(window.session_id, window.session_name)
         raise RuntimeError(f"new task target {window.target} changed before task registration.")
 
 
 def new_window(args: Args) -> str:
     window = new_window_bound(args)
-    return LaunchTarget(window.target, window.pane_id, window.session_id)
+    return LaunchTarget(window.target, window.pane_id, window.session_id, window.created_session, window.session_name)
 
 
 def ensure_task_file(args: Args, tmux_target: str) -> Path:
@@ -1605,10 +1699,10 @@ def dry_run(args: Args) -> None:
     if not args.no_link:
         print(f"todo_line: {todo_line(args, tmux_target)}")
     if session is not None:
-        bound_args = replace(args, tmux_session=session.target)
+        bound_args = replace(args, tmux_session=session.name if session.create else session.target)
         if args.prelaunch_source is not None:
             print(f"prelaunch_source: {args.prelaunch_source}")
-        command = ["tmux", *new_window_command(bound_args)]
+        command = ["tmux", *new_window_command(bound_args, session.create)]
         print("tmux: " + " ".join(shlex.quote(part) for part in command))
         launch_target = tmux_target
         manager_file = args.root / "MANAGER.md" if args.is_manager else None
@@ -1804,7 +1898,15 @@ def main(argv: list[str]) -> int:
                 if existing_pane_id and exact_pane_id(tmux_target) != existing_pane_id:
                     raise ValueError(f"existing target `{tmux_target}` changed before task registration; retry or use --workdir to launch a new worker.")
                 if args.workdir is not None and isinstance(launch_target, LaunchTarget):
-                    verify_launch_window(LaunchWindow(tmux_target, launch_target.pane_id, launch_target.session_id))
+                    verify_launch_window(
+                        LaunchWindow(
+                            tmux_target,
+                            launch_target.pane_id,
+                            launch_target.session_id,
+                            launch_target.created_session,
+                            launch_target.session_name,
+                        )
+                    )
                 path = ensure_task_file(args, tmux_target)
                 if not args.no_link:
                     link_todo(args, tmux_target)
