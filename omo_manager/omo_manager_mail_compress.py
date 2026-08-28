@@ -51,6 +51,9 @@ SOURCE_815_APPROVAL_SHA256 = "0e6c0fad72ea98b04749c6cd0294ba3a168411c757d049be5c
 SOURCE_815_SOURCE_BINDING = "17338:1874072255391401971:1873525670359176908:11ad6ed3f1b029318d15b5b45f78b270aa8e774203687571e1ad2e615faea755"
 SOURCE_815_TASK_ID = "manager-rewrite-owner-transfer"
 SOURCE_815_EXACT_REMOVAL_EXCEPTION = "source-815-human-approved-exact-removal"
+SOURCE_1140_APPROVAL_FILE = "85c5dff58359-1140.txt"
+SOURCE_1140_APPROVAL_QUOTE = "Perhaps all of them."
+SOURCE_1140_APPROVAL_SHA256 = "a80ed239e1acbd07750c2f55202ec2d5a68e6bd53068ae9c1eed36925fc7e436"
 GMAIL_IDENTITY_UID_BATCH = 40
 GMAIL_THREAD_OR_BATCH = 32
 EXPORT_FULL_FETCH_ATTEMPTS = 2
@@ -1974,6 +1977,77 @@ def require_human_approved_exact_removal(
     )
 
 
+def require_source_1140_direct_removal(
+    approval_file: Path | None,
+    approval_quote: str | None,
+    review_file: Path | None,
+    task_id: str,
+    sources: list[ScopedSource],
+    contexts: list[ScopedSource],
+    preparer: str,
+    reviewer: str,
+) -> None:
+    if approval_file is None or approval_quote != SOURCE_1140_APPROVAL_QUOTE:
+        raise RuntimeError("replacement-free removal requires the exact source-1140 approval")
+    approval_arg = approval_file.expanduser()
+    work_logs_root_arg = configured_work_logs_root()
+    mail_root_arg = work_logs_root_arg / "manager_mail"
+    if not approval_arg.is_absolute() or approval_arg.parent != mail_root_arg or approval_arg.name != SOURCE_1140_APPROVAL_FILE:
+        raise RuntimeError("replacement-free removal requires the trusted source-1140 manager mail")
+    try:
+        work_logs_root_stat = work_logs_root_arg.lstat()
+        mail_root_stat = mail_root_arg.lstat()
+        work_logs_root = work_logs_root_arg.resolve(strict=True)
+        mail_root = mail_root_arg.resolve(strict=True)
+        approval_path, approval_bytes = read_owner_only_regular_file(approval_arg, "replacement-free removal approval file")
+        approval_text = approval_bytes.decode("utf-8")
+    except (OSError, RuntimeError, UnicodeDecodeError) as exc:
+        raise RuntimeError("replacement-free removal approval evidence is unreadable") from exc
+    if (
+        stat.S_ISLNK(work_logs_root_stat.st_mode)
+        or stat.S_ISLNK(mail_root_stat.st_mode)
+        or not stat.S_ISDIR(mail_root_stat.st_mode)
+        or mail_root_stat.st_uid != os.geteuid()
+        or mail_root_stat.st_mode & 0o077
+        or approval_arg.parent.resolve(strict=False) != mail_root
+        or approval_path.parent != mail_root
+        or hashlib.sha256(approval_bytes).hexdigest() != SOURCE_1140_APPROVAL_SHA256
+        or SOURCE_1140_APPROVAL_QUOTE not in approval_text
+        or work_logs_root != mail_root.parent
+    ):
+        raise RuntimeError("replacement-free removal approval evidence does not match source-1140")
+    if review_file is None:
+        raise RuntimeError("replacement-free removal requires exact independent review evidence")
+    try:
+        _review_path, review_bytes = read_owner_only_regular_file(review_file.expanduser(), "replacement-free removal review file")
+        review_text = review_bytes.decode("utf-8")
+    except (OSError, RuntimeError, UnicodeDecodeError) as exc:
+        raise RuntimeError("replacement-free removal review evidence is unreadable") from exc
+    rows = read_tsv_text(review_text, {"kind", "value"}, "replacement-free removal review file")
+    values: dict[str, list[str]] = {}
+    for row in rows:
+        values.setdefault(row["kind"], []).append(row["value"])
+    expected_single = {
+        "version": ["v1.0.0"],
+        "approval_sha256": [SOURCE_1140_APPROVAL_SHA256],
+        "task_id": [task_id],
+        "preparer": [preparer],
+        "reviewer": [reviewer],
+        "verdict": ["PASS"],
+    }
+    expected_sources = sorted(f"{source.uid}:{source.gmail_msgid}:{source.gmail_thrid}:{source.raw_sha256}" for source in sources)
+    expected_contexts = sorted(f"{context.gmail_msgid}:{context.gmail_thrid}:{context.raw_sha256}" for context in contexts)
+    if (
+        set(values) != {*expected_single, "source", "context"}
+        or any(values.get(kind) != expected for kind, expected in expected_single.items())
+        or sorted(values.get("source", [])) != expected_sources
+        or sorted(values.get("context", [])) != expected_contexts
+        or not expected_sources
+        or not expected_contexts
+    ):
+        raise RuntimeError("replacement-free removal review evidence does not match the exact operation")
+
+
 def disposition_text(
     rows: list[dict[str, str]],
     batch_id: str,
@@ -3003,7 +3077,8 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
 
     try:
         task_ids = args.task_id if isinstance(args.task_id, list) else [args.task_id]
-        replacement_ids = args.replacement_id if isinstance(args.replacement_id, list) else [args.replacement_id]
+        replacement_ids = args.replacement_id if isinstance(args.replacement_id, list) else ([args.replacement_id] if args.replacement_id else [])
+        replacement_not_required = bool(getattr(args, "replacement_not_required", False))
         raw_task_sources = getattr(args, "task_source", [])
         task_source_values = raw_task_sources if isinstance(raw_task_sources, list) else [raw_task_sources]
         task_identity = ",".join(task_ids)
@@ -3015,13 +3090,31 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
             raise ValueError("explicit sources contain duplicate or ambiguous identities")
         if (
             not task_ids
-            or len(task_ids) != len(replacement_ids)
+            or (not replacement_not_required and len(task_ids) != len(replacement_ids))
+            or (replacement_not_required and (replacement_ids or len(task_ids) != 1))
             or len(set(task_ids)) != len(task_ids)
             or any(not task_id or tsv_value(task_id) != task_id for task_id in task_ids)
         ):
             raise ValueError("one unique nonempty task identity is required per replacement")
         if len(set(replacement_ids)) != len(replacement_ids):
             raise ValueError("replacement identities must be unique")
+        if replacement_not_required:
+            require_source_1140_direct_removal(
+                getattr(args, "human_approval_file", None),
+                getattr(args, "human_approval_quote", None),
+                getattr(args, "independent_review_file", None),
+                task_ids[0],
+                sources,
+                contexts,
+                args.preparer,
+                args.reviewer,
+            )
+        elif (
+            getattr(args, "human_approval_file", None) is not None
+            or getattr(args, "human_approval_quote", None)
+            or getattr(args, "independent_review_file", None) is not None
+        ):
+            raise ValueError("human approval evidence requires --replacement-not-required")
         task_sources: set[tuple[int, str]] = set()
         for value in task_source_values:
             fields = value.split(":")
@@ -3038,7 +3131,9 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
             raise ValueError("task-source bindings must cover every task and source exactly within this operation")
         raw_route_resolutions = getattr(args, "route_resolution", [])
         route_resolution_values = raw_route_resolutions if isinstance(raw_route_resolutions, list) else [raw_route_resolutions]
-        route_resolutions = parse_route_resolutions(route_resolution_values, task_ids)
+        route_resolutions = parse_route_resolutions(route_resolution_values, task_ids) if not replacement_not_required else {}
+        if replacement_not_required and route_resolution_values:
+            raise ValueError("replacement-free removal does not accept a replacement route")
         if (
             not args.preparer
             or not args.reviewer
@@ -3054,7 +3149,7 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
             raise ValueError("explicit context must contain every source identity exactly once")
         if any(not re.fullmatch(r"<[^<>\s]+>", replacement_id) for replacement_id in replacement_ids):
             raise ValueError("each replacement identity must be a syntactically valid Message-ID")
-    except ValueError as exc:
+    except (RuntimeError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
     def disarm_pre_move_timer() -> None:
@@ -3113,7 +3208,7 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
         ]
         try:
             set_trash_stage("derive-original-targets")
-            original_targets = (
+            original_targets = [] if replacement_not_required else (
                 [route_resolutions[task_id] for task_id in task_ids]
                 if route_resolutions
                 else original_sender_targets_by_task(
@@ -3134,7 +3229,7 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
         except RuntimeError as exc:
             return refuse_trash(f"refusing because {exc}")
         set_trash_stage("special-use-mailboxes-recheck")
-        if [subject_tmux_target(subject) for subject in replacement_subjects] != original_targets:
+        if replacement_ids and [subject_tmux_target(subject) for subject in replacement_subjects] != original_targets:
             return refuse_trash("refusing because a replacement does not preserve its original sender tmux target")
         if special_use_mailboxes(client) != special_use:
             return refuse_trash("refusing because special-use mailbox identity changed")
@@ -3184,7 +3279,7 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
             raise
         except RuntimeError as exc:
             return refuse_trash(f"refusing because {exc}")
-        if final_replacement_subjects != replacement_subjects or [subject_tmux_target(subject) for subject in final_replacement_subjects] != original_targets:
+        if final_replacement_subjects != replacement_subjects or (replacement_ids and [subject_tmux_target(subject) for subject in final_replacement_subjects] != original_targets):
             return refuse_trash("refusing because a replacement sender tmux target changed immediately before move")
         set_trash_stage("select-inbox-mutation-gate")
         select_mailbox(client, "INBOX", readonly=False)
@@ -3568,9 +3663,17 @@ def parser() -> argparse.ArgumentParser:
         "--replacement-message-id",
         action="append",
         dest="replacement_id",
-        required=True,
+        default=[],
         help="Verified replacement Message-ID; repeat once per task when splitting multi-task sources.",
     )
+    direct.add_argument(
+        "--replacement-not-required",
+        action="store_true",
+        help="Move one independently reviewed task with no retained agent mail under exact Human Source-1140 approval.",
+    )
+    direct.add_argument("--human-approval-file", type=Path, help="Exact owner-only Source-1140 manager-mail file.")
+    direct.add_argument("--human-approval-quote", help="Exact Source-1140 approval sentence.")
+    direct.add_argument("--independent-review-file", type=Path, help="Owner-only TSV binding the exact PASS-reviewed operation.")
     direct.add_argument(
         "--task-id",
         action="append",

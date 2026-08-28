@@ -31,6 +31,8 @@ from omo_manager.omo_manager_mail_compress import (
     SOURCE_815_APPROVAL_QUOTE_SHA256,
     SOURCE_815_EXACT_REMOVAL_EXCEPTION,
     SOURCE_815_TASK_ID,
+    SOURCE_1140_APPROVAL_FILE,
+    SOURCE_1140_APPROVAL_QUOTE,
     accepted_manager_headers,
     claim_batch,
     cmd_reconcile_intent,
@@ -71,6 +73,7 @@ from omo_manager.omo_manager_mail_compress import (
     parse_explicit_context,
     parse_explicit_source,
     parse_route_resolutions,
+    require_source_1140_direct_removal,
     manager_candidate_uids,
     manager_unread_candidate_uids,
     parse_uid_text,
@@ -2835,8 +2838,87 @@ with tempfile.TemporaryDirectory() as tmp:
         self.assertIn("--source UID:GMAIL-MSGID:GMAIL-THRID:RAW-SHA256", result.stdout)
         self.assertIn("--context GMAIL-MSGID:GMAIL-THRID:RAW-SHA256", result.stdout)
         self.assertIn("--route-resolution TASK-ID=SESSION:WINDOW[.PANE]", result.stdout)
+        self.assertIn("--replacement-not-required", result.stdout)
         self.assertNotIn("--source-dir", result.stdout)
         self.assertNotIn("--uid-file", result.stdout)
+
+    def test_trash_explicit_replacement_free_requires_source_1140_before_mailbox(self) -> None:
+        digest = "a" * 64
+        args = type(
+            "DirectArgs",
+            (),
+            {
+                "yes": True,
+                "source": [f"7:100:200:{digest}"],
+                "context": [f"100:200:{digest}"],
+                "replacement_id": [],
+                "replacement_not_required": True,
+                "human_approval_file": None,
+                "human_approval_quote": None,
+                "independent_review_file": None,
+                "task_id": ["task-a"],
+                "preparer": "owner-a",
+                "reviewer": "reviewer-b",
+                "task_source": ["1:100"],
+                "route_resolution": [],
+                "source_uidvalidity": "1",
+            },
+        )()
+        with patch("omo_manager.omo_manager_mail_compress.open_mailbox") as open_mailbox_mock:
+            self.assertEqual(2, cmd_trash_explicit(args))
+        open_mailbox_mock.assert_not_called()
+
+    def test_source_1140_direct_removal_binds_exact_reviewed_operation(self) -> None:
+        digest = "a" * 64
+        source = parse_explicit_source(f"7:100:200:{digest}")
+        context = parse_explicit_context(f"100:200:{digest}")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mail_root = root / "manager_mail"
+            mail_root.mkdir(mode=0o700)
+            approval = mail_root / SOURCE_1140_APPROVAL_FILE
+            approval.write_text(SOURCE_1140_APPROVAL_QUOTE, encoding="utf-8")
+            approval.chmod(0o600)
+            approval_sha256 = hashlib.sha256(approval.read_bytes()).hexdigest()
+            review = root / "review.tsv"
+            review.write_text(
+                "kind\tvalue\n"
+                "version\tv1.0.0\n"
+                f"approval_sha256\t{approval_sha256}\n"
+                "task_id\ttask-a\n"
+                "preparer\towner-a\n"
+                "reviewer\treviewer-b\n"
+                "verdict\tPASS\n"
+                f"source\t7:100:200:{digest}\n"
+                f"context\t100:200:{digest}\n",
+                encoding="utf-8",
+            )
+            review.chmod(0o600)
+            with (
+                patch("omo_manager.omo_manager_mail_compress.configured_work_logs_root", return_value=root),
+                patch("omo_manager.omo_manager_mail_compress.SOURCE_1140_APPROVAL_SHA256", approval_sha256),
+            ):
+                require_source_1140_direct_removal(
+                    approval,
+                    SOURCE_1140_APPROVAL_QUOTE,
+                    review,
+                    "task-a",
+                    [source],
+                    [context],
+                    "owner-a",
+                    "reviewer-b",
+                )
+                with self.assertRaisesRegex(RuntimeError, "does not match the exact operation"):
+                    require_source_1140_direct_removal(
+                        approval,
+                        SOURCE_1140_APPROVAL_QUOTE,
+                        review,
+                        "task-b",
+                        [source],
+                        [context],
+                        "owner-a",
+                        "reviewer-b",
+                    )
 
     def test_inspect_explicit_requires_task_and_uids_before_mailbox_access(self) -> None:
         args = type("InspectArgs", (), {"uids": "", "task_id": "task-a"})()
@@ -3186,6 +3268,68 @@ with tempfile.TemporaryDirectory() as tmp:
         self.assertEqual([("select", "INBOX", "False"), ("uidvalidity",)], events[move_index - 2 : move_index])
         self.assertFalse(any("EXPUNGE" in call.args for call in imap_uid_mock.call_args_list))
         write_mock.assert_not_called()
+
+    def test_trash_explicit_replacement_free_preserves_move_safeguards(self) -> None:
+        raw_sha256 = "a" * 64
+        source = MailRecord(
+            "7",
+            "",
+            "Agent <agent@example.test>",
+            "Human <human@example.test>",
+            "[worker:0] complete",
+            "msg-a",
+            gmail_msgid="100",
+            gmail_thrid="200",
+            raw_sha256=raw_sha256,
+        )
+        args = type(
+            "DirectArgs",
+            (),
+            {
+                "yes": True,
+                "source": [f"7:100:200:{raw_sha256}"],
+                "context": [f"100:200:{raw_sha256}"],
+                "replacement_id": [],
+                "replacement_not_required": True,
+                "human_approval_file": Path("/approval"),
+                "human_approval_quote": SOURCE_1140_APPROVAL_QUOTE,
+                "independent_review_file": Path("/review"),
+                "task_id": ["task-a"],
+                "preparer": "owner-a",
+                "reviewer": "reviewer-b",
+                "task_source": ["1:100"],
+                "route_resolution": [],
+                "source_uidvalidity": "1",
+            },
+        )()
+        client = FakeClient({})
+        trashed = replace(source, uid="70")
+        with (
+            patch("omo_manager.omo_manager_mail_compress.require_source_1140_direct_removal"),
+            patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {})),
+            patch("omo_manager.omo_manager_mail_compress.mail_boundary", return_value=("agent@example.test", "human@example.test")),
+            patch("omo_manager.omo_manager_mail_compress.selected_uidvalidity", return_value="1"),
+            patch("omo_manager.omo_manager_mail_compress.mailbox_exists", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.observe_explicit_sources", side_effect=[([source], []), ([source], []), ([], [trashed])]),
+            patch("omo_manager.omo_manager_mail_compress.replacement_exists") as replacement_exists_mock,
+            patch("omo_manager.omo_manager_mail_compress.replacement_gmail_msgid") as replacement_gmail_mock,
+            patch("omo_manager.omo_manager_mail_compress.replacement_subject") as replacement_subject_mock,
+            patch("omo_manager.omo_manager_mail_compress.fetch_direct_thread_contexts", return_value={"200": [source]}),
+            patch(
+                "omo_manager.omo_manager_mail_compress.special_use_mailboxes",
+                return_value={r"\All": "[Gmail]/All Mail", r"\Sent": "[Gmail]/Sent Mail"},
+            ),
+            patch("omo_manager.omo_manager_mail_compress.direct_context_intact", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.select_mailbox"),
+            patch("omo_manager.omo_manager_mail_compress.inbox_subset", side_effect=[["7"], ["7"]]),
+            patch("omo_manager.omo_manager_mail_compress.imap_uid", return_value=("OK", [b""])) as imap_uid_mock,
+        ):
+            self.assertEqual(0, cmd_trash_explicit(args))
+        self.assertIn((client, "move-explicit-sources-to-trash", "MOVE", "7", '"[Gmail]/Trash"'), [call.args for call in imap_uid_mock.call_args_list])
+        replacement_exists_mock.assert_not_called()
+        replacement_gmail_mock.assert_not_called()
+        replacement_subject_mock.assert_not_called()
+        self.assertFalse(any("EXPUNGE" in call.args for call in imap_uid_mock.call_args_list))
 
     def test_trash_explicit_retries_verified_trash_without_another_move(self) -> None:
         raw_sha256 = "a" * 64
