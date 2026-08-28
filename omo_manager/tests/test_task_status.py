@@ -23,6 +23,7 @@ from omo_manager.omo_task_status import normalize_low_priority_current
 from omo_manager.omo_task_status import park_audit_record
 from omo_manager.omo_task_status import park_target_pane_id
 from omo_manager.omo_task_status import park_unlinked
+from omo_manager.omo_task_status import reconcile_prior_stop_park_index
 from omo_manager.omo_task_status import finish_shared_target_done
 from omo_manager.omo_task_status import StopArgs
 from omo_manager.omo_task_status import parse_args
@@ -215,6 +216,111 @@ class TaskStatusTests(unittest.TestCase):
             self.assertEqual(text, task.read_text(encoding="utf-8"))
             self.assertEqual(expected, todo.read_text(encoding="utf-8"))
             self.assertIn("state: complete", args.audit_output.read_text(encoding="utf-8"))
+
+    def test_reconcile_prior_stop_park_index_moves_only_canonical_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, text, todo, original_todo, args = self.write_park_case(root)
+            session_id = "01a03a33-5aa7-7752-ba19-95d74a2910e3"
+            text = text.rstrip("\n") + close_note("vl:2", session_id)
+            task.write_text(text, encoding="utf-8")
+            args = replace(
+                args,
+                park_unlinked=False,
+                reconcile_prior_stop_park_index=True,
+                session_id=session_id,
+                expected_pane_id="",
+                expected_task_sha256=hashlib.sha256(text.encode()).hexdigest(),
+                audit_output=None,
+            )
+            with patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=("", "", "")):
+                reconcile_prior_stop_park_index(args, task, text, task.stat())
+            expected = original_todo.replace("human pending:\nvl_task.md vl:2\n", "human pending:\n", 1).replace(
+                "previous:\n",
+                "previous:\nvl_task.md vl:2\n",
+                1,
+            )
+            self.assertEqual(expected, todo.read_text(encoding="utf-8"))
+            self.assertEqual(text, task.read_text(encoding="utf-8"))
+
+    def test_reconcile_prior_stop_park_index_fails_closed_on_stale_or_live_state(self) -> None:
+        for case, expected in (("todo", "TODO bytes"), ("target", "remain absent")):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                task, text, todo, _original_todo, args = self.write_park_case(root)
+                session_id = "01a03a33-5aa7-7752-ba19-95d74a2910e3"
+                text = text.rstrip("\n") + close_note("vl:2", session_id)
+                task.write_text(text, encoding="utf-8")
+                args = replace(
+                    args,
+                    park_unlinked=False,
+                    reconcile_prior_stop_park_index=True,
+                    session_id=session_id,
+                    expected_pane_id="",
+                    expected_task_sha256=hashlib.sha256(text.encode()).hexdigest(),
+                    expected_todo_sha256="0" * 64 if case == "todo" else args.expected_todo_sha256,
+                    audit_output=None,
+                )
+                with (
+                    patch("omo_manager.omo_task_status.park_target_pane_id", return_value="%9" if case == "target" else ""),
+                    self.assertRaisesRegex(TaskFrontmatterError, expected),
+                ):
+                    reconcile_prior_stop_park_index(args, task, text, task.stat())
+                self.assertIn("human pending:\nvl_task.md vl:2\n", todo.read_text(encoding="utf-8"))
+
+    def test_reconcile_prior_stop_park_index_rolls_back_if_target_reappears_after_update(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, text, todo, _original_todo, args = self.write_park_case(root)
+            session_id = "01a03a33-5aa7-7752-ba19-95d74a2910e3"
+            text = text.rstrip("\n") + close_note("vl:2", session_id)
+            task.write_text(text, encoding="utf-8")
+            args = replace(args, park_unlinked=False, reconcile_prior_stop_park_index=True, session_id=session_id, expected_pane_id="", expected_task_sha256=hashlib.sha256(text.encode()).hexdigest(), audit_output=None)
+            with patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=("", "", "%9", "%9")), self.assertRaisesRegex(TaskFrontmatterError, "reappeared after TODO"):
+                reconcile_prior_stop_park_index(args, task, text, task.stat())
+            self.assertIn("human pending:\nvl_task.md vl:2\n", todo.read_text(encoding="utf-8"))
+
+    def test_reconcile_prior_stop_park_index_rejects_noncanonical_source(self) -> None:
+        for replacement in ("vl_task.md", "vl_task.md vl:2 note", "Human Pending:\nvl_task.md vl:2"):
+            with self.subTest(replacement=replacement), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                task, text, todo, original_todo, args = self.write_park_case(root)
+                changed_todo = original_todo.replace("human pending:\nvl_task.md vl:2", f"human pending:\n{replacement}", 1)
+                todo.write_text(changed_todo, encoding="utf-8")
+                session_id = "01a03a33-5aa7-7752-ba19-95d74a2910e3"
+                text = text.rstrip("\n") + close_note("vl:2", session_id)
+                task.write_text(text, encoding="utf-8")
+                args = replace(args, park_unlinked=False, reconcile_prior_stop_park_index=True, session_id=session_id, expected_pane_id="", expected_task_sha256=hashlib.sha256(text.encode()).hexdigest(), expected_todo_sha256=hashlib.sha256(changed_todo.encode()).hexdigest(), audit_output=None)
+                with patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""), self.assertRaisesRegex(TaskFrontmatterError, "canonical"):
+                    reconcile_prior_stop_park_index(args, task, text, task.stat())
+                self.assertEqual(changed_todo, todo.read_text(encoding="utf-8"))
+
+    def test_reconcile_prior_stop_park_index_parser_requires_prior_stop_without_audit(self) -> None:
+        args = parse_args(
+            [
+                "--reconcile-prior-stop-park-index",
+                "--session-id",
+                "01a03a33-5aa7-7752-ba19-95d74a2910e3",
+                "--expected-task-sha256",
+                "1" * 64,
+                "--expected-todo-sha256",
+                "2" * 64,
+                "--authority-file",
+                "manager_mail/halt.txt",
+                "--authority-lines",
+                "3-6",
+                "--authority-sha256",
+                "3" * 64,
+                "--authority-envelope",
+                "vl_pause.md",
+                "--authority-envelope-sha256",
+                "4" * 64,
+                "vl_task.md",
+            ]
+        )
+        self.assertTrue(args.reconcile_prior_stop_park_index)
+        self.assertFalse(args.park_unlinked)
+        self.assertIsNone(args.audit_output)
 
     def test_park_unlinked_prior_stop_requires_exact_note_and_absent_target(self) -> None:
         for case, expected in (("note", "exact structured close note"), ("live", "historical target live")):

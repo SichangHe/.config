@@ -107,6 +107,7 @@ class Args:
     retire_blocked_target: bool = False
     reconcile_long_running_human_index: bool = False
     reconcile_blocked_index: bool = False
+    reconcile_prior_stop_park_index: bool = False
     closure_repository: Path | None = None
     dirty_path_handoff: Path | None = None
     restore_terminal_target: bool = False
@@ -158,6 +159,7 @@ class ParsedArgs(argparse.Namespace):
     retire_blocked_target: bool = False
     reconcile_long_running_human_index: bool = False
     reconcile_blocked_index: bool = False
+    reconcile_prior_stop_park_index: bool = False
     closure_repository: Path | None = None
     dirty_path_handoff: Path | None = None
     restore_terminal_target: bool = False
@@ -213,6 +215,7 @@ shutdown.""",
     _ = parser.add_argument("--retire-blocked-target", action="store_true", help="Atomically retire one blocked human-pending worker target that conflicts with one live lifecycle owner; performs no tmux action.")
     _ = parser.add_argument("--reconcile-long-running-human-index", action="store_true", help="Move one unchanged long_running task with exact human blocker from TODO current to human pending without changing task or pane state.")
     _ = parser.add_argument("--reconcile-blocked-index", action="store_true", help="Move one digest-bound v1 blocked worker with an open queue from TODO previous or low priority to human pending without changing task or pane state.")
+    _ = parser.add_argument("--reconcile-prior-stop-park-index", action="store_true", help="Move one authority-bound, already-stopped blocked worker from human pending to previous as the precondition for --park-unlinked.")
     _ = parser.add_argument("--session-id", default="", help="Session id captured by the prior close, if available.")
     _ = parser.add_argument("--replacement-task", type=Path, help="Active replacement task file; required with --finish-replaced-done.")
     _ = parser.add_argument("--stale-target", help="Exact stopped target recorded by the stale task; required with --finish-replaced-done.")
@@ -266,16 +269,16 @@ shutdown.""",
         parser.error("--closure-repository must be an explicit absolute Git worktree root.")
     if parsed.dirty_path_handoff is not None and parsed.closure_repository is None:
         parser.error("--dirty-path-handoff requires --closure-repository.")
-    if sum((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done, parsed.park_unlinked, parsed.retire_blocked_target, parsed.reconcile_long_running_human_index, parsed.reconcile_blocked_index, parsed.restore_terminal_target, parsed.close_shared_target, parsed.close_retired_done, parsed.normalize_retired_todo, parsed.normalize_low_priority_current)) > 1:
+    if sum((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done, parsed.park_unlinked, parsed.retire_blocked_target, parsed.reconcile_long_running_human_index, parsed.reconcile_blocked_index, parsed.reconcile_prior_stop_park_index, parsed.restore_terminal_target, parsed.close_shared_target, parsed.close_retired_done, parsed.normalize_retired_todo, parsed.normalize_low_priority_current)) > 1:
         parser.error("finish and recovery modes are mutually exclusive.")
     if (parsed.active_target or parsed.manager_target) and not parsed.normalize_low_priority_current:
         parser.error("--active-target and --manager-target are only valid with --normalize-low-priority-current.")
     if any(human_close_authority) and (
         parsed.status != "done"
-        or any((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done, parsed.park_unlinked, parsed.retire_blocked_target, parsed.reconcile_long_running_human_index, parsed.reconcile_blocked_index, parsed.restore_terminal_target, parsed.close_shared_target, parsed.close_retired_done, parsed.normalize_retired_todo, parsed.normalize_low_priority_current))
+        or any((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done, parsed.park_unlinked, parsed.retire_blocked_target, parsed.reconcile_long_running_human_index, parsed.reconcile_blocked_index, parsed.reconcile_prior_stop_park_index, parsed.restore_terminal_target, parsed.close_shared_target, parsed.close_retired_done, parsed.normalize_retired_todo, parsed.normalize_low_priority_current))
     ):
         parser.error("human-close authorization is valid only for a normal done transition.")
-    if parsed.park_unlinked:
+    if parsed.park_unlinked or parsed.reconcile_prior_stop_park_index:
         unrelated = (
             parsed.status,
             parsed.blocked_on,
@@ -306,10 +309,9 @@ shutdown.""",
             any(unrelated)
             or SHA256_RE.fullmatch(parsed.expected_task_sha256.strip()) is None
             or SHA256_RE.fullmatch(parsed.expected_todo_sha256.strip()) is None
-            or (
-                not parsed.session_id.strip()
-                and re.fullmatch(r"%[0-9]+", parsed.expected_pane_id.strip()) is None
-            )
+            or (parsed.reconcile_prior_stop_park_index and CODEX_SESSION_RE.fullmatch(parsed.session_id.strip()) is None)
+            or (parsed.reconcile_prior_stop_park_index and parsed.expected_pane_id.strip())
+            or (parsed.park_unlinked and not parsed.session_id.strip() and re.fullmatch(r"%[0-9]+", parsed.expected_pane_id.strip()) is None)
             or (
                 parsed.session_id.strip()
                 and (CODEX_SESSION_RE.fullmatch(parsed.session_id.strip()) is None or parsed.expected_pane_id.strip())
@@ -319,10 +321,11 @@ shutdown.""",
             or SHA256_RE.fullmatch(parsed.authority_sha256.strip()) is None
             or parsed.authority_envelope is None
             or SHA256_RE.fullmatch(parsed.authority_envelope_sha256.strip()) is None
-            or parsed.audit_output is None
+            or (parsed.park_unlinked and parsed.audit_output is None)
+            or (parsed.reconcile_prior_stop_park_index and parsed.audit_output is not None)
         ):
-            parser.error("--park-unlinked requires task/TODO digests, exact authority source and envelope, an audit output, and either a numeric live pane id or a prior close session id.")
-        if not parsed.audit_output.is_absolute():
+            parser.error("park preparation requires task/TODO digests, exact authority source and envelope, and an exact prior close session; --park-unlinked additionally requires an audit output and permits a pinned live pane.")
+        if parsed.audit_output is not None and not parsed.audit_output.is_absolute():
             parser.error("--park-unlinked requires an absolute --audit-output path.")
         return Args(
             parsed.root.resolve(),
@@ -330,7 +333,8 @@ shutdown.""",
             "",
             "",
             session_id=parsed.session_id.strip(),
-            park_unlinked=True,
+            park_unlinked=parsed.park_unlinked,
+            reconcile_prior_stop_park_index=parsed.reconcile_prior_stop_park_index,
             expected_task_sha256=parsed.expected_task_sha256.strip(),
             expected_todo_sha256=parsed.expected_todo_sha256.strip(),
             expected_pane_id=parsed.expected_pane_id.strip(),
@@ -339,7 +343,7 @@ shutdown.""",
             authority_sha256=parsed.authority_sha256.strip(),
             authority_envelope=parsed.authority_envelope,
             authority_envelope_sha256=parsed.authority_envelope_sha256.strip(),
-            audit_output=parsed.audit_output.resolve(),
+            audit_output=parsed.audit_output.resolve() if parsed.audit_output is not None else None,
         )
     if any((parsed.expected_task_sha256, parsed.expected_todo_sha256, parsed.expected_pane_id, parsed.authority_file, parsed.authority_lines, parsed.authority_sha256, parsed.authority_envelope, parsed.authority_envelope_sha256)):
         parser.error("park-unlinked task, TODO, pane, and authority assertions require --park-unlinked.")
@@ -1628,6 +1632,86 @@ def park_unlinked(args: Args, path: Path, text: str, before: os.stat_result) -> 
     return session_id
 
 
+def reconcile_prior_stop_park_index(args: Args, path: Path, text: str, before: os.stat_result) -> None:
+    """Move one authority-bound, already-stopped park candidate to `previous`."""
+
+    todo = args.root / "TODO.md"
+    metadata = parse_task_metadata(text, args.root)
+    if (
+        path == todo
+        or not todo.is_file()
+        or metadata is None
+        or metadata.status != "blocked"
+        or not metadata.blocked_on
+        or not metadata.pending_task_items
+        or has_pending_marker(text)
+        or metadata.is_manager
+        or TARGET_RE.fullmatch(metadata.runat) is None
+        or metadata.runat.partition(":")[0].startswith("h")
+    ):
+        raise TaskFrontmatterError("prior-stop park index reconciliation requires one blocked non-manager task with a recorded blocker, nonempty queue, exact non-human historical target, and no live pending marker.")
+    if hashlib.sha256(text.encode()).hexdigest() != args.expected_task_sha256:
+        raise TaskFrontmatterError("prior-stop park index task bytes do not match --expected-task-sha256.")
+    if not has_close_note(text, metadata.runat, args.session_id):
+        raise TaskFrontmatterError("prior-stop park index reconciliation requires the exact structured close note for this task, target, and session.")
+    with root_membership_lock(args.root), task_target_lock(args.root, metadata.runat):
+        with ExitStack() as locks:
+            for locked_path in sorted({path, todo}, key=lambda candidate: str(candidate)):
+                locks.enter_context(task_file_lock(locked_path))
+            current_before = path.stat()
+            current_text = path.read_text(encoding="utf-8")
+            if not same_file_state(before, current_before) or current_text != text:
+                raise TaskFrontmatterError("prior-stop park index task changed while the operation was being prepared; retry.")
+            excerpt, locator = read_park_authority(args)
+            _ = read_park_authority_envelope(args, excerpt, locator)
+            owners = authoritative_active_target_task_paths(args.root, metadata.runat)
+            if owners != (path,):
+                refs = ", ".join(relative_task_ref(args.root, owner) for owner in owners) or "none"
+                raise TaskFrontmatterError(f"prior-stop park index reconciliation requires sole historical ownership of `{metadata.runat}`: {refs}.")
+            if park_target_pane_id(metadata.runat) != "":
+                raise TaskFrontmatterError("prior-stop park index reconciliation requires the historical target to remain absent.")
+            todo_before = todo.stat()
+            todo_text = todo.read_text(encoding="utf-8")
+            if hashlib.sha256(todo_text.encode()).hexdigest() != args.expected_todo_sha256:
+                raise TaskFrontmatterError("prior-stop park index TODO bytes do not match --expected-todo-sha256.")
+            headers = {name: 0 for name in ("current", "human pending", "low priority", "previous")}
+            for line in todo_text.splitlines():
+                heading = line.strip()
+                folded = heading.casefold()
+                if folded.endswith(":") and folded[:-1] in headers:
+                    section = folded[:-1]
+                    if heading != f"{section}:":
+                        raise TaskFrontmatterError("prior-stop park index reconciliation requires canonical TODO section headers.")
+                    headers[section] += 1
+            if any(count != 1 for count in headers.values()):
+                raise TaskFrontmatterError("prior-stop park index reconciliation requires exactly one canonical current, human pending, low priority, and previous TODO section.")
+            section = ""
+            rows: list[tuple[str, str]] = []
+            for line in todo_text.splitlines():
+                if line in {"current:", "human pending:", "low priority:", "previous:"}:
+                    section = line[:-1]
+                elif path in todo_row_task_paths(args.root, line):
+                    rows.append((section, line))
+            expected_row = f"{relative_task_ref(args.root, path)} {metadata.runat}"
+            if rows != [("human pending", expected_row)]:
+                raise TaskFrontmatterError("prior-stop park index reconciliation requires one canonical human-pending row naming only the task and exact historical target.")
+            updated_todo = reconcile_todo_text(args.root, path, todo_text, metadata.runat, "previous", ("human pending",))
+            if updated_todo == todo_text:
+                raise TaskFrontmatterError("prior-stop park index reconciliation requires the sole TODO row to move from human pending to previous.")
+            if park_target_pane_id(metadata.runat) != "":
+                raise TaskFrontmatterError("prior-stop park index historical target reappeared; TODO custody was not changed.")
+            replace_if_unchanged_locked(todo, updated_todo, todo_before)
+            updated_todo_before = todo.stat()
+            if park_target_pane_id(metadata.runat) != "":
+                try:
+                    replace_if_unchanged_locked(todo, todo_text, updated_todo_before)
+                except Exception as rollback_exc:
+                    raise TaskFrontmatterError(f"prior-stop park index target reappeared and TODO rollback failed: {rollback_exc}") from rollback_exc
+                raise TaskFrontmatterError("prior-stop park index historical target reappeared after TODO custody update; TODO was rolled back.")
+            if path.read_text(encoding="utf-8") != text:
+                raise TaskFrontmatterError("prior-stop park index task bytes changed unexpectedly after TODO reconciliation.")
+
+
 def restore_terminal_target(args: Args, path: Path, text: str, before: os.stat_result) -> None:
     """Restore only a proven historical target on an unchanged terminal record."""
 
@@ -2729,6 +2813,8 @@ def run(args: Args) -> int:
             parked_unlinked = True
         elif args.reconcile_blocked_index:
             reconcile_previous_blocked_index(args, path, text, before)
+        elif args.reconcile_prior_stop_park_index:
+            reconcile_prior_stop_park_index(args, path, text, before)
         elif args.retire_blocked_target:
             retire_blocked_target(args, path, text, before)
         elif args.reconcile_long_running_human_index:
