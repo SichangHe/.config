@@ -90,6 +90,7 @@ env_agent_email="${OMO_AGENT_GMAIL_ADDRESS+x}${OMO_AGENT_GMAIL_ADDRESS-}"
 env_agent_password="${OMO_AGENT_GMAIL_APP_PASSWORD+x}${OMO_AGENT_GMAIL_APP_PASSWORD-}"
 env_human_email="${OMO_HUMAN_EMAIL_ADDRESS+x}${OMO_HUMAN_EMAIL_ADDRESS-}"
 env_human_config="${OMO_HUMAN_EMAIL_CONFIG_PATH+x}${OMO_HUMAN_EMAIL_CONFIG_PATH-}"
+env_default_contact_agent="${DEFAULT_CONTACT_AGENT+x}${DEFAULT_CONTACT_AGENT-}"
 local_env="${OMO_MANAGER_LOCAL_ENV:-$HOME/.config/omo_manager/local.env}"
 if [ -f "$local_env" ]; then
   # shellcheck disable=SC1090
@@ -116,9 +117,11 @@ fi
 [ -n "${env_agent_password#x}" ] && OMO_AGENT_GMAIL_APP_PASSWORD="${env_agent_password#x}"
 [ -n "${env_human_email#x}" ] && OMO_HUMAN_EMAIL_ADDRESS="${env_human_email#x}"
 [ -n "${env_human_config#x}" ] && OMO_HUMAN_EMAIL_CONFIG_PATH="${env_human_config#x}"
+[ -n "${env_default_contact_agent#x}" ] && DEFAULT_CONTACT_AGENT="${env_default_contact_agent#x}"
 root="${OMO_WORK_LOGS_ROOT:-$HOME/work_logs}"
 manager_url="${OMO_MANAGER_URL:-}"
 manager_target="${OMO_MANAGER_TMUX_TARGET:-}"
+default_contact_agent="${DEFAULT_CONTACT_AGENT:-}"
 state_base="${XDG_STATE_HOME:-$HOME/.local/state}/omo-manager"
 state_dir="${OMO_MANAGER_STATE_DIR:-$state_base}"
 email_enable="${OMO_MANAGER_ENABLE_EMAIL_WATCHER:-auto}"
@@ -143,6 +146,7 @@ case "$audit_enable" in
 esac
 export OMO_MANAGER_URL="$manager_url"
 export OMO_MANAGER_TMUX_TARGET="$manager_target"
+export DEFAULT_CONTACT_AGENT="$default_contact_agent"
 export OMO_WORK_LOGS_ROOT="$root"
 export OMO_MANAGER_STATE_DIR="$state_dir"
 export OMO_MANAGER_EMAIL_SUPERVISOR_STARTUP_GRACE_S="$email_supervisor_startup_grace_s"
@@ -597,6 +601,7 @@ if [ "$start_email" -eq 1 ]; then
   email_args=(--root "$root" --mail-dir "$mail_dir" --state-dir "$state_dir")
   [ -n "$manager_url" ] && email_args+=(--manager-url "$manager_url")
   [ -n "$manager_target" ] && email_args+=(--manager-target "$manager_target")
+  [ -n "$default_contact_agent" ] && email_args+=(--default-contact-agent "$default_contact_agent")
   email_token="$(owner_token)"
   email_launch_pid_file="$state_dir/.email-supervisor.$email_token.pid"
   setsid bash -c '

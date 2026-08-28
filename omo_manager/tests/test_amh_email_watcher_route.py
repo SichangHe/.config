@@ -14,7 +14,15 @@ from unittest.mock import patch
 from omo_manager import email_idle_watcher as watcher
 
 
-def split_args(root: Path, state: Path, manager_file: Path, *, manager_target: str = "", inbox_identity: str) -> watcher.Args:
+def split_args(
+    root: Path,
+    state: Path,
+    manager_file: Path,
+    *,
+    manager_target: str = "",
+    default_contact_agent: str = "",
+    inbox_identity: str,
+) -> watcher.Args:
     return watcher.Args(
         root,
         "",
@@ -26,6 +34,7 @@ def split_args(root: Path, state: Path, manager_file: Path, *, manager_target: s
         0,
         Path("/bin/false"),
         manager_target=manager_target,
+        default_contact_agent=default_contact_agent,
         mail_thresholds=False,
         inbox_identity=inbox_identity,
     )
@@ -54,6 +63,77 @@ class AmhEmailWatcherRouteTests(unittest.TestCase):
     def test_live_mailbox_approval_only_requires_once(self) -> None:
         with self.assertRaises(SystemExit):
             watcher.parse_args(["--live-mailbox-approval-only"])
+
+    def test_parse_args_accepts_default_contact_agent(self) -> None:
+        args = watcher.parse_args(["--default-contact-agent", "hwl:3"])
+        self.assertEqual("hwl:3", args.default_contact_agent)
+
+    def test_untagged_email_routes_to_available_default_contact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            state.mkdir()
+            contact = root / "contact.md"
+            contact.write_text(
+                "---\nversion: v1.0.0\nstatus: long_running\nblocked_on: human\nrunat: hwl:3\ntool: codex\nmanagerat: wl:1\nis_manager: true\npending_task_items: []\n---\n",
+                encoding="utf-8",
+            )
+            (root / "TODO.md").write_text(f"human pending:\n- `{contact.name}`\n", encoding="utf-8")
+            args = split_args(
+                root,
+                state,
+                root / "work_manager_today.md",
+                manager_target="wl:1",
+                default_contact_agent="hwl:3",
+                inbox_identity="agent@example.test\x00999",
+            )
+            with (
+                patch.object(watcher, "current_task_file_for_target", return_value=contact),
+                patch.object(watcher, "sendable_codex_target", return_value=True),
+            ):
+                route = watcher.email_route(args, "Plain subject")
+            self.assertEqual(contact, route.manager_file)
+            self.assertEqual("hwl:3", route.manager_target)
+
+    def test_untagged_email_falls_back_to_main_manager_when_default_contact_is_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            state.mkdir()
+            manager_file = root / "work_manager_today.md"
+            args = split_args(
+                root,
+                state,
+                manager_file,
+                manager_target="wl:1",
+                default_contact_agent="hwl:3",
+                inbox_identity="agent@example.test\x00999",
+            )
+            route = watcher.email_route(args, "Plain subject")
+            self.assertEqual(manager_file, route.manager_file)
+            self.assertEqual("wl:1", route.manager_target)
+
+    def test_unknown_address_falls_back_to_main_manager(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            state.mkdir()
+            manager_file = root / "work_manager_today.md"
+            args = split_args(
+                root,
+                state,
+                manager_file,
+                manager_target="wl:1",
+                default_contact_agent="hwl:3",
+                inbox_identity="agent@example.test\x00999",
+            )
+            with (
+                patch.object(watcher, "inactive_task_files_for_target", return_value=[]),
+                patch.object(watcher, "current_task_file_for_target", return_value=None),
+            ):
+                route = watcher.email_route(args, "[missing:4] Plain subject")
+            self.assertEqual(manager_file, route.manager_file)
+            self.assertEqual("wl:1", route.manager_target)
 
     def test_split_email_watcher_routes_exact_amh_subject_tag_before_legacy_pending(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

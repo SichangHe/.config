@@ -72,6 +72,7 @@ def fsync_directory(path: Path) -> None:
 DEFAULT_ROOT = Path(os.environ.get("OMO_WORK_LOGS_ROOT", Path.home() / "work_logs"))
 DEFAULT_MANAGER_URL = os.environ.get("OMO_MANAGER_URL", "http://127.0.0.1:18790")
 DEFAULT_MANAGER_TARGET = os.environ.get("OMO_MANAGER_TMUX_TARGET", "")
+DEFAULT_CONTACT_AGENT = os.environ.get("DEFAULT_CONTACT_AGENT", "")
 DEFAULT_MAIL_DIR = Path(os.environ.get("OMO_MANAGER_MAIL_DIR", DEFAULT_ROOT / "manager_mail"))
 CONFIG_PATH = human_config_path()
 LEGACY_MANAGER_SUBJECT_TOKENS = ("[a]", "[omo_manager]")
@@ -215,6 +216,7 @@ class Args:
     manager_mail_subject_tags: bool = True
     live_mailbox_approval_only: bool = False
     live_mailbox_stage: str = "email1"
+    default_contact_agent: str = ""
 
 
 class ParsedArgs(argparse.Namespace):
@@ -236,6 +238,7 @@ class ParsedArgs(argparse.Namespace):
     recent_cleanup_window_s: float = DEFAULT_MANAGER_RECENT_CLEANUP_WINDOW_S
     live_mailbox_approval_only: bool = False
     live_mailbox_stage: str = "email1"
+    default_contact_agent: str = DEFAULT_CONTACT_AGENT
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -243,6 +246,7 @@ def parse_args(argv: list[str]) -> Args:
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     parser.add_argument("--manager-url", default=DEFAULT_MANAGER_URL)
     parser.add_argument("--manager-target", default=DEFAULT_MANAGER_TARGET)
+    parser.add_argument("--default-contact-agent", default=DEFAULT_CONTACT_AGENT)
     parser.add_argument("--mail-dir", type=Path, default=DEFAULT_MAIL_DIR)
     parser.add_argument("--state-dir", type=Path, default=default_state_dir())
     parser.add_argument("--manager-file", type=Path, default=None)
@@ -286,6 +290,7 @@ def parse_args(argv: list[str]) -> Args:
         mail_thresholds=True,
         live_mailbox_approval_only=parsed.live_mailbox_approval_only,
         live_mailbox_stage=parsed.live_mailbox_stage,
+        default_contact_agent=parsed.default_contact_agent.strip(),
     )
 
 
@@ -593,6 +598,16 @@ def fallback_manager_target_for_file(args: Args, manager_file: Path, requested_t
     return requested_target
 
 
+def default_email_route(args: Args) -> EmailRoute:
+    target = args.default_contact_agent
+    if target and target not in target_aliases(args.manager_target):
+        contact_file = current_task_file_for_target(args.root, target)
+        if contact_file is not None and sendable_codex_target(target):
+            return EmailRoute(contact_file, target, pending_watcher_delivery=True)
+        logging.warning("default contact agent is unavailable; using main manager: target=%s fallback=%s", target, args.manager_target)
+    return EmailRoute(current_manager_file(args), args.manager_target, pending_watcher_delivery=True)
+
+
 def task_file_for_target_in_candidates(root: Path, tmux_target: str, candidates: list[Path]) -> Path | None:
     aliases = target_aliases(tmux_target)
     seen: set[Path] = set()
@@ -631,7 +646,7 @@ def email_route(args: Args, subject: str, body: str = "") -> EmailRoute:
     del body
     tmux_target = subject_manager_target(subject)
     if not tmux_target:
-        return EmailRoute(current_manager_file(args), args.manager_target, pending_watcher_delivery=True)
+        return default_email_route(args)
     manager_file = current_task_file_for_target(args.root, tmux_target)
     if manager_file is None:
         for inactive_file in inactive_task_files_for_target(args.root, tmux_target):
