@@ -743,6 +743,10 @@ def manager_mail_threshold_state_path(args: Args) -> Path:
     return email_uid_state_path(args, "email-manager-mail-thresholds")
 
 
+def manager_mail_threshold_watermarks_path(args: Args) -> Path:
+    return email_uid_state_path(args, "email-manager-mail-threshold-watermarks")
+
+
 def load_processed_uids(path: Path) -> set[str]:
     try:
         return {line.split("\t", 1)[0] for line in path.read_text(encoding="utf-8").splitlines() if line.strip()}
@@ -795,6 +799,30 @@ def load_active_manager_mail_thresholds(path: Path) -> set[str]:
 
 def save_active_manager_mail_thresholds(path: Path, active: set[str]) -> None:
     body = "".join(f"{kind}\t1\n" for kind in sorted(active))
+    write_private_state(path, body)
+
+
+def load_manager_mail_threshold_watermarks(path: Path) -> dict[str, int]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {}
+    watermarks: dict[str, int] = {}
+    for line in lines:
+        parts = line.split("\t", 1)
+        if len(parts) != 2:
+            continue
+        try:
+            count = int(parts[1])
+        except ValueError:
+            continue
+        if count >= 0:
+            watermarks[parts[0]] = count
+    return watermarks
+
+
+def save_manager_mail_threshold_watermarks(path: Path, watermarks: dict[str, int]) -> None:
+    body = "".join(f"{kind}\t{watermarks[kind]}\n" for kind in sorted(watermarks))
     write_private_state(path, body)
 
 
@@ -1698,6 +1726,9 @@ def handle_manager_mail_thresholds(client: imaplib.IMAP4_SSL, args: Args) -> boo
     threshold_state_path = manager_mail_threshold_state_path(args)
     active = load_active_manager_mail_thresholds(threshold_state_path)
     next_active = set(active)
+    watermark_path = manager_mail_threshold_watermarks_path(args)
+    watermarks = load_manager_mail_threshold_watermarks(watermark_path)
+    next_watermarks = dict(watermarks)
     triggered = False
     state_changed = False
     checks = (
@@ -1706,19 +1737,41 @@ def handle_manager_mail_thresholds(client: imaplib.IMAP4_SSL, args: Args) -> boo
     )
     for kind, threshold, count in checks:
         exceeded = threshold > 0 and count > threshold
-        if exceeded and kind not in active:
-            line_no, created = ensure_manager_mail_threshold_pending(args, kind, counts)
+        pending_line = existing_current_threshold_pending_line(current_manager_file(args), kind)
+        growth_retrigger = (
+            exceeded
+            and kind in active
+            and pending_line is None
+            and count >= watermarks.get(kind, threshold) + threshold
+        )
+        if exceeded and (kind not in active or growth_retrigger):
+            if pending_line is None:
+                line_no, created = ensure_manager_mail_threshold_pending(args, kind, counts)
+            else:
+                line_no, created = pending_line, False
             next_active.add(kind)
+            next_watermarks[kind] = count
             save_active_manager_mail_thresholds(threshold_state_path, next_active)
+            save_manager_mail_threshold_watermarks(watermark_path, next_watermarks)
             active = set(next_active)
+            watermarks = dict(next_watermarks)
             if created:
                 push_manager_mail_threshold_ref(args, line_no, kind)
                 triggered = True
         elif not exceeded and kind in next_active:
             next_active.remove(kind)
+            next_watermarks.pop(kind, None)
+            state_changed = True
+        elif exceeded and kind in active and kind not in next_watermarks:
+            # Older watcher versions persisted only the active latch. Use the
+            # configured threshold as their conservative trigger watermark so
+            # a substantially grown mailbox can recover without waiting for a
+            # below-threshold reset.
+            next_watermarks[kind] = threshold
             state_changed = True
     if state_changed:
         save_active_manager_mail_thresholds(threshold_state_path, next_active)
+        save_manager_mail_threshold_watermarks(watermark_path, next_watermarks)
     return triggered
 
 
