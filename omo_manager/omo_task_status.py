@@ -459,6 +459,7 @@ shutdown.""",
             parsed.source_sha256,
             parsed.human_close_authorization_source,
             parsed.human_close_authorization_sha256,
+            parsed.expected_receipt_sha256,
         )
         if (
             any(unrelated)
@@ -515,6 +516,7 @@ shutdown.""",
             parsed.source_sha256,
             parsed.human_close_authorization_source,
             parsed.human_close_authorization_sha256,
+            parsed.expected_receipt_sha256,
         )
         if (
             any(unrelated)
@@ -1450,17 +1452,29 @@ def closed_missing_task_text(
     queue_sha256 = hashlib.sha256(queue_text.encode()).hexdigest()
     cleared = cleared_pending_task_text(text, args.root)
     updated = update_frontmatter_status(cleared, "done", "", args.root).rstrip("\n")
-    assert args.audit_output is not None
-    note = (
-        f"(missing-target record closed without tmux mutation: {args.missing_target}; authority: {authority_locator}; "
-        f"authority envelope: {authority_envelope}; prior blocker: {json.dumps(metadata.blocked_on, ensure_ascii=False)}; "
-        f"prior queue preserved in owner-private audit {args.audit_output}; prior queue SHA-256: {queue_sha256})"
-    )
+    note = missing_close_note(args, authority_locator, authority_envelope, metadata.blocked_on, queue_sha256)
     updated = f"{updated}\n\n{note}\n"
     closed = parse_task_metadata(updated, args.root)
     if closed is None or closed.status != "done" or closed.runat != args.missing_target or closed.pending_task_items:
         raise TaskFrontmatterError("missing-target closure did not produce a valid terminal task record.")
     return updated, queue_sha256
+
+
+def missing_close_note(
+    args: Args,
+    authority_locator: str,
+    authority_envelope: str,
+    blocker: str,
+    queue_sha256: str,
+) -> str:
+    """Render the durable task-body binding for one missing-record closure."""
+
+    assert args.audit_output is not None
+    return (
+        f"(missing-target record closed without tmux mutation: {args.missing_target}; authority: {authority_locator}; "
+        f"authority envelope: {authority_envelope}; prior blocker: {json.dumps(blocker, ensure_ascii=False)}; "
+        f"prior queue preserved in owner-private audit {args.audit_output}; prior queue SHA-256: {queue_sha256})"
+    )
 
 
 def closed_missing_todo_text(root: Path, path: Path, text: str, target: str) -> str:
@@ -1485,9 +1499,9 @@ def closed_missing_todo_text(root: Path, path: Path, text: str, target: str) -> 
         raise TaskFrontmatterError("missing-target closure requires one canonical lifecycle section of each kind and one TODO row.")
     row_index, row_section = rows[0]
     validate_reconciled_todo_row(root, path, lines[row_index], target)
-    if row_section not in {"human pending", "low priority", "previous"}:
+    if row_section not in headers:
         raise TaskFrontmatterError(
-            "missing-target closure requires the TODO row in human pending, low priority, or previous."
+            "missing-target closure requires the TODO row in a canonical lifecycle section."
         )
     ref = relative_task_ref(root, path)
     row = lines[row_index].rstrip("\r\n")
@@ -1505,10 +1519,14 @@ def closed_missing_todo_text(root: Path, path: Path, text: str, target: str) -> 
 def missing_close_audit_record(
     args: Args,
     path: Path,
-    metadata: TaskMetadata,
+    blocked_on: str,
+    is_manager: bool,
+    pending_task_items: tuple[str, ...],
     authority_locator: str,
     authority_envelope: str,
     queue_sha256: str,
+    committed_task_sha256: str,
+    committed_todo_sha256: str,
     state: str,
 ) -> str:
     """Render the exact authority, source state, and preserved queue for closure."""
@@ -1522,32 +1540,115 @@ def missing_close_audit_record(
             "target": args.missing_target,
             "task_sha256": args.expected_task_sha256,
             "initial_todo_sha256": args.expected_todo_sha256,
+            "committed_task_sha256": committed_task_sha256,
+            "committed_todo_sha256": committed_todo_sha256,
             "authority_source": authority_locator,
             "authority_sha256": args.authority_sha256,
             "authority_envelope": authority_envelope,
             "authority_envelope_sha256": args.authority_envelope_sha256,
-            "blocked_on": metadata.blocked_on,
-            "is_manager": metadata.is_manager,
-            "pending_task_items": list(metadata.pending_task_items),
+            "blocked_on": blocked_on,
+            "is_manager": is_manager,
+            "pending_task_items": list(pending_task_items),
             "pending_task_items_sha256": queue_sha256,
         },
         sort_keys=True,
     )
 
 
+def validate_missing_close_recovery_audit(
+    args: Args,
+    path: Path,
+    audit_text: str,
+    authority_locator: str,
+    authority_envelope: str,
+) -> dict[str, object]:
+    """Validate an exact prepared receipt before resuming a partial commit."""
+
+    try:
+        record = yaml.safe_load(audit_text)
+    except yaml.YAMLError as exc:
+        raise TaskFrontmatterError("missing-target closure audit is not valid YAML.") from exc
+    if not isinstance(record, dict):
+        raise TaskFrontmatterError("missing-target closure audit must be a mapping.")
+    expected_scalars = {
+        "version": CUSTODY_RECEIPT_VERSION,
+        "operation": "close-missing-target",
+        "task": relative_task_ref(args.root, path),
+        "target": args.missing_target,
+        "task_sha256": args.expected_task_sha256,
+        "initial_todo_sha256": args.expected_todo_sha256,
+        "authority_source": authority_locator,
+        "authority_sha256": args.authority_sha256,
+        "authority_envelope": authority_envelope,
+        "authority_envelope_sha256": args.authority_envelope_sha256,
+    }
+    if any(record.get(key) != value for key, value in expected_scalars.items()):
+        raise TaskFrontmatterError("missing-target closure audit does not match the requested recovery identity.")
+    expected_keys = {
+        *expected_scalars,
+        "state",
+        "committed_task_sha256",
+        "committed_todo_sha256",
+        "blocked_on",
+        "is_manager",
+        "pending_task_items",
+        "pending_task_items_sha256",
+    }
+    queue = record.get("pending_task_items")
+    queue_sha256 = record.get("pending_task_items_sha256")
+    if (
+        set(record) != expected_keys
+        or record.get("state") not in {"prepared-or-committed", "complete"}
+        or SHA256_RE.fullmatch(str(record.get("committed_task_sha256", ""))) is None
+        or SHA256_RE.fullmatch(str(record.get("committed_todo_sha256", ""))) is None
+        or not isinstance(record.get("blocked_on"), str)
+        or not isinstance(record.get("is_manager"), bool)
+        or not isinstance(queue, list)
+        or any(not isinstance(item, str) for item in queue)
+        or SHA256_RE.fullmatch(str(queue_sha256 or "")) is None
+        or hashlib.sha256(yaml.safe_dump(queue, sort_keys=False).encode()).hexdigest() != queue_sha256
+    ):
+        raise TaskFrontmatterError("missing-target closure audit is malformed or its preserved queue does not match.")
+    return record
+
+
 def close_missing_target(args: Args, path: Path, text: str, before: os.stat_result) -> None:
     """Close one exact absent blocked record without starting or stopping tmux."""
 
-    if hashlib.sha256(text.encode()).hexdigest() != args.expected_task_sha256:
-        raise TaskFrontmatterError("task bytes do not match --expected-task-sha256.")
+    if args.audit_output is None or not args.audit_output.is_absolute():
+        raise TaskFrontmatterError("missing-target closure requires an absolute owner-private audit output.")
     excerpt, authority_locator = read_park_authority(args)
     if not authority_locator.startswith("manager_mail/"):
         raise TaskFrontmatterError("missing-target closure authority must be one direct manager_mail file.")
     normalized_excerpt = excerpt.replace("\r\n", "\n")
-    required_authority = (
-        "do whatever you need to do to make those\nproblems go away",
-        "So maybe just close them.",
-        "The seven records with missing tmux targets were ordered closed",
+    sentences = re.split(r"(?<=[.!?])(?:\s+|$)", re.sub(r"\s+", " ", normalized_excerpt))
+
+    def unambiguous_close_authority(sentence: str) -> bool:
+        stripped = sentence.strip()
+        missing_object = r"(?:missing[- ]target records?|records? with missing (?:tmux )?targets?)"
+        direct_close = (
+            rf"(?:\bclose (?:the )?(?:seven |those |these )?{missing_object}\b|"
+            rf"\b(?:the )?(?:seven )?{missing_object} (?:can be closed|(?:were |are )?ordered closed)\b)"
+        )
+        uncertain = (
+            "?" in stripped
+            or re.match(
+                r"(?:are|can|could|should|would|will|do|does|did|is|may|might|tell me whether|ask whether|whether)\b",
+                stripped,
+                re.IGNORECASE,
+            )
+            is not None
+            or re.search(
+                r"\b(?:if|unless|whether|when|after|before|once|until|pending|depending on|provided that|subject to)\b",
+                stripped,
+                re.IGNORECASE,
+            )
+            is not None
+        )
+        return not uncertain and re.search(direct_close, stripped, re.IGNORECASE) is not None
+
+    explicit_authority = any(
+        unambiguous_close_authority(sentence) for sentence in sentences
     )
     prohibited_authority = re.search(
         r"\b(?:do not|don't|must not|never|refuse to|should not)\s+(?:[A-Za-z-]+\s+){0,4}clos(?:e|ed|ing)\b"
@@ -1555,76 +1656,152 @@ def close_missing_target(args: Args, path: Path, text: str, before: os.stat_resu
         normalized_excerpt,
         re.IGNORECASE | re.DOTALL,
     )
-    if any(phrase not in normalized_excerpt for phrase in required_authority) or prohibited_authority is not None:
+    if not explicit_authority or prohibited_authority is not None:
         raise TaskFrontmatterError("authority excerpt does not explicitly authorize closing missing-target records.")
     authority_envelope = read_park_authority_envelope(args, excerpt, authority_locator)
-    metadata = parse_task_metadata(text, args.root)
-    if metadata is None:
-        raise TaskFrontmatterError("missing-target closure requires a task record.")
-    updated_task, queue_sha256 = closed_missing_task_text(
-        args, path, text, authority_locator, authority_envelope
-    )
     todo = args.root / "TODO.md"
     if path == todo or not todo.is_file():
         raise TaskFrontmatterError("missing-target closure requires a task file and TODO.md.")
-    assert args.audit_output is not None
-    prepared_audit = missing_close_audit_record(
-        args, path, metadata, authority_locator, authority_envelope, queue_sha256, "prepared-or-committed"
-    )
-    complete_audit = missing_close_audit_record(
-        args, path, metadata, authority_locator, authority_envelope, queue_sha256, "complete"
-    )
-    failed_audit = missing_close_audit_record(
-        args, path, metadata, authority_locator, authority_envelope, queue_sha256, "not-completed"
-    )
+    protected_paths = {path.resolve(), todo.resolve(), (args.root / authority_locator.partition(":")[0]).resolve()}
+    if args.authority_envelope is not None:
+        protected_paths.add((args.root / args.authority_envelope).resolve())
+    if args.audit_output.resolve() in protected_paths:
+        raise TaskFrontmatterError("missing-target closure audit output must be distinct from task, TODO, and authority files.")
     with root_membership_lock(args.root), task_target_lock(args.root, args.missing_target):
         with ExitStack() as locks:
             for locked_path in sorted({path, todo}, key=str):
                 locks.enter_context(task_file_lock(locked_path))
-            if path.read_text(encoding="utf-8") != text or not same_file_state(before, path.stat()):
-                raise TaskFrontmatterError("task changed while missing-target closure was prepared.")
+            task_before = path.stat()
+            current_task = path.read_text(encoding="utf-8")
+            if not same_file_state(task_before, path.stat()):
+                raise TaskFrontmatterError("task changed while missing-target closure was read.")
+            current_task_sha256 = hashlib.sha256(current_task.encode()).hexdigest()
             todo_before = todo.stat()
-            todo_text = todo.read_text(encoding="utf-8")
-            if hashlib.sha256(todo_text.encode()).hexdigest() != args.expected_todo_sha256:
-                raise TaskFrontmatterError("TODO bytes do not match --expected-todo-sha256.")
+            current_todo = todo.read_text(encoding="utf-8")
+            current_todo_sha256 = hashlib.sha256(current_todo.encode()).hexdigest()
             if read_park_authority(args) != (excerpt, authority_locator):
                 raise TaskFrontmatterError("authority changed while missing-target closure was prepared.")
             if read_park_authority_envelope(args, excerpt, authority_locator) != authority_envelope:
                 raise TaskFrontmatterError("authority envelope changed while missing-target closure was prepared.")
+            audit_text = read_private_audit(args.audit_output)
+            if audit_text is None:
+                if current_task_sha256 != args.expected_task_sha256 or not same_file_state(before, path.stat()):
+                    raise TaskFrontmatterError("task bytes do not match --expected-task-sha256.")
+                if current_todo_sha256 != args.expected_todo_sha256:
+                    raise TaskFrontmatterError("TODO bytes do not match --expected-todo-sha256.")
+                metadata = parse_task_metadata(current_task, args.root)
+                if metadata is None:
+                    raise TaskFrontmatterError("missing-target closure requires a task record.")
+                updated_task, queue_sha256 = closed_missing_task_text(
+                    args, path, current_task, authority_locator, authority_envelope
+                )
+                updated_todo = closed_missing_todo_text(args.root, path, current_todo, args.missing_target)
+                committed_task_sha256 = hashlib.sha256(updated_task.encode()).hexdigest()
+                committed_todo_sha256 = hashlib.sha256(updated_todo.encode()).hexdigest()
+                prepared_audit = missing_close_audit_record(
+                    args,
+                    path,
+                    metadata.blocked_on,
+                    metadata.is_manager,
+                    metadata.pending_task_items,
+                    authority_locator,
+                    authority_envelope,
+                    queue_sha256,
+                    committed_task_sha256,
+                    committed_todo_sha256,
+                    "prepared-or-committed",
+                )
+                complete_audit = missing_close_audit_record(
+                    args,
+                    path,
+                    metadata.blocked_on,
+                    metadata.is_manager,
+                    metadata.pending_task_items,
+                    authority_locator,
+                    authority_envelope,
+                    queue_sha256,
+                    committed_task_sha256,
+                    committed_todo_sha256,
+                    "complete",
+                )
+                reserve_private_audit(args.audit_output, prepared_audit)
+            else:
+                record = validate_missing_close_recovery_audit(
+                    args, path, audit_text, authority_locator, authority_envelope
+                )
+                committed_task_sha256 = str(record["committed_task_sha256"])
+                committed_todo_sha256 = str(record["committed_todo_sha256"])
+                queue_sha256 = str(record["pending_task_items_sha256"])
+                prepared_audit = missing_close_audit_record(
+                    args,
+                    path,
+                    str(record["blocked_on"]),
+                    bool(record["is_manager"]),
+                    tuple(str(item) for item in record["pending_task_items"]),
+                    authority_locator,
+                    authority_envelope,
+                    queue_sha256,
+                    committed_task_sha256,
+                    committed_todo_sha256,
+                    "prepared-or-committed",
+                )
+                complete_audit = missing_close_audit_record(
+                    args,
+                    path,
+                    str(record["blocked_on"]),
+                    bool(record["is_manager"]),
+                    tuple(str(item) for item in record["pending_task_items"]),
+                    authority_locator,
+                    authority_envelope,
+                    queue_sha256,
+                    committed_task_sha256,
+                    committed_todo_sha256,
+                    "complete",
+                )
+                if record["state"] == "complete":
+                    prepared_audit = audit_text
+                    complete_audit = audit_text
+                updated_task = ""
+                updated_todo = ""
+                if current_task_sha256 == args.expected_task_sha256:
+                    updated_task, recovered_queue_sha256 = closed_missing_task_text(
+                        args, path, current_task, authority_locator, authority_envelope
+                    )
+                    if hashlib.sha256(updated_task.encode()).hexdigest() != committed_task_sha256 or recovered_queue_sha256 != queue_sha256:
+                        raise TaskFrontmatterError("missing-target closure task recovery bytes do not match the prepared audit.")
+                elif current_task_sha256 != committed_task_sha256:
+                    raise TaskFrontmatterError("task bytes match neither the initial nor committed closure state.")
+                if current_todo_sha256 == args.expected_todo_sha256:
+                    updated_todo = closed_missing_todo_text(args.root, path, current_todo, args.missing_target)
+                    if hashlib.sha256(updated_todo.encode()).hexdigest() != committed_todo_sha256:
+                        raise TaskFrontmatterError("missing-target closure TODO recovery bytes do not match the prepared audit.")
+                elif current_todo_sha256 != committed_todo_sha256:
+                    raise TaskFrontmatterError("TODO bytes match neither the initial nor committed closure state.")
             if park_target_pane_id(args.missing_target) != "":
                 raise TaskFrontmatterError("target is live or tmux could not prove it absent.")
-            updated_todo = closed_missing_todo_text(args.root, path, todo_text, args.missing_target)
-            reserve_private_audit(args.audit_output, prepared_audit)
+            if park_target_pane_id(args.missing_target) != "":
+                raise TaskFrontmatterError("target reappeared while missing-target closure was prepared.")
+            todo_moved = current_todo_sha256 != committed_todo_sha256
+            if todo_moved:
+                replace_if_unchanged_locked(todo, updated_todo, todo_before)
+            moved_todo_before = todo.stat()
             try:
                 if park_target_pane_id(args.missing_target) != "":
-                    raise TaskFrontmatterError("target reappeared while missing-target closure was prepared.")
-                if updated_todo != todo_text:
-                    replace_if_unchanged_locked(todo, updated_todo, todo_before)
-                moved_todo_before = todo.stat()
-                if park_target_pane_id(args.missing_target) != "":
-                    if updated_todo != todo_text:
-                        replace_if_unchanged_locked(todo, todo_text, moved_todo_before)
-                    raise TaskFrontmatterError("target reappeared during missing-target closure; TODO was restored.")
-                try:
-                    replace_if_unchanged_locked(path, updated_task, before)
-                except Exception as exc:
-                    if updated_todo != todo_text:
-                        try:
-                            replace_if_unchanged_locked(todo, todo_text, moved_todo_before)
-                        except Exception as rollback_exc:
-                            raise TaskFrontmatterError(f"missing-target closure failed and TODO rollback also failed: {rollback_exc}") from exc
-                    raise
+                    raise TaskFrontmatterError("target reappeared during missing-target closure.")
+                if current_task_sha256 != committed_task_sha256:
+                    replace_if_unchanged_locked(path, updated_task, task_before)
             except Exception as mutation_error:
-                try:
-                    replace_private_audit(args.audit_output, prepared_audit, failed_audit)
-                except Exception as audit_error:
-                    mutation_error.add_note(
-                        "closure did not commit and audit finalization also failed; "
-                        f"inspect prepared-or-committed receipt against task state: {audit_error}"
-                    )
+                if todo_moved:
+                    try:
+                        replace_if_unchanged_locked(todo, current_todo, moved_todo_before)
+                    except Exception as rollback_error:
+                        raise TaskFrontmatterError(
+                            f"missing-target closure failed and TODO rollback also failed: {rollback_error}"
+                        ) from mutation_error
                 raise
             try:
-                replace_private_audit(args.audit_output, prepared_audit, complete_audit)
+                if prepared_audit != complete_audit:
+                    replace_private_audit(args.audit_output, prepared_audit, complete_audit)
             except Exception as audit_error:
                 print(
                     "omo_task_status.py: closure committed; audit remains prepared-or-committed "

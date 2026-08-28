@@ -165,6 +165,7 @@ class TaskStatusTests(unittest.TestCase):
 
     def test_close_missing_target_handles_all_canonical_sections_and_record_shapes(self) -> None:
         shapes = (
+            ("current", True, "human", False),
             ("human pending", False, "direct human halt", True),
             ("low priority", True, "token quota", False),
             ("low priority", False, "reviewed lifecycle helper limitation", True),
@@ -213,7 +214,10 @@ class TaskStatusTests(unittest.TestCase):
                 self.assertEqual(todo_text, todo.read_text())
 
     def test_close_missing_target_rejects_drift_malformed_authority_and_ambiguous_todo(self) -> None:
-        for case in ("task_digest", "todo_digest", "authority", "negated_authority", "envelope", "duplicate", "current"):
+        for case in (
+            "task_digest", "todo_digest", "authority", "negated_authority", "unrelated_closure",
+            "question_authority", "conditional_authority", "temporal_authority", "envelope", "duplicate",
+        ):
             with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 task, text, todo, todo_text, args = self.write_close_missing_case(root)
@@ -246,17 +250,53 @@ class TaskStatusTests(unittest.TestCase):
                         authority_sha256=hashlib.sha256(negated.encode()).hexdigest(),
                         authority_envelope_sha256=hashlib.sha256(changed_envelope.encode()).hexdigest(),
                     )
+                elif case == "unrelated_closure":
+                    authority = root / "manager_mail/close.txt"
+                    unrelated = "Subject: decision\n\nMissing-target records require review; unrelated records were ordered closed.\n"
+                    authority.write_text(unrelated)
+                    authority.chmod(0o600)
+                    excerpt = unrelated.splitlines(keepends=True)[2]
+                    envelope = root / "request_task.md"
+                    envelope_text = (
+                        '<human_instruction authoritative="true" source="manager_mail/close.txt:3-3">\n'
+                        f"{excerpt}</human_instruction>\n"
+                    )
+                    envelope.write_text(envelope_text)
+                    args = replace(
+                        args,
+                        authority_lines=(3, 3),
+                        authority_sha256=hashlib.sha256(unrelated.encode()).hexdigest(),
+                        authority_envelope_sha256=hashlib.sha256(envelope_text.encode()).hexdigest(),
+                    )
+                elif case in {"question_authority", "conditional_authority", "temporal_authority"}:
+                    authority = root / "manager_mail/close.txt"
+                    if case == "question_authority":
+                        decision = "Are records with missing tmux targets ordered closed?"
+                    elif case == "conditional_authority":
+                        decision = "If the owner agrees, missing-target records can be closed."
+                    else:
+                        decision = "Close missing-target records after the owner approves."
+                    uncertain = f"Subject: decision\n\n{decision}\n"
+                    authority.write_text(uncertain)
+                    authority.chmod(0o600)
+                    excerpt = uncertain.splitlines(keepends=True)[2]
+                    envelope = root / "request_task.md"
+                    envelope_text = (
+                        '<human_instruction authoritative="true" source="manager_mail/close.txt:3-3">\n'
+                        f"{excerpt}</human_instruction>\n"
+                    )
+                    envelope.write_text(envelope_text)
+                    args = replace(
+                        args,
+                        authority_lines=(3, 3),
+                        authority_sha256=hashlib.sha256(uncertain.encode()).hexdigest(),
+                        authority_envelope_sha256=hashlib.sha256(envelope_text.encode()).hexdigest(),
+                    )
                 elif case == "envelope":
                     envelope = root / "request_task.md"
                     changed = envelope.read_text().replace("ordered closed", "need review")
                     envelope.write_text(changed)
                     args = replace(args, authority_envelope_sha256=hashlib.sha256(changed.encode()).hexdigest())
-                elif case == "current":
-                    changed = todo_text.replace("current:\n", "current:\nmissing.md vl:8\n", 1).replace(
-                        "human pending:\nmissing.md vl:8", "human pending:\n"
-                    )
-                    todo.write_text(changed)
-                    args = replace(args, expected_todo_sha256=hashlib.sha256(changed.encode()).hexdigest())
                 else:
                     changed = todo_text.replace("previous:\n", "previous:\nmissing.md vl:8\n")
                     todo.write_text(changed)
@@ -285,6 +325,78 @@ class TaskStatusTests(unittest.TestCase):
                     close_missing_target(args, task, text, task.stat())
             self.assertEqual(text, task.read_text())
             self.assertEqual(todo_text, todo.read_text())
+
+    def test_close_missing_target_recovers_after_todo_commit_before_task_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, text, todo, _todo_text, args = self.write_close_missing_case(root, section="low priority")
+            real_replace = replace_if_unchanged_locked
+
+            def interrupt_task(path: Path, updated: str, before: os.stat_result) -> None:
+                if path == task:
+                    raise KeyboardInterrupt
+                real_replace(path, updated, before)
+
+            with (
+                patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""),
+                patch("omo_manager.omo_task_status.replace_if_unchanged_locked", side_effect=interrupt_task),
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    close_missing_target(args, task, text, task.stat())
+            self.assertEqual(text, task.read_text())
+            self.assertIn("previous:\nmissing.md\n", todo.read_text())
+            self.assertEqual("prepared-or-committed", yaml.safe_load(args.audit_output.read_text())["state"])
+
+            with patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""):
+                close_missing_target(args, task, task.read_text(), task.stat())
+            metadata = parse_task_metadata(task.read_text(), root)
+            assert metadata is not None
+            self.assertEqual("done", metadata.status)
+            self.assertEqual((), metadata.pending_task_items)
+            self.assertEqual("complete", yaml.safe_load(args.audit_output.read_text())["state"])
+
+    def test_close_missing_target_rejects_post_preparation_task_drift_fresh_and_recovery(self) -> None:
+        for recovery in (False, True):
+            with self.subTest(recovery=recovery), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                task, text, todo, todo_text, args = self.write_close_missing_case(root, section="low priority")
+                if recovery:
+                    real_replace = replace_if_unchanged_locked
+
+                    def interrupt_task(path: Path, updated: str, before: os.stat_result) -> None:
+                        if path == task:
+                            raise KeyboardInterrupt
+                        real_replace(path, updated, before)
+
+                    with (
+                        patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""),
+                        patch("omo_manager.omo_task_status.replace_if_unchanged_locked", side_effect=interrupt_task),
+                    ):
+                        with self.assertRaises(KeyboardInterrupt):
+                            close_missing_target(args, task, text, task.stat())
+
+                calls = 0
+                drifted = text + "concurrent drift\n"
+
+                def drift_before_task_commit(_target: str) -> str:
+                    nonlocal calls
+                    calls += 1
+                    if calls == 3:
+                        task.write_text(drifted)
+                    return ""
+
+                with patch(
+                    "omo_manager.omo_task_status.park_target_pane_id",
+                    side_effect=drift_before_task_commit,
+                ):
+                    with self.assertRaisesRegex(TaskFrontmatterError, "changed"):
+                        close_missing_target(args, task, task.read_text(), task.stat())
+                self.assertEqual(drifted, task.read_text())
+                if recovery:
+                    self.assertIn("previous:\nmissing.md\n", todo.read_text())
+                else:
+                    self.assertEqual(todo_text, todo.read_text())
+                self.assertEqual("prepared-or-committed", yaml.safe_load(args.audit_output.read_text())["state"])
 
     def test_close_missing_target_detects_envelope_drift_before_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -355,6 +467,35 @@ class TaskStatusTests(unittest.TestCase):
             self.assertIn("previous:\nmissing.md\n", todo.read_text())
             self.assertEqual("prepared-or-committed", yaml.safe_load(args.audit_output.read_text())["state"])
 
+            with patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""):
+                close_missing_target(args, task, task.read_text(), task.stat())
+            self.assertEqual("complete", yaml.safe_load(args.audit_output.read_text())["state"])
+
+    def test_close_missing_target_accepts_semantic_direct_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, text, _todo, _todo_text, args = self.write_close_missing_case(root)
+            authority = root / "manager_mail/close.txt"
+            semantic = "Subject: decision\n\nClose the seven missing-target records.\n"
+            authority.write_text(semantic)
+            authority.chmod(0o600)
+            excerpt = semantic.splitlines(keepends=True)[2]
+            envelope = root / "request_task.md"
+            envelope_text = (
+                '<human_instruction authoritative="true" source="manager_mail/close.txt:3-3">\n'
+                f"{excerpt}</human_instruction>\n"
+            )
+            envelope.write_text(envelope_text)
+            args = replace(
+                args,
+                authority_lines=(3, 3),
+                authority_sha256=hashlib.sha256(semantic.encode()).hexdigest(),
+                authority_envelope_sha256=hashlib.sha256(envelope_text.encode()).hexdigest(),
+            )
+            with patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""):
+                close_missing_target(args, task, text, task.stat())
+            self.assertEqual("done", parse_task_metadata(task.read_text(), root).status)
+
     def test_close_missing_target_accepts_crlf_authority_with_exact_digest_and_envelope(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -400,6 +541,18 @@ class TaskStatusTests(unittest.TestCase):
         )
         self.assertTrue(args.close_missing_target)
         self.assertEqual("vl:8", args.missing_target)
+        with self.assertRaises(SystemExit):
+            parse_args(
+                [
+                    "--root", "/tmp/root", "--close-missing-target", "--missing-target", "vl:8",
+                    "--expected-task-sha256", "1" * 64, "--expected-todo-sha256", "2" * 64,
+                    "--expected-receipt-sha256", "5" * 64,
+                    "--authority-file", "manager_mail/request.txt", "--authority-lines", "3-4",
+                    "--authority-sha256", "3" * 64, "--authority-envelope", "task.md",
+                    "--authority-envelope-sha256", "4" * 64, "--audit-output", "/tmp/audit.yaml",
+                    "missing.md",
+                ]
+            )
         with self.assertRaises(SystemExit):
             parse_args(
                 [
