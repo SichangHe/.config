@@ -100,7 +100,7 @@ class TaskStatusTests(unittest.TestCase):
     CLOSE_MISSING_AUTHORITY_TEXT = (
         "Subject: close missing records\n\n"
         "As for the sessions without IDs, do whatever you need to do to make those\n"
-        "problems go away. So maybe just close them.\n\n"
+        "problems go away. If they don't provide the session ID, force close them. So maybe just close them.\n\n"
         "The seven records with missing tmux targets were ordered closed.\n"
     )
 

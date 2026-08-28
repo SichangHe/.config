@@ -1550,7 +1550,7 @@ def close_missing_target(args: Args, path: Path, text: str, before: os.stat_resu
         "The seven records with missing tmux targets were ordered closed",
     )
     prohibited_authority = re.search(
-        r"\b(?:do not|don't|must not|never|refuse to|should not)\b.{0,120}\bclos(?:e|ed|ing)\b"
+        r"\b(?:do not|don't|must not|never|refuse to|should not)\s+(?:[A-Za-z-]+\s+){0,4}clos(?:e|ed|ing)\b"
         r"|\bclos(?:e|ed|ing)\b.{0,120}\b(?:not authorized|not allowed|prohibited|forbidden)\b",
         normalized_excerpt,
         re.IGNORECASE | re.DOTALL,
