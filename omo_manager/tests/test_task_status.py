@@ -23,6 +23,7 @@ from omo_manager.omo_task_status import normalize_low_priority_current
 from omo_manager.omo_task_status import park_audit_record
 from omo_manager.omo_task_status import park_target_pane_id
 from omo_manager.omo_task_status import park_unlinked
+from omo_manager.omo_task_status import reattest_park_unlinked
 from omo_manager.omo_task_status import finish_shared_target_done
 from omo_manager.omo_task_status import StopArgs
 from omo_manager.omo_task_status import parse_args
@@ -268,6 +269,102 @@ class TaskStatusTests(unittest.TestCase):
             "low priority:\nvl_task.md\n",
             1,
         )
+
+    def write_park_reattestation_case(self, root: Path) -> tuple[Path, str, Path, str, StatusArgs, str]:
+        todo_text = "current:\n\nlow priority:\n\nhuman pending:\n\nprevious:\nvl_task.md vl:2\n"
+        task, text, todo, _original_todo, args = self.write_park_case(root, todo_text=todo_text)
+        session_id = "01a03a33-5aa7-7752-ba19-95d74a2910e3"
+        text = text + "authority: manager_mail/halt.txt:3-6\n" + close_note("vl:2", session_id)
+        task.write_text(text, encoding="utf-8")
+        envelope = root / "vl_pause.md"
+        with envelope.open("a", encoding="utf-8") as output:
+            output.write("<agent_message>route under manager_mail/halt.txt:3-6</agent_message>\n")
+        args = replace(
+            args,
+            session_id=session_id,
+            expected_pane_id="",
+            expected_task_sha256=hashlib.sha256(text.encode()).hexdigest(),
+            authority_envelope_sha256=hashlib.sha256(envelope.read_bytes()).hexdigest(),
+        )
+        with patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=("", "")):
+            park_unlinked(args, task, text, task.stat())
+        prior_text = args.audit_output.read_text(encoding="utf-8")
+        archive = root / "202607"
+        (archive / "manager_mail").mkdir(parents=True)
+        archive.chmod(0o755)
+        (archive / "manager_mail").chmod(0o755)
+        (root / "manager_mail/halt.txt").rename(archive / "manager_mail/halt.txt")
+        (root / "vl_pause.md").rename(archive / "vl_pause.md")
+        envelope = archive / "vl_pause.md"
+        envelope_text = envelope.read_text(encoding="utf-8").replace("manager_mail/halt.txt:3-6", "202607/manager_mail/halt.txt:3-6")
+        envelope.write_text(envelope_text, encoding="utf-8")
+        current_text = task.read_text(encoding="utf-8").replace("manager_mail/halt.txt:3-6", "202607/manager_mail/halt.txt:3-6")
+        task.write_text(current_text, encoding="utf-8")
+        current_todo = todo.read_text(encoding="utf-8")
+        args = replace(
+            args,
+            park_unlinked=False,
+            reattest_park_unlinked=True,
+            expected_task_sha256=hashlib.sha256(current_text.encode()).hexdigest(),
+            expected_todo_sha256=hashlib.sha256(current_todo.encode()).hexdigest(),
+            expected_receipt_sha256=hashlib.sha256(prior_text.encode()).hexdigest(),
+            authority_file=Path("202607/manager_mail/halt.txt"),
+            authority_envelope=Path("202607/vl_pause.md"),
+            authority_envelope_sha256=hashlib.sha256(envelope_text.encode()).hexdigest(),
+        )
+        return task, current_text, todo, current_todo, args, prior_text
+
+    def test_park_unlinked_reattestation_preserves_custody_and_tmux(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, text, todo, todo_text, args, prior_text = self.write_park_reattestation_case(root)
+            with (
+                patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=("", "")) as inspect_target,
+                patch("omo_manager.omo_task_status.stop") as stop_owner,
+            ):
+                reattest_park_unlinked(args, task, text, task.stat())
+            self.assertEqual(2, inspect_target.call_count)
+            stop_owner.assert_not_called()
+            self.assertEqual(text, task.read_text(encoding="utf-8"))
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+            receipt = args.audit_output.read_text(encoding="utf-8")
+            self.assertIn("operation: park-unlinked-re-attestation", receipt)
+            self.assertIn(hashlib.sha256(prior_text.encode()).hexdigest(), receipt)
+
+    def test_park_unlinked_reattestation_rejects_drift_duplicate_owner_and_target(self) -> None:
+        for case in ("task", "receipt", "malformed receipt", "envelope", "authority symlink", "owner", "live", "unknown"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                task, text, todo, todo_text, args, prior_text = self.write_park_reattestation_case(root)
+                if case == "task":
+                    changed = text + "semantic drift\n"
+                    task.write_text(changed, encoding="utf-8")
+                    args = replace(args, expected_task_sha256=hashlib.sha256(changed.encode()).hexdigest())
+                elif case == "receipt":
+                    args = replace(args, expected_receipt_sha256="0" * 64)
+                elif case == "malformed receipt":
+                    malformed = prior_text + "state: complete\n"
+                    args.audit_output.write_text(malformed, encoding="utf-8")
+                    args = replace(args, expected_receipt_sha256=hashlib.sha256(malformed.encode()).hexdigest())
+                    prior_text = malformed
+                elif case == "envelope":
+                    envelope = root / "202607/vl_pause.md"
+                    changed_envelope = envelope.read_text().replace("</human_instruction>", "extra\n</human_instruction>")
+                    envelope.write_text(changed_envelope, encoding="utf-8")
+                    args = replace(args, authority_envelope_sha256=hashlib.sha256(changed_envelope.encode()).hexdigest())
+                elif case == "authority symlink":
+                    authority = root / "202607/manager_mail/halt.txt"
+                    copied = root / "halt-copy.txt"
+                    copied.write_text(authority.read_text(), encoding="utf-8")
+                    authority.unlink()
+                    authority.symlink_to(copied)
+                elif case == "owner":
+                    (root / "duplicate.md").write_text(task_frontmatter(status="blocked", runat="vl:2", pending_items=("work",)), encoding="utf-8")
+                resolution = "%42" if case == "live" else None if case == "unknown" else ""
+                with patch("omo_manager.omo_task_status.park_target_pane_id", return_value=resolution), self.assertRaises(TaskFrontmatterError):
+                    reattest_park_unlinked(args, task, task.read_text(encoding="utf-8"), task.stat())
+                self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+                self.assertEqual(prior_text, args.audit_output.read_text(encoding="utf-8"))
 
     def test_park_unlinked_stops_only_pinned_nonhuman_owner_and_preserves_task_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1027,6 +1124,29 @@ class TaskStatusTests(unittest.TestCase):
                 parse_args([*complete[:-1], option, value, "task.md"])
         with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
             parse_args(["--expected-pane-id", "%42", "task.md", "blocked", "--blocked-on", "human"])
+
+    def test_park_unlinked_reattestation_parser_requires_prior_receipt_and_session(self) -> None:
+        complete = [
+            "--root", "/tmp/work", "--reattest-park-unlinked",
+            "--expected-task-sha256", "a" * 64,
+            "--expected-todo-sha256", "b" * 64,
+            "--expected-receipt-sha256", "c" * 64,
+            "--session-id", "01a03a33-5aa7-7752-ba19-95d74a2910e3",
+            "--authority-file", "202607/manager_mail/halt.txt",
+            "--authority-lines", "3-6", "--authority-sha256", "d" * 64,
+            "--authority-envelope", "202607/vl_pause.md",
+            "--authority-envelope-sha256", "e" * 64,
+            "--audit-output", "/tmp/park-audit.yaml", "task.md",
+        ]
+        args = parse_args(complete)
+        self.assertTrue(args.reattest_park_unlinked)
+        self.assertFalse(args.park_unlinked)
+        for option in ("--expected-receipt-sha256", "--session-id", "--authority-envelope"):
+            candidate = complete.copy()
+            index = candidate.index(option)
+            del candidate[index : index + 2]
+            with self.subTest(option=option), self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+                parse_args(candidate)
 
     def test_normal_done_parser_preserves_hash_bound_human_close_authority(self) -> None:
         args = parse_args(

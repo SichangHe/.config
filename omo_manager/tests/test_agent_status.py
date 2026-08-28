@@ -1,3 +1,4 @@
+import hashlib
 import subprocess
 import tempfile
 import unittest
@@ -6,7 +7,9 @@ from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
-from omo_manager.omo_agent_status import Args, TaskFrontmatterError, active_task_targets, classify_task, format_problem_summary, format_summary, is_authoritative_human_blocked_ready_task, load_local_env, load_task_state, main, parse_task_lines, parse_task_metadata, persistent_blocked_task_lines, registry_prune, report_output_evidence, scan_task_state, session_records
+import yaml
+
+from omo_manager.omo_agent_status import Args, TaskFrontmatterError, TaskState, active_task_targets, classify_task, format_problem_summary, format_summary, is_authoritative_human_blocked_ready_task, is_targetless_low_priority_custody, load_local_env, load_task_state, main, parse_task_lines, parse_task_metadata, persistent_blocked_task_lines, registry_prune, report_output_evidence, scan_task_state, session_records
 from omo_manager.omo_agent_status import BLOCKED_DELIVERY_ITEMS
 from omo_manager.omo_agent_status import target_resolution_state
 from omo_manager.omo_agent_status import SessionRecord, StatusRow, TaskLine
@@ -3687,6 +3690,91 @@ resolved_task_items: []
                     ),
                 )
             self.assertIn("missing: task=parked.md", out.getvalue())
+
+    def write_reattested_custody_case(self, root: Path, state_dir: Path) -> tuple[TaskLine, TaskState, Path]:
+        source = "Subject: halt\n\nstop this owner and preserve its queued work\n"
+        old_locator = "manager_mail/halt.txt:3-3"
+        locator = "202607/manager_mail/halt.txt:3-3"
+        archive = root / "202607"
+        (archive / "manager_mail").mkdir(parents=True)
+        (archive / "manager_mail/halt.txt").write_text(source, encoding="utf-8")
+        envelope_text = (
+            f'<human_instruction authoritative="true" source="{locator}">\n'
+            "stop this owner and preserve its queued work\n"
+            "</human_instruction>\n"
+            f"<agent_message>route under {locator}</agent_message>\n"
+        )
+        (archive / "halt_envelope.md").write_text(envelope_text, encoding="utf-8")
+        session_id = "01a03a33-5aa7-7752-ba19-95d74a2910e3"
+        old_task = task_frontmatter("blocked", runat="vl:31", blocked_on="paused by direct human decision", pending_items=("open work",))
+        old_task += f"authority: {old_locator}\n(manager closed Codex agent 08-25 12:15 PDT; tmux target `vl:31`; session_id: `{session_id}`.)\n"
+        task_text = old_task.replace(old_locator, locator)
+        task_path = root / "parked.md"
+        task_path.write_text(task_text, encoding="utf-8")
+        todo_text = "low priority:\nparked.md\n"
+        (root / "TODO.md").write_text(todo_text, encoding="utf-8")
+        old_envelope = envelope_text.replace(locator, old_locator)
+        prior = {
+            "version": "v1.0.0", "operation": "park-unlinked", "task": "parked.md", "target": "vl:31",
+            "pane_id": "", "task_sha256": hashlib.sha256(old_task.encode()).hexdigest(),
+            "initial_todo_sha256": "1" * 64, "close_proof_commitment": "0" * 64,
+            "prior_close_session_id": session_id, "authority_source": old_locator,
+            "authority_sha256": hashlib.sha256(source.encode()).hexdigest(), "authority_envelope": "halt_envelope.md",
+            "authority_envelope_sha256": hashlib.sha256(old_envelope.encode()).hexdigest(), "state": "complete",
+        }
+        prior_text = yaml.safe_dump(prior, sort_keys=True)
+        receipt = {
+            "version": "v2.0.0", "operation": "park-unlinked-re-attestation", "state": "complete",
+            "task": "parked.md", "target": "vl:31", "task_sha256": hashlib.sha256(task_text.encode()).hexdigest(),
+            "todo_sha256": hashlib.sha256(todo_text.encode()).hexdigest(), "authority_source": locator,
+            "authority_sha256": hashlib.sha256(source.encode()).hexdigest(), "authority_envelope": "202607/halt_envelope.md",
+            "authority_envelope_sha256": hashlib.sha256(envelope_text.encode()).hexdigest(),
+            "prior_complete_receipt_sha256": hashlib.sha256(prior_text.encode()).hexdigest(),
+            "prior_complete_receipt": prior,
+        }
+        receipt_dir = state_dir / "park-unlinked"
+        receipt_dir.mkdir(parents=True, mode=0o700)
+        state_dir.chmod(0o700)
+        receipt_dir.chmod(0o700)
+        receipt_path = receipt_dir / "parked.yaml"
+        receipt_path.write_text(yaml.safe_dump(receipt, sort_keys=True), encoding="utf-8")
+        receipt_path.chmod(0o600)
+        task = TaskLine("parked.md", "todo:low priority", "parked.md", "", None)
+        state = TaskState("blocked", "vl:31", None, reason="paused by direct human decision")
+        return task, state, receipt_path
+
+    def test_targetless_low_priority_custody_accepts_only_authenticated_reattestation(self) -> None:
+        for case in ("valid", "receipt drift", "receipt symlink", "authority drift", "task drift", "TODO drift", "duplicate owner", "unknown target"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp) / "work"
+                root.mkdir()
+                state_dir = Path(tmp) / "state"
+                task, state, receipt = self.write_reattested_custody_case(root, state_dir)
+                if case == "receipt drift":
+                    receipt.write_text(receipt.read_text().replace("state: complete", "state: prepared", 1), encoding="utf-8")
+                elif case == "receipt symlink":
+                    copy = state_dir / "receipt-copy.yaml"
+                    copy.write_text(receipt.read_text(), encoding="utf-8")
+                    copy.chmod(0o600)
+                    receipt.unlink()
+                    receipt.symlink_to(copy)
+                elif case == "authority drift":
+                    with (root / "202607/manager_mail/halt.txt").open("a", encoding="utf-8") as output:
+                        output.write("drift\n")
+                elif case == "task drift":
+                    with (root / "parked.md").open("a", encoding="utf-8") as output:
+                        output.write("drift\n")
+                elif case == "TODO drift":
+                    with (root / "TODO.md").open("a", encoding="utf-8") as output:
+                        output.write("low priority note\n")
+                elif case == "duplicate owner":
+                    (root / "duplicate.md").write_text(task_frontmatter("blocked", runat="vl:31", blocked_on="paused", pending_items=("work",)), encoding="utf-8")
+                resolution = None if case == "unknown target" else False
+                with (
+                    patch.dict("omo_manager.omo_agent_status.LOCAL_ENV", {"OMO_MANAGER_STATE_DIR": str(state_dir)}),
+                    patch("omo_manager.omo_agent_status.target_resolution_state", return_value=resolution),
+                ):
+                    self.assertEqual(case == "valid", is_targetless_low_priority_custody(root, task, state))
 
     def test_target_resolution_state_rejects_failed_malformed_or_ambiguous_snapshots(self) -> None:
         cases = (

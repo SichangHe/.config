@@ -72,6 +72,7 @@ SHA256_RE = re.compile(r"[0-9a-f]{64}")
 GIT_COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 CODEX_SESSION_RE = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
 CUSTODY_RECEIPT_VERSION = "v1.0.0"
+RE_ATTESTED_CUSTODY_RECEIPT_VERSION = "v2.0.0"
 MAX_AUTHORITY_BYTES = 1_000_000
 AUTHORITATIVE_HUMAN_ENVELOPE_RE = re.compile(
     r'<human_instruction[ \t]+authoritative="true"[ \t]+source="([^"\r\n]+)">\r?\n(.*?)</human_instruction>',
@@ -127,8 +128,10 @@ class Args:
     human_close_authorization_source: str = ""
     human_close_authorization_sha256: str = ""
     park_unlinked: bool = False
+    reattest_park_unlinked: bool = False
     expected_task_sha256: str = ""
     expected_todo_sha256: str = ""
+    expected_receipt_sha256: str = ""
     expected_pane_id: str = ""
     authority_file: Path | None = None
     authority_lines: tuple[int, int] = (0, 0)
@@ -179,8 +182,10 @@ class ParsedArgs(argparse.Namespace):
     human_close_authorization_source: str = ""
     human_close_authorization_sha256: str = ""
     park_unlinked: bool = False
+    reattest_park_unlinked: bool = False
     expected_task_sha256: str = ""
     expected_todo_sha256: str = ""
+    expected_receipt_sha256: str = ""
     expected_pane_id: str = ""
     authority_file: Path | None = None
     authority_lines: tuple[int, int] | None = None
@@ -213,6 +218,11 @@ shutdown.""",
         "--park-unlinked",
         action="store_true",
         help="Stop one exact non-human halted owner and atomically move its targetless TODO row from human pending to low priority without changing task bytes.",
+    )
+    _ = parser.add_argument(
+        "--reattest-park-unlinked",
+        action="store_true",
+        help="Migrate one exact complete prior-stop receipt to current archived authority and unchanged targetless custody without accessing tmux for mutation.",
     )
     _ = parser.add_argument("--retire-blocked-target", action="store_true", help="Atomically retire one blocked human-pending worker target that conflicts with one live lifecycle owner; performs no tmux action.")
     _ = parser.add_argument("--reconcile-missing-target", action="store_true", help="Atomically mark one authority-approved absent blocked target historical and remove it from its sole human-pending TODO row; never starts or stops tmux.")
@@ -248,18 +258,19 @@ shutdown.""",
     _ = parser.add_argument("--source-sha256", default="", help="Exact SHA-256 of the source task bytes required with --close-shared-target, --close-retired-done, or --normalize-retired-todo.")
     _ = parser.add_argument("--human-close-authorization-source", default="", help="Exact manager_mail/<id>.txt record that directly authorizes closing this human-owned task target during normal done closure.")
     _ = parser.add_argument("--human-close-authorization-sha256", default="", help="Lowercase SHA-256 of that exact human-close authorization record.")
-    _ = parser.add_argument("--expected-task-sha256", default="", help="Exact SHA-256 of unchanged task bytes required with --park-unlinked.")
-    _ = parser.add_argument("--expected-todo-sha256", default="", help="Exact SHA-256 of unchanged TODO bytes required with --park-unlinked.")
+    _ = parser.add_argument("--expected-task-sha256", default="", help="Exact SHA-256 of unchanged task bytes required with --park-unlinked or --reattest-park-unlinked.")
+    _ = parser.add_argument("--expected-todo-sha256", default="", help="Exact SHA-256 of unchanged TODO bytes required with --park-unlinked or --reattest-park-unlinked.")
+    _ = parser.add_argument("--expected-receipt-sha256", default="", help="Exact SHA-256 of the complete v1 receipt required with --reattest-park-unlinked.")
     _ = parser.add_argument("--expected-pane-id", default="", help="Exact numeric tmux pane id required with --park-unlinked.")
     _ = parser.add_argument(
         "--authority-file",
         type=Path,
-        help="Owner-private manager_mail/FILE or owner-controlled YYYYMM/manager_mail/FILE source required with --park-unlinked.",
+        help="Owner-private manager_mail/FILE or owner-controlled YYYYMM/manager_mail/FILE source required with a park operation.",
     )
-    _ = parser.add_argument("--authority-lines", type=parse_line_range, help="Inclusive authoritative human-source lines required with --park-unlinked.")
-    _ = parser.add_argument("--authority-sha256", default="", help="Exact SHA-256 of the complete authority file required with --park-unlinked.")
-    _ = parser.add_argument("--authority-envelope", type=Path, help="Digest-bound task record containing the authoritative human-instruction envelope required with --park-unlinked.")
-    _ = parser.add_argument("--authority-envelope-sha256", default="", help="Exact SHA-256 of the complete authority envelope required with --park-unlinked.")
+    _ = parser.add_argument("--authority-lines", type=parse_line_range, help="Inclusive authoritative human-source lines required with a park operation.")
+    _ = parser.add_argument("--authority-sha256", default="", help="Exact SHA-256 of the complete authority file required with a park operation.")
+    _ = parser.add_argument("--authority-envelope", type=Path, help="Digest-bound task record containing the authoritative human-instruction envelope required with a park operation.")
+    _ = parser.add_argument("--authority-envelope-sha256", default="", help="Exact SHA-256 of the complete authority envelope required with a park operation.")
     _ = parser.add_argument("task_file", type=Path)
     _ = parser.add_argument("status", nargs="?", choices=sorted(TASK_FRONTMATTER_STATUSES))
     _ = parser.add_argument("--blocked-on", default="", help="Required when setting status to `blocked`; optional for `long_running`; removed for other statuses.")
@@ -276,7 +287,7 @@ shutdown.""",
         parser.error("--closure-repository must be an explicit absolute Git worktree root.")
     if parsed.dirty_path_handoff is not None and parsed.closure_repository is None:
         parser.error("--dirty-path-handoff requires --closure-repository.")
-    if sum((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done, parsed.park_unlinked, parsed.retire_blocked_target, parsed.reconcile_missing_target, parsed.reconcile_long_running_human_index, parsed.reconcile_blocked_index, parsed.restore_terminal_target, parsed.close_shared_target, parsed.close_retired_done, parsed.normalize_retired_todo, parsed.normalize_low_priority_current)) > 1:
+    if sum((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done, parsed.park_unlinked, parsed.reattest_park_unlinked, parsed.retire_blocked_target, parsed.reconcile_missing_target, parsed.reconcile_long_running_human_index, parsed.reconcile_blocked_index, parsed.restore_terminal_target, parsed.close_shared_target, parsed.close_retired_done, parsed.normalize_retired_todo, parsed.normalize_low_priority_current)) > 1:
         parser.error("finish and recovery modes are mutually exclusive.")
     if (parsed.active_target or parsed.manager_target) and not parsed.normalize_low_priority_current:
         parser.error("--active-target and --manager-target are only valid with --normalize-low-priority-current.")
@@ -351,6 +362,67 @@ shutdown.""",
             authority_envelope_sha256=parsed.authority_envelope_sha256.strip(),
             audit_output=parsed.audit_output.resolve(),
         )
+    if parsed.reattest_park_unlinked:
+        unrelated = (
+            parsed.status,
+            parsed.blocked_on,
+            parsed.expected_pane_id,
+            parsed.replacement_task,
+            parsed.stale_target,
+            parsed.replacement_target,
+            parsed.stale_sha256,
+            parsed.replacement_sha256,
+            parsed.replacement_status,
+            parsed.protected_target,
+            parsed.stopped_evidence,
+            parsed.replacement_pane_evidence,
+            parsed.pane_id,
+            parsed.terminal_evidence,
+            parsed.closure_repository,
+            parsed.dirty_path_handoff,
+            parsed.historical_target,
+            parsed.task_sha256,
+            parsed.historical_commit,
+            parsed.shared_target,
+            parsed.active_target,
+            parsed.manager_target,
+            parsed.source_sha256,
+            parsed.human_close_authorization_source,
+            parsed.human_close_authorization_sha256,
+            parsed.missing_target,
+        )
+        if (
+            any(unrelated)
+            or CODEX_SESSION_RE.fullmatch(parsed.session_id.strip()) is None
+            or SHA256_RE.fullmatch(parsed.expected_task_sha256.strip()) is None
+            or SHA256_RE.fullmatch(parsed.expected_todo_sha256.strip()) is None
+            or SHA256_RE.fullmatch(parsed.expected_receipt_sha256.strip()) is None
+            or parsed.authority_file is None
+            or parsed.authority_lines is None
+            or SHA256_RE.fullmatch(parsed.authority_sha256.strip()) is None
+            or parsed.authority_envelope is None
+            or SHA256_RE.fullmatch(parsed.authority_envelope_sha256.strip()) is None
+            or parsed.audit_output is None
+            or not parsed.audit_output.is_absolute()
+        ):
+            parser.error("--reattest-park-unlinked requires exact task, TODO, receipt, prior-session, archived-authority, envelope, and absolute receipt assertions.")
+        return Args(
+            parsed.root.resolve(),
+            parsed.task_file,
+            "",
+            "",
+            session_id=parsed.session_id.strip(),
+            reattest_park_unlinked=True,
+            expected_task_sha256=parsed.expected_task_sha256.strip(),
+            expected_todo_sha256=parsed.expected_todo_sha256.strip(),
+            expected_receipt_sha256=parsed.expected_receipt_sha256.strip(),
+            authority_file=parsed.authority_file,
+            authority_lines=parsed.authority_lines,
+            authority_sha256=parsed.authority_sha256.strip(),
+            authority_envelope=parsed.authority_envelope,
+            authority_envelope_sha256=parsed.authority_envelope_sha256.strip(),
+            audit_output=Path(os.path.abspath(parsed.audit_output.expanduser())),
+        )
     if parsed.reconcile_missing_target:
         unrelated = (
             parsed.status,
@@ -410,8 +482,8 @@ shutdown.""",
         )
     if parsed.missing_target:
         parser.error("--missing-target requires --reconcile-missing-target.")
-    if any((parsed.expected_task_sha256, parsed.expected_todo_sha256, parsed.expected_pane_id, parsed.authority_file, parsed.authority_lines, parsed.authority_sha256, parsed.authority_envelope, parsed.authority_envelope_sha256)):
-        parser.error("park-unlinked task, TODO, pane, and authority assertions require --park-unlinked.")
+    if any((parsed.expected_task_sha256, parsed.expected_todo_sha256, parsed.expected_receipt_sha256, parsed.expected_pane_id, parsed.authority_file, parsed.authority_lines, parsed.authority_sha256, parsed.authority_envelope, parsed.authority_envelope_sha256)):
+        parser.error("park-unlinked task, TODO, receipt, pane, and authority assertions require a park operation.")
     if parsed.retire_blocked_target:
         parser.error("--retire-blocked-target is disabled: preserve the historical target and resolve ownership without writing retired semantics.")
     if parsed.restore_terminal_target:
@@ -1362,26 +1434,25 @@ def read_park_authority_envelope(args: Args, excerpt: str, locator: str) -> str:
         raise TaskFrontmatterError("park-unlinked authority envelope is missing.")
     try:
         root = args.root.resolve(strict=True)
-        candidate = args.authority_envelope if args.authority_envelope.is_absolute() else root / args.authority_envelope
-        candidate_state = candidate.lstat()
-        source = candidate.resolve(strict=True)
-    except OSError as exc:
+        relative = args.authority_envelope.relative_to(root) if args.authority_envelope.is_absolute() else args.authority_envelope
+    except (OSError, ValueError) as exc:
         raise TaskFrontmatterError(f"park-unlinked authority envelope is unavailable: {exc}") from exc
-    if (
-        source == root
-        or root not in source.parents
-        or stat.S_ISLNK(candidate_state.st_mode)
-        or not stat.S_ISREG(candidate_state.st_mode)
-        or candidate_state.st_uid != os.getuid()
-        or stat.S_IMODE(candidate_state.st_mode) & 0o022
-    ):
-        raise TaskFrontmatterError("park-unlinked authority envelope must be one owner-controlled regular file under the task root.")
+    if not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+        raise TaskFrontmatterError("park-unlinked authority envelope must be one root-relative file without traversal.")
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    directory_flags = flags | getattr(os, "O_DIRECTORY", 0)
+    descriptors: list[int] = []
     try:
-        fd = os.open(source, flags)
-    except OSError as exc:
-        raise TaskFrontmatterError(f"park-unlinked authority envelope cannot be opened safely: {exc}") from exc
-    try:
+        directory_fd = os.open(root, directory_flags)
+        descriptors.append(directory_fd)
+        for part in relative.parts[:-1]:
+            directory_fd = os.open(part, directory_flags, dir_fd=directory_fd)
+            descriptors.append(directory_fd)
+            directory_state = os.fstat(directory_fd)
+            if not stat.S_ISDIR(directory_state.st_mode) or directory_state.st_uid != os.getuid() or stat.S_IMODE(directory_state.st_mode) & 0o022:
+                raise TaskFrontmatterError("park-unlinked authority envelope directory is not owner-controlled.")
+        fd = os.open(relative.parts[-1], flags, dir_fd=directory_fd)
+        descriptors.append(fd)
         before = os.fstat(fd)
         chunks: list[bytes] = []
         remaining = MAX_AUTHORITY_BYTES + 1
@@ -1393,17 +1464,21 @@ def read_park_authority_envelope(args: Args, excerpt: str, locator: str) -> str:
             remaining -= len(chunk)
         payload = b"".join(chunks)
         after = os.fstat(fd)
+    except OSError as exc:
+        raise TaskFrontmatterError(f"park-unlinked authority envelope cannot be opened safely: {exc}") from exc
     finally:
-        os.close(fd)
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
     try:
-        current = source.stat()
         envelope = payload.decode("utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
+    except UnicodeDecodeError as exc:
         raise TaskFrontmatterError(f"park-unlinked authority envelope is unavailable or not UTF-8: {exc}") from exc
     if (
         len(payload) > MAX_AUTHORITY_BYTES
         or not same_file_state(before, after)
-        or not same_file_state(after, current)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_uid != os.getuid()
+        or stat.S_IMODE(before.st_mode) & 0o022
         or hashlib.sha256(payload).hexdigest() != args.authority_envelope_sha256
     ):
         raise TaskFrontmatterError("park-unlinked authority envelope changed, is oversized, or does not match its digest.")
@@ -1416,7 +1491,7 @@ def read_park_authority_envelope(args: Args, excerpt: str, locator: str) -> str:
         raise TaskFrontmatterError(
             "park-unlinked authority envelope must contain exactly the selected authoritative human text."
         )
-    return source.relative_to(root).as_posix()
+    return relative.as_posix()
 
 
 def park_target_pane_id(target: str) -> str | None:
@@ -1594,6 +1669,233 @@ def validate_park_audit(
     ):
         raise TaskFrontmatterError("park-unlinked audit record does not match this exact operation.")
     return str(state), initial_todo, proof_commitment
+
+
+def parse_complete_prior_stop_receipt(text: str) -> dict[str, object]:
+    """Parse one exact v1 completed prior-stop receipt without accepting aliases."""
+
+    try:
+        record = yaml.load(text, Loader=UniqueKeyLoader)
+    except (yaml.YAMLError, TaskFrontmatterError) as exc:
+        raise TaskFrontmatterError("park-unlinked prior receipt is not unambiguous YAML.") from exc
+    expected_keys = {
+        "version",
+        "operation",
+        "task",
+        "target",
+        "pane_id",
+        "task_sha256",
+        "initial_todo_sha256",
+        "close_proof_commitment",
+        "prior_close_session_id",
+        "authority_source",
+        "authority_sha256",
+        "authority_envelope",
+        "authority_envelope_sha256",
+        "state",
+    }
+    if not isinstance(record, dict) or set(record) != expected_keys:
+        raise TaskFrontmatterError("park-unlinked prior receipt has an unknown or incomplete schema.")
+    string_record = {key: value for key, value in record.items() if isinstance(key, str) and isinstance(value, str)}
+    if len(string_record) != len(expected_keys):
+        raise TaskFrontmatterError("park-unlinked prior receipt fields must all be strings.")
+    source = string_record["authority_source"]
+    source_match = re.fullmatch(r"((?:[0-9]{4}(?:0[1-9]|1[0-2])\/)?manager_mail\/[^\/\r\n:]+):(\d+)-(\d+)", source)
+    envelope = Path(string_record["authority_envelope"])
+    if (
+        string_record["version"] != CUSTODY_RECEIPT_VERSION
+        or string_record["operation"] != "park-unlinked"
+        or string_record["state"] != "complete"
+        or string_record["pane_id"]
+        or CODEX_SESSION_RE.fullmatch(string_record["prior_close_session_id"]) is None
+        or string_record["close_proof_commitment"] != "0" * 64
+        or TARGET_RE.fullmatch(string_record["target"]) is None
+        or string_record["target"].partition(":")[0].startswith("h")
+        or SHA256_RE.fullmatch(string_record["task_sha256"]) is None
+        or SHA256_RE.fullmatch(string_record["initial_todo_sha256"]) is None
+        or SHA256_RE.fullmatch(string_record["authority_sha256"]) is None
+        or SHA256_RE.fullmatch(string_record["authority_envelope_sha256"]) is None
+        or source_match is None
+        or int(source_match.group(2)) < 1
+        or int(source_match.group(3)) < int(source_match.group(2))
+        or envelope.is_absolute()
+        or not envelope.parts
+        or any(part in {"", ".", ".."} for part in envelope.parts)
+    ):
+        raise TaskFrontmatterError("park-unlinked prior receipt is not one exact completed prior-stop operation.")
+    return string_record
+
+
+def validate_private_audit_parent(path: Path) -> None:
+    """Require an absolute, symlink-free owner-private receipt directory."""
+
+    if not path.is_absolute() or path.name in {"", ".", ".."}:
+        raise TaskFrontmatterError("park-unlinked audit output must be one absolute file path.")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptors: list[int] = []
+    try:
+        directory_fd = os.open(path.anchor, flags)
+        descriptors.append(directory_fd)
+        info = os.fstat(directory_fd)
+        for part in path.parent.parts[1:]:
+            directory_fd = os.open(part, flags, dir_fd=directory_fd)
+            descriptors.append(directory_fd)
+        info = os.fstat(directory_fd)
+    except OSError as exc:
+        raise TaskFrontmatterError(f"park-unlinked audit output parent is unavailable or contains a symlink: {exc}") from exc
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077:
+        raise TaskFrontmatterError("park-unlinked audit output directory must be owner-private.")
+
+
+def reattested_park_receipt(
+    args: Args,
+    path: Path,
+    target: str,
+    authority_locator: str,
+    envelope_ref: str,
+    prior_text: str,
+    prior_record: dict[str, object],
+) -> str:
+    """Render a complete receipt that retains its exact v1 predecessor."""
+
+    return yaml.safe_dump(
+        {
+            "version": RE_ATTESTED_CUSTODY_RECEIPT_VERSION,
+            "operation": "park-unlinked-re-attestation",
+            "state": "complete",
+            "task": relative_task_ref(args.root, path),
+            "target": target,
+            "task_sha256": args.expected_task_sha256,
+            "todo_sha256": args.expected_todo_sha256,
+            "authority_source": authority_locator,
+            "authority_sha256": args.authority_sha256,
+            "authority_envelope": envelope_ref,
+            "authority_envelope_sha256": args.authority_envelope_sha256,
+            "prior_complete_receipt_sha256": hashlib.sha256(prior_text.encode()).hexdigest(),
+            "prior_complete_receipt": prior_record,
+        },
+        sort_keys=True,
+    )
+
+
+def digest_after_locator_rollback(text: str, current_locator: str, prior_locator: str) -> str:
+    """Return the digest after every exact authority-locator migration is reversed."""
+
+    if current_locator == prior_locator or current_locator not in text:
+        raise TaskFrontmatterError("park-unlinked re-attestation requires an unambiguous archived authority-locator migration.")
+    return hashlib.sha256(text.replace(current_locator, prior_locator).encode()).hexdigest()
+
+
+def reattest_park_unlinked(args: Args, path: Path, text: str, before: os.stat_result) -> None:
+    """Rebind one complete prior-stop receipt without changing task, TODO, or tmux state."""
+
+    todo = args.root / "TODO.md"
+    if (
+        path == todo
+        or args.audit_output is None
+        or not args.audit_output.is_absolute()
+        or args.audit_output in {path, todo}
+        or not todo.is_file()
+    ):
+        raise TaskFrontmatterError("park-unlinked re-attestation requires a task, TODO.md, and existing private receipt.")
+    validate_private_audit_parent(args.audit_output)
+    metadata = parse_task_metadata(text, args.root)
+    if (
+        metadata is None
+        or metadata.status != "blocked"
+        or not metadata.blocked_on
+        or not metadata.pending_task_items
+        or metadata.is_manager
+        or has_pending_marker(text)
+        or TARGET_RE.fullmatch(metadata.runat) is None
+        or metadata.runat.partition(":")[0].startswith("h")
+        or hashlib.sha256(text.encode()).hexdigest() != args.expected_task_sha256
+    ):
+        raise TaskFrontmatterError("park-unlinked re-attestation requires one unchanged blocked non-human worker with preserved queued work.")
+    with root_membership_lock(args.root), task_target_lock(args.root, metadata.runat):
+        with ExitStack() as locks:
+            for locked_path in sorted({path, todo}, key=str):
+                locks.enter_context(task_file_lock(locked_path))
+            current_before = path.stat()
+            current_text = path.read_text(encoding="utf-8")
+            todo_before = todo.stat()
+            todo_text = todo.read_text(encoding="utf-8")
+            if (
+                not same_file_state(before, current_before)
+                or current_text != text
+                or parse_task_metadata(current_text, args.root) != metadata
+                or hashlib.sha256(current_text.encode()).hexdigest() != args.expected_task_sha256
+                or hashlib.sha256(todo_text.encode()).hexdigest() != args.expected_todo_sha256
+            ):
+                raise TaskFrontmatterError("park-unlinked task or TODO changed while re-attestation was prepared.")
+            prior_text = read_private_audit(args.audit_output)
+            if prior_text is None or hashlib.sha256(prior_text.encode()).hexdigest() != args.expected_receipt_sha256:
+                raise TaskFrontmatterError("park-unlinked complete receipt does not match --expected-receipt-sha256.")
+            prior = parse_complete_prior_stop_receipt(prior_text)
+            if (
+                yaml.safe_dump(prior, sort_keys=True) != prior_text
+                or prior["task"] != relative_task_ref(args.root, path)
+                or prior["target"] != metadata.runat
+                or prior["prior_close_session_id"] != args.session_id
+                or prior["authority_sha256"] != args.authority_sha256
+                or not has_close_note(current_text, metadata.runat, args.session_id)
+            ):
+                raise TaskFrontmatterError("park-unlinked prior receipt or close proof does not bind the current task operation.")
+            old_locator = str(prior["authority_source"])
+            old_source, _separator, old_range = old_locator.rpartition(":")
+            excerpt, authority_locator = read_park_authority(args)
+            current_source, _separator, current_range = authority_locator.rpartition(":")
+            old_parts = Path(old_source).parts
+            current_parts = Path(current_source).parts
+            if (
+                len(old_parts) != 2
+                or old_parts[0] != "manager_mail"
+                or len(current_parts) != 3
+                or re.fullmatch(r"[0-9]{4}(?:0[1-9]|1[0-2])", current_parts[0]) is None
+                or old_parts != current_parts[-2:]
+                or old_range != current_range
+                or digest_after_locator_rollback(current_text, authority_locator, old_locator) != prior["task_sha256"]
+            ):
+                raise TaskFrontmatterError("park-unlinked archived authority does not preserve the prior source identity and line range.")
+            envelope_ref = read_park_authority_envelope(args, excerpt, authority_locator)
+            prior_envelope = Path(str(prior["authority_envelope"]))
+            current_envelope = Path(envelope_ref)
+            try:
+                envelope_text = (args.root / current_envelope).read_text(encoding="utf-8")
+            except OSError as exc:
+                raise TaskFrontmatterError(f"park-unlinked archived authority envelope is unavailable: {exc}") from exc
+            if (
+                len(prior_envelope.parts) != 1
+                or len(current_envelope.parts) != 2
+                or current_envelope.parts[0] != current_parts[0]
+                or prior_envelope.name != current_envelope.name
+                or digest_after_locator_rollback(envelope_text, authority_locator, old_locator)
+                != prior["authority_envelope_sha256"]
+            ):
+                raise TaskFrontmatterError("park-unlinked archived envelope does not preserve the prior authoritative envelope.")
+            if authoritative_active_target_task_paths(args.root, metadata.runat) != (path,):
+                raise TaskFrontmatterError("park-unlinked re-attestation requires one sole authoritative historical owner.")
+            if parked_todo_text(args.root, path, todo_text, metadata.runat, allow_already_parked=True) != todo_text:
+                raise TaskFrontmatterError("park-unlinked re-attestation requires unchanged targetless low-priority custody.")
+            if park_target_pane_id(metadata.runat) != "":
+                raise TaskFrontmatterError("park-unlinked re-attestation requires the historical target to remain unambiguously absent.")
+            updated = reattested_park_receipt(args, path, metadata.runat, authority_locator, envelope_ref, prior_text, prior)
+            if (
+                path.read_text(encoding="utf-8") != current_text
+                or not same_file_state(current_before, path.stat())
+                or todo.read_text(encoding="utf-8") != todo_text
+                or not same_file_state(todo_before, todo.stat())
+                or read_park_authority(args) != (excerpt, authority_locator)
+                or read_park_authority_envelope(args, excerpt, authority_locator) != envelope_ref
+                or (args.root / current_envelope).read_text(encoding="utf-8") != envelope_text
+                or read_private_audit(args.audit_output) != prior_text
+                or park_target_pane_id(metadata.runat) != ""
+            ):
+                raise TaskFrontmatterError("park-unlinked re-attestation evidence changed before receipt migration.")
+            replace_private_audit(args.audit_output, prior_text, updated)
 
 
 def path_artifact_exists(path: Path) -> bool:
@@ -2911,6 +3213,7 @@ def run(args: Args) -> int:
     preserved_replacement = False
     shared_target_closure = False
     parked_unlinked = False
+    reattested_park = False
     try:
         path = task_path(args.root, args.task_file)
         before = path.stat()
@@ -2931,6 +3234,9 @@ def run(args: Args) -> int:
         elif args.park_unlinked:
             session_id = park_unlinked(args, path, text, before)
             parked_unlinked = True
+        elif args.reattest_park_unlinked:
+            reattest_park_unlinked(args, path, text, before)
+            reattested_park = True
         elif args.reconcile_blocked_index:
             reconcile_previous_blocked_index(args, path, text, before)
         elif args.retire_blocked_target:
@@ -3031,6 +3337,8 @@ def run(args: Args) -> int:
     elif parked_unlinked:
         print(f"Parked {args.task_file.as_posix()} without changing task bytes; exact non-human owner stopped and TODO target removed.")
         print(f"session_id: {session_id}")
+    elif reattested_park:
+        print(f"Re-attested immutable targetless custody for {args.task_file.as_posix()} without task, TODO, or tmux mutation.")
     return 0
 
 

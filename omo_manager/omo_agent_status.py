@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import cast
+
+import yaml
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -35,12 +39,14 @@ from omo_manager.omo_task_metadata import TARGET_RE
 from omo_manager.omo_task_metadata import HumanBlocker
 from omo_manager.omo_task_metadata import TaskFrontmatterError
 from omo_manager.omo_task_metadata import TaskMetadata
+from omo_manager.omo_task_metadata import UniqueKeyLoader
 from omo_manager.omo_task_metadata import frontmatter_parts
 from omo_manager.omo_task_metadata import parse_task_metadata
 
 
 def default_state_dir() -> Path:
-    return Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "omo-manager"
+    env = globals().get("LOCAL_ENV", os.environ)
+    return Path(env.get("OMO_MANAGER_STATE_DIR", Path(env.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "omo-manager"))
 
 
 def read_json(path: Path, fallback: dict[str, object]) -> dict[str, object]:
@@ -83,6 +89,11 @@ LOCAL_ENV = load_local_env()
 DEFAULT_ROOT = Path(LOCAL_ENV.get("OMO_WORK_LOGS_ROOT", str(Path.home() / "work_logs")))
 DEFAULT_REGISTRY = Path(LOCAL_ENV.get("OMO_MANAGER_SESSION_REGISTRY", str(default_state_dir() / "sessions.json")))
 DEFAULT_MANAGER_TARGET = ""
+MAX_CUSTODY_RECEIPT_BYTES = 1_000_000
+PARK_RECEIPT_VERSION = "v1.0.0"
+PARK_REATTESTATION_VERSION = "v2.0.0"
+SHA256_RE = re.compile(r"[0-9a-f]{64}")
+CODEX_SESSION_RE = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
 PENDING_TASK_ITEMS_MARKER = "(above are pending task items)"
 TASK_RE = re.compile(r"`?([A-Za-z0-9_./-]+\.md)`?")
 BLOCKED_DEPENDENCY_LIST_RE = re.compile(r"`?[A-Za-z0-9_./-]+\.md`?(?:\s*,\s*`?[A-Za-z0-9_./-]+\.md`?)*")
@@ -619,6 +630,209 @@ def is_intentionally_absent_bind_path_blocked_worker(root: Path, task: TaskLine,
     return is_bind_path_blocked_worker_candidate(root, task, state) and not target_resolves_exactly(state.target) and not absent_bind_path_workdir_exists()
 
 
+def read_digest_bound_file(root: Path, relative: Path, digest: str | None, *, private: bool = False) -> bytes | None:
+    """Read one root-confined regular file without following links."""
+
+    if relative.is_absolute() or not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
+        return None
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    directory_flags = flags | getattr(os, "O_DIRECTORY", 0)
+    descriptors: list[int] = []
+    try:
+        directory_fd = os.open(root, directory_flags)
+        descriptors.append(directory_fd)
+        root_info = os.fstat(directory_fd)
+        if (
+            not stat.S_ISDIR(root_info.st_mode)
+            or root_info.st_uid != os.getuid()
+            or (private and stat.S_IMODE(root_info.st_mode) & 0o077)
+        ):
+            return None
+        for part in relative.parts[:-1]:
+            directory_fd = os.open(part, directory_flags, dir_fd=directory_fd)
+            descriptors.append(directory_fd)
+            info = os.fstat(directory_fd)
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o022:
+                return None
+        fd = os.open(relative.parts[-1], flags, dir_fd=directory_fd)
+        descriptors.append(fd)
+        before = os.fstat(fd)
+        chunks: list[bytes] = []
+        remaining = MAX_CUSTODY_RECEIPT_BYTES + 1
+        while remaining:
+            chunk = os.read(fd, min(64 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+        after = os.fstat(fd)
+    except OSError:
+        return None
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+    mode = stat.S_IMODE(before.st_mode)
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or before.st_uid != os.getuid()
+        or (mode != 0o600 if private else bool(mode & 0o022))
+        or len(payload) > MAX_CUSTODY_RECEIPT_BYTES
+        or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+        or (digest is not None and hashlib.sha256(payload).hexdigest() != digest)
+    ):
+        return None
+    return payload
+
+
+def parse_prior_park_receipt(value: object) -> dict[str, str] | None:
+    """Return one exact complete v1 prior-stop receipt."""
+
+    keys = {
+        "version", "operation", "task", "target", "pane_id", "task_sha256",
+        "initial_todo_sha256", "close_proof_commitment", "prior_close_session_id",
+        "authority_source", "authority_sha256", "authority_envelope",
+        "authority_envelope_sha256", "state",
+    }
+    if not isinstance(value, dict) or set(value) != keys or not all(isinstance(key, str) and isinstance(item, str) for key, item in value.items()):
+        return None
+    record = cast(dict[str, str], value)
+    if (
+        record["version"] != PARK_RECEIPT_VERSION
+        or record["operation"] != "park-unlinked"
+        or record["state"] != "complete"
+        or record["pane_id"]
+        or record["close_proof_commitment"] != "0" * 64
+        or CODEX_SESSION_RE.fullmatch(record["prior_close_session_id"]) is None
+        or TARGET_RE.fullmatch(record["target"]) is None
+        or record["target"].partition(":")[0].startswith("h")
+        or any(SHA256_RE.fullmatch(record[key]) is None for key in ("task_sha256", "initial_todo_sha256", "authority_sha256", "authority_envelope_sha256"))
+        or re.fullmatch(r"manager_mail/[^/\r\n:]+:[1-9][0-9]*-[1-9][0-9]*", record["authority_source"]) is None
+        or re.fullmatch(r"[^/\r\n]+", record["authority_envelope"]) is None
+    ):
+        return None
+    start, end = (int(part) for part in record["authority_source"].rsplit(":", 1)[1].split("-", 1))
+    return record if start <= end else None
+
+
+def sole_active_target_owner(root: Path, task_path: Path, target: str) -> bool:
+    """Return whether one task is the sole active metadata owner of a target."""
+
+    owners: set[Path] = set()
+    for candidate in root.rglob("*.md"):
+        try:
+            text = candidate.read_text(encoding="utf-8")
+        except OSError:
+            return False
+        raw_claim = any(
+            key.strip() == "runat" and separator and same_tmux_target(value.strip(), target)
+            for key, separator, value in (line.partition(":") for line in text.splitlines())
+        )
+        try:
+            metadata = parse_task_metadata(text, root)
+        except TaskFrontmatterError:
+            if raw_claim:
+                return False
+            continue
+        if metadata is not None and metadata.status != "done" and same_tmux_target(metadata.runat, target):
+            owners.add(candidate.resolve())
+    return owners == {task_path.resolve()}
+
+
+def has_complete_park_reattestation(root: Path, task_path: Path, state: TaskState, task_text: str) -> bool:
+    """Authenticate immutable archived authority for one parked historical target."""
+
+    receipt_path = Path("park-unlinked") / f"{task_path.stem}.yaml"
+    receipt_bytes = read_digest_bound_file(default_state_dir(), receipt_path, None, private=True)
+    if receipt_bytes is None:
+        return False
+    try:
+        record = yaml.load(receipt_bytes.decode("utf-8"), Loader=UniqueKeyLoader)
+    except (UnicodeDecodeError, yaml.YAMLError, TaskFrontmatterError):
+        return False
+    keys = {
+        "version", "operation", "state", "task", "target", "task_sha256", "todo_sha256",
+        "authority_source", "authority_sha256", "authority_envelope", "authority_envelope_sha256",
+        "prior_complete_receipt_sha256", "prior_complete_receipt",
+    }
+    if not isinstance(record, dict) or set(record) != keys:
+        return False
+    scalar_keys = keys - {"prior_complete_receipt"}
+    if not all(isinstance(record[key], str) for key in scalar_keys):
+        return False
+    prior = parse_prior_park_receipt(record["prior_complete_receipt"])
+    task_ref = task_path.relative_to(root).as_posix()
+    try:
+        todo_bytes = (root / "TODO.md").read_bytes()
+        todo_digest = hashlib.sha256(todo_bytes).hexdigest()
+    except OSError:
+        return False
+    source_match = re.fullmatch(r"([0-9]{4}(?:0[1-9]|1[0-2]))/(manager_mail/[^/\r\n:]+):([1-9][0-9]*-[1-9][0-9]*)", record["authority_source"])
+    envelope_match = re.fullmatch(r"([0-9]{4}(?:0[1-9]|1[0-2]))/([^/\r\n]+)", record["authority_envelope"])
+    if (
+        prior is None
+        or record["version"] != PARK_REATTESTATION_VERSION
+        or record["operation"] != "park-unlinked-re-attestation"
+        or record["state"] != "complete"
+        or record["task"] != task_ref
+        or record["target"] != state.target
+        or prior["task"] != task_ref
+        or prior["target"] != state.target
+        or record["task_sha256"] != hashlib.sha256(task_text.encode()).hexdigest()
+        or record["todo_sha256"] != todo_digest
+        or any(SHA256_RE.fullmatch(record[key]) is None for key in ("todo_sha256", "authority_sha256", "authority_envelope_sha256", "prior_complete_receipt_sha256"))
+        or record["prior_complete_receipt_sha256"] != hashlib.sha256(yaml.safe_dump(prior, sort_keys=True).encode()).hexdigest()
+        or record["authority_sha256"] != prior["authority_sha256"]
+        or source_match is None
+        or source_match.group(2) != prior["authority_source"].rsplit(":", 1)[0]
+        or source_match.group(3) != prior["authority_source"].rsplit(":", 1)[1]
+        or envelope_match is None
+        or envelope_match.group(1) != source_match.group(1)
+        or envelope_match.group(2) != prior["authority_envelope"]
+        or len(re.findall(
+            rf"^\(manager closed Codex agent [^;\r\n]+; tmux target `{re.escape(state.target)}`; session_id: `{re.escape(prior['prior_close_session_id'])}`\.\)$",
+            task_text,
+            re.MULTILINE,
+        )) != 1
+    ):
+        return False
+    current_locator = str(record["authority_source"])
+    prior_locator = prior["authority_source"]
+    if current_locator not in task_text or hashlib.sha256(task_text.replace(current_locator, prior_locator).encode()).hexdigest() != prior["task_sha256"]:
+        return False
+    authority = Path(current_locator.rsplit(":", 1)[0])
+    envelope = Path(str(record["authority_envelope"]))
+    authority_bytes = read_digest_bound_file(root, authority, str(record["authority_sha256"]))
+    envelope_bytes = read_digest_bound_file(root, envelope, str(record["authority_envelope_sha256"]))
+    if authority_bytes is None or envelope_bytes is None:
+        return False
+    try:
+        authority_lines = authority_bytes.decode("utf-8").splitlines(keepends=True)
+        envelope_text = envelope_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    start, end = (int(part) for part in source_match.group(3).split("-", 1))
+    excerpt = "".join(authority_lines[start - 1 : end])
+    envelope_pattern = re.compile(
+        r'<human_instruction[ \t]+authoritative="true"[ \t]+source="([^"\r\n]+)">\r?\n(.*?)</human_instruction>',
+        re.DOTALL,
+    )
+    matches = [(locator, value.replace("\r\n", "\n")) for locator, value in envelope_pattern.findall(envelope_text)]
+    try:
+        unchanged = task_path.read_text(encoding="utf-8") == task_text and (root / "TODO.md").read_bytes() == todo_bytes
+    except OSError:
+        return False
+    return (
+        1 <= start <= end <= len(authority_lines)
+        and matches == [(current_locator, excerpt.replace("\r\n", "\n"))]
+        and hashlib.sha256(envelope_text.replace(current_locator, prior_locator).encode()).hexdigest() == prior["authority_envelope_sha256"]
+        and sole_active_target_owner(root, task_path, state.target)
+        and target_resolution_state(state.target) is False
+        and unchanged
+        and read_digest_bound_file(default_state_dir(), receipt_path, hashlib.sha256(receipt_bytes).hexdigest(), private=True) == receipt_bytes
+    )
+
+
 def is_targetless_low_priority_custody(root: Path, task: TaskLine, state: TaskState) -> bool:
     """Return whether TODO explicitly parks a blocked worker without an owner."""
 
@@ -636,19 +850,26 @@ def is_targetless_low_priority_custody(root: Path, task: TaskLine, state: TaskSt
         return False
     if task_path is None or task.task_file != canonical_ref or task_has_pending_marker(task_path):
         return False
-    genuine_human_gate = NON_HUMAN_GATE_RE.search(state.reason) is None and (
-        HUMAN_WAIT_RE.search(state.reason) is not None
-        or re.search(r"\b(?:direct human|human halt|human review|human source|human decision|human pending)\b", state.reason, re.IGNORECASE) is not None
-    )
-    if not genuine_human_gate:
-        return False
-    if state.target:
-        return False
     try:
         task_text = task_path.read_text(encoding="utf-8")
     except OSError:
         return False
     metadata = read_task_metadata(task_path, root)
+    if (
+        state.target
+        and metadata is not None
+        and metadata.runat == state.target
+        and not metadata.is_manager
+        and bool(pending_task_items(task_path, root))
+        and has_complete_park_reattestation(root, task_path, state, task_text)
+    ):
+        return True
+    genuine_human_gate = NON_HUMAN_GATE_RE.search(state.reason) is None and (
+        HUMAN_WAIT_RE.search(state.reason) is not None
+        or re.search(r"\b(?:direct human|human halt|human review|human source|human decision|human pending)\b", state.reason, re.IGNORECASE) is not None
+    )
+    if not genuine_human_gate or state.target:
+        return False
     if metadata is None or metadata.runat != "retired":
         return False
     if re.search(r"^\(historical tmux target retired: [A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?; authority: manager_mail/[^\r\n:]+\.txt:\d+-\d+\)$", task_text, re.MULTILINE) is None:
