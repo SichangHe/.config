@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import ANY, patch
 from omo_manager.omo_codex_start import Args, Pane, StartError, launch_command, query_exact_status_session_id, record_session_id
 from omo_manager.omo_task_metadata import TaskFrontmatterError, parse_task_metadata
-from omo_manager.omo_codex_session_migrate import CODEX_PANE_COMMANDS, candidates, run as run_migration
+from omo_manager.omo_codex_session_migrate import CODEX_PANE_COMMANDS, authorized_human_targets, candidates, run as run_migration, submit_existing_input
 
 
 class CodexSessionCaptureTests(unittest.TestCase):
@@ -14,6 +14,23 @@ class CodexSessionCaptureTests(unittest.TestCase):
 
     def test_migration_accepts_live_bunx_launcher_command(self):
         self.assertIn("bunx", CODEX_PANE_COMMANDS)
+
+    def test_existing_input_enter_is_exact_process_guarded(self):
+        pane = Pane("w:1.0", "%1", "@1", "bunx", Path("/tmp"), 42)
+
+        def run(argv, **_kwargs):
+            accepted = argv[6].split("display-message -p ", 1)[1]
+            return __import__("subprocess").CompletedProcess(argv, 0, accepted + "\n", "")
+
+        with patch("omo_manager.omo_codex_session_migrate.subprocess.run", side_effect=run) as mocked:
+            submit_existing_input(pane)
+        argv = mocked.call_args.args[0]
+        self.assertIn("#{pane_id},%1", argv[5])
+        self.assertIn("#{window_id},@1", argv[5])
+        self.assertIn("#{session_name}:#{window_index}.#{pane_index},w:1.0", argv[5])
+        self.assertIn("#{pane_pid},42", argv[5])
+        self.assertIn("#{pane_current_command},bunx", argv[5])
+        self.assertEqual(1, argv[6].count(" Enter"))
 
     def test_human_owned_candidate_requires_explicit_option(self):
         text = "---\nversion: v1.0.0\nstatus: running\nrunat: hcfg:1\ntool: codex\nmanagerat: mgr:9\nis_manager: false\npending_task_items: []\n---\n"
@@ -25,7 +42,7 @@ class CodexSessionCaptureTests(unittest.TestCase):
             report = __import__("omo_manager.omo_codex_status", fromlist=["Report"]).Report("ready", [])
             with patch("omo_manager.omo_codex_session_migrate.task_paths", return_value=(task,)), patch("omo_manager.omo_codex_session_migrate.resolve_pane", return_value=pane), patch("omo_manager.omo_codex_session_migrate.inspect", return_value=report):
                 self.assertEqual([], candidates(root))
-                self.assertEqual([task], candidates(root, include_human_owned=True))
+                self.assertEqual([task], candidates(root, {"hcfg:1"}))
 
     def test_human_owned_apply_records_with_explicit_option(self):
         text = "---\nversion: v1.0.0\nstatus: running\nrunat: hcfg:1\ntool: codex\nmanagerat: mgr:9\nis_manager: false\npending_task_items: []\n---\n"
@@ -35,9 +52,35 @@ class CodexSessionCaptureTests(unittest.TestCase):
             task.write_text(text)
             pane = Pane("hcfg:1", "%1", "@1", "bunx", root, 41)
             report = __import__("omo_manager.omo_codex_status", fromlist=["Report"]).Report("ready", [])
-            with patch("omo_manager.omo_codex_session_migrate.candidates", return_value=[task]), patch("omo_manager.omo_codex_session_migrate.resolve_pane", return_value=pane), patch("omo_manager.omo_codex_session_migrate.inspect", return_value=report), patch("omo_manager.omo_codex_session_migrate.query_exact_status_session_id", return_value=self.UUID), patch("omo_manager.omo_codex_session_migrate.record_session_id") as record:
+            with patch("omo_manager.omo_codex_session_migrate.authorized_human_targets", return_value={"hcfg:1"}), patch("omo_manager.omo_codex_session_migrate.candidates", return_value=[task]), patch("omo_manager.omo_codex_session_migrate.resolve_pane", return_value=pane), patch("omo_manager.omo_codex_session_migrate.inspect", return_value=report), patch("omo_manager.omo_codex_session_migrate.query_exact_status_session_id", return_value=self.UUID), patch("omo_manager.omo_codex_session_migrate.record_session_id") as record:
                 self.assertEqual(0, run_migration(Namespace(root=root, apply=True, include_human_owned=True)))
             record.assert_called_once_with(task, self.UUID, ANY, lock_held=True)
+
+    def test_human_authority_must_name_each_exact_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            mail = root / "manager_mail"
+            mail.mkdir(mode=0o700)
+            source = mail / "request.txt"
+            text = "Subject: status\n\nDo these to the human windows as well: hcfg:1.\n"
+            source.write_text(text, encoding="utf-8")
+            source.chmod(0o600)
+            base = Namespace(
+                include_human_owned=True,
+                human_target=["hcfg:1"],
+                human_authority_file=Path("manager_mail/request.txt"),
+                human_authority_lines=(3, 3),
+                human_authority_sha256=__import__("hashlib").sha256(text.encode()).hexdigest(),
+            )
+            self.assertEqual({"hcfg:1"}, authorized_human_targets(base, root))
+            base.human_target = ["hcfg:2"]
+            with self.assertRaisesRegex(ValueError, "does not name"):
+                authorized_human_targets(base, root)
+            source.write_text(text.replace("hcfg:1", "hcfg:10"), encoding="utf-8")
+            base.human_target = ["hcfg:1"]
+            base.human_authority_sha256 = __import__("hashlib").sha256(source.read_bytes()).hexdigest()
+            with self.assertRaisesRegex(ValueError, "does not name"):
+                authorized_human_targets(base, root)
 
     def test_migration_failure_is_per_candidate_skip(self):
         text = "---\nversion: v1.0.0\nstatus: running\nrunat: {target}\ntool: codex\nmanagerat: mgr:9\nis_manager: false\npending_task_items: []\n---\n"
@@ -55,6 +98,19 @@ class CodexSessionCaptureTests(unittest.TestCase):
                 self.assertEqual(0, run_migration(Namespace(root=root, apply=True)))
             record.assert_called_once()
             self.assertEqual(paths[1], record.call_args.args[0])
+
+    def test_running_input_is_submitted_before_query_and_record(self):
+        text = "---\nversion: v1.0.0\nstatus: running\nrunat: w:1\ntool: codex\nmanagerat: mgr:9\nis_manager: false\npending_task_items: []\n---\n"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            task = root / "running.md"
+            task.write_text(text)
+            pane = Pane("w:1", "%1", "@1", "bunx", root, 41)
+            report = __import__("omo_manager.omo_codex_status", fromlist=["Report"]).Report("running", [])
+            order: list[str] = []
+            with patch("omo_manager.omo_codex_session_migrate.candidates", return_value=[task]), patch("omo_manager.omo_codex_session_migrate.resolve_pane", return_value=pane), patch("omo_manager.omo_codex_session_migrate.inspect", return_value=report), patch("omo_manager.omo_codex_session_migrate.current_input_text", side_effect=("queued work", "")), patch("omo_manager.omo_codex_session_migrate.submit_existing_input", side_effect=lambda _pane: order.append("submit")), patch("omo_manager.omo_codex_session_migrate.query_exact_status_session_id", side_effect=lambda *_args: order.append("query") or self.UUID), patch("omo_manager.omo_codex_session_migrate.record_session_id", side_effect=lambda *_args, **_kwargs: order.append("record")):
+                self.assertEqual(0, run_migration(Namespace(root=root, apply=True)))
+            self.assertEqual(["submit", "query", "record"], order)
 
     def test_frontmatter_session_id_round_trip(self):
         text = "---\nversion: v1.0.0\nstatus: running\nrunat: w:1\ntool: codex\nmanagerat: w:2\nis_manager: false\npending_task_items: []\n---\nbody\n"

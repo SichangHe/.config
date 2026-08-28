@@ -30,6 +30,7 @@ from omo_manager.omo_task_status import reconcile_blocked_index
 from omo_manager.omo_task_status import reconcile_done_index
 from omo_manager.omo_task_status import reconcile_running_index
 from omo_manager.omo_task_status import reconcile_long_running_human_index
+from omo_manager.omo_task_status import reconcile_missing_target
 from omo_manager.omo_task_status import replace_if_unchanged_locked
 from omo_manager.omo_task_status import replace_private_audit
 from omo_manager.omo_task_status import reserve_private_audit
@@ -87,6 +88,95 @@ class TaskStatusTests(unittest.TestCase):
         "them. If an agent is paused, take it down and consider it closed and\n"
         "instead put the pending item under the to do file without a linked agent.\n"
     )
+    RECONCILE_AUTHORITY_TEXT = (
+        "Subject: correct missing task records\n\n"
+        "I don't see any task I am aware of that is not tracked, so just correct "
+        "the task records as opposed to reinstating the agents.\n"
+    )
+
+    def write_missing_target_case(self, root: Path, *, runat: str = "vl:8", is_manager: bool = False) -> tuple[Path, str, Path, str, StatusArgs]:
+        authority_dir = root / "manager_mail"
+        authority_dir.mkdir(mode=0o700)
+        authority = authority_dir / "request.txt"
+        authority.write_text(self.RECONCILE_AUTHORITY_TEXT, encoding="utf-8")
+        authority.chmod(0o600)
+        excerpt = self.RECONCILE_AUTHORITY_TEXT.splitlines(keepends=True)[2]
+        envelope = root / "request_task.md"
+        envelope_text = (
+            '<human_instruction authoritative="true" source="manager_mail/request.txt:3-3">\n'
+            f"{excerpt}</human_instruction>\n"
+        )
+        envelope.write_text(envelope_text, encoding="utf-8")
+        text = task_frontmatter(
+            status="blocked",
+            blocked_on="direct human shutdown",
+            pending_items=("preserve work",),
+            runat=runat,
+            is_manager=is_manager,
+        ) + "existing evidence\n"
+        task = root / "missing.md"
+        task.write_text(text, encoding="utf-8")
+        todo_text = f"current:\n\nlow priority:\nslow.md vl:7\n\nhuman pending:\nmissing.md {runat}\n\nprevious:\n"
+        todo = root / "TODO.md"
+        todo.write_text(todo_text, encoding="utf-8")
+        args = StatusArgs(
+            root,
+            Path("missing.md"),
+            "",
+            "",
+            reconcile_missing_target=True,
+            missing_target=runat,
+            expected_task_sha256=hashlib.sha256(text.encode()).hexdigest(),
+            expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest(),
+            authority_file=Path("manager_mail/request.txt"),
+            authority_lines=(3, 3),
+            authority_sha256=hashlib.sha256(self.RECONCILE_AUTHORITY_TEXT.encode()).hexdigest(),
+            authority_envelope=Path("request_task.md"),
+            authority_envelope_sha256=hashlib.sha256(envelope_text.encode()).hexdigest(),
+        )
+        return task, text, todo, todo_text, args
+
+    def test_reconcile_missing_target_corrects_worker_manager_and_human_records_without_tmux_mutation(self) -> None:
+        for target, is_manager in (("vl:8", False), ("vl:8", True), ("hvl:8", False)):
+            with self.subTest(target=target, is_manager=is_manager), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                task, _text, todo, _todo_text, args = self.write_missing_target_case(root, runat=target, is_manager=is_manager)
+                with patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=("", "")) as inspect_target:
+                    reconcile_missing_target(args, task, task.read_text(), task.stat())
+                self.assertEqual(2, inspect_target.call_count)
+                self.assertIn("runat: retired", task.read_text())
+                self.assertIn(f"historical tmux target retired: {target}", task.read_text())
+                self.assertIn("low priority:\nmissing.md\n", todo.read_text())
+                self.assertNotIn(f"missing.md {target}", todo.read_text())
+
+    def test_reconcile_missing_target_rejects_live_or_unprovable_target_without_mutation(self) -> None:
+        for resolution in ("%42", None):
+            with self.subTest(resolution=resolution), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                task, text, todo, todo_text, args = self.write_missing_target_case(root)
+                with patch("omo_manager.omo_task_status.park_target_pane_id", return_value=resolution):
+                    with self.assertRaisesRegex(TaskFrontmatterError, "live or tmux could not prove"):
+                        reconcile_missing_target(args, task, text, task.stat())
+                self.assertEqual(text, task.read_text())
+                self.assertEqual(todo_text, todo.read_text())
+
+    def test_reconcile_missing_target_rejects_nonhuman_blocker_or_wrong_todo_custody(self) -> None:
+        for case in ("nonhuman", "hyphenated_nonhuman", "current"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                task, text, todo, todo_text, args = self.write_missing_target_case(root)
+                if case in {"nonhuman", "hyphenated_nonhuman"}:
+                    blocker = "non-human dependency" if case == "hyphenated_nonhuman" else "build dependency"
+                    changed = text.replace("blocked_on: direct human shutdown", f"blocked_on: {blocker}")
+                    task.write_text(changed, encoding="utf-8")
+                    args = replace(args, expected_task_sha256=hashlib.sha256(changed.encode()).hexdigest())
+                else:
+                    changed_todo = todo_text.replace("human pending:\nmissing.md vl:8", "human pending:\n\ncurrent:\nmissing.md vl:8")
+                    todo.write_text(changed_todo, encoding="utf-8")
+                    args = replace(args, expected_todo_sha256=hashlib.sha256(changed_todo.encode()).hexdigest())
+                with patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""):
+                    with self.assertRaises(TaskFrontmatterError):
+                        reconcile_missing_target(args, task, task.read_text(), task.stat())
 
     @staticmethod
     def complete_guarded_park_stop(args: StopArgs, session_id: str = "session") -> str:

@@ -28,6 +28,8 @@ from omo_manager.omo_agent_status import TaskFrontmatterError
 from omo_manager.omo_agent_status import DEFAULT_ROOT
 from omo_manager.omo_agent_status import TASK_RE
 from omo_manager.omo_agent_status import same_tmux_target
+from omo_manager.omo_agent_status import HUMAN_WAIT_RE
+from omo_manager.omo_agent_status import NON_HUMAN_GATE_RE
 from omo_manager.omo_blocking import BlockingError
 from omo_manager.omo_blocking import load_yaml_mapping
 from omo_manager.omo_blocking import only_wake_pending_markers
@@ -117,6 +119,7 @@ class Args:
     close_retired_done: bool = False
     normalize_retired_todo: bool = False
     normalize_low_priority_current: bool = False
+    reconcile_missing_target: bool = False
     shared_target: str = ""
     active_target: str = ""
     manager_target: str = ""
@@ -132,6 +135,7 @@ class Args:
     authority_sha256: str = ""
     authority_envelope: Path | None = None
     authority_envelope_sha256: str = ""
+    missing_target: str = ""
 
 
 class ParsedArgs(argparse.Namespace):
@@ -211,6 +215,8 @@ shutdown.""",
         help="Stop one exact non-human halted owner and atomically move its targetless TODO row from human pending to low priority without changing task bytes.",
     )
     _ = parser.add_argument("--retire-blocked-target", action="store_true", help="Atomically retire one blocked human-pending worker target that conflicts with one live lifecycle owner; performs no tmux action.")
+    _ = parser.add_argument("--reconcile-missing-target", action="store_true", help="Atomically mark one authority-approved absent blocked target historical and remove it from its sole human-pending TODO row; never starts or stops tmux.")
+    _ = parser.add_argument("--missing-target", default="", help="Exact absent target required with --reconcile-missing-target.")
     _ = parser.add_argument("--reconcile-long-running-human-index", action="store_true", help="Move one unchanged long_running task with exact human blocker from TODO current to human pending without changing task or pane state.")
     _ = parser.add_argument("--reconcile-blocked-index", action="store_true", help="Move one digest-bound v1 blocked worker with an open queue from TODO previous or low priority to human pending without changing task or pane state.")
     _ = parser.add_argument("--session-id", default="", help="Session id captured by the prior close, if available.")
@@ -266,7 +272,7 @@ shutdown.""",
         parser.error("--closure-repository must be an explicit absolute Git worktree root.")
     if parsed.dirty_path_handoff is not None and parsed.closure_repository is None:
         parser.error("--dirty-path-handoff requires --closure-repository.")
-    if sum((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done, parsed.park_unlinked, parsed.retire_blocked_target, parsed.reconcile_long_running_human_index, parsed.reconcile_blocked_index, parsed.restore_terminal_target, parsed.close_shared_target, parsed.close_retired_done, parsed.normalize_retired_todo, parsed.normalize_low_priority_current)) > 1:
+    if sum((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done, parsed.park_unlinked, parsed.retire_blocked_target, parsed.reconcile_missing_target, parsed.reconcile_long_running_human_index, parsed.reconcile_blocked_index, parsed.restore_terminal_target, parsed.close_shared_target, parsed.close_retired_done, parsed.normalize_retired_todo, parsed.normalize_low_priority_current)) > 1:
         parser.error("finish and recovery modes are mutually exclusive.")
     if (parsed.active_target or parsed.manager_target) and not parsed.normalize_low_priority_current:
         parser.error("--active-target and --manager-target are only valid with --normalize-low-priority-current.")
@@ -341,6 +347,65 @@ shutdown.""",
             authority_envelope_sha256=parsed.authority_envelope_sha256.strip(),
             audit_output=parsed.audit_output.resolve(),
         )
+    if parsed.reconcile_missing_target:
+        unrelated = (
+            parsed.status,
+            parsed.blocked_on,
+            parsed.session_id,
+            parsed.expected_pane_id,
+            parsed.audit_output,
+            parsed.replacement_task,
+            parsed.stale_target,
+            parsed.replacement_target,
+            parsed.stale_sha256,
+            parsed.replacement_sha256,
+            parsed.replacement_status,
+            parsed.protected_target,
+            parsed.stopped_evidence,
+            parsed.replacement_pane_evidence,
+            parsed.pane_id,
+            parsed.terminal_evidence,
+            parsed.closure_repository,
+            parsed.dirty_path_handoff,
+            parsed.historical_target,
+            parsed.task_sha256,
+            parsed.historical_commit,
+            parsed.shared_target,
+            parsed.active_target,
+            parsed.manager_target,
+            parsed.source_sha256,
+            parsed.human_close_authorization_source,
+            parsed.human_close_authorization_sha256,
+        )
+        if (
+            any(unrelated)
+            or TARGET_RE.fullmatch(parsed.missing_target.strip()) is None
+            or SHA256_RE.fullmatch(parsed.expected_task_sha256.strip()) is None
+            or SHA256_RE.fullmatch(parsed.expected_todo_sha256.strip()) is None
+            or parsed.authority_file is None
+            or parsed.authority_lines is None
+            or SHA256_RE.fullmatch(parsed.authority_sha256.strip()) is None
+            or parsed.authority_envelope is None
+            or SHA256_RE.fullmatch(parsed.authority_envelope_sha256.strip()) is None
+        ):
+            parser.error("--reconcile-missing-target requires an exact target, task/TODO digests, and exact authority source and envelope.")
+        return Args(
+            parsed.root.resolve(),
+            parsed.task_file,
+            "",
+            "",
+            reconcile_missing_target=True,
+            missing_target=parsed.missing_target.strip(),
+            expected_task_sha256=parsed.expected_task_sha256.strip(),
+            expected_todo_sha256=parsed.expected_todo_sha256.strip(),
+            authority_file=parsed.authority_file,
+            authority_lines=parsed.authority_lines,
+            authority_sha256=parsed.authority_sha256.strip(),
+            authority_envelope=parsed.authority_envelope,
+            authority_envelope_sha256=parsed.authority_envelope_sha256.strip(),
+        )
+    if parsed.missing_target:
+        parser.error("--missing-target requires --reconcile-missing-target.")
     if any((parsed.expected_task_sha256, parsed.expected_todo_sha256, parsed.expected_pane_id, parsed.authority_file, parsed.authority_lines, parsed.authority_sha256, parsed.authority_envelope, parsed.authority_envelope_sha256)):
         parser.error("park-unlinked task, TODO, pane, and authority assertions require --park-unlinked.")
     if parsed.retire_blocked_target:
@@ -1036,6 +1101,8 @@ def retire_todo_text(root: Path, path: Path, text: str, stale_target: str) -> st
 def retire_blocked_target(args: Args, path: Path, text: str, before: os.stat_result) -> None:
     """Atomically retire a blocked worker's conflicting target without tmux access."""
     raise TaskFrontmatterError("target retirement is disabled: retired is not a run target")
+
+
     if TARGET_RE.fullmatch(args.stale_target) is None:
         raise TaskFrontmatterError("--stale-target must be an exact SESSION:WINDOW[.PANE] target.")
     if args.stale_target.partition(":")[0].startswith("h"):
@@ -1082,6 +1149,117 @@ def retire_blocked_target(args: Args, path: Path, text: str, before: os.stat_res
                 raise
 
 
+def reconciled_missing_task_text(text: str, target: str, root: Path, authority_locator: str) -> str:
+    """Replace one blocked task's absent run target with durable historical custody."""
+
+    metadata = parse_task_metadata(text, root)
+    if (
+        metadata is None
+        or metadata.status != "blocked"
+        or metadata.runat != target
+        or has_pending_marker(text)
+        or NON_HUMAN_GATE_RE.search(metadata.blocked_on) is not None
+        or (
+            HUMAN_WAIT_RE.search(metadata.blocked_on) is None
+            and re.search(r"\b(?:direct human|human halt|human review|human source|human decision|human pending)\b", metadata.blocked_on, re.IGNORECASE) is None
+        )
+    ):
+        raise TaskFrontmatterError("missing-target reconciliation requires one human-blocked task at the exact target with no pending marker.")
+    lines = text.splitlines(keepends=True)
+    closing = next((index for index, line in enumerate(lines[1:], start=1) if line.strip() == "---"), None)
+    if closing is None:
+        raise TaskFrontmatterError("task frontmatter opening marker has no closing marker.")
+    matches = [index for index in range(1, closing) if lines[index].partition(":")[0].strip() == "runat"]
+    if len(matches) != 1 or lines[matches[0]].partition(":")[2].strip() != target:
+        raise TaskFrontmatterError("missing-target reconciliation found run target drift.")
+    newline = lines[matches[0]][len(lines[matches[0]].rstrip("\r\n")) :]
+    lines[matches[0]] = f"runat: retired{newline}"
+    note = f"(historical tmux target retired: {target}; authority: {authority_locator})"
+    updated = "".join(lines).rstrip("\n") + f"\n\n{note}\n"
+    parsed = parse_task_metadata(updated, root)
+    if parsed is None or parsed.status != "blocked" or parsed.runat != "retired":
+        raise TaskFrontmatterError("reconciled task metadata did not validate.")
+    return updated
+
+
+def reconciled_missing_todo_text(root: Path, path: Path, text: str, target: str) -> str:
+    """Move the sole task reference to canonical targetless low-priority custody."""
+
+    lines = text.splitlines(keepends=True)
+    section = ""
+    rows: list[tuple[int, str]] = []
+    low_headers: list[int] = []
+    for index, line in enumerate(lines):
+        stripped = line.rstrip("\r\n")
+        if stripped in {"current:", "human pending:", "low priority:", "previous:"}:
+            section = stripped[:-1]
+            if section == "low priority":
+                low_headers.append(index)
+            continue
+        if stripped.endswith(":"):
+            section = ""
+        if path in todo_row_task_paths(root, line):
+            rows.append((index, section))
+    if len(rows) != 1 or len(low_headers) != 1:
+        raise TaskFrontmatterError("missing-target reconciliation requires one task row and one canonical low-priority section.")
+    row_index, row_section = rows[0]
+    row = lines[row_index]
+    validate_reconciled_todo_row(root, path, row, target)
+    row_targets = TARGET_RE.findall(row)
+    if row_section != "human pending" or row_targets != [target]:
+        raise TaskFrontmatterError("TODO row must be exact human-pending ownership naming the missing target.")
+    newline = row[len(row.rstrip("\r\n")) :]
+    canonical = relative_task_ref(root, path) + (newline or "\n")
+    lines.pop(row_index)
+    low_index = next(index for index, line in enumerate(lines) if line.rstrip("\r\n") == "low priority:")
+    lines.insert(low_index + 1, canonical)
+    return "".join(lines)
+
+
+def reconcile_missing_target(args: Args, path: Path, text: str, before: os.stat_result) -> None:
+    """Correct one absent task/TODO target under exact direct-human authority."""
+
+    todo = args.root / "TODO.md"
+    if path == todo or not todo.is_file():
+        raise TaskFrontmatterError("missing-target reconciliation requires a task file and TODO.md.")
+    if hashlib.sha256(text.encode()).hexdigest() != args.expected_task_sha256:
+        raise TaskFrontmatterError("task bytes do not match --expected-task-sha256.")
+    excerpt, authority_locator = read_park_authority(args)
+    if "correct the task records as opposed to reinstating the agents" not in excerpt:
+        raise TaskFrontmatterError("authority excerpt does not authorize correcting missing task records.")
+    envelope_ref = read_park_authority_envelope(args, excerpt, authority_locator)
+    updated_task = reconciled_missing_task_text(text, args.missing_target, args.root, authority_locator)
+    with root_membership_lock(args.root), task_target_lock(args.root, args.missing_target):
+        with ExitStack() as locks:
+            for locked_path in sorted({path, todo}, key=str):
+                locks.enter_context(task_file_lock(locked_path))
+            if path.read_text(encoding="utf-8") != text or not same_file_state(before, path.stat()):
+                raise TaskFrontmatterError("task changed while missing-target reconciliation was prepared.")
+            todo_before = todo.stat()
+            todo_text = todo.read_text(encoding="utf-8")
+            if hashlib.sha256(todo_text.encode()).hexdigest() != args.expected_todo_sha256:
+                raise TaskFrontmatterError("TODO bytes do not match --expected-todo-sha256.")
+            if read_park_authority(args) != (excerpt, authority_locator):
+                raise TaskFrontmatterError("authority changed while missing-target reconciliation was prepared.")
+            if read_park_authority_envelope(args, excerpt, authority_locator) != envelope_ref:
+                raise TaskFrontmatterError("authority envelope changed while missing-target reconciliation was prepared.")
+            if park_target_pane_id(args.missing_target) != "":
+                raise TaskFrontmatterError("target is live or tmux could not prove it absent.")
+            updated_todo = reconciled_missing_todo_text(args.root, path, todo_text, args.missing_target)
+            if park_target_pane_id(args.missing_target) != "":
+                raise TaskFrontmatterError("target reappeared while reconciliation was prepared.")
+            replace_if_unchanged_locked(todo, updated_todo, todo_before)
+            moved_todo_before = todo.stat()
+            try:
+                replace_if_unchanged_locked(path, updated_task, before)
+            except Exception as exc:
+                try:
+                    replace_if_unchanged_locked(todo, todo_text, moved_todo_before)
+                except Exception as rollback_exc:
+                    raise TaskFrontmatterError(f"task correction failed and TODO rollback also failed: {rollback_exc}") from exc
+                raise
+
+
 def read_park_authority(args: Args) -> tuple[str, str]:
     """Return the exact authority excerpt and its stable source locator."""
 
@@ -1089,47 +1267,65 @@ def read_park_authority(args: Args) -> tuple[str, str]:
         raise TaskFrontmatterError("park-unlinked authority file is missing.")
     try:
         root = args.root.resolve(strict=True)
-        mail_candidate = root / "manager_mail"
-        mail_candidate_state = mail_candidate.lstat()
-        mail_root = mail_candidate.resolve(strict=True)
-        mail_state = mail_root.stat()
-        candidate = args.authority_file if args.authority_file.is_absolute() else root / args.authority_file
-        candidate_state = candidate.lstat()
-        source = candidate.resolve(strict=True)
-    except OSError as exc:
-        raise TaskFrontmatterError(f"park-unlinked authority source is unavailable: {exc}") from exc
-    if (
-        source.parent != mail_root
-        or stat.S_ISLNK(candidate_state.st_mode)
-        or stat.S_ISLNK(mail_candidate_state.st_mode)
-        or not stat.S_ISDIR(mail_state.st_mode)
-        or mail_state.st_uid != os.getuid()
-        or stat.S_IMODE(mail_state.st_mode) & 0o077
-    ):
-        raise TaskFrontmatterError("park-unlinked authority must be one direct file in an owner-private manager_mail directory.")
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        relative = args.authority_file.relative_to(root) if args.authority_file.is_absolute() else args.authority_file
+    except (OSError, ValueError) as exc:
+        raise TaskFrontmatterError(f"park-unlinked authority source is outside the task root or unavailable: {exc}") from exc
+    parts = relative.parts
+    direct = len(parts) == 2 and parts[0] == "manager_mail"
+    archived = (
+        len(parts) == 3
+        and re.fullmatch(r"\d{4}(?:0[1-9]|1[0-2])", parts[0]) is not None
+        and parts[1] == "manager_mail"
+    )
+    if not (direct or archived) or any(part in {"", ".", ".."} for part in parts):
+        raise TaskFrontmatterError(
+            "park-unlinked authority must be one direct manager_mail file or one YYYYMM/manager_mail file under the task root."
+        )
+    directory_states: list[tuple[Path, os.stat_result]] = []
     try:
-        fd = os.open(source, flags)
+        with ExitStack() as descriptors:
+            directory_flags = (
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+            )
+            directory_fd = os.open(root, directory_flags)
+            descriptors.callback(os.close, directory_fd)
+            current_path = root
+            for part in parts[:-1]:
+                current_path /= part
+                directory_fd = os.open(part, directory_flags, dir_fd=directory_fd)
+                descriptors.callback(os.close, directory_fd)
+                state = os.fstat(directory_fd)
+                directory_states.append((current_path, state))
+                if (
+                    not stat.S_ISDIR(state.st_mode)
+                    or state.st_uid != os.getuid()
+                    or stat.S_IMODE(state.st_mode) & (0o077 if direct else 0o022)
+                ):
+                    raise TaskFrontmatterError("park-unlinked authority directory is not owner-controlled.")
+            source = root.joinpath(*parts)
+            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(parts[-1], flags, dir_fd=directory_fd)
+            descriptors.callback(os.close, fd)
+            before = os.fstat(fd)
+            chunks: list[bytes] = []
+            remaining = MAX_AUTHORITY_BYTES + 1
+            while remaining:
+                chunk = os.read(fd, min(64 * 1024, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            payload = b"".join(chunks)
+            after = os.fstat(fd)
+            current = source.lstat()
+            current_directories = [(path, path.lstat()) for path, _state in directory_states]
     except OSError as exc:
-        raise TaskFrontmatterError(f"park-unlinked authority source cannot be opened safely: {exc}") from exc
-    try:
-        before = os.fstat(fd)
-        chunks: list[bytes] = []
-        remaining = MAX_AUTHORITY_BYTES + 1
-        while remaining:
-            chunk = os.read(fd, min(64 * 1024, remaining))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        payload = b"".join(chunks)
-        after = os.fstat(fd)
-    finally:
-        os.close(fd)
-    try:
-        current = source.stat()
-    except OSError as exc:
-        raise TaskFrontmatterError(f"park-unlinked authority source disappeared: {exc}") from exc
+        raise TaskFrontmatterError(
+            f"park-unlinked authority must be a direct file in an allowed manager_mail layout without symlinks: {exc}"
+        ) from exc
     if (
         not stat.S_ISREG(before.st_mode)
         or before.st_uid != os.getuid()
@@ -1137,6 +1333,10 @@ def read_park_authority(args: Args) -> tuple[str, str]:
         or len(payload) > MAX_AUTHORITY_BYTES
         or not same_file_state(before, after)
         or not same_file_state(after, current)
+        or any(
+            stat.S_ISLNK(state.st_mode) or not same_file_state(state, latest)
+            for (_path, state), (_latest_path, latest) in zip(directory_states, current_directories)
+        )
         or hashlib.sha256(payload).hexdigest() != args.authority_sha256
     ):
         raise TaskFrontmatterError("park-unlinked authority source is unsafe, changed, oversized, or does not match --authority-sha256.")
@@ -2731,6 +2931,8 @@ def run(args: Args) -> int:
             reconcile_previous_blocked_index(args, path, text, before)
         elif args.retire_blocked_target:
             retire_blocked_target(args, path, text, before)
+        elif args.reconcile_missing_target:
+            reconcile_missing_target(args, path, text, before)
         elif args.reconcile_long_running_human_index:
             reconcile_long_running_human_index(args.root, path, text, before)
         elif args.finish_replaced_done:

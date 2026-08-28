@@ -58,6 +58,25 @@ class AgentStatusTests(unittest.TestCase):
             self.assertEqual({"active.md"}, done)
             self.assertEqual(set(), human_pending)
 
+    def test_retired_targetless_low_priority_custody_is_not_a_missing_problem(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            registry.write_text('{"sessions":[]}', encoding="utf-8")
+            (root / "TODO.md").write_text("current:\n\nlow priority:\nparked.md\n\nhuman pending:\n\nprevious:\n", encoding="utf-8")
+            task = task_frontmatter(
+                "blocked",
+                runat="cfg:8",
+                blocked_on="direct human shutdown",
+                pending_items=("preserve work",),
+            ).replace("runat: cfg:8", "runat: retired")
+            task += "\n(historical tmux target retired: cfg:8; authority: manager_mail/request.txt:3-3)\n"
+            (root / "parked.md").write_text(task, encoding="utf-8")
+            out = StringIO()
+            with redirect_stdout(out):
+                self.assertEqual(0, main(["--root", str(root), "--registry", str(registry), "--problems-only"]))
+            self.assertEqual("", out.getvalue())
+
     def test_output_evidence_strips_complete_benign_codex_apps_warning(self) -> None:
         lines = [
             '⚠ MCP client for `codex_apps` failed to start: MCP startup failed: handshaking with MCP server failed: Send message error Transport',
@@ -3493,7 +3512,7 @@ resolved_task_items: []
             self.assertEqual("", out.getvalue())
             inspect.assert_not_called()
 
-    def test_problems_only_ignores_targetless_low_priority_custody(self) -> None:
+    def test_problems_only_does_not_quiet_legacy_target_bound_low_priority_custody(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             registry = root / "sessions.json"
@@ -3506,7 +3525,7 @@ resolved_task_items: []
                 task_frontmatter(
                     "blocked",
                     runat="vl:31",
-                    blocked_on="paused by an authoritative lifecycle decision",
+                    blocked_on="paused by direct human decision",
                     pending_items=("resume this work only when authorized",),
                 ),
                 encoding="utf-8",
@@ -3515,12 +3534,12 @@ resolved_task_items: []
             with (
                 patch("omo_manager.omo_agent_status.target_resolution_state", return_value=False),
                 patch("omo_manager.omo_agent_status.target_resolves_exactly", return_value=False),
-                patch("omo_manager.omo_agent_status.inspect") as inspect,
+                patch("omo_manager.omo_agent_status.inspect", return_value=Report("missing", [])) as inspect,
                 patch("omo_manager.omo_agent_status.tmux_list_panes", return_value=[]),
                 redirect_stdout(out),
             ):
                 self.assertEqual(
-                    0,
+                    3,
                     main(
                         [
                             "--root",
@@ -3532,8 +3551,27 @@ resolved_task_items: []
                         ]
                     ),
                 )
-            self.assertEqual("", out.getvalue())
-            inspect.assert_not_called()
+            self.assertIn("missing: task=parked.md", out.getvalue())
+            inspect.assert_called()
+
+    def test_targetless_low_priority_nonhuman_dependency_is_not_quiet(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            registry.write_text('{"sessions":[]}', encoding="utf-8")
+            (root / "TODO.md").write_text("low priority:\nparked.md\n", encoding="utf-8")
+            (root / "parked.md").write_text(
+                task_frontmatter("blocked", runat="vl:31", blocked_on="non-human dependency", pending_items=("resume work",)),
+                encoding="utf-8",
+            )
+            out = StringIO()
+            with (
+                patch("omo_manager.omo_agent_status.target_resolution_state", return_value=False),
+                patch("omo_manager.omo_agent_status.inspect", return_value=Report("missing", [])),
+                redirect_stdout(out),
+            ):
+                self.assertEqual(3, main(["--root", str(root), "--registry", str(registry), "--problems-only", "--no-auto-unstick"]))
+            self.assertIn("missing: task=parked.md", out.getvalue())
 
     def test_targetless_low_priority_custody_requires_all_boundaries(self) -> None:
         for case in (

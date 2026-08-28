@@ -142,6 +142,26 @@ class Args:
     require_existing_tmux_session: bool = False
 
 
+@dataclass(frozen=True)
+class LaunchWindow:
+    target: str
+    pane_id: str
+    session_id: str
+
+
+class LaunchTarget(str):
+    """String-compatible target carrying the identity returned by new-window."""
+
+    pane_id: str
+    session_id: str
+
+    def __new__(cls, target: str, pane_id: str, session_id: str) -> LaunchTarget:
+        value = super().__new__(cls, target)
+        value.pane_id = pane_id
+        value.session_id = session_id
+        return value
+
+
 class ParsedArgs(argparse.Namespace):
     root: Path = DEFAULT_ROOT
     task_file: str = ""
@@ -174,7 +194,6 @@ class ParsedArgs(argparse.Namespace):
 class LaunchSession:
     name: str
     target: str
-    create: bool
 
 
 def codex_flags_model_error(codex_flags: tuple[str, ...]) -> str:
@@ -260,7 +279,7 @@ Ownership migration:
     _ = parser.add_argument(
         "--require-existing-tmux-session",
         action="store_true",
-        help="Fail a launch if the named tmux session is absent instead of creating it.",
+        help="Compatibility flag; all launches require the named tmux session to exist.",
     )
     _ = parser.add_argument(
         "--migrate-manager-owner", action="store_true", help="Atomically migrate only `managerat` on one existing task; requires explicit old and new targets and performs no launch or TODO action."
@@ -591,34 +610,19 @@ def validate_launch_session(args: Args) -> str:
 
 
 def launch_session(args: Args) -> LaunchSession:
-    """Choose existing-window launch or missing-session creation without mutation."""
+    """Bind a worker launch to an existing tmux session without mutation."""
 
     if args.workdir is None:
         raise ValueError("--workdir is required to launch a new worker.")
     session_name = validate_launch_session(args)
     exact_session_target = f"={session_name}:"
-    result = tmux(["display-message", "-p", "-t", exact_session_target, "#{session_id}\t#{session_path}"])
-    session_details = result.stdout.removesuffix("\n")
-    session_missing = result.returncode != 0
-    if result.returncode == 0 and not session_details.strip():
-        session_missing = tmux(["has-session", "-t", exact_session_target]).returncode != 0
-    if session_missing:
-        if args.require_existing_tmux_session:
-            raise ValueError(f"tmux session `{session_name}` must already exist.")
-        if args.tmux_window:
-            raise ValueError(f"cannot create missing tmux session `{session_name}` at requested --tmux-window {args.tmux_window}.")
-        return LaunchSession(session_name, f"={session_name}", True)
-    session_id, separator, session_workdir_text = session_details.partition("\t")
-    if not separator or TMUX_SESSION_ID_RE.fullmatch(session_id) is None or not session_workdir_text or "\n" in session_workdir_text:
-        raise RuntimeError(f"tmux session `{session_name}` did not report one usable session_id and session_path.")
-    session_workdir = Path(session_workdir_text)
-    try:
-        same_workdir = os.path.samefile(args.workdir, session_workdir)
-    except OSError as error:
-        raise ValueError(f"cannot verify that --workdir `{args.workdir}` matches tmux session `{session_name}` session_path `{session_workdir}`: {error}") from error
-    if not same_workdir:
-        raise ValueError(f"--workdir `{args.workdir}` does not match tmux session `{session_name}` session_path `{session_workdir}`; both must identify the same directory.")
-    return LaunchSession(session_name, session_id, False)
+    result = tmux(["display-message", "-p", "-t", exact_session_target, "#{session_id}"])
+    if result.returncode != 0:
+        raise ValueError(f"tmux session `{session_name}` must already exist.")
+    session_id = result.stdout.strip()
+    if TMUX_SESSION_ID_RE.fullmatch(session_id) is None:
+        raise RuntimeError(f"tmux session `{session_name}` did not report one usable session_id.")
+    return LaunchSession(session_name, session_id)
 
 
 def is_vl_task_file(task_file: str) -> bool:
@@ -1325,11 +1329,9 @@ def wait_command_started(
     raise RuntimeError(f"Codex launch not verified after {timeout_s:g}s: pane command={last_command or 'unknown'}, status={last_status}")
 
 
-def new_window_command(args: Args, create_session: bool = False) -> list[str]:
+def new_window_command(args: Args) -> list[str]:
     name = args.window_name or Path(args.task_file).stem
-    if create_session:
-        return ["new-session", "-d", "-P", "-F", "#{session_name}:#{window_index}", "-s", args.tmux_session.lstrip("="), "-n", name, "-c", str(args.workdir)]
-    return ["new-window", "-P", "-F", "#{session_name}:#{window_index}", "-t", target(args), "-n", name, "-c", str(args.workdir)]
+    return ["new-window", "-P", "-F", "#{session_id}\t#{session_name}:#{window_index}\t#{pane_id}", "-t", target(args), "-n", name, "-c", str(args.workdir)]
 
 
 def launch_input_state(path: Path | None) -> str:
@@ -1455,12 +1457,14 @@ def start_codex(target: str, args: Args) -> None:
             manager_delegation_file.unlink(missing_ok=True)
 
 
-def new_window(args: Args) -> str:
+def new_window_bound(args: Args) -> LaunchWindow:
     if args.workdir is None:
-        return target(args)
+        tmux_target = target(args)
+        pane_id = exact_pane_id(tmux_target)
+        return LaunchWindow(tmux_target, pane_id, "")
     session = launch_session(args)
     bound_args = replace(args, tmux_session=session.target)
-    command = new_window_command(bound_args, session.create)
+    command = new_window_command(bound_args)
     try:
         out = tmux(command, check=True)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as error:
@@ -1469,9 +1473,27 @@ def new_window(args: Args) -> str:
         except OSError as evidence_error:
             raise RuntimeError(f"tmux {command[0]} failed; diagnostic retention failed: {evidence_error}") from error
         raise RuntimeError(f"tmux {command[0]} failed; diagnostic: {evidence}") from error
-    tmux_target = out.stdout.strip()
-    wait_shell(tmux_target)
-    return tmux_target
+    fields = out.stdout.rstrip("\r\n").split("\t")
+    if len(fields) != 3:
+        raise RuntimeError("tmux new-window did not return bound session, target, and pane identity.")
+    created_session_id, tmux_target, pane_id = fields
+    if created_session_id != session.target or TMUX_TARGET_RE.fullmatch(tmux_target) is None or re.fullmatch(r"%[0-9]+", pane_id) is None:
+        raise RuntimeError("tmux new-window identity did not match the bound existing session.")
+    wait_shell(pane_id)
+    return LaunchWindow(tmux_target, pane_id, created_session_id)
+
+
+def verify_launch_window(window: LaunchWindow) -> None:
+    """Fail if the created pane's symbolic target or session identity rebound."""
+
+    result = tmux(["display-message", "-p", "-t", f"={window.target}", "#{session_id}\t#{pane_id}"])
+    if result.returncode != 0 or result.stdout.strip() != f"{window.session_id}\t{window.pane_id}":
+        raise RuntimeError(f"new task target {window.target} changed before task registration.")
+
+
+def new_window(args: Args) -> str:
+    window = new_window_bound(args)
+    return LaunchTarget(window.target, window.pane_id, window.session_id)
 
 
 def ensure_task_file(args: Args, tmux_target: str) -> Path:
@@ -1586,7 +1608,7 @@ def dry_run(args: Args) -> None:
         bound_args = replace(args, tmux_session=session.target)
         if args.prelaunch_source is not None:
             print(f"prelaunch_source: {args.prelaunch_source}")
-        command = ["tmux", *new_window_command(bound_args, session.create)]
+        command = ["tmux", *new_window_command(bound_args)]
         print("tmux: " + " ".join(shlex.quote(part) for part in command))
         launch_target = tmux_target
         manager_file = args.root / "MANAGER.md" if args.is_manager else None
@@ -1777,9 +1799,12 @@ def main(argv: list[str]) -> int:
                     dry_run(args)
                     return 0
                 existed = task_path(args.root, args.task_file).exists()
-                tmux_target = new_window(args)
+                launch_target = new_window(args)
+                tmux_target = str(launch_target)
                 if existing_pane_id and exact_pane_id(tmux_target) != existing_pane_id:
                     raise ValueError(f"existing target `{tmux_target}` changed before task registration; retry or use --workdir to launch a new worker.")
+                if args.workdir is not None and isinstance(launch_target, LaunchTarget):
+                    verify_launch_window(LaunchWindow(tmux_target, launch_target.pane_id, launch_target.session_id))
                 path = ensure_task_file(args, tmux_target)
                 if not args.no_link:
                     link_todo(args, tmux_target)

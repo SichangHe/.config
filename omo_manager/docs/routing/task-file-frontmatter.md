@@ -56,13 +56,18 @@ ALL other fields are required.
 Codex worker records may include `session_id`, a UUID captured from a guarded
 launch-time `/status` query. Fresh prompts are delivered only after this UUID is
 captured and bound to the task. It is not valid for `pcodx` records. Existing
-eligible idle workers can be reviewed with `omo_codex_session_migrate.py
---root ROOT` (use `--apply` only after review). Human-owned (`h*`) targets are
-excluded by default; direct human authorization may opt them in with
-`--include-human-owned`, while retaining ready, empty-input, and exact-process
-guards.
+eligible live workers can be reviewed with `omo_codex_session_migrate.py
+--root ROOT` (use `--apply` only after review). Apply accepts ready or running
+Codex panes; when non-placeholder input is visible, it submits that input once
+through the exact bound process before querying `/status`. Human-owned (`h*`)
+targets are excluded by default. Applying to them requires `--include-human-owned`,
+one repeated `--human-target` per exact `h*` target, and an owner-private
+manager-mail file, selected line range, and complete-file digest that both
+authorizes status capture and names every target. Pane, window, canonical
+target, PID, and process command remain guarded across input submission and
+status capture.
 
-`runat` is a tmux target. Legacy `runat: retired` values remain readable only for historical compatibility; helpers must not create new retired targets. As a read-only exception, the manager status helper validates completed child records with `status: done` and `runat: retired` while checking whether their parent can close.
+`runat` is normally a tmux target. `runat: retired` records verified historical ownership after the target disappeared. New retirement is allowed only through the digest-bound `omo_task_status.py --reconcile-missing-target` lifecycle operation with an exact owner-private direct-human authority source, selected line range, and authoritative envelope; it moves the sole TODO reference into targetless low-priority custody and never starts, stops, or reinstates a pane. The manager status helper also validates completed child records with `status: done` and `runat: retired` while checking whether their parent can close.
 
 `long_running` is active but suppresses ordinary ready/close reminders. Use it for managers and persistent human-facing interactive agents. A `long_running` task with `blocked_on` is waiting and does not receive pending-item reminders; without it, it does. Error, missing-pane, stuck-input, malformed-state, and launch-failure handling remains active.
 

@@ -23,7 +23,8 @@ manager_url="${OMO_MANAGER_URL:-http://127.0.0.1:18790}"
 root="${OMO_WORK_LOGS_ROOT:-$HOME/work_logs}"
 state_dir="${OMO_MANAGER_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/omo-manager}"
 workdir="${OMO_MANAGER_WORKDIR:-$root}"
-tmux_target="${OMO_MANAGER_TMUX_TARGET:-omo-manager:0.0}"
+tmux_target="${OMO_MANAGER_TMUX_TARGET:-}"
+tmux_pane_ref="$tmux_target"
 manager_model="${OMO_MANAGER_MODEL:-openai/gpt-5.6-terra}"
 startup_prompt=1
 refresh_watchers=1
@@ -42,7 +43,7 @@ Options:
   --root DIR              Markdown work-log root (default: OMO_WORK_LOGS_ROOT or ~/work_logs)
   --state-dir DIR         Private state/log dir (default: OMO_MANAGER_STATE_DIR or ~/.local/state/omo-manager)
   --workdir DIR           Directory where manager OpenCode should run (default: root)
-  --tmux-target TARGET    Existing pane or manager session pane (default: OMO_MANAGER_TMUX_TARGET or omo-manager:0.0)
+  --tmux-target TARGET    Existing manager pane (default: OMO_MANAGER_TMUX_TARGET)
   --model MODEL           OpenCode model for the manager (default: OMO_MANAGER_MODEL or openai/gpt-5.6-terra)
   --no-startup-prompt     Do not submit the post-restart work-log MANAGER.md prompt
   --no-refresh-watchers   Do not run omo_manager_setup_watchers.sh after health succeeds
@@ -52,7 +53,7 @@ Options:
 
 Examples:
   OMO_MANAGER_URL=http://127.0.0.1:18917 omo_manager_restart.sh --tmux-target wl:4.0
-  omo_manager_restart.sh --manager-url http://127.0.0.1:18790 --tmux-target omo-manager:0.0
+  omo_manager_restart.sh --manager-url http://127.0.0.1:18790 --tmux-target wl:1.0
 EOF
 }
 
@@ -80,6 +81,34 @@ while [ "$#" -gt 0 ]; do
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
+
+if [ -z "$tmux_target" ]; then
+  echo "OMO_MANAGER_TMUX_TARGET or --tmux-target is required" >&2
+  exit 1
+fi
+if [[ "${tmux_target%%:*}" == h* ]]; then
+  echo "manager restart refuses human-owned h* tmux targets" >&2
+  exit 1
+fi
+if ! tmux has-session -t "=${tmux_target%%:*}:" 2>/dev/null; then
+  echo "tmux session not found: ${tmux_target%%:*}; manager restart requires an existing session" >&2
+  exit 1
+fi
+tmux_session_name="${tmux_target%%:*}"
+tmux_target_suffix="${tmux_target#*:}"
+tmux_identity="$(tmux display-message -p -t "=${tmux_session_name}:${tmux_target_suffix}" '#{session_id} #{pane_id} #{session_name}:#{window_index}.#{pane_index}' 2>/dev/null || true)"
+read -r tmux_session_id tmux_pane_id tmux_canonical_target <<<"$tmux_identity"
+if [[ ! "$tmux_session_id" =~ ^\$[0-9]+$ || ! "$tmux_pane_id" =~ ^%[0-9]+$ || "$tmux_canonical_target" != "$tmux_target" ]]; then
+  echo "tmux target not found exactly: $tmux_target" >&2
+  exit 1
+fi
+tmux_pane_ref="$tmux_pane_id"
+
+guard_tmux_target() {
+  local current
+  current="$(tmux display-message -p -t "=${tmux_session_name}:${tmux_target_suffix}" '#{session_id} #{pane_id}' 2>/dev/null || true)"
+  [ "$current" = "$tmux_session_id $tmux_pane_id" ]
+}
 
 manager_endpoint() {
   python3 - "$manager_url" <<'PY'
@@ -129,7 +158,7 @@ port_listener_pids() {
 }
 
 tmux_target_pid() {
-  tmux display-message -p -t "$tmux_target" '#{pane_pid}' 2>/dev/null || true
+  tmux display-message -p -t "$tmux_pane_ref" '#{pane_pid}' 2>/dev/null || true
 }
 
 process_field() {
@@ -194,7 +223,7 @@ wait_pane_ready() {
   local deadline=$((SECONDS + 10))
   local cmd
   while [ "$SECONDS" -lt "$deadline" ]; do
-    cmd="$(tmux display-message -p -t "$tmux_target" '#{pane_current_command}' 2>/dev/null || true)"
+    cmd="$(tmux display-message -p -t "$tmux_pane_ref" '#{pane_current_command}' 2>/dev/null || true)"
     case "$cmd" in
       opencode|node|bun) sleep 0.25 ;;
       bash|dash|fish|sh|zsh) return 0 ;;
@@ -206,7 +235,7 @@ wait_pane_ready() {
 
 pane_restartable() {
   local cmd
-  cmd="$(tmux display-message -p -t "$tmux_target" '#{pane_current_command}' 2>/dev/null || true)"
+  cmd="$(tmux display-message -p -t "$tmux_pane_ref" '#{pane_current_command}' 2>/dev/null || true)"
   case "$cmd" in
     bash|dash|fish|opencode|sh|zsh) return 0 ;;
     node|bun) port_occupied && port_owned_by_target ;;
@@ -340,27 +369,20 @@ if [ "$dry_run" -eq 1 ]; then
   exit 0
 fi
 
-if ! tmux has-session -t "${tmux_target%%:*}" 2>/dev/null; then
-  session_name="${tmux_target%%:*}"
-  log "tmux session missing; creating detached session $session_name in $workdir"
-  tmux new-session -d -s "$session_name" -c "$workdir"
-fi
-
-if ! tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index}' | grep -Fxq "$tmux_target"; then
-  echo "tmux target not found after session check: $tmux_target" >&2
+if ! guard_tmux_target; then
+  echo "tmux target changed after identity binding: $tmux_target" >&2
   exit 1
 fi
 
 if [ -n "${TMUX_PANE:-}" ]; then
   current_pane_id="$(tmux display-message -p '#{pane_id}' 2>/dev/null || true)"
-  target_pane_id="$(tmux display-message -p -t "$tmux_target" '#{pane_id}' 2>/dev/null || true)"
-  if [ -n "$current_pane_id" ] && [ "$current_pane_id" = "$target_pane_id" ]; then
+  if [ -n "$current_pane_id" ] && [ "$current_pane_id" = "$tmux_pane_id" ]; then
     echo "refusing to restart the current pane ($tmux_target); run this helper from another shell or tmux pane" >&2
     exit 1
   fi
 fi
 
-tmux capture-pane -p -S -2000 -t "$tmux_target" >"$pane_log" 2>/dev/null || true
+tmux capture-pane -p -S -2000 -t "$tmux_pane_ref" >"$pane_log" 2>/dev/null || true
 chmod 600 "$pane_log" 2>/dev/null || true
 log "captured prior pane output to $pane_log"
 
@@ -371,14 +393,16 @@ if port_occupied && ! port_owned_by_target && [ "$force_port" -eq 0 ]; then
 fi
 
 if ! pane_restartable; then
-  current_cmd="$(tmux display-message -p -t "$tmux_target" '#{pane_current_command}' 2>/dev/null || true)"
+  current_cmd="$(tmux display-message -p -t "$tmux_pane_ref" '#{pane_current_command}' 2>/dev/null || true)"
   echo "tmux pane $tmux_target is running ${current_cmd:-unknown}, not a known shell or manager process; refusing to send Ctrl-C" >&2
   exit 1
 fi
 
-tmux send-keys -t "$tmux_target" C-c
+guard_tmux_target || { echo "tmux target changed before interrupt: $tmux_target" >&2; exit 1; }
+tmux send-keys -t "$tmux_pane_ref" C-c
 if ! wait_port_free; then
-  tmux send-keys -t "$tmux_target" C-c
+  guard_tmux_target || { echo "tmux target changed before second interrupt: $tmux_target" >&2; exit 1; }
+  tmux send-keys -t "$tmux_pane_ref" C-c
 fi
 if ! wait_port_free; then
   pids="$(port_listener_pids)"
@@ -404,12 +428,13 @@ if ! wait_port_free; then
 fi
 
 if ! wait_pane_ready; then
-  current_cmd="$(tmux display-message -p -t "$tmux_target" '#{pane_current_command}' 2>/dev/null || true)"
+  current_cmd="$(tmux display-message -p -t "$tmux_pane_ref" '#{pane_current_command}' 2>/dev/null || true)"
   echo "tmux pane $tmux_target did not return to a known shell after Ctrl-C (current command: ${current_cmd:-unknown}); not typing restart command" >&2
   exit 1
 fi
 
-tmux send-keys -t "$tmux_target" "$command" Enter
+guard_tmux_target || { echo "tmux target changed before restart command: $tmux_target" >&2; exit 1; }
+tmux send-keys -t "$tmux_pane_ref" "$command" Enter
 log "started OpenCode in $tmux_target: $command"
 
 if ! wait_health; then

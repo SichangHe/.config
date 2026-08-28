@@ -627,10 +627,6 @@ def is_targetless_low_priority_custody(root: Path, task: TaskLine, state: TaskSt
         or task.line != task.task_file
         or task.target
         or state.status != "blocked"
-        or state.is_manager
-        or not state.target
-        or target_session(state.target).startswith("h")
-        or target_resolution_state(state.target) is not False
     ):
         return False
     task_path = resolve_task_path(root, task.task_file)
@@ -638,12 +634,24 @@ def is_targetless_low_priority_custody(root: Path, task: TaskLine, state: TaskSt
         canonical_ref = task_path.relative_to(root).as_posix() if task_path is not None else ""
     except ValueError:
         return False
-    if (
-        task_path is None
-        or task.task_file != canonical_ref
-        or task_has_pending_marker(task_path)
-        or not pending_task_items(task_path, root)
-    ):
+    if task_path is None or task.task_file != canonical_ref or task_has_pending_marker(task_path):
+        return False
+    genuine_human_gate = NON_HUMAN_GATE_RE.search(state.reason) is None and (
+        HUMAN_WAIT_RE.search(state.reason) is not None
+        or re.search(r"\b(?:direct human|human halt|human review|human source|human decision|human pending)\b", state.reason, re.IGNORECASE) is not None
+    )
+    if not genuine_human_gate:
+        return False
+    if state.target:
+        return False
+    try:
+        task_text = task_path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    metadata = read_task_metadata(task_path, root)
+    if metadata is None or metadata.runat != "retired":
+        return False
+    if re.search(r"^\(historical tmux target retired: [A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?; authority: manager_mail/[^\r\n:]+\.txt:\d+-\d+\)$", task_text, re.MULTILINE) is None:
         return False
     try:
         lines = (root / "TODO.md").read_text(encoding="utf-8").splitlines()
