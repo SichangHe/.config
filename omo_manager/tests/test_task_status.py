@@ -238,6 +238,26 @@ class TaskStatusTests(unittest.TestCase):
         return task, text, todo, original_todo, args
 
     @staticmethod
+    def archive_park_authority(root: Path, args: StatusArgs) -> StatusArgs:
+        relative = Path("202607/manager_mail/halt.txt")
+        archive_mail = root / relative.parent
+        archive_mail.mkdir(parents=True)
+        archive_mail.parent.chmod(0o755)
+        archive_mail.chmod(0o755)
+        (root / "manager_mail/halt.txt").rename(root / relative)
+        envelope = root / "vl_pause.md"
+        envelope_text = envelope.read_text(encoding="utf-8").replace(
+            "manager_mail/halt.txt:3-6",
+            f"{relative.as_posix()}:3-6",
+        )
+        envelope.write_text(envelope_text, encoding="utf-8")
+        return replace(
+            args,
+            authority_file=relative,
+            authority_envelope_sha256=hashlib.sha256(envelope_text.encode()).hexdigest(),
+        )
+
+    @staticmethod
     def parked_low_priority_todo(todo_text: str, *, runat: str = "vl:2") -> str:
         source = f"human pending:\nvl_task.md {runat}\n"
         destination = "low priority:\n"
@@ -679,6 +699,100 @@ class TaskStatusTests(unittest.TestCase):
                 self.assertEqual(0, run(args))
             self.assertEqual(text.encode(), task.read_bytes())
             self.assertEqual(self.parked_low_priority_todo(todo_text), todo.read_text(encoding="utf-8"))
+
+    def test_park_unlinked_accepts_digest_bound_monthly_archive_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, text, todo, todo_text, args = self.write_park_case(root)
+            args = self.archive_park_authority(root, args)
+            with (
+                patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=("%42", "")),
+                patch("omo_manager.omo_task_status.stop", side_effect=self.complete_guarded_park_stop),
+            ):
+                self.assertEqual("session", park_unlinked(args, task, text, task.stat()))
+            self.assertEqual(text, task.read_text(encoding="utf-8"))
+            self.assertEqual(self.parked_low_priority_todo(todo_text), todo.read_text(encoding="utf-8"))
+            self.assertIn("authority_source: 202607/manager_mail/halt.txt:3-6", args.audit_output.read_text(encoding="utf-8"))
+
+    def test_park_unlinked_monthly_archive_rejects_traversal_and_malformed_layouts(self) -> None:
+        paths = (
+            Path("202607/manager_mail/../manager_mail/halt.txt"),
+            Path("202607/halt.txt"),
+            Path("archive/manager_mail/halt.txt"),
+            Path("٢٠٢٦07/manager_mail/halt.txt"),
+            Path("202613/manager_mail/halt.txt"),
+            Path("202607/manager_mail/nested/halt.txt"),
+        )
+        for authority_file in paths:
+            with self.subTest(authority_file=authority_file), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                task, text, todo, todo_text, args = self.write_park_case(root)
+                args = replace(self.archive_park_authority(root, args), authority_file=authority_file)
+                with patch("omo_manager.omo_task_status.stop") as stop_owner, self.assertRaisesRegex(
+                    TaskFrontmatterError,
+                    "under the task root",
+                ):
+                    park_unlinked(args, task, text, task.stat())
+                stop_owner.assert_not_called()
+                self.assertEqual(text, task.read_text(encoding="utf-8"))
+                self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+
+    def test_park_unlinked_monthly_archive_rejects_symlinked_components(self) -> None:
+        for component in ("month", "manager_mail", "file"):
+            with self.subTest(component=component), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                task, text, todo, todo_text, args = self.write_park_case(root)
+                args = self.archive_park_authority(root, args)
+                month = root / "202607"
+                mail = month / "manager_mail"
+                authority = mail / "halt.txt"
+                if component == "month":
+                    real = root / "archive-month"
+                    month.rename(real)
+                    month.symlink_to(real.name, target_is_directory=True)
+                elif component == "manager_mail":
+                    real = month / "archive-mail"
+                    mail.rename(real)
+                    mail.symlink_to(real.name, target_is_directory=True)
+                else:
+                    real = mail / "archive-authority.txt"
+                    authority.rename(real)
+                    authority.symlink_to(real.name)
+                with patch("omo_manager.omo_task_status.stop") as stop_owner, self.assertRaisesRegex(
+                    TaskFrontmatterError,
+                    "without symlinks",
+                ):
+                    park_unlinked(args, task, text, task.stat())
+                stop_owner.assert_not_called()
+                self.assertEqual(text, task.read_text(encoding="utf-8"))
+                self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+
+    def test_park_unlinked_monthly_archive_retains_digest_and_envelope_binding(self) -> None:
+        for case in ("digest", "envelope"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                task, text, todo, todo_text, args = self.write_park_case(root)
+                args = self.archive_park_authority(root, args)
+                if case == "digest":
+                    args = replace(args, authority_sha256="0" * 64)
+                    expected = "authority source"
+                else:
+                    envelope = root / "vl_pause.md"
+                    changed = envelope.read_text(encoding="utf-8").replace(
+                        "202607/manager_mail/halt.txt:3-6",
+                        "manager_mail/halt.txt:3-6",
+                    )
+                    envelope.write_text(changed, encoding="utf-8")
+                    args = replace(args, authority_envelope_sha256=hashlib.sha256(changed.encode()).hexdigest())
+                    expected = "authority envelope"
+                with patch("omo_manager.omo_task_status.stop") as stop_owner, self.assertRaisesRegex(
+                    TaskFrontmatterError,
+                    expected,
+                ):
+                    park_unlinked(args, task, text, task.stat())
+                stop_owner.assert_not_called()
+                self.assertEqual(text, task.read_text(encoding="utf-8"))
+                self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
 
     def test_park_unlinked_rejects_owner_stopped_audit_without_matching_close_proof(self) -> None:
         for case in ("missing", "mismatched", "stale symlink"):

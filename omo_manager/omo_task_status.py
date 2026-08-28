@@ -251,7 +251,11 @@ shutdown.""",
     _ = parser.add_argument("--expected-task-sha256", default="", help="Exact SHA-256 of unchanged task bytes required with --park-unlinked.")
     _ = parser.add_argument("--expected-todo-sha256", default="", help="Exact SHA-256 of unchanged TODO bytes required with --park-unlinked.")
     _ = parser.add_argument("--expected-pane-id", default="", help="Exact numeric tmux pane id required with --park-unlinked.")
-    _ = parser.add_argument("--authority-file", type=Path, help="Direct owner-private manager_mail source required with --park-unlinked.")
+    _ = parser.add_argument(
+        "--authority-file",
+        type=Path,
+        help="Owner-private manager_mail/FILE or owner-controlled YYYYMM/manager_mail/FILE source required with --park-unlinked.",
+    )
     _ = parser.add_argument("--authority-lines", type=parse_line_range, help="Inclusive authoritative human-source lines required with --park-unlinked.")
     _ = parser.add_argument("--authority-sha256", default="", help="Exact SHA-256 of the complete authority file required with --park-unlinked.")
     _ = parser.add_argument("--authority-envelope", type=Path, help="Digest-bound task record containing the authoritative human-instruction envelope required with --park-unlinked.")
@@ -1274,7 +1278,7 @@ def read_park_authority(args: Args) -> tuple[str, str]:
     direct = len(parts) == 2 and parts[0] == "manager_mail"
     archived = (
         len(parts) == 3
-        and re.fullmatch(r"\d{4}(?:0[1-9]|1[0-2])", parts[0]) is not None
+        and re.fullmatch(r"[0-9]{4}(?:0[1-9]|1[0-2])", parts[0]) is not None
         and parts[1] == "manager_mail"
     )
     if not (direct or archived) or any(part in {"", ".", ".."} for part in parts):
