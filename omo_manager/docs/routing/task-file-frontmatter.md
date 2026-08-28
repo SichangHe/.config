@@ -55,9 +55,12 @@ ALL other fields are required.
 
 Codex worker records may include `session_id`, a UUID captured from a guarded
 launch-time `/status` query. Fresh prompts are delivered only after this UUID is
-captured and bound to the task. It is not valid for `pcodx` records or human
-(`h*`) targets. Existing eligible idle workers can be reviewed with
-`omo_codex_session_migrate.py --root ROOT` (use `--apply` only after review).
+captured and bound to the task. It is not valid for `pcodx` records. Existing
+eligible idle workers can be reviewed with `omo_codex_session_migrate.py
+--root ROOT` (use `--apply` only after review). Human-owned (`h*`) targets are
+excluded by default; direct human authorization may opt them in with
+`--include-human-owned`, while retaining ready, empty-input, and exact-process
+guards.
 
 `runat` is a tmux target. Legacy `runat: retired` values remain readable only for historical compatibility; helpers must not create new retired targets. As a read-only exception, the manager status helper validates completed child records with `status: done` and `runat: retired` while checking whether their parent can close.
 

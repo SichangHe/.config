@@ -27,17 +27,18 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--apply", action="store_true", help="Write captured UUIDs; otherwise print a dry-run plan.")
+    parser.add_argument("--include-human-owned", action="store_true", help="Explicitly include h* task targets (still requires ready/empty Codex state).")
     return parser.parse_args(argv)
 
 
-def candidates(root: Path) -> list[Path]:
+def candidates(root: Path, include_human_owned: bool = False) -> list[Path]:
     result = []
     targets: set[str] = set()
     for path in task_paths(root):
         metadata = parse_task_metadata(path.read_text(encoding="utf-8"), root)
         if metadata is None or metadata.tool != "codex" or metadata.session_id:
             continue
-        if metadata.status == "done" or metadata.runat == "retired" or metadata.runat.partition(":")[0].startswith("h"):
+        if metadata.status == "done" or metadata.runat == "retired" or (metadata.runat.partition(":")[0].startswith("h") and not include_human_owned):
             continue
         try:
             pane = resolve_pane(metadata.runat)
@@ -57,7 +58,8 @@ def candidates(root: Path) -> list[Path]:
 
 def run(args: argparse.Namespace) -> int:
     root = args.root.expanduser().resolve()
-    paths = candidates(root)
+    include_human_owned = getattr(args, "include_human_owned", False)
+    paths = candidates(root, include_human_owned)
     if not args.apply:
         for path in paths:
             print(f"eligible\t{path.relative_to(root)}")
@@ -67,14 +69,20 @@ def run(args: argparse.Namespace) -> int:
         with task_file_lock(path):
             expected_sha256 = __import__("hashlib").sha256(path.read_bytes()).hexdigest()
             metadata = parse_task_metadata(path.read_text(encoding="utf-8"), root)
-            if metadata is None or metadata.tool != "codex" or metadata.session_id or metadata.status == "done" or metadata.runat == "retired" or metadata.runat.partition(":")[0].startswith("h"):
+            if metadata is None or metadata.tool != "codex" or metadata.session_id or metadata.status == "done" or metadata.runat == "retired" or (metadata.runat.partition(":")[0].startswith("h") and not include_human_owned):
                 continue
             with task_target_lock(root, metadata.runat):
-                pane = resolve_pane(metadata.runat)
+                try:
+                    pane = resolve_pane(metadata.runat)
+                except Exception as exc:
+                    print(f"skipped\t{path.relative_to(root)}\t{metadata.runat}\tpane unavailable: {exc}", file=sys.stderr)
+                    continue
                 if pane.command not in CODEX_PANE_COMMANDS:
+                    print(f"skipped\t{path.relative_to(root)}\t{metadata.runat}\tnot a Codex pane", file=sys.stderr)
                     continue
                 report = inspect(StatusArgs(pane.target, 80))
                 if report.status != "ready" or current_input_text(report.lines).strip():
+                    print(f"skipped\t{path.relative_to(root)}\t{metadata.runat}\tnot ready or has input", file=sys.stderr)
                     continue
                 try:
                     session_id = query_exact_status_session_id(pane, 240, 10.0)
@@ -84,12 +92,18 @@ def run(args: argparse.Namespace) -> int:
                 if UUID_RE.fullmatch(session_id) is None:
                     print(f"skipped\t{path.relative_to(root)}\t/status did not return a valid UUID", file=sys.stderr)
                     continue
-                current = resolve_pane(metadata.runat)
+                try:
+                    current = resolve_pane(metadata.runat)
+                except Exception as exc:
+                    print(f"skipped\t{path.relative_to(root)}\t{metadata.runat}\tpane unavailable after capture: {exc}", file=sys.stderr)
+                    continue
                 if (current.pane_id, current.window_id, current.pane_pid, current.command) != (pane.pane_id, pane.window_id, pane.pane_pid, pane.command):
-                    raise RuntimeError(f"{path}: pane identity changed during capture")
+                    print(f"skipped\t{path.relative_to(root)}\t{metadata.runat}\tpane identity changed during capture", file=sys.stderr)
+                    continue
                 after = parse_task_metadata(path.read_text(encoding="utf-8"), root)
-                if after is None or after.tool != "codex" or after.session_id or after.status != metadata.status or after.status == "done" or after.runat != metadata.runat or after.runat == "retired" or after.runat.partition(":")[0].startswith("h"):
-                    raise RuntimeError(f"{path}: task eligibility changed during capture")
+                if after is None or after.tool != "codex" or after.session_id or after.status != metadata.status or after.status == "done" or after.runat != metadata.runat or after.runat == "retired" or (after.runat.partition(":")[0].startswith("h") and not include_human_owned):
+                    print(f"skipped\t{path.relative_to(root)}\t{metadata.runat}\ttask eligibility changed during capture", file=sys.stderr)
+                    continue
                 record_session_id(path, session_id, expected_sha256, lock_held=True)
                 print(f"migrated\t{path.relative_to(root)}\t{session_id}")
     return 0

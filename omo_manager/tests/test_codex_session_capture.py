@@ -3,10 +3,10 @@ import unittest
 from argparse import Namespace
 from pathlib import Path
 
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 from omo_manager.omo_codex_start import Args, Pane, StartError, launch_command, query_exact_status_session_id, record_session_id
 from omo_manager.omo_task_metadata import TaskFrontmatterError, parse_task_metadata
-from omo_manager.omo_codex_session_migrate import CODEX_PANE_COMMANDS, run as run_migration
+from omo_manager.omo_codex_session_migrate import CODEX_PANE_COMMANDS, candidates, run as run_migration
 
 
 class CodexSessionCaptureTests(unittest.TestCase):
@@ -14,6 +14,30 @@ class CodexSessionCaptureTests(unittest.TestCase):
 
     def test_migration_accepts_live_bunx_launcher_command(self):
         self.assertIn("bunx", CODEX_PANE_COMMANDS)
+
+    def test_human_owned_candidate_requires_explicit_option(self):
+        text = "---\nversion: v1.0.0\nstatus: running\nrunat: hcfg:1\ntool: codex\nmanagerat: mgr:9\nis_manager: false\npending_task_items: []\n---\n"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            task = root / "human.md"
+            task.write_text(text)
+            pane = Pane("hcfg:1", "%1", "@1", "bunx", root, 41)
+            report = __import__("omo_manager.omo_codex_status", fromlist=["Report"]).Report("ready", [])
+            with patch("omo_manager.omo_codex_session_migrate.task_paths", return_value=(task,)), patch("omo_manager.omo_codex_session_migrate.resolve_pane", return_value=pane), patch("omo_manager.omo_codex_session_migrate.inspect", return_value=report):
+                self.assertEqual([], candidates(root))
+                self.assertEqual([task], candidates(root, include_human_owned=True))
+
+    def test_human_owned_apply_records_with_explicit_option(self):
+        text = "---\nversion: v1.0.0\nstatus: running\nrunat: hcfg:1\ntool: codex\nmanagerat: mgr:9\nis_manager: false\npending_task_items: []\n---\n"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            task = root / "human.md"
+            task.write_text(text)
+            pane = Pane("hcfg:1", "%1", "@1", "bunx", root, 41)
+            report = __import__("omo_manager.omo_codex_status", fromlist=["Report"]).Report("ready", [])
+            with patch("omo_manager.omo_codex_session_migrate.candidates", return_value=[task]), patch("omo_manager.omo_codex_session_migrate.resolve_pane", return_value=pane), patch("omo_manager.omo_codex_session_migrate.inspect", return_value=report), patch("omo_manager.omo_codex_session_migrate.query_exact_status_session_id", return_value=self.UUID), patch("omo_manager.omo_codex_session_migrate.record_session_id") as record:
+                self.assertEqual(0, run_migration(Namespace(root=root, apply=True, include_human_owned=True)))
+            record.assert_called_once_with(task, self.UUID, ANY, lock_held=True)
 
     def test_migration_failure_is_per_candidate_skip(self):
         text = "---\nversion: v1.0.0\nstatus: running\nrunat: {target}\ntool: codex\nmanagerat: mgr:9\nis_manager: false\npending_task_items: []\n---\n"
@@ -81,6 +105,25 @@ class CodexSessionCaptureTests(unittest.TestCase):
         if_shell = next(call.args[0] for call in run_mock.call_args_list if call.args[0][:3] == ["tmux", "if-shell", "-F"])
         self.assertIn("#{pane_pid},42", if_shell[5])
         self.assertIn("#{pane_current_command},bun", if_shell[5])
+
+    def test_exact_status_accepts_visible_bound_process_card(self):
+        pane = Pane("w:1.0", "%1", "@1", "bun", Path("/tmp"), 42)
+        completed = __import__("subprocess").CompletedProcess([], 0, "", "")
+
+        def fake_run(argv):
+            if argv[:3] == ["tmux", "if-shell", "-F"]:
+                token = next(part for part in argv[6].split(" ; ") if part.startswith("display-message -p ")).split()[-1]
+                return __import__("subprocess").CompletedProcess(argv, 0, token + "\n", "")
+            return completed
+
+        status = f"╭────╮\n│ >_ OpenAI Codex (v0.150.1) │\n│ Session: {self.UUID} │\n╰────╯"
+        with patch("omo_manager.omo_codex_start.run", side_effect=fake_run), patch("omo_manager.omo_codex_start.exact_tail", side_effect=((True, [status]), (True, [status]))), patch("omo_manager.omo_codex_start.verify_same_process"):
+            self.assertEqual(self.UUID, query_exact_status_session_id(pane, 80, 1))
+
+    def test_exact_status_rejects_plain_stale_session_line(self):
+        from omo_manager.omo_codex_start import visible_status_card_session_id
+
+        self.assertEqual("", visible_status_card_session_id(f"old transcript says Session: {self.UUID}"))
 
 
 if __name__ == "__main__":

@@ -878,6 +878,18 @@ def send_prompt(pane: Pane, prompt_path: Path) -> None:
         raise StartError("pane/window/process identity changed before prompt delivery; no prompt was sent.")
 
 
+def visible_status_card_session_id(text: str) -> str:
+    """Return the UUID from the last complete Codex `/status` card only."""
+    cards = re.findall(r"╭─+╮\n(?P<body>.*?)\n╰─+╯", text, flags=re.DOTALL)
+    for card in reversed(cards):
+        if ">_ OpenAI Codex" not in card:
+            continue
+        matches = re.findall(rf"^│\s*Session:\s*({UUID_RE.pattern[1:-1]})\s*│$", card, flags=re.MULTILINE)
+        if len(matches) == 1:
+            return matches[0]
+    return ""
+
+
 def query_exact_status_session_id(pane: Pane, n_lines: int, wait_s: float) -> str:
     """Submit `/status` atomically only to one exact tmux process identity."""
     condition = "#{&&:#{==:#{pane_id},%s},#{&&:#{==:#{window_id},%s},#{&&:#{==:#{session_name}:#{window_index}.#{pane_index},%s},#{&&:#{==:#{pane_pid},%s},#{==:#{pane_current_command},%s}}}}}" % (pane.pane_id, pane.window_id, pane.target, pane.pane_pid, pane.command)
@@ -911,7 +923,7 @@ def query_exact_status_session_id(pane: Pane, n_lines: int, wait_s: float) -> st
         if not exists:
             raise StartError("target disappeared during /status query.")
         after = "\n".join(after_lines)
-        session_id = extract_new_status_session_id(before, after)
+        session_id = extract_new_status_session_id(before, after) or visible_status_card_session_id(after)
         if session_id:
             verify_same_process(pane)
             return session_id
