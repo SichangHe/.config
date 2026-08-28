@@ -1,14 +1,36 @@
 import tempfile
 import unittest
+from argparse import Namespace
 from pathlib import Path
 
 from unittest.mock import patch
 from omo_manager.omo_codex_start import Args, Pane, StartError, launch_command, query_exact_status_session_id, record_session_id
 from omo_manager.omo_task_metadata import TaskFrontmatterError, parse_task_metadata
+from omo_manager.omo_codex_session_migrate import CODEX_PANE_COMMANDS, run as run_migration
 
 
 class CodexSessionCaptureTests(unittest.TestCase):
     UUID = "019f670b-6a2f-7463-b9be-9aa6ff0cec43"
+
+    def test_migration_accepts_live_bunx_launcher_command(self):
+        self.assertIn("bunx", CODEX_PANE_COMMANDS)
+
+    def test_migration_failure_is_per_candidate_skip(self):
+        text = "---\nversion: v1.0.0\nstatus: running\nrunat: {target}\ntool: codex\nmanagerat: mgr:9\nis_manager: false\npending_task_items: []\n---\n"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = [root / "one.md", root / "two.md"]
+            for index, path in enumerate(paths, start=1):
+                path.write_text(text.format(target=f"w:{index}"))
+
+            def pane(target: str) -> Pane:
+                return Pane(target, f"%{target[-1]}", f"@{target[-1]}", "bunx", root, 40 + int(target[-1]))
+
+            report = __import__("omo_manager.omo_codex_status", fromlist=["Report"]).Report("ready", [])
+            with patch("omo_manager.omo_codex_session_migrate.candidates", return_value=paths), patch("omo_manager.omo_codex_session_migrate.resolve_pane", side_effect=pane), patch("omo_manager.omo_codex_session_migrate.inspect", return_value=report), patch("omo_manager.omo_codex_session_migrate.query_exact_status_session_id", side_effect=(RuntimeError("capture failed"), self.UUID)), patch("omo_manager.omo_codex_session_migrate.record_session_id") as record:
+                self.assertEqual(0, run_migration(Namespace(root=root, apply=True)))
+            record.assert_called_once()
+            self.assertEqual(paths[1], record.call_args.args[0])
 
     def test_frontmatter_session_id_round_trip(self):
         text = "---\nversion: v1.0.0\nstatus: running\nrunat: w:1\ntool: codex\nmanagerat: w:2\nis_manager: false\npending_task_items: []\n---\nbody\n"

@@ -20,6 +20,8 @@ from omo_manager.omo_task_lock import task_file_lock, task_target_lock
 from omo_manager.omo_task_metadata import parse_task_metadata
 from omo_manager.omo_blocking import task_paths
 
+CODEX_PANE_COMMANDS = {"bun", "bunx", "codex"}
+
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -41,7 +43,7 @@ def candidates(root: Path) -> list[Path]:
             pane = resolve_pane(metadata.runat)
         except Exception:
             continue
-        if pane.command not in {"bun", "codex"}:
+        if pane.command not in CODEX_PANE_COMMANDS:
             continue
         report = inspect(StatusArgs(pane.target, 80))
         if report.status != "ready" or current_input_text(report.lines).strip():
@@ -69,14 +71,19 @@ def run(args: argparse.Namespace) -> int:
                 continue
             with task_target_lock(root, metadata.runat):
                 pane = resolve_pane(metadata.runat)
-                if pane.command not in {"bun", "codex"}:
+                if pane.command not in CODEX_PANE_COMMANDS:
                     continue
                 report = inspect(StatusArgs(pane.target, 80))
                 if report.status != "ready" or current_input_text(report.lines).strip():
                     continue
-                session_id = query_exact_status_session_id(pane, 240, 10.0)
+                try:
+                    session_id = query_exact_status_session_id(pane, 240, 10.0)
+                except Exception as exc:
+                    print(f"skipped\t{path.relative_to(root)}\t{exc}", file=sys.stderr)
+                    continue
                 if UUID_RE.fullmatch(session_id) is None:
-                    raise RuntimeError(f"{path}: /status did not return a valid UUID")
+                    print(f"skipped\t{path.relative_to(root)}\t/status did not return a valid UUID", file=sys.stderr)
+                    continue
                 current = resolve_pane(metadata.runat)
                 if (current.pane_id, current.window_id, current.pane_pid, current.command) != (pane.pane_id, pane.window_id, pane.pane_pid, pane.command):
                     raise RuntimeError(f"{path}: pane identity changed during capture")
