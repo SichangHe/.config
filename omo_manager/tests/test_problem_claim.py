@@ -138,6 +138,24 @@ class ProblemClaimTest(unittest.TestCase):
             self.assertEqual({}, read_claims(path))
             self.assertEqual({}, read_issues(issue_path(path)))
 
+    def test_fresh_unowned_scan_prunes_stale_replayed_owner_issue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = watcher.Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, root / "status.py", False, False, manager_target="agent_managers:0")
+            stale_line = "untracked_agent: task=tmux:dw:2 evidence=target=dw:2 output=old notice owner_target=amh:1"
+            stale_id = watcher.problem_claim_id("amh:1", (stale_line,))
+            issue_problem(watcher.problem_claim_path(args), stale_id, "amh:1", (stale_line,), 90.0)
+            fresh_line = f"{stale_line} route_owner_target=-"
+            fresh_groups = watcher.authoritative_problem_groups(args, f"agent-problems: untracked_agent=1\n{fresh_line}\n")
+            active = {
+                watcher.problem_claim_id(owner, lines): (owner, lines)
+                for owner, lines in fresh_groups.items()
+            }
+
+            sync_problem_issues(watcher.problem_claim_path(args), active, 100.0)
+
+            self.assertNotIn(stale_id, read_issues(issue_path(watcher.problem_claim_path(args))))
+
     def test_problem_id_uses_untruncated_raw_evidence(self) -> None:
         prefix = "x" * 2500
         first = watcher.problem_claim_id("wl:1", (f"error: {prefix} first",))

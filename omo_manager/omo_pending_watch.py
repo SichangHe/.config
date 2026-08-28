@@ -4391,8 +4391,11 @@ def agent_status_count_line(lines: list[str], count_line: str) -> str:
 
 
 def problem_line_owner_target(line: str) -> str:
-    match = re.search(r"\bowner_target=([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\b", line)
-    return match.group(1) if match is not None else ""
+    route_match = re.search(r"\sroute_owner_target=([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?|-)\s*$", line)
+    if route_match is not None:
+        return "" if route_match.group(1) == "-" else route_match.group(1)
+    legacy_match = re.search(r"\sowner_target=([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)(?=\s+unstick=\S+\s*$|\s*$)", line)
+    return legacy_match.group(1) if legacy_match is not None else ""
 
 
 def problem_line_target(line: str) -> str:
@@ -4419,7 +4422,7 @@ def problem_line_unstick(line: str) -> str:
 
 
 def problem_line_value(line: str, key: str) -> str:
-    match = re.search(rf"\b{re.escape(key)}=(.*?)(?=\s+(?:output_tail|role|persistent_role|task_status|idle_status|reason|pending_item|interrupt|unstick|owner_target)=|$)", line)
+    match = re.search(rf"\b{re.escape(key)}=(.*?)(?=\s+(?:output_tail|role|persistent_role|task_status|idle_status|reason|pending_item|interrupt|unstick|owner_target|route_owner_target)=|$)", line)
     return match.group(1).strip() if match is not None else ""
 
 
@@ -4438,7 +4441,7 @@ def parse_problem_row(line: str) -> ProblemRow | None:
         pending_item=problem_line_value(line, "pending_item"),
         owner_target=problem_line_owner_target(line),
         unstick=problem_line_unstick(line),
-        metadata_error=re.sub(r"\s+owner_target=\S+$", "", line.partition(" evidence=")[2]) if status == "malformed_task" else "",
+        metadata_error=re.sub(r"(?:\s+(?:owner_target|route_owner_target)=\S+)+$", "", line.partition(" evidence=")[2]) if status == "malformed_task" else "",
         main_manager=bool(task == "manager" and re.search(r"\brole=manager\b", line)),
     )
 

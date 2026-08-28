@@ -1978,7 +1978,7 @@ def format_problem_summary(rows: list[StatusRow], completed_stale: set[str] | di
     if counts["manager_compaction"]:
         lines.append("manager-action: manager_compaction>0 reread MANAGER.md after compaction unless the compaction summary already included it")
     for row in sorted(problem_rows, key=lambda item: (item.status, item.task_file)):
-        lines.append(f"{row.status}: task={row.task_file} evidence={row.evidence}")
+        lines.append(f"{row.status}: task={row.task_file} evidence={row.evidence} route_owner_target={row.owner_target or '-'}")
     unstuck: dict[str, tuple[str, str]] = {}
     for row in problem_rows:
         if row.unstick in {"sent_enter", "sent_escape"} and row.target:
@@ -1986,7 +1986,9 @@ def format_problem_summary(rows: list[StatusRow], completed_stale: set[str] | di
     for target, (task_file, action) in sorted(unstuck.items()):
         lines.append(f"unstuck: target={target} task={task_file} action={action}")
     for task_file, evidence in sorted(completed_stale_evidence_map.items()):
-        lines.append(f"done-stale: task={task_file} evidence={evidence}")
+        owner_match = re.search(r"\sowner_target=([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)$", evidence)
+        owner = owner_match.group(1) if owner_match is not None else "-"
+        lines.append(f"done-stale: task={task_file} evidence={evidence} route_owner_target={owner}")
     return "\n".join(lines)
 
 

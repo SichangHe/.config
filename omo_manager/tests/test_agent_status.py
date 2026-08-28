@@ -642,6 +642,17 @@ resolved_task_items: []
         self.assertIn("done-stale: task=done.md", text)
         self.assertNotIn("ok.md", text)
 
+    def test_problem_summary_emits_explicit_route_owner_for_owned_and_unowned_rows(self) -> None:
+        rows = [
+            StatusRow("owned.md", "ready", "target=dw2:0 output=idle owner_target=agent_managers:0", owner_target="agent_managers:0"),
+            StatusRow("tmux:dw:2", "untracked_agent", "target=dw:2 output=old notice owner_target=amh:1"),
+        ]
+
+        text = format_problem_summary(rows, set())
+
+        self.assertIn("ready: task=owned.md evidence=target=dw2:0 output=idle owner_target=agent_managers:0 route_owner_target=agent_managers:0", text)
+        self.assertIn("untracked_agent: task=tmux:dw:2 evidence=target=dw:2 output=old notice owner_target=amh:1 route_owner_target=-", text)
+
     def test_problem_summary_reports_not_codex_blocked_persistent_roles(self) -> None:
         rows = [
             StatusRow("standby.md", "ready", "target=cfg:1 persistent_role=true task_status=blocked", True, "blocked"),
