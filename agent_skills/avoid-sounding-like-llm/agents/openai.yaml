@@ -1,4 +1,4 @@
 interface:
   display_name: "Avoid Sounding Like LLM"
-  short_description: "Make agent prose specific and natural"
+  short_description: "Use when revising text for human readers"
   default_prompt: "Use $avoid-sounding-like-llm to revise this text so it sounds specific and natural."
