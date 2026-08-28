@@ -1,0 +1,37 @@
+# global TODO raw-line reconciliation
+
+- scope
+  - one fixed obsolete `human pending` line
+  - terminal owner `eda_reg_chat.md` at `hcppb:1`
+- proof
+  - caller binds exact TODO and task bytes by SHA-256
+  - caller supplies owner-only recovery storage outside the work-log root
+  - task is `done`, non-manager, queue-empty, and contains the supplied close-session note
+  - TODO has one canonical `human pending` section and one exact target line
+  - TODO has one exact `eda_reg_chat.md hcppb:1` row under `previous`
+- effect
+  - lock task and TODO in path order; every supported writer must use these locks
+  - preserve task bytes
+  - delete only the target TODO line by byte-preserving line reconstruction
+  - descriptor-pin and validate replacement bytes
+  - create and open an owner-only per-operation directory through pinned directory descriptors
+  - create, exchange, and validate the private replacement through pinned descriptors
+  - store recovery artifacts under owner-only private storage outside the work-log repository, on the same filesystem for exchange compatibility
+  - publish recovery with no-replace semantics and retry name collisions without unlinking existing bytes
+  - if publication fails after exchange, close and validate the exchange watch before rollback; report the exact retained private recovery path whether rollback succeeds or fails
+  - retain full recovery bytes on success and failure; this operation never deletes or truncates a potentially substituted entry
+  - artifacts remain until the manager acknowledges success or recovery, then the manager-owned private-storage janitor may remove them
+  - snapshot replacement and TODO metadata, then watch both operands plus the task witness from before the first atomic exchange through post-exchange validation
+  - include task identity events so in-place writes, chmod, deletion, and atomic-save replacement all fail closed and roll back TODO
+  - treat every ordinary watch-completion exception as a detected change and enter the same rollback path; do not intercept process-control `BaseException`s
+  - re-snapshot TODO, private replacement, and task after watch completion; preserve a changed current TODO and never exchange a substituted recovery inode back into TODO
+  - compare mode, uid, gid, ctime, mtime, inode, device, and size before exchange; reject a watched ctime-producing chmod/write in the final syscall window
+  - validate installed and displaced bytes plus rename-preserved metadata against the pre-exchange snapshots; roll back only while the installed TODO is unchanged
+  - require both TODO to remain the installed operation bytes and recovery to remain the verified displaced source before any rollback; never displace a concurrent regular, symlink, or other nonregular TODO entry
+  - otherwise preserve the concurrent TODO and retain the displaced private entry, then fail
+  - verify both rollback operands and restore a save that races rollback
+  - retain unknown substituted bytes at the reported recovery path instead of installing or deleting them
+- boundary
+  - no tmux access
+  - no task mutation
+  - no generic raw-line or task parameters
