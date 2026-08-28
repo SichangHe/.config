@@ -2,6 +2,12 @@ U = require("util")
 
 return {
 	{
+		"teamtype/teamtype-nvim",
+		commit = "711eade8cd5d7d3efa9ec25ea0a390a954030222",
+		lazy = false,
+	},
+
+	{
 		"CopilotC-Nvim/CopilotChat.nvim",
 		opts = {
 			context = "buffer",
