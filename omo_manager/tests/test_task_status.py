@@ -6,6 +6,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+import yaml
 from contextlib import nullcontext
 from contextlib import redirect_stderr
 from contextlib import redirect_stdout
@@ -330,6 +331,70 @@ class TaskStatusTests(unittest.TestCase):
             receipt = args.audit_output.read_text(encoding="utf-8")
             self.assertIn("operation: park-unlinked-re-attestation", receipt)
             self.assertIn(hashlib.sha256(prior_text.encode()).hexdigest(), receipt)
+
+            v3_args = replace(
+                args,
+                expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest(),
+                expected_receipt_sha256=hashlib.sha256(receipt.encode()).hexdigest(),
+            )
+            with (
+                patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=("", "")) as inspect_target,
+                patch("omo_manager.omo_task_status.stop") as stop_owner,
+            ):
+                reattest_park_unlinked(v3_args, task, text, task.stat())
+            self.assertEqual(2, inspect_target.call_count)
+            stop_owner.assert_not_called()
+            self.assertEqual(text, task.read_text(encoding="utf-8"))
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+            v3_receipt = args.audit_output.read_text(encoding="utf-8")
+            self.assertIn("operation: park-unlinked-custody-re-attestation", v3_receipt)
+            self.assertIn(hashlib.sha256(receipt.encode()).hexdigest(), v3_receipt)
+
+    def test_park_unlinked_v2_migration_treats_todo_digest_as_historical(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, text, todo, todo_text, args, _prior_text = self.write_park_reattestation_case(root)
+            with patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=("", "")):
+                reattest_park_unlinked(args, task, text, task.stat())
+            receipt = args.audit_output.read_text(encoding="utf-8")
+            record = yaml.safe_load(receipt)
+            record["todo_sha256"] = "0" * 64
+            changed = yaml.safe_dump(record, sort_keys=True)
+            args.audit_output.write_text(changed, encoding="utf-8")
+            migration_args = replace(
+                args,
+                expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest(),
+                expected_receipt_sha256=hashlib.sha256(changed.encode()).hexdigest(),
+            )
+            with patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=("", "")):
+                reattest_park_unlinked(migration_args, task, text, task.stat())
+            self.assertEqual(text, task.read_text(encoding="utf-8"))
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+            migrated = yaml.safe_load(args.audit_output.read_text(encoding="utf-8"))
+            self.assertEqual("0" * 64, migrated["prior_complete_receipt"]["todo_sha256"])
+
+    def test_park_unlinked_v2_migration_rejects_rehashed_embedded_v1_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, text, todo, todo_text, args, _prior_text = self.write_park_reattestation_case(root)
+            with patch("omo_manager.omo_task_status.park_target_pane_id", side_effect=("", "")):
+                reattest_park_unlinked(args, task, text, task.stat())
+            record = yaml.safe_load(args.audit_output.read_text(encoding="utf-8"))
+            record["prior_complete_receipt"]["task"] = "other.md"
+            embedded = yaml.safe_dump(record["prior_complete_receipt"], sort_keys=True)
+            record["prior_complete_receipt_sha256"] = hashlib.sha256(embedded.encode()).hexdigest()
+            changed = yaml.safe_dump(record, sort_keys=True)
+            args.audit_output.write_text(changed, encoding="utf-8")
+            migration_args = replace(
+                args,
+                expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest(),
+                expected_receipt_sha256=hashlib.sha256(changed.encode()).hexdigest(),
+            )
+            with patch("omo_manager.omo_task_status.park_target_pane_id", return_value=""), self.assertRaises(TaskFrontmatterError):
+                reattest_park_unlinked(migration_args, task, text, task.stat())
+            self.assertEqual(text, task.read_text(encoding="utf-8"))
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+            self.assertEqual(changed, args.audit_output.read_text(encoding="utf-8"))
 
     def test_park_unlinked_reattestation_rejects_drift_duplicate_owner_and_target(self) -> None:
         for case in ("task", "receipt", "malformed receipt", "envelope", "authority symlink", "owner", "live", "unknown"):

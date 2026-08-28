@@ -3723,7 +3723,7 @@ resolved_task_items: []
             "authority_envelope_sha256": hashlib.sha256(old_envelope.encode()).hexdigest(), "state": "complete",
         }
         prior_text = yaml.safe_dump(prior, sort_keys=True)
-        receipt = {
+        reattestation = {
             "version": "v2.0.0", "operation": "park-unlinked-re-attestation", "state": "complete",
             "task": "parked.md", "target": "vl:31", "task_sha256": hashlib.sha256(task_text.encode()).hexdigest(),
             "todo_sha256": hashlib.sha256(todo_text.encode()).hexdigest(), "authority_source": locator,
@@ -3731,6 +3731,16 @@ resolved_task_items: []
             "authority_envelope_sha256": hashlib.sha256(envelope_text.encode()).hexdigest(),
             "prior_complete_receipt_sha256": hashlib.sha256(prior_text.encode()).hexdigest(),
             "prior_complete_receipt": prior,
+        }
+        reattestation_text = yaml.safe_dump(reattestation, sort_keys=True)
+        receipt = {
+            "version": "v3.0.0", "operation": "park-unlinked-custody-re-attestation", "state": "complete",
+            "task": "parked.md", "target": "vl:31", "task_sha256": hashlib.sha256(task_text.encode()).hexdigest(),
+            "custody_sha256": hashlib.sha256(b"low priority:\nparked.md\n").hexdigest(), "authority_source": locator,
+            "authority_sha256": hashlib.sha256(source.encode()).hexdigest(), "authority_envelope": "202607/halt_envelope.md",
+            "authority_envelope_sha256": hashlib.sha256(envelope_text.encode()).hexdigest(),
+            "prior_complete_receipt_sha256": hashlib.sha256(reattestation_text.encode()).hexdigest(),
+            "prior_complete_receipt": reattestation,
         }
         receipt_dir = state_dir / "park-unlinked"
         receipt_dir.mkdir(parents=True, mode=0o700)
@@ -3744,7 +3754,20 @@ resolved_task_items: []
         return task, state, receipt_path
 
     def test_targetless_low_priority_custody_accepts_only_authenticated_reattestation(self) -> None:
-        for case in ("valid", "receipt drift", "receipt symlink", "authority drift", "task drift", "TODO drift", "duplicate owner", "unknown target"):
+        for case in (
+            "valid",
+            "unrelated TODO change",
+            "receipt drift",
+            "receipt todo digest drift",
+            "receipt symlink",
+            "authority drift",
+            "task drift",
+            "TODO custody target",
+            "TODO custody duplicate",
+            "TODO custody section",
+            "duplicate owner",
+            "unknown target",
+        ):
             with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp) / "work"
                 root.mkdir()
@@ -3752,6 +3775,10 @@ resolved_task_items: []
                 task, state, receipt = self.write_reattested_custody_case(root, state_dir)
                 if case == "receipt drift":
                     receipt.write_text(receipt.read_text().replace("state: complete", "state: prepared", 1), encoding="utf-8")
+                elif case == "receipt todo digest drift":
+                    record = yaml.safe_load(receipt.read_text(encoding="utf-8"))
+                    record["prior_complete_receipt"]["todo_sha256"] = "0" * 64
+                    receipt.write_text(yaml.safe_dump(record, sort_keys=True), encoding="utf-8")
                 elif case == "receipt symlink":
                     copy = state_dir / "receipt-copy.yaml"
                     copy.write_text(receipt.read_text(), encoding="utf-8")
@@ -3764,9 +3791,15 @@ resolved_task_items: []
                 elif case == "task drift":
                     with (root / "parked.md").open("a", encoding="utf-8") as output:
                         output.write("drift\n")
-                elif case == "TODO drift":
+                elif case == "unrelated TODO change":
                     with (root / "TODO.md").open("a", encoding="utf-8") as output:
-                        output.write("low priority note\n")
+                        output.write("other.md\n")
+                elif case == "TODO custody target":
+                    (root / "TODO.md").write_text("low priority:\nparked.md vl:31\n", encoding="utf-8")
+                elif case == "TODO custody duplicate":
+                    (root / "TODO.md").write_text("low priority:\nparked.md\nparked.md\n", encoding="utf-8")
+                elif case == "TODO custody section":
+                    (root / "TODO.md").write_text("current:\nparked.md\nlow priority:\n", encoding="utf-8")
                 elif case == "duplicate owner":
                     (root / "duplicate.md").write_text(task_frontmatter("blocked", runat="vl:31", blocked_on="paused", pending_items=("work",)), encoding="utf-8")
                 resolution = None if case == "unknown target" else False
@@ -3774,7 +3807,7 @@ resolved_task_items: []
                     patch.dict("omo_manager.omo_agent_status.LOCAL_ENV", {"OMO_MANAGER_STATE_DIR": str(state_dir)}),
                     patch("omo_manager.omo_agent_status.target_resolution_state", return_value=resolution),
                 ):
-                    self.assertEqual(case == "valid", is_targetless_low_priority_custody(root, task, state))
+                    self.assertEqual(case in {"valid", "unrelated TODO change"}, is_targetless_low_priority_custody(root, task, state))
 
     def test_target_resolution_state_rejects_failed_malformed_or_ambiguous_snapshots(self) -> None:
         cases = (

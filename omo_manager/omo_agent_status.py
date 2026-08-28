@@ -92,6 +92,7 @@ DEFAULT_MANAGER_TARGET = ""
 MAX_CUSTODY_RECEIPT_BYTES = 1_000_000
 PARK_RECEIPT_VERSION = "v1.0.0"
 PARK_REATTESTATION_VERSION = "v2.0.0"
+PARK_CUSTODY_REATTESTATION_VERSION = "v3.0.0"
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 CODEX_SESSION_RE = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
 PENDING_TASK_ITEMS_MARKER = "(above are pending task items)"
@@ -715,6 +716,39 @@ def parse_prior_park_receipt(value: object) -> dict[str, str] | None:
     return record if start <= end else None
 
 
+def parse_prior_park_reattestation(value: object) -> dict[str, object] | None:
+    """Return one exact v2 receipt whose embedded v1 receipt authenticates."""
+
+    keys = {
+        "version", "operation", "state", "task", "target", "task_sha256", "todo_sha256",
+        "authority_source", "authority_sha256", "authority_envelope", "authority_envelope_sha256",
+        "prior_complete_receipt_sha256", "prior_complete_receipt",
+    }
+    if not isinstance(value, dict) or set(value) != keys:
+        return None
+    scalar_keys = keys - {"prior_complete_receipt"}
+    if not all(isinstance(value[key], str) for key in scalar_keys):
+        return None
+    record = cast(dict[str, object], value)
+    prior = parse_prior_park_receipt(record["prior_complete_receipt"])
+    if (
+        prior is None
+        or record["version"] != PARK_REATTESTATION_VERSION
+        or record["operation"] != "park-unlinked-re-attestation"
+        or record["state"] != "complete"
+        or any(SHA256_RE.fullmatch(str(record[key])) is None for key in ("task_sha256", "todo_sha256", "authority_sha256", "authority_envelope_sha256", "prior_complete_receipt_sha256"))
+        or record["prior_complete_receipt_sha256"] != hashlib.sha256(yaml.safe_dump(prior, sort_keys=True).encode()).hexdigest()
+    ):
+        return None
+    return record
+
+
+def parked_custody_sha256(task_ref: str) -> str:
+    """Bind stable semantic TODO custody without binding unrelated rows."""
+
+    return hashlib.sha256(f"low priority:\n{task_ref}\n".encode()).hexdigest()
+
+
 def sole_active_target_owner(root: Path, task_path: Path, target: str) -> bool:
     """Return whether one task is the sole active metadata owner of a target."""
 
@@ -739,6 +773,28 @@ def sole_active_target_owner(root: Path, task_path: Path, target: str) -> bool:
     return owners == {task_path.resolve()}
 
 
+def has_exact_targetless_low_priority_row(root: Path, task_path: Path, task_ref: str, todo_text: str) -> bool:
+    """Return whether one TODO snapshot gives the task sole canonical parked custody."""
+
+    section = ""
+    low_priority_headers = 0
+    references = 0
+    canonical_row = False
+    known_sections = {"current", "human pending", "low priority", "previous"}
+    for line in todo_text.splitlines():
+        stripped = line.strip()
+        if stripped.endswith(":"):
+            heading = stripped[:-1]
+            section = heading if heading in known_sections and line == f"{heading}:" else ""
+            if section == "low priority":
+                low_priority_headers += 1
+            continue
+        if any(resolve_task_path(root, match.group(1)) == task_path for match in TASK_RE.finditer(line)):
+            references += 1
+            canonical_row = canonical_row or (section == "low priority" and line == task_ref)
+    return low_priority_headers == 1 and references == 1 and canonical_row
+
+
 def has_complete_park_reattestation(root: Path, task_path: Path, state: TaskState, task_text: str) -> bool:
     """Authenticate immutable archived authority for one parked historical target."""
 
@@ -751,7 +807,7 @@ def has_complete_park_reattestation(root: Path, task_path: Path, state: TaskStat
     except (UnicodeDecodeError, yaml.YAMLError, TaskFrontmatterError):
         return False
     keys = {
-        "version", "operation", "state", "task", "target", "task_sha256", "todo_sha256",
+        "version", "operation", "state", "task", "target", "task_sha256", "custody_sha256",
         "authority_source", "authority_sha256", "authority_envelope", "authority_envelope_sha256",
         "prior_complete_receipt_sha256", "prior_complete_receipt",
     }
@@ -760,29 +816,37 @@ def has_complete_park_reattestation(root: Path, task_path: Path, state: TaskStat
     scalar_keys = keys - {"prior_complete_receipt"}
     if not all(isinstance(record[key], str) for key in scalar_keys):
         return False
-    prior = parse_prior_park_receipt(record["prior_complete_receipt"])
+    prior_reattestation = parse_prior_park_reattestation(record["prior_complete_receipt"])
+    prior = parse_prior_park_receipt(prior_reattestation["prior_complete_receipt"]) if prior_reattestation is not None else None
     task_ref = task_path.relative_to(root).as_posix()
     try:
         todo_bytes = (root / "TODO.md").read_bytes()
-        todo_digest = hashlib.sha256(todo_bytes).hexdigest()
-    except OSError:
+        todo_text = todo_bytes.decode("utf-8")
+    except (OSError, UnicodeDecodeError):
         return False
     source_match = re.fullmatch(r"([0-9]{4}(?:0[1-9]|1[0-2]))/(manager_mail/[^/\r\n:]+):([1-9][0-9]*-[1-9][0-9]*)", record["authority_source"])
     envelope_match = re.fullmatch(r"([0-9]{4}(?:0[1-9]|1[0-2]))/([^/\r\n]+)", record["authority_envelope"])
     if (
-        prior is None
-        or record["version"] != PARK_REATTESTATION_VERSION
-        or record["operation"] != "park-unlinked-re-attestation"
+        prior_reattestation is None
+        or prior is None
+        or record["version"] != PARK_CUSTODY_REATTESTATION_VERSION
+        or record["operation"] != "park-unlinked-custody-re-attestation"
         or record["state"] != "complete"
         or record["task"] != task_ref
         or record["target"] != state.target
+        or prior_reattestation["task"] != task_ref
+        or prior_reattestation["target"] != state.target
         or prior["task"] != task_ref
         or prior["target"] != state.target
         or record["task_sha256"] != hashlib.sha256(task_text.encode()).hexdigest()
-        or record["todo_sha256"] != todo_digest
-        or any(SHA256_RE.fullmatch(record[key]) is None for key in ("todo_sha256", "authority_sha256", "authority_envelope_sha256", "prior_complete_receipt_sha256"))
-        or record["prior_complete_receipt_sha256"] != hashlib.sha256(yaml.safe_dump(prior, sort_keys=True).encode()).hexdigest()
+        or record["custody_sha256"] != parked_custody_sha256(task_ref)
+        or any(SHA256_RE.fullmatch(record[key]) is None for key in ("custody_sha256", "authority_sha256", "authority_envelope_sha256", "prior_complete_receipt_sha256"))
+        or record["prior_complete_receipt_sha256"] != hashlib.sha256(yaml.safe_dump(prior_reattestation, sort_keys=True).encode()).hexdigest()
         or record["authority_sha256"] != prior["authority_sha256"]
+        or record["authority_source"] != prior_reattestation["authority_source"]
+        or record["authority_sha256"] != prior_reattestation["authority_sha256"]
+        or record["authority_envelope"] != prior_reattestation["authority_envelope"]
+        or record["authority_envelope_sha256"] != prior_reattestation["authority_envelope_sha256"]
         or source_match is None
         or source_match.group(2) != prior["authority_source"].rsplit(":", 1)[0]
         or source_match.group(3) != prior["authority_source"].rsplit(":", 1)[1]
@@ -826,6 +890,7 @@ def has_complete_park_reattestation(root: Path, task_path: Path, state: TaskStat
         1 <= start <= end <= len(authority_lines)
         and matches == [(current_locator, excerpt.replace("\r\n", "\n"))]
         and hashlib.sha256(envelope_text.replace(current_locator, prior_locator).encode()).hexdigest() == prior["authority_envelope_sha256"]
+        and has_exact_targetless_low_priority_row(root, task_path, task_ref, todo_text)
         and sole_active_target_owner(root, task_path, state.target)
         and target_resolution_state(state.target) is False
         and unchanged
@@ -875,26 +940,10 @@ def is_targetless_low_priority_custody(root: Path, task: TaskLine, state: TaskSt
     if re.search(r"^\(historical tmux target retired: [A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?; authority: manager_mail/[^\r\n:]+\.txt:\d+-\d+\)$", task_text, re.MULTILINE) is None:
         return False
     try:
-        lines = (root / "TODO.md").read_text(encoding="utf-8").splitlines()
+        todo_text = (root / "TODO.md").read_text(encoding="utf-8")
     except OSError:
         return False
-    section = ""
-    low_priority_headers = 0
-    references = 0
-    canonical_row = False
-    known_sections = {"current", "human pending", "low priority", "previous"}
-    for line in lines:
-        stripped = line.strip()
-        if stripped.endswith(":"):
-            heading = stripped[:-1]
-            section = heading if heading in known_sections and line == f"{heading}:" else ""
-            if section == "low priority":
-                low_priority_headers += 1
-            continue
-        if any(resolve_task_path(root, match.group(1)) == task_path for match in TASK_RE.finditer(line)):
-            references += 1
-            canonical_row = canonical_row or (section == "low priority" and line == task.task_file)
-    return low_priority_headers == 1 and references == 1 and canonical_row
+    return has_exact_targetless_low_priority_row(root, task_path, task.task_file, todo_text)
 
 
 def absent_bind_path_workdir_exists() -> bool:
