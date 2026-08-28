@@ -84,6 +84,7 @@ env_root="${OMO_WORK_LOGS_ROOT+x}${OMO_WORK_LOGS_ROOT-}"
 env_state_dir="${OMO_MANAGER_STATE_DIR+x}${OMO_MANAGER_STATE_DIR-}"
 env_mail_dir="${OMO_MANAGER_MAIL_DIR+x}${OMO_MANAGER_MAIL_DIR-}"
 env_email_enable="${OMO_MANAGER_ENABLE_EMAIL_WATCHER+x}${OMO_MANAGER_ENABLE_EMAIL_WATCHER-}"
+env_audit_enable="${OMO_MANAGER_ENABLE_AGENT_AUDIT+x}${OMO_MANAGER_ENABLE_AGENT_AUDIT-}"
 env_email_config="${OMO_EMAIL_CONFIG_PATH+x}${OMO_EMAIL_CONFIG_PATH-}"
 env_agent_email="${OMO_AGENT_GMAIL_ADDRESS+x}${OMO_AGENT_GMAIL_ADDRESS-}"
 env_agent_password="${OMO_AGENT_GMAIL_APP_PASSWORD+x}${OMO_AGENT_GMAIL_APP_PASSWORD-}"
@@ -109,6 +110,7 @@ fi
 [ -n "${env_state_dir#x}" ] && OMO_MANAGER_STATE_DIR="${env_state_dir#x}"
 [ -n "${env_mail_dir#x}" ] && OMO_MANAGER_MAIL_DIR="${env_mail_dir#x}"
 [ -n "${env_email_enable#x}" ] && OMO_MANAGER_ENABLE_EMAIL_WATCHER="${env_email_enable#x}"
+[ -n "${env_audit_enable#x}" ] && OMO_MANAGER_ENABLE_AGENT_AUDIT="${env_audit_enable#x}"
 [ -n "${env_email_config#x}" ] && OMO_EMAIL_CONFIG_PATH="${env_email_config#x}"
 [ -n "${env_agent_email#x}" ] && OMO_AGENT_GMAIL_ADDRESS="${env_agent_email#x}"
 [ -n "${env_agent_password#x}" ] && OMO_AGENT_GMAIL_APP_PASSWORD="${env_agent_password#x}"
@@ -120,6 +122,7 @@ manager_target="${OMO_MANAGER_TMUX_TARGET:-}"
 state_base="${XDG_STATE_HOME:-$HOME/.local/state}/omo-manager"
 state_dir="${OMO_MANAGER_STATE_DIR:-$state_base}"
 email_enable="${OMO_MANAGER_ENABLE_EMAIL_WATCHER:-auto}"
+audit_enable="${OMO_MANAGER_ENABLE_AGENT_AUDIT:-false}"
 email_config="${OMO_EMAIL_CONFIG_PATH:-$HOME/.config/himalaya/config.toml}"
 agent_email="${OMO_AGENT_GMAIL_ADDRESS:-}"
 agent_password="${OMO_AGENT_GMAIL_APP_PASSWORD:-}"
@@ -132,6 +135,11 @@ case "$email_supervisor_startup_grace_s" in
 esac
 case "$watcher_health_timeout_s" in
   ''|*[!0-9]*) echo "OMO_MANAGER_WATCHER_HEALTH_TIMEOUT_S must be a non-negative integer" >&2; exit 2 ;;
+esac
+case "$audit_enable" in
+  1|true|yes|on) start_audit=1 ;;
+  0|false|no|off) start_audit=0 ;;
+  *) echo "OMO_MANAGER_ENABLE_AGENT_AUDIT must be true or false" >&2; exit 2 ;;
 esac
 export OMO_MANAGER_URL="$manager_url"
 export OMO_MANAGER_TMUX_TARGET="$manager_target"
@@ -561,6 +569,7 @@ stop_pidfile_supervisor pending "$helper_dir/omo_pending_watch.py" "$root" "" "p
 stop_legacy_supervisors pending "$helper_dir/omo_pending_watch.py" "$root"
 stop_pidfile_supervisor email "$helper_dir/email_idle_watcher.py" "$root" "$state_dir" "email watcher exited status"
 stop_legacy_supervisors email "$helper_dir/email_idle_watcher.py" "$root" "$state_dir"
+stop_pidfile_supervisor audit "$helper_dir/omo_agent_audit.py" "$root" "$state_dir" "audit watcher exited status"
 pending_args=(--root "$root")
 pending_token="$(owner_token)"
 pending_launch_pid_file="$state_dir/.pending-supervisor.$pending_token.pid"
@@ -619,6 +628,31 @@ done
 else
   echo "skipped email watcher; configure the split agent/human email values or enable the legacy email config"
 fi
+if [ "$start_audit" -eq 1 ]; then
+  audit_args=(--root "$root" --state-dir "$state_dir" --loop --enable)
+  audit_token="$(owner_token)"
+  audit_launch_pid_file="$state_dir/.audit-supervisor.$audit_token.pid"
+  setsid bash -c '
+launch_pid_file="$1"
+owner_token="$2"
+shift 2
+printf "%s\n" "$$" >"$launch_pid_file"
+while :; do
+  "$@"
+  st=$?
+  printf "%s audit watcher exited status=%s; restarting in 5s\n" "$(date "+%Y-%m-%d %H:%M:%S %z")" "$st" >&2
+  sleep 5
+done
+' audit-watch-supervisor "$audit_launch_pid_file" "$audit_token" "${uv_run[@]}" "$helper_dir/omo_agent_audit.py" "${audit_args[@]}" 8>&- >>"$state_dir/audit-watch.log" 2>&1 &
+  audit_launcher_pid=$!
+  audit_launcher_start="$(process_start_ticks "$audit_launcher_pid" 2>/dev/null || true)"
+  audit_pid="$(wait_launch_pid audit "$audit_launcher_pid" "$audit_launcher_start" "$audit_launch_pid_file")"
+  audit_start="$(process_start_ticks "$audit_pid")"
+  write_pidfile audit "$audit_pid" "$audit_token"
+  echo "started audit watcher supervisor pid=$audit_pid log=$state_dir/audit-watch.log"
+else
+  echo "skipped agent audit watcher; set OMO_MANAGER_ENABLE_AGENT_AUDIT=true to enable"
+fi
 if ! wait_supervised_child pending "$pending_pid" "$helper_dir/omo_pending_watch.py" "$watcher_health_timeout_s" "$state_dir/pending-watch.log"; then
   if [ "$start_email" -eq 1 ]; then
     stop_owned_supervisor email "$email_pid" "$email_start" "$email_token" "$helper_dir/email_idle_watcher.py" "$root" "$state_dir" "email watcher exited status" || true
@@ -626,6 +660,10 @@ if ! wait_supervised_child pending "$pending_pid" "$helper_dir/omo_pending_watch
   fi
   stop_owned_supervisor pending "$pending_pid" "$pending_start" "$pending_token" "$helper_dir/omo_pending_watch.py" "$root" "" "pending watcher exited status" || true
   rm -f "$(pid_file pending)"
+  if [ "$start_audit" -eq 1 ]; then
+    stop_owned_supervisor audit "$audit_pid" "$audit_start" "$audit_token" "$helper_dir/omo_agent_audit.py" "$root" "$state_dir" "audit watcher exited status" || true
+    rm -f "$(pid_file audit)"
+  fi
   exit 1
 fi
 if [ "$start_email" -eq 1 ]; then
@@ -640,8 +678,22 @@ if [ "$start_email" -eq 1 ]; then
       echo "email watcher failed to stay running; see $state_dir/email-watch.log" >&2
       stop_owned_supervisor pending "$pending_pid" "$pending_start" "$pending_token" "$helper_dir/omo_pending_watch.py" "$root" "" "pending watcher exited status" || true
       rm -f "$(pid_file pending)"
+      if [ "$start_audit" -eq 1 ]; then
+        stop_owned_supervisor audit "$audit_pid" "$audit_start" "$audit_token" "$helper_dir/omo_agent_audit.py" "$root" "$state_dir" "audit watcher exited status" || true
+        rm -f "$(pid_file audit)"
+      fi
       exit 1
     fi
+  fi
+fi
+if [ "$start_audit" -eq 1 ]; then
+  # Audit passes may be deliberately one-shot; the supervisor itself is the
+  # health boundary and restarts each bounded invocation.
+  if ! owned_supervisor_process "$audit_pid" "$audit_start" "$audit_token" audit "$helper_dir/omo_agent_audit.py" "$root" "$state_dir" "audit watcher exited status"; then
+    stop_owned_supervisor audit "$audit_pid" "$audit_start" "$audit_token" "$helper_dir/omo_agent_audit.py" "$root" "$state_dir" "audit watcher exited status" || true
+    rm -f "$(pid_file audit)"
+    echo "agent audit watcher failed to stay running; see $state_dir/audit-watch.log" >&2
+    exit 1
   fi
 fi
 echo "watchers ready"

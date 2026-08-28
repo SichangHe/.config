@@ -36,14 +36,14 @@ try:
     from omo_manager.omo_codex_status import status as classify_status
     from omo_manager.omo_codex_stop import extract_new_status_session_id, query_status_session_id
     from omo_manager.omo_task_lock import task_file_lock, task_target_lock
-    from omo_manager.omo_task_metadata import TARGET_RE, TASK_FRONTMATTER_STATUSES, parse_task_metadata
+    from omo_manager.omo_task_metadata import TARGET_RE, TASK_FRONTMATTER_STATUSES, frontmatter_parts, parse_task_metadata
 except ModuleNotFoundError:
     from omo_codex_status import Args as StatusArgs
     from omo_codex_status import CODEX_FOOTER_RE, current_block, current_input_text, exact_tail, inspect, is_stock_placeholder_input_text, report_from_lines, tail, visible_error_lines
     from omo_codex_status import status as classify_status
     from omo_codex_stop import extract_new_status_session_id, query_status_session_id
     from omo_task_lock import task_file_lock, task_target_lock
-    from omo_task_metadata import TARGET_RE, TASK_FRONTMATTER_STATUSES, parse_task_metadata
+    from omo_task_metadata import TARGET_RE, TASK_FRONTMATTER_STATUSES, frontmatter_parts, parse_task_metadata
 
 HELPER_DIR = Path(__file__).resolve().parent
 WORKER_DEFAULTS = HELPER_DIR / "WORKER_DEFAULTS.md"
@@ -851,6 +851,100 @@ def send_shell_command(pane: Pane, command: str) -> None:
     submitted = run(["tmux", "send-keys", "-t", pane.pane_id, "Enter"])
     if submitted.returncode != 0:
         raise StartError(f"failed to submit launch command: {submitted.stderr.strip()}")
+
+
+def send_prompt(pane: Pane, prompt_path: Path) -> None:
+    """Deliver a fresh-session prompt only after the launch identity is bound."""
+    condition = "#{&&:#{==:#{pane_id},%s},#{&&:#{==:#{window_id},%s},#{&&:#{==:#{session_name}:#{window_index}.#{pane_index},%s},#{&&:#{==:#{pane_pid},%s},#{==:#{pane_current_command},%s}}}}}" % (pane.pane_id, pane.window_id, pane.target, pane.pane_pid, pane.command)
+    nonce = f"{os.getpid()}-{time.monotonic_ns()}"
+    buffer_name = f"omo-codex-prompt-{nonce}"
+    accepted = f"OMO_PROMPT_ACCEPTED_{nonce}"
+    rejected = f"OMO_PROMPT_REJECTED_{nonce}"
+    loaded = run(["tmux", "set-buffer", "-b", buffer_name, "--", prompt_path.read_text(encoding="utf-8")])
+    if loaded.returncode != 0:
+        raise StartError("failed to load task prompt; no prompt was sent.")
+    sequence = " ; ".join(
+        (
+            f"paste-buffer -d -b {shlex.quote(buffer_name)} -t {shlex.quote(pane.pane_id)}",
+            f"send-keys -t {shlex.quote(pane.pane_id)} Enter",
+            f"display-message -p {accepted}",
+        )
+    )
+    try:
+        result = run(["tmux", "if-shell", "-F", "-t", pane.target, condition, sequence, f"display-message -p {rejected}"])
+    finally:
+        _ = run(["tmux", "delete-buffer", "-b", buffer_name])
+    if result.returncode != 0 or result.stdout != accepted + "\n":
+        raise StartError("pane/window/process identity changed before prompt delivery; no prompt was sent.")
+
+
+def query_exact_status_session_id(pane: Pane, n_lines: int, wait_s: float) -> str:
+    """Submit `/status` atomically only to one exact tmux process identity."""
+    condition = "#{&&:#{==:#{pane_id},%s},#{&&:#{==:#{window_id},%s},#{&&:#{==:#{session_name}:#{window_index}.#{pane_index},%s},#{&&:#{==:#{pane_pid},%s},#{==:#{pane_current_command},%s}}}}}" % (pane.pane_id, pane.window_id, pane.target, pane.pane_pid, pane.command)
+    exists, before_lines = exact_tail(pane.target, n_lines)
+    if not exists:
+        raise StartError("target disappeared before /status query.")
+    before = "\n".join(before_lines)
+    nonce = f"{os.getpid()}-{time.monotonic_ns()}"
+    buffer_name = f"omo-codex-status-{nonce}"
+    accepted = f"OMO_STATUS_ACCEPTED_{nonce}"
+    loaded = run(["tmux", "set-buffer", "-b", buffer_name, "--", "/status"])
+    if loaded.returncode != 0:
+        raise StartError("failed to load /status query.")
+    sequence = " ; ".join(
+        (
+            f"paste-buffer -d -b {shlex.quote(buffer_name)} -t {shlex.quote(pane.pane_id)}",
+            f"send-keys -t {shlex.quote(pane.pane_id)} Enter",
+            f"display-message -p {accepted}",
+        )
+    )
+    try:
+        result = run(["tmux", "if-shell", "-F", "-t", pane.target, condition, sequence, "display-message -p OMO_STATUS_REJECTED"])
+    finally:
+        _ = run(["tmux", "delete-buffer", "-b", buffer_name])
+    if result.returncode != 0 or result.stdout != accepted + "\n":
+        raise StartError("pane/window/process identity changed before /status submission.")
+    deadline = time.monotonic() + wait_s
+    while time.monotonic() < deadline:
+        verify_same_process(pane)
+        exists, after_lines = exact_tail(pane.target, n_lines)
+        if not exists:
+            raise StartError("target disappeared during /status query.")
+        after = "\n".join(after_lines)
+        session_id = extract_new_status_session_id(before, after)
+        if session_id:
+            verify_same_process(pane)
+            return session_id
+        time.sleep(0.25)
+    return ""
+
+
+def record_session_id(path: Path, session_id: str, expected_sha256: str = "", *, lock_held: bool = False) -> None:
+    """Atomically bind the captured Codex UUID in existing task frontmatter."""
+    if UUID_RE.fullmatch(session_id) is None:
+        raise StartError("Codex status did not return one valid session UUID.")
+    before = path.stat()
+    text = path.read_text(encoding="utf-8")
+    if expected_sha256 and hashlib.sha256(text.encode()).hexdigest() != expected_sha256:
+        raise StartError("task changed before session UUID binding; no prompt was sent.")
+    parts = frontmatter_parts(text)
+    if parts is None:
+        raise StartError("task file requires valid frontmatter before session binding.")
+    frontmatter, body = parts
+    existing = [line.split(":", 1)[1].strip() for line in frontmatter if line.startswith("session_id:")]
+    if existing and existing != [session_id]:
+        raise StartError("task frontmatter already contains a different Codex session UUID.")
+    if not existing:
+        frontmatter.append(f"session_id: {session_id}")
+    trailing = "\n" if text.endswith("\n") else ""
+    try:
+        from omo_manager.omo_task import atomic_replace_if_unchanged
+    except ModuleNotFoundError:
+        from omo_task import atomic_replace_if_unchanged
+    try:
+        atomic_replace_if_unchanged(path, "\n".join(["---", *frontmatter, "---", *body]) + trailing, before, lock_held=lock_held)
+    except (OSError, ValueError) as exc:
+        raise StartError(f"task changed during session UUID binding; no prompt was sent: {exc}") from exc
 
 
 def respawn_codex(pane: Pane, command: str) -> None:
@@ -2338,7 +2432,7 @@ def start(args: Args) -> str:
             command = launch_command(
                 effective_args,
                 pane,
-                prompt_path,
+                None if (args.prompt_file is not None and not any((args.restart_running, args.rotate_worker, args.recover_non_codex))) else prompt_path,
                 marker,
                 replace_process=args.restart_running or args.rotate_worker or args.recover_non_codex,
                 tool=task_binding.tool,
@@ -2419,6 +2513,20 @@ def start(args: Args) -> str:
                 require_same_shell(pane)
                 send_shell_command(pane, command)
             result = wait_started(pane, marker, args.startup_timeout_s)
+            # A fresh task prompt is intentionally held back until Codex has
+            # proved its UUID.  This makes the task binding durable before any
+            # user prompt can create work in the session.
+            if args.prompt_file is not None and task_binding.tool == "codex" and not any((args.restart_running, args.rotate_worker, args.recover_non_codex)):
+                current = resolve_pane(pane.target)
+                session_id = query_exact_status_session_id(current, 240, min(10.0, args.startup_timeout_s))
+                if args.session_id and session_id != args.session_id:
+                    raise StartError("captured Codex session UUID differs from --session-id; no prompt was sent.")
+                if not session_id:
+                    raise StartError("could not capture the new Codex session id; no prompt was sent.")
+                record_session_id(path, session_id, task_binding.task_sha256, lock_held=True)
+                if prompt_path is None:
+                    raise StartError("task prompt was not prepared; no prompt was sent.")
+                send_prompt(current, prompt_path)
             if args.restart_running:
                 verify_restart_continuity(effective_args, pane, effective_args.session_id, task_binding, live_pcodx_state)
             if args.recover_non_codex:

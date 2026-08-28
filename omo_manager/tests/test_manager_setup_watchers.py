@@ -214,6 +214,44 @@ esac
             finally:
                 self.stop_supervisors(tmp / "state")
 
+    def test_agent_audit_is_disabled_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            try:
+                result = self.run_setup(tmp)
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertFalse((tmp / "state" / "audit-supervisor.pid").exists())
+                self.assertIn("skipped agent audit watcher", result.stdout)
+            finally:
+                self.stop_supervisors(tmp / "state")
+
+    def test_agent_audit_supervisor_is_opt_in_and_owned(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            try:
+                result = self.run_setup(tmp, extra_env={"OMO_MANAGER_ENABLE_AGENT_AUDIT": "true"})
+                self.assertEqual(0, result.returncode, result.stderr)
+                pidfile = tmp / "state" / "audit-supervisor.pid"
+                self.assertTrue(pidfile.exists())
+                audit_pid = self.pid_from_file(pidfile)
+                self.assertIsNotNone(audit_pid)
+                assert audit_pid is not None
+                self.assertTrue(self.process_active(audit_pid))
+                invocation = (tmp / "fake-uv.log").read_text(encoding="utf-8")
+                self.assertIn("omo_agent_audit.py", invocation)
+                self.assertIn("--loop", invocation)
+                self.assertIn("--enable", invocation)
+            finally:
+                self.stop_supervisors(tmp / "state")
+
+    def test_agent_audit_rejects_invalid_enable_value_before_launching(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            result = self.run_setup(tmp, extra_env={"OMO_MANAGER_ENABLE_AGENT_AUDIT": "maybe"})
+            self.assertEqual(2, result.returncode)
+            self.assertIn("OMO_MANAGER_ENABLE_AGENT_AUDIT must be true or false", result.stderr)
+            self.assertFalse((tmp / "state" / "pending-supervisor.pid").exists())
+
     def test_local_env_manager_target_overrides_stale_inherited_target(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
