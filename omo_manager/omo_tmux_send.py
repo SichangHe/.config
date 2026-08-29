@@ -34,7 +34,6 @@ try:
         has_codex_model_footer,
         has_cursor_followups_overlay,
         has_plan_prompt,
-        has_queued_running_input,
         inspect,
         is_cursor_agent_capture,
         pane_has_exact_managed_agent_process,
@@ -61,7 +60,6 @@ except ModuleNotFoundError:
         has_codex_model_footer,
         has_cursor_followups_overlay,
         has_plan_prompt,
-        has_queued_running_input,
         inspect,
         is_cursor_agent_capture,
         pane_has_exact_managed_agent_process,
@@ -746,8 +744,6 @@ def verify_submit(
         input_text = current_input_text(lines)
         real_input_visible = is_real_input_text(input_text)
         prompt_still_present = real_input_visible and (any(probe in input_text for probe in probes) or has_collapsed_paste_text(input_text))
-        if prompt_still_present and has_queued_running_input(lines):
-            return
         if last_status in {"ready", "running", "waiting_subagent"} and not real_input_visible:
             return
         if real_input_visible and not prompt_still_present:
