@@ -16,10 +16,16 @@ from pathlib import Path
 
 
 HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+TMUX_TARGET_RE = re.compile(r"^([^:\s]+):(\d+)(?:\.(\d+))?$")
 
 
 def canonical_target(target: str) -> str:
-    return target[:-2] if target.endswith(".0") else target
+    match = TMUX_TARGET_RE.fullmatch(target)
+    if match is None:
+        return target
+    session, window, pane = match.groups()
+    canonical = f"{session}:{int(window)}"
+    return canonical if pane is None or int(pane) == 0 else f"{canonical}.{int(pane)}"
 
 
 def task_target_lock_path(root: Path, target: str) -> Path:
@@ -60,14 +66,8 @@ def watcher_report_state_maintenance_temporary(state: Path) -> Path:
 def task_target_lock(root: Path, target: str) -> Iterator[None]:
     """Hold the cross-process ownership lock for `target` until the operation ends."""
 
-    lock_path = task_target_lock_path(root, target)
-    lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    with lock_path.open("a", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    with task_file_lock_at_path(task_target_lock_path(root, target)):
+        yield
 
 
 @contextmanager
@@ -77,25 +77,28 @@ def task_file_lock_at_path(lock_path: Path) -> Iterator[None]:
     lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     directory_fd = os.open(lock_path.parent, directory_flags)
+    lock_fd = -1
     try:
         directory_info = os.fstat(directory_fd)
         if not stat.S_ISDIR(directory_info.st_mode) or directory_info.st_uid != os.getuid() or stat.S_IMODE(directory_info.st_mode) != 0o700:
             raise OSError("task-file lock directory is unsafe")
         lock_flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         lock_fd = os.open(lock_path.name, lock_flags, 0o600, dir_fd=directory_fd)
-    finally:
-        os.close(directory_fd)
-    try:
         lock_info = os.fstat(lock_fd)
-        if not stat.S_ISREG(lock_info.st_mode) or lock_info.st_uid != os.getuid():
+        if not stat.S_ISREG(lock_info.st_mode) or lock_info.st_uid != os.getuid() or lock_info.st_mode & 0o022:
             raise OSError("task-file lock is unsafe")
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
         try:
+            bound_info = os.stat(lock_path.name, dir_fd=directory_fd, follow_symlinks=False)
+            if (bound_info.st_dev, bound_info.st_ino) != (lock_info.st_dev, lock_info.st_ino):
+                raise OSError("task-file lock entry changed during acquisition")
             yield
         finally:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
     finally:
-        os.close(lock_fd)
+        if lock_fd >= 0:
+            os.close(lock_fd)
+        os.close(directory_fd)
 
 
 @contextmanager

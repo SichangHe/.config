@@ -21,6 +21,59 @@ class TaskTargetLockTests(unittest.TestCase):
 
             self.assertEqual(first, second)
 
+    def test_numeric_target_aliases_share_one_lock_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            expected = task_target_lock_path(root, "guest_hees:5")
+
+            self.assertEqual(expected, task_target_lock_path(root, "guest_hees:05"))
+            self.assertEqual(expected, task_target_lock_path(root, "guest_hees:005.00"))
+            self.assertEqual(task_target_lock_path(root, "guest_hees:5.2"), task_target_lock_path(root, "guest_hees:05.02"))
+
+    def test_target_lock_rejects_hostile_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock_path = root / "locks" / "target"
+            lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            outside = root / "outside"
+            outside.write_text("foreign", encoding="utf-8")
+            lock_path.symlink_to(outside)
+
+            with patch("omo_manager.omo_task_lock.task_target_lock_path", return_value=lock_path), self.assertRaises(OSError), task_target_lock(root, "guest_hees:5"):
+                self.fail("hostile target lock was acquired")
+
+    def test_target_lock_rejects_hostile_directory_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock_path = root / "locks" / "target"
+            lock_path.parent.mkdir(mode=0o777, parents=True, exist_ok=True)
+            lock_path.parent.chmod(0o777)
+
+            with patch("omo_manager.omo_task_lock.task_target_lock_path", return_value=lock_path), self.assertRaisesRegex(OSError, "lock directory is unsafe"), task_target_lock(root, "guest_hees:5"):
+                self.fail("hostile target lock directory was accepted")
+
+    def test_target_lock_rejects_rebound_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lock_path = root / "locks" / "target"
+            lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            lock_path.parent.chmod(0o700)
+            real_open = os.open
+            rebound = False
+
+            def rebind_open(path: str | bytes | os.PathLike[str] | os.PathLike[bytes], flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+                nonlocal rebound
+                fd = real_open(path, flags, mode, dir_fd=dir_fd)
+                if dir_fd is not None and os.fspath(path) == lock_path.name and not rebound:
+                    rebound = True
+                    os.unlink(lock_path.name, dir_fd=dir_fd)
+                    replacement_fd = real_open(lock_path.name, os.O_RDWR | os.O_CREAT, 0o600, dir_fd=dir_fd)
+                    os.close(replacement_fd)
+                return fd
+
+            with patch("omo_manager.omo_task_lock.task_target_lock_path", return_value=lock_path), patch("omo_manager.omo_task_lock.os.open", side_effect=rebind_open), self.assertRaisesRegex(OSError, "entry changed"), task_target_lock(root, "guest_hees:5"):
+                self.fail("rebound target lock entry was accepted")
+
     def test_zero_pane_aliases_serialize_ownership_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
