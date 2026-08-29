@@ -1162,6 +1162,7 @@ def trash_explicit_summary(
     replacement_ids: list[str],
     retained_replacement_count: int,
     sources: list[ScopedSource],
+    source_location_mode: str,
     final_context_mode: str,
     final_gate_passed: bool,
     final_gate_observations: str,
@@ -1179,6 +1180,7 @@ def trash_explicit_summary(
     return (
         f"trash_explicit: task_ids={','.join(task_ids)} replacements={len(replacement_ids)}"
         f" retained_replacements={retained_replacement_count} requested={len(sources)}"
+        f" source_location_mode={source_location_mode}"
         f" final_context={final_context_mode} final_gate_passed={int(final_gate_passed)}"
         f" final_gate_observations={final_gate_observations}"
         f" move_attempted={move_attempted} moved_now={moved_now} move_outcome={move_outcome}"
@@ -3538,6 +3540,17 @@ def observe_explicit_sources(
     return observed["INBOX"], observed["Trash"]
 
 
+def strict_fresh_source_locations_intact(
+    sources: list[ScopedSource],
+    inbox_records: list[MailRecord],
+    trash_records: list[MailRecord],
+) -> bool:
+    """Require every exact bound source, and no other record, in INBOX."""
+    expected = {(source.uid, source.gmail_msgid) for source in sources}
+    actual = {(record.uid, record.gmail_msgid) for record in inbox_records}
+    return bool(expected) and not trash_records and len(inbox_records) == len(expected) and actual == expected
+
+
 def cmd_trash_explicit(args: argparse.Namespace) -> int:
     """Move exact live-bound sources to recoverable Trash without persisted evidence."""
     if not args.yes:
@@ -3557,6 +3570,7 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
     replacement_ids: list[str] = []
     retained_replacements: list[RetainedReplacement] = []
     sources: list[ScopedSource] = []
+    source_location_mode = "unvalidated"
     allow_additive_final_context = bool(getattr(args, "allow_additive_final_context", False))
     final_context_mode = "additive-compatible" if allow_additive_final_context else "strict"
     final_gate_passed = False
@@ -3579,6 +3593,7 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
                 replacement_ids,
                 len(retained_replacements),
                 sources,
+                source_location_mode,
                 final_context_mode,
                 final_gate_passed,
                 final_gate.receipt,
@@ -3598,6 +3613,10 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
         task_ids = args.task_id if isinstance(args.task_id, list) else [args.task_id]
         replacement_ids = args.replacement_id if isinstance(args.replacement_id, list) else ([args.replacement_id] if args.replacement_id else [])
         replacement_not_required = bool(getattr(args, "replacement_not_required", False))
+        raw_source_location_mode = getattr(args, "source_location_mode", "strict-fresh")
+        if raw_source_location_mode not in {"strict-fresh", "recover-partial-move"}:
+            raise ValueError("choose exactly one source-location mode: --strict-fresh or --recover-partial-move")
+        source_location_mode = raw_source_location_mode
         raw_task_sources = getattr(args, "task_source", [])
         task_source_values = raw_task_sources if isinstance(raw_task_sources, list) else [raw_task_sources]
         task_identity = ",".join(task_ids)
@@ -3709,6 +3728,8 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
             return refuse_trash("refusing because Gmail special-use mailboxes are missing")
         set_trash_stage("observe-explicit-sources")
         inbox_records, trash_records = observe_explicit_sources(client, sources, sender_email, recipient_email)
+        if source_location_mode == "strict-fresh" and not strict_fresh_source_locations_intact(sources, inbox_records, trash_records):
+            return refuse_trash("refusing because strict-fresh requires every bound source to remain in INBOX")
         set_trash_stage("replacement-exists")
         if any(
             not replacement_exists(client, special_use[r"\All"], replacement_id, sender_email, recipient_email)
@@ -3780,9 +3801,11 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
         if set(inbox_subset(client, inbox_uids)) != set(inbox_uids):
             return refuse_trash("refusing because a planned source moved during revalidation")
         set_trash_stage("observe-explicit-sources-final")
-        final_inbox, _final_trash = observe_explicit_sources(client, sources, sender_email, recipient_email)
+        final_inbox, final_trash = observe_explicit_sources(client, sources, sender_email, recipient_email)
         if {record.gmail_msgid for record in final_inbox} != {record.gmail_msgid for record in inbox_records}:
             return refuse_trash("refusing because a planned source moved immediately before mutation")
+        if source_location_mode == "strict-fresh" and not strict_fresh_source_locations_intact(sources, final_inbox, final_trash):
+            return refuse_trash("refusing because strict-fresh source location changed immediately before mutation")
         set_trash_stage("replacement-exists-final")
         if any(
             not replacement_exists(client, special_use[r"\All"], replacement_id, sender_email, recipient_email)
@@ -3833,9 +3856,13 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
         final_gate.observed("special-use")
         if retained_replacements and {item.gmail_msgid for item in retained_replacements} != set(replacement_gmail_ids):
             return refuse_trash("refusing because a reviewed retained replacement identity does not match the replacement")
+        final_inbox_ids = {record.gmail_msgid for record in final_inbox}
+        expected_final_inbox_sources = sources if source_location_mode == "strict-fresh" else [
+            source for source in sources if source.gmail_msgid in final_inbox_ids
+        ]
         final_inbox_ids_by_thread: dict[str, set[str]] = {}
-        for record in final_inbox:
-            final_inbox_ids_by_thread.setdefault(record.gmail_thrid, set()).add(record.gmail_msgid)
+        for source in expected_final_inbox_sources:
+            final_inbox_ids_by_thread.setdefault(source.gmail_thrid, set()).add(source.gmail_msgid)
         set_trash_stage("direct-context-intact-final")
         if not direct_contexts_intact(
             final_context_client,
@@ -3847,12 +3874,10 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
         ):
             return refuse_trash("refusing because complete Gmail thread context changed immediately before move")
         set_trash_stage("inbox-bindings-final")
-        final_inbox_ids = {record.gmail_msgid for record in final_inbox}
-        final_inbox_sources = [source for source in sources if source.gmail_msgid in final_inbox_ids]
-        if (final_inbox_sources or retained_replacements) and not final_inbox_bindings_intact(
+        if (expected_final_inbox_sources or retained_replacements) and not final_inbox_bindings_intact(
             final_context_client,
             expected_uidvalidity,
-            final_inbox_sources,
+            expected_final_inbox_sources,
             retained_replacements,
             sender_email,
             recipient_email,
@@ -3924,6 +3949,7 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
                 replacement_ids,
                 len(retained_replacements),
                 sources,
+                source_location_mode,
                 final_context_mode,
                 final_gate_passed,
                 final_gate.receipt,
@@ -3958,6 +3984,7 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
             replacement_ids,
             len(retained_replacements),
             sources,
+            source_location_mode,
             final_context_mode,
             final_gate_passed,
             final_gate.receipt,
@@ -4282,6 +4309,21 @@ This command moves the old message only from Inbox to recoverable Gmail Trash an
         default=[],
         metavar="GMAIL-MSGID:GMAIL-THRID:RAW-SHA256",
         help="Exact frozen thread context binding; repeat for every member present when execution starts. The final pre-MOVE gate rejects additions by default.",
+    )
+    source_location = direct.add_mutually_exclusive_group(required=True)
+    source_location.add_argument(
+        "--strict-fresh",
+        action="store_const",
+        dest="source_location_mode",
+        const="strict-fresh",
+        help="Fresh-operation mode: require every bound source UID to remain in INBOX through the final combined source-and-retained fetch; any prior or concurrent movement aborts before MOVE.",
+    )
+    source_location.add_argument(
+        "--recover-partial-move",
+        action="store_const",
+        dest="source_location_mode",
+        const="recover-partial-move",
+        help="Explicit interrupted-operation recovery mode: reconcile exact bound sources already in Trash and MOVE only the remaining bound INBOX subset. Never use for a fresh reviewed manifest.",
     )
     direct.add_argument(
         "--allow-additive-final-context",
