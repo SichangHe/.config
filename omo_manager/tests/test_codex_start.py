@@ -1060,6 +1060,42 @@ class CodexStartTests(unittest.TestCase):
                 self.assertIn("replacement-observed: true\nreplacement-target: cfg:2.0\n", audit)
                 self.assertIn(f"replacement-pane-pid: 5252\nreplacement-command: {command}\n", audit)
 
+    def test_rotate_worker_recovers_fresh_session_id_with_exact_process_query(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root, status="blocked", pending=["preserve exact queue"])
+            initial = Pane("cfg:2.0", "%2", "@2", "bun", root, 4242)
+            replacement = replace(initial, pane_pid=5252)
+            rotated = False
+
+            def resolve(_target: str) -> Pane:
+                return replacement if rotated else initial
+
+            def respawn(_pane: Pane, _command: str) -> None:
+                nonlocal rotated
+                rotated = True
+
+            sessions = iter(((self.SESSION_ID, ""), ("", "")))
+            new_session = "119f670b-6a2f-7463-b9be-9aa6ff0cec43"
+            with (
+                patch("omo_manager.omo_codex_start.resolve_pane", side_effect=resolve),
+                patch("omo_manager.omo_codex_start.inspect", return_value=Report("running", ["working"])),
+                patch("omo_manager.omo_codex_start.query_status_session_id", side_effect=lambda *_args: next(sessions)) as legacy_query,
+                patch("omo_manager.omo_codex_start.query_exact_status_session_id", return_value=new_session) as exact_query,
+                patch("omo_manager.omo_codex_start.prompt_text", return_value="worker-only prompt\n"),
+                patch("omo_manager.omo_codex_start.respawn_codex", side_effect=respawn),
+                patch("omo_manager.omo_codex_start.wait_started", return_value="running"),
+                patch("omo_manager.omo_codex_start.send_prompt") as deliver,
+            ):
+                self.assertEqual("running", start(self.rotation_args(root)))
+
+            self.assertEqual(2, legacy_query.call_count)
+            exact_query.assert_called_once_with(replacement, 240, 10.0)
+            deliver.assert_called_once()
+            audit = (root / "rotation.audit").read_text(encoding="utf-8")
+            self.assertIn(f"new-session-id: {new_session}\n", audit)
+            self.assertIn("terminal-authoritative-owner-count: 1\n", audit)
+
     def test_reconcile_rotation_audit_parser_requires_all_assertions_and_is_mutually_exclusive(self) -> None:
         common = [
             "--task-file",
@@ -1175,6 +1211,7 @@ class CodexStartTests(unittest.TestCase):
                     stack.enter_context(patch("omo_manager.omo_codex_start.resolve_pane", side_effect=resolve))
                     stack.enter_context(patch("omo_manager.omo_codex_start.inspect", return_value=Report("running", ["working"])))
                     stack.enter_context(patch("omo_manager.omo_codex_start.query_status_session_id", side_effect=lambda *_args: next(sessions)))
+                    stack.enter_context(patch("omo_manager.omo_codex_start.query_exact_status_session_id", return_value=""))
                     stack.enter_context(patch("omo_manager.omo_codex_start.prompt_text", return_value="worker-only prompt\n"))
                     stack.enter_context(patch("omo_manager.omo_codex_start.respawn_codex", side_effect=respawn))
                     stack.enter_context(patch("omo_manager.omo_codex_start.wait_started", side_effect=startup_error if case == "startup error" else None, return_value="running"))

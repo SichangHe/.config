@@ -2467,6 +2467,9 @@ def verify_fresh_rotation(args: Args, snapshot: RotationSnapshot, replacement: P
         None,
         (current.target, current.pane_id),
     )
+    # 🧑 Source-1183: "Solve this as soon as possible with anything you have"
+    if not fresh_session_id:
+        fresh_session_id = query_exact_status_session_id(current, 240, min(10.0, args.startup_timeout_s))
     if not fresh_session_id:
         raise NewSessionIdCaptureFailed("rotated worker did not expose a new Codex session id.")
     if fresh_session_id == snapshot.old_session_id:

@@ -14,6 +14,9 @@
   - accepts tmux commands `bun`, `bunx`, and `codex`
   - records the changed process before startup and UUID verification
   - a wrapper or unsupported command remains uncheckpointed
+- fresh UUID capture
+  - retries an empty legacy capture through the existing exact-process `/status` query
+  - preserves the same checkpointed replacement and all snapshot bindings
 - reconciliation eligibility
   - requires the replacement checkpoint
   - requires the exact UUID-capture failure kind
