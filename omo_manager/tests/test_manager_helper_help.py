@@ -76,6 +76,32 @@ class ManagerHelperHelpTests(unittest.TestCase):
         self.assertIn("infers routing from the producer pane", report_help)
         self.assertIn("do not pass task-file, root, manager-target", report_help)
 
+    def test_worker_defaults_points_to_complete_unread_report_replacement_help(self) -> None:
+        worker_defaults = (OMO_DIR / "WORKER_DEFAULTS.md").read_text(encoding="utf-8")
+        self.assertIn(
+            "To remove a message you previously sent to the human, read and follow `omo_manager_mail_compress.py agent-trash-replaced --help`.",
+            worker_defaults,
+        )
+        self.assertEqual(1, worker_defaults.count("agent-trash-replaced"))
+
+        replacement_help = helper_help("omo_manager_mail_compress.py", "agent-trash-replaced")
+        for required in (
+            "Only revoke mail the human has not read",
+            "agent-unread",
+            "marks trashable",
+            "Send the replacement before moving the old unread message",
+            "email_me.py --supersedes-message-id",
+            "retain everything the human absolutely needs now",
+            "omitting obsolete information is allowed and encouraged",
+            "preserve the current exact tmux sender and Codex session",
+            "legacy or prior-session mail is refused",
+            "recoverable Gmail Trash and never expunges it",
+            "repeated identical command reconciles an interrupted move",
+            "mixed or missing Inbox/Trash outcomes require manual inspection",
+            "Do not schedule this cleanup",
+        ):
+            self.assertIn(required, replacement_help)
+
     def test_ops_manager_cursor_replace_help_owns_pin_and_fail_closed_details(self) -> None:
         replace_help = helper_help("omo_ops_manager_cursor_replace.py")
         self.assertIn("ops_manager.md", replace_help)

@@ -3836,7 +3836,16 @@ def parser() -> argparse.ArgumentParser:
     unread_summary.set_defaults(func=cmd_unread_summary)
     agent_unread = sub.add_parser("agent-unread", help="List unread agent-to-human mail sent by the current tmux agent.")
     agent_unread.set_defaults(func=cmd_agent_unread)
-    agent_trash = sub.add_parser("agent-trash-replaced", help="Move the current agent's still-unread mail to recoverable Trash after a verified replacement exists.")
+    agent_trash = sub.add_parser(
+        "agent-trash-replaced",
+        help="Move the current agent's still-unread mail to recoverable Trash after a verified replacement exists.",
+        description="""Remove a report you previously sent to the human. Only revoke mail the human has not read: run agent-unread and select only messages it marks trashable.
+Send the replacement before moving the old unread message, using email_me.py --supersedes-message-id for each selected message_id and retaining the replacement Message-ID.
+The replacement must retain everything the human absolutely needs now; omitting obsolete information is allowed and encouraged.
+The source and replacement must preserve the current exact tmux sender and Codex session; legacy or prior-session mail is refused.
+This command moves the old message only from Inbox to recoverable Gmail Trash and never expunges it. A repeated identical command reconciles an interrupted move; mixed or missing Inbox/Trash outcomes require manual inspection. Do not schedule this cleanup.""",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     agent_trash.add_argument("--uid", action="append", required=True, help="Unread Inbox UID printed by agent-unread; repeat for multiple messages.")
     agent_trash.add_argument("--source-uidvalidity", required=True, help="Exact UIDVALIDITY printed by agent-unread.")
     agent_trash.add_argument("--replacement-message-id", required=True, help="Message-ID printed by email_me.py after sending the replacement.")
