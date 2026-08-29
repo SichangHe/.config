@@ -1777,6 +1777,9 @@ def handle_manager_mail_thresholds(client: imaplib.IMAP4_SSL, args: Args) -> boo
             next_active.remove(kind)
             next_watermarks.pop(kind, None)
             state_changed = True
+        elif exceeded and kind in active and pending_line is None and count < watermarks.get(kind, count):
+            next_watermarks[kind] = count
+            state_changed = True
         elif exceeded and kind in active and kind not in next_watermarks:
             # Older watcher versions persisted only the active latch. Use the
             # configured threshold as their conservative trigger watermark so
