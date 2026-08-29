@@ -5,8 +5,9 @@ import os
 import stat
 import subprocess
 import tempfile
+import threading
 import unittest
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +24,7 @@ from omo_manager.omo_codex_start import (
     RECOVERY_RECEIPT_DIRNAME,
     StartError,
     TaskBinding,
+    capture_rotation_snapshot,
     choose_resume_cwd_prompt,
     current_todo_entries,
     consume_recovery_receipt,
@@ -53,11 +55,13 @@ from omo_manager.omo_codex_start import (
     start,
     task_path,
     validate_task,
+    verify_rotation_snapshot,
     wait_resume_cwd_recovery,
 )
 from omo_manager.omo_codex_status import Report
 from omo_manager.omo_pending_watch import record_terminal_delivery_failure, terminal_delivery_failure
 from omo_manager.omo_pending_watch import PrePasteRejected, try_send_delivery_text
+from omo_manager.omo_task_status import authoritative_active_target_task_paths, root_membership_lock
 
 
 class CodexStartTests(unittest.TestCase):
@@ -134,6 +138,11 @@ class CodexStartTests(unittest.TestCase):
             "pending-items-sha256": hashlib.sha256(b"preserve exact queue").hexdigest(),
             "protected-target-count": str(len(protected)),
             "protected-targets-sha256": hashlib.sha256("\0".join(protected).encode()).hexdigest(),
+            "authoritative-owner-count": "1",
+            "authoritative-owner-task-file": "worker.md",
+            "rotation-snapshot-sha256": "",
+            "todo-sha256": hashlib.sha256((root / "TODO.md").read_bytes()).hexdigest(),
+            "prompt-delivery": "held-until-terminal-sole-owner-proof",
             "is-manager": "false",
             "tool": "codex",
             "completion": "unknown-until-finalized",
@@ -146,6 +155,27 @@ class CodexStartTests(unittest.TestCase):
             "failure-kind": "post-respawn-new-session-id-capture-failed",
             "final-result": "failed",
         }
+        fields["rotation-snapshot-sha256"] = hashlib.sha256(
+            "\0".join(
+                (
+                    fields["task-file"],
+                    fields["task-sha256"],
+                    fields["status"],
+                    fields["manager-target"],
+                    "preserve exact queue",
+                    fields["target"],
+                    fields["pane-id"],
+                    fields["window-id"],
+                    fields["old-pane-pid"],
+                    fields["old-command"],
+                    fields["old-session-id"],
+                    *protected,
+                    "worker.md",
+                    str(root / "rotation.audit"),
+                    fields["todo-sha256"],
+                )
+            ).encode()
+        ).hexdigest()
         fields.update(changes)
         audit = root / "rotation.audit"
         audit.write_text("\n".join(f"{key}: {value}" for key, value in fields.items()) + "\n", encoding="utf-8")
@@ -219,7 +249,7 @@ class CodexStartTests(unittest.TestCase):
             "pending_task_items": pending if pending is not None else [],
         }
         frontmatter = yaml.safe_dump({key: value for key, value in fields.items() if value is not None}, sort_keys=False)
-        frontmatter = frontmatter.replace("pending_task_items:\n- ", "pending_task_items:\n  - ")
+        frontmatter = frontmatter.replace("pending_task_items:\n- ", "pending_task_items:\n  - ").replace("\n- ", "\n  - ")
         text = "---\n" + frontmatter + "---\n\nGoal.\n"
         path = root / task_file
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -967,7 +997,7 @@ class CodexStartTests(unittest.TestCase):
                 self.assertNotIn(" resume ", command)
                 rotated = True
 
-            sessions = iter(((old_session, ""), (old_session, ""), (old_session, ""), (new_session, "")))
+            sessions = iter(((old_session, ""), (new_session, "")))
             args = self.rotation_args(root)
             with (
                 patch("omo_manager.omo_codex_start.resolve_pane", side_effect=resolve),
@@ -976,16 +1006,21 @@ class CodexStartTests(unittest.TestCase):
                 patch("omo_manager.omo_codex_start.prompt_text", return_value="worker-only prompt\n") as prompt,
                 patch("omo_manager.omo_codex_start.respawn_codex", side_effect=respawn),
                 patch("omo_manager.omo_codex_start.wait_started", return_value="running"),
+                patch("omo_manager.omo_codex_start.send_prompt") as deliver,
             ):
                 self.assertEqual("running", start(args))
 
             self.assertTrue(rotated)
             prompt.assert_called_once()
+            deliver.assert_called_once()
             self.assertFalse(prompt.call_args.args[1])
             self.assertEqual(task_before, (root / "worker.md").read_bytes())
             audit = root / "rotation.audit"
             self.assertEqual(0o600, audit.stat().st_mode & 0o777)
-            self.assertIn(f"new-session-id: {new_session}\nfinal-result: success\n", audit.read_text(encoding="utf-8"))
+            audit_text = audit.read_text(encoding="utf-8")
+            self.assertIn(f"new-session-id: {new_session}\nterminal-replacement-pane-pid: 5252\nterminal-replacement-command: bun\n", audit_text)
+            self.assertIn("terminal-authoritative-owner-count: 1\n", audit_text)
+            self.assertIn("terminal-prompt-delivery: authorized-after-terminal-sole-owner-proof\nfinal-result: success\n", audit_text)
 
     def test_rotate_worker_checkpoints_supported_codex_processes_after_wrapper(self) -> None:
         for command in ("bun", "bunx", "codex"):
@@ -1009,7 +1044,7 @@ class CodexStartTests(unittest.TestCase):
                     nonlocal rotated
                     rotated = True
 
-                sessions = iter(((self.SESSION_ID, ""), (self.SESSION_ID, ""), (self.SESSION_ID, ""), ("119f670b-6a2f-7463-b9be-9aa6ff0cec43", "")))
+                sessions = iter(((self.SESSION_ID, ""), ("119f670b-6a2f-7463-b9be-9aa6ff0cec43", "")))
                 with (
                     patch("omo_manager.omo_codex_start.resolve_pane", side_effect=resolve),
                     patch("omo_manager.omo_codex_start.inspect", return_value=Report("running", ["working"])),
@@ -1017,6 +1052,7 @@ class CodexStartTests(unittest.TestCase):
                     patch("omo_manager.omo_codex_start.prompt_text", return_value="worker-only prompt\n"),
                     patch("omo_manager.omo_codex_start.respawn_codex", side_effect=respawn),
                     patch("omo_manager.omo_codex_start.wait_started", return_value="running"),
+                    patch("omo_manager.omo_codex_start.send_prompt"),
                     patch("omo_manager.omo_codex_start.time.sleep"),
                 ):
                     self.assertEqual("running", start(self.rotation_args(root)))
@@ -1126,7 +1162,7 @@ class CodexStartTests(unittest.TestCase):
                     rotated = True
 
                 final_session = "" if case == "empty UUID" else self.SESSION_ID
-                sessions = iter(((self.SESSION_ID, ""), (self.SESSION_ID, ""), (self.SESSION_ID, ""), (final_session, "")))
+                sessions = iter(((self.SESSION_ID, ""), (final_session, "")))
                 startup_error = StartError("startup failed after replacement")
                 verification_error: Exception | None = (
                     StartError("task or pane changed after replacement")
@@ -1210,7 +1246,7 @@ class CodexStartTests(unittest.TestCase):
                 nonlocal rotated
                 rotated = True
 
-            sessions = iter(((self.SESSION_ID, ""), (self.SESSION_ID, ""), (self.SESSION_ID, "")))
+            sessions = iter(((self.SESSION_ID, ""),))
             with (
                 patch("omo_manager.omo_codex_start.resolve_pane", side_effect=resolve),
                 patch("omo_manager.omo_codex_start.inspect", return_value=Report("running", ["working"])),
@@ -1367,35 +1403,75 @@ class CodexStartTests(unittest.TestCase):
             self.assertIn("#{==:#{pane_current_command},bun}", condition)
         self.assertFalse(any(command[1] in {"paste-buffer", "send-keys"} for command in commands))
 
-    def test_reconcile_lock_order_matches_concurrent_lifecycle_order(self) -> None:
+    def test_reconciliation_owner_scan_excludes_concurrent_membership_change(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root)
-            todo = root / "TODO.md"
-            todo.write_text("current:\n", encoding="utf-8")
-            (root / "todo-alias.md").symlink_to(todo)
+            self.write_task(root, status="blocked", pending=["preserve exact queue"])
+            pane = Pane("cfg:2.0", "%2", "@2", "bunx", root, 5252)
+            self.write_failed_rotation_audit(root, pane)
+            audit_before = (root / "rotation.audit").read_bytes()
+            task_before = (root / "worker.md").read_bytes()
+            todo_before = (root / "TODO.md").read_bytes()
+            competing = root / "competing.md"
+            attempt = threading.Event()
+            attempted = threading.Event()
+            acquired = threading.Event()
+            writer_finished = threading.Event()
 
-            @contextmanager
-            def target_lock(_root: Path, _target: str):
-                yield
+            def add_owner() -> None:
+                if not attempt.wait(1.0):
+                    return
+                attempted.set()
+                with root_membership_lock(root):
+                    acquired.set()
+                    competing.write_bytes((root / "worker.md").read_bytes())
+                writer_finished.set()
 
-            for task_file in ("worker.md", "TODO.md", "todo-alias.md"):
-                with self.subTest(task_file=task_file):
-                    entered: list[Path] = []
+            writer = threading.Thread(target=add_owner)
+            writer.start()
+            n_scans = 0
 
-                    @contextmanager
-                    def file_lock(path: Path):
-                        entered.append(path)
-                        yield
+            def scan(scan_root: Path, target: str) -> tuple[Path, ...]:
+                nonlocal n_scans
+                n_scans += 1
+                attempt.set()
+                self.assertTrue(attempted.wait(1.0))
+                self.assertFalse(acquired.wait(0.1), "membership writer interleaved with the locked owner scan")
+                self.assertFalse(competing.exists())
+                owners = authoritative_active_target_task_paths(scan_root, target)
+                self.assertEqual((root / "worker.md",), owners)
+                return owners
 
-                    args = self.args(root, task_file=task_file, session_id="", reconcile_rotation_audit=True)
-                    with (
-                        patch("omo_manager.omo_codex_start.task_target_lock", side_effect=target_lock),
-                        patch("omo_manager.omo_codex_start.task_file_lock", side_effect=file_lock),
-                        patch("omo_manager.omo_codex_start.reconcile_rotation_audit_locked", return_value="rotation-audit-reconciled"),
-                    ):
-                        self.assertEqual("rotation-audit-reconciled", reconcile_rotation_audit(args))
-                    task = (root / task_file).resolve()
-                    self.assertEqual(sorted({task, todo}, key=lambda path: str(path)), entered)
+            try:
+                with (
+                    patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                    patch("omo_manager.omo_codex_start.authoritative_active_target_task_paths", side_effect=scan),
+                    patch("omo_manager.omo_codex_start.query_reconciliation_session_id", return_value="119f670b-6a2f-7463-b9be-9aa6ff0cec43"),
+                ):
+                    self.assertEqual("rotation-audit-reconciled", reconcile_rotation_audit(self.reconciliation_args(root, pane)))
+            finally:
+                writer.join(2.0)
+            self.assertFalse(writer.is_alive())
+            self.assertTrue(acquired.is_set())
+            self.assertTrue(writer_finished.is_set())
+            self.assertTrue(competing.is_file())
+            self.assertGreaterEqual(n_scans, 3)
+            self.assertEqual(audit_before, (root / "rotation.audit").read_bytes())
+            self.assertEqual(task_before, (root / "worker.md").read_bytes())
+            self.assertEqual(todo_before, (root / "TODO.md").read_bytes())
+
+            failed_receipt = root / "reconciliation-after-membership-change.receipt"
+            with (
+                patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                patch("omo_manager.omo_codex_start.query_reconciliation_session_id") as query,
+                self.assertRaisesRegex(StartError, "sole authoritative active owner"),
+            ):
+                reconcile_rotation_audit(self.reconciliation_args(root, pane, reconciliation_receipt=failed_receipt))
+            query.assert_not_called()
+            self.assertFalse(failed_receipt.exists())
+            self.assertEqual(audit_before, (root / "rotation.audit").read_bytes())
+            self.assertEqual(task_before, (root / "worker.md").read_bytes())
+            self.assertEqual(todo_before, (root / "TODO.md").read_bytes())
 
     def test_reconcile_rotation_audit_refuses_invalid_audit_and_assertion_bindings(self) -> None:
         audit_cases = {
@@ -1642,7 +1718,7 @@ class CodexStartTests(unittest.TestCase):
                 self.assertNotIn(" resume ", command)
                 rotated = True
 
-            sessions = iter((("", "legacy"), ("", "legacy"), ("", "legacy"), (new_session, "")))
+            sessions = iter((("", "legacy"), (new_session, "")))
             with (
                 patch("omo_manager.omo_codex_start.resolve_pane", side_effect=resolve),
                 patch("omo_manager.omo_codex_start.inspect", return_value=Report("running", ["working"])),
@@ -1650,15 +1726,19 @@ class CodexStartTests(unittest.TestCase):
                 patch("omo_manager.omo_codex_start.prompt_text", return_value="worker-only prompt\n") as prompt,
                 patch("omo_manager.omo_codex_start.respawn_codex", side_effect=respawn),
                 patch("omo_manager.omo_codex_start.wait_started", return_value="running"),
+                patch("omo_manager.omo_codex_start.send_prompt") as deliver,
             ):
                 self.assertEqual("running", start(self.legacy_rotation_args(root)))
 
             prompt.assert_called_once()
+            deliver.assert_called_once()
             self.assertFalse(prompt.call_args.args[1])
             self.assertEqual(task_before, (root / "worker.md").read_bytes())
             audit = (root / "rotation.audit").read_text(encoding="utf-8")
             self.assertIn("old-session-id: unavailable-asserted-legacy\nlegacy-missing-session-id: asserted-and-observed\n", audit)
-            self.assertIn(f"new-session-id: {new_session}\nfinal-result: success\n", audit)
+            self.assertIn(f"new-session-id: {new_session}\nterminal-replacement-pane-pid: 5252\nterminal-replacement-command: bun\n", audit)
+            self.assertIn("terminal-authoritative-owner-count: 1\n", audit)
+            self.assertIn("terminal-prompt-delivery: authorized-after-terminal-sole-owner-proof\nfinal-result: success\n", audit)
 
     def test_legacy_rotation_refuses_false_or_missing_legacy_assertion(self) -> None:
         for case in ("assertion absent", "UUID recoverable"):
@@ -1680,7 +1760,7 @@ class CodexStartTests(unittest.TestCase):
                 self.assertFalse((root / "rotation.audit").exists())
 
     def test_legacy_rotation_refuses_lifecycle_role_target_and_identity_mismatches(self) -> None:
-        for case in ("blocker", "manager", "human", "protected", "process"):
+        for case in ("blocker", "manager", "human", "protected"):
             with self.subTest(case=case), tempfile.TemporaryDirectory() as raw_root:
                 root = Path(raw_root)
                 self.write_task(root, status="blocked", manager=case == "manager", pending=["preserve exact queue"])
@@ -1693,57 +1773,43 @@ class CodexStartTests(unittest.TestCase):
                     protected_targets=("cfg:2.0",) if case == "protected" else ("protected:9",),
                 )
 
-                def same_process(_pane: Pane) -> None:
-                    if case == "process" and (root / "rotation.audit").exists():
-                        raise StartError("tmux pane process identity changed before process replacement.")
-
                 with (
                     patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
                     patch("omo_manager.omo_codex_start.inspect", return_value=Report("running", ["working"])),
                     patch("omo_manager.omo_codex_start.query_status_session_id", return_value=("", "legacy")),
-                    patch("omo_manager.omo_codex_start.verify_same_process", side_effect=same_process),
                     patch("omo_manager.omo_codex_start.respawn_codex") as respawn,
                     self.assertRaises(StartError),
                 ):
                     start(args)
                 respawn.assert_not_called()
-                if case == "process":
-                    self.assertIn("final-result: failed", (root / "rotation.audit").read_text(encoding="utf-8"))
 
-    def test_legacy_rotation_catches_last_probe_mutation_and_respawn_failure(self) -> None:
-        for case in ("task mutation", "UUID recovery", "respawn failure"):
-            with self.subTest(case=case), tempfile.TemporaryDirectory() as raw_root:
-                root = Path(raw_root)
-                self.write_task(root, status="blocked", pending=["preserve exact queue"])
-                pane = Pane("cfg:2.0", "%2", "@2", "bun", root, 4242)
-                n_queries = 0
+    def test_rotation_uses_one_stable_old_identity_snapshot_despite_removed_probe_race(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root, status="blocked", pending=["preserve exact queue"])
+            initial = Pane("cfg:2.0", "%2", "@2", "bun", root, 4242)
+            replacement = replace(initial, pane_pid=5252)
+            rotated = False
 
-                def session(*_args: object) -> tuple[str, str]:
-                    nonlocal n_queries
-                    n_queries += 1
-                    if case == "task mutation" and n_queries == 3:
-                        task = root / "worker.md"
-                        task.write_text(task.read_text(encoding="utf-8") + "concurrent mutation\n", encoding="utf-8")
-                    if case == "UUID recovery" and n_queries == 3:
-                        return self.SESSION_ID, ""
-                    return "", "legacy"
+            def resolve(_target: str) -> Pane:
+                return replacement if rotated else initial
 
-                respawn_error = StartError("respawn failed")
-                with (
-                    patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
-                    patch("omo_manager.omo_codex_start.inspect", return_value=Report("running", ["working"])),
-                    patch("omo_manager.omo_codex_start.query_status_session_id", side_effect=session),
-                    patch("omo_manager.omo_codex_start.prompt_text", return_value="worker-only prompt\n"),
-                    patch("omo_manager.omo_codex_start.respawn_codex", side_effect=respawn_error) as respawn,
-                    self.assertRaises(StartError),
-                ):
-                    start(self.legacy_rotation_args(root))
+            def respawn(_pane: Pane, _command: str) -> None:
+                nonlocal rotated
+                rotated = True
 
-                if case in {"task mutation", "UUID recovery"}:
-                    respawn.assert_not_called()
-                else:
-                    respawn.assert_called_once()
-                self.assertIn("final-result: failed", (root / "rotation.audit").read_text(encoding="utf-8"))
+            sessions = iter(((self.SESSION_ID, ""), ("119f670b-6a2f-7463-b9be-9aa6ff0cec43", "")))
+            with (
+                patch("omo_manager.omo_codex_start.resolve_pane", side_effect=resolve),
+                patch("omo_manager.omo_codex_start.inspect", return_value=Report("running", ["working"])),
+                patch("omo_manager.omo_codex_start.query_status_session_id", side_effect=lambda *_args: next(sessions)) as query,
+                patch("omo_manager.omo_codex_start.prompt_text", return_value="worker-only prompt\n"),
+                patch("omo_manager.omo_codex_start.respawn_codex", side_effect=respawn),
+                patch("omo_manager.omo_codex_start.wait_started", return_value="running"),
+                patch("omo_manager.omo_codex_start.send_prompt"),
+            ):
+                self.assertEqual("running", start(self.rotation_args(root)))
+            self.assertEqual(2, query.call_count)
 
     def test_legacy_rotation_audit_finalization_failure_leaves_durable_unknown(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
@@ -1782,7 +1848,7 @@ class CodexStartTests(unittest.TestCase):
                     nonlocal rotated
                     rotated = True
 
-                sessions = iter(((self.SESSION_ID, ""), (self.SESSION_ID, ""), (self.SESSION_ID, ""), ("119f670b-6a2f-7463-b9be-9aa6ff0cec43", "")))
+                sessions = iter(((self.SESSION_ID, ""), ("119f670b-6a2f-7463-b9be-9aa6ff0cec43", "")))
                 startup_error = StartError("fresh startup failed after respawn")
                 with (
                     patch("omo_manager.omo_codex_start.resolve_pane", side_effect=resolve),
@@ -1869,43 +1935,196 @@ class CodexStartTests(unittest.TestCase):
                 patch("omo_manager.omo_codex_start.inspect", return_value=Report("running", ["working"])),
                 patch("omo_manager.omo_codex_start.query_status_session_id", side_effect=capture),
                 patch("omo_manager.omo_codex_start.respawn_codex") as respawn,
-                self.assertRaisesRegex(StartError, "task or pending queue no longer has its captured binding"),
+                self.assertRaisesRegex(StartError, "task bytes do not equal|atomic rotation snapshot"),
             ):
                 start(self.rotation_args(root))
             respawn.assert_not_called()
             self.assertFalse((root / "rotation.audit").exists())
 
-    def test_rotate_worker_revalidates_binding_and_session_after_audit_reservation(self) -> None:
-        for case in ("task during reservation", "task during session check", "session"):
+    def test_rotation_snapshot_rejects_every_bound_identity_and_custody_drift(self) -> None:
+        for case in ("task", "queue", "manager", "target", "pane", "protected", "audit", "custody", "sole owner"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as raw_root:
+                root = Path(raw_root)
+                self.write_task(root, status="blocked", pending=["first queue item", "second queue item"])
+                task_file = root / "worker.md"
+                pane = Pane("cfg:2.0", "%2", "@2", "bun", root, 4242)
+                args = self.rotation_args(root, expected_pending_items=("first queue item", "second queue item"))
+                with (
+                    patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
+                    patch("omo_manager.omo_codex_start.inspect", return_value=Report("running", ["working"])),
+                    patch("omo_manager.omo_codex_start.query_status_session_id", return_value=(self.SESSION_ID, "")),
+                ):
+                    task = validate_task(args, pane, verify_target=False)
+                    snapshot = capture_rotation_snapshot(args, pane, task)
+                changed_args = args
+                changed_pane = pane
+                task_path = task_file
+                if case == "task":
+                    task_path.write_text(task_path.read_text(encoding="utf-8") + "drift\n", encoding="utf-8")
+                elif case in {"queue", "manager"}:
+                    text = task_path.read_text(encoding="utf-8")
+                    if case == "queue":
+                        text = text.replace("  - first queue item\n  - second queue item", "  - second queue item\n  - first queue item")
+                    else:
+                        text = text.replace("managerat: cfg:1", "managerat: cfg:9")
+                    task_path.write_text(text, encoding="utf-8")
+                elif case == "target":
+                    changed_args = replace(args, target="cfg:9")
+                elif case == "pane":
+                    changed_pane = replace(pane, pane_pid=5252)
+                elif case == "protected":
+                    changed_args = replace(args, protected_targets=("other:9",))
+                elif case == "audit":
+                    changed_args = replace(args, audit_output=root / "other.audit")
+                elif case == "custody":
+                    (root / "TODO.md").write_text("current:\n\nworker.md cfg:2\nother.md cfg:9\n", encoding="utf-8")
+                else:
+                    (root / "competing.md").write_bytes(task_path.read_bytes())
+                with patch("omo_manager.omo_codex_start.resolve_pane", return_value=changed_pane), self.assertRaises(StartError):
+                    verify_rotation_snapshot(changed_args, snapshot)
+
+    def test_rotation_withholds_delivery_until_audit_and_terminal_sole_owner_proof(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root, status="blocked", pending=["preserve exact queue"])
+            initial = Pane("cfg:2.0", "%2", "@2", "bun", root, 4242)
+            replacement = replace(initial, pane_pid=5252)
+            rotated = False
+
+            def resolve(_target: str) -> Pane:
+                return replacement if rotated else initial
+
+            def respawn(_pane: Pane, _command: str) -> None:
+                nonlocal rotated
+                rotated = True
+
+            real_finish = finish_rotation_audit
+            with (
+                patch("omo_manager.omo_codex_start.resolve_pane", side_effect=resolve),
+                patch("omo_manager.omo_codex_start.inspect", return_value=Report("running", ["working"])),
+                patch(
+                    "omo_manager.omo_codex_start.query_status_session_id",
+                    side_effect=((self.SESSION_ID, ""), ("119f670b-6a2f-7463-b9be-9aa6ff0cec43", "")),
+                ),
+                patch("omo_manager.omo_codex_start.prompt_text", return_value="worker-only prompt\n"),
+                patch("omo_manager.omo_codex_start.respawn_codex", side_effect=respawn),
+                patch("omo_manager.omo_codex_start.wait_started", return_value="running"),
+                patch("omo_manager.omo_codex_start.send_prompt") as deliver,
+            ):
+                def finish(
+                    path: Path,
+                    prepared: str,
+                    result: str,
+                    new_session_id: str = "",
+                    failure_kind: str = "",
+                    terminal_owner_task: str = "",
+                    terminal_replacement: Pane | None = None,
+                ) -> None:
+                    deliver.assert_not_called()
+                    real_finish(path, prepared, result, new_session_id, failure_kind, terminal_owner_task, terminal_replacement)
+
+                with patch("omo_manager.omo_codex_start.finish_rotation_audit", side_effect=finish):
+                    self.assertEqual("running", start(self.rotation_args(root)))
+            deliver.assert_called_once()
+
+    def test_rotation_rejects_exact_replacement_drift_before_uuid_audit_or_prompt(self) -> None:
+        for phase in ("before UUID", "before audit finalization", "before prompt"):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as raw_root:
+                root = Path(raw_root)
+                self.write_task(root, status="blocked", pending=["preserve exact queue"])
+                initial = Pane("cfg:2.0", "%2", "@2", "bun", root, 4242)
+                first = replace(initial, pane_pid=5252)
+                second = replace(initial, pane_pid=6262, command="codex")
+                current = initial
+
+                def resolve(_target: str) -> Pane:
+                    return current
+
+                def respawn(_pane: Pane, _command: str) -> None:
+                    nonlocal current
+                    current = first
+
+                def wait(_pane: Pane, _marker: str, _timeout_s: float) -> str:
+                    nonlocal current
+                    if phase == "before UUID":
+                        current = second
+                    return "running"
+
+                def session(*_args: object) -> tuple[str, str]:
+                    nonlocal current
+                    if current == initial:
+                        return self.SESSION_ID, ""
+                    if phase == "before audit finalization":
+                        current = second
+                    return "119f670b-6a2f-7463-b9be-9aa6ff0cec43", ""
+
+                real_finish = finish_rotation_audit
+
+                def finish(
+                    path: Path,
+                    prepared: str,
+                    result: str,
+                    new_session_id: str = "",
+                    failure_kind: str = "",
+                    terminal_owner_task: str = "",
+                    terminal_replacement: Pane | None = None,
+                ) -> None:
+                    nonlocal current
+                    real_finish(path, prepared, result, new_session_id, failure_kind, terminal_owner_task, terminal_replacement)
+                    if phase == "before prompt" and result == "success":
+                        current = second
+
+                with (
+                    patch("omo_manager.omo_codex_start.resolve_pane", side_effect=resolve),
+                    patch("omo_manager.omo_codex_start.inspect", return_value=Report("running", ["working"])),
+                    patch("omo_manager.omo_codex_start.query_status_session_id", side_effect=session),
+                    patch("omo_manager.omo_codex_start.prompt_text", return_value="worker-only prompt\n"),
+                    patch("omo_manager.omo_codex_start.respawn_codex", side_effect=respawn),
+                    patch("omo_manager.omo_codex_start.wait_started", side_effect=wait),
+                    patch("omo_manager.omo_codex_start.finish_rotation_audit", side_effect=finish),
+                    patch("omo_manager.omo_codex_start.send_prompt") as deliver,
+                    self.assertRaisesRegex(StartError, "atomic rotation snapshot"),
+                ):
+                    start(self.rotation_args(root))
+                deliver.assert_not_called()
+                audit = (root / "rotation.audit").read_text(encoding="utf-8")
+                self.assertIn("replacement-pane-pid: 5252\nreplacement-command: bun\n", audit)
+                self.assertNotIn("terminal-replacement-pane-pid: 6262", audit)
+                if phase == "before prompt":
+                    self.assertIn("terminal-replacement-pane-pid: 5252\nterminal-replacement-command: bun\n", audit)
+                    self.assertIn("final-result: success\n", audit)
+                else:
+                    self.assertIn("final-result: failed\n", audit)
+
+    def test_rotate_worker_revalidates_binding_after_audit_reservation(self) -> None:
+        for case in ("task", "queue", "manager", "sole owner"):
             with self.subTest(case=case), tempfile.TemporaryDirectory() as raw_root:
                 root = Path(raw_root)
                 self.write_task(root, status="blocked", pending=["preserve exact queue"])
                 pane = Pane("cfg:2.0", "%2", "@2", "bun", root, 4242)
-                reserved = False
 
                 def reserve(path: Path, text: str) -> None:
-                    nonlocal reserved
                     reserve_rotation_audit(path, text)
-                    reserved = True
-                    if case == "task during reservation":
-                        task = root / "worker.md"
+                    task = root / "worker.md"
+                    if case == "task":
                         task.write_text(task.read_text(encoding="utf-8") + "lifecycle drift\n", encoding="utf-8")
+                    elif case in {"queue", "manager"}:
+                        needle = "preserve exact queue" if case == "queue" else "managerat: cfg:1"
+                        replacement = "changed queue" if case == "queue" else "managerat: cfg:9"
+                        task.write_text(task.read_text(encoding="utf-8").replace(needle, replacement), encoding="utf-8")
+                    elif case == "sole owner":
+                        (root / "competing.md").write_bytes(task.read_bytes())
 
-                def session(*_args: object) -> tuple[str, str]:
-                    if reserved and case == "task during session check":
-                        task = root / "worker.md"
-                        task.write_text(task.read_text(encoding="utf-8") + "lifecycle drift\n", encoding="utf-8")
-                    return ("119f670b-6a2f-7463-b9be-9aa6ff0cec43", "") if reserved and case == "session" else (self.SESSION_ID, "")
-
+                args = self.rotation_args(root)
                 with (
                     patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane),
                     patch("omo_manager.omo_codex_start.inspect", return_value=Report("running", ["working"])),
-                    patch("omo_manager.omo_codex_start.query_status_session_id", side_effect=session),
+                    patch("omo_manager.omo_codex_start.query_status_session_id", return_value=(self.SESSION_ID, "")),
                     patch("omo_manager.omo_codex_start.reserve_rotation_audit", side_effect=reserve),
                     patch("omo_manager.omo_codex_start.respawn_codex") as respawn,
                     self.assertRaises(StartError),
                 ):
-                    start(self.rotation_args(root))
+                    start(args)
 
                 respawn.assert_not_called()
                 self.assertIn("final-result: failed", (root / "rotation.audit").read_text(encoding="utf-8"))

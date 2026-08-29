@@ -25,7 +25,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Mapping
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,6 +37,7 @@ try:
     from omo_manager.omo_codex_stop import extract_new_status_session_id, query_status_session_id
     from omo_manager.omo_task_lock import task_file_lock, task_target_lock
     from omo_manager.omo_task_metadata import TARGET_RE, TASK_FRONTMATTER_STATUSES, frontmatter_parts, parse_task_metadata
+    from omo_manager.omo_task_status import authoritative_active_target_task_paths, root_membership_lock
 except ModuleNotFoundError:
     from omo_codex_status import Args as StatusArgs
     from omo_codex_status import CODEX_FOOTER_RE, current_block, current_input_text, exact_tail, inspect, is_stock_placeholder_input_text, report_from_lines, tail, visible_error_lines
@@ -44,6 +45,7 @@ except ModuleNotFoundError:
     from omo_codex_stop import extract_new_status_session_id, query_status_session_id
     from omo_task_lock import task_file_lock, task_target_lock
     from omo_task_metadata import TARGET_RE, TASK_FRONTMATTER_STATUSES, frontmatter_parts, parse_task_metadata
+    from omo_task_status import authoritative_active_target_task_paths, root_membership_lock  # pyright: ignore[reportImplicitRelativeImport]
 
 HELPER_DIR = Path(__file__).resolve().parent
 WORKER_DEFAULTS = HELPER_DIR / "WORKER_DEFAULTS.md"
@@ -179,6 +181,19 @@ class TaskBinding:
     pending_task_items: tuple[str, ...]
     blocked_on: str
     task_sha256: str
+
+
+# 🧑 Manager delegation: "replace separate rotation identity probes with one stable atomic snapshot"
+@dataclass(frozen=True)
+class RotationSnapshot:
+    pane: Pane
+    task: TaskBinding
+    old_session_id: str
+    task_path: Path
+    protected_targets: tuple[str, ...]
+    audit_path: Path
+    todo_sha256: str
+    sha256: str
 
 
 @dataclass(frozen=True)
@@ -535,7 +550,7 @@ def current_todo_entries(text: str) -> set[str]:
     return entries
 
 
-def validate_task(args: Args, pane: Pane) -> TaskBinding:
+def validate_task(args: Args, pane: Pane, *, verify_target: bool = True) -> TaskBinding:
     path = task_path(args.root, args.task_file)
     if not path.is_file():
         raise StartError(f"task file does not exist: {path}")
@@ -566,7 +581,7 @@ def validate_task(args: Args, pane: Pane) -> TaskBinding:
             raise StartError("task blocker does not equal --expected-blocker.")
         if hashlib.sha256(task_bytes).hexdigest() != args.expected_task_sha256:
             raise StartError("task bytes do not equal --expected-task-sha256.")
-    if resolve_pane(metadata.runat).pane_id != pane.pane_id:
+    if verify_target and resolve_pane(metadata.runat).pane_id != pane.pane_id:
         raise StartError(f"task `runat` {metadata.runat} does not identify target {pane.target}.")
     todo = args.root / "TODO.md"
     expected = f"{task_ref(args.root, path)} {metadata.runat}"
@@ -705,6 +720,114 @@ def verify_task_binding(args: Args, pane: Pane, expected: TaskBinding) -> None:
         raise StartError(f"task or pending queue no longer has its captured binding: {error}") from error
     if actual != expected:
         raise StartError("task or pending queue changed after restart preparation.")
+
+
+def rotation_owner_path(args: Args, pane: Pane) -> Path:
+    """Return the exact task only when it is the sole active target owner."""
+
+    expected = task_path(args.root, args.task_file).resolve()
+    try:
+        owners = authoritative_active_target_task_paths(args.root, pane.target)
+    except (OSError, UnicodeError, ValueError) as error:
+        raise StartError(f"could not prove authoritative rotation ownership: {error}") from error
+    if owners != (expected,):
+        refs = ", ".join(path.relative_to(args.root.resolve()).as_posix() for path in owners) or "none"
+        raise StartError(f"worker rotation requires the task to be the sole authoritative active owner of `{pane.target}`: {refs}.")
+    return expected
+
+
+def rotation_snapshot_sha256(args: Args, pane: Pane, task: TaskBinding, old_session_id: str, owner: Path, todo_sha256: str) -> str:
+    """Hash every immutable pre-rotation identity and custody assertion."""
+
+    fields = (
+        args.task_file,
+        task.task_sha256,
+        task.status,
+        task.managerat,
+        *task.pending_task_items,
+        pane.target,
+        pane.pane_id,
+        pane.window_id,
+        str(pane.pane_pid),
+        pane.command,
+        old_session_id,
+        *args.protected_targets,
+        owner.relative_to(args.root.resolve()).as_posix(),
+        str(args.audit_output),
+        todo_sha256,
+    )
+    return hashlib.sha256("\0".join(fields).encode()).hexdigest()
+
+
+def capture_rotation_snapshot(args: Args, pane: Pane, task: TaskBinding) -> RotationSnapshot:
+    """Capture the old UUID once and bind it to stable pane and custody state."""
+
+    require_restartable_codex(pane)
+    old_session_id, _ = query_status_session_id(
+        pane.pane_id,
+        240,
+        min(10.0, args.startup_timeout_s),
+        None,
+        (pane.target, pane.pane_id),
+    )
+    if args.assert_legacy_missing_session_id:
+        if old_session_id:
+            raise StartError("legacy missing-session assertion is false because the old worker UUID is recoverable; the pane was not replaced.")
+    elif not old_session_id:
+        raise StartError("could not capture the current worker session id; the pane was not replaced.")
+    current = resolve_pane(pane.target)
+    if current != pane:
+        raise StartError("worker pane identity or process changed during the atomic rotation snapshot; the pane was not replaced.")
+    current_task = validate_task(args, current, verify_target=False)
+    if current_task != task:
+        raise StartError("task, ordered queue, manager, or custody changed during the atomic rotation snapshot; the pane was not replaced.")
+    owner = rotation_owner_path(args, current)
+    todo_sha256 = hashlib.sha256((args.root / "TODO.md").read_bytes()).hexdigest()
+    audit_path = args.audit_output
+    if audit_path is None:
+        raise StartError("--rotate-worker requires --audit-output.")
+    return RotationSnapshot(
+        current,
+        current_task,
+        old_session_id,
+        owner,
+        args.protected_targets,
+        audit_path,
+        todo_sha256,
+        rotation_snapshot_sha256(args, current, current_task, old_session_id, owner, todo_sha256),
+    )
+
+
+def verify_rotation_snapshot(args: Args, expected: RotationSnapshot, *, replacement: Pane | None = None) -> Pane:
+    """Prove snapshot stability and sole ownership without querying the old UUID again."""
+
+    current = resolve_pane(expected.pane.target)
+    same_pane = (current.target, current.pane_id, current.window_id) == (
+        expected.pane.target,
+        expected.pane.pane_id,
+        expected.pane.window_id,
+    )
+    expected_process = expected.pane if replacement is None else replacement
+    valid_replacement = replacement is None or (
+        (replacement.target, replacement.pane_id, replacement.window_id) == (expected.pane.target, expected.pane.pane_id, expected.pane.window_id)
+        and replacement.pane_pid != expected.pane.pane_pid
+        and replacement.command in SUPPORTED_CODEX_PROCESS_COMMANDS
+    )
+    if not same_pane or not valid_replacement or (current.pane_pid, current.command) != (expected_process.pane_pid, expected_process.command):
+        phase = "after replacement" if replacement is not None else "before replacement"
+        raise StartError(f"worker pane identity or process does not match the atomic rotation snapshot {phase}.")
+    current_task = validate_task(args, current, verify_target=False)
+    owner = rotation_owner_path(args, current)
+    if (
+        current_task != expected.task
+        or owner != expected.task_path
+        or args.protected_targets != expected.protected_targets
+        or args.audit_output != expected.audit_path
+        or hashlib.sha256((args.root / "TODO.md").read_bytes()).hexdigest() != expected.todo_sha256
+        or rotation_snapshot_sha256(args, expected.pane, current_task, expected.old_session_id, owner, expected.todo_sha256) != expected.sha256
+    ):
+        raise StartError("task, ordered queue, manager, target, protected set, audit, or sole ownership drifted from the atomic rotation snapshot.")
+    return current
 
 
 def descendant_pids(root_pid: int) -> set[int]:
@@ -1080,7 +1203,15 @@ def reserve_rotation_audit(path: Path, text: str) -> None:
         raise StartError(f"could not reserve private rotation audit: {error}") from error
 
 
-def finish_rotation_audit(path: Path, prepared: str, result: str, new_session_id: str = "", failure_kind: str = "") -> None:
+def finish_rotation_audit(
+    path: Path,
+    prepared: str,
+    result: str,
+    new_session_id: str = "",
+    failure_kind: str = "",
+    terminal_owner_task: str = "",
+    terminal_replacement: Pane | None = None,
+) -> None:
     """Finalize only the exact owner-private rotation audit reserved by this run."""
 
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -1094,7 +1225,20 @@ def finish_rotation_audit(path: Path, prepared: str, result: str, new_session_id
                 raise StartError("reserved rotation audit lost its owner-private file binding.")
             if output.read() != prepared:
                 raise StartError("reserved rotation audit changed before completion.")
-        suffix = f"new-session-id: {new_session_id}\n" if new_session_id else f"failure-kind: {failure_kind}\n" if failure_kind else ""
+        if terminal_owner_task and terminal_replacement is not None:
+            suffix = "\n".join(
+                (
+                    f"new-session-id: {new_session_id}",
+                    f"terminal-replacement-pane-pid: {terminal_replacement.pane_pid}",
+                    f"terminal-replacement-command: {terminal_replacement.command}",
+                    "terminal-authoritative-owner-count: 1",
+                    f"terminal-authoritative-owner-task-file: {terminal_owner_task}",
+                    "terminal-prompt-delivery: authorized-after-terminal-sole-owner-proof",
+                    "",
+                )
+            )
+        else:
+            suffix = f"new-session-id: {new_session_id}\n" if new_session_id else f"failure-kind: {failure_kind}\n" if failure_kind else ""
         finalized = prepared + suffix + f"final-result: {result}\n"
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False) as output:
             temporary = Path(output.name)
@@ -1156,16 +1300,19 @@ def finish_rotation_audit(path: Path, prepared: str, result: str, new_session_id
             temporary.unlink(missing_ok=True)
 
 
-def checkpoint_rotation_replacement(path: Path, prepared: str, original: Pane, args: Args, task: TaskBinding) -> tuple[str, Pane]:
+def checkpoint_rotation_replacement(path: Path, prepared: str, snapshot: RotationSnapshot, args: Args) -> tuple[str, Pane]:
     """Persist proof that this rotation observed its replacement process."""
 
     deadline_s = time.monotonic() + min(10.0, args.startup_timeout_s)
     while True:
-        current = resolve_pane(original.target)
-        if current.pane_id != original.pane_id or current.window_id != original.window_id or current.target != original.target:
+        current = resolve_pane(snapshot.pane.target)
+        if current.pane_id != snapshot.pane.pane_id or current.window_id != snapshot.pane.window_id or current.target != snapshot.pane.target:
             raise StartError("rotation replacement checkpoint found a rebound pane or window.")
-        verify_task_binding(args, current, task)
-        if current.pane_pid != original.pane_pid and current.command in SUPPORTED_CODEX_PROCESS_COMMANDS:
+        current_task = validate_task(args, current, verify_target=False)
+        if current_task != snapshot.task or rotation_owner_path(args, current) != snapshot.task_path:
+            raise StartError("rotation replacement checkpoint found task, queue, manager, or sole-owner drift.")
+        if current.pane_pid != snapshot.pane.pane_pid and current.command in SUPPORTED_CODEX_PROCESS_COMMANDS:
+            current = verify_rotation_snapshot(args, snapshot, replacement=current)
             break
         if time.monotonic() >= deadline_s:
             raise StartError("rotation replacement checkpoint did not observe a new supported Codex process before timeout.")
@@ -1230,6 +1377,11 @@ FAILED_ROTATION_AUDIT_FIELDS = {
     "pending-items-sha256",
     "protected-target-count",
     "protected-targets-sha256",
+    "authoritative-owner-count",
+    "authoritative-owner-task-file",
+    "rotation-snapshot-sha256",
+    "todo-sha256",
+    "prompt-delivery",
     "is-manager",
     "tool",
     "completion",
@@ -1412,6 +1564,11 @@ def reconciliation_binding(args: Args) -> ReconciliationBinding:
         or fields["pending-items-sha256"] != queue_sha256
         or protected_count != len(args.protected_targets)
         or fields["protected-targets-sha256"] != protected_sha256
+        or fields["authoritative-owner-count"] != "1"
+        or fields["authoritative-owner-task-file"] != args.task_file
+        or SHA256_RE.fullmatch(fields["rotation-snapshot-sha256"]) is None
+        or fields["prompt-delivery"] != "held-until-terminal-sole-owner-proof"
+        or SHA256_RE.fullmatch(fields["todo-sha256"]) is None
         or fields["is-manager"] != "false"
         or fields["tool"] != "codex"
         or fields["legacy-missing-session-id"] != "not-asserted"
@@ -1424,6 +1581,28 @@ def reconciliation_binding(args: Args) -> ReconciliationBinding:
         or fields["replacement-command"] != pane.command
     ):
         raise StartError("rotation audit does not match the exact task, pane, lifecycle, or protection binding.")
+    owner = rotation_owner_path(args, pane)
+    snapshot_fields = (
+        args.task_file,
+        fields["task-sha256"],
+        fields["status"],
+        fields["manager-target"],
+        *args.expected_pending_items,
+        fields["target"],
+        fields["pane-id"],
+        fields["window-id"],
+        fields["old-pane-pid"],
+        fields["old-command"],
+        fields["old-session-id"],
+        *args.protected_targets,
+        owner.relative_to(args.root.resolve()).as_posix(),
+        str(audit.path),
+        fields["todo-sha256"],
+    )
+    if fields["rotation-snapshot-sha256"] != hashlib.sha256("\0".join(snapshot_fields).encode()).hexdigest():
+        raise StartError("rotation audit does not match its bound atomic snapshot digest.")
+    if owner != task_path(args.root, args.task_file).resolve():
+        raise StartError("rotation audit reconciliation requires the same sole authoritative task owner.")
     if pane.pane_pid != args.expected_current_pane_pid or pane.command != args.expected_current_command or pane.command not in SUPPORTED_CODEX_PROCESS_COMMANDS:
         raise StartError("current pane process does not match the explicit reconciliation assertion.")
     if old_pid <= 0 or replacement_pid <= 0 or replacement_pid != pane.pane_pid or pane.pane_pid == old_pid:
@@ -1437,6 +1616,9 @@ def reconciliation_binding(args: Args) -> ReconciliationBinding:
 
     if todo_identity(todo_before) != todo_identity(todo_after):
         raise StartError("TODO changed while its reconciliation binding was read.")
+    todo_sha256 = hashlib.sha256(todo_bytes).hexdigest()
+    if fields["todo-sha256"] != todo_sha256:
+        raise StartError("rotation audit does not match the preserved TODO custody bytes.")
     return ReconciliationBinding(
         audit,
         task,
@@ -1449,7 +1631,7 @@ def reconciliation_binding(args: Args) -> ReconciliationBinding:
         todo_before.st_ino,
         todo_before.st_size,
         todo_before.st_mtime_ns,
-        hashlib.sha256(todo_bytes).hexdigest(),
+        todo_sha256,
     )
 
 
@@ -1578,7 +1760,7 @@ def reconcile_rotation_audit(args: Args) -> str:
 
     task = task_path(args.root, args.task_file)
     todo = args.root / "TODO.md"
-    with task_target_lock(args.root, args.target), ExitStack() as locks:
+    with root_membership_lock(args.root), task_target_lock(args.root, args.target), ExitStack() as locks:
         for path in sorted({task, todo}, key=lambda candidate: str(candidate)):
             locks.enter_context(task_file_lock(path))
         return reconcile_rotation_audit_locked(args)
@@ -2274,36 +2456,23 @@ def verify_restart_continuity(
         raise StartError("restarted Codex did not prove continuity with the captured original session.")
 
 
-def verify_fresh_rotation(args: Args, original: Pane, original_session_id: str, task: TaskBinding) -> str:
+def verify_fresh_rotation(args: Args, snapshot: RotationSnapshot, replacement: Pane) -> str:
     """Prove same-pane fresh-session startup and unchanged task boundaries."""
 
-    current = resolve_pane(original.target)
-    if current.pane_id != original.pane_id or current.window_id != original.window_id:
-        raise StartError("tmux pane or window identity changed after worker rotation.")
-    if current.pane_pid == original.pane_pid:
-        raise StartError("Codex pane process identity did not change during worker rotation.")
-    verify_task_binding(args, current, task)
-    fresh_session_id, _ = query_status_session_id(current.pane_id, 240, min(10.0, args.startup_timeout_s))
+    current = verify_rotation_snapshot(args, snapshot, replacement=replacement)
+    fresh_session_id, _ = query_status_session_id(
+        current.pane_id,
+        240,
+        min(10.0, args.startup_timeout_s),
+        None,
+        (current.target, current.pane_id),
+    )
     if not fresh_session_id:
         raise NewSessionIdCaptureFailed("rotated worker did not expose a new Codex session id.")
-    if fresh_session_id == original_session_id:
+    if fresh_session_id == snapshot.old_session_id:
         raise StartError("rotated worker resumed the old Codex session instead of starting fresh.")
+    verify_rotation_snapshot(args, snapshot, replacement=replacement)
     return fresh_session_id
-
-
-def verify_rotation_before_respawn(args: Args, pane: Pane, original_session_id: str, task: TaskBinding) -> None:
-    """Revalidate every worker-rotation binding at the replacement boundary."""
-
-    if pane.target.partition(":")[0].startswith("h") or target_is_fresh_rotation_protected(pane.target, args.protected_targets):
-        raise StartError("worker rotation target became prohibited before respawn; the pane was not replaced.")
-    current_session_id, _ = query_status_session_id(pane.pane_id, 240, min(10.0, args.startup_timeout_s))
-    if args.assert_legacy_missing_session_id:
-        if current_session_id:
-            raise StartError("legacy missing-session assertion is false because the old worker UUID is recoverable; the pane was not replaced.")
-    elif current_session_id != original_session_id:
-        raise StartError("current worker session changed before rotation; the pane was not replaced.")
-    verify_task_binding(args, pane, task)
-    verify_same_process(pane)
 
 
 def start(args: Args) -> str:
@@ -2359,12 +2528,17 @@ def start(args: Args) -> str:
     if not any(modes):
         require_same_shell(pane)
     path = task_path(args.root, args.task_file)
-    with task_target_lock(args.root, pane.target), task_file_lock(path):
-        verify_same_pane(pane)
+    membership_lock = root_membership_lock(args.root) if args.rotate_worker else nullcontext()
+    with membership_lock, task_target_lock(args.root, pane.target), ExitStack() as lifecycle_locks:
+        lock_paths = {path, args.root / "TODO.md"} if args.rotate_worker else {path}
+        for lock_path in sorted(lock_paths, key=str):
+            lifecycle_locks.enter_context(task_file_lock(lock_path))
+        if not args.rotate_worker:
+            verify_same_pane(pane)
         if not any(modes):
             require_same_shell(pane)
-        task_binding = validate_task(args, pane)
-        if args.restart_running or args.rotate_worker:
+        task_binding = validate_task(args, pane, verify_target=not args.rotate_worker)
+        if args.restart_running:
             require_restartable_codex(pane)
         if args.recover_non_codex:
             require_recovery_target(pane, args.recovery_evidence, args.root, args.task_file, task_binding)
@@ -2408,7 +2582,7 @@ def start(args: Args) -> str:
             return wait_resume_cwd_recovery(pane, args.session_id, args.startup_timeout_s)
         effective_args = args
         live_pcodx_state: dict[str, str] | None = None
-        original_session_id = ""
+        rotation_snapshot: RotationSnapshot | None = None
         if args.restart_running and task_binding.tool == "pcodx":
             live_pcodx_state = pcodx_state(pane)
         if args.restart_running and not args.session_id:
@@ -2423,13 +2597,7 @@ def start(args: Args) -> str:
                     raise StartError("live PCODX state changed during session capture; the pane was not replaced.")
                 effective_args = replace(args, session_id=session_id)
         if args.rotate_worker:
-            original_session_id, _ = query_status_session_id(pane.pane_id, 240, min(10.0, args.startup_timeout_s))
-            if args.assert_legacy_missing_session_id and original_session_id:
-                raise StartError("legacy missing-session assertion is false because the old worker UUID is recoverable; the pane was not replaced.")
-            if not args.assert_legacy_missing_session_id and not original_session_id:
-                raise StartError("could not capture the current worker session id; the pane was not replaced.")
-            require_restartable_codex(pane)
-            verify_task_binding(args, pane, task_binding)
+            rotation_snapshot = capture_rotation_snapshot(args, pane, task_binding)
             effective_args = replace(args, prompt_file=path, session_id="")
         text = prompt_text(effective_args, False if args.rotate_worker else task_binding.is_manager)
         prompt_path: Path | None = None
@@ -2444,7 +2612,7 @@ def start(args: Args) -> str:
             command = launch_command(
                 effective_args,
                 pane,
-                None if (args.prompt_file is not None and not any((args.restart_running, args.rotate_worker, args.recover_non_codex))) else prompt_path,
+                None if args.rotate_worker or (args.prompt_file is not None and not any((args.restart_running, args.recover_non_codex))) else prompt_path,
                 marker,
                 replace_process=args.restart_running or args.rotate_worker or args.recover_non_codex,
                 tool=task_binding.tool,
@@ -2467,13 +2635,15 @@ def start(args: Args) -> str:
                         raise StartError("live PCODX state changed before respawn; the pane was not replaced.")
                     verify_human_restart_authority(args, pane, human_restart_authority)
                 if args.rotate_worker:
-                    verify_rotation_before_respawn(args, pane, original_session_id, task_binding)
+                    if rotation_snapshot is None:
+                        raise StartError("worker rotation lacks its atomic identity snapshot.")
+                    pane = verify_rotation_snapshot(args, rotation_snapshot)
                     audit_path = args.audit_output
                     if audit_path is None:
                         raise StartError("--rotate-worker requires --audit-output.")
                     queue_sha256 = hashlib.sha256("\0".join(task_binding.pending_task_items).encode()).hexdigest()
                     protected_sha256 = hashlib.sha256("\0".join(args.protected_targets).encode()).hexdigest()
-                    old_session_evidence = original_session_id or "unavailable-asserted-legacy"
+                    old_session_evidence = rotation_snapshot.old_session_id or "unavailable-asserted-legacy"
                     prepared_audit = "\n".join(
                         (
                             "operation: rotate-worker",
@@ -2492,6 +2662,11 @@ def start(args: Args) -> str:
                             f"pending-items-sha256: {queue_sha256}",
                             f"protected-target-count: {len(args.protected_targets)}",
                             f"protected-targets-sha256: {protected_sha256}",
+                            "authoritative-owner-count: 1",
+                            f"authoritative-owner-task-file: {args.task_file}",
+                            f"rotation-snapshot-sha256: {rotation_snapshot.sha256}",
+                            f"todo-sha256: {rotation_snapshot.todo_sha256}",
+                            "prompt-delivery: held-until-terminal-sole-owner-proof",
                             "is-manager: false",
                             "tool: codex",
                             "completion: unknown-until-finalized",
@@ -2501,11 +2676,11 @@ def start(args: Args) -> str:
                     reserve_rotation_audit(audit_path, prepared_audit)
                     active_audit = prepared_audit
                     try:
-                        verify_rotation_before_respawn(args, pane, original_session_id, task_binding)
+                        pane = verify_rotation_snapshot(args, rotation_snapshot)
                         respawn_codex(pane, command)
-                        active_audit, _replacement = checkpoint_rotation_replacement(audit_path, prepared_audit, pane, args, task_binding)
-                        result = wait_started(pane, marker, args.startup_timeout_s)
-                        new_session_id = verify_fresh_rotation(args, pane, original_session_id, task_binding)
+                        active_audit, replacement = checkpoint_rotation_replacement(audit_path, prepared_audit, rotation_snapshot, args)
+                        result = wait_started(replacement, marker, args.startup_timeout_s)
+                        new_session_id = verify_fresh_rotation(args, rotation_snapshot, replacement)
                     except NewSessionIdCaptureFailed as rotation_error:
                         try:
                             finish_rotation_audit(audit_path, active_audit, "failed", failure_kind=RECONCILABLE_ROTATION_FAILURE_KIND)
@@ -2518,7 +2693,26 @@ def start(args: Args) -> str:
                         except Exception as audit_error:
                             rotation_error.add_note(f"private audit finalization also failed; audit remains completion-unknown: {audit_error}")
                         raise
-                    finish_rotation_audit(audit_path, active_audit, "success", new_session_id)
+                    try:
+                        replacement = verify_rotation_snapshot(args, rotation_snapshot, replacement=replacement)
+                    except Exception as rotation_error:
+                        try:
+                            finish_rotation_audit(audit_path, active_audit, "failed")
+                        except Exception as audit_error:
+                            rotation_error.add_note(f"private audit finalization also failed; audit remains completion-unknown: {audit_error}")
+                        raise
+                    finish_rotation_audit(
+                        audit_path,
+                        active_audit,
+                        "success",
+                        new_session_id,
+                        terminal_owner_task=args.task_file,
+                        terminal_replacement=replacement,
+                    )
+                    replacement = verify_rotation_snapshot(args, rotation_snapshot, replacement=replacement)
+                    if prompt_path is None:
+                        raise StartError("worker rotation did not prepare its held task prompt.")
+                    send_prompt(replacement, prompt_path)
                     return result
                 respawn_codex(pane, command)
             else:

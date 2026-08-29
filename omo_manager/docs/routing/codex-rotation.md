@@ -1,5 +1,15 @@
 # Codex worker rotation audit
 
+- stable pre-rotation snapshot
+  - holds root membership, target, task, and TODO locks through the operation
+  - captures the old Codex UUID once with the exact tmux target and pane guard
+  - binds task bytes, ordered queue, status, manager, target, pane/window/process, protected-target order, TODO custody, sole active owner, and private audit path in one digest
+  - rejects any bound-state drift without a second old-session query
+- delivery boundary
+  - launches the replacement without the task prompt
+  - binds the first checkpointed replacement process through startup, distinct new UUID capture, audit finalization, terminal sole-owner proof, and held-prompt delivery
+  - rejects a second respawn or process drift before delivery
+  - records the initial and terminal singleton owner, exact terminal replacement process, and delivery authorization in the audit
 - replacement checkpoint
   - accepts tmux commands `bun`, `bunx`, and `codex`
   - records the changed process before startup and UUID verification
@@ -8,6 +18,7 @@
   - requires the replacement checkpoint
   - requires the exact UUID-capture failure kind
   - requires the inode-bound eligibility digest written by finalization
+  - holds root membership, target, task, and TODO locks while proving the sole owner
 - old pre-checkpoint failures
   - remain immutable and unreconcilable
   - a matching path, content digest, or added xattr cannot supply missing causal evidence
