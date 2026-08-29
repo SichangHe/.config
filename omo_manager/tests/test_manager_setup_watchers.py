@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -629,6 +630,36 @@ esac
                 self.assertFalse((tmp / "state" / "pending-supervisor.pid").exists())
             finally:
                 self.stop_supervisors(tmp / "state")
+
+    def test_duplicate_pending_watcher_exit_is_not_restarted(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            setup_text = SETUP.read_text(encoding="utf-8")
+            match = re.search(r"setsid bash -c '\n(.*?)\n' pending-watch-supervisor", setup_text, re.DOTALL)
+            self.assertIsNotNone(match)
+            assert match is not None
+            calls = tmp / "calls"
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    match.group(1),
+                    "pending-watch-supervisor",
+                    str(tmp / "launch.pid"),
+                    "token",
+                    "bash",
+                    "-c",
+                    f"printf x >>{shlex.quote(str(calls))}; exit 75",
+                ],
+                text=True,
+                capture_output=True,
+                timeout=2,
+                check=False,
+            )
+            self.assertEqual(75, result.returncode)
+            self.assertEqual("x", calls.read_text(encoding="utf-8"))
+            self.assertIn("duplicate-root refusal; stopping supervisor", result.stderr)
+            self.assertNotIn("restarting", result.stderr)
 
     def test_setup_rejects_spoofed_watcher_argv0(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:

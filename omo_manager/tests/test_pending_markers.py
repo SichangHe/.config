@@ -289,6 +289,65 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertIn("(delegate manager_mail/4002.txt)", markers[0].ref)
             self.assertNotIn("(record and delegate manager_mail/4002.txt)", markers[0].ref)
 
+    def test_delivery_pending_watcher_root_lock_rejects_second_process(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "work_logs"
+            root.mkdir()
+            ready = Path(tmp) / "ready"
+            release = Path(tmp) / "release"
+            holder = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    """from pathlib import Path
+import time
+from omo_manager.omo_pending_watch import exclusive_watcher_root
+root, ready, release = map(Path, __import__('sys').argv[1:])
+with exclusive_watcher_root(root):
+    ready.touch()
+    while not release.exists():
+        time.sleep(0.01)
+""",
+                    str(root),
+                    str(ready),
+                    str(release),
+                ],
+                cwd=Path(__file__).resolve().parents[2],
+            )
+            try:
+                for _ in range(200):
+                    if ready.exists():
+                        break
+                    time.sleep(0.01)
+                self.assertTrue(ready.exists())
+                with patch.object(watcher, "email_human_watcher_crash") as email_crash:
+                    self.assertEqual(75, watcher.cli(["--root", str(root), "--once"]))
+                email_crash.assert_not_called()
+            finally:
+                release.touch()
+                holder.wait(timeout=2)
+
+    def test_dry_run_one_shot_pending_watcher_does_not_require_root_lock(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "work_logs"
+            root.mkdir()
+            with watcher.exclusive_watcher_root(root), patch.object(watcher, "run", return_value=0) as run:
+                self.assertEqual(0, watcher.main(["--root", str(root), "--once", "--dry-run"]))
+            run.assert_called_once()
+
+    def test_pending_watcher_cli_reports_duplicate_without_crash_email(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with patch.object(watcher, "main", side_effect=watcher.WatcherAlreadyRunning("duplicate")), patch.object(
+            watcher, "email_human_watcher_crash"
+        ) as email_crash:
+            self.assertEqual(75, watcher.cli([]))
+        email_crash.assert_not_called()
+
     def test_email_pending_append_waits_for_shared_task_file_writer(self) -> None:
         from omo_manager import email_idle_watcher as watcher
 

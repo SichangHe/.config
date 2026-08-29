@@ -112,6 +112,32 @@ def task_file_lock(path: Path) -> Iterator[None]:
         finally:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
+
+class WatcherAlreadyRunning(RuntimeError):
+    """Raised when another continuous watcher owns the same task root."""
+
+
+@contextmanager
+def exclusive_watcher_root(root: Path) -> Iterator[None]:
+    """Allow one continuous pending watcher for each canonical task root."""
+
+    resolved_root = root.resolve(strict=False)
+    digest = hashlib.sha256(os.fspath(resolved_root).encode()).hexdigest()
+    lock_dir = Path("/tmp") / f"omo-pending-watch-roots-{os.getuid()}"
+    lock_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    lock_dir.chmod(0o700)
+    lock_path = lock_dir / f"{digest}.lock"
+    with lock_path.open("a", encoding="utf-8") as handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise WatcherAlreadyRunning(f"pending watcher already running for root: {resolved_root}") from exc
+        try:
+            # 🧑 "Look into this and fix it"
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
 DEFAULT_ROOT = Path(os.environ.get("OMO_WORK_LOGS_ROOT", Path.home() / "work_logs"))
 DEFAULT_MANAGER_TARGET = os.environ.get("OMO_MANAGER_TMUX_TARGET", "")
 DEFAULT_STATE = default_state_dir() / "pending-watch-consumed-reports.tsv"
@@ -6029,12 +6055,20 @@ def run(args: Args, actor_controller: BlockingActorController) -> int:
 
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
-    actor_controller = BlockingActorController(args.root, allow_existing=args.once)
-    actor_controller.ensure()
-    try:
-        return run(args, actor_controller)
-    finally:
-        actor_controller.close()
+    if args.once and args.dry_run:
+        actor_controller = BlockingActorController(args.root, allow_existing=True)
+        actor_controller.ensure()
+        try:
+            return run(args, actor_controller)
+        finally:
+            actor_controller.close()
+    with exclusive_watcher_root(args.root):
+        actor_controller = BlockingActorController(args.root, allow_existing=args.once)
+        actor_controller.ensure()
+        try:
+            return run(args, actor_controller)
+        finally:
+            actor_controller.close()
 
 
 def crash_email_sender_target(argv: list[str]) -> str:
@@ -6078,6 +6112,9 @@ def cli(argv: list[str]) -> int:
         status = main(argv)
         _ = sys.stdout.flush()
         return status
+    except WatcherAlreadyRunning as exc:
+        print(f"omo_pending_watch: {exc}", file=sys.stderr)
+        return 75
     except BrokenPipeError:
         try:
             stdout_fd = sys.stdout.fileno()

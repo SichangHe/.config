@@ -598,6 +598,10 @@ printf "%s\n" "$$" >"$launch_pid_file"
 while :; do
   "$@"
   st=$?
+  if [ "$st" -eq 75 ]; then
+    printf "%s pending watcher duplicate-root refusal; stopping supervisor\n" "$(date "+%Y-%m-%d %H:%M:%S %z")" >&2
+    exit "$st"
+  fi
   printf "%s pending watcher exited status=%s; restarting in 5s\n" "$(date "+%Y-%m-%d %H:%M:%S %z")" "$st" >&2
   sleep 5
 done
