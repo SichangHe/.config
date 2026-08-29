@@ -76,8 +76,17 @@ DEFAULT_CONTACT_AGENT = os.environ.get("DEFAULT_CONTACT_AGENT", "")
 DEFAULT_MAIL_DIR = Path(os.environ.get("OMO_MANAGER_MAIL_DIR", DEFAULT_ROOT / "manager_mail"))
 CONFIG_PATH = human_config_path()
 LEGACY_MANAGER_SUBJECT_TOKENS = ("[a]", "[omo_manager]")
-PB_CLEANUP_EXCLUDED_SUBJECT_PREFIXES = ("PB news", "PB stock watch", "PB urgent")
-PB_CLEANUP_EXCLUDED_SUBJECT_RE = re.compile(r"^(?:PB news|PB stock watch|PB urgent)\b", re.IGNORECASE)
+PB_CLEANUP_EXCLUDED_SUBJECT_PREFIXES = (
+    "PB news",
+    "PB stock watch",
+    "PB urgent",
+    "An example of news that should have been intercepted",
+    "Another example of mail that should be news digest input",
+)
+PB_CLEANUP_EXCLUDED_SUBJECT_RE = re.compile(
+    rf"^(?:{'|'.join(re.escape(prefix) for prefix in PB_CLEANUP_EXCLUDED_SUBJECT_PREFIXES)})\b",
+    re.IGNORECASE,
+)
 MANAGER_REPLY_SUBJECT_RE = re.compile(r"^re:\s*(?:\[a\]|\[omo_manager\])\s*", re.IGNORECASE)
 MANAGER_TARGET_SUBJECT_RE = re.compile(r"^(?:re:\s*)*(?:(?:\[a\]|\[omo_manager\])\s+)?(?:\[([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\]|([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?))(?:\s+|$)", re.IGNORECASE)
 TMUX_TARGET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?$")
@@ -155,6 +164,7 @@ DEFAULT_PULL_INTERVAL_S = float(os.environ.get("OMO_MANAGER_EMAIL_PULL_INTERVAL_
 DEFAULT_IDLE_EXIT_AFTER_S = float(os.environ.get("OMO_MANAGER_EMAIL_IDLE_EXIT_AFTER_S", "3600"))
 DEFAULT_EMAIL_PUSH_SUBMIT_VERIFY_TIMEOUT_S = float(os.environ.get("OMO_MANAGER_EMAIL_PUSH_SUBMIT_VERIFY_TIMEOUT_S", "1"))
 DEFAULT_MANAGER_UNREAD_COMPRESSION_THRESHOLD = int(os.environ.get("OMO_MANAGER_EMAIL_UNREAD_COMPRESSION_THRESHOLD", "16"))
+DEFAULT_MANAGER_TOTAL_CLEANUP_THRESHOLD = int(os.environ.get("OMO_MANAGER_EMAIL_TOTAL_CLEANUP_THRESHOLD", "29"))
 DEFAULT_MANAGER_RECENT_CLEANUP_THRESHOLD = int(os.environ.get("OMO_MANAGER_EMAIL_RECENT_CLEANUP_THRESHOLD", "64"))
 DEFAULT_MANAGER_RECENT_CLEANUP_WINDOW_S = float(os.environ.get("OMO_MANAGER_EMAIL_RECENT_CLEANUP_WINDOW_S", str(24 * 60 * 60)))
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -217,6 +227,7 @@ class Args:
     live_mailbox_approval_only: bool = False
     live_mailbox_stage: str = "email1"
     default_contact_agent: str = ""
+    total_cleanup_threshold: int = DEFAULT_MANAGER_TOTAL_CLEANUP_THRESHOLD
 
 
 class ParsedArgs(argparse.Namespace):
@@ -239,6 +250,7 @@ class ParsedArgs(argparse.Namespace):
     live_mailbox_approval_only: bool = False
     live_mailbox_stage: str = "email1"
     default_contact_agent: str = DEFAULT_CONTACT_AGENT
+    total_cleanup_threshold: int = DEFAULT_MANAGER_TOTAL_CLEANUP_THRESHOLD
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -257,6 +269,7 @@ def parse_args(argv: list[str]) -> Args:
     parser.add_argument("--pull-interval-s", type=float, default=DEFAULT_PULL_INTERVAL_S, help="Unread mailbox scan interval while IDLE is otherwise quiet")
     parser.add_argument("--idle-exit-after-s", type=float, default=DEFAULT_IDLE_EXIT_AFTER_S, help="Exit after this many quiet seconds so the outer supervisor refreshes the process; set <=0 to disable")
     parser.add_argument("--unread-compression-threshold", type=int, default=DEFAULT_MANAGER_UNREAD_COMPRESSION_THRESHOLD, help="Queue manager-sent unread mail compression when unread manager mail exceeds this count; set <=0 to disable")
+    parser.add_argument("--total-cleanup-threshold", type=int, default=DEFAULT_MANAGER_TOTAL_CLEANUP_THRESHOLD, help="Queue manager-mail cleanup when retained Inbox mail exceeds this count; set <=0 to disable")
     parser.add_argument("--recent-cleanup-threshold", type=int, default=DEFAULT_MANAGER_RECENT_CLEANUP_THRESHOLD, help="Queue manager-human cleanup when recent manager mail exceeds this count; set <=0 to disable")
     parser.add_argument("--recent-cleanup-window-s", type=float, default=DEFAULT_MANAGER_RECENT_CLEANUP_WINDOW_S, help="Recent manager-human cleanup threshold window")
     parser.add_argument("--live-mailbox-approval-only", action="store_true", help="One-shot scan only for AMH live-mailbox approval replies in the pinned approval thread")
@@ -291,6 +304,7 @@ def parse_args(argv: list[str]) -> Args:
         live_mailbox_approval_only=parsed.live_mailbox_approval_only,
         live_mailbox_stage=parsed.live_mailbox_stage,
         default_contact_agent=parsed.default_contact_agent.strip(),
+        total_cleanup_threshold=parsed.total_cleanup_threshold,
     )
 
 
@@ -1309,6 +1323,10 @@ def append_manager_mail_threshold_pending(args: Args, kind: str, counts: Manager
         summary = f"manager email watcher threshold: unread manager mail {counts.unread} exceeds {args.unread_compression_threshold}"
         route = "route a worker through `~/.config/omo_manager/docs/mail/compression.md`"
         retention = "compress only unread manager-sent mail, retain full-read memos, send replacement summaries first, then move only explicitly superseded source UIDs to Trash"
+    elif kind == "total-cleanup":
+        summary = f"manager email watcher threshold: retained manager mail {counts.total} exceeds {args.total_cleanup_threshold}"
+        route = "route the existing singular owner through `~/.config/omo_manager/docs/mail/compression.md`"
+        retention = "compress task by task regardless of read state; exclude PB digest streams from removal; retain current requests, decisions, results, and status"
     elif kind == "recent-cleanup":
         hours = args.recent_cleanup_window_s / 3600
         summary = f"manager email watcher threshold: manager-human mail within last {hours:g}h is {counts.recent_total}, exceeding {args.recent_cleanup_threshold}"
@@ -1747,17 +1765,18 @@ def handle_manager_mail_thresholds(client: imaplib.IMAP4_SSL, args: Args) -> boo
     triggered = False
     state_changed = False
     checks = (
-        ("unread-compression", args.unread_compression_threshold, counts.unread),
-        ("recent-cleanup", args.recent_cleanup_threshold, counts.recent_total),
+        ("total-cleanup", args.total_cleanup_threshold, counts.total, 1),
+        ("unread-compression", args.unread_compression_threshold, counts.unread, args.unread_compression_threshold),
+        ("recent-cleanup", args.recent_cleanup_threshold, counts.recent_total, args.recent_cleanup_threshold),
     )
-    for kind, threshold, count in checks:
+    for kind, threshold, count, growth_step in checks:
         exceeded = threshold > 0 and count > threshold
         pending_line = existing_current_threshold_pending_line(current_manager_file(args), kind)
         growth_retrigger = (
             exceeded
             and kind in active
             and pending_line is None
-            and count >= watermarks.get(kind, threshold) + threshold
+            and count >= watermarks.get(kind, threshold) + growth_step
         )
         if exceeded and (kind not in active or growth_retrigger):
             if pending_line is None:
@@ -3075,8 +3094,8 @@ def main(argv: list[str]) -> int:
         print(f"email_idle_watcher: missing config keys {sorted(missing)} in {CONFIG_PATH}", file=sys.stderr)
         return 1
     accepted_human = split_settings.human_address if split_settings is not None else config["user"]
-    safe_args = Args(args.root, args.manager_url, args.mail_dir, args.state_dir, args.manager_file, args.once, accepted_human, args.recovery_debounce_s, args.restart_script, args.idle_wait_s, args.manager_target, args.imap_timeout_s, args.pull_interval_s, args.idle_exit_after_s, args.unread_compression_threshold, args.recent_cleanup_threshold, args.recent_cleanup_window_s, mail_thresholds=split_settings is None, inbox_identity=config["user"] if split_settings is not None else "", live_mailbox_approval_only=args.live_mailbox_approval_only, live_mailbox_stage=args.live_mailbox_stage)
-    logging.info("email watcher starting: root=%s mail_dir=%s state_dir=%s manager_target=%s manager_url=%s idle_wait_s=%s imap_timeout_s=%s pull_interval_s=%s idle_exit_after_s=%s unread_compression_threshold=%s recent_cleanup_threshold=%s recent_cleanup_window_s=%s", safe_args.root, safe_args.mail_dir, safe_args.state_dir, safe_args.manager_target or "unset", safe_args.manager_url or "unset", safe_args.idle_wait_s, safe_args.imap_timeout_s, safe_args.pull_interval_s, safe_args.idle_exit_after_s, safe_args.unread_compression_threshold, safe_args.recent_cleanup_threshold, int(safe_args.recent_cleanup_window_s))
+    safe_args = Args(args.root, args.manager_url, args.mail_dir, args.state_dir, args.manager_file, args.once, accepted_human, args.recovery_debounce_s, args.restart_script, args.idle_wait_s, args.manager_target, args.imap_timeout_s, args.pull_interval_s, args.idle_exit_after_s, args.unread_compression_threshold, args.recent_cleanup_threshold, args.recent_cleanup_window_s, mail_thresholds=split_settings is None, inbox_identity=config["user"] if split_settings is not None else "", live_mailbox_approval_only=args.live_mailbox_approval_only, live_mailbox_stage=args.live_mailbox_stage, total_cleanup_threshold=args.total_cleanup_threshold)
+    logging.info("email watcher starting: root=%s mail_dir=%s state_dir=%s manager_target=%s manager_url=%s idle_wait_s=%s imap_timeout_s=%s pull_interval_s=%s idle_exit_after_s=%s total_cleanup_threshold=%s unread_compression_threshold=%s recent_cleanup_threshold=%s recent_cleanup_window_s=%s", safe_args.root, safe_args.mail_dir, safe_args.state_dir, safe_args.manager_target or "unset", safe_args.manager_url or "unset", safe_args.idle_wait_s, safe_args.imap_timeout_s, safe_args.pull_interval_s, safe_args.idle_exit_after_s, safe_args.total_cleanup_threshold, safe_args.unread_compression_threshold, safe_args.recent_cleanup_threshold, int(safe_args.recent_cleanup_window_s))
     while True:
         try:
             with imaplib.IMAP4_SSL(config["host"], timeout=safe_args.imap_timeout_s) as client:

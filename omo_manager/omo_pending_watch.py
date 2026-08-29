@@ -172,8 +172,8 @@ AGENT_REPORT_OWNER_RE = re.compile(
 AGENT_MESSAGE_DIR_RE = re.compile(rf"^/tmp/omo-agent-messages-{os.getuid()}/")
 MANAGER_GENERATED_SOURCE_RE = re.compile(
     r"^(?:\(from manager (?:omo_task_edit delegate-message|bidirectional blocking (?:wake|escalation) [A-Za-z0-9_.:-]+)\)"
-    r"|\(from agent email_idle_watcher manager-mail-threshold (?:unread-compression|recent-cleanup)\)"
-    r"|\(from manager-email-threshold (?:unread-compression|recent-cleanup)\))$"
+    r"|\(from agent email_idle_watcher manager-mail-threshold (?:total-cleanup|unread-compression|recent-cleanup)\)"
+    r"|\(from manager-email-threshold (?:total-cleanup|unread-compression|recent-cleanup)\))$"
 )
 AGENT_PROBLEM_HEADER = "Handle ALL omo_pending_watch agent problems below; only email human if you cannot handle them:"
 DELIVERY_RECOVERY_POLICY = (

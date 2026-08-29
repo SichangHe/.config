@@ -1973,6 +1973,12 @@ class PendingMarkerTests(unittest.TestCase):
         self.assertFalse(watcher.is_manager_subject("Re: pb news"))
         self.assertFalse(watcher.is_manager_subject("Re: pb news setup"))
 
+    def test_email_watcher_excludes_pb_news_examples_from_cleanup_count(self) -> None:
+        from omo_manager import email_idle_watcher as watcher
+
+        self.assertTrue(watcher.is_mail_cleanup_excluded_subject("Re: [pb:9] An example of news that should have been intercepted"))
+        self.assertTrue(watcher.is_mail_cleanup_excluded_subject("[wl:1] Another example of mail that should be news digest input"))
+
     def test_split_email_watcher_accepts_untagged_mail_only_from_human(self) -> None:
         from omo_manager import email_idle_watcher as watcher
 
@@ -2357,7 +2363,19 @@ class PendingMarkerTests(unittest.TestCase):
             watcher.push_email_ref = push
             try:
                 client = Client()
-                args = watcher.Args(root, "", root / "manager_mail", state, root / "work_manager_today.md", True, "me@example.com", 0, Path("/bin/false"), manager_target="wl:1.0")
+                args = watcher.Args(
+                    root,
+                    "",
+                    root / "manager_mail",
+                    state,
+                    root / "work_manager_today.md",
+                    True,
+                    "me@example.com",
+                    0,
+                    Path("/bin/false"),
+                    manager_target="wl:1.0",
+                    total_cleanup_threshold=0,
+                )
                 with patch.object(watcher, "fsync_directory", side_effect=record_directory):
                     watcher.handle_unseen(client, args)
             finally:
@@ -2689,6 +2707,7 @@ class PendingMarkerTests(unittest.TestCase):
                 0,
                 Path("/bin/false"),
                 manager_target="wl:1.0",
+                total_cleanup_threshold=0,
             )
             counts = iter(
                 (
@@ -2710,6 +2729,47 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertEqual([(2, "unread-compression"), (9, "unread-compression")], calls)
             self.assertIn("unread-compression\t33\n", watcher.manager_mail_threshold_watermarks_path(args).read_text(encoding="utf-8"))
 
+    def test_email_watcher_total_cleanup_retriggers_for_each_message_above_limit(self) -> None:
+        from omo_manager import email_idle_watcher as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            root.mkdir()
+            state = Path(tmp) / "state"
+            state.mkdir()
+            args = watcher.Args(
+                root,
+                "",
+                root / "manager_mail",
+                state,
+                root / "work_manager_today.md",
+                True,
+                "me@example.com",
+                0,
+                Path("/bin/false"),
+                manager_target="wl:1.0",
+            )
+            counts = iter(
+                (
+                    watcher.ManagerMailCounts(30, 10, 86400, 10, True),
+                    watcher.ManagerMailCounts(30, 10, 86400, 10, True),
+                    watcher.ManagerMailCounts(31, 10, 86400, 10, True),
+                )
+            )
+            calls: list[tuple[int, str]] = []
+
+            with (
+                patch.object(watcher, "manager_mail_counts", side_effect=lambda *_args, **_kwargs: next(counts)),
+                patch.object(watcher, "push_manager_mail_threshold_ref", side_effect=lambda _args, line, kind: calls.append((line, kind)) or True),
+            ):
+                self.assertTrue(watcher.handle_manager_mail_thresholds(object(), args))
+                manager_path = root / "work_manager_today.md"
+                manager_path.write_text(manager_path.read_text(encoding="utf-8").replace("(pending)\n", "(done: consumed)\n", 1), encoding="utf-8")
+                self.assertFalse(watcher.handle_manager_mail_thresholds(object(), args))
+                self.assertTrue(watcher.handle_manager_mail_thresholds(object(), args))
+
+            self.assertEqual([(2, "total-cleanup"), (9, "total-cleanup")], calls)
+
     def test_email_watcher_growth_retrigger_waits_while_marker_is_pending(self) -> None:
         from omo_manager import email_idle_watcher as watcher
 
@@ -2729,6 +2789,7 @@ class PendingMarkerTests(unittest.TestCase):
                 0,
                 Path("/bin/false"),
                 manager_target="wl:1.0",
+                total_cleanup_threshold=0,
             )
             counts = iter(
                 (
@@ -2767,6 +2828,7 @@ class PendingMarkerTests(unittest.TestCase):
                 0,
                 Path("/bin/false"),
                 manager_target="wl:1.0",
+                total_cleanup_threshold=0,
             )
             counts = iter(
                 (
@@ -2812,6 +2874,7 @@ class PendingMarkerTests(unittest.TestCase):
                 0,
                 Path("/bin/false"),
                 manager_target="wl:1.0",
+                total_cleanup_threshold=0,
             )
             watcher.save_active_manager_mail_thresholds(
                 watcher.manager_mail_threshold_state_path(args),
@@ -2981,6 +3044,22 @@ class PendingMarkerTests(unittest.TestCase):
             self.assertIn("manager email watcher threshold: unread manager mail 17 exceeds 16", text)
             self.assertNotIn("[omo-message-source:", text)
 
+    def test_pending_watcher_dispatches_total_cleanup_without_human_ack(self) -> None:
+        from omo_manager import email_idle_watcher
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            root.mkdir()
+            manager_path = root / "work_manager_today.md"
+            args = email_idle_watcher.Args(root, "", root / "manager_mail", Path(tmp) / "state", manager_path, True, "me@example.com", 0, Path("/bin/false"), manager_target="wl:1.0")
+            counts = email_idle_watcher.ManagerMailCounts(30, 10, 86400, 10, True)
+            email_idle_watcher.append_manager_mail_threshold_pending(args, "total-cleanup", counts)
+
+            marker = watcher.find_markers(root, [manager_path])[0]
+            self.assertEqual(("agent", "manager", "no-human-ack"), (marker.origin, marker.source, marker.action))
+            self.assertIn("Do not pass `--ack-human`", watcher.marker_delivery_text(marker))
+
     def test_email_watcher_recent_cleanup_threshold_filters_to_last_24h(self) -> None:
         from datetime import datetime, timedelta
         from email.message import EmailMessage
@@ -3072,7 +3151,19 @@ class PendingMarkerTests(unittest.TestCase):
             old_push = watcher.push_manager_mail_threshold_ref
             watcher.push_manager_mail_threshold_ref = push
             try:
-                args = watcher.Args(root, "", root / "manager_mail", state, root / "work_manager_today.md", True, "me@example.com", 0, Path("/bin/false"), manager_target="wl:1.0")
+                args = watcher.Args(
+                    root,
+                    "",
+                    root / "manager_mail",
+                    state,
+                    root / "work_manager_today.md",
+                    True,
+                    "me@example.com",
+                    0,
+                    Path("/bin/false"),
+                    manager_target="wl:1.0",
+                    total_cleanup_threshold=0,
+                )
                 self.assertTrue(watcher.handle_manager_mail_thresholds(Client(), args))
                 self.assertFalse(watcher.handle_manager_mail_thresholds(Client(), args))
             finally:

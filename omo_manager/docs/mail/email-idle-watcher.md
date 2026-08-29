@@ -10,6 +10,8 @@ It keeps IMAP IDLE as the push path, runs an unread pull scan every `--pull-inte
 
 Legacy self-addressed mode retains `[a]` and `[omo_manager]` threshold checks for already-sent mail. Split-account mode watches only the agent inbox; human-mail cleanup remains available explicitly through the separate human mailbox config and `omo_manager_mail_compress.py`.
 
+Split-account manager-mail checks queue the singular compression owner when non-PB Inbox mail exceeds 29 messages. After that marker is consumed, each additional message above the limit retriggers cleanup. Independent unread-growth and 24-hour-volume triggers remain early-warning paths. These triggers only start the documented compression workflow; they do not bypass its replacement, review, or recoverable-Trash gates.
+
 The processed-UID record is authoritative even after its source task is archived. Only UIDs explicitly recorded as unaccepted delivery attempts are retried. UID state is namespaced by agent inbox because Gmail UID numbers are mailbox-local.
 
 New human email pending blocks write `(record and delegate manager_mail/UID.txt)`. Legacy `(from email manager_mail/UID.txt)` and `[source: email manager_mail/UID.txt]` remain recognized for historical duplicate detection but should not be written for new email blocks.
