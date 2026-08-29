@@ -14,6 +14,7 @@ import re
 import signal
 import socket
 import stat
+import subprocess
 import sys
 import threading
 from dataclasses import dataclass, replace
@@ -32,12 +33,13 @@ from omo_manager.email_idle_watcher import LEGACY_MANAGER_SUBJECT_TOKENS, is_mai
 from omo_manager.omo_email_config import configured_agent_mail, human_config_path, parse_env_file
 from omo_manager.omo_email_subject import TMUX_TARGET_RE, canonical_tmux_target, subject_tmux_target
 
-HEADER_FETCH = "(BODY.PEEK[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)])"
-HEADER_BATCH_FETCH = "(UID BODY.PEEK[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)])"
+HEADER_FETCH = "(BODY.PEEK[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID X-OMO-AGENT-SESSION-ID)])"
+HEADER_BATCH_FETCH = "(UID BODY.PEEK[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID X-OMO-AGENT-SESSION-ID)])"
 FULL_FETCH = "(BODY.PEEK[])"
 FULL_BATCH_FETCH = "(UID BODY.PEEK[])"
 GMAIL_METADATA_FETCH = "(FLAGS X-GM-MSGID X-GM-THRID X-GM-LABELS)"
 GMAIL_METADATA_BATCH_FETCH = "(UID FLAGS X-GM-MSGID X-GM-THRID X-GM-LABELS)"
+SUPERSESSION_HEADER_FETCH = "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID X-OMO-SUPERSEDES X-OMO-AGENT-SESSION-ID)])"
 TRASH_MAILBOX = "[Gmail]/Trash"
 CONFIG_PATH = human_config_path()
 DEFAULT_THREADS_PER_BATCH = 10
@@ -83,6 +85,8 @@ class MailRecord:
     labels: str = ""
     raw_sha256: str = ""
     source_uidvalidity: str = ""
+    message_id: str = ""
+    agent_session_id: str = ""
 
     @property
     def body_bytes(self) -> int:
@@ -373,6 +377,8 @@ def record_from_msg(
         flags=flags,
         labels=labels,
         raw_sha256=raw_sha256,
+        message_id=rfc_message_id(msg),
+        agent_session_id=" ".join(str(msg.get("X-OMO-Agent-Session-ID", "")).split()).lower(),
     )
 
 
@@ -1410,6 +1416,220 @@ def cmd_unread_summary(args: argparse.Namespace) -> int:
     return 0
 
 
+def current_agent_mail_target() -> str:
+    pane = os.environ.get("TMUX_PANE", "").strip()
+    if pane:
+        result = subprocess.run(
+            ["tmux", "display-message", "-p", "-t", pane, "#S:#I.#P"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise RuntimeError("could not resolve the current tmux pane")
+        target = result.stdout.strip()
+    else:
+        target = os.environ.get("OMO_AGENT_TMUX_TARGET", "").strip()
+    target = canonical_tmux_target(target)
+    if TMUX_TARGET_RE.fullmatch(target) is None:
+        raise RuntimeError("could not resolve the current agent tmux target")
+    return target
+
+
+def current_agent_session_id() -> str:
+    value = (os.environ.get("CODEX_SESSION_ID", "").strip() or os.environ.get("CODEX_THREAD_ID", "").strip()).lower()
+    return value if re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", value) else ""
+
+
+def agent_unread_records(client: imaplib.IMAP4_SSL, sender_email: str, recipient_email: str, target: str, agent_session: str) -> list[MailRecord]:
+    candidates = manager_unread_candidate_uids(client, sender_email)
+    headers, _skipped = accepted_manager_headers(client, candidates, sender_email, recipient_email)
+    records = unread_records_with_metadata(client, headers)
+    return [
+        record
+        for record in records
+        if r"\Seen" not in record.flags
+        and subject_tmux_target(record.subject) == target
+        and record.agent_session_id in {"", agent_session}
+    ]
+
+
+def cmd_agent_unread(args: argparse.Namespace) -> int:
+    del args
+    target = current_agent_mail_target()
+    agent_session = current_agent_session_id()
+    client, config = open_mailbox(readonly=True)
+    try:
+        sender_email, recipient_email = mail_boundary(config)
+        records = agent_unread_records(client, sender_email, recipient_email, target, agent_session)
+        result = {
+            "schema": "omo-agent-unread-mail/v1",
+            "target": target,
+            "source_uidvalidity": selected_uidvalidity(client),
+            "count": len(records),
+            "messages": [
+                {
+                    "uid": record.uid,
+                    "date": record.date,
+                    "subject": record.subject,
+                    "message_id": record.message_id,
+                    "trashable": bool(agent_session and record.agent_session_id == agent_session),
+                }
+                for record in records
+            ],
+        }
+        print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+    finally:
+        logout_mailbox(client)
+    return 0
+
+
+def agent_move_paths(target: str, agent_session: str, source_uidvalidity: str, uids: list[str], replacement_id: str) -> tuple[Path, Path]:
+    state = Path(os.environ.get("OMO_MANAGER_STATE_DIR", Path.home() / ".local/state/omo-manager")) / "agent-mail-moves"
+    state.mkdir(mode=0o700, parents=True, exist_ok=True)
+    state.chmod(0o700)
+    digest = hashlib.sha256("\0".join((target, agent_session, source_uidvalidity, *uids, replacement_id)).encode()).hexdigest()
+    return state / f"{digest}.intent.json", state / f"{digest}.outcome.json"
+
+
+def agent_move_locations(client: imaplib.IMAP4_SSL, gmail_ids: list[str]) -> dict[str, str]:
+    locations: dict[str, str] = {}
+    for name, mailbox in (("inbox", "INBOX"), ("trash", TRASH_MAILBOX)):
+        select_mailbox(client, mailbox, readonly=True)
+        for gmail_id in gmail_ids:
+            if gmail_message_uids(client, gmail_id):
+                if gmail_id in locations:
+                    raise RuntimeError("source appears in both Inbox and Trash")
+                locations[gmail_id] = name
+    return locations
+
+
+def cmd_agent_trash_replaced(args: argparse.Namespace) -> int:
+    if not args.yes:
+        print("refusing to move unread mail to Trash without --yes", file=sys.stderr)
+        return 2
+    target = current_agent_mail_target()
+    agent_session = current_agent_session_id()
+    if not agent_session:
+        raise RuntimeError("current agent has no stable Codex session identity")
+    requested = parse_uid_text("\n".join(args.uid))
+    if not requested:
+        raise RuntimeError("at least one source UID is required")
+    intent_path, outcome_path = agent_move_paths(target, agent_session, args.source_uidvalidity, requested, args.replacement_message_id)
+    client, config = open_mailbox(readonly=False)
+    try:
+        sender_email, recipient_email = mail_boundary(config)
+        if outcome_path.exists():
+            outcome = json.loads(outcome_path.read_text(encoding="utf-8"))
+            if (
+                outcome.get("schema") != "omo-agent-mail-move-outcome/v1"
+                or outcome.get("result") != "trash"
+                or outcome.get("target") != target
+                or outcome.get("agent_session_id") != agent_session
+            ):
+                raise RuntimeError("saved move outcome is malformed")
+            print(f"agent_trash_replaced: recovered=1 permanent_deleted=0 target={target}")
+            return 0
+        if intent_path.exists():
+            intent = json.loads(intent_path.read_text(encoding="utf-8"))
+            gmail_ids = intent.get("source_gmail_ids", [])
+            if (
+                intent.get("schema") != "omo-agent-mail-move-intent/v1"
+                or intent.get("target") != target
+                or intent.get("agent_session_id") != agent_session
+                or intent.get("source_uidvalidity") != args.source_uidvalidity
+                or intent.get("source_uids") != requested
+                or intent.get("replacement_message_id") != args.replacement_message_id
+                or not isinstance(gmail_ids, list)
+                or not gmail_ids
+                or any(not isinstance(value, str) or not value.isdecimal() for value in gmail_ids)
+            ):
+                raise RuntimeError("saved move intent is malformed")
+            locations = agent_move_locations(client, gmail_ids)
+            if set(locations.values()) == {"trash"} and set(locations) == set(gmail_ids):
+                write_private_exclusive(outcome_path, json.dumps({"schema": "omo-agent-mail-move-outcome/v1", "result": "trash", "target": target, "agent_session_id": agent_session, "source_gmail_ids": gmail_ids}, sort_keys=True) + "\n")
+                print(f"agent_trash_replaced: recovered=1 moved={len(gmail_ids)} permanent_deleted=0 target={target}")
+                return 0
+            if set(locations.values()) != {"inbox"} or set(locations) != set(gmail_ids):
+                raise RuntimeError("saved move intent has a mixed or missing mailbox outcome; inspect Inbox and Trash")
+            select_mailbox(client, "INBOX", readonly=False)
+        expected_uidvalidity = selected_uidvalidity(client)
+        if expected_uidvalidity != args.source_uidvalidity:
+            raise RuntimeError("source UIDVALIDITY changed; rerun agent-unread")
+        records = agent_unread_records(client, sender_email, recipient_email, target, agent_session)
+        records_by_uid = {record.uid: record for record in records}
+        if set(requested) != set(records_by_uid).intersection(requested):
+            raise RuntimeError("every source must still be unread mail sent by the current agent")
+        sources = [records_by_uid[uid] for uid in requested]
+        if any(record.agent_session_id != agent_session for record in sources):
+            raise RuntimeError("legacy or prior-session mail is visible but not trashable by this agent")
+        special_use = special_use_mailboxes(client)
+        all_mailbox = special_use.get(r"\All", "")
+        if not all_mailbox or not special_use.get(r"\Sent") or not mailbox_exists(client, TRASH_MAILBOX):
+            raise RuntimeError("required Gmail All Mail, Sent, or Trash mailbox is unavailable")
+        if not replacement_exists(client, all_mailbox, args.replacement_message_id, sender_email, recipient_email):
+            raise RuntimeError("replacement Message-ID is missing, ambiguous, or outside the agent-human mail boundary")
+        if subject_tmux_target(replacement_subject(client, all_mailbox, args.replacement_message_id, sender_email, recipient_email)) != target:
+            raise RuntimeError("replacement was not sent by the current agent target")
+        source_message_ids = {record.message_id for record in sources}
+        if "" in source_message_ids or replacement_supersedes_ids(client, all_mailbox, args.replacement_message_id) != source_message_ids:
+            raise RuntimeError("replacement does not explicitly supersede exactly the selected sources")
+        if replacement_agent_session_id(client, all_mailbox, args.replacement_message_id) != agent_session:
+            raise RuntimeError("replacement was not sent by the current agent session")
+        replacement_gmail_id = replacement_gmail_msgid(client, all_mailbox, args.replacement_message_id)
+        if replacement_gmail_id in {record.gmail_msgid for record in sources}:
+            raise RuntimeError("replacement must be different from every source")
+        if int(replacement_gmail_id) <= max(int(record.gmail_msgid) for record in sources):
+            raise RuntimeError("replacement must be newer than every selected source")
+        select_mailbox(client, "INBOX", readonly=False)
+        if selected_uidvalidity(client) != expected_uidvalidity or set(inbox_subset(client, requested)) != set(requested):
+            raise RuntimeError("source mailbox changed before mutation; rerun agent-unread")
+        final_metadata = fetch_gmail_metadata_records_compatible(client, requested)
+        if any(
+            r"\Seen" in final_metadata[record.uid].flags
+            or final_metadata[record.uid].gmail_msgid != record.gmail_msgid
+            or final_metadata[record.uid].gmail_thrid != record.gmail_thrid
+            for record in sources
+        ):
+            raise RuntimeError("a source was read or changed before mutation; nothing was moved")
+        if not intent_path.exists():
+            write_private_exclusive(
+                intent_path,
+                json.dumps(
+                    {
+                        "schema": "omo-agent-mail-move-intent/v1",
+                        "target": target,
+                        "agent_session_id": agent_session,
+                        "source_uidvalidity": expected_uidvalidity,
+                        "source_uids": requested,
+                        "source_gmail_ids": [record.gmail_msgid for record in sources],
+                        "source_message_ids": sorted(source_message_ids),
+                        "replacement_message_id": args.replacement_message_id,
+                    },
+                    sort_keys=True,
+                )
+                + "\n",
+            )
+        typ, _data = imap_uid(client, "move-agent-unread-to-trash", "MOVE", ",".join(requested), imap_quoted(TRASH_MAILBOX))
+        if typ != "OK":
+            raise RuntimeError(f"Gmail MOVE failed: {typ}")
+        select_mailbox(client, "INBOX", readonly=True)
+        remaining = inbox_subset(client, requested)
+        select_mailbox(client, TRASH_MAILBOX, readonly=True)
+        trashed = {record.gmail_msgid: gmail_message_uids(client, record.gmail_msgid) for record in sources}
+        if remaining or any(len(uids) != 1 for uids in trashed.values()):
+            raise RuntimeError("move outcome could not be verified; inspect Inbox and Trash before retrying")
+        write_private_exclusive(
+            outcome_path,
+            json.dumps({"schema": "omo-agent-mail-move-outcome/v1", "result": "trash", "target": target, "agent_session_id": agent_session, "source_gmail_ids": [record.gmail_msgid for record in sources]}, sort_keys=True) + "\n",
+        )
+        print(f"agent_trash_replaced: moved={len(sources)} permanent_deleted=0 target={target}")
+    finally:
+        logout_mailbox(client)
+    return 0
+
+
 def cmd_inspect_explicit(args: argparse.Namespace) -> int:
     """Print live source/context bindings and bodies without persisted evidence."""
     try:
@@ -1502,6 +1722,7 @@ def write_private_exclusive(path: Path, text: str) -> None:
         handle.write(text)
         handle.flush()
         os.fsync(handle.fileno())
+    fsync_dir(path.parent)
 
 
 def fsync_dir(path: Path) -> None:
@@ -2740,6 +2961,37 @@ def replacement_subject(
             select_mailbox(client, "INBOX", readonly=False)
 
 
+def replacement_supersedes_ids(client: imaplib.IMAP4_SSL, mailbox: str, replacement_id: str) -> set[str]:
+    select_mailbox(client, mailbox, readonly=True)
+    try:
+        typ, data = imap_uid(client, "replacement-supersession-search", "search", None, "HEADER", "Message-ID", imap_quoted(replacement_id))
+        uids = [raw.decode() for raw in data[0].split()] if typ == "OK" and data and data[0] else []
+        if len(uids) != 1:
+            raise RuntimeError("replacement identity is missing or ambiguous")
+        msg, _digest = fetch_msg(client, uids[0], SUPERSESSION_HEADER_FETCH)
+        values = {" ".join(str(value).split()) for value in msg.get_all("X-OMO-Supersedes", [])}
+        if any(re.fullmatch(r"<[^<>\s]+>", value) is None for value in values):
+            raise RuntimeError("replacement has a malformed supersession binding")
+        return values
+    finally:
+        if not getattr(client, "_omo_operation_timed_out", False):
+            select_mailbox(client, "INBOX", readonly=False)
+
+
+def replacement_agent_session_id(client: imaplib.IMAP4_SSL, mailbox: str, replacement_id: str) -> str:
+    select_mailbox(client, mailbox, readonly=True)
+    try:
+        typ, data = imap_uid(client, "replacement-agent-session-search", "search", None, "HEADER", "Message-ID", imap_quoted(replacement_id))
+        uids = [raw.decode() for raw in data[0].split()] if typ == "OK" and data and data[0] else []
+        if len(uids) != 1:
+            raise RuntimeError("replacement identity is missing or ambiguous")
+        msg, _digest = fetch_msg(client, uids[0], SUPERSESSION_HEADER_FETCH)
+        return " ".join(str(msg.get("X-OMO-Agent-Session-ID", "")).split()).lower()
+    finally:
+        if not getattr(client, "_omo_operation_timed_out", False):
+            select_mailbox(client, "INBOX", readonly=False)
+
+
 def original_sender_targets_by_task(
     task_ids: list[str],
     task_sources: set[tuple[int, str]],
@@ -3582,6 +3834,14 @@ def parser() -> argparse.ArgumentParser:
     unread_summary.add_argument("--max-body-chars", type=int, default=1200, help="Maximum read-now text per chain; 80..5000.")
     unread_summary.add_argument("--max-messages-per-thread", type=int, default=20, help="Maximum unread messages to fetch per chain; 1..50.")
     unread_summary.set_defaults(func=cmd_unread_summary)
+    agent_unread = sub.add_parser("agent-unread", help="List unread agent-to-human mail sent by the current tmux agent.")
+    agent_unread.set_defaults(func=cmd_agent_unread)
+    agent_trash = sub.add_parser("agent-trash-replaced", help="Move the current agent's still-unread mail to recoverable Trash after a verified replacement exists.")
+    agent_trash.add_argument("--uid", action="append", required=True, help="Unread Inbox UID printed by agent-unread; repeat for multiple messages.")
+    agent_trash.add_argument("--source-uidvalidity", required=True, help="Exact UIDVALIDITY printed by agent-unread.")
+    agent_trash.add_argument("--replacement-message-id", required=True, help="Message-ID printed by email_me.py after sending the replacement.")
+    agent_trash.add_argument("--yes", action="store_true")
+    agent_trash.set_defaults(func=cmd_agent_trash_replaced)
     inspect_explicit = sub.add_parser("inspect-explicit", help="Print exact live bindings and bodies for selected manager UIDs without creating evidence files.")
     inspect_explicit.add_argument("--uids", required=True, help="Comma or whitespace separated current INBOX UIDs.")
     inspect_explicit.add_argument("--task-id", required=True, help="Task identity assigned to every selected source.")

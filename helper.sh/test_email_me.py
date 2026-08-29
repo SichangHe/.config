@@ -367,6 +367,34 @@ class EmailMeTests(unittest.TestCase):
         self.assertEqual(SHELL_SENSITIVE_BODY, args.content)
         self.assertTrue(args.add_pwd_footer)
 
+    def test_build_message_assigns_rfc_message_id(self) -> None:
+        msg = email_me.build_message("me@example.com", "hi", "body\n")
+        self.assertRegex(str(msg["Message-ID"]), r"^<[^<>\s]+@example\.com>$")
+
+    def test_build_message_binds_superseded_message_ids(self) -> None:
+        msg = email_me.build_message(
+            "me@example.com",
+            "hi",
+            "body\n",
+            supersedes_message_ids=("<old-1@example.com>", "<old-2@example.com>"),
+        )
+        self.assertEqual(["<old-1@example.com>", "<old-2@example.com>"], msg.get_all("X-OMO-Supersedes"))
+
+    def test_build_message_binds_agent_session_identity(self) -> None:
+        session_id = "01a0369c-7895-70f2-ae4b-5f59d920e99a"
+        msg = email_me.build_message("me@example.com", "hi", "body\n", agent_session=session_id)
+        self.assertEqual(session_id, msg["X-OMO-Agent-Session-ID"])
+
+    def test_agent_session_prefers_session_over_different_thread_id(self) -> None:
+        session_id = "01a0369c-7895-70f2-ae4b-5f59d920e99a"
+        thread_id = "01a04b9d-7895-70f2-ae4b-5f59d920e99a"
+        with patch.dict(os.environ, {"CODEX_SESSION_ID": session_id, "CODEX_THREAD_ID": thread_id}):
+            self.assertEqual(session_id, email_me.agent_session_id())
+
+    def test_parse_args_rejects_malformed_superseded_message_id(self) -> None:
+        with patch.object(sys, "stdin", StringIO("body\n")), patch("sys.stderr", new_callable=StringIO), self.assertRaises(SystemExit):
+            email_me.parse_args(["--subject", "hi", "--supersedes-message-id", "bad"])
+
     def test_parse_args_allows_omitted_subject(self) -> None:
         with patch.object(sys, "stdin", StringIO("body\n")):
             args = email_me.parse_args([])
@@ -932,6 +960,42 @@ class EmailMeTests(unittest.TestCase):
         self.assertEqual("agent@example.test", sent_messages[0]["From"])
         self.assertEqual("human@example.test", sent_messages[0]["To"])
         self.assertNotIn("PWD:", sent_messages[0].get_body(preferencelist=("plain",)).get_content())
+
+    def test_smtp_uncertain_failure_reports_reusable_message_id(self) -> None:
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+            app_password = "secret"
+
+        class FakeSmtp:
+            def __init__(self, **_kwargs: object) -> None:
+                return None
+
+            def __enter__(self) -> "FakeSmtp":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def login(self, _sender: str, _password: str) -> None:
+                return None
+
+            def send_message(self, _msg: object) -> None:
+                raise email_me.smtplib.SMTPException("connection lost")
+
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {"OMO_MANAGER_STATE_DIR": str(Path(tmp) / "state")}, clear=False),
+            patch.object(email_me, "configured_agent_mail", return_value=Settings()),
+            patch.object(email_me, "prepare_subject_and_headers", return_value=("[wl:1] Topic", {})),
+            patch.object(email_me.smtplib, "SMTP_SSL", FakeSmtp),
+            patch.object(email_me.ssl, "create_default_context", return_value=None),
+            patch.object(sys, "stdin", StringIO("body\n")),
+            patch("sys.stderr", new_callable=StringIO) as stderr,
+        ):
+            result = email_me.main(["--manager-human", "--tmux-target", "wl:1", "--subject", "Topic"],)
+        self.assertEqual(1, result)
+        self.assertRegex(stderr.getvalue(), r"Delivery-uncertain Message-ID: <[^<>\s]+@example\.test>")
 
 
 if __name__ == "__main__":

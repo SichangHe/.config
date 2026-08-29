@@ -13,3 +13,5 @@
   - ingest human email into durable manager pending blocks
 - `digest-and-email.md`
   - durable digest queue and manager-human email sending behavior
+- `agent-sent-mail.md`
+  - per-agent unread sent-mail inspection and replacement

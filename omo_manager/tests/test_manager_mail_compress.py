@@ -14,6 +14,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
 from email.message import Message
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from omo_manager.omo_manager_mail_compress import (
@@ -34,6 +35,7 @@ from omo_manager.omo_manager_mail_compress import (
     SOURCE_1140_APPROVAL_FILE,
     SOURCE_1140_APPROVAL_QUOTE,
     accepted_manager_headers,
+    agent_unread_records,
     claim_batch,
     cmd_reconcile_intent,
     cmd_recover_already_trashed,
@@ -45,6 +47,9 @@ from omo_manager.omo_manager_mail_compress import (
     cmd_locate_replacement,
     cmd_mark_seen,
     cmd_unread_summary,
+    cmd_agent_trash_replaced,
+    current_agent_mail_target,
+    current_agent_session_id,
     cmd_trash_explicit,
     cmd_trash_superseded,
     direct_context_intact,
@@ -822,6 +827,202 @@ with tempfile.TemporaryDirectory() as tmp:
             [("search", None, "UNSEEN", "FROM", '"agent@example.test"')],
             client.calls,
         )
+
+    def test_agent_unread_records_filters_to_exact_current_target(self) -> None:
+        raw_a = self.raw_message("[wl:7] own", "body")
+        raw_b = self.raw_message("[wl:8] other", "body")
+        client = FakeClient(
+            {
+                ("search", None, "UNSEEN", "FROM", '"agent@example.test"'): ("OK", [b"7 8"]),
+                ("fetch", "7,8", HEADER_BATCH_FETCH): (
+                    "OK",
+                    [
+                        (b"7 (UID 7 BODY[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)] {1}", raw_a),
+                        (b"8 (UID 8 BODY[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID)] {1}", raw_b),
+                    ],
+                ),
+                ("fetch", "7,8", GMAIL_METADATA_BATCH_FETCH): (
+                    "OK",
+                    [
+                        b"7 (UID 7 FLAGS () X-GM-MSGID 100 X-GM-THRID 200 X-GM-LABELS (\\Inbox))",
+                        b"8 (UID 8 FLAGS () X-GM-MSGID 101 X-GM-THRID 201 X-GM-LABELS (\\Inbox))",
+                    ],
+                ),
+            }
+        )
+        with patch("omo_manager.omo_manager_mail_compress.configured_agent_mail", return_value=object()):
+            records = agent_unread_records(client, "agent@example.test", "human@example.test", "wl:7", "session-a")
+        self.assertEqual(["7"], [record.uid for record in records])
+
+    def test_agent_unread_records_excludes_finally_seen_and_prior_session(self) -> None:
+        current = MailRecord("7", "date", "agent@example.test", "human@example.test", "[wl:7] current", "digest", flags="", agent_session_id="session-a")
+        read = MailRecord("8", "date", "agent@example.test", "human@example.test", "[wl:7] read", "digest", flags=r"\Seen", agent_session_id="session-a")
+        prior = MailRecord("9", "date", "agent@example.test", "human@example.test", "[wl:7] prior", "digest", flags="", agent_session_id="session-b")
+        legacy = MailRecord("10", "date", "agent@example.test", "human@example.test", "[wl:7] legacy", "digest", flags="")
+        with (
+            patch("omo_manager.omo_manager_mail_compress.manager_unread_candidate_uids", return_value=["7", "8", "9", "10"]),
+            patch("omo_manager.omo_manager_mail_compress.accepted_manager_headers", return_value=([current, read, prior, legacy], [])),
+            patch("omo_manager.omo_manager_mail_compress.unread_records_with_metadata", return_value=[current, read, prior, legacy]),
+        ):
+            records = agent_unread_records(FakeClient({}), "agent@example.test", "human@example.test", "wl:7", "session-a")
+        self.assertEqual(["7", "10"], [record.uid for record in records])
+
+    def test_current_agent_mail_target_preserves_nonzero_pane(self) -> None:
+        result = SimpleNamespace(returncode=0, stdout="wl:7.1\n")
+        with patch.dict(os.environ, {"TMUX_PANE": "%42"}), patch("omo_manager.omo_manager_mail_compress.subprocess.run", return_value=result):
+            self.assertEqual("wl:7.1", current_agent_mail_target())
+
+    def test_current_agent_mail_target_does_not_fall_back_from_stale_pane(self) -> None:
+        result = SimpleNamespace(returncode=1, stdout="")
+        with (
+            patch.dict(os.environ, {"TMUX_PANE": "%42", "OMO_AGENT_TMUX_TARGET": "wl:7"}),
+            patch("omo_manager.omo_manager_mail_compress.subprocess.run", return_value=result),
+            self.assertRaisesRegex(RuntimeError, "current tmux pane"),
+        ):
+            current_agent_mail_target()
+
+    def test_current_agent_session_prefers_session_over_different_thread_id(self) -> None:
+        session_id = "01a0369c-7895-70f2-ae4b-5f59d920e99a"
+        thread_id = "01a04b9d-7895-70f2-ae4b-5f59d920e99a"
+        with patch.dict(os.environ, {"CODEX_SESSION_ID": session_id, "CODEX_THREAD_ID": thread_id}):
+            self.assertEqual(session_id, current_agent_session_id())
+
+    def test_agent_trash_replaced_moves_only_verified_unread_own_mail(self) -> None:
+        client = FakeClient({("MOVE", "7", '"[Gmail]/Trash"'): ("OK", [b""])})
+        source = MailRecord("7", "date", "agent@example.test", "human@example.test", "[wl:7] old", "digest", gmail_msgid="100", gmail_thrid="200", message_id="<old@example.test>", agent_session_id="01a0369c-7895-70f2-ae4b-5f59d920e99a")
+        args = SimpleNamespace(uid=["7"], source_uidvalidity="9", replacement_message_id="<new@example.test>", yes=True)
+        final = {"7": SimpleNamespace(flags="", gmail_msgid="100", gmail_thrid="200")}
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {"OMO_MANAGER_STATE_DIR": tmp}),
+            patch("omo_manager.omo_manager_mail_compress.current_agent_mail_target", return_value="wl:7"),
+            patch("omo_manager.omo_manager_mail_compress.current_agent_session_id", return_value="01a0369c-7895-70f2-ae4b-5f59d920e99a"),
+            patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {})),
+            patch("omo_manager.omo_manager_mail_compress.mail_boundary", return_value=("agent@example.test", "human@example.test")),
+            patch("omo_manager.omo_manager_mail_compress.agent_unread_records", return_value=[source]),
+            patch("omo_manager.omo_manager_mail_compress.special_use_mailboxes", return_value={r"\All": "All", r"\Sent": "Sent"}),
+            patch("omo_manager.omo_manager_mail_compress.mailbox_exists", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.replacement_exists", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.replacement_subject", return_value="[wl:7] new"),
+            patch("omo_manager.omo_manager_mail_compress.replacement_gmail_msgid", return_value="101"),
+            patch("omo_manager.omo_manager_mail_compress.replacement_supersedes_ids", return_value={"<old@example.test>"}),
+            patch("omo_manager.omo_manager_mail_compress.replacement_agent_session_id", return_value="01a0369c-7895-70f2-ae4b-5f59d920e99a"),
+            patch("omo_manager.omo_manager_mail_compress.inbox_subset", side_effect=[["7"], []]),
+            patch("omo_manager.omo_manager_mail_compress.fetch_gmail_metadata_records_compatible", return_value=final),
+            patch("omo_manager.omo_manager_mail_compress.gmail_message_uids", return_value=["70"]),
+        ):
+            self.assertEqual(0, cmd_agent_trash_replaced(args))
+        self.assertIn(("MOVE", "7", '"[Gmail]/Trash"'), client.uid_calls)
+
+    def test_agent_trash_replaced_refuses_source_read_at_mutation_gate(self) -> None:
+        client = FakeClient({})
+        source = MailRecord("7", "date", "agent@example.test", "human@example.test", "[wl:7] old", "digest", gmail_msgid="100", gmail_thrid="200", message_id="<old@example.test>", agent_session_id="01a0369c-7895-70f2-ae4b-5f59d920e99a")
+        args = SimpleNamespace(uid=["7"], source_uidvalidity="9", replacement_message_id="<new@example.test>", yes=True)
+        final = {"7": SimpleNamespace(flags=r"\Seen", gmail_msgid="100", gmail_thrid="200")}
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {"OMO_MANAGER_STATE_DIR": tmp}),
+            patch("omo_manager.omo_manager_mail_compress.current_agent_mail_target", return_value="wl:7"),
+            patch("omo_manager.omo_manager_mail_compress.current_agent_session_id", return_value="01a0369c-7895-70f2-ae4b-5f59d920e99a"),
+            patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {})),
+            patch("omo_manager.omo_manager_mail_compress.mail_boundary", return_value=("agent@example.test", "human@example.test")),
+            patch("omo_manager.omo_manager_mail_compress.agent_unread_records", return_value=[source]),
+            patch("omo_manager.omo_manager_mail_compress.special_use_mailboxes", return_value={r"\All": "All", r"\Sent": "Sent"}),
+            patch("omo_manager.omo_manager_mail_compress.mailbox_exists", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.replacement_exists", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.replacement_subject", return_value="[wl:7] new"),
+            patch("omo_manager.omo_manager_mail_compress.replacement_gmail_msgid", return_value="101"),
+            patch("omo_manager.omo_manager_mail_compress.replacement_supersedes_ids", return_value={"<old@example.test>"}),
+            patch("omo_manager.omo_manager_mail_compress.replacement_agent_session_id", return_value="01a0369c-7895-70f2-ae4b-5f59d920e99a"),
+            patch("omo_manager.omo_manager_mail_compress.inbox_subset", return_value=["7"]),
+            patch("omo_manager.omo_manager_mail_compress.fetch_gmail_metadata_records_compatible", return_value=final),
+            self.assertRaisesRegex(RuntimeError, "read or changed"),
+        ):
+            cmd_agent_trash_replaced(args)
+        self.assertFalse(any(call[0] == "MOVE" for call in client.uid_calls))
+
+    def test_agent_trash_replaced_refuses_unbound_replacement(self) -> None:
+        client = FakeClient({})
+        source = MailRecord("7", "date", "agent@example.test", "human@example.test", "[wl:7] old", "digest", gmail_msgid="100", gmail_thrid="200", message_id="<old@example.test>", agent_session_id="01a0369c-7895-70f2-ae4b-5f59d920e99a")
+        args = SimpleNamespace(uid=["7"], source_uidvalidity="9", replacement_message_id="<unrelated@example.test>", yes=True)
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {"OMO_MANAGER_STATE_DIR": tmp}),
+            patch("omo_manager.omo_manager_mail_compress.current_agent_mail_target", return_value="wl:7"),
+            patch("omo_manager.omo_manager_mail_compress.current_agent_session_id", return_value="01a0369c-7895-70f2-ae4b-5f59d920e99a"),
+            patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {})),
+            patch("omo_manager.omo_manager_mail_compress.mail_boundary", return_value=("agent@example.test", "human@example.test")),
+            patch("omo_manager.omo_manager_mail_compress.agent_unread_records", return_value=[source]),
+            patch("omo_manager.omo_manager_mail_compress.special_use_mailboxes", return_value={r"\All": "All", r"\Sent": "Sent"}),
+            patch("omo_manager.omo_manager_mail_compress.mailbox_exists", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.replacement_exists", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.replacement_subject", return_value="[wl:7] unrelated"),
+            patch("omo_manager.omo_manager_mail_compress.replacement_supersedes_ids", return_value=set()),
+            self.assertRaisesRegex(RuntimeError, "does not explicitly supersede"),
+        ):
+            cmd_agent_trash_replaced(args)
+        self.assertFalse(any(call[0] == "MOVE" for call in client.uid_calls))
+
+    def test_agent_trash_replaced_refuses_older_replacement(self) -> None:
+        client = FakeClient({})
+        source = MailRecord("7", "date", "agent@example.test", "human@example.test", "[wl:7] old", "digest", gmail_msgid="100", gmail_thrid="200", message_id="<old@example.test>", agent_session_id="01a0369c-7895-70f2-ae4b-5f59d920e99a")
+        args = SimpleNamespace(uid=["7"], source_uidvalidity="9", replacement_message_id="<new@example.test>", yes=True)
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {"OMO_MANAGER_STATE_DIR": tmp}),
+            patch("omo_manager.omo_manager_mail_compress.current_agent_mail_target", return_value="wl:7"),
+            patch("omo_manager.omo_manager_mail_compress.current_agent_session_id", return_value="01a0369c-7895-70f2-ae4b-5f59d920e99a"),
+            patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {})),
+            patch("omo_manager.omo_manager_mail_compress.mail_boundary", return_value=("agent@example.test", "human@example.test")),
+            patch("omo_manager.omo_manager_mail_compress.agent_unread_records", return_value=[source]),
+            patch("omo_manager.omo_manager_mail_compress.special_use_mailboxes", return_value={r"\All": "All", r"\Sent": "Sent"}),
+            patch("omo_manager.omo_manager_mail_compress.mailbox_exists", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.replacement_exists", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.replacement_subject", return_value="[wl:7] new"),
+            patch("omo_manager.omo_manager_mail_compress.replacement_supersedes_ids", return_value={"<old@example.test>"}),
+            patch("omo_manager.omo_manager_mail_compress.replacement_agent_session_id", return_value="01a0369c-7895-70f2-ae4b-5f59d920e99a"),
+            patch("omo_manager.omo_manager_mail_compress.replacement_gmail_msgid", return_value="99"),
+            self.assertRaisesRegex(RuntimeError, "newer"),
+        ):
+            cmd_agent_trash_replaced(args)
+        self.assertFalse(any(call[0] == "MOVE" for call in client.uid_calls))
+
+    def test_agent_trash_replaced_recovers_timeout_after_applied_move(self) -> None:
+        first_client = FakeClient({})
+        second_client = FakeClient({})
+        source = MailRecord("7", "date", "agent@example.test", "human@example.test", "[wl:7] old", "digest", gmail_msgid="100", gmail_thrid="200", message_id="<old@example.test>", agent_session_id="01a0369c-7895-70f2-ae4b-5f59d920e99a")
+        args = SimpleNamespace(uid=["7"], source_uidvalidity="9", replacement_message_id="<new@example.test>", yes=True)
+        final = {"7": SimpleNamespace(flags="", gmail_msgid="100", gmail_thrid="200")}
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch.dict(os.environ, {"OMO_MANAGER_STATE_DIR": tmp}),
+                patch("omo_manager.omo_manager_mail_compress.current_agent_mail_target", return_value="wl:7"),
+                patch("omo_manager.omo_manager_mail_compress.current_agent_session_id", return_value="01a0369c-7895-70f2-ae4b-5f59d920e99a"),
+                patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(first_client, {})),
+                patch("omo_manager.omo_manager_mail_compress.mail_boundary", return_value=("agent@example.test", "human@example.test")),
+                patch("omo_manager.omo_manager_mail_compress.agent_unread_records", return_value=[source]),
+                patch("omo_manager.omo_manager_mail_compress.special_use_mailboxes", return_value={r"\All": "All", r"\Sent": "Sent"}),
+                patch("omo_manager.omo_manager_mail_compress.mailbox_exists", return_value=True),
+                patch("omo_manager.omo_manager_mail_compress.replacement_exists", return_value=True),
+                patch("omo_manager.omo_manager_mail_compress.replacement_subject", return_value="[wl:7] new"),
+                patch("omo_manager.omo_manager_mail_compress.replacement_gmail_msgid", return_value="101"),
+                patch("omo_manager.omo_manager_mail_compress.replacement_supersedes_ids", return_value={"<old@example.test>"}),
+                patch("omo_manager.omo_manager_mail_compress.replacement_agent_session_id", return_value="01a0369c-7895-70f2-ae4b-5f59d920e99a"),
+                patch("omo_manager.omo_manager_mail_compress.inbox_subset", return_value=["7"]),
+                patch("omo_manager.omo_manager_mail_compress.fetch_gmail_metadata_records_compatible", return_value=final),
+                patch("omo_manager.omo_manager_mail_compress.imap_uid", side_effect=ImapOperationError("move-agent-unread-to-trash", "timeout after apply")),
+                self.assertRaisesRegex(ImapOperationError, "timeout after apply"),
+            ):
+                cmd_agent_trash_replaced(args)
+            with (
+                patch.dict(os.environ, {"OMO_MANAGER_STATE_DIR": tmp}),
+                patch("omo_manager.omo_manager_mail_compress.current_agent_mail_target", return_value="wl:7"),
+                patch("omo_manager.omo_manager_mail_compress.current_agent_session_id", return_value="01a0369c-7895-70f2-ae4b-5f59d920e99a"),
+                patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(second_client, {})),
+                patch("omo_manager.omo_manager_mail_compress.mail_boundary", return_value=("agent@example.test", "human@example.test")),
+                patch("omo_manager.omo_manager_mail_compress.agent_move_locations", return_value={"100": "trash"}),
+            ):
+                self.assertEqual(0, cmd_agent_trash_replaced(args))
 
     def test_unread_summary_groups_read_only_threads_and_preserves_read_now_fields(self) -> None:
         raw_old = self.raw_message("[wl:1] task", "first body\n> quoted old body")

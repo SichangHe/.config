@@ -17,6 +17,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from email.message import EmailMessage
+from email.utils import make_msgid
 from html import escape
 from pathlib import Path
 
@@ -43,6 +44,7 @@ except ImportError:
 PWD_FOOTER_RE = re.compile(r"(?:^|\n)(?:>\s*)?PWD: [^\n]+\n?\Z")
 UNQUOTED_PWD_FOOTER_RE = re.compile(r"(?:^|\n)PWD: [^\n]+\n?\Z")
 TMUX_WINDOW_RE = re.compile(r"[^:\n]+:\d+(?:\.\d+)?\Z")
+AGENT_SESSION_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z", re.IGNORECASE)
 TMUX_SUBJECT_TAG_RE = re.compile(r"^\s*(?:\[[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?\]|[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)(?:\s+|$)")
 BRACKETED_TMUX_TAG_RE = re.compile(r"\[[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?\]")
 MANAGER_HUMAN_SUBJECT_RE = re.compile(r"^(?:Re:\s*)?\[[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?\](?:\s+|$)", re.IGNORECASE)
@@ -64,6 +66,7 @@ class CliArgs:
     add_pwd_footer: bool
     manager_human: bool
     tmux_target: str | None
+    supersedes_message_ids: tuple[str, ...]
 
 
 class ParsedArgs(argparse.Namespace):
@@ -76,6 +79,7 @@ class ParsedArgs(argparse.Namespace):
     manager_human: bool = False
     tmux_target: str | None = None
     sender_tmux_target: str | None = None
+    supersedes_message_id: list[str]
 
 
 def parse_args(argv: list[str]) -> CliArgs:
@@ -99,6 +103,7 @@ def parse_args(argv: list[str]) -> CliArgs:
     )
     _ = parser.add_argument("--tmux-target", help="Normally omit: the helper infers producer identity from the exact current pane, then the launch environment. Override only to preserve a different verified producer identity; never pass a task owner or delivery target.")
     _ = parser.add_argument("--sender-tmux-target", dest="sender_tmux_target", help="Alias for --tmux-target; use only when forwarding or compressing mail while preserving a different verified producer identity.")
+    _ = parser.add_argument("--supersedes-message-id", action="append", default=[], help="Exact Message-ID from agent-unread that this replacement supersedes; repeat for multiple messages.")
     _ = parser.add_argument("--manager-human", action="store_true", help=argparse.SUPPRESS)
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     if parsed.legacy_args:
@@ -138,7 +143,19 @@ def parse_args(argv: list[str]) -> CliArgs:
     tmux_target = parsed.tmux_target or parsed.sender_tmux_target
     if tmux_target is not None and not valid_tmux_target(tmux_target):
         parser.error("--tmux-target must have shape session:window or session:window.pane, for example wl:4.")
-    return CliArgs(title=title, content=content, dry_run=parsed.dry_run, add_pwd_footer=not parsed.no_pwd_footer, manager_human=parsed.manager_human, tmux_target=tmux_target)
+    if any(re.fullmatch(r"<[^<>\s]+>", value) is None for value in parsed.supersedes_message_id):
+        parser.error("--supersedes-message-id must be an exact RFC Message-ID enclosed in angle brackets.")
+    if len(set(parsed.supersedes_message_id)) != len(parsed.supersedes_message_id):
+        parser.error("--supersedes-message-id values must be unique.")
+    return CliArgs(
+        title=title,
+        content=content,
+        dry_run=parsed.dry_run,
+        add_pwd_footer=not parsed.no_pwd_footer,
+        manager_human=parsed.manager_human,
+        tmux_target=tmux_target,
+        supersedes_message_ids=tuple(parsed.supersedes_message_id),
+    )
 
 
 def normalize_subject(title: str, tmux_target: str = "") -> str:
@@ -256,6 +273,11 @@ def inferred_tmux_target(manager_human: bool) -> str | None:
     if fallback_target is not None:
         return fallback_target
     return None if has_pane_id else current_tmux_window()
+
+
+def agent_session_id() -> str:
+    value = (os.environ.get("CODEX_SESSION_ID", "").strip() or os.environ.get("CODEX_THREAD_ID", "").strip()).lower()
+    return value if AGENT_SESSION_RE.fullmatch(value) else ""
 
 
 def footer_tmux_target(explicit_tmux_target: str | None = None, manager_human: bool = False) -> str | None:
@@ -459,12 +481,19 @@ def markdown_to_html(text: str) -> str:
     return f'<!doctype html><html><body style="font-family: -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif; line-height: 1.45;">{body}</body></html>\n'
 
 
-def build_message(sender_email: str, title: str, content: str, add_pwd_footer: bool = True, prepared_subject: str | None = None, reply_headers: dict[str, str] | None = None, tmux_target: str | None = None, manager_human: bool = False, recipient_email: str | None = None) -> EmailMessage:
+def build_message(sender_email: str, title: str, content: str, add_pwd_footer: bool = True, prepared_subject: str | None = None, reply_headers: dict[str, str] | None = None, tmux_target: str | None = None, manager_human: bool = False, recipient_email: str | None = None, supersedes_message_ids: tuple[str, ...] = (), agent_session: str = "") -> EmailMessage:
     source_target = footer_tmux_target(tmux_target, manager_human)
     msg = EmailMessage()
     msg.add_header("Subject", prepared_subject or normalize_subject(title, source_target or ""))
     msg.add_header("From", sender_email)
     msg.add_header("To", recipient_email or sender_email)
+    msg.add_header("Message-ID", make_msgid(domain=sender_email.partition("@")[2] or None))
+    if agent_session:
+        if AGENT_SESSION_RE.fullmatch(agent_session) is None:
+            raise ValueError("agent session identity must be a UUID")
+        msg.add_header("X-OMO-Agent-Session-ID", agent_session.lower())
+    for message_id in supersedes_message_ids:
+        msg.add_header("X-OMO-Supersedes", message_id)
     if reply_headers is not None:
         for name, value in reply_headers.items():
             msg.add_header(name, value)
@@ -687,6 +716,8 @@ def main(argv: list[str]) -> int:
             tmux_target=subject_tmux_target,
             manager_human=args.manager_human,
             recipient_email=recipient_email,
+            supersedes_message_ids=args.supersedes_message_ids,
+            agent_session=agent_session_id(),
         )
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
@@ -709,6 +740,7 @@ def main(argv: list[str]) -> int:
         return 1
     except (OSError, smtplib.SMTPException) as exc:
         print(f"Email send failed: {exc}", file=sys.stderr)
+        print(f"Delivery-uncertain Message-ID: {msg['Message-ID']}", file=sys.stderr)
         return 1
 
     if args.manager_human:
@@ -716,6 +748,7 @@ def main(argv: list[str]) -> int:
         print("Emailed the human")
     else:
         print("Email sent.")
+    print(f"Message-ID: {msg['Message-ID']}")
     maybe_print_thread_reminder()
     return 0
 
