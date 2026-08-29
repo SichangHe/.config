@@ -770,6 +770,8 @@ def capture_rotation_snapshot(args: Args, pane: Pane, task: TaskBinding) -> Rota
         None,
         (pane.target, pane.pane_id),
     )
+    if not old_session_id:
+        old_session_id = query_exact_status_session_id(pane, 240, min(10.0, args.startup_timeout_s))
     if args.assert_legacy_missing_session_id:
         if old_session_id:
             raise StartError("legacy missing-session assertion is false because the old worker UUID is recoverable; the pane was not replaced.")
