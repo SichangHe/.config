@@ -62,6 +62,10 @@ SOURCE_815_EXACT_REMOVAL_EXCEPTION = "source-815-human-approved-exact-removal"
 SOURCE_1140_APPROVAL_FILE = "85c5dff58359-1140.txt"
 SOURCE_1140_APPROVAL_QUOTE = "Perhaps all of them."
 SOURCE_1140_APPROVAL_SHA256 = "a80ed239e1acbd07750c2f55202ec2d5a68e6bd53068ae9c1eed36925fc7e436"
+# 🧑 “Trash the emails that I no longer need to read that are not read yet.”
+SOURCE_1179_APPROVAL_FILE = "85c5dff58359-1179.txt"
+SOURCE_1179_APPROVAL_QUOTE = "Trash the emails that I no longer need to read that are not read yet."
+SOURCE_1179_APPROVAL_SHA256 = "0c470c290d70d8cf66a95ba8fabce3d2881b4ca0edb866267f28eabc529ce6db"
 GMAIL_IDENTITY_UID_BATCH = 40
 GMAIL_THREAD_OR_BATCH = 32
 EXPORT_FULL_FETCH_ATTEMPTS = 2
@@ -2469,14 +2473,20 @@ def require_source_1140_direct_removal(
     contexts: list[ScopedSource],
     preparer: str,
     reviewer: str,
-) -> None:
-    if approval_file is None or approval_quote != SOURCE_1140_APPROVAL_QUOTE:
-        raise RuntimeError("replacement-free removal requires the exact source-1140 approval")
+) -> bool:
+    approvals = {
+        SOURCE_1140_APPROVAL_FILE: (SOURCE_1140_APPROVAL_QUOTE, SOURCE_1140_APPROVAL_SHA256),
+        SOURCE_1179_APPROVAL_FILE: (SOURCE_1179_APPROVAL_QUOTE, SOURCE_1179_APPROVAL_SHA256),
+    }
+    approval_name = approval_file.name if approval_file is not None else ""
+    expected_quote, expected_sha256 = approvals.get(approval_name, ("", ""))
+    if approval_file is None or approval_quote != expected_quote:
+        raise RuntimeError("replacement-free removal requires an exact supported Human approval")
     approval_arg = approval_file.expanduser()
     work_logs_root_arg = configured_work_logs_root()
     mail_root_arg = work_logs_root_arg / "manager_mail"
-    if not approval_arg.is_absolute() or approval_arg.parent != mail_root_arg or approval_arg.name != SOURCE_1140_APPROVAL_FILE:
-        raise RuntimeError("replacement-free removal requires the trusted source-1140 manager mail")
+    if not approval_arg.is_absolute() or approval_arg.parent != mail_root_arg or approval_arg.name not in approvals:
+        raise RuntimeError("replacement-free removal requires trusted manager mail")
     try:
         work_logs_root_stat = work_logs_root_arg.lstat()
         mail_root_stat = mail_root_arg.lstat()
@@ -2494,11 +2504,11 @@ def require_source_1140_direct_removal(
         or mail_root_stat.st_mode & 0o077
         or approval_arg.parent.resolve(strict=False) != mail_root
         or approval_path.parent != mail_root
-        or hashlib.sha256(approval_bytes).hexdigest() != SOURCE_1140_APPROVAL_SHA256
-        or SOURCE_1140_APPROVAL_QUOTE not in approval_text
+        or hashlib.sha256(approval_bytes).hexdigest() != expected_sha256
+        or expected_quote not in " ".join(approval_text.split())
         or work_logs_root != mail_root.parent
     ):
-        raise RuntimeError("replacement-free removal approval evidence does not match source-1140")
+        raise RuntimeError("replacement-free removal approval evidence does not match the supported Human source")
     if review_file is None:
         raise RuntimeError("replacement-free removal requires exact independent review evidence")
     try:
@@ -2512,7 +2522,7 @@ def require_source_1140_direct_removal(
         values.setdefault(row["kind"], []).append(row["value"])
     expected_single = {
         "version": ["v1.0.0"],
-        "approval_sha256": [SOURCE_1140_APPROVAL_SHA256],
+        "approval_sha256": [expected_sha256],
         "task_id": [task_id],
         "preparer": [preparer],
         "reviewer": [reviewer],
@@ -2529,6 +2539,7 @@ def require_source_1140_direct_removal(
         or not expected_contexts
     ):
         raise RuntimeError("replacement-free removal review evidence does not match the exact operation")
+    return approval_arg.name == SOURCE_1179_APPROVAL_FILE
 
 
 def disposition_text(
@@ -3610,6 +3621,7 @@ def final_inbox_bindings_intact(
     sender_email: str,
     recipient_email: str,
     observed: Callable[[str], None] | None = None,
+    require_unread_sources: bool = False,
 ) -> bool:
     """Authenticate source and retained Inbox bindings in the last pre-MOVE fetch."""
     expected_uids = [item.uid for item in [*sources, *retained]]
@@ -3626,6 +3638,7 @@ def final_inbox_bindings_intact(
     retained_by_uid = {item.uid: item for item in retained}
     sources_intact = all(
         is_manager_record(record, sender_email, recipient_email)
+        and (not require_unread_sources or r"\Seen" not in record.flags)
         and (
             record.gmail_msgid,
             record.gmail_thrid,
@@ -3805,8 +3818,9 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
             raise ValueError("one reviewed retained replacement binding is required per replacement")
         if replacement_not_required and retained_replacements:
             raise ValueError("replacement-free removal does not accept a retained replacement binding")
+        require_unread_sources = False
         if replacement_not_required:
-            require_source_1140_direct_removal(
+            require_unread_sources = require_source_1140_direct_removal(
                 getattr(args, "human_approval_file", None),
                 getattr(args, "human_approval_quote", None),
                 getattr(args, "independent_review_file", None),
@@ -3893,6 +3907,8 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
         inbox_records, trash_records = observe_explicit_sources(client, sources, sender_email, recipient_email)
         if source_location_mode == "strict-fresh" and not strict_fresh_source_locations_intact(sources, inbox_records, trash_records):
             return refuse_trash("refusing because strict-fresh requires every bound source to remain in INBOX")
+        if require_unread_sources and any(r"\Seen" in record.flags for record in inbox_records):
+            return refuse_trash("refusing because a Source-1179 source is no longer unread")
         set_trash_stage("replacement-exists")
         if any(
             not replacement_exists(client, special_use[r"\All"], replacement_id, sender_email, recipient_email)
@@ -3969,6 +3985,8 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
             return refuse_trash("refusing because a planned source moved immediately before mutation")
         if source_location_mode == "strict-fresh" and not strict_fresh_source_locations_intact(sources, final_inbox, final_trash):
             return refuse_trash("refusing because strict-fresh source location changed immediately before mutation")
+        if require_unread_sources and any(r"\Seen" in record.flags for record in final_inbox):
+            return refuse_trash("refusing because a Source-1179 source is no longer unread")
         set_trash_stage("replacement-exists-final")
         if any(
             not replacement_exists(client, special_use[r"\All"], replacement_id, sender_email, recipient_email)
@@ -4045,6 +4063,7 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
             sender_email,
             recipient_email,
             observed=final_gate.observed,
+            require_unread_sources=require_unread_sources,
         ):
             return refuse_trash("refusing because a source or retained replacement Inbox binding changed at the final mutation gate")
         final_gate_passed = True
@@ -4524,10 +4543,10 @@ This command moves the old message only from Inbox to recoverable Gmail Trash an
     direct.add_argument(
         "--replacement-not-required",
         action="store_true",
-        help="Move one independently reviewed task with no retained agent mail under exact Human Source-1140 approval.",
+        help="Move one independently reviewed task with no retained agent mail under an exact supported Human approval.",
     )
-    direct.add_argument("--human-approval-file", type=Path, help="Exact owner-only Source-1140 manager-mail file.")
-    direct.add_argument("--human-approval-quote", help="Exact Source-1140 approval sentence.")
+    direct.add_argument("--human-approval-file", type=Path, help="Exact owner-only supported Human manager-mail file.")
+    direct.add_argument("--human-approval-quote", help="Exact supported Human approval sentence.")
     direct.add_argument("--independent-review-file", type=Path, help="Owner-only TSV binding the exact PASS-reviewed operation.")
     direct.add_argument(
         "--task-id",

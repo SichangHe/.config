@@ -39,6 +39,8 @@ from omo_manager.omo_manager_mail_compress import (
     SOURCE_815_TASK_ID,
     SOURCE_1140_APPROVAL_FILE,
     SOURCE_1140_APPROVAL_QUOTE,
+    SOURCE_1179_APPROVAL_FILE,
+    SOURCE_1179_APPROVAL_QUOTE,
     TRUSTED_LOCAL_ENV_PATH,
     accepted_manager_headers,
     agent_unread_records,
@@ -3177,6 +3179,90 @@ with tempfile.TemporaryDirectory() as tmp:
                         "owner-a",
                         "reviewer-b",
                     )
+
+    def test_source_1179_direct_removal_binds_exact_reviewed_operation(self) -> None:
+        digest = "a" * 64
+        source = parse_explicit_source(f"7:100:200:{digest}")
+        context = parse_explicit_context(f"100:200:{digest}")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mail_root = root / "manager_mail"
+            mail_root.mkdir(mode=0o700)
+            approval = mail_root / SOURCE_1179_APPROVAL_FILE
+            approval.write_text("Trash the emails that I no longer need\nto read that are not read yet.", encoding="utf-8")
+            approval.chmod(0o600)
+            approval_sha256 = hashlib.sha256(approval.read_bytes()).hexdigest()
+            review = root / "review.tsv"
+            review.write_text(
+                "kind\tvalue\n"
+                "version\tv1.0.0\n"
+                f"approval_sha256\t{approval_sha256}\n"
+                "task_id\ttask-a\n"
+                "preparer\towner-a\n"
+                "reviewer\treviewer-b\n"
+                "verdict\tPASS\n"
+                f"source\t7:100:200:{digest}\n"
+                f"context\t100:200:{digest}\n",
+                encoding="utf-8",
+            )
+            review.chmod(0o600)
+            with (
+                patch("omo_manager.omo_manager_mail_compress.configured_work_logs_root", return_value=root),
+                patch("omo_manager.omo_manager_mail_compress.SOURCE_1179_APPROVAL_SHA256", approval_sha256),
+            ):
+                self.assertTrue(require_source_1140_direct_removal(
+                    approval,
+                    SOURCE_1179_APPROVAL_QUOTE,
+                    review,
+                    "task-a",
+                    [source],
+                    [context],
+                    "owner-a",
+                    "reviewer-b",
+                ))
+                with self.assertRaisesRegex(RuntimeError, "exact supported Human approval"):
+                    require_source_1140_direct_removal(
+                        approval,
+                        SOURCE_1140_APPROVAL_QUOTE,
+                        review,
+                        "task-a",
+                        [source],
+                        [context],
+                        "owner-a",
+                        "reviewer-b",
+                    )
+
+    def test_source_1179_final_binding_rejects_seen_source(self) -> None:
+        source_binding = parse_explicit_source(f"7:100:200:{'a' * 64}")
+        source = MailRecord(
+            "7",
+            "",
+            "Agent <agent@example.test>",
+            "Human <human@example.test>",
+            "source",
+            "source",
+            "",
+            "100",
+            "200",
+            flags=r"\Seen",
+            raw_sha256="a" * 64,
+        )
+        with (
+            patch("omo_manager.omo_manager_mail_compress.select_mailbox"),
+            patch("omo_manager.omo_manager_mail_compress.selected_uidvalidity", return_value="1"),
+            patch("omo_manager.omo_manager_mail_compress.fetch_final_gate_records", return_value=[source]),
+        ):
+            self.assertFalse(
+                final_inbox_bindings_intact(
+                    FakeClient({}),
+                    "1",
+                    [source_binding],
+                    [],
+                    "agent@example.test",
+                    "human@example.test",
+                    require_unread_sources=True,
+                )
+            )
 
     def test_inspect_explicit_requires_task_and_uids_before_mailbox_access(self) -> None:
         args = type("InspectArgs", (), {"uids": "", "task_id": "task-a"})()
