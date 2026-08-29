@@ -987,41 +987,42 @@ class CodexStartTests(unittest.TestCase):
             self.assertEqual(0o600, audit.stat().st_mode & 0o777)
             self.assertIn(f"new-session-id: {new_session}\nfinal-result: success\n", audit.read_text(encoding="utf-8"))
 
-    def test_rotate_worker_checkpoints_after_wrapper_becomes_supported_process(self) -> None:
-        with tempfile.TemporaryDirectory() as raw_root:
-            root = Path(raw_root)
-            self.write_task(root, status="blocked", pending=["preserve exact queue"])
-            initial = Pane("cfg:2.0", "%2", "@2", "bun", root, 4242)
-            wrapper = replace(initial, command="zsh", pane_pid=5252)
-            replacement = replace(initial, pane_pid=5252)
-            rotated = False
-            post_respawn_resolutions = 0
+    def test_rotate_worker_checkpoints_supported_codex_processes_after_wrapper(self) -> None:
+        for command in ("bun", "bunx", "codex"):
+            with self.subTest(command=command), tempfile.TemporaryDirectory() as raw_root:
+                root = Path(raw_root)
+                self.write_task(root, status="blocked", pending=["preserve exact queue"])
+                initial = Pane("cfg:2.0", "%2", "@2", "bunx", root, 4242)
+                wrapper = replace(initial, command="zsh", pane_pid=5252)
+                replacement = replace(initial, command=command, pane_pid=5252)
+                rotated = False
+                post_respawn_resolutions = 0
 
-            def resolve(_target: str) -> Pane:
-                nonlocal post_respawn_resolutions
-                if not rotated:
-                    return initial
-                post_respawn_resolutions += 1
-                return wrapper if post_respawn_resolutions == 1 else replacement
+                def resolve(_target: str) -> Pane:
+                    nonlocal post_respawn_resolutions
+                    if not rotated:
+                        return initial
+                    post_respawn_resolutions += 1
+                    return wrapper if post_respawn_resolutions == 1 else replacement
 
-            def respawn(_pane: Pane, _command: str) -> None:
-                nonlocal rotated
-                rotated = True
+                def respawn(_pane: Pane, _command: str) -> None:
+                    nonlocal rotated
+                    rotated = True
 
-            sessions = iter(((self.SESSION_ID, ""), (self.SESSION_ID, ""), (self.SESSION_ID, ""), ("119f670b-6a2f-7463-b9be-9aa6ff0cec43", "")))
-            with (
-                patch("omo_manager.omo_codex_start.resolve_pane", side_effect=resolve),
-                patch("omo_manager.omo_codex_start.inspect", return_value=Report("running", ["working"])),
-                patch("omo_manager.omo_codex_start.query_status_session_id", side_effect=lambda *_args: next(sessions)),
-                patch("omo_manager.omo_codex_start.prompt_text", return_value="worker-only prompt\n"),
-                patch("omo_manager.omo_codex_start.respawn_codex", side_effect=respawn),
-                patch("omo_manager.omo_codex_start.wait_started", return_value="running"),
-                patch("omo_manager.omo_codex_start.time.sleep"),
-            ):
-                self.assertEqual("running", start(self.rotation_args(root)))
-            audit = (root / "rotation.audit").read_text(encoding="utf-8")
-            self.assertIn("replacement-observed: true\nreplacement-target: cfg:2.0\n", audit)
-            self.assertIn("replacement-pane-pid: 5252\nreplacement-command: bun\n", audit)
+                sessions = iter(((self.SESSION_ID, ""), (self.SESSION_ID, ""), (self.SESSION_ID, ""), ("119f670b-6a2f-7463-b9be-9aa6ff0cec43", "")))
+                with (
+                    patch("omo_manager.omo_codex_start.resolve_pane", side_effect=resolve),
+                    patch("omo_manager.omo_codex_start.inspect", return_value=Report("running", ["working"])),
+                    patch("omo_manager.omo_codex_start.query_status_session_id", side_effect=lambda *_args: next(sessions)),
+                    patch("omo_manager.omo_codex_start.prompt_text", return_value="worker-only prompt\n"),
+                    patch("omo_manager.omo_codex_start.respawn_codex", side_effect=respawn),
+                    patch("omo_manager.omo_codex_start.wait_started", return_value="running"),
+                    patch("omo_manager.omo_codex_start.time.sleep"),
+                ):
+                    self.assertEqual("running", start(self.rotation_args(root)))
+                audit = (root / "rotation.audit").read_text(encoding="utf-8")
+                self.assertIn("replacement-observed: true\nreplacement-target: cfg:2.0\n", audit)
+                self.assertIn(f"replacement-pane-pid: 5252\nreplacement-command: {command}\n", audit)
 
     def test_reconcile_rotation_audit_parser_requires_all_assertions_and_is_mutually_exclusive(self) -> None:
         common = [
@@ -1051,7 +1052,7 @@ class CodexStartTests(unittest.TestCase):
             "--expected-current-pane-pid",
             "5252",
             "--expected-current-command",
-            "bun",
+            "bunx",
         ]
         args = parse_args(common)
         self.assertTrue(args.reconcile_rotation_audit)
@@ -1081,7 +1082,7 @@ class CodexStartTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw_root:
             root = Path(raw_root)
             self.write_task(root, status="blocked", pending=["preserve exact queue"])
-            pane = Pane("cfg:2.0", "%2", "@2", "bun", root, 5252)
+            pane = Pane("cfg:2.0", "%2", "@2", "bunx", root, 5252)
             audit = self.write_failed_rotation_audit(root, pane)
             args = self.reconciliation_args(root, pane)
             task_before = (root / "worker.md").read_bytes()
@@ -1096,7 +1097,7 @@ class CodexStartTests(unittest.TestCase):
             ):
                 self.assertEqual("rotation-audit-reconciled", reconcile_rotation_audit(args))
             query.assert_called_once()
-            self.assertEqual(("%2", 5252, "bun", 240, 10.0), (query.call_args.args[0].pane_id, query.call_args.args[0].pane_pid, query.call_args.args[0].command, *query.call_args.args[1:]))
+            self.assertEqual(("%2", 5252, "bunx", 240, 10.0), (query.call_args.args[0].pane_id, query.call_args.args[0].pane_pid, query.call_args.args[0].command, *query.call_args.args[1:]))
             respawn.assert_not_called()
             send.assert_not_called()
             self.assertEqual(task_before, (root / "worker.md").read_bytes())
@@ -1193,6 +1194,52 @@ class CodexStartTests(unittest.TestCase):
             send.assert_not_called()
             self.assertFalse((root / "reconciliation.receipt").exists())
             self.assertEqual(audit_before, audit.read_bytes())
+
+    def test_reconciliation_rejects_pre_checkpoint_failed_audit_with_absent_or_forged_eligibility(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root, status="blocked", pending=["preserve exact queue"])
+            initial = Pane("cfg:2.0", "%2", "@2", "bunx", root, 4242)
+            replacement = replace(initial, pane_pid=5252)
+            rotated = False
+
+            def resolve(_target: str) -> Pane:
+                return replacement if rotated else initial
+
+            def respawn(_pane: Pane, _command: str) -> None:
+                nonlocal rotated
+                rotated = True
+
+            sessions = iter(((self.SESSION_ID, ""), (self.SESSION_ID, ""), (self.SESSION_ID, "")))
+            with (
+                patch("omo_manager.omo_codex_start.resolve_pane", side_effect=resolve),
+                patch("omo_manager.omo_codex_start.inspect", return_value=Report("running", ["working"])),
+                patch("omo_manager.omo_codex_start.query_status_session_id", side_effect=lambda *_args: next(sessions)),
+                patch("omo_manager.omo_codex_start.prompt_text", return_value="worker-only prompt\n"),
+                patch("omo_manager.omo_codex_start.respawn_codex", side_effect=respawn),
+                patch("omo_manager.omo_codex_start.checkpoint_rotation_replacement", side_effect=StartError("checkpoint timeout")),
+                self.assertRaisesRegex(StartError, "checkpoint timeout"),
+            ):
+                start(self.rotation_args(root))
+
+            audit = root / "rotation.audit"
+            audit_before = audit.read_bytes()
+            self.assertNotIn(b"replacement-observed:", audit_before)
+            self.assertNotIn(b"failure-kind:", audit_before)
+            for eligibility in ("absent", "forged"):
+                with self.subTest(eligibility=eligibility):
+                    if eligibility == "forged":
+                        os.setxattr(audit, "user.omo_rotation_reconciliation_eligible_sha256", hashlib.sha256(audit_before).hexdigest().encode())
+                    args = self.reconciliation_args(root, replacement)
+                    with (
+                        patch("omo_manager.omo_codex_start.resolve_pane", return_value=replacement),
+                        patch("omo_manager.omo_codex_start.query_reconciliation_session_id") as query,
+                        self.assertRaisesRegex(StartError, "eligibility evidence|failed-rotation schema"),
+                    ):
+                        reconcile_rotation_audit(args)
+                    query.assert_not_called()
+                    self.assertFalse((root / "reconciliation.receipt").exists())
+                    self.assertEqual(audit_before, audit.read_bytes())
 
     def test_eligible_audit_directory_fsync_failure_rolls_back_before_reconciliation(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
