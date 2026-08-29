@@ -366,6 +366,47 @@ class HeesFinalArtifactReplaceTests(unittest.TestCase):
             with patch.object(replace_module, "trusted_writer_group", side_effect=(trust, changed)), self.assertRaisesRegex(ReplaceError, "trusted writer group changed"):
                 replace_module.markdown_records(root)
 
+    def test_owner_proof_allows_unrelated_root_namespace_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _stale, _todo, _args = self.make_root(root)
+            original_read = replace_module.read_snapshot_at
+            changed = False
+
+            def change_unrelated_entry(parent_fd: int, name: str, path: Path, label: str, trust: replace_module.TrustedGroup | None = None):
+                nonlocal changed
+                snapshot = original_read(parent_fd, name, path, label, trust)
+                if not changed:
+                    changed = True
+                    (root / ".unrelated-supported-writer.tmp").write_bytes(b"state\n")
+                return snapshot
+
+            with patch.object(replace_module, "read_snapshot_at", side_effect=change_unrelated_entry):
+                records = replace_module.markdown_records(root)
+            self.assertEqual({"TODO.md", "hees_1170_policy.md"}, {record.path.name for record in records})
+
+    def test_owner_proof_allows_unrelated_task_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _stale, _todo, _args = self.make_root(root)
+            other = root / "other.md"
+            other.write_text(task_text(runat="guest_hees:8"), encoding="utf-8")
+            original_read = replace_module.read_snapshot_at
+            changed = False
+
+            def replace_before_read(parent_fd: int, name: str, path: Path, label: str, trust: replace_module.TrustedGroup | None = None):
+                nonlocal changed
+                if name == other.name and not changed:
+                    changed = True
+                    os.replace(other, root / "other-owned")
+                    other.write_text(task_text(runat="guest_hees:9"), encoding="utf-8")
+                return original_read(parent_fd, name, path, label, trust)
+
+            with patch.object(replace_module, "read_snapshot_at", side_effect=replace_before_read):
+                records = replace_module.markdown_records(root)
+            other_record = next(record for record in records if record.path == other)
+            self.assertEqual("guest_hees:9", metadata(other_record.data.decode(), root).runat)
+
     def test_rejects_child_directory_replacement_during_owner_proof(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as outside_tmp:
             root = Path(tmp)
@@ -828,8 +869,31 @@ class HeesFinalArtifactReplaceTests(unittest.TestCase):
                     with patch.object(replace_module, "active_owners", side_effect=rebind_after_scan):
                         original_proof(**values)  # type: ignore[arg-type]
 
-                with patch.object(replace_module, "prove_committed_state", side_effect=rebind_during_owner_proof), self.assertRaisesRegex(ReplaceError, "namespace changed during the final commit proof"):
+                with (
+                    patch.object(replace_module, "prove_committed_state", side_effect=rebind_during_owner_proof),
+                    self.assertRaisesRegex(ReplaceError, "TODO changed while replacement was being prepared"),
+                ):
                     replace(args)
+
+    def test_final_proof_allows_unrelated_root_namespace_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _stale, _todo, args = self.make_root(root)
+            original_owners = replace_module.active_owners
+            calls = 0
+
+            def change_after_final_scan(scan_root: Path, target: str, overrides: dict[Path, bytes], root_fd: int | None = None):
+                nonlocal calls
+                calls += 1
+                owners = original_owners(scan_root, target, overrides, root_fd)
+                if calls == 4:
+                    (root / ".unrelated-supported-writer.tmp").write_bytes(b"state\n")
+                return owners
+
+            with patch.object(replace_module, "active_owners", side_effect=change_after_final_scan):
+                _ = replace(args)
+            self.assertEqual(4, calls)
+            self.assertTrue((root / "hees_final_artifact.md").is_file())
 
     def test_committed_recovery_final_proof_rejects_identical_or_changed_successor_rebind(self) -> None:
         for changed in (False, True):
@@ -916,7 +980,10 @@ class HeesFinalArtifactReplaceTests(unittest.TestCase):
                     with patch.object(replace_module, "active_owners", side_effect=rebind_after_scan):
                         original_proof(**values)  # type: ignore[arg-type]
 
-                with patch.object(replace_module, "prove_committed_state", side_effect=rebind_during_owner_proof), self.assertRaisesRegex(ReplaceError, "namespace changed during the final commit proof"):
+                with (
+                    patch.object(replace_module, "prove_committed_state", side_effect=rebind_during_owner_proof),
+                    self.assertRaisesRegex(ReplaceError, "TODO changed while replacement was being prepared"),
+                ):
                     replace(args)
 
     def test_failed_stage_restoration_is_not_reported_as_successful_rollback(self) -> None:

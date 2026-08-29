@@ -183,11 +183,6 @@ def file_identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
     return value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns
 
 
-def directory_generation(fd: int) -> tuple[int, int, int, int]:
-    state = os.fstat(fd)
-    return state.st_dev, state.st_ino, state.st_mtime_ns, state.st_ctime_ns
-
-
 def require_safe_file(fd: int, state: os.stat_result, label: str, trust: TrustedGroup) -> None:
     if not stat.S_ISREG(state.st_mode) or state.st_uid != os.getuid() or state.st_mode & stat.S_IWOTH:
         raise ReplaceError(f"{label} must be one owner-owned authenticated regular file")
@@ -410,13 +405,6 @@ class ScannedDirectory:
 
 
 @dataclass(frozen=True)
-class ScannedRecord:
-    snapshot: Snapshot
-    parent_fd: int
-    name: str
-
-
-@dataclass(frozen=True)
 class TrustedGroup:
     gid: int
     members: tuple[tuple[str, int], ...]
@@ -491,7 +479,7 @@ def markdown_records(root: Path, existing_root_fd: int | None = None) -> tuple[S
         root_state = os.fstat(root_fd)
         require_safe_directory(root_fd, root_state, root, trust)
         directories = [ScannedDirectory(root_fd, root, root_state, None, root.name)]
-        records: list[ScannedRecord] = []
+        records: list[Snapshot] = []
         for directory in directories:
             try:
                 entries = tuple(sorted(os.scandir(directory.fd), key=lambda entry: entry.name))
@@ -515,34 +503,26 @@ def markdown_records(root: Path, existing_root_fd: int | None = None) -> tuple[S
                     fds.append(child_fd)
                     child_state = os.fstat(child_fd)
                     require_safe_directory(child_fd, child_state, path, trust)
-                    if file_identity(child_state) != file_identity(entry_state):
+                    if (child_state.st_dev, child_state.st_ino) != (entry_state.st_dev, entry_state.st_ino):
                         raise ReplaceError(f"cannot prove target ownership because directory {path} changed during traversal")
                     directories.append(ScannedDirectory(child_fd, path, child_state, directory.fd, entry.name))
                 elif path.suffix == ".md":
                     if not stat.S_ISREG(entry_state.st_mode):
                         raise ReplaceError(f"cannot prove target ownership because {path.name} is not a regular file")
                     snapshot = read_snapshot_at(directory.fd, entry.name, path, f"task record {path.name}", trust)
-                    if file_identity(snapshot.state) != file_identity(entry_state):
-                        raise ReplaceError(f"cannot prove target ownership because {path.name} changed before it was read")
-                    records.append(ScannedRecord(snapshot, directory.fd, entry.name))
+                    records.append(snapshot)
         root_current = os.stat(root, follow_symlinks=False)
-        if file_identity(root_current) != file_identity(root_state):
+        if (root_current.st_dev, root_current.st_ino) != (root_state.st_dev, root_state.st_ino):
             raise ReplaceError("cannot prove target ownership because the root directory changed during traversal")
         for directory in directories[1:]:
             if directory.parent_fd is None:
                 raise AssertionError("child directory has no parent descriptor")
             current = os.stat(directory.name, dir_fd=directory.parent_fd, follow_symlinks=False)
-            if file_identity(current) != file_identity(directory.state):
+            if (current.st_dev, current.st_ino) != (directory.state.st_dev, directory.state.st_ino):
                 raise ReplaceError(f"cannot prove target ownership because directory {directory.path} changed during traversal")
-        snapshots: list[Snapshot] = []
-        for record in records:
-            current = read_snapshot_at(record.parent_fd, record.name, record.snapshot.path, f"task record {record.snapshot.path.name}", trust)
-            if file_identity(current.state) != file_identity(record.snapshot.state) or current.data != record.snapshot.data:
-                raise ReplaceError(f"cannot prove target ownership because {record.snapshot.path.name} changed during traversal")
-            snapshots.append(current)
         if trusted_writer_group() != trust:
             raise ReplaceError("trusted writer group changed during traversal")
-        return tuple(snapshots)
+        return tuple(records)
     except OSError as error:
         raise ReplaceError(f"cannot prove target ownership because traversal state changed: {error}") from error
     finally:
@@ -910,7 +890,6 @@ def prove_committed_state(
     successor: Snapshot,
     receipts: tuple[Snapshot, ...],
 ) -> None:
-    generation = directory_generation(root_fd)
     require_snapshot_at(journal, "transaction journal", root_fd)
     require_snapshot_at(stale, "stale task", root_fd)
     require_snapshot_at(todo, "TODO", root_fd)
@@ -922,9 +901,13 @@ def prove_committed_state(
         raise ReplaceError("final state does not have exactly one committed successor owner")
     if checked_pane_id(target):
         raise ReplaceError("stale target became live at the final commit boundary")
+    require_snapshot_at(journal, "transaction journal", root_fd)
+    require_snapshot_at(stale, "stale task", root_fd)
+    require_snapshot_at(todo, "TODO", root_fd)
+    require_snapshot_at(successor, "successor task", root_fd)
+    for receipt in receipts:
+        require_snapshot_at(receipt, f"{receipt.path.name} displaced-inode receipt", root_fd)
     require_root_identity(root_identity)
-    if directory_generation(root_fd) != generation:
-        raise ReplaceError("work-log root namespace changed during the final commit proof")
 
 
 def recover_journal(args: Args, path: Path, root_identity: RootIdentity, root_fd: int) -> Journal | bool | None:
