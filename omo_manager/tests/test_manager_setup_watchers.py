@@ -89,6 +89,7 @@ esac
             "OMO_WORK_LOGS_ROOT": str(root),
             "OMO_MANAGER_STATE_DIR": str(state),
             "OMO_MANAGER_ENABLE_EMAIL_WATCHER": email,
+            "OMO_MANAGER_ENABLE_GUEST_HEES_EMAIL_WATCHER": "false",
             "OMO_MANAGER_WATCHER_HEALTH_TIMEOUT_S": health_timeout_s,
             "OMO_MANAGER_EMAIL_SUPERVISOR_STARTUP_GRACE_S": email_grace_s,
             "FAKE_UV_LOG": str(fake_uv_log),
@@ -676,6 +677,28 @@ esac
             self.assertNotEqual(0, result.returncode)
             self.assertIn("OMO_MANAGER_ENABLE_EMAIL_WATCHER must be auto, true, or false", result.stderr)
             self.assertFalse((tmp / "state" / "pending-supervisor.pid").exists())
+
+    def test_guest_hees_email_watcher_is_disabled_by_default(self) -> None:
+        text = SETUP.read_text(encoding="utf-8")
+        self.assertIn('guest_hees_email_enable="${OMO_MANAGER_ENABLE_GUEST_HEES_EMAIL_WATCHER:-false}"', text)
+        self.assertIn("skipped guest-hees email watcher; approval-gated and disabled by default", text)
+
+    def test_setup_rejects_invalid_guest_hees_email_mode_before_launching(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            result = self.run_setup(tmp, extra_env={"OMO_MANAGER_ENABLE_GUEST_HEES_EMAIL_WATCHER": "maybe"})
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("OMO_MANAGER_ENABLE_GUEST_HEES_EMAIL_WATCHER must be true or false", result.stderr)
+            self.assertFalse((tmp / "state" / "pending-supervisor.pid").exists())
+
+    def test_setup_prepares_pinned_guest_hees_watcher(self) -> None:
+        text = SETUP.read_text(encoding="utf-8")
+        self.assertIn('guest_hees_email_args=(--guest-hees', text)
+        self.assertIn('--manager-file guest_hees_mail_mgr.md --manager-target guest_hees:0', text)
+        self.assertIn('guest_hees_mail_dir="$root/guest_hees_manager_mail"', text)
+        guest_block = text.split("guest_hees_email_args=", 1)[1].split("' guest-hees-email-watch-supervisor", 1)[0]
+        self.assertIn('startup_grace_s="${OMO_MANAGER_EMAIL_SUPERVISOR_STARTUP_GRACE_S:-2}"', guest_block)
+        self.assertIn('if [ "$started" -eq 0 ] && [ "$runtime_s" -lt "$startup_grace_s" ]; then', guest_block)
 
     def test_empty_inherited_values_do_not_erase_local_routing(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:

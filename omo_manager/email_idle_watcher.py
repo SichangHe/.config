@@ -30,15 +30,21 @@ from typing import Callable
 from urllib.parse import urlparse
 
 try:
-    from .omo_email_config import AgentMailSettings, GMAIL_IMAP_HOST, configured_agent_mail, human_config_path
+    from .omo_email_config import AgentMailSettings, GMAIL_IMAP_HOST, GUEST_HEES_MANAGER_TARGET, GUEST_HEES_TASK_FILE, guest_hees_mail, configured_agent_mail, human_config_path
     from .omo_email_subject import subject_base
+    from .omo_guest_images import AUTHENTICATION as GUEST_IMAGE_AUTHENTICATION
+    from .omo_guest_images import GUEST_HEES_ADDRESS as GUEST_IMAGE_SENDER
+    from .omo_guest_images import GuestImageError, store_message_images
     from .omo_agent_status import TaskFrontmatterError, parse_task_metadata
     from .omo_task_lock import task_file_lock
     from .omo_tmux_send import CodexSendOptions, DEFAULT_TMUX_ENTER_COUNT, require_sendable_codex_target, send_system_to_codex as send_to_codex
 except ImportError:
     try:
-        from omo_email_config import AgentMailSettings, GMAIL_IMAP_HOST, configured_agent_mail, human_config_path
+        from omo_email_config import AgentMailSettings, GMAIL_IMAP_HOST, GUEST_HEES_MANAGER_TARGET, GUEST_HEES_TASK_FILE, guest_hees_mail, configured_agent_mail, human_config_path
         from omo_email_subject import subject_base
+        from omo_guest_images import AUTHENTICATION as GUEST_IMAGE_AUTHENTICATION
+        from omo_guest_images import GUEST_HEES_ADDRESS as GUEST_IMAGE_SENDER
+        from omo_guest_images import GuestImageError, store_message_images
         from omo_agent_status import TaskFrontmatterError, parse_task_metadata
         from omo_task_lock import task_file_lock
         from omo_tmux_send import CodexSendOptions, DEFAULT_TMUX_ENTER_COUNT, require_sendable_codex_target, send_system_to_codex as send_to_codex
@@ -228,6 +234,7 @@ class Args:
     live_mailbox_stage: str = "email1"
     default_contact_agent: str = ""
     total_cleanup_threshold: int = DEFAULT_MANAGER_TOTAL_CLEANUP_THRESHOLD
+    guest_hees: bool = False
 
 
 class ParsedArgs(argparse.Namespace):
@@ -251,6 +258,7 @@ class ParsedArgs(argparse.Namespace):
     live_mailbox_stage: str = "email1"
     default_contact_agent: str = DEFAULT_CONTACT_AGENT
     total_cleanup_threshold: int = DEFAULT_MANAGER_TOTAL_CLEANUP_THRESHOLD
+    guest_hees: bool = False
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -275,6 +283,7 @@ def parse_args(argv: list[str]) -> Args:
     parser.add_argument("--live-mailbox-approval-only", action="store_true", help="One-shot scan only for AMH live-mailbox approval replies in the pinned approval thread")
     parser.add_argument("--live-mailbox-stage", choices=("email1", "email2"), default="email1", help="Pinned live-mailbox approval stage to collect")
     parser.add_argument("--once", action="store_true")
+    parser.add_argument("--guest-hees", action="store_true", help=argparse.SUPPRESS)
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     if parsed.live_mailbox_approval_only and not parsed.once:
         parser.error("--live-mailbox-approval-only requires --once")
@@ -305,6 +314,7 @@ def parse_args(argv: list[str]) -> Args:
         live_mailbox_stage=parsed.live_mailbox_stage,
         default_contact_agent=parsed.default_contact_agent.strip(),
         total_cleanup_threshold=parsed.total_cleanup_threshold,
+        guest_hees=parsed.guest_hees,
     )
 
 
@@ -397,6 +407,36 @@ def gmail_spf_authenticated_sender(msg: Message, sender_email: str) -> bool:
         re.search(r"(?:^|\s)spf=pass(?:\s|$)", segment) is not None
         and re.search(rf"(?:^|\s)smtp\.mailfrom={escaped_sender}(?:\s|$)", segment) is not None
         for segment in clean_segments
+    )
+
+
+def guest_hees_sender_authenticated(msg: Message, require_transport_identity: bool) -> bool:
+    """Validate every guest identity with literal mailbox equality."""
+    def exact_headers(name: str, *, required: bool, maximum: int | None = None) -> bool:
+        headers = [str(value) for value in msg.get_all(name, [])]
+        if (required and not headers) or (maximum is not None and len(headers) > maximum):
+            return False
+        return all(parseaddr(header)[1] == GUEST_IMAGE_SENDER for header in headers)
+
+    if not exact_headers("From", required=True, maximum=1) or not exact_headers("Sender", required=False, maximum=1):
+        return False
+    if not require_transport_identity:
+        return True
+    if not exact_headers("Return-Path", required=True):
+        return False
+    headers = msg.get_all("Authentication-Results", [])
+    if len(headers) != 1:
+        return False
+    parts = str(headers[0]).split(";")
+    if parts[0].strip().casefold() not in TRUSTED_AUTH_SERVERS:
+        return False
+    spf_segments = [" ".join(segment.split()) for segment in parts[1:] if re.search(r"(?:^|\s)spf=[^\s;]+", segment, re.IGNORECASE)]
+    mailfrom_values = [match.group(1) for segment in spf_segments for match in re.finditer(r"(?:^|\s)smtp\.mailfrom=([^\s;]+)(?:\s|$)", segment, re.IGNORECASE)]
+    return (
+        bool(spf_segments)
+        and len(mailfrom_values) == len(spf_segments)
+        and all(value == GUEST_IMAGE_SENDER for value in mailfrom_values)
+        and any(re.search(r"(?:^|\s)spf=pass(?:\s|$)", segment, re.IGNORECASE) is not None for segment in spf_segments)
     )
 
 
@@ -658,6 +698,16 @@ def inactive_task_files_for_target(root: Path, tmux_target: str) -> list[Path]:
 
 def email_route(args: Args, subject: str, body: str = "") -> EmailRoute:
     del body
+    if args.guest_hees:
+        manager_file = current_manager_file(args)
+        try:
+            manager_text = manager_file.read_text(encoding="utf-8")
+            manager_file.resolve(strict=False).relative_to(args.root.resolve(strict=False))
+        except (OSError, ValueError):
+            raise RuntimeError(f"guest-hees manager is unavailable: {GUEST_HEES_MANAGER_TARGET}")
+        if manager_file.name != GUEST_HEES_TASK_FILE or re.search(rf"(?m)^runat:\s*{re.escape(GUEST_HEES_MANAGER_TARGET)}\s*$", manager_text) is None:
+            raise RuntimeError(f"guest-hees manager is unavailable: {GUEST_HEES_MANAGER_TARGET}")
+        return EmailRoute(manager_file, GUEST_HEES_MANAGER_TARGET, pending_watcher_delivery=True)
     tmux_target = subject_manager_target(subject)
     if not tmux_target:
         return default_email_route(args)
@@ -1366,7 +1416,7 @@ def append_recovery_record(root: Path, txt_path: Path, summary: str, manager_fil
     return line_no + 1
 
 
-def write_mail(args: Args, uid: str, msg: Message, _sender: str, subject: str) -> Path:
+def write_mail(args: Args, uid: str, msg: Message, _sender: str, subject: str, image_references: tuple[str, ...] = ()) -> Path:
     missing_dirs: list[Path] = []
     candidate = args.mail_dir
     while not candidate.exists():
@@ -1377,7 +1427,8 @@ def write_mail(args: Args, uid: str, msg: Message, _sender: str, subject: str) -
         fsync_directory(created_dir.parent)
     args.mail_dir.chmod(0o700)
     txt_path = args.mail_dir / mail_artifact_name(args, uid)
-    body = f"Subject: {normalize_human_subject(subject)}\n\n{message_text(msg)}"
+    references = "" if not image_references else "\n\nGuest images:\n" + "".join(f"- {reference}\n" for reference in image_references)
+    body = f"Subject: {normalize_human_subject(subject)}\n\n{message_text(msg)}{references}"
     fd = os.open(txt_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write(body)
@@ -1412,6 +1463,8 @@ def email_human(args: Args, subject: str, body: str) -> None:
     subject_path = write_private_temp(subject.rstrip("\n") + "\n", ".txt")
     body_path = write_private_temp(body, ".md")
     command = [str(Path.home() / ".config/helper.sh/email_me.py"), "--manager-human"]
+    if args.guest_hees:
+        command.append("--guest-hees")
     if args.manager_target:
         command.extend(("--sender-tmux-target", args.manager_target))
     command.extend(("--subject-file", str(subject_path), "--message-file", str(body_path)))
@@ -2933,18 +2986,35 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
         msg = BytesParser(policy=policy.default).parsebytes(msg_data[0][1])
         sender = str(msg.get("From", ""))
         subject = str(msg.get("Subject", ""))
-        sender_accepted = exact_human_sender(msg, args.self_email, require_transport_identity=bool(args.inbox_identity))
+        sender_accepted = (
+            guest_hees_sender_authenticated(msg, require_transport_identity=True)
+            if args.guest_hees
+            else exact_human_sender(msg, args.self_email, require_transport_identity=bool(args.inbox_identity))
+        )
         if not sender_accepted:
             logging.warning("email candidate rejected after fetch: uid=%s subject=%r from_self=%s", uid, subject, from_self(sender, args.self_email))
             continue
-        if manager_authored_message(msg, args.self_email):
+        if not args.guest_hees and manager_authored_message(msg, args.self_email):
             logging.info("email candidate ignored as manager-authored echo: uid=%s subject=%r", uid, subject)
             ignored_uids.add(uid)
             ignored_changed = True
             continue
         raw_mime = msg_data[0][1]
         body_text = message_text(msg)
-        amh_result = try_route_amh_message(client, args, uid, msg, raw_mime if isinstance(raw_mime, bytes) else b"")
+        image_references: tuple[str, ...] = ()
+        if args.guest_hees:
+            try:
+                image_references = store_message_images(
+                    msg,
+                    sender=GUEST_IMAGE_SENDER,
+                    route_target=GUEST_HEES_MANAGER_TARGET,
+                    authentication=GUEST_IMAGE_AUTHENTICATION,
+                    source_id=f"gmail:{hashlib.sha256((args.inbox_identity or args.self_email).encode()).hexdigest()}:{uid}",
+                )
+            except (GuestImageError, OSError) as exc:
+                logging.warning("guest email image batch rejected; leaving unread: uid=%s error=%s", uid, exc)
+                continue
+        amh_result = AmhRouteDisposition.FALLBACK if args.guest_hees else try_route_amh_message(client, args, uid, msg, raw_mime if isinstance(raw_mime, bytes) else b"")
         if amh_result is AmhRouteDisposition.HOLD:
             logging.info("email AMH route held for replay: uid=%s subject=%r", uid, subject)
             handled = True
@@ -2960,9 +3030,9 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
         if amh_result is AmhRouteDisposition.SKIP:
             logging.warning("email AMH metadata unavailable; leaving unread: uid=%s subject=%r", uid, subject)
             continue
-        txt_path = write_mail(args, uid, msg, sender, subject)
+        txt_path = write_mail(args, uid, msg, sender, subject, image_references)
         logging.info("email stored: uid=%s path=%s subject=%r", uid, source_ref(args.root, txt_path), subject)
-        if is_recovery_subject(subject):
+        if not args.guest_hees and is_recovery_subject(subject):
             if recovery_sender_authenticated(msg, args.self_email):
                 handle_recovery_email(args, uid, txt_path)
             else:
@@ -3093,17 +3163,27 @@ def main(argv: list[str]) -> int:
     if missing:
         print(f"email_idle_watcher: missing config keys {sorted(missing)} in {CONFIG_PATH}", file=sys.stderr)
         return 1
-    accepted_human = split_settings.human_address if split_settings is not None else config["user"]
-    safe_args = Args(args.root, args.manager_url, args.mail_dir, args.state_dir, args.manager_file, args.once, accepted_human, args.recovery_debounce_s, args.restart_script, args.idle_wait_s, args.manager_target, args.imap_timeout_s, args.pull_interval_s, args.idle_exit_after_s, args.unread_compression_threshold, args.recent_cleanup_threshold, args.recent_cleanup_window_s, mail_thresholds=split_settings is None, inbox_identity=config["user"] if split_settings is not None else "", live_mailbox_approval_only=args.live_mailbox_approval_only, live_mailbox_stage=args.live_mailbox_stage, total_cleanup_threshold=args.total_cleanup_threshold)
+    if args.guest_hees and split_settings is None:
+        print("email_idle_watcher: guest-hees intake requires split email configuration", file=sys.stderr)
+        return 1
+    intake_settings = guest_hees_mail(split_settings) if args.guest_hees and split_settings is not None else split_settings
+    accepted_human = intake_settings.human_address if intake_settings is not None else config["user"]
+    inbox_identity = config["user"] if split_settings is not None else ""
+    if args.guest_hees:
+        inbox_identity = f"{inbox_identity}\0guest-hees"
+    safe_args = Args(args.root, args.manager_url, args.mail_dir, args.state_dir, args.manager_file, args.once, accepted_human, args.recovery_debounce_s, args.restart_script, args.idle_wait_s, args.manager_target, args.imap_timeout_s, args.pull_interval_s, args.idle_exit_after_s, args.unread_compression_threshold, args.recent_cleanup_threshold, args.recent_cleanup_window_s, mail_thresholds=split_settings is None, inbox_identity=inbox_identity, live_mailbox_approval_only=args.live_mailbox_approval_only, live_mailbox_stage=args.live_mailbox_stage, total_cleanup_threshold=args.total_cleanup_threshold, guest_hees=args.guest_hees)
     logging.info("email watcher starting: root=%s mail_dir=%s state_dir=%s manager_target=%s manager_url=%s idle_wait_s=%s imap_timeout_s=%s pull_interval_s=%s idle_exit_after_s=%s total_cleanup_threshold=%s unread_compression_threshold=%s recent_cleanup_threshold=%s recent_cleanup_window_s=%s", safe_args.root, safe_args.mail_dir, safe_args.state_dir, safe_args.manager_target or "unset", safe_args.manager_url or "unset", safe_args.idle_wait_s, safe_args.imap_timeout_s, safe_args.pull_interval_s, safe_args.idle_exit_after_s, safe_args.total_cleanup_threshold, safe_args.unread_compression_threshold, safe_args.recent_cleanup_threshold, int(safe_args.recent_cleanup_window_s))
     while True:
         try:
             with imaplib.IMAP4_SSL(config["host"], timeout=safe_args.imap_timeout_s) as client:
                 client.login(config["user"], config["password"])
                 client.select("INBOX")
-                runtime_args = replace(safe_args, inbox_identity=mailbox_state_identity(client, config["user"])) if split_settings is not None else safe_args
+                runtime_identity = mailbox_state_identity(client, config["user"])
+                if safe_args.guest_hees:
+                    runtime_identity = f"{runtime_identity}\0guest-hees"
+                runtime_args = replace(safe_args, inbox_identity=runtime_identity) if split_settings is not None else safe_args
                 logging.info("email watcher connected and selected INBOX")
-                threshold_check = (lambda: maybe_handle_split_manager_mail_thresholds(runtime_args, split_settings)) if split_settings is not None else None
+                threshold_check = (lambda: maybe_handle_split_manager_mail_thresholds(runtime_args, split_settings)) if split_settings is not None and not runtime_args.guest_hees else None
                 if runtime_args.live_mailbox_approval_only:
                     handle_live_mailbox_approval_replies(client, runtime_args)
                     wait_email_pushes()

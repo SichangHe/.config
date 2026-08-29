@@ -91,6 +91,7 @@ env_agent_password="${OMO_AGENT_GMAIL_APP_PASSWORD+x}${OMO_AGENT_GMAIL_APP_PASSW
 env_human_email="${OMO_HUMAN_EMAIL_ADDRESS+x}${OMO_HUMAN_EMAIL_ADDRESS-}"
 env_human_config="${OMO_HUMAN_EMAIL_CONFIG_PATH+x}${OMO_HUMAN_EMAIL_CONFIG_PATH-}"
 env_default_contact_agent="${DEFAULT_CONTACT_AGENT+x}${DEFAULT_CONTACT_AGENT-}"
+env_guest_hees_email_enable="${OMO_MANAGER_ENABLE_GUEST_HEES_EMAIL_WATCHER+x}${OMO_MANAGER_ENABLE_GUEST_HEES_EMAIL_WATCHER-}"
 local_env="${OMO_MANAGER_LOCAL_ENV:-$HOME/.config/omo_manager/local.env}"
 if [ -f "$local_env" ]; then
   # shellcheck disable=SC1090
@@ -118,10 +119,12 @@ fi
 [ -n "${env_human_email#x}" ] && OMO_HUMAN_EMAIL_ADDRESS="${env_human_email#x}"
 [ -n "${env_human_config#x}" ] && OMO_HUMAN_EMAIL_CONFIG_PATH="${env_human_config#x}"
 [ -n "${env_default_contact_agent#x}" ] && DEFAULT_CONTACT_AGENT="${env_default_contact_agent#x}"
+[ -n "${env_guest_hees_email_enable#x}" ] && OMO_MANAGER_ENABLE_GUEST_HEES_EMAIL_WATCHER="${env_guest_hees_email_enable#x}"
 root="${OMO_WORK_LOGS_ROOT:-$HOME/work_logs}"
 manager_url="${OMO_MANAGER_URL:-}"
 manager_target="${OMO_MANAGER_TMUX_TARGET:-}"
 default_contact_agent="${DEFAULT_CONTACT_AGENT:-}"
+guest_hees_email_enable="${OMO_MANAGER_ENABLE_GUEST_HEES_EMAIL_WATCHER:-false}"
 state_base="${XDG_STATE_HOME:-$HOME/.local/state}/omo-manager"
 state_dir="${OMO_MANAGER_STATE_DIR:-$state_base}"
 email_enable="${OMO_MANAGER_ENABLE_EMAIL_WATCHER:-auto}"
@@ -143,6 +146,11 @@ case "$audit_enable" in
   1|true|yes|on) start_audit=1 ;;
   0|false|no|off) start_audit=0 ;;
   *) echo "OMO_MANAGER_ENABLE_AGENT_AUDIT must be true or false" >&2; exit 2 ;;
+esac
+case "$guest_hees_email_enable" in
+  1|true|yes|on) start_guest_hees_email=1 ;;
+  0|false|no|off) start_guest_hees_email=0 ;;
+  *) echo "OMO_MANAGER_ENABLE_GUEST_HEES_EMAIL_WATCHER must be true or false" >&2; exit 2 ;;
 esac
 export OMO_MANAGER_URL="$manager_url"
 export OMO_MANAGER_TMUX_TARGET="$manager_target"
@@ -174,6 +182,10 @@ split_email_values=0
 [ -n "$human_email" ] && split_email_values=$((split_email_values + 1))
 if [ "$split_email_values" -ne 0 ] && [ "$split_email_values" -ne 3 ]; then
   echo "split email setup requires OMO_AGENT_GMAIL_ADDRESS, OMO_AGENT_GMAIL_APP_PASSWORD, and OMO_HUMAN_EMAIL_ADDRESS together" >&2
+  exit 2
+fi
+if [ "$start_guest_hees_email" -eq 1 ] && [ "$split_email_values" -ne 3 ]; then
+  echo "guest-hees email watcher requires split email setup" >&2
   exit 2
 fi
 case "$email_enable" in
@@ -573,6 +585,7 @@ stop_pidfile_supervisor pending "$helper_dir/omo_pending_watch.py" "$root" "" "p
 stop_legacy_supervisors pending "$helper_dir/omo_pending_watch.py" "$root"
 stop_pidfile_supervisor email "$helper_dir/email_idle_watcher.py" "$root" "$state_dir" "email watcher exited status"
 stop_legacy_supervisors email "$helper_dir/email_idle_watcher.py" "$root" "$state_dir"
+stop_pidfile_supervisor guest-hees-email "$helper_dir/email_idle_watcher.py" "$root" "$state_dir" "guest-hees email watcher exited status"
 stop_pidfile_supervisor audit "$helper_dir/omo_agent_audit.py" "$root" "$state_dir" "audit watcher exited status"
 pending_args=(--root "$root")
 pending_token="$(owner_token)"
@@ -633,6 +646,42 @@ done
 else
   echo "skipped email watcher; configure the split agent/human email values or enable the legacy email config"
 fi
+if [ "$start_guest_hees_email" -eq 1 ]; then
+  guest_hees_mail_dir="$root/guest_hees_manager_mail"
+  mkdir -p -m 700 "$guest_hees_mail_dir"
+  chmod 700 "$guest_hees_mail_dir"
+  guest_hees_email_args=(--guest-hees --root "$root" --mail-dir "$guest_hees_mail_dir" --state-dir "$state_dir" --manager-file guest_hees_mail_mgr.md --manager-target guest_hees:0)
+  guest_hees_email_token="$(owner_token)"
+  guest_hees_email_launch_pid_file="$state_dir/.guest-hees-email-supervisor.$guest_hees_email_token.pid"
+  setsid bash -c '
+launch_pid_file="$1"
+owner_token="$2"
+shift 2
+printf "%s\n" "$$" >"$launch_pid_file"
+startup_grace_s="${OMO_MANAGER_EMAIL_SUPERVISOR_STARTUP_GRACE_S:-2}"
+started=0
+while :; do
+  start_s=$SECONDS
+  "$@"
+  st=$?
+  runtime_s=$((SECONDS - start_s))
+  printf "%s guest-hees email watcher exited status=%s; restarting in 5s\n" "$(date "+%Y-%m-%d %H:%M:%S %z")" "$st" >&2
+  if [ "$started" -eq 0 ] && [ "$runtime_s" -lt "$startup_grace_s" ]; then
+    exit "$st"
+  fi
+  started=1
+  sleep 5
+done
+' guest-hees-email-watch-supervisor "$guest_hees_email_launch_pid_file" "$guest_hees_email_token" "${uv_run[@]}" "$helper_dir/email_idle_watcher.py" "${guest_hees_email_args[@]}" 8>&- >>"$state_dir/guest-hees-email-watch.log" 2>&1 &
+  guest_hees_email_launcher_pid=$!
+  guest_hees_email_launcher_start="$(process_start_ticks "$guest_hees_email_launcher_pid" 2>/dev/null || true)"
+  guest_hees_email_pid="$(wait_launch_pid guest-hees-email "$guest_hees_email_launcher_pid" "$guest_hees_email_launcher_start" "$guest_hees_email_launch_pid_file")"
+  guest_hees_email_start="$(process_start_ticks "$guest_hees_email_pid")"
+  write_pidfile guest-hees-email "$guest_hees_email_pid" "$guest_hees_email_token"
+  echo "started guest-hees email watcher supervisor pid=$guest_hees_email_pid log=$state_dir/guest-hees-email-watch.log"
+else
+  echo "skipped guest-hees email watcher; approval-gated and disabled by default"
+fi
 if [ "$start_audit" -eq 1 ]; then
   audit_args=(--root "$root" --state-dir "$state_dir" --loop --enable)
   audit_token="$(owner_token)"
@@ -663,6 +712,10 @@ if ! wait_supervised_child pending "$pending_pid" "$helper_dir/omo_pending_watch
     stop_owned_supervisor email "$email_pid" "$email_start" "$email_token" "$helper_dir/email_idle_watcher.py" "$root" "$state_dir" "email watcher exited status" || true
     rm -f "$(pid_file email)"
   fi
+  if [ "$start_guest_hees_email" -eq 1 ]; then
+    stop_owned_supervisor guest-hees-email "$guest_hees_email_pid" "$guest_hees_email_start" "$guest_hees_email_token" "$helper_dir/email_idle_watcher.py" "$root" "$state_dir" "guest-hees email watcher exited status" || true
+    rm -f "$(pid_file guest-hees-email)"
+  fi
   stop_owned_supervisor pending "$pending_pid" "$pending_start" "$pending_token" "$helper_dir/omo_pending_watch.py" "$root" "" "pending watcher exited status" || true
   rm -f "$(pid_file pending)"
   if [ "$start_audit" -eq 1 ]; then
@@ -670,6 +723,15 @@ if ! wait_supervised_child pending "$pending_pid" "$helper_dir/omo_pending_watch
     rm -f "$(pid_file audit)"
   fi
   exit 1
+fi
+if [ "$start_guest_hees_email" -eq 1 ]; then
+  if ! wait_supervised_child guest-hees-email "$guest_hees_email_pid" "$helper_dir/email_idle_watcher.py" "$watcher_health_timeout_s" "$state_dir/guest-hees-email-watch.log"; then
+    stop_owned_supervisor guest-hees-email "$guest_hees_email_pid" "$guest_hees_email_start" "$guest_hees_email_token" "$helper_dir/email_idle_watcher.py" "$root" "$state_dir" "guest-hees email watcher exited status" || true
+    rm -f "$(pid_file guest-hees-email)"
+    stop_owned_supervisor pending "$pending_pid" "$pending_start" "$pending_token" "$helper_dir/omo_pending_watch.py" "$root" "" "pending watcher exited status" || true
+    rm -f "$(pid_file pending)"
+    exit 1
+  fi
 fi
 if [ "$start_email" -eq 1 ]; then
   sleep "$email_supervisor_startup_grace_s"
@@ -683,6 +745,10 @@ if [ "$start_email" -eq 1 ]; then
       echo "email watcher failed to stay running; see $state_dir/email-watch.log" >&2
       stop_owned_supervisor pending "$pending_pid" "$pending_start" "$pending_token" "$helper_dir/omo_pending_watch.py" "$root" "" "pending watcher exited status" || true
       rm -f "$(pid_file pending)"
+      if [ "$start_guest_hees_email" -eq 1 ]; then
+        stop_owned_supervisor guest-hees-email "$guest_hees_email_pid" "$guest_hees_email_start" "$guest_hees_email_token" "$helper_dir/email_idle_watcher.py" "$root" "$state_dir" "guest-hees email watcher exited status" || true
+        rm -f "$(pid_file guest-hees-email)"
+      fi
       if [ "$start_audit" -eq 1 ]; then
         stop_owned_supervisor audit "$audit_pid" "$audit_start" "$audit_token" "$helper_dir/omo_agent_audit.py" "$root" "$state_dir" "audit watcher exited status" || true
         rm -f "$(pid_file audit)"

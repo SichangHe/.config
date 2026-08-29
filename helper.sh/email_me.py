@@ -14,7 +14,7 @@ import ssl
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as dataclass_replace
 from datetime import datetime
 from email.message import EmailMessage
 from email.utils import make_msgid
@@ -28,10 +28,14 @@ MANAGER_DIR = Path(__file__).resolve().parents[1] / "omo_manager"
 if MANAGER_DIR.is_dir():
     sys.path.insert(0, str(MANAGER_DIR))
 try:
-    from omo_email_config import configured_agent_mail
+    from omo_email_config import GUEST_HEES_ADDRESS, GUEST_HEES_MANAGER_TARGET, configured_agent_mail, guest_hees_mail
     from omo_email_subject import SubjectInputError, canonical_tmux_target, normalized_subject_key, prepare_latest_thread_for_tmux_target, prepare_subject, prepare_subject_and_headers, reply_headers_for_subject, strip_leading_tmux_tags
+    from omo_guest_images import GuestImageError, ValidatedImage, reply_attachments
 except ImportError:
     configured_agent_mail = None
+    guest_hees_mail = None
+    GUEST_HEES_ADDRESS = "46496337@qq.com"
+    GUEST_HEES_MANAGER_TARGET = "guest_hees:0"
     SubjectInputError = ValueError
     canonical_tmux_target = None
     normalized_subject_key = None
@@ -40,6 +44,9 @@ except ImportError:
     prepare_latest_thread_for_tmux_target = None
     reply_headers_for_subject = None
     strip_leading_tmux_tags = None
+    reply_attachments = None
+    GuestImageError = ValueError
+    ValidatedImage = object
 
 PWD_FOOTER_RE = re.compile(r"(?:^|\n)(?:>\s*)?PWD: [^\n]+\n?\Z")
 UNQUOTED_PWD_FOOTER_RE = re.compile(r"(?:^|\n)PWD: [^\n]+\n?\Z")
@@ -67,6 +74,8 @@ class CliArgs:
     manager_human: bool
     tmux_target: str | None
     supersedes_message_ids: tuple[str, ...]
+    guest_hees: bool
+    guest_image_references: tuple[str, ...]
 
 
 class ParsedArgs(argparse.Namespace):
@@ -80,6 +89,8 @@ class ParsedArgs(argparse.Namespace):
     tmux_target: str | None = None
     sender_tmux_target: str | None = None
     supersedes_message_id: list[str]
+    guest_hees: bool = False
+    guest_image_reference: list[str]
 
 
 def parse_args(argv: list[str]) -> CliArgs:
@@ -105,6 +116,8 @@ def parse_args(argv: list[str]) -> CliArgs:
     _ = parser.add_argument("--sender-tmux-target", dest="sender_tmux_target", help="Alias for --tmux-target; use only when forwarding or compressing mail while preserving a different verified producer identity.")
     _ = parser.add_argument("--supersedes-message-id", action="append", default=[], help="Exact Message-ID from agent-unread that this replacement supersedes; repeat for multiple messages.")
     _ = parser.add_argument("--manager-human", action="store_true", help=argparse.SUPPRESS)
+    _ = parser.add_argument("--guest-hees", action="store_true", help=argparse.SUPPRESS)
+    _ = parser.add_argument("--guest-image-reference", action="append", default=[], help=argparse.SUPPRESS)
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     if parsed.legacy_args:
         parser.error("pass email subject with --subject or --subject-file; pass email body by standard input or --message-file.")
@@ -143,6 +156,11 @@ def parse_args(argv: list[str]) -> CliArgs:
     tmux_target = parsed.tmux_target or parsed.sender_tmux_target
     if tmux_target is not None and not valid_tmux_target(tmux_target):
         parser.error("--tmux-target must have shape session:window or session:window.pane, for example wl:4.")
+    guest_hees = parsed.guest_hees or (parsed.manager_human and guest_hees_tmux_target(tmux_target))
+    if guest_hees and not parsed.manager_human:
+        parser.error("--guest-hees requires --manager-human.")
+    if guest_hees and not guest_hees_tmux_target(tmux_target):
+        parser.error("--guest-hees requires a --tmux-target in the guest_hees session.")
     if any(re.fullmatch(r"<[^<>\s]+>", value) is None for value in parsed.supersedes_message_id):
         parser.error("--supersedes-message-id must be an exact RFC Message-ID enclosed in angle brackets.")
     if len(set(parsed.supersedes_message_id)) != len(parsed.supersedes_message_id):
@@ -155,6 +173,8 @@ def parse_args(argv: list[str]) -> CliArgs:
         manager_human=parsed.manager_human,
         tmux_target=tmux_target,
         supersedes_message_ids=tuple(parsed.supersedes_message_id),
+        guest_hees=guest_hees,
+        guest_image_references=tuple(parsed.guest_image_reference),
     )
 
 
@@ -236,6 +256,15 @@ def current_tmux_window() -> str | None:
 
 def valid_tmux_target(target: str) -> bool:
     return bool(TMUX_WINDOW_RE.fullmatch(target))
+
+
+# 🧑 "The dedicated guest manager and its agents for hees ... send emails back to `46496337@qq.com`"
+def guest_hees_tmux_target(target: str | None) -> bool:
+    """Return whether `target` belongs to the dedicated guest session."""
+    if target is None:
+        return False
+    canonical = canonical_email_tmux_target(target)
+    return canonical.partition(":")[0] == GUEST_HEES_MANAGER_TARGET.partition(":")[0]
 
 
 def canonical_email_tmux_target(target: str) -> str:
@@ -506,6 +535,12 @@ def build_message(sender_email: str, title: str, content: str, add_pwd_footer: b
     return msg
 
 
+def attach_guest_images(msg: EmailMessage, images: tuple[ValidatedImage, ...]) -> None:
+    for image in images:
+        maintype, subtype = image.mime_type.split("/", 1)
+        msg.add_attachment(image.data, maintype=maintype, subtype=subtype, filename=image.filename)
+
+
 def parse_env_file(file_path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
     try:
@@ -570,14 +605,14 @@ def should_send_manager_email(subject: str, content: str) -> bool:
     return should_send_manager_email_key(subject, subject, content)
 
 
-def should_send_manager_email_key(dedupe_subject: str, display_subject: str, content: str) -> bool:
+def should_send_manager_email_key(dedupe_subject: str, display_subject: str, content: str, state_scope: str = "human") -> bool:
     try:
         state_dir = manager_state_dir()
         state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         state_dir.chmod(0o700)
         dedupe_s = int(os.environ.get("OMO_MANAGER_EMAIL_DEDUPE_S", "300"))
-        dedupe_file = state_dir / "human-email-dedupe.tsv"
-        lock_file = state_dir / "human-email-dedupe.lock"
+        dedupe_file = state_dir / f"{state_scope}-email-dedupe.tsv"
+        lock_file = state_dir / f"{state_scope}-email-dedupe.lock"
         digest = hashlib.sha256(dedupe_subject.encode() + b"\0" + content.encode()).hexdigest()
         now_s = int(time.time())
         fd = os.open(lock_file, os.O_RDWR | os.O_CREAT, 0o600)
@@ -604,12 +639,12 @@ def should_send_manager_email_key(dedupe_subject: str, display_subject: str, con
     return True
 
 
-def log_manager_email(subject: str) -> None:
+def log_manager_email(subject: str, state_scope: str = "human") -> None:
     try:
         state_dir = manager_state_dir()
         state_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         state_dir.chmod(0o700)
-        log_file = state_dir / "human-email-sent.tsv"
+        log_file = state_dir / f"{state_scope}-email-sent.tsv"
         safe_subject = subject.replace("\t", " ").replace("\n", " ")
         with log_file.open("a", encoding="utf-8") as handle:
             handle.write(f"{datetime.now().astimezone().isoformat(timespec='seconds')}\t{safe_subject}\n")
@@ -631,8 +666,12 @@ def main(argv: list[str]) -> int:
     args = parse_args(argv)
     try:
         subject_tmux_target = footer_tmux_target(args.tmux_target, args.manager_human)
+        if args.manager_human and guest_hees_tmux_target(subject_tmux_target) and not args.guest_hees:
+            args = dataclass_replace(args, guest_hees=True)
         if args.manager_human and subject_tmux_target is None:
             raise ValueError("manager-human email requires a tmux target.")
+        if args.guest_image_references and not args.guest_hees:
+            raise ValueError("--guest-image-reference requires a guest_hees producer target.")
         if args.title is None:
             if subject_tmux_target is None:
                 raise ValueError("email without a subject requires an inferred tmux target.")
@@ -665,20 +704,40 @@ def main(argv: list[str]) -> int:
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
+    if args.guest_hees:
+        if split_settings is None or guest_hees_mail is None:
+            print("guest-hees email requires split email configuration", file=sys.stderr)
+            return 2
+        split_settings = guest_hees_mail(split_settings)
+        if split_settings.human_address != GUEST_HEES_ADDRESS:
+            print("guest-hees recipient configuration is not pinned", file=sys.stderr)
+            return 2
+    guest_images: tuple[ValidatedImage, ...] = ()
+    if args.guest_image_references:
+        if reply_attachments is None:
+            print("guest image validation is unavailable", file=sys.stderr)
+            return 2
+        try:
+            guest_images = reply_attachments(args.guest_image_references, recipient=GUEST_HEES_ADDRESS)
+        except GuestImageError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
     add_pwd_footer = False if split_settings is not None else args.add_pwd_footer or args.manager_human
     if args.dry_run:
         body = append_pwd_footer(args.content, tmux_target=subject_tmux_target, require_unquoted_footer=args.manager_human) if add_pwd_footer else args.content
         print(f"dry-run: email not sent; subject={subject}; body-bytes={len(body.encode())}")
         return 0
     dedupe_subject = normalized_subject_key(title) if args.manager_human and normalized_subject_key is not None else subject
-    if args.manager_human and not should_send_manager_email_key(dedupe_subject, subject, args.content):
+    dedupe_content = args.content + "\0" + "\0".join(args.guest_image_references)
+    state_scope = "guest-hees" if args.guest_hees else "human"
+    if args.manager_human and not should_send_manager_email_key(dedupe_subject, subject, dedupe_content, state_scope):
         print("Skipped duplicate human email")
         return 0
     if fake_log := fake_send_log_path():
         fake_log.parent.mkdir(parents=True, exist_ok=True)
         fake_log.write_text(f"{subject}\n{args.content}", encoding="utf-8")
         if args.manager_human:
-            log_manager_email(subject)
+            log_manager_email(subject, state_scope)
             print("Emailed the human")
         else:
             print("Email sent.")
@@ -719,6 +778,7 @@ def main(argv: list[str]) -> int:
             supersedes_message_ids=args.supersedes_message_ids,
             agent_session=agent_session_id(),
         )
+        attach_guest_images(msg, guest_images)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
@@ -744,7 +804,7 @@ def main(argv: list[str]) -> int:
         return 1
 
     if args.manager_human:
-        log_manager_email(subject)
+        log_manager_email(subject, state_scope)
         print("Emailed the human")
     else:
         print("Email sent.")

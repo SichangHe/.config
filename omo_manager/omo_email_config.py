@@ -13,6 +13,10 @@ AGENT_PASSWORD_KEY = "OMO_AGENT_GMAIL_APP_PASSWORD"
 HUMAN_ADDRESS_KEY = "OMO_HUMAN_EMAIL_ADDRESS"
 HUMAN_CONFIG_PATH_KEY = "OMO_HUMAN_EMAIL_CONFIG_PATH"
 GMAIL_IMAP_HOST = "imap.gmail.com"
+# 🧑 "The dedicated guest manager and its agents for hees receive emails from `46496337@qq.com`, send emails back to `46496337@qq.com`"
+GUEST_HEES_ADDRESS = "46496337@qq.com"
+GUEST_HEES_MANAGER_TARGET = "guest_hees:0"
+GUEST_HEES_TASK_FILE = "guest_hees_mail_mgr.md"
 
 
 @dataclass(frozen=True)
@@ -20,6 +24,11 @@ class AgentMailSettings:
     agent_address: str
     app_password: str
     human_address: str
+
+
+def guest_hees_mail(settings: AgentMailSettings) -> AgentMailSettings:
+    """Return the pinned guest intake/reply profile over the agent mailbox."""
+    return AgentMailSettings(settings.agent_address, settings.app_password, GUEST_HEES_ADDRESS)
 
 
 def parse_env_file(path: Path) -> dict[str, str]:

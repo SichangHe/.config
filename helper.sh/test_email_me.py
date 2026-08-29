@@ -17,6 +17,7 @@ email_me = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = email_me
 SPEC.loader.exec_module(email_me)
 omo_email_subject = sys.modules["omo_email_subject"]
+omo_guest_images = sys.modules["omo_guest_images"]
 
 SHELL_SENSITIVE_BODY = """literal $HOME
 literal $(touch /tmp/email-me-should-not-run)
@@ -483,6 +484,174 @@ class EmailMeTests(unittest.TestCase):
             result = email_me.main(["--dry-run", "--subject", "hi"])
         self.assertEqual(0, result)
         self.assertIn("dry-run: email not sent", stdout.getvalue())
+
+    def test_guest_hees_mode_requires_manager_human_and_guest_session(self) -> None:
+        for argv in (["--guest-hees", "--subject", "hi"], ["--guest-hees", "--manager-human", "--tmux-target", "other:1", "--subject", "hi"]):
+            with self.subTest(argv=argv), patch.object(sys, "stdin", StringIO("body\n")), patch("sys.stderr", new_callable=StringIO), self.assertRaises(SystemExit) as raised:
+                email_me.parse_args(argv)
+            self.assertEqual(2, raised.exception.code)
+        with patch.object(sys, "stdin", StringIO("body\n")):
+            args = email_me.parse_args(["--guest-hees", "--manager-human", "--tmux-target", "guest_hees:1", "--subject", "hi"])
+        self.assertTrue(args.guest_hees)
+
+    def test_guest_image_reference_rejects_non_guest_producer(self) -> None:
+        reference = "guest-image:v1:" + "a" * 64
+        with (
+            patch.dict(os.environ, {"OMO_AGENT_TMUX_TARGET": "other:1"}, clear=False),
+            patch.object(sys, "stdin", StringIO("body\n")),
+            patch("sys.stderr", new_callable=StringIO) as stderr,
+        ):
+            result = email_me.main(["--manager-human", "--guest-image-reference", reference, "--subject", "hi"])
+        self.assertEqual(2, result)
+        self.assertIn("requires a guest_hees producer target", stderr.getvalue())
+
+    def test_guest_manager_target_implies_pinned_guest_recipient(self) -> None:
+        with patch.object(sys, "stdin", StringIO("body\n")):
+            args = email_me.parse_args(["--manager-human", "--tmux-target", "guest_hees:0", "--subject", "hi"])
+        self.assertTrue(args.guest_hees)
+
+    def test_guest_dedupe_includes_image_references_and_uses_separate_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"OMO_MANAGER_STATE_DIR": tmp}, clear=False):
+            reference_a = "guest-image:v1:" + "a" * 64
+            reference_b = "guest-image:v1:" + "b" * 64
+            self.assertTrue(email_me.should_send_manager_email_key("topic", "topic", f"body\0{reference_a}", "guest-hees"))
+            self.assertTrue(email_me.should_send_manager_email_key("topic", "topic", f"body\0{reference_b}", "guest-hees"))
+            email_me.log_manager_email("topic", "guest-hees")
+            state = Path(tmp)
+            self.assertTrue((state / "guest-hees-email-dedupe.tsv").is_file())
+            self.assertTrue((state / "guest-hees-email-sent.tsv").is_file())
+            self.assertFalse((state / "human-email-dedupe.tsv").exists())
+            self.assertFalse((state / "human-email-sent.tsv").exists())
+
+    def test_guest_hees_reply_is_sent_to_exact_guest_address(self) -> None:
+        sent_messages = []
+
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+            app_password = "secret"
+
+        class FakeSmtp:
+            def __init__(self, **_kwargs: object) -> None:
+                return None
+
+            def __enter__(self) -> "FakeSmtp":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def login(self, _sender: str, _password: str) -> None:
+                return None
+
+            def send_message(self, msg: object) -> None:
+                sent_messages.append(msg)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch.dict(os.environ, {"OMO_MANAGER_STATE_DIR": str(Path(tmp) / "state")}, clear=False),
+                patch.object(sys, "stdin", StringIO("guest reply\n")),
+                patch.object(email_me, "configured_agent_mail", return_value=Settings()),
+                patch.object(email_me.smtplib, "SMTP_SSL", FakeSmtp),
+                patch.object(email_me.ssl, "create_default_context", return_value=None),
+                patch.object(email_me, "maybe_print_thread_reminder"),
+            ):
+                result = email_me.main(["--guest-hees", "--manager-human", "--tmux-target", "guest_hees:1", "--subject", "Topic"])
+        self.assertEqual(0, result)
+        self.assertEqual("46496337@qq.com", sent_messages[0]["To"])
+        self.assertIn("[guest_hees:1]", sent_messages[0]["Subject"])
+
+    def test_inferred_guest_agent_target_sends_to_exact_guest_address(self) -> None:
+        sent_messages = []
+
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+            app_password = "secret"
+
+        class FakeSmtp:
+            def __init__(self, **_kwargs: object) -> None:
+                return None
+
+            def __enter__(self) -> "FakeSmtp":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def login(self, _sender: str, _password: str) -> None:
+                return None
+
+            def send_message(self, msg: object) -> None:
+                sent_messages.append(msg)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch.dict(os.environ, {"OMO_MANAGER_STATE_DIR": str(Path(tmp) / "state"), "OMO_AGENT_TMUX_TARGET": "guest_hees:2"}, clear=False),
+                patch.object(sys, "stdin", StringIO("guest reply\n")),
+                patch.object(email_me, "configured_agent_mail", return_value=Settings()),
+                patch.object(email_me.smtplib, "SMTP_SSL", FakeSmtp),
+                patch.object(email_me.ssl, "create_default_context", return_value=None),
+                patch.object(email_me, "maybe_print_thread_reminder"),
+            ):
+                result = email_me.main(["--manager-human", "--subject", "Topic"])
+        self.assertEqual(0, result)
+        self.assertEqual("46496337@qq.com", sent_messages[0]["To"])
+        self.assertIn("[guest_hees:2]", sent_messages[0]["Subject"])
+
+    def test_guest_hees_reply_resolves_selected_images_before_smtp(self) -> None:
+        sent_messages = []
+        image_bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + b"\x00" * 13 + b"\x00\x00\x00\x00IEND\x00\x00\x00\x00"
+
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+            app_password = "secret"
+
+        class FakeSmtp:
+            def __init__(self, **_kwargs: object) -> None:
+                return None
+
+            def __enter__(self) -> "FakeSmtp":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def login(self, _sender: str, _password: str) -> None:
+                return None
+
+            def send_message(self, msg: object) -> None:
+                sent_messages.append(msg)
+
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as tmp:
+            incoming = email_me.EmailMessage()
+            incoming.set_content("request")
+            incoming.add_attachment(image_bytes, maintype="image", subtype="png", filename="image.png")
+            image_root = Path(tmp) / "images"
+            reference = omo_guest_images.store_message_images(
+                incoming,
+                sender="46496337@qq.com",
+                route_target="guest_hees:0",
+                authentication=omo_guest_images.AUTHENTICATION,
+                source_id="gmail:test:reply",
+                root=image_root,
+            )[0]
+            with (
+                patch.dict(os.environ, {"OMO_MANAGER_STATE_DIR": str(Path(tmp) / "state"), "OMO_GUEST_IMAGE_ROOT": str(image_root), "OMO_AGENT_TMUX_TARGET": "guest_hees:3"}, clear=False),
+                patch.object(sys, "stdin", StringIO("guest reply\n")),
+                patch.object(email_me, "configured_agent_mail", return_value=Settings()),
+                patch.object(email_me.smtplib, "SMTP_SSL", FakeSmtp),
+                patch.object(email_me.ssl, "create_default_context", return_value=None),
+                patch.object(email_me, "maybe_print_thread_reminder"),
+            ):
+                result = email_me.main(["--guest-image-reference", reference, "--manager-human", "--subject", "Image"])
+        self.assertEqual(0, result)
+        self.assertEqual("46496337@qq.com", sent_messages[0]["To"])
+        self.assertIn("[guest_hees:3]", sent_messages[0]["Subject"])
+        attachments = list(sent_messages[0].iter_attachments())
+        self.assertEqual(1, len(attachments))
+        self.assertEqual(image_bytes, attachments[0].get_payload(decode=True))
 
     def test_omitted_subject_reuses_latest_thread_for_inferred_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
