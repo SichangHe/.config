@@ -964,25 +964,41 @@ class OmoTaskTests(unittest.TestCase):
                 _ = new_window(args)
             self.assertEqual(1, tmux_mock.call_count)
 
-    def test_blank_session_identity_is_rejected_without_creation(self) -> None:
+    def test_blank_session_identity_is_treated_as_missing_without_creation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             args = Args(Path(tmp), "x.md", "newcfg", "", "codex", Path(tmp), "worker", None, False, False, "", "", ())
             blank = subprocess.CompletedProcess(["tmux"], 0, "\n", "")
             with (
                 patch("omo_manager.omo_task.resolved_launch_session_name", return_value="newcfg"),
                 patch("omo_manager.omo_task.tmux", return_value=blank) as tmux_mock,
-                self.assertRaisesRegex(RuntimeError, "did not report one usable session_id"),
+                self.assertRaisesRegex(ValueError, "must already exist"),
             ):
                 _ = new_window(args)
             self.assertEqual(1, tmux_mock.call_count)
 
-    def test_blank_session_display_for_existing_session_remains_invalid(self) -> None:
+    def test_blank_session_identity_allows_explicit_session_creation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args = Args(
+                Path(tmp), "x.md", "newcfg", "", "codex", Path(tmp), "worker", None,
+                False, False, "", "", (), allow_new_tmux_session=True,
+            )
+            blank = subprocess.CompletedProcess(["tmux"], 0, "\n", "")
+            created = subprocess.CompletedProcess(["tmux"], 0, "$8\tnewcfg:0\t%9\n", "")
+            with (
+                patch("omo_manager.omo_task.resolved_launch_session_name", return_value="newcfg"),
+                patch("omo_manager.omo_task.tmux", side_effect=[blank, created]) as tmux_mock,
+                patch("omo_manager.omo_task.wait_shell"),
+            ):
+                self.assertEqual("newcfg:0", new_window(args))
+            self.assertEqual("new-session", tmux_mock.call_args_list[1].args[0][0])
+
+    def test_nonempty_malformed_session_identity_remains_invalid(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             args = Args(Path(tmp), "x.md", "cfg", "", "codex", Path(tmp), "worker", None, False, False, "", "", ())
-            blank = subprocess.CompletedProcess(["tmux"], 0, "\n", "")
+            malformed = subprocess.CompletedProcess(["tmux"], 0, "not-a-session-id\n", "")
             with (
                 patch("omo_manager.omo_task.resolved_launch_session_name", return_value="cfg"),
-                patch("omo_manager.omo_task.tmux", return_value=blank) as tmux_mock,
+                patch("omo_manager.omo_task.tmux", return_value=malformed) as tmux_mock,
                 self.assertRaisesRegex(RuntimeError, "did not report one usable session_id"),
             ):
                 _ = new_window(args)

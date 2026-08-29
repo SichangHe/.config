@@ -651,7 +651,11 @@ def launch_session(args: Args) -> LaunchSession:
     session_name = validate_launch_session(args)
     exact_session_target = f"={session_name}:"
     result = tmux(["display-message", "-p", "-t", exact_session_target, "#{session_id}"])
-    if result.returncode != 0:
+    # tmux 3.4 may return success with an empty format expansion when an exact
+    # missing-session target such as `=name:` is queried.  Treat only that
+    # empty result like the ordinary nonzero "missing session" response;
+    # nonempty malformed identities still fail closed below.
+    if result.returncode != 0 or not result.stdout.strip():
         if not args.allow_new_tmux_session:
             raise ValueError(
                 f"tmux session `{session_name}` must already exist; reuse an existing non-human session, "
