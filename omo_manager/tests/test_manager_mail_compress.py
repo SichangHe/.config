@@ -7,10 +7,13 @@ import json
 import os
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
 import unittest
+import zipfile
+import zipimport
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
 from email.message import Message
@@ -36,8 +39,10 @@ from omo_manager.omo_manager_mail_compress import (
     SOURCE_815_TASK_ID,
     SOURCE_1140_APPROVAL_FILE,
     SOURCE_1140_APPROVAL_QUOTE,
+    TRUSTED_LOCAL_ENV_PATH,
     accepted_manager_headers,
     agent_unread_records,
+    build_runtime_bundle,
     claim_batch,
     cmd_reconcile_intent,
     cmd_recover_already_trashed,
@@ -50,9 +55,10 @@ from omo_manager.omo_manager_mail_compress import (
     cmd_mark_seen,
     cmd_unread_summary,
     cmd_agent_trash_replaced,
+    configured_work_logs_root,
     current_agent_mail_target,
     current_agent_session_id,
-    cmd_trash_explicit,
+    cmd_trash_explicit as production_cmd_trash_explicit,
     cmd_trash_superseded,
     direct_context_intact,
     direct_contexts_intact,
@@ -78,6 +84,8 @@ from omo_manager.omo_manager_mail_compress import (
     intent_reconciliation_evidence,
     is_manager_record,
     load_reviewed_scope,
+    local_python_import_closure,
+    local_python_import_closure_entries,
     mail_boundary,
     mailbox_exists,
     parse_explicit_context,
@@ -102,6 +110,7 @@ from omo_manager.omo_manager_mail_compress import (
     verify_post_move_imap,
     validate_task_terminal_dispositions,
     validate_scoped_records,
+    validate_runtime_bundle,
     verified_existing_trash_records,
     write_export_receipt,
     write_private,
@@ -111,6 +120,13 @@ from omo_manager.omo_email_subject import subject_tmux_target
 TEST_RETAINED_BODY = "x"
 TEST_RETAINED_REPLACEMENT = f"18692:999:300:{'d' * 64}:1:{hashlib.sha256(TEST_RETAINED_BODY.encode()).hexdigest()}"
 TEST_RETAINED_REPLACEMENT_998 = f"18693:998:301:{'e' * 64}:1:{hashlib.sha256(TEST_RETAINED_BODY.encode()).hexdigest()}"
+
+
+def cmd_trash_explicit(args: argparse.Namespace) -> int:
+    """Exercise the production entrypoint after simulating exact bundle validation."""
+    args.runtime_bundle_sha256 = "a" * 64
+    with patch("omo_manager.omo_manager_mail_compress.validate_runtime_bundle"):
+        return production_cmd_trash_explicit(args)
 
 
 class FakeClient:
@@ -3057,6 +3073,8 @@ with tempfile.TemporaryDirectory() as tmp:
         self.assertIn("--recover-partial-move", result.stdout)
         self.assertIn("Explicit interrupted-operation recovery mode", result.stdout)
         self.assertIn("--retained-replacement UID:GMAIL-MSGID:GMAIL-THRID:RAW-SHA256:BODY-BYTES:BODY-SHA256", result.stdout)
+        self.assertIn("--runtime-bundle-sha256 RUNTIME_BUNDLE_SHA256", result.stdout)
+        self.assertIn("reviewed immutable .pyz runtime", result.stdout)
         self.assertIn("Required reviewed retained Inbox binding", result.stdout)
         self.assertIn("rejects additions by default", result.stdout)
         self.assertIn("sequential, non-atomic final read gate", result.stdout)
@@ -4171,9 +4189,9 @@ with tempfile.TemporaryDirectory() as tmp:
             patch("omo_manager.omo_manager_mail_compress.replacement_subject", return_value="[worker:0] replacement"),
             patch("omo_manager.omo_manager_mail_compress.fetch_direct_thread_contexts", return_value={"200": [source]}),
             patch("omo_manager.omo_manager_mail_compress.direct_context_intact", side_effect=[True, True]) as context_mock,
-            patch("omo_manager.omo_manager_mail_compress.direct_contexts_intact", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.direct_contexts_intact", return_value=True) as contexts_mock,
             patch("omo_manager.omo_manager_mail_compress.final_inbox_bindings_intact", return_value=True),
-            patch("omo_manager.omo_manager_mail_compress.retained_replacements_intact", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.retained_replacements_intact", return_value=True) as retained_mock,
             patch("omo_manager.omo_manager_mail_compress.select_mailbox"),
             patch("omo_manager.omo_manager_mail_compress.inbox_subset", return_value=["7"]),
             patch("omo_manager.omo_manager_mail_compress.imap_uid", return_value=("OK", [b""])) as imap_uid_mock,
@@ -4185,6 +4203,10 @@ with tempfile.TemporaryDirectory() as tmp:
         self.assertIn("post_move_verified=0", output.getvalue())
         self.assertIn("post_move_verification_error=gmail-message-search_message=100", output.getvalue())
         self.assertEqual(1, context_mock.call_count)
+        self.assertEqual(2, contexts_mock.call_count)
+        retained_mock.assert_called_once()
+        self.assertIn("post_move_reconciliation_ran=1", output.getvalue())
+        self.assertIn("post_move_reconciled=0", output.getvalue())
         self.assertEqual(1, imap_uid_mock.call_count)
 
     def test_trash_explicit_move_timeout_returns_unknown_outcome_summary(self) -> None:
@@ -4200,6 +4222,7 @@ with tempfile.TemporaryDirectory() as tmp:
             gmail_thrid="200",
             raw_sha256=raw_sha256,
         )
+        trashed = replace(source, uid="70")
         args = type(
             "DirectArgs",
             (),
@@ -4224,7 +4247,7 @@ with tempfile.TemporaryDirectory() as tmp:
             patch("omo_manager.omo_manager_mail_compress.selected_uidvalidity", return_value="1"),
             patch("omo_manager.omo_manager_mail_compress.mailbox_exists", return_value=True),
             patch("omo_manager.omo_manager_mail_compress.special_use_mailboxes", return_value={r"\All": "[Gmail]/All Mail", r"\Sent": "[Gmail]/Sent Mail"}),
-            patch("omo_manager.omo_manager_mail_compress.observe_explicit_sources", side_effect=[([source], []), ([source], [])]) as observe_mock,
+            patch("omo_manager.omo_manager_mail_compress.observe_explicit_sources", side_effect=[([source], []), ([source], []), ([], [trashed])]) as observe_mock,
             patch("omo_manager.omo_manager_mail_compress.replacement_exists", return_value=True),
             patch("omo_manager.omo_manager_mail_compress.replacement_gmail_msgid", return_value="999"),
             patch("omo_manager.omo_manager_mail_compress.replacement_subject", return_value="[worker:0] replacement"),
@@ -4242,12 +4265,98 @@ with tempfile.TemporaryDirectory() as tmp:
             redirect_stdout(io.StringIO()) as output,
         ):
             self.assertEqual(1, cmd_trash_explicit(args))
-        self.assertEqual(2, observe_mock.call_count)
+        self.assertEqual(3, observe_mock.call_count)
         self.assertIn("move_attempted=1", output.getvalue())
-        self.assertIn("moved_now=0", output.getvalue())
+        self.assertIn("moved_now=1", output.getvalue())
         self.assertIn("move_outcome=unknown", output.getvalue())
         self.assertIn("post_move_verified=0", output.getvalue())
         self.assertIn("post_move_verification_error=move-explicit-sources-to-trash", output.getvalue())
+        self.assertIn("post_move_reconciliation_ran=1", output.getvalue())
+        self.assertIn("post_move_reconciled=1", output.getvalue())
+
+    def test_runtime_bundle_is_deterministic_and_binds_complete_local_import_closure(self) -> None:
+        closure_names = {path.name for path in local_python_import_closure()}
+        self.assertTrue(
+            {
+                "omo_manager_mail_compress.py",
+                "email_idle_watcher.py",
+                "omo_email_config.py",
+                "omo_email_subject.py",
+                "omo_guest_images.py",
+                "omo_agent_status.py",
+                "omo_task_lock.py",
+                "omo_tmux_send.py",
+            }.issubset(closure_names)
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            first = Path(tmp) / "first.pyz"
+            second = Path(tmp) / "second.pyz"
+            first_digest = build_runtime_bundle(first)
+            second_digest = build_runtime_bundle(second)
+            self.assertEqual(first_digest, second_digest)
+            self.assertEqual(first.read_bytes(), second.read_bytes())
+            self.assertEqual(0o500, first.stat().st_mode & 0o777)
+            with zipfile.ZipFile(first) as bundle:
+                names = set(bundle.namelist())
+            self.assertIn("__main__.py", names)
+            self.assertTrue({f"omo_manager/{name}" for name in closure_names}.issubset(names))
+            with patch("omo_manager.omo_manager_mail_compress.__loader__", zipimport.zipimporter(str(first))):
+                validate_runtime_bundle(first_digest)
+                with self.assertRaisesRegex(ValueError, "changed"):
+                    validate_runtime_bundle("0" * 64)
+            with patch("sys.argv", [str(first)]), self.assertRaisesRegex(ValueError, "reviewed .pyz"):
+                validate_runtime_bundle(hashlib.sha256(Path(__file__).read_bytes()).hexdigest())
+
+            attacker_env = Path(tmp) / "attacker.env"
+            attacker_env.write_text(f"OMO_WORK_LOGS_ROOT={Path(tmp) / 'wrong-work-logs'}\n")
+            env = os.environ.copy()
+            env["HOME"] = str(Path(tmp) / "wrong-home")
+            env["OMO_MANAGER_LOCAL_ENV"] = str(attacker_env)
+            env["PYTHONPATH"] = str(first)
+            bundled_config = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "from omo_manager.omo_manager_mail_compress import LOCAL_ENV_PATH, configured_work_logs_root; print(LOCAL_ENV_PATH); print(configured_work_logs_root())",
+                ],
+                cwd=tmp,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(0, bundled_config.returncode, bundled_config.stderr)
+            self.assertEqual([str(TRUSTED_LOCAL_ENV_PATH), str(configured_work_logs_root())], bundled_config.stdout.splitlines())
+
+    def test_trash_explicit_production_entrypoint_requires_actual_digest_bound_zip_loader(self) -> None:
+        args = argparse.Namespace(yes=True)
+        with patch("omo_manager.omo_manager_mail_compress.open_mailbox") as open_mailbox_mock:
+            self.assertEqual(2, production_cmd_trash_explicit(args))
+            args.runtime_bundle_sha256 = "a" * 64
+            with patch("sys.argv", ["/tmp/reviewed.pyz"]):
+                self.assertEqual(2, production_cmd_trash_explicit(args))
+        open_mailbox_mock.assert_not_called()
+
+    def test_runtime_closure_captures_package_imports_and_exact_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            package = root / "omo_manager"
+            package.mkdir()
+            entrypoint = package / "entrypoint.py"
+            dependency = package / "dependency.py"
+            transitive = package / "transitive.py"
+            entrypoint.write_text("from omo_manager import dependency\n")
+            dependency.write_text("from omo_manager import transitive\n")
+            transitive.write_text("VALUE = 1\n")
+            entries = local_python_import_closure_entries(entrypoint, root)
+        self.assertEqual(
+            {
+                "omo_manager/dependency.py": b"from omo_manager import transitive\n",
+                "omo_manager/entrypoint.py": b"from omo_manager import dependency\n",
+                "omo_manager/transitive.py": b"VALUE = 1\n",
+            },
+            {path.relative_to(root).as_posix(): content for path, content in entries},
+        )
 
     def test_trash_explicit_pre_move_imap_failure_returns_terminal_summary(self) -> None:
         raw_sha256 = "a" * 64

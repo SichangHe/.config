@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import csv
 import hashlib
 import io
 import imaplib
 import json
 import os
+import pwd
 import re
 import signal
 import socket
@@ -17,6 +19,8 @@ import stat
 import subprocess
 import sys
 import threading
+import zipfile
+import zipimport
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from email import policy
@@ -42,10 +46,11 @@ GMAIL_METADATA_FETCH = "(FLAGS X-GM-MSGID X-GM-THRID X-GM-LABELS)"
 GMAIL_METADATA_BATCH_FETCH = "(UID FLAGS X-GM-MSGID X-GM-THRID X-GM-LABELS)"
 SUPERSESSION_HEADER_FETCH = "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID X-OMO-SUPERSEDES X-OMO-AGENT-SESSION-ID)])"
 TRASH_MAILBOX = "[Gmail]/Trash"
+ACCOUNT_HOME = Path(pwd.getpwuid(os.geteuid()).pw_dir)
 CONFIG_PATH = human_config_path()
 DEFAULT_THREADS_PER_BATCH = 10
-DEFAULT_WORK_LOGS_ROOT = Path.home() / "work_logs"
-TRUSTED_LOCAL_ENV_PATH = Path(__file__).resolve().with_name("local.env")
+DEFAULT_WORK_LOGS_ROOT = ACCOUNT_HOME / "work_logs"
+TRUSTED_LOCAL_ENV_PATH = ACCOUNT_HOME / ".config/omo_manager/local.env"
 LOCAL_ENV_PATH = TRUSTED_LOCAL_ENV_PATH
 SOURCE_815_APPROVAL_FILE = "85c5dff58359-815.txt"
 SOURCE_815_APPROVAL_QUOTE = "This is not an email I did not read. Anyway, just remove it"
@@ -63,10 +68,156 @@ EXPORT_FULL_FETCH_ATTEMPTS = 2
 IMAP_OPERATION_TIMEOUT_S = 45.0
 TRASH_EXPLICIT_PRE_MOVE_TIMEOUT_S = 300.0
 T = TypeVar("T")
+RUNTIME_CLOSURE_ROOT = Path(__file__).resolve().parents[1]
+RUNTIME_CLOSURE_ENTRYPOINT = Path(__file__).resolve()
 
 
 def final_gate_event(_name: str) -> None:
     """Deterministic test seam after each ordered final-gate observation."""
+
+
+def local_python_import_closure_entries(
+    entrypoint: Path = RUNTIME_CLOSURE_ENTRYPOINT,
+    root: Path = RUNTIME_CLOSURE_ROOT,
+) -> tuple[tuple[Path, bytes], ...]:
+    """Capture the complete statically reachable local Python import closure."""
+    root = root.resolve()
+    pending = [entrypoint.resolve()]
+    found: dict[Path, bytes] = {}
+    while pending:
+        path = pending.pop()
+        if path in found:
+            continue
+        try:
+            relative = path.relative_to(root)
+            content = path.read_bytes()
+            tree = ast.parse(content, filename=str(path))
+        except (OSError, SyntaxError, ValueError) as exc:
+            raise RuntimeError(f"cannot resolve local Python runtime closure: {path}") from exc
+        if path.suffix != ".py":
+            raise RuntimeError(f"local Python runtime closure contains a non-Python file: {relative}")
+        found[path] = content
+        current_module = ".".join(relative.with_suffix("").parts)
+        current_package = current_module.split(".")[:-1]
+        candidates: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                candidates.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                if node.level:
+                    keep = len(current_package) - node.level + 1
+                    base = current_package[: max(keep, 0)]
+                    if node.module:
+                        base.extend(node.module.split("."))
+                    candidates.add(".".join(base))
+                    candidates.update(".".join([*base, alias.name]) for alias in node.names if alias.name != "*")
+                elif node.module:
+                    candidates.add(node.module)
+                    candidates.update(f"{node.module}.{alias.name}" for alias in node.names if alias.name != "*")
+        for module in candidates:
+            module_parts = module.split(".")
+            possible = root.joinpath(*module_parts).with_suffix(".py")
+            if not possible.is_file() and len(module_parts) == 1:
+                possible = root / "omo_manager" / f"{module}.py"
+            if possible.is_file():
+                resolved = possible.resolve()
+                try:
+                    resolved.relative_to(root)
+                except ValueError as exc:
+                    raise RuntimeError(f"local Python runtime closure escapes its root: {possible}") from exc
+                pending.append(resolved)
+    return tuple(sorted(found.items(), key=lambda item: item[0].relative_to(root).as_posix()))
+
+
+def local_python_import_closure(entrypoint: Path = RUNTIME_CLOSURE_ENTRYPOINT, root: Path = RUNTIME_CLOSURE_ROOT) -> tuple[Path, ...]:
+    """Return paths in the complete statically reachable local Python import closure."""
+    return tuple(path for path, _content in local_python_import_closure_entries(entrypoint, root))
+
+
+def runtime_closure_entries() -> tuple[tuple[str, str], ...]:
+    """Return canonical relative-path and content-digest runtime entries."""
+    return tuple(
+        (path.relative_to(RUNTIME_CLOSURE_ROOT).as_posix(), hashlib.sha256(content).hexdigest())
+        for path, content in local_python_import_closure_entries()
+    )
+
+
+def runtime_closure_sha256() -> str:
+    """Digest the complete canonical local Python runtime closure."""
+    digest = hashlib.sha256()
+    for relative, content_sha256 in runtime_closure_entries():
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(content_sha256.encode("ascii"))
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def build_runtime_bundle(out_path: Path) -> str:
+    """Create one immutable zipapp containing the complete local Python closure."""
+    if not out_path.is_absolute():
+        raise ValueError("runtime bundle path must be absolute")
+    out_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    parent_stat = out_path.parent.stat()
+    if not stat.S_ISDIR(parent_stat.st_mode) or parent_stat.st_uid != os.getuid() or stat.S_IMODE(parent_stat.st_mode) & 0o077:
+        raise ValueError("runtime bundle parent must be owner-only")
+    closure_entries = local_python_import_closure_entries()
+    fd = os.open(out_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w+b", closefd=False) as bundle_file:
+            bundle_file.write(b"#!/usr/bin/env python3\n")
+            with zipfile.ZipFile(bundle_file, mode="a", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as bundle:
+                entries = [("omo_manager/__init__.py", b"")]
+                entries.extend(
+                    (path.relative_to(RUNTIME_CLOSURE_ROOT).as_posix(), content)
+                    for path, content in closure_entries
+                )
+                entries.append(
+                    (
+                        "__main__.py",
+                        b"from omo_manager.omo_manager_mail_compress import main\n"
+                        b"import sys\n"
+                        b"raise SystemExit(main(sys.argv[1:]))\n",
+                    )
+                )
+                for relative, content in sorted(entries):
+                    info = zipfile.ZipInfo(relative, date_time=(1980, 1, 1, 0, 0, 0))
+                    info.compress_type = zipfile.ZIP_DEFLATED
+                    info.external_attr = 0o100400 << 16
+                    bundle.writestr(info, content)
+            bundle_file.flush()
+            os.fsync(bundle_file.fileno())
+    except BaseException:
+        try:
+            out_path.unlink()
+        except OSError:
+            pass
+        raise
+    finally:
+        os.close(fd)
+    out_path.chmod(0o500)
+    fsync_dir(out_path.parent)
+    return hashlib.sha256(out_path.read_bytes()).hexdigest()
+
+
+def validate_runtime_bundle(expected_sha256: str) -> None:
+    """Require execution from the exact reviewed immutable runtime zipapp."""
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+        raise ValueError("runtime bundle SHA-256 must be lowercase hexadecimal")
+    loader = __loader__
+    if not isinstance(loader, zipimport.zipimporter):
+        raise ValueError("trash-explicit must execute from a reviewed .pyz runtime bundle")
+    runtime_path = Path(loader.archive).resolve()
+    if runtime_path.suffix != ".pyz" or not zipfile.is_zipfile(runtime_path):
+        raise ValueError("trash-explicit must execute from a reviewed .pyz runtime bundle")
+    if hashlib.sha256(runtime_path.read_bytes()).hexdigest() != expected_sha256:
+        raise ValueError("runtime bundle SHA-256 changed")
+
+
+def cmd_build_runtime_bundle(args: argparse.Namespace) -> int:
+    digest = build_runtime_bundle(args.out)
+    print(f"runtime_bundle={args.out} runtime_bundle_sha256={digest} local_python_files={len(local_python_import_closure_entries())}")
+    return 0
 
 
 class ImapOperationError(RuntimeError):
@@ -1162,6 +1313,7 @@ def trash_explicit_summary(
     replacement_ids: list[str],
     retained_replacement_count: int,
     sources: list[ScopedSource],
+    runtime_bundle_sha256: str,
     source_location_mode: str,
     final_context_mode: str,
     final_gate_passed: bool,
@@ -1180,6 +1332,7 @@ def trash_explicit_summary(
     return (
         f"trash_explicit: task_ids={','.join(task_ids)} replacements={len(replacement_ids)}"
         f" retained_replacements={retained_replacement_count} requested={len(sources)}"
+        f" runtime_bundle_sha256={runtime_bundle_sha256}"
         f" source_location_mode={source_location_mode}"
         f" final_context={final_context_mode} final_gate_passed={int(final_gate_passed)}"
         f" final_gate_observations={final_gate_observations}"
@@ -3552,7 +3705,16 @@ def strict_fresh_source_locations_intact(
 
 
 def cmd_trash_explicit(args: argparse.Namespace) -> int:
-    """Move exact live-bound sources to recoverable Trash without persisted evidence."""
+    """Validate the immutable runtime before entering the mailbox mutation path."""
+    runtime_bundle_digest = getattr(args, "runtime_bundle_sha256", "")
+    if not isinstance(runtime_bundle_digest, str) or not runtime_bundle_digest:
+        print("refusing trash-explicit without --runtime-bundle-sha256", file=sys.stderr)
+        return 2
+    try:
+        validate_runtime_bundle(runtime_bundle_digest)
+    except ValueError as exc:
+        print(f"refusing trash-explicit: {exc}", file=sys.stderr)
+        return 2
     if not args.yes:
         print("refusing to move superseded mail to Trash without --yes", file=sys.stderr)
         return 2
@@ -3593,6 +3755,7 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
                 replacement_ids,
                 len(retained_replacements),
                 sources,
+                runtime_bundle_digest,
                 source_location_mode,
                 final_context_mode,
                 final_gate_passed,
@@ -3904,7 +4067,6 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
                 verified_inbox = []
                 verified_trash = []
                 move_error = summary_token(exc.stage)
-                post_move_verification_error = move_error
             else:
                 move_outcome = "ok"
                 if typ != "OK":
@@ -3912,29 +4074,34 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
                     move_error = summary_token(f"move-explicit-sources-to-trash:{typ}")
         else:
             move_outcome = "not-needed"
-        if not post_move_verification_error:
-            mutation_complete = True
-            post_move_reconciliation_ran = True
+        mutation_complete = True
+        post_move_reconciliation_ran = True
+        reconciliation_errors: list[str] = []
+        try:
+            verified_inbox, verified_trash = observe_explicit_sources(final_context_client, sources, sender_email, recipient_email)
+        except (OSError, imaplib.IMAP4.error, RuntimeError) as exc:
+            verified_inbox = []
+            verified_trash = []
+            reconciliation_errors.append(exc.stage if isinstance(exc, ImapOperationError) else f"source:{exc.__class__.__name__}:{exc}")
+        if retained_replacements:
             try:
-                verified_inbox, verified_trash = observe_explicit_sources(client, sources, sender_email, recipient_email)
-                if retained_replacements:
-                    select_mailbox(final_context_client, "INBOX", readonly=True)
-                    if selected_uidvalidity(final_context_client) != expected_uidvalidity or not retained_replacements_intact(final_context_client, retained_replacements):
-                        raise RuntimeError("post-MOVE retained replacement reconciliation failed")
-                if not direct_contexts_intact(
-                    final_context_client,
-                    special_use[r"\All"],
-                    contexts_by_thread,
-                    allow_additive=allow_additive_final_context,
-                ):
-                    raise RuntimeError("post-MOVE complete context reconciliation failed")
-                post_move_reconciled = True
-            except (imaplib.IMAP4.error, RuntimeError) as exc:
-                verified_inbox = []
-                verified_trash = []
-                post_move_verification_error = summary_token(exc.stage if isinstance(exc, ImapOperationError) else f"{exc.__class__.__name__}:{exc}")
-            if move_error and not post_move_verification_error:
-                post_move_verification_error = move_error
+                select_mailbox(final_context_client, "INBOX", readonly=True)
+                if selected_uidvalidity(final_context_client) != expected_uidvalidity or not retained_replacements_intact(final_context_client, retained_replacements):
+                    raise RuntimeError("post-MOVE retained replacement reconciliation failed")
+            except (OSError, imaplib.IMAP4.error, RuntimeError) as exc:
+                reconciliation_errors.append(exc.stage if isinstance(exc, ImapOperationError) else f"retained:{exc.__class__.__name__}:{exc}")
+        try:
+            if not direct_contexts_intact(
+                final_context_client,
+                special_use[r"\All"],
+                contexts_by_thread,
+                allow_additive=allow_additive_final_context,
+            ):
+                raise RuntimeError("post-MOVE complete context reconciliation failed")
+        except (OSError, imaplib.IMAP4.error, RuntimeError) as exc:
+            reconciliation_errors.append(exc.stage if isinstance(exc, ImapOperationError) else f"context:{exc.__class__.__name__}:{exc}")
+        post_move_reconciled = not reconciliation_errors
+        post_move_verification_error = summary_token("+".join(filter(None, [move_error, *reconciliation_errors]))) if move_error or reconciliation_errors else ""
     except (OSError, RuntimeError, imaplib.IMAP4.error) as exc:
         pre_move_failure_summarized = True
         if pre_move_complete:
@@ -3949,6 +4116,7 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
                 replacement_ids,
                 len(retained_replacements),
                 sources,
+                runtime_bundle_digest,
                 source_location_mode,
                 final_context_mode,
                 final_gate_passed,
@@ -3984,6 +4152,7 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
             replacement_ids,
             len(retained_replacements),
             sources,
+            runtime_bundle_digest,
             source_location_mode,
             final_context_mode,
             final_gate_passed,
@@ -4200,6 +4369,9 @@ def cmd_trash_superseded(args: argparse.Namespace) -> int:
 def parser() -> argparse.ArgumentParser:
     arg_parser = argparse.ArgumentParser(description=__doc__)
     sub = arg_parser.add_subparsers(dest="cmd", required=True)
+    runtime_bundle = sub.add_parser("build-runtime-bundle", help="Build one immutable zipapp containing the complete local Python import closure without mailbox access.")
+    runtime_bundle.add_argument("--out", type=Path, required=True, help="New absolute .pyz path inside an existing or newly created owner-only directory.")
+    runtime_bundle.set_defaults(func=cmd_build_runtime_bundle)
     identity_preflight = sub.add_parser("identity-preflight", help="Read-only aggregate Gmail identity preflight for manager mail.")
     identity_preflight.set_defaults(func=cmd_identity_preflight)
     snapshot = sub.add_parser("snapshot", help="Print manager mail headers and UIDs.")
@@ -4336,6 +4508,11 @@ This command moves the old message only from Inbox to recoverable Gmail Trash an
         default=[],
         metavar="UID:GMAIL-MSGID:GMAIL-THRID:RAW-SHA256:BODY-BYTES:BODY-SHA256",
         help="Required reviewed retained Inbox binding; repeat once per --replacement-message-id. Omit only with --replacement-not-required. The final gate authenticates UIDVALIDITY separately.",
+    )
+    direct.add_argument(
+        "--runtime-bundle-sha256",
+        required=True,
+        help="Exact SHA-256 printed by build-runtime-bundle. trash-explicit refuses direct source-tree execution and requires that reviewed immutable .pyz runtime.",
     )
     direct.add_argument(
         "--replacement-message-id",
