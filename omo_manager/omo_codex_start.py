@@ -1015,13 +1015,14 @@ def visible_status_card_session_id(text: str) -> str:
     return ""
 
 
-def query_exact_status_session_id(pane: Pane, n_lines: int, wait_s: float) -> str:
-    """Submit `/status` atomically only to one exact tmux process identity."""
+def query_exact_status_session_id(pane: Pane, n_lines: int, wait_s: float, stale_visible_session_id: str = "") -> str:
+    """Submit `/status` atomically and ignore one UUID found only in prior visible history."""
     condition = "#{&&:#{==:#{pane_id},%s},#{&&:#{==:#{window_id},%s},#{&&:#{==:#{session_name}:#{window_index}.#{pane_index},%s},#{&&:#{==:#{pane_pid},%s},#{==:#{pane_current_command},%s}}}}}" % (pane.pane_id, pane.window_id, pane.target, pane.pane_pid, pane.command)
     exists, before_lines = exact_tail(pane.target, n_lines)
     if not exists:
         raise StartError("target disappeared before /status query.")
     before = "\n".join(before_lines)
+    stale_before = visible_status_card_session_id(before)
     nonce = f"{os.getpid()}-{time.monotonic_ns()}"
     buffer_name = f"omo-codex-status-{nonce}"
     accepted = f"OMO_STATUS_ACCEPTED_{nonce}"
@@ -1048,7 +1049,10 @@ def query_exact_status_session_id(pane: Pane, n_lines: int, wait_s: float) -> st
         if not exists:
             raise StartError("target disappeared during /status query.")
         after = "\n".join(after_lines)
-        session_id = extract_new_status_session_id(before, after) or visible_status_card_session_id(after)
+        new_session_id = extract_new_status_session_id(before, after)
+        visible_session_id = visible_status_card_session_id(after)
+        stale_visible = visible_session_id == stale_visible_session_id and stale_before == stale_visible_session_id
+        session_id = new_session_id or ("" if stale_visible else visible_session_id)
         if session_id:
             verify_same_process(pane)
             return session_id
@@ -2471,7 +2475,7 @@ def verify_fresh_rotation(args: Args, snapshot: RotationSnapshot, replacement: P
     )
     # 🧑 Source-1183: "Solve this as soon as possible with anything you have"
     if not fresh_session_id:
-        fresh_session_id = query_exact_status_session_id(current, 240, min(10.0, args.startup_timeout_s))
+        fresh_session_id = query_exact_status_session_id(current, 240, min(10.0, args.startup_timeout_s), snapshot.old_session_id)
     if not fresh_session_id:
         raise NewSessionIdCaptureFailed("rotated worker did not expose a new Codex session id.")
     if fresh_session_id == snapshot.old_session_id:

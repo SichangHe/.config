@@ -176,6 +176,46 @@ class CodexSessionCaptureTests(unittest.TestCase):
         with patch("omo_manager.omo_codex_start.run", side_effect=fake_run), patch("omo_manager.omo_codex_start.exact_tail", side_effect=((True, [status]), (True, [status]))), patch("omo_manager.omo_codex_start.verify_same_process"):
             self.assertEqual(self.UUID, query_exact_status_session_id(pane, 80, 1))
 
+    def test_exact_status_ignores_stale_visible_uuid_until_new_response(self):
+        pane = Pane("w:1.0", "%1", "@1", "bun", Path("/tmp"), 42)
+        completed = __import__("subprocess").CompletedProcess([], 0, "", "")
+        new_session = "119f670b-6a2f-7463-b9be-9aa6ff0cec43"
+
+        def fake_run(argv):
+            if argv[:3] == ["tmux", "if-shell", "-F"]:
+                token = next(part for part in argv[6].split(" ; ") if part.startswith("display-message -p ")).split()[-1]
+                return __import__("subprocess").CompletedProcess(argv, 0, token + "\n", "")
+            return completed
+
+        status = f"╭────╮\n│ >_ OpenAI Codex (v0.150.1) │\n│ Session: {self.UUID} │\n╰────╯"
+        with (
+            patch("omo_manager.omo_codex_start.run", side_effect=fake_run),
+            patch("omo_manager.omo_codex_start.exact_tail", side_effect=((True, [status]), (True, [status]), (True, [status]))),
+            patch("omo_manager.omo_codex_start.extract_new_status_session_id", side_effect=("", new_session)),
+            patch("omo_manager.omo_codex_start.verify_same_process"),
+            patch("omo_manager.omo_codex_start.time.sleep"),
+        ):
+            self.assertEqual(new_session, query_exact_status_session_id(pane, 80, 1, self.UUID))
+
+    def test_exact_status_returns_newly_visible_old_uuid_for_freshness_rejection(self):
+        pane = Pane("w:1.0", "%1", "@1", "bun", Path("/tmp"), 42)
+        completed = __import__("subprocess").CompletedProcess([], 0, "", "")
+        status = f"╭────╮\n│ >_ OpenAI Codex (v0.150.1) │\n│ Session: {self.UUID} │\n╰────╯"
+
+        def fake_run(argv):
+            if argv[:3] == ["tmux", "if-shell", "-F"]:
+                token = next(part for part in argv[6].split(" ; ") if part.startswith("display-message -p ")).split()[-1]
+                return __import__("subprocess").CompletedProcess(argv, 0, token + "\n", "")
+            return completed
+
+        with (
+            patch("omo_manager.omo_codex_start.run", side_effect=fake_run),
+            patch("omo_manager.omo_codex_start.exact_tail", side_effect=((True, ["fresh pane"]), (True, [status]))),
+            patch("omo_manager.omo_codex_start.extract_new_status_session_id", return_value=""),
+            patch("omo_manager.omo_codex_start.verify_same_process"),
+        ):
+            self.assertEqual(self.UUID, query_exact_status_session_id(pane, 80, 1, self.UUID))
+
     def test_exact_status_rejects_plain_stale_session_line(self):
         from omo_manager.omo_codex_start import visible_status_card_session_id
 
