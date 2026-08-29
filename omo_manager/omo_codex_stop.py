@@ -695,7 +695,9 @@ def query_status_session_id(
     wait_s: float,
     identity_is_current: Callable[[], bool] | None = None,
     tmux_guard: tuple[str, str] | None = None,
+    strict_status_response: bool = False,
 ) -> tuple[str, str]:
+    """Return a status UUID, optionally only from the newly submitted `/status`."""
     if identity_is_current is not None and not identity_is_current():
         raise RuntimeError("tmux pane identity changed before status query")
     before = capture(target, n_lines) if tmux_guard is None else guarded_capture(target, n_lines, tmux_guard)
@@ -714,9 +716,10 @@ def query_status_session_id(
     fallback_sent = False
     while time.monotonic() < deadline_s:
         after = capture(target, n_lines) if tmux_guard is None else guarded_capture(target, n_lines, tmux_guard)
-        session_id = extract_new_status_session_id(before, after)
+        response = after.rsplit("/status", 1)[-1] if after.count("/status") > before.count("/status") else ""
+        session_id = extract_status_session_id(response) if strict_status_response else extract_new_status_session_id(before, after)
         if session_id:
-            return session_id, after
+            return session_id, response if strict_status_response else after
         if not fallback_sent and input_has_status_prompt(after):
             if identity_is_current is not None and not identity_is_current():
                 raise RuntimeError("tmux pane identity changed before fallback status submission")
@@ -726,7 +729,8 @@ def query_status_session_id(
                 guarded_tmux_command(*tmux_guard, ["send-keys", "-t", target, "Enter"])
             fallback_sent = True
         time.sleep(0.25)
-    return "", after
+    response = (after.rsplit("/status", 1)[-1] if after.count("/status") > before.count("/status") else "") if strict_status_response else after
+    return "", response
 
 
 def send_exit_keys(

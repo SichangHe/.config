@@ -17,7 +17,8 @@
 - fresh UUID capture
   - retries an empty incumbent capture through the existing exact-process `/status` query before audit reservation or respawn
   - retries an empty legacy capture through the existing exact-process `/status` query
-  - ignores the old UUID only when it appears solely in retained visible history; a new response containing it still fails as a resumed session
+  - accepts a post-respawn UUID only from output after its exact `/status` submission; retained cards of every UUID are ineligible
+  - records a response hash, captured UUID when present, and distinct absent/same-old/stale-history failure kinds; only absent-UUID failure is reconcilable
   - preserves the same checkpointed replacement and all snapshot bindings
 - reconciliation eligibility
   - requires the replacement checkpoint

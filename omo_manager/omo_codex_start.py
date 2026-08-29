@@ -34,7 +34,7 @@ try:
     from omo_manager.omo_codex_status import Args as StatusArgs
     from omo_manager.omo_codex_status import CODEX_FOOTER_RE, current_block, current_input_text, exact_tail, inspect, is_stock_placeholder_input_text, report_from_lines, tail, visible_error_lines
     from omo_manager.omo_codex_status import status as classify_status
-    from omo_manager.omo_codex_stop import extract_new_status_session_id, query_status_session_id
+    from omo_manager.omo_codex_stop import extract_new_status_session_id, extract_status_session_id, query_status_session_id
     from omo_manager.omo_task_lock import task_file_lock, task_target_lock
     from omo_manager.omo_task_metadata import TARGET_RE, TASK_FRONTMATTER_STATUSES, frontmatter_parts, parse_task_metadata
     from omo_manager.omo_task_status import authoritative_active_target_task_paths, root_membership_lock
@@ -42,7 +42,7 @@ except ModuleNotFoundError:
     from omo_codex_status import Args as StatusArgs
     from omo_codex_status import CODEX_FOOTER_RE, current_block, current_input_text, exact_tail, inspect, is_stock_placeholder_input_text, report_from_lines, tail, visible_error_lines
     from omo_codex_status import status as classify_status
-    from omo_codex_stop import extract_new_status_session_id, query_status_session_id
+    from omo_codex_stop import extract_new_status_session_id, extract_status_session_id, query_status_session_id
     from omo_task_lock import task_file_lock, task_target_lock
     from omo_task_metadata import TARGET_RE, TASK_FRONTMATTER_STATUSES, frontmatter_parts, parse_task_metadata
     from omo_task_status import authoritative_active_target_task_paths, root_membership_lock  # pyright: ignore[reportImplicitRelativeImport]
@@ -115,8 +115,14 @@ class StartError(RuntimeError):
     """A same-pane launch precondition or operation failed."""
 
 
-class NewSessionIdCaptureFailed(StartError):
-    """The validated replacement exposed no UUID after successful startup."""
+class RotationSessionCaptureFailed(StartError):
+    """Fresh rotation evidence was absent, stale-only, or proved same-old."""
+
+    def __init__(self, message: str, failure_kind: str, response_sha256: str = "", captured_session_id: str = "") -> None:
+        super().__init__(message)
+        self.failure_kind = failure_kind
+        self.response_sha256 = response_sha256
+        self.captured_session_id = captured_session_id
 
 
 @dataclass(frozen=True)
@@ -1015,14 +1021,15 @@ def visible_status_card_session_id(text: str) -> str:
     return ""
 
 
-def query_exact_status_session_id(pane: Pane, n_lines: int, wait_s: float, stale_visible_session_id: str = "") -> str:
+def query_exact_status_session_id(pane: Pane, n_lines: int, wait_s: float, stale_visible_session_id: str = "", evidence: dict[str, str] | None = None) -> str:
     """Submit `/status` atomically and ignore one UUID found only in prior visible history."""
     condition = "#{&&:#{==:#{pane_id},%s},#{&&:#{==:#{window_id},%s},#{&&:#{==:#{session_name}:#{window_index}.#{pane_index},%s},#{&&:#{==:#{pane_pid},%s},#{==:#{pane_current_command},%s}}}}}" % (pane.pane_id, pane.window_id, pane.target, pane.pane_pid, pane.command)
     exists, before_lines = exact_tail(pane.target, n_lines)
     if not exists:
         raise StartError("target disappeared before /status query.")
     before = "\n".join(before_lines)
-    stale_before = visible_status_card_session_id(before)
+    if stale_visible_session_id and evidence is not None:
+        evidence["retained-session-id"] = visible_status_card_session_id(before)
     nonce = f"{os.getpid()}-{time.monotonic_ns()}"
     buffer_name = f"omo-codex-status-{nonce}"
     accepted = f"OMO_STATUS_ACCEPTED_{nonce}"
@@ -1049,10 +1056,14 @@ def query_exact_status_session_id(pane: Pane, n_lines: int, wait_s: float, stale
         if not exists:
             raise StartError("target disappeared during /status query.")
         after = "\n".join(after_lines)
-        new_session_id = extract_new_status_session_id(before, after)
-        visible_session_id = visible_status_card_session_id(after)
-        stale_visible = visible_session_id == stale_visible_session_id and stale_before == stale_visible_session_id
-        session_id = new_session_id or ("" if stale_visible else visible_session_id)
+        if stale_visible_session_id:
+            response = after.rsplit("/status", 1)[-1] if after.count("/status") > before.count("/status") else ""
+            if evidence is not None:
+                evidence["response-sha256"] = hashlib.sha256(response.encode()).hexdigest()
+                evidence["response-session-id"] = extract_status_session_id(response)
+            session_id = extract_status_session_id(response)
+        else:
+            session_id = extract_new_status_session_id(before, after) or visible_status_card_session_id(after)
         if session_id:
             verify_same_process(pane)
             return session_id
@@ -1217,6 +1228,8 @@ def finish_rotation_audit(
     failure_kind: str = "",
     terminal_owner_task: str = "",
     terminal_replacement: Pane | None = None,
+    captured_response_sha256: str = "",
+    captured_session_id: str = "",
 ) -> None:
     """Finalize only the exact owner-private rotation audit reserved by this run."""
 
@@ -1245,6 +1258,11 @@ def finish_rotation_audit(
             )
         else:
             suffix = f"new-session-id: {new_session_id}\n" if new_session_id else f"failure-kind: {failure_kind}\n" if failure_kind else ""
+            if failure_kind:
+                response_sha256 = captured_response_sha256 or hashlib.sha256(b"").hexdigest()
+                suffix += f"captured-response-sha256: {response_sha256}\n"
+            if captured_session_id:
+                suffix += f"captured-session-id: {captured_session_id}\n"
         finalized = prepared + suffix + f"final-result: {result}\n"
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False) as output:
             temporary = Path(output.name)
@@ -1263,11 +1281,11 @@ def finish_rotation_audit(
             os.fsync(directory_fd)
         finally:
             os.close(directory_fd)
-        if failure_kind:
+        if failure_kind == RECONCILABLE_ROTATION_FAILURE_KIND:
             os.setxattr(path, ROTATION_ELIGIBILITY_XATTR, hashlib.sha256(finalized.encode()).hexdigest().encode(), follow_symlinks=False)
     except OSError as error:
         rollback_error: OSError | None = None
-        if installed and failure_kind:
+        if installed and failure_kind == RECONCILABLE_ROTATION_FAILURE_KIND:
             rollback_temporary: Path | None = None
             try:
                 with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.rollback.", delete=False) as output:
@@ -1398,6 +1416,7 @@ FAILED_ROTATION_AUDIT_FIELDS = {
     "replacement-pane-pid",
     "replacement-command",
     "failure-kind",
+    "captured-response-sha256",
     "final-result",
 }
 
@@ -1467,6 +1486,7 @@ def read_failed_rotation_audit(path: Path, expected_sha256: str) -> RotationAudi
         or fields["completion"] != "unknown-until-finalized"
         or fields["failure-kind"] != RECONCILABLE_ROTATION_FAILURE_KIND
         or fields["final-result"] != "failed"
+        or SHA256_RE.fullmatch(fields["captured-response-sha256"]) is None
     ):
         raise StartError("rotation audit is not one exact failed rotate-worker record.")
     return RotationAuditBinding(path, before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, content, text, digest, fields)
@@ -2462,24 +2482,23 @@ def verify_restart_continuity(
         raise StartError("restarted Codex did not prove continuity with the captured original session.")
 
 
-def verify_fresh_rotation(args: Args, snapshot: RotationSnapshot, replacement: Pane) -> str:
+def verify_fresh_rotation(args: Args, snapshot: RotationSnapshot, replacement: Pane, capture_evidence: dict[str, str] | None = None) -> str:
     """Prove same-pane fresh-session startup and unchanged task boundaries."""
 
     current = verify_rotation_snapshot(args, snapshot, replacement=replacement)
-    fresh_session_id, _ = query_status_session_id(
-        current.pane_id,
-        240,
-        min(10.0, args.startup_timeout_s),
-        None,
-        (current.target, current.pane_id),
-    )
+    fresh_session_id, response = query_status_session_id(current.pane_id, 240, min(10.0, args.startup_timeout_s), None, (current.target, current.pane_id), True)
+    if capture_evidence is not None:
+        capture_evidence["response-sha256"] = hashlib.sha256(response.encode()).hexdigest()
+        capture_evidence["response-session-id"] = fresh_session_id
     # 🧑 Source-1183: "Solve this as soon as possible with anything you have"
     if not fresh_session_id:
-        fresh_session_id = query_exact_status_session_id(current, 240, min(10.0, args.startup_timeout_s), snapshot.old_session_id)
+        fresh_session_id = query_exact_status_session_id(current, 240, min(10.0, args.startup_timeout_s), snapshot.old_session_id, capture_evidence)
     if not fresh_session_id:
-        raise NewSessionIdCaptureFailed("rotated worker did not expose a new Codex session id.")
+        retained_session_id = (capture_evidence or {}).get("retained-session-id", "")
+        failure_kind = "post-respawn-stale-unrelated-history" if retained_session_id and retained_session_id != snapshot.old_session_id else RECONCILABLE_ROTATION_FAILURE_KIND
+        raise RotationSessionCaptureFailed("rotated worker did not expose a new Codex session id.", failure_kind, (capture_evidence or {}).get("response-sha256", ""), (capture_evidence or {}).get("response-session-id", ""))
     if fresh_session_id == snapshot.old_session_id:
-        raise StartError("rotated worker resumed the old Codex session instead of starting fresh.")
+        raise RotationSessionCaptureFailed("rotated worker resumed the old Codex session instead of starting fresh.", "post-respawn-same-old-session-id", (capture_evidence or {}).get("response-sha256", ""), fresh_session_id)
     verify_rotation_snapshot(args, snapshot, replacement=replacement)
     return fresh_session_id
 
@@ -2684,15 +2703,16 @@ def start(args: Args) -> str:
                     )
                     reserve_rotation_audit(audit_path, prepared_audit)
                     active_audit = prepared_audit
+                    capture_evidence: dict[str, str] = {}
                     try:
                         pane = verify_rotation_snapshot(args, rotation_snapshot)
                         respawn_codex(pane, command)
                         active_audit, replacement = checkpoint_rotation_replacement(audit_path, prepared_audit, rotation_snapshot, args)
                         result = wait_started(replacement, marker, args.startup_timeout_s)
-                        new_session_id = verify_fresh_rotation(args, rotation_snapshot, replacement)
-                    except NewSessionIdCaptureFailed as rotation_error:
+                        new_session_id = verify_fresh_rotation(args, rotation_snapshot, replacement, capture_evidence)
+                    except RotationSessionCaptureFailed as rotation_error:
                         try:
-                            finish_rotation_audit(audit_path, active_audit, "failed", failure_kind=RECONCILABLE_ROTATION_FAILURE_KIND)
+                            finish_rotation_audit(audit_path, active_audit, "failed", failure_kind=rotation_error.failure_kind, captured_response_sha256=rotation_error.response_sha256, captured_session_id=rotation_error.captured_session_id)
                         except Exception as audit_error:
                             rotation_error.add_note(f"private audit finalization also failed; audit remains completion-unknown: {audit_error}")
                         raise

@@ -153,6 +153,7 @@ class CodexStartTests(unittest.TestCase):
             "replacement-pane-pid": str(pane.pane_pid),
             "replacement-command": pane.command,
             "failure-kind": "post-respawn-new-session-id-capture-failed",
+            "captured-response-sha256": hashlib.sha256(b"").hexdigest(),
             "final-result": "failed",
         }
         fields["rotation-snapshot-sha256"] = hashlib.sha256(
@@ -1090,7 +1091,13 @@ class CodexStartTests(unittest.TestCase):
                 self.assertEqual("running", start(self.rotation_args(root)))
 
             self.assertEqual(2, legacy_query.call_count)
-            exact_query.assert_called_once_with(replacement, 240, 10.0, self.SESSION_ID)
+            exact_query.assert_called_once_with(
+                replacement,
+                240,
+                10.0,
+                self.SESSION_ID,
+                {"response-sha256": hashlib.sha256(b"").hexdigest(), "response-session-id": ""},
+            )
             deliver.assert_called_once()
             audit = (root / "rotation.audit").read_text(encoding="utf-8")
             self.assertIn(f"new-session-id: {new_session}\n", audit)
@@ -1164,8 +1171,53 @@ class CodexStartTests(unittest.TestCase):
 
             deliver.assert_not_called()
             audit = (root / "rotation.audit").read_text(encoding="utf-8")
+            self.assertIn("failure-kind: post-respawn-same-old-session-id\n", audit)
+            self.assertIn(f"captured-session-id: {self.SESSION_ID}\n", audit)
+            self.assertIn("captured-response-sha256: ", audit)
             self.assertIn("final-result: failed\n", audit)
             self.assertNotIn("terminal-prompt-delivery: authorized", audit)
+            with self.assertRaises(OSError):
+                os.getxattr(root / "rotation.audit", "user.omo_rotation_reconciliation_eligible_sha256")
+
+    def test_rotate_worker_audits_stale_unrelated_history_as_ineligible(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root, status="blocked", pending=["preserve exact queue"])
+            initial = Pane("cfg:2.0", "%2", "@2", "bun", root, 4242)
+            replacement = replace(initial, pane_pid=5252)
+            rotated = False
+
+            def resolve(_target: str) -> Pane:
+                return replacement if rotated else initial
+
+            def respawn(_pane: Pane, _command: str) -> None:
+                nonlocal rotated
+                rotated = True
+
+            def stale_only(_pane: Pane, _lines: int, _wait_s: float, _old: str, evidence: dict[str, str]) -> str:
+                evidence.update({"retained-session-id": "119f670b-6a2f-7463-b9be-9aa6ff0cec43", "response-sha256": hashlib.sha256(b"no session row").hexdigest(), "response-session-id": ""})
+                return ""
+
+            sessions = iter(((self.SESSION_ID, ""), ("", "no session row")))
+            with (
+                patch("omo_manager.omo_codex_start.resolve_pane", side_effect=resolve),
+                patch("omo_manager.omo_codex_start.inspect", return_value=Report("running", ["working"])),
+                patch("omo_manager.omo_codex_start.query_status_session_id", side_effect=lambda *_args: next(sessions)),
+                patch("omo_manager.omo_codex_start.query_exact_status_session_id", side_effect=stale_only),
+                patch("omo_manager.omo_codex_start.prompt_text", return_value="worker-only prompt\n"),
+                patch("omo_manager.omo_codex_start.respawn_codex", side_effect=respawn),
+                patch("omo_manager.omo_codex_start.wait_started", return_value="running"),
+                patch("omo_manager.omo_codex_start.send_prompt") as deliver,
+                self.assertRaisesRegex(StartError, "did not expose"),
+            ):
+                start(self.rotation_args(root))
+
+            deliver.assert_not_called()
+            audit = (root / "rotation.audit").read_text(encoding="utf-8")
+            self.assertIn("failure-kind: post-respawn-stale-unrelated-history\n", audit)
+            self.assertIn(f"captured-response-sha256: {hashlib.sha256(b'no session row').hexdigest()}\n", audit)
+            with self.assertRaises(OSError):
+                os.getxattr(root / "rotation.audit", "user.omo_rotation_reconciliation_eligible_sha256")
 
     def test_reconcile_rotation_audit_parser_requires_all_assertions_and_is_mutually_exclusive(self) -> None:
         common = [
