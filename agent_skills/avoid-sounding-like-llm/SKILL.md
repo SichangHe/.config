@@ -18,13 +18,14 @@ description: Write prose so they do not sound like LLM slop. Use when revising t
     - Focus on what the thing is,
         omit what it is not unless the audience is provably already confused
         with the thing it is not.
-- Speak plainly
-    - Only use AI vocabulary where they absolutely fit.
-        Crucial, delve, enduring, fostering, garner, interplay, intricate,
-        landscape, pivotal, showcase, tapestry, testament, underscore, vibrant,
-        bridge, gate, lane, ledger, forbid.
+- Speak plain English
+    - Only use AI vocabulary where they absolutely fit: crucial, delve,
+        enduring, fostering, garner, interplay, intricate, landscape, pivotal,
+        showcase, tapestry, testament, underscore, vibrant, bridge, gate, lane,
+        stream, ledger, forbid, safety, custody.
     - Prefer repeating a simple word over cycling more complex synonyms.
     - Prefer periods or commas over em dashes.
+        Em dashes must not be surrounded by spaces.
     - Reserve bold and italics for actual important emphasis.
 - Use more I we you as opposed to keep using third person.
 - Strongly prefer plain, ordinary sentences and paragraphs.
@@ -49,7 +50,7 @@ description: Write prose so they do not sound like LLM slop. Use when revising t
 
 Examples:
 
-Bad: Keep the current primary plan. Better: or I intend to...
+Bad: Keep the current primary plan. Better: I intend to...
 
 Bad: Treat this as the framing issue. Better: I think this is a framing issue.
 

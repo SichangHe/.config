@@ -1,4 +1,4 @@
 interface:
   display_name: "Avoid Sounding Like LLM"
-  short_description: "Use when revising text for human readers"
+  short_description: "Use whenever writing for human readers"
   default_prompt: "Use $avoid-sounding-like-llm to revise this text so it sounds specific and natural."
