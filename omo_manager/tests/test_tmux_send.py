@@ -1548,28 +1548,53 @@ class TmuxSendTests(unittest.TestCase):
         with patch("omo_manager.omo_tmux_send.tail", return_value=lines):
             verify_submit("cfg:1.0", "Read the dispatch prompt from /tmp/x and follow it exactly.\n", options())
 
-    def test_verify_submit_retries_enter_for_collapsed_paste_until_prompt_clears(self) -> None:
-        tails = iter(
-            [
-                [
-                    "• Working (19m 47s • esc to interrupt)",
-                    "",
-                    "› [Pasted Content 2048 chars]",
-                    "  tab to queue message                                                                                    28% context left",
-                ],
-                ["• Working", "", "› Implement {feature}", "  gpt-5.5"],
-            ]
-        )
+    def test_verify_submit_accepts_queued_collapsed_paste_without_another_enter(self) -> None:
+        lines = [
+            "• Working (19m 47s • esc to interrupt)",
+            "",
+            "› [Pasted Content 2048 chars]",
+            "  tab to queue message                                                                                    28% context left",
+        ]
         calls: list[list[str]] = []
 
         def fake_run(command: list[str], **_: object) -> subprocess.CompletedProcess[str]:
             calls.append(command)
             return subprocess.CompletedProcess(command, 0)
 
-        with patch("omo_manager.omo_tmux_send.tail", side_effect=lambda *_: next(tails)), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run), patch("omo_manager.omo_tmux_send.time.sleep"):
+        with patch("omo_manager.omo_tmux_send.tail", return_value=lines), patch("omo_manager.omo_tmux_send.subprocess.run", side_effect=fake_run):
             verify_submit("cfg:1.0", "Read the dispatch prompt from /tmp/x and follow it exactly.\n", options())
 
-        self.assertEqual([["tmux", "send-keys", "-t", "cfg:1.0", "Enter"]], calls)
+        self.assertEqual([], calls)
+
+    def test_run_tmux_submits_busy_codex_queue_once_when_card_remains_visible(self) -> None:
+        queued_cards: list[str] = []
+
+        def fake_enter(target: str) -> None:
+            self.assertEqual("cfg:1.0", target)
+            queued_cards.append("› queued once")
+
+        def queued_screen(*_: object) -> list[str]:
+            return [
+                "• Working (2m 26s • esc to interrupt)",
+                "",
+                *queued_cards,
+                "  tab to queue message                                        30% context left",
+            ]
+
+        with patch("omo_manager.omo_tmux_send.agent_message_source", return_value="helper"), patch(
+            "omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None
+        ), patch("omo_manager.omo_tmux_send.clear_existing_input_before_send", return_value=""), patch(
+            "omo_manager.omo_tmux_send.require_no_existing_input"
+        ), patch("omo_manager.omo_tmux_send.revalidate_error_transition", return_value=["• Working"]), patch(
+            "omo_manager.omo_tmux_send.verify_placeholder_paste", return_value=False
+        ), patch("omo_manager.omo_tmux_send.wait_paste_visible"), patch(
+            "omo_manager.omo_tmux_send.tail", side_effect=queued_screen
+        ), patch("omo_manager.omo_tmux_send.send_enter", side_effect=fake_enter), patch(
+            "omo_manager.omo_tmux_send.subprocess.run", return_value=subprocess.CompletedProcess(["tmux"], 0)
+        ):
+            run_tmux("cfg:1.0", "queued once\n", options())
+
+        self.assertEqual(["› queued once"], queued_cards)
 
     def test_verify_submit_rejects_unrelated_visible_input_even_if_running(self) -> None:
         lines = [
