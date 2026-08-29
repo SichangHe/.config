@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import hashlib
 import io
 import json
@@ -20,6 +21,7 @@ from unittest.mock import patch
 from omo_manager.omo_manager_mail_compress import (
     FULL_FETCH,
     FULL_BATCH_FETCH,
+    FINAL_GATE_FETCH,
     GMAIL_METADATA_FETCH,
     GMAIL_METADATA_BATCH_FETCH,
     HEADER_BATCH_FETCH,
@@ -53,10 +55,12 @@ from omo_manager.omo_manager_mail_compress import (
     cmd_trash_explicit,
     cmd_trash_superseded,
     direct_context_intact,
+    direct_contexts_intact,
     cmd_verify_run,
     connect_mailbox,
     ensure_empty_private_dir,
     export_receipt_path,
+    final_inbox_bindings_intact,
     export_failure_diagnostics,
     export_body,
     export_batches,
@@ -65,6 +69,7 @@ from omo_manager.omo_manager_mail_compress import (
     fetch_header_records,
     fetch_direct_thread_contexts,
     fetch_full_records,
+    fetch_final_gate_records,
     fetch_imap_thread_contexts,
     discover_gmail_thread_member_uids,
     gmail_thrid_or_query,
@@ -77,6 +82,7 @@ from omo_manager.omo_manager_mail_compress import (
     mailbox_exists,
     parse_explicit_context,
     parse_explicit_source,
+    parse_retained_replacement,
     parse_route_resolutions,
     require_source_1140_direct_removal,
     manager_candidate_uids,
@@ -86,6 +92,7 @@ from omo_manager.omo_manager_mail_compress import (
     record_from_msg,
     record_matches_reconciliation_location,
     replacement_exists,
+    retained_replacements_intact,
     special_use_mailboxes,
     frozen_thread_context,
     thread_context_digest,
@@ -99,6 +106,10 @@ from omo_manager.omo_manager_mail_compress import (
     write_private,
 )
 from omo_manager.omo_email_subject import subject_tmux_target
+
+TEST_RETAINED_BODY = "x"
+TEST_RETAINED_REPLACEMENT = f"18692:999:300:{'d' * 64}:1:{hashlib.sha256(TEST_RETAINED_BODY.encode()).hexdigest()}"
+TEST_RETAINED_REPLACEMENT_998 = f"18693:998:301:{'e' * 64}:1:{hashlib.sha256(TEST_RETAINED_BODY.encode()).hexdigest()}"
 
 
 class FakeClient:
@@ -3040,8 +3051,32 @@ with tempfile.TemporaryDirectory() as tmp:
         self.assertIn("--context GMAIL-MSGID:GMAIL-THRID:RAW-SHA256", result.stdout)
         self.assertIn("--route-resolution TASK-ID=SESSION:WINDOW[.PANE]", result.stdout)
         self.assertIn("--replacement-not-required", result.stdout)
+        self.assertIn("--allow-additive-final-context", result.stdout)
+        self.assertIn("--retained-replacement UID:GMAIL-MSGID:GMAIL-THRID:RAW-SHA256:BODY-BYTES:BODY-SHA256", result.stdout)
+        self.assertIn("Required reviewed retained Inbox binding", result.stdout)
+        self.assertIn("rejects additions by default", result.stdout)
+        self.assertIn("sequential, non-atomic final read gate", result.stdout)
+        self.assertIn("final_gate_atomic=0", result.stdout)
         self.assertNotIn("--source-dir", result.stdout)
         self.assertNotIn("--uid-file", result.stdout)
+
+    def test_trash_explicit_direct_caller_requires_retained_binding(self) -> None:
+        digest = "a" * 64
+        args = argparse.Namespace(
+            yes=True,
+            source=[f"7:100:200:{digest}"],
+            context=[f"100:200:{digest}"],
+            replacement_id=["<replacement@example.test>"],
+            task_id=["task-a"],
+            preparer="owner-a",
+            reviewer="reviewer-b",
+            task_source=["1:100"],
+            route_resolution=[],
+            source_uidvalidity="1",
+        )
+        with patch("omo_manager.omo_manager_mail_compress.open_mailbox") as open_mailbox_mock:
+            self.assertEqual(2, cmd_trash_explicit(args))
+        open_mailbox_mock.assert_not_called()
 
     def test_trash_explicit_replacement_free_requires_source_1140_before_mailbox(self) -> None:
         digest = "a" * 64
@@ -3255,6 +3290,7 @@ with tempfile.TemporaryDirectory() as tmp:
                 "source": [f"7:100:200:{digest}"],
                 "context": [f"100:200:{digest}"],
                 "replacement_id": "<replacement@example.test>",
+                "retained_replacement": [TEST_RETAINED_REPLACEMENT],
                 "task_id": "task-a",
                 "preparer": "owner",
                 "reviewer": "owner ",
@@ -3274,6 +3310,7 @@ with tempfile.TemporaryDirectory() as tmp:
                 "source": [f"7:100:200:{digest}"],
                 "context": [f"100:200:{digest}"],
                 "replacement_id": "<replacement@example.test>",
+                "retained_replacement": [TEST_RETAINED_REPLACEMENT],
                 "task_id": "task-a",
                 "preparer": "same",
                 "reviewer": "same",
@@ -3292,6 +3329,7 @@ with tempfile.TemporaryDirectory() as tmp:
                 "source": ["7:100:200:bad"],
                 "context": [],
                 "replacement_id": "<replacement@example.test>",
+                "retained_replacement": [TEST_RETAINED_REPLACEMENT],
                 "task_id": "task-a",
                 "preparer": "owner-a",
                 "reviewer": "reviewer-b",
@@ -3313,6 +3351,7 @@ with tempfile.TemporaryDirectory() as tmp:
                 "source": [f"task-b:7:100:200:{digest}"],
                 "context": [f"7:100:200:{digest}"],
                 "replacement_id": "<replacement@example.test>",
+                "retained_replacement": [TEST_RETAINED_REPLACEMENT],
                 "task_id": "task-a",
                 "preparer": "owner-a",
                 "reviewer": "reviewer-b",
@@ -3339,6 +3378,415 @@ with tempfile.TemporaryDirectory() as tmp:
             changed = MailRecord("7", "", "", "", "", "msg-a", gmail_msgid="100", gmail_thrid="200", raw_sha256="c" * 64)
             with patch("omo_manager.omo_manager_mail_compress.fetch_records", side_effect=[[changed, later], []]):
                 self.assertFalse(direct_context_intact(client, "[Gmail]/All Mail", [context], allow_additive=True))
+
+    def test_batched_final_context_rejects_arrival_between_trash_and_all_reads(self) -> None:
+        source = MailRecord("7", "", "", "", "", "source", gmail_msgid="100", gmail_thrid="200", raw_sha256="a" * 64)
+        later = replace(source, uid="8", gmail_msgid="101", raw_sha256="b" * 64)
+        events: list[str] = []
+
+        def inject_arrival(name: str) -> None:
+            events.append(name)
+
+        def records_after_event(_client: FakeClient, _uids: list[str]) -> list[MailRecord]:
+            return [source, later] if "contexts-trash" in events else []
+
+        with (
+            patch("omo_manager.omo_manager_mail_compress.select_mailbox"),
+            patch("omo_manager.omo_manager_mail_compress.gmail_thread_uids_union", side_effect=[["70"], ["7", "8"]]),
+            patch("omo_manager.omo_manager_mail_compress.fetch_full_records", side_effect=records_after_event),
+            patch("omo_manager.omo_manager_mail_compress.final_gate_event", side_effect=inject_arrival),
+        ):
+            self.assertFalse(
+                direct_contexts_intact(
+                    FakeClient({}),
+                    "[Gmail]/All Mail",
+                    {"200": [parse_explicit_context(f"100:200:{'a' * 64}")]},
+                    allow_additive=False,
+                )
+            )
+        self.assertEqual(["contexts-trash", "contexts-all"], events)
+
+    def test_batched_final_context_rejects_arrival_after_earlier_thread_baseline(self) -> None:
+        first = MailRecord("7", "", "", "", "", "first", gmail_msgid="100", gmail_thrid="200", raw_sha256="a" * 64)
+        second = MailRecord("8", "", "", "", "", "second", gmail_msgid="101", gmail_thrid="201", raw_sha256="b" * 64)
+        later = replace(first, uid="9", gmail_msgid="102", raw_sha256="c" * 64)
+        expected = {
+            "200": [parse_explicit_context(f"100:200:{'a' * 64}")],
+            "201": [parse_explicit_context(f"101:201:{'b' * 64}")],
+        }
+        events: list[str] = []
+
+        def records_after_earlier_observation(_client: FakeClient, _uids: list[str]) -> list[MailRecord]:
+            return [first, second, later] if "contexts-trash" in events else []
+
+        with (
+            patch("omo_manager.omo_manager_mail_compress.select_mailbox"),
+            patch("omo_manager.omo_manager_mail_compress.gmail_thread_uids_union", side_effect=[[], ["7", "8", "9"]]),
+            patch("omo_manager.omo_manager_mail_compress.fetch_full_records", side_effect=records_after_earlier_observation),
+            patch("omo_manager.omo_manager_mail_compress.final_gate_event", side_effect=events.append),
+        ):
+            self.assertFalse(direct_contexts_intact(FakeClient({}), "[Gmail]/All Mail", expected, allow_additive=False))
+
+    def test_final_inbox_binding_rejects_source_archive_and_retained_drift(self) -> None:
+        source_binding = parse_explicit_source(f"7:100:200:{'a' * 64}")
+        retained_body = "retained\n"
+        retained_binding = parse_retained_replacement(
+            f"8:300:400:{'b' * 64}:{len(retained_body.encode())}:{hashlib.sha256(retained_body.encode()).hexdigest()}"
+        )
+        source = MailRecord(
+            "7", "", "Agent <agent@example.test>", "Human <human@example.test>", "source", "source", "", "100", "200", raw_sha256="a" * 64
+        )
+        retained = MailRecord("8", "", "Agent", "Human", "retained", "retained", retained_body, "300", "400", raw_sha256="b" * 64)
+        client = FakeClient({})
+        with (
+            patch("omo_manager.omo_manager_mail_compress.select_mailbox"),
+            patch("omo_manager.omo_manager_mail_compress.selected_uidvalidity", return_value="1"),
+            patch("omo_manager.omo_manager_mail_compress.fetch_final_gate_records", return_value=[retained]) as fetch_mock,
+        ):
+            self.assertFalse(
+                final_inbox_bindings_intact(
+                    client, "1", [source_binding], [retained_binding], "agent@example.test", "human@example.test"
+                )
+            )
+        fetch_mock.assert_called_once()
+        retained_drifts = (
+            replace(retained, gmail_msgid="301"),
+            replace(retained, gmail_thrid="401"),
+            replace(retained, raw_sha256="c" * 64),
+            replace(retained, body=f"{retained_body}x"),
+            replace(retained, body=retained_body.upper()),
+        )
+        for changed in retained_drifts:
+            with (
+                self.subTest(changed=changed),
+                patch("omo_manager.omo_manager_mail_compress.select_mailbox"),
+                patch("omo_manager.omo_manager_mail_compress.selected_uidvalidity", return_value="1"),
+                patch("omo_manager.omo_manager_mail_compress.fetch_final_gate_records", return_value=[source, changed]),
+            ):
+                self.assertFalse(
+                    final_inbox_bindings_intact(
+                        client, "1", [source_binding], [retained_binding], "agent@example.test", "human@example.test"
+                    )
+                )
+
+    def test_final_gate_fetch_combines_full_content_and_gmail_identity(self) -> None:
+        raw = (
+            b"From: Agent <agent@example.test>\r\n"
+            b"To: Human <human@example.test>\r\n"
+            b"Subject: retained\r\n"
+            b"Message-ID: <retained@example.test>\r\n\r\nbody\r\n"
+        )
+        client = FakeClient(
+            {
+                ("fetch", "7", FINAL_GATE_FETCH): (
+                    "OK",
+                    [
+                        (b"1 (UID 7 FLAGS () X-GM-MSGID 300 X-GM-THRID 400 X-GM-LABELS (\\Inbox) BODY[] {120}", raw),
+                        b")",
+                    ],
+                )
+            }
+        )
+        records = fetch_final_gate_records(client, ["7"])
+        self.assertEqual(1, len(records))
+        self.assertEqual(
+            ("7", "300", "400", hashlib.sha256(raw).hexdigest()),
+            (records[0].uid, records[0].gmail_msgid, records[0].gmail_thrid, records[0].raw_sha256),
+        )
+
+    def test_final_gate_fetch_associates_metadata_trailer_after_literal(self) -> None:
+        raw = (
+            b"From: Agent <agent@example.test>\r\n"
+            b"To: Human <human@example.test>\r\n"
+            b"Subject: retained\r\n"
+            b"Message-ID: <retained@example.test>\r\n\r\nbody\r\n"
+        )
+        client = FakeClient(
+            {
+                ("fetch", "7", FINAL_GATE_FETCH): (
+                    "OK",
+                    [
+                        (b"1 (UID 7 BODY[] {120}", raw),
+                        b" FLAGS () X-GM-MSGID 300 X-GM-THRID 400 X-GM-LABELS (\\Inbox))",
+                    ],
+                )
+            }
+        )
+        records = fetch_final_gate_records(client, ["7"])
+        self.assertEqual(
+            ("7", "300", "400", hashlib.sha256(raw).hexdigest()),
+            (records[0].uid, records[0].gmail_msgid, records[0].gmail_thrid, records[0].raw_sha256),
+        )
+
+    def test_final_gate_fetch_rejects_malformed_duplicate_ambiguous_and_mismatched_records(self) -> None:
+        raw = b"From: Agent <agent@example.test>\r\nTo: Human <human@example.test>\r\n\r\nbody\r\n"
+        responses = (
+            [(b"1 (UID 7 BODY[] {80}", raw), b")"],
+            [
+                (b"1 (UID 7 X-GM-MSGID 300 X-GM-THRID 400 BODY[] {80}", raw),
+                b")",
+                (b"2 (UID 7 X-GM-MSGID 300 X-GM-THRID 400 BODY[] {80}", raw),
+                b")",
+            ],
+            [(b"1 (UID 7 UID 8 X-GM-MSGID 300 X-GM-THRID 400 BODY[] {80}", raw), b")"],
+            [(b"1 (UID 8 X-GM-MSGID 300 X-GM-THRID 400 BODY[] {80}", raw), b")"],
+        )
+        for response in responses:
+            with self.subTest(response=response):
+                client = FakeClient({("fetch", "7", FINAL_GATE_FETCH): ("OK", response)})
+                with self.assertRaises(RuntimeError):
+                    fetch_final_gate_records(client, ["7"])
+
+    def test_retained_replacement_contract_accepts_guest_and_teamtype_bindings(self) -> None:
+        bindings = (
+            (
+                "18692:1874858195211945940:1874832269607972216:"
+                "796701fadec87d3e2b2399a6f50a49d98274259d63a2b73b11e437082742829f:3708:"
+                "d1ecf9c36d114f29b7ea837d967f101cac2838c121314318b9a1bd0effa7c897",
+                ("18692", "1874858195211945940", "1874832269607972216", 3708),
+            ),
+            (
+                "18693:1874860920982136423:1874844935645274852:"
+                "753ecf258f29155a4deb851076cc5f67085c921a4237af89f3a8038c83e21969:7627:"
+                "c921eb8b19440fe2a473498db2621976d887346ecf0ba8448e028cbc9ba0722a",
+                ("18693", "1874860920982136423", "1874844935645274852", 7627),
+            ),
+        )
+        for value, expected in bindings:
+            with self.subTest(uid=expected[0]):
+                binding = parse_retained_replacement(value)
+                self.assertEqual(expected, (binding.uid, binding.gmail_msgid, binding.gmail_thrid, binding.body_bytes))
+
+    def test_retained_replacement_gate_rejects_every_exact_binding_drift(self) -> None:
+        body = "reviewed replacement\n"
+        binding = parse_retained_replacement(
+            f"18692:300:400:{'a' * 64}:{len(body.encode())}:{hashlib.sha256(body.encode()).hexdigest()}"
+        )
+        exact = MailRecord(
+            binding.uid,
+            "",
+            "Agent",
+            "Human",
+            "replacement",
+            "msg",
+            body,
+            binding.gmail_msgid,
+            binding.gmail_thrid,
+            raw_sha256=binding.raw_sha256,
+        )
+        drifts = {
+            "uid-absence": ([], [exact], binding),
+            "gmail-message": ([binding.uid], [replace(exact, gmail_msgid="301")], binding),
+            "gmail-thread": ([binding.uid], [replace(exact, gmail_thrid="401")], binding),
+            "raw-digest": ([binding.uid], [replace(exact, raw_sha256="b" * 64)], binding),
+            "body-size": ([binding.uid], [exact], replace(binding, body_bytes=binding.body_bytes + 1)),
+            "body-digest": ([binding.uid], [exact], replace(binding, body_sha256="b" * 64)),
+        }
+        client = FakeClient({})
+        with (
+            patch("omo_manager.omo_manager_mail_compress.inbox_subset", return_value=[binding.uid]),
+            patch("omo_manager.omo_manager_mail_compress.fetch_records", return_value=[exact]),
+        ):
+            self.assertTrue(retained_replacements_intact(client, [binding]))
+        for name, (uids, records, changed_binding) in drifts.items():
+            with (
+                self.subTest(name=name),
+                patch("omo_manager.omo_manager_mail_compress.inbox_subset", return_value=uids),
+                patch("omo_manager.omo_manager_mail_compress.fetch_records", return_value=records),
+            ):
+                self.assertFalse(retained_replacements_intact(client, [changed_binding]))
+
+    def test_trash_explicit_retained_replacement_gate_succeeds_strictly(self) -> None:
+        source = MailRecord(
+            "7",
+            "",
+            "Agent <agent@example.test>",
+            "Human <human@example.test>",
+            "[worker:0] source",
+            "source",
+            gmail_msgid="100",
+            gmail_thrid="200",
+            raw_sha256="a" * 64,
+        )
+        body = "reviewed replacement\n"
+        retained_value = f"18692:300:400:{'b' * 64}:{len(body.encode())}:{hashlib.sha256(body.encode()).hexdigest()}"
+        retained = MailRecord(
+            "18692",
+            "",
+            "Agent",
+            "Human",
+            "[worker:0] replacement",
+            "retained",
+            body,
+            "300",
+            "400",
+            raw_sha256="b" * 64,
+        )
+        trashed = replace(source, uid="70")
+        args = argparse.Namespace(
+            yes=True,
+            source=[f"7:100:200:{'a' * 64}"],
+            context=[f"100:200:{'a' * 64}"],
+            replacement_id=["<replacement@example.test>"],
+            retained_replacement=[retained_value],
+            task_id=["task-a"],
+            preparer="owner-a",
+            reviewer="reviewer-b",
+            task_source=["1:100"],
+            route_resolution=[],
+            source_uidvalidity="1",
+        )
+        client = FakeClient({})
+        final_context_client = FakeClient({})
+
+        def retained_subset(_client: FakeClient, uids: list[str]) -> list[str]:
+            return list(uids)
+
+        def context_gate(*_args: object, observed: object = None, **_kwargs: object) -> bool:
+            if callable(observed):
+                observed("contexts-trash")
+                observed("contexts-all")
+            return True
+
+        def inbox_gate(*_args: object, observed: object = None, **_kwargs: object) -> bool:
+            assert callable(observed)
+            observed("inbox-bindings")
+            return True
+
+        with (
+            patch("omo_manager.omo_manager_mail_compress.open_mailbox", side_effect=[(client, {}), (final_context_client, {})]),
+            patch("omo_manager.omo_manager_mail_compress.mail_boundary", return_value=("agent@example.test", "human@example.test")),
+            patch("omo_manager.omo_manager_mail_compress.selected_uidvalidity", return_value="1"),
+            patch("omo_manager.omo_manager_mail_compress.mailbox_exists", return_value=True),
+            patch(
+                "omo_manager.omo_manager_mail_compress.special_use_mailboxes",
+                return_value={r"\All": "[Gmail]/All Mail", r"\Sent": "[Gmail]/Sent Mail"},
+            ),
+            patch("omo_manager.omo_manager_mail_compress.observe_explicit_sources", side_effect=[([source], []), ([source], []), ([], [trashed])]),
+            patch("omo_manager.omo_manager_mail_compress.replacement_exists", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.replacement_gmail_msgid", return_value="300"),
+            patch("omo_manager.omo_manager_mail_compress.replacement_subject", return_value="[worker:0] replacement"),
+            patch("omo_manager.omo_manager_mail_compress.fetch_direct_thread_contexts", return_value={"200": [source]}),
+            patch("omo_manager.omo_manager_mail_compress.direct_context_intact", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.direct_contexts_intact", side_effect=context_gate),
+            patch("omo_manager.omo_manager_mail_compress.final_inbox_bindings_intact", side_effect=inbox_gate),
+            patch("omo_manager.omo_manager_mail_compress.retained_replacements_intact", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.select_mailbox"),
+            patch("omo_manager.omo_manager_mail_compress.inbox_subset", side_effect=retained_subset),
+            patch("omo_manager.omo_manager_mail_compress.fetch_records", return_value=[retained]),
+            patch("omo_manager.omo_manager_mail_compress.imap_uid", return_value=("OK", [b""])) as move_mock,
+            redirect_stdout(io.StringIO()) as output,
+        ):
+            self.assertEqual(0, cmd_trash_explicit(args))
+        self.assertEqual(1, move_mock.call_count)
+        self.assertIn("retained_replacements=1", output.getvalue())
+        self.assertIn("final_gate_passed=1", output.getvalue())
+        self.assertIn("final_gate_observations=boundary>uidvalidity>special-use>contexts-trash>contexts-all>inbox-bindings", output.getvalue())
+        self.assertIn("post_move_reconciled=1", output.getvalue())
+
+    def test_trash_explicit_retained_replacement_drift_fails_before_move(self) -> None:
+        source = MailRecord(
+            "7",
+            "",
+            "Agent <agent@example.test>",
+            "Human <human@example.test>",
+            "[worker:0] source",
+            "source",
+            gmail_msgid="100",
+            gmail_thrid="200",
+            raw_sha256="a" * 64,
+        )
+        body = "reviewed replacement\n"
+        body_sha256 = hashlib.sha256(body.encode()).hexdigest()
+        retained_value = f"18692:300:400:{'b' * 64}:{len(body.encode())}:{body_sha256}"
+        exact = MailRecord(
+            "18692",
+            "",
+            "Agent",
+            "Human",
+            "[worker:0] replacement",
+            "retained",
+            body,
+            "300",
+            "400",
+            raw_sha256="b" * 64,
+        )
+        cases = {
+            "source-archive": (exact, False, True, None),
+            "uid-absence": (exact, True, False, None),
+            "uidvalidity": (exact, False, False, ["1", "1", "1", "2"]),
+            "gmail-message": (replace(exact, gmail_msgid="301"), False, False, None),
+            "gmail-thread": (replace(exact, gmail_thrid="401"), False, False, None),
+            "raw-digest": (replace(exact, raw_sha256="c" * 64), False, False, None),
+            "body-size": (replace(exact, body=f"{body}x"), False, False, None),
+            "body-digest": (replace(exact, body=body.upper()), False, False, None),
+        }
+        for name, (retained, absent, archived, uidvalidities) in cases.items():
+            with self.subTest(name=name):
+                args = argparse.Namespace(
+                    yes=True,
+                    source=[f"7:100:200:{'a' * 64}"],
+                    context=[f"100:200:{'a' * 64}"],
+                    replacement_id=["<replacement@example.test>"],
+                    retained_replacement=[retained_value],
+                    task_id=["task-a"],
+                    preparer="owner-a",
+                    reviewer="reviewer-b",
+                    task_source=["1:100"],
+                    route_resolution=[],
+                    source_uidvalidity="1",
+                )
+                client = FakeClient({})
+                final_context_client = FakeClient({})
+                gate_events: list[str] = []
+
+                def retained_subset(_client: FakeClient, uids: list[str]) -> list[str]:
+                    if uids == ["7"]:
+                        return list(uids)
+                    return [uid for uid in uids if not (absent and uid == "18692") and not (archived and uid == "7")]
+
+                def final_records(_client: FakeClient, _uids: list[str]) -> list[MailRecord]:
+                    return [record for record in (source, retained) if not (absent and record.uid == "18692") and not (archived and record.uid == "7")]
+
+                def context_gate(*_args: object, observed: object = None, **_kwargs: object) -> bool:
+                    assert callable(observed)
+                    observed("contexts-trash")
+                    observed("contexts-all")
+                    return True
+
+                with (
+                    patch("omo_manager.omo_manager_mail_compress.open_mailbox", side_effect=[(client, {}), (final_context_client, {})]),
+                    patch("omo_manager.omo_manager_mail_compress.mail_boundary", return_value=("agent@example.test", "human@example.test")),
+                    patch(
+                        "omo_manager.omo_manager_mail_compress.selected_uidvalidity",
+                        side_effect=uidvalidities if uidvalidities is not None else None,
+                        return_value="1",
+                    ),
+                    patch("omo_manager.omo_manager_mail_compress.mailbox_exists", return_value=True),
+                    patch(
+                        "omo_manager.omo_manager_mail_compress.special_use_mailboxes",
+                        return_value={r"\All": "[Gmail]/All Mail", r"\Sent": "[Gmail]/Sent Mail"},
+                    ),
+                    patch("omo_manager.omo_manager_mail_compress.observe_explicit_sources", side_effect=[([source], []), ([source], [])]),
+                    patch("omo_manager.omo_manager_mail_compress.replacement_exists", return_value=True),
+                    patch("omo_manager.omo_manager_mail_compress.replacement_gmail_msgid", return_value="300"),
+                    patch("omo_manager.omo_manager_mail_compress.replacement_subject", return_value="[worker:0] replacement"),
+                    patch("omo_manager.omo_manager_mail_compress.fetch_direct_thread_contexts", return_value={"200": [source]}),
+                    patch("omo_manager.omo_manager_mail_compress.direct_context_intact", return_value=True),
+                    patch("omo_manager.omo_manager_mail_compress.direct_contexts_intact", side_effect=context_gate),
+                    patch("omo_manager.omo_manager_mail_compress.final_gate_event", side_effect=gate_events.append),
+                    patch("omo_manager.omo_manager_mail_compress.select_mailbox"),
+                    patch("omo_manager.omo_manager_mail_compress.inbox_subset", side_effect=retained_subset),
+                    patch("omo_manager.omo_manager_mail_compress.fetch_final_gate_records", side_effect=final_records),
+                    patch("omo_manager.omo_manager_mail_compress.imap_uid") as move_mock,
+                    redirect_stdout(io.StringIO()) as output,
+                ):
+                    self.assertEqual(1, cmd_trash_explicit(args))
+                move_mock.assert_not_called()
+                if name != "uidvalidity":
+                    self.assertIn("contexts-all", gate_events)
+                self.assertIn("final_gate_passed=0", output.getvalue())
+                self.assertIn("move_attempted=0", output.getvalue())
 
     def test_trash_explicit_rejects_missing_conflicting_or_wrong_sender_target(self) -> None:
         raw_sha256 = "a" * 64
@@ -3371,6 +3819,7 @@ with tempfile.TemporaryDirectory() as tmp:
                         "source": [f"7:100:200:{raw_sha256}"],
                         "context": context_args,
                         "replacement_id": "<replacement@example.test>",
+                "retained_replacement": [TEST_RETAINED_REPLACEMENT],
                         "task_id": "task-a",
                         "preparer": "owner-a",
                         "reviewer": "reviewer-b",
@@ -3411,25 +3860,29 @@ with tempfile.TemporaryDirectory() as tmp:
             raw_sha256=raw_sha256,
         )
         prior = MailRecord("8", "", "Agent", "Human", "[legacy:2] prior", "msg-b", gmail_msgid="101", gmail_thrid="200", raw_sha256=prior_sha256)
+        second = replace(source, uid="9", gmail_msgid="102", gmail_thrid="201", raw_sha256="c" * 64)
         args = type(
             "DirectArgs",
             (),
             {
                 "yes": True,
-                "source": [f"7:100:200:{raw_sha256}"],
-                "context": [f"100:200:{raw_sha256}", f"101:200:{prior_sha256}"],
+                "source": [f"7:100:200:{raw_sha256}", f"9:102:201:{'c' * 64}"],
+                "context": [f"100:200:{raw_sha256}", f"101:200:{prior_sha256}", f"102:201:{'c' * 64}"],
                 "replacement_id": "<replacement@example.test>",
+                "retained_replacement": [TEST_RETAINED_REPLACEMENT],
                 "task_id": "task-a",
                 "preparer": "owner-a",
                 "reviewer": "reviewer-b",
-                "task_source": ["1:100"],
+                "task_source": ["1:100", "1:102"],
                 "route_resolution": ["task-a=wl:31.0"],
                 "source_uidvalidity": "1",
             },
         )()
         client = FakeClient({})
-        trashed = replace(source, uid="70")
+        final_context_client = FakeClient({})
+        trashed = [replace(source, uid="70"), replace(second, uid="90")]
         events: list[tuple[str, ...]] = []
+        context_clients: list[FakeClient] = []
 
         def selected_uidvalidity(_client: FakeClient) -> str:
             events.append(("uidvalidity",))
@@ -3442,35 +3895,47 @@ with tempfile.TemporaryDirectory() as tmp:
             events.append(("move",))
             return "OK", [b""]
 
+        def context_intact(context_client: FakeClient, *_args: object, allow_additive: bool, **_kwargs: object) -> bool:
+            context_clients.append(context_client)
+            events.append(("context", str(allow_additive)))
+            return True
+
         with (
-            patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {})),
+            patch("omo_manager.omo_manager_mail_compress.open_mailbox", side_effect=[(client, {}), (final_context_client, {})]) as open_mock,
             patch("omo_manager.omo_manager_mail_compress.mail_boundary", return_value=("agent@example.test", "human@example.test")),
             patch("omo_manager.omo_manager_mail_compress.selected_uidvalidity", side_effect=selected_uidvalidity),
             patch("omo_manager.omo_manager_mail_compress.mailbox_exists", return_value=True),
-            patch("omo_manager.omo_manager_mail_compress.observe_explicit_sources", side_effect=[([source], []), ([source], []), ([], [trashed])]),
+            patch("omo_manager.omo_manager_mail_compress.observe_explicit_sources", side_effect=[([source, second], []), ([source, second], []), ([], trashed)]),
             patch("omo_manager.omo_manager_mail_compress.replacement_exists", side_effect=[True, True]),
             patch("omo_manager.omo_manager_mail_compress.replacement_gmail_msgid", return_value="999"),
             patch("omo_manager.omo_manager_mail_compress.replacement_subject", return_value="[wl:31] replacement"),
-            patch("omo_manager.omo_manager_mail_compress.fetch_direct_thread_contexts", return_value={"200": [source, prior]}),
+            patch("omo_manager.omo_manager_mail_compress.fetch_direct_thread_contexts", return_value={"200": [source, prior], "201": [second]}),
             patch(
                 "omo_manager.omo_manager_mail_compress.special_use_mailboxes",
                 return_value={r"\All": "[Gmail]/All Mail", r"\Sent": "[Gmail]/Sent Mail"},
             ),
-            patch("omo_manager.omo_manager_mail_compress.direct_context_intact", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.direct_context_intact", side_effect=context_intact) as context_mock,
+            patch("omo_manager.omo_manager_mail_compress.direct_contexts_intact", return_value=True) as contexts_mock,
+            patch("omo_manager.omo_manager_mail_compress.final_inbox_bindings_intact", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.retained_replacements_intact", return_value=True),
             patch("omo_manager.omo_manager_mail_compress.select_mailbox", side_effect=select_mailbox),
-            patch("omo_manager.omo_manager_mail_compress.inbox_subset", side_effect=[["7"], ["7"]]),
+            patch("omo_manager.omo_manager_mail_compress.inbox_subset", side_effect=[["7", "9"], ["7", "9"]]),
             patch("omo_manager.omo_manager_mail_compress.imap_uid", side_effect=move) as imap_uid_mock,
             patch("omo_manager.omo_manager_mail_compress.write_private_exclusive") as write_mock,
         ):
             self.assertEqual(0, cmd_trash_explicit(args))
-        self.assertIn((client, "move-explicit-sources-to-trash", "MOVE", "7", '"[Gmail]/Trash"'), [call.args for call in imap_uid_mock.call_args_list])
+        self.assertIn((client, "move-explicit-sources-to-trash", "MOVE", "7,9", '"[Gmail]/Trash"'), [call.args for call in imap_uid_mock.call_args_list])
+        self.assertEqual([False] * 2, [call.kwargs["allow_additive"] for call in context_mock.call_args_list])
+        self.assertEqual([client, client], context_clients)
+        self.assertEqual(2, contexts_mock.call_count)
+        self.assertEqual([False, True], [call.kwargs["readonly"] for call in open_mock.call_args_list])
         move_index = events.index(("move",))
         self.assertEqual([("select", "INBOX", "False"), ("uidvalidity",)], events[:2])
-        self.assertEqual([("select", "INBOX", "False"), ("uidvalidity",)], events[move_index - 2 : move_index])
+        self.assertEqual(("uidvalidity",), events[move_index - 1])
         self.assertFalse(any("EXPUNGE" in call.args for call in imap_uid_mock.call_args_list))
         write_mock.assert_not_called()
 
-    def test_trash_explicit_replacement_free_preserves_move_safeguards(self) -> None:
+    def test_trash_explicit_additive_compatibility_mode_preserves_move_safeguards(self) -> None:
         raw_sha256 = "a" * 64
         source = MailRecord(
             "7",
@@ -3483,28 +3948,38 @@ with tempfile.TemporaryDirectory() as tmp:
             gmail_thrid="200",
             raw_sha256=raw_sha256,
         )
-        args = type(
-            "DirectArgs",
-            (),
-            {
-                "yes": True,
-                "source": [f"7:100:200:{raw_sha256}"],
-                "context": [f"100:200:{raw_sha256}"],
-                "replacement_id": [],
-                "replacement_not_required": True,
-                "human_approval_file": Path("/approval"),
-                "human_approval_quote": SOURCE_1140_APPROVAL_QUOTE,
-                "independent_review_file": Path("/review"),
-                "task_id": ["task-a"],
-                "preparer": "owner-a",
-                "reviewer": "reviewer-b",
-                "task_source": ["1:100"],
-                "route_resolution": [],
-                "source_uidvalidity": "1",
-            },
-        )()
+        args = argparse.Namespace(
+            yes=True,
+            source=[f"7:100:200:{raw_sha256}"],
+            context=[f"100:200:{raw_sha256}"],
+            replacement_id=[],
+            replacement_not_required=True,
+            human_approval_file=Path("/approval"),
+            human_approval_quote=SOURCE_1140_APPROVAL_QUOTE,
+            independent_review_file=Path("/review"),
+            task_id=["task-a"],
+            preparer="owner-a",
+            reviewer="reviewer-b",
+            task_source=["1:100"],
+            route_resolution=[],
+            source_uidvalidity="1",
+            allow_additive_final_context=True,
+        )
         client = FakeClient({})
         trashed = replace(source, uid="70")
+        context_calls: list[bool] = []
+
+        def additive_arrival_gate(
+            _client: FakeClient,
+            _all_mailbox: str,
+            _records: list[object],
+            *,
+            allow_additive: bool,
+            **_kwargs: object,
+        ) -> bool:
+            context_calls.append(allow_additive)
+            return len(context_calls) == 1 or allow_additive
+
         with (
             patch("omo_manager.omo_manager_mail_compress.require_source_1140_direct_removal"),
             patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {})),
@@ -3520,13 +3995,19 @@ with tempfile.TemporaryDirectory() as tmp:
                 "omo_manager.omo_manager_mail_compress.special_use_mailboxes",
                 return_value={r"\All": "[Gmail]/All Mail", r"\Sent": "[Gmail]/Sent Mail"},
             ),
-            patch("omo_manager.omo_manager_mail_compress.direct_context_intact", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.direct_context_intact", side_effect=additive_arrival_gate),
+            patch("omo_manager.omo_manager_mail_compress.direct_contexts_intact", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.final_inbox_bindings_intact", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.retained_replacements_intact", return_value=True),
             patch("omo_manager.omo_manager_mail_compress.select_mailbox"),
             patch("omo_manager.omo_manager_mail_compress.inbox_subset", side_effect=[["7"], ["7"]]),
             patch("omo_manager.omo_manager_mail_compress.imap_uid", return_value=("OK", [b""])) as imap_uid_mock,
+            redirect_stdout(io.StringIO()) as output,
         ):
             self.assertEqual(0, cmd_trash_explicit(args))
         self.assertIn((client, "move-explicit-sources-to-trash", "MOVE", "7", '"[Gmail]/Trash"'), [call.args for call in imap_uid_mock.call_args_list])
+        self.assertEqual([False], context_calls)
+        self.assertIn("final_context=additive-compatible", output.getvalue())
         replacement_exists_mock.assert_not_called()
         replacement_gmail_mock.assert_not_called()
         replacement_subject_mock.assert_not_called()
@@ -3553,6 +4034,7 @@ with tempfile.TemporaryDirectory() as tmp:
                 "source": [f"7:100:200:{raw_sha256}"],
                 "context": [f"100:200:{raw_sha256}"],
                 "replacement_id": "<replacement@example.test>",
+                "retained_replacement": [TEST_RETAINED_REPLACEMENT],
                 "task_id": "task-a",
                 "preparer": "owner-a",
                 "reviewer": "reviewer-b",
@@ -3573,6 +4055,9 @@ with tempfile.TemporaryDirectory() as tmp:
             patch("omo_manager.omo_manager_mail_compress.replacement_subject", return_value="[worker:0] replacement"),
             patch("omo_manager.omo_manager_mail_compress.fetch_direct_thread_contexts", return_value={"200": [trashed]}),
             patch("omo_manager.omo_manager_mail_compress.direct_context_intact", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.direct_contexts_intact", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.retained_replacements_intact", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.final_inbox_bindings_intact", return_value=True),
             patch("omo_manager.omo_manager_mail_compress.select_mailbox"),
             patch("omo_manager.omo_manager_mail_compress.imap_uid") as imap_uid_mock,
         ):
@@ -3600,6 +4085,7 @@ with tempfile.TemporaryDirectory() as tmp:
                 "source": [f"7:100:200:{raw_sha256}"],
                 "context": [f"100:200:{raw_sha256}"],
                 "replacement_id": "<replacement@example.test>",
+                "retained_replacement": [TEST_RETAINED_REPLACEMENT],
                 "task_id": "task-a",
                 "preparer": "owner-a",
                 "reviewer": "reviewer-b",
@@ -3628,6 +4114,9 @@ with tempfile.TemporaryDirectory() as tmp:
             patch("omo_manager.omo_manager_mail_compress.replacement_subject", return_value="[worker:0] replacement"),
             patch("omo_manager.omo_manager_mail_compress.fetch_direct_thread_contexts", return_value={"200": [source]}),
             patch("omo_manager.omo_manager_mail_compress.direct_context_intact", side_effect=[True, True]) as context_mock,
+            patch("omo_manager.omo_manager_mail_compress.direct_contexts_intact", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.final_inbox_bindings_intact", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.retained_replacements_intact", return_value=True),
             patch("omo_manager.omo_manager_mail_compress.select_mailbox"),
             patch("omo_manager.omo_manager_mail_compress.inbox_subset", return_value=["7"]),
             patch("omo_manager.omo_manager_mail_compress.imap_uid", return_value=("OK", [b""])) as imap_uid_mock,
@@ -3638,7 +4127,7 @@ with tempfile.TemporaryDirectory() as tmp:
         self.assertIn("moved_now=0", output.getvalue())
         self.assertIn("post_move_verified=0", output.getvalue())
         self.assertIn("post_move_verification_error=gmail-message-search_message=100", output.getvalue())
-        self.assertEqual(2, context_mock.call_count)
+        self.assertEqual(1, context_mock.call_count)
         self.assertEqual(1, imap_uid_mock.call_count)
 
     def test_trash_explicit_move_timeout_returns_unknown_outcome_summary(self) -> None:
@@ -3662,6 +4151,7 @@ with tempfile.TemporaryDirectory() as tmp:
                 "source": [f"7:100:200:{raw_sha256}"],
                 "context": [f"100:200:{raw_sha256}"],
                 "replacement_id": "<replacement@example.test>",
+                "retained_replacement": [TEST_RETAINED_REPLACEMENT],
                 "task_id": "task-a",
                 "preparer": "owner-a",
                 "reviewer": "reviewer-b",
@@ -3682,7 +4172,10 @@ with tempfile.TemporaryDirectory() as tmp:
             patch("omo_manager.omo_manager_mail_compress.replacement_gmail_msgid", return_value="999"),
             patch("omo_manager.omo_manager_mail_compress.replacement_subject", return_value="[worker:0] replacement"),
             patch("omo_manager.omo_manager_mail_compress.fetch_direct_thread_contexts", return_value={"200": [source]}),
-            patch("omo_manager.omo_manager_mail_compress.direct_context_intact", side_effect=[True, True]),
+            patch("omo_manager.omo_manager_mail_compress.direct_context_intact", side_effect=[True, True, True]),
+            patch("omo_manager.omo_manager_mail_compress.direct_contexts_intact", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.final_inbox_bindings_intact", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.retained_replacements_intact", return_value=True),
             patch("omo_manager.omo_manager_mail_compress.select_mailbox"),
             patch("omo_manager.omo_manager_mail_compress.inbox_subset", return_value=["7"]),
             patch(
@@ -3720,6 +4213,7 @@ with tempfile.TemporaryDirectory() as tmp:
                 "source": [f"7:100:200:{raw_sha256}"],
                 "context": [f"100:200:{raw_sha256}"],
                 "replacement_id": ["<replacement@example.test>"],
+                "retained_replacement": [TEST_RETAINED_REPLACEMENT],
                 "task_id": ["task-a"],
                 "preparer": "owner-a",
                 "reviewer": "reviewer-b",
@@ -3772,6 +4266,7 @@ with tempfile.TemporaryDirectory() as tmp:
                 "source": [f"7:100:200:{raw_sha256}"],
                 "context": [f"100:200:{raw_sha256}"],
                 "replacement_id": ["<replacement@example.test>"],
+                "retained_replacement": [TEST_RETAINED_REPLACEMENT],
                 "task_id": ["task-a"],
                 "preparer": "owner-a",
                 "reviewer": "reviewer-b",
@@ -3798,6 +4293,7 @@ with tempfile.TemporaryDirectory() as tmp:
             patch("omo_manager.omo_manager_mail_compress.replacement_subject", return_value="[worker:0] replacement"),
             patch("omo_manager.omo_manager_mail_compress.fetch_direct_thread_contexts", return_value={"200": [source]}),
             patch("omo_manager.omo_manager_mail_compress.direct_context_intact", side_effect=slow_context),
+            patch("omo_manager.omo_manager_mail_compress.direct_contexts_intact", return_value=True),
             patch("omo_manager.omo_manager_mail_compress.select_mailbox"),
             patch("omo_manager.omo_manager_mail_compress.imap_uid") as imap_uid_mock,
             redirect_stdout(io.StringIO()) as output,
@@ -3831,6 +4327,7 @@ with tempfile.TemporaryDirectory() as tmp:
                 "source": [f"7:100:200:{raw_sha256}"],
                 "context": [f"100:200:{raw_sha256}"],
                 "replacement_id": ["<replacement@example.test>"],
+                "retained_replacement": [TEST_RETAINED_REPLACEMENT],
                 "task_id": ["task-a"],
                 "preparer": "owner-a",
                 "reviewer": "reviewer-b",
@@ -3862,6 +4359,7 @@ with tempfile.TemporaryDirectory() as tmp:
             patch("omo_manager.omo_manager_mail_compress.replacement_subject", return_value="[worker:0] replacement"),
             patch("omo_manager.omo_manager_mail_compress.fetch_direct_thread_contexts", return_value={"200": [source]}),
             patch("omo_manager.omo_manager_mail_compress.direct_context_intact", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.direct_contexts_intact", return_value=True),
             patch("omo_manager.omo_manager_mail_compress.select_mailbox"),
             patch("omo_manager.omo_manager_mail_compress.inbox_subset", return_value=["7"]),
             patch("omo_manager.omo_manager_mail_compress.imap_uid") as imap_uid_mock,
@@ -3883,6 +4381,7 @@ with tempfile.TemporaryDirectory() as tmp:
                 "source": [f"7:100:200:{raw_sha256}"],
                 "context": [f"100:200:{raw_sha256}"],
                 "replacement_id": ["<replacement@example.test>"],
+                "retained_replacement": [TEST_RETAINED_REPLACEMENT],
                 "task_id": ["task-a"],
                 "preparer": "owner-a",
                 "reviewer": "reviewer-b",
@@ -3918,6 +4417,7 @@ with tempfile.TemporaryDirectory() as tmp:
                 "source": [f"7:100:200:{raw_sha256}"],
                 "context": [f"100:200:{raw_sha256}"],
                 "replacement_id": ["<replacement@example.test>"],
+                "retained_replacement": [TEST_RETAINED_REPLACEMENT],
                 "task_id": ["task-a"],
                 "preparer": "owner-a",
                 "reviewer": "reviewer-b",
@@ -3962,6 +4462,7 @@ with tempfile.TemporaryDirectory() as tmp:
                 "source": [f"7:100:200:{raw_sha256}"],
                 "context": [f"100:200:{raw_sha256}"],
                 "replacement_id": ["<replacement@example.test>"],
+                "retained_replacement": [TEST_RETAINED_REPLACEMENT],
                 "task_id": ["task-a"],
                 "preparer": "owner-a",
                 "reviewer": "reviewer-b",
@@ -3994,6 +4495,7 @@ with tempfile.TemporaryDirectory() as tmp:
                 "source": [f"7:100:200:{raw_sha256}"],
                 "context": [f"100:200:{raw_sha256}"],
                 "replacement_id": ["<replacement@example.test>"],
+                "retained_replacement": [TEST_RETAINED_REPLACEMENT],
                 "task_id": ["task-a"],
                 "preparer": "owner-a",
                 "reviewer": "reviewer-b",
@@ -4066,6 +4568,7 @@ with tempfile.TemporaryDirectory() as tmp:
                 "source": [f"7:100:200:{raw_sha256}"],
                 "context": [f"100:200:{raw_sha256}"],
                 "replacement_id": ["<replacement@example.test>"],
+                "retained_replacement": [TEST_RETAINED_REPLACEMENT],
                 "task_id": ["task-a"],
                 "preparer": "owner-a",
                 "reviewer": "reviewer-b",
@@ -4111,6 +4614,7 @@ with tempfile.TemporaryDirectory() as tmp:
                 "source": [f"7:100:200:{raw_sha256}"],
                 "context": [f"100:200:{raw_sha256}"],
                 "replacement_id": ["<replacement@example.test>"],
+                "retained_replacement": [TEST_RETAINED_REPLACEMENT],
                 "task_id": ["task-a"],
                 "preparer": "owner-a",
                 "reviewer": "reviewer-b",
@@ -4167,6 +4671,7 @@ with tempfile.TemporaryDirectory() as tmp:
                 "source": [f"7:100:200:{raw_sha256}"],
                 "context": [f"100:200:{raw_sha256}"],
                 "replacement_id": ["<replacement@example.test>"],
+                "retained_replacement": [TEST_RETAINED_REPLACEMENT],
                 "task_id": ["task-a"],
                 "preparer": "owner-a",
                 "reviewer": "reviewer-b",
@@ -4227,6 +4732,7 @@ with tempfile.TemporaryDirectory() as tmp:
                 "source": [f"7:100:200:{raw_sha256}"],
                 "context": [f"100:200:{raw_sha256}"],
                 "replacement_id": "<replacement@example.test>",
+                "retained_replacement": [TEST_RETAINED_REPLACEMENT],
                 "task_id": "task-a",
                 "preparer": "owner-a",
                 "reviewer": "reviewer-b",
@@ -4247,7 +4753,10 @@ with tempfile.TemporaryDirectory() as tmp:
             patch("omo_manager.omo_manager_mail_compress.replacement_gmail_msgid", return_value="999"),
             patch("omo_manager.omo_manager_mail_compress.replacement_subject", return_value="[worker:0] replacement"),
             patch("omo_manager.omo_manager_mail_compress.fetch_direct_thread_contexts", return_value={"200": [source]}),
-            patch("omo_manager.omo_manager_mail_compress.direct_context_intact", side_effect=[True, True]),
+            patch("omo_manager.omo_manager_mail_compress.direct_context_intact", side_effect=[True, True, True]),
+            patch("omo_manager.omo_manager_mail_compress.direct_contexts_intact", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.final_inbox_bindings_intact", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.retained_replacements_intact", return_value=True),
             patch("omo_manager.omo_manager_mail_compress.select_mailbox"),
             patch("omo_manager.omo_manager_mail_compress.inbox_subset", return_value=["7"]),
             patch("omo_manager.omo_manager_mail_compress.imap_uid", return_value=("NO", [b"partial move"])),
@@ -4260,6 +4769,8 @@ with tempfile.TemporaryDirectory() as tmp:
         self.assertIn("move_outcome=failed", output.getvalue())
         self.assertIn("verified_trash=1", output.getvalue())
         self.assertIn("post_move_verified=0", output.getvalue())
+        self.assertIn("post_move_reconciliation_ran=1", output.getvalue())
+        self.assertIn("post_move_reconciled=1", output.getvalue())
         self.assertIn("post_move_verification_error=move-explicit-sources-to-trash:NO", output.getvalue())
 
     def test_trash_explicit_post_move_logout_failure_returns_terminal_summary(self) -> None:
@@ -4284,6 +4795,7 @@ with tempfile.TemporaryDirectory() as tmp:
                 "source": [f"7:100:200:{raw_sha256}"],
                 "context": [f"100:200:{raw_sha256}"],
                 "replacement_id": "<replacement@example.test>",
+                "retained_replacement": [TEST_RETAINED_REPLACEMENT],
                 "task_id": "task-a",
                 "preparer": "owner-a",
                 "reviewer": "reviewer-b",
@@ -4304,7 +4816,10 @@ with tempfile.TemporaryDirectory() as tmp:
             patch("omo_manager.omo_manager_mail_compress.replacement_gmail_msgid", return_value="999"),
             patch("omo_manager.omo_manager_mail_compress.replacement_subject", return_value="[worker:0] replacement"),
             patch("omo_manager.omo_manager_mail_compress.fetch_direct_thread_contexts", return_value={"200": [source]}),
-            patch("omo_manager.omo_manager_mail_compress.direct_context_intact", side_effect=[True, True]),
+            patch("omo_manager.omo_manager_mail_compress.direct_context_intact", side_effect=[True, True, True]),
+            patch("omo_manager.omo_manager_mail_compress.direct_contexts_intact", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.final_inbox_bindings_intact", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.retained_replacements_intact", return_value=True),
             patch("omo_manager.omo_manager_mail_compress.select_mailbox"),
             patch("omo_manager.omo_manager_mail_compress.inbox_subset", return_value=["7"]),
             patch("omo_manager.omo_manager_mail_compress.imap_uid", return_value=("OK", [b""])),
@@ -4315,6 +4830,8 @@ with tempfile.TemporaryDirectory() as tmp:
         self.assertIn("moved_now=1", output.getvalue())
         self.assertIn("verified_trash=1", output.getvalue())
         self.assertIn("post_move_verified=0", output.getvalue())
+        self.assertIn("post_move_reconciliation_ran=1", output.getvalue())
+        self.assertIn("post_move_reconciled=1", output.getvalue())
         self.assertIn("post_move_verification_error=logout:RuntimeError:logout_failed", output.getvalue())
 
     def test_trash_explicit_rechecks_replacement_sender_target_at_final_gate(self) -> None:
@@ -4340,6 +4857,7 @@ with tempfile.TemporaryDirectory() as tmp:
                 "source": [f"7:100:200:{raw_sha256}"],
                 "context": [f"100:200:{raw_sha256}", f"101:200:{prior_sha256}"],
                 "replacement_id": "<replacement@example.test>",
+                "retained_replacement": [TEST_RETAINED_REPLACEMENT],
                 "task_id": "task-a",
                 "preparer": "owner-a",
                 "reviewer": "reviewer-b",
@@ -4361,6 +4879,7 @@ with tempfile.TemporaryDirectory() as tmp:
             patch("omo_manager.omo_manager_mail_compress.replacement_subject", side_effect=["[wl:31] replacement", "[other:1] replacement"]) as subject_mock,
             patch("omo_manager.omo_manager_mail_compress.fetch_direct_thread_contexts", return_value={"200": [source, prior]}),
             patch("omo_manager.omo_manager_mail_compress.direct_context_intact", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.direct_contexts_intact", return_value=True),
             patch("omo_manager.omo_manager_mail_compress.select_mailbox"),
             patch("omo_manager.omo_manager_mail_compress.inbox_subset", return_value=["7"]),
             patch("omo_manager.omo_manager_mail_compress.imap_uid") as imap_uid_mock,
@@ -4379,6 +4898,7 @@ with tempfile.TemporaryDirectory() as tmp:
                 "source": [f"7:100:200:{raw_sha256}"],
                 "context": [f"100:200:{raw_sha256}"],
                 "replacement_id": ["<replacement-a@example.test>"],
+                "retained_replacement": [TEST_RETAINED_REPLACEMENT],
                 "task_id": ["task-a", "task-b"],
                 "preparer": "owner-a",
                 "reviewer": "reviewer-b",
@@ -4413,6 +4933,7 @@ with tempfile.TemporaryDirectory() as tmp:
                 "source": [f"7:100:200:{raw_sha256}"],
                 "context": [f"100:200:{raw_sha256}", f"101:200:{prior_sha256}"],
                 "replacement_id": ["<replacement-a@example.test>", "<replacement-b@example.test>"],
+                "retained_replacement": [TEST_RETAINED_REPLACEMENT_998, TEST_RETAINED_REPLACEMENT],
                 "task_id": ["task-a", "task-b"],
                 "preparer": "owner-a",
                 "reviewer": "reviewer-b",
@@ -4445,7 +4966,7 @@ with tempfile.TemporaryDirectory() as tmp:
     def test_trash_explicit_rejects_replacement_source_overlap(self) -> None:
         raw_sha256 = "a" * 64
         source = MailRecord("7", "", "Agent <agent@example.test>", "Human <human@example.test>", "[worker:0] subject", "msg", gmail_msgid="100", gmail_thrid="200", raw_sha256=raw_sha256)
-        args = type("DirectArgs", (), {"yes": True, "source": [f"7:100:200:{raw_sha256}"], "context": [f"100:200:{raw_sha256}"], "replacement_id": "<replacement@example.test>", "task_id": "task:a", "preparer": "owner-a", "reviewer": "reviewer-b", "task_source": ["1:100"], "source_uidvalidity": "1"})()
+        args = type("DirectArgs", (), {"yes": True, "source": [f"7:100:200:{raw_sha256}"], "context": [f"100:200:{raw_sha256}"], "replacement_id": "<replacement@example.test>", "retained_replacement": [TEST_RETAINED_REPLACEMENT], "task_id": "task:a", "preparer": "owner-a", "reviewer": "reviewer-b", "task_source": ["1:100"], "source_uidvalidity": "1"})()
         client = FakeClient({})
         with (
             patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {})),
@@ -4461,13 +4982,26 @@ with tempfile.TemporaryDirectory() as tmp:
             self.assertEqual(1, cmd_trash_explicit(args))
         imap_uid_mock.assert_not_called()
 
-    def test_trash_explicit_rechecks_context_at_final_gate(self) -> None:
+    def test_trash_explicit_strict_final_gate_rejects_additive_arrival_without_move(self) -> None:
         raw_sha256 = "a" * 64
         source = MailRecord("7", "", "Agent <agent@example.test>", "Human <human@example.test>", "[worker:0] subject", "msg", gmail_msgid="100", gmail_thrid="200", raw_sha256=raw_sha256)
-        args = type("DirectArgs", (), {"yes": True, "source": [f"7:100:200:{raw_sha256}"], "context": [f"100:200:{raw_sha256}"], "replacement_id": "<replacement@example.test>", "task_id": "task-a", "preparer": "owner-a", "reviewer": "reviewer-b", "task_source": ["1:100"], "source_uidvalidity": "1"})()
+        args = argparse.Namespace(
+            yes=True,
+            source=[f"7:100:200:{raw_sha256}"],
+            context=[f"100:200:{raw_sha256}"],
+            replacement_id="<replacement@example.test>",
+            retained_replacement=[TEST_RETAINED_REPLACEMENT],
+            task_id="task-a",
+            preparer="owner-a",
+            reviewer="reviewer-b",
+            task_source=["1:100"],
+            source_uidvalidity="1",
+        )
         client = FakeClient({})
+        final_context_client = FakeClient({})
+
         with (
-            patch("omo_manager.omo_manager_mail_compress.open_mailbox", return_value=(client, {})),
+            patch("omo_manager.omo_manager_mail_compress.open_mailbox", side_effect=[(client, {}), (final_context_client, {})]),
             patch("omo_manager.omo_manager_mail_compress.mail_boundary", return_value=("agent@example.test", "human@example.test")),
             patch("omo_manager.omo_manager_mail_compress.selected_uidvalidity", return_value="1"),
             patch("omo_manager.omo_manager_mail_compress.mailbox_exists", return_value=True),
@@ -4477,13 +5011,22 @@ with tempfile.TemporaryDirectory() as tmp:
             patch("omo_manager.omo_manager_mail_compress.replacement_gmail_msgid", return_value="999"),
             patch("omo_manager.omo_manager_mail_compress.replacement_subject", return_value="[worker:0] replacement"),
             patch("omo_manager.omo_manager_mail_compress.fetch_direct_thread_contexts", return_value={"200": [source]}),
-            patch("omo_manager.omo_manager_mail_compress.direct_context_intact", side_effect=[True, False]),
+            patch("omo_manager.omo_manager_mail_compress.direct_context_intact", return_value=True),
+            patch("omo_manager.omo_manager_mail_compress.direct_contexts_intact", return_value=False),
+            patch("omo_manager.omo_manager_mail_compress.retained_replacements_intact", return_value=True),
             patch("omo_manager.omo_manager_mail_compress.select_mailbox"),
             patch("omo_manager.omo_manager_mail_compress.inbox_subset", return_value=["7"]),
             patch("omo_manager.omo_manager_mail_compress.imap_uid") as imap_uid_mock,
+            patch("omo_manager.omo_manager_mail_compress.write_private_exclusive") as write_mock,
+            redirect_stdout(io.StringIO()) as output,
         ):
             self.assertEqual(1, cmd_trash_explicit(args))
+        self.assertIn("final_context=strict", output.getvalue())
+        self.assertIn("final_gate_passed=0", output.getvalue())
+        self.assertIn("post_move_reconciled=0", output.getvalue())
+        self.assertIn("move_attempted=0", output.getvalue())
         imap_uid_mock.assert_not_called()
+        write_mock.assert_not_called()
 
     def test_trash_superseded_refuses_inline_uid_broadening(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

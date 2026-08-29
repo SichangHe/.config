@@ -17,7 +17,7 @@ import stat
 import subprocess
 import sys
 import threading
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from email import policy
 from email.message import Message
@@ -37,6 +37,7 @@ HEADER_FETCH = "(BODY.PEEK[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID X-OMO-
 HEADER_BATCH_FETCH = "(UID BODY.PEEK[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID X-OMO-AGENT-SESSION-ID)])"
 FULL_FETCH = "(BODY.PEEK[])"
 FULL_BATCH_FETCH = "(UID BODY.PEEK[])"
+FINAL_GATE_FETCH = "(UID FLAGS X-GM-MSGID X-GM-THRID X-GM-LABELS BODY.PEEK[])"
 GMAIL_METADATA_FETCH = "(FLAGS X-GM-MSGID X-GM-THRID X-GM-LABELS)"
 GMAIL_METADATA_BATCH_FETCH = "(UID FLAGS X-GM-MSGID X-GM-THRID X-GM-LABELS)"
 SUPERSESSION_HEADER_FETCH = "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID X-OMO-SUPERSEDES X-OMO-AGENT-SESSION-ID)])"
@@ -62,6 +63,10 @@ EXPORT_FULL_FETCH_ATTEMPTS = 2
 IMAP_OPERATION_TIMEOUT_S = 45.0
 TRASH_EXPLICIT_PRE_MOVE_TIMEOUT_S = 300.0
 T = TypeVar("T")
+
+
+def final_gate_event(_name: str) -> None:
+    """Deterministic test seam after each ordered final-gate observation."""
 
 
 class ImapOperationError(RuntimeError):
@@ -125,6 +130,31 @@ class ScopedSource:
 
 
 @dataclass(frozen=True)
+class RetainedReplacement:
+    uid: str
+    gmail_msgid: str
+    gmail_thrid: str
+    raw_sha256: str
+    body_bytes: int
+    body_sha256: str
+
+
+@dataclass
+class FinalGateState:
+    """Ordered, explicitly non-atomic observations made before one MOVE."""
+
+    observations: list[str] = field(default_factory=list)
+
+    def observed(self, name: str) -> None:
+        self.observations.append(name)
+        final_gate_event(name)
+
+    @property
+    def receipt(self) -> str:
+        return summary_token(">".join(self.observations)) if self.observations else "none"
+
+
+@dataclass(frozen=True)
 class ReviewedScope:
     sources: tuple[ScopedSource, ...]
     preparer: str
@@ -170,6 +200,21 @@ def parse_explicit_context(value: str) -> ScopedSource:
     if not re.fullmatch(r"[0-9a-f]{64}", raw_sha256):
         raise ValueError("explicit context raw SHA-256 must be lowercase hexadecimal")
     return ScopedSource("", "", gmail_msgid, gmail_thrid, raw_sha256)
+
+
+def parse_retained_replacement(value: str) -> RetainedReplacement:
+    """Parse one reviewed retained replacement binding."""
+    fields = value.split(":")
+    if len(fields) != 6:
+        raise ValueError("retained replacement must be UID:GMAIL-MSGID:GMAIL-THRID:RAW-SHA256:BODY-BYTES:BODY-SHA256")
+    uid, gmail_msgid, gmail_thrid, raw_sha256, body_bytes, body_sha256 = fields
+    if not uid.isdecimal() or not gmail_msgid.isdecimal() or not gmail_thrid.isdecimal() or not body_bytes.isdecimal():
+        raise ValueError("retained replacement UID, Gmail identities, and body size must be decimal")
+    if int(body_bytes) < 1:
+        raise ValueError("retained replacement body size must be positive")
+    if not re.fullmatch(r"[0-9a-f]{64}", raw_sha256) or not re.fullmatch(r"[0-9a-f]{64}", body_sha256):
+        raise ValueError("retained replacement digests must be lowercase SHA-256")
+    return RetainedReplacement(uid, gmail_msgid, gmail_thrid, raw_sha256, int(body_bytes), body_sha256)
 
 
 def load_reviewed_scope(path: Path) -> ReviewedScope:
@@ -505,7 +550,7 @@ def imap_response_text(data: list[object]) -> str:
     return " ".join(chunks)
 
 
-def imap_fetch_attributes(text: str) -> dict[str, str]:
+def imap_fetch_attributes(text: str, *, reject_duplicate_keys: frozenset[str] | None = None) -> dict[str, str]:
     """Return top-level FETCH attributes without treating nested labels as fields."""
     outer = text.find("(")
     if outer < 0:
@@ -567,7 +612,10 @@ def imap_fetch_attributes(text: str) -> dict[str, str]:
         else:
             while index < len(text) and not text[index].isspace() and text[index] != ")":
                 index += 1
-        attributes[key.upper()] = text[value_start:index]
+        normalized_key = key.upper()
+        if normalized_key in attributes and reject_duplicate_keys is not None and normalized_key in reject_duplicate_keys:
+            return {}
+        attributes[normalized_key] = text[value_start:index]
     return attributes
 
 
@@ -733,6 +781,54 @@ def fetch_full_records(client: imaplib.IMAP4_SSL, uids: list[str], n_fetch_attem
         }:
             raise
         return fetch_records(client, uids, with_body=True, with_metadata=True, n_fetch_attempts=n_fetch_attempts)
+
+
+def fetch_final_gate_records(client: imaplib.IMAP4_SSL, uids: list[str]) -> list[MailRecord]:
+    """Fetch exact full content and Gmail identity for all selected-INBOX UIDs once."""
+    if not uids:
+        return []
+    typ, data = imap_uid(client, "final-gate-inbox-fetch", "fetch", ",".join(uids), FINAL_GATE_FETCH)
+    if typ != "OK":
+        raise RuntimeError(f"IMAP final-gate fetch failed: typ={typ}")
+    records: dict[str, MailRecord] = {}
+    index = 0
+    while index < len(data):
+        item = data[index]
+        if not isinstance(item, tuple) or len(item) != 2 or not isinstance(item[0], bytes) or not isinstance(item[1], bytes):
+            raise RuntimeError("IMAP final-gate fetch returned an unassociated or malformed response")
+        response_parts = [item[0]]
+        index += 1
+        while index < len(data):
+            trailer = data[index]
+            if not isinstance(trailer, bytes):
+                break
+            response_parts.append(trailer)
+            index += 1
+        attributes = imap_fetch_attributes(
+            b" ".join(response_parts).decode("ascii", errors="strict"),
+            reject_duplicate_keys=frozenset({"UID", "FLAGS", "X-GM-MSGID", "X-GM-THRID", "X-GM-LABELS"}),
+        )
+        uid = attributes.get("UID", "")
+        gmail_msgid = attributes.get("X-GM-MSGID", "")
+        gmail_thrid = attributes.get("X-GM-THRID", "")
+        if not uid.isdecimal() or not gmail_msgid.isdecimal() or not gmail_thrid.isdecimal():
+            raise RuntimeError("IMAP final-gate fetch returned incomplete or ambiguous identity metadata")
+        if uid in records:
+            raise RuntimeError("IMAP final-gate fetch returned duplicate UID")
+        msg = BytesParser(policy=policy.default).parsebytes(item[1])
+        records[uid] = record_from_msg(
+            uid,
+            msg,
+            message_text(msg),
+            gmail_msgid,
+            gmail_thrid,
+            imap_list_value(attributes.get("FLAGS", "")),
+            imap_list_value(attributes.get("X-GM-LABELS", "")),
+            hashlib.sha256(item[1]).hexdigest(),
+        )
+    if set(records) != set(uids):
+        raise RuntimeError("IMAP final-gate fetch returned incomplete or duplicate UIDs")
+    return [records[uid] for uid in uids]
 
 
 def accepted_manager_headers(client: imaplib.IMAP4_SSL, uids: list[str], sender_email: str, recipient_email: str) -> tuple[list[MailRecord], list[str]]:
@@ -1064,22 +1160,33 @@ def abort_imap_client(client: imaplib.IMAP4_SSL) -> None:
 def trash_explicit_summary(
     task_ids: list[str],
     replacement_ids: list[str],
+    retained_replacement_count: int,
     sources: list[ScopedSource],
+    final_context_mode: str,
+    final_gate_passed: bool,
+    final_gate_observations: str,
     move_attempted: int,
     final_inbox: list[MailRecord],
     verified_inbox: list[MailRecord],
     verified_trash: list[MailRecord],
     move_outcome: str,
     post_move_verification_error: str,
+    post_move_reconciliation_ran: bool,
+    post_move_reconciled: bool,
 ) -> str:
     moved_now = len({record.gmail_msgid for record in verified_trash} & {record.gmail_msgid for record in final_inbox})
     post_move_verified = not post_move_verification_error and not verified_inbox and len(verified_trash) == len(sources)
     return (
-        f"trash_explicit: task_ids={','.join(task_ids)} replacements={len(replacement_ids)} requested={len(sources)}"
+        f"trash_explicit: task_ids={','.join(task_ids)} replacements={len(replacement_ids)}"
+        f" retained_replacements={retained_replacement_count} requested={len(sources)}"
+        f" final_context={final_context_mode} final_gate_passed={int(final_gate_passed)}"
+        f" final_gate_observations={final_gate_observations}"
         f" move_attempted={move_attempted} moved_now={moved_now} move_outcome={move_outcome}"
         f" verified_inbox={len(verified_inbox)} verified_trash={len(verified_trash)}"
         f" post_move_verified={int(post_move_verified)}"
         f" post_move_verification_error={post_move_verification_error or 'none'}"
+        f" final_gate_atomic=0 residual_arrival_race=nonzero"
+        f" post_move_reconciliation_ran={int(post_move_reconciliation_ran)} post_move_reconciled={int(post_move_reconciled)}"
         f" later_arrivals_moved=0 permanent_deleted=0 persisted_evidence=0"
     )
 
@@ -3221,22 +3328,27 @@ def direct_context_intact(
     expected_sources: list[ScopedSource],
     *,
     allow_additive: bool,
+    expected_nontrash_ids: set[str] | None = None,
 ) -> bool:
-    """Revalidate an in-memory fixed-start thread while ignoring additive arrivals."""
+    """Revalidate an in-memory fixed-start thread under the selected additive policy."""
     if not expected_sources:
         return False
     gmail_thrids = {source.gmail_thrid for source in expected_sources}
     if len(gmail_thrids) != 1:
         return False
     gmail_thrid = next(iter(gmail_thrids))
-    select_mailbox(client, all_mailbox, readonly=True)
-    current = fetch_full_records(client, gmail_thread_uids(client, gmail_thrid))
     select_mailbox(client, TRASH_MAILBOX, readonly=True)
     trash_records = fetch_full_records(client, gmail_thread_uids(client, gmail_thrid))
+    final_gate_event(f"context-trash:{gmail_thrid}")
+    select_mailbox(client, all_mailbox, readonly=True)
+    current = fetch_full_records(client, gmail_thread_uids(client, gmail_thrid))
+    final_gate_event(f"context-all:{gmail_thrid}")
     require_gmail_identities([*current, *trash_records])
     current_ids = {record.gmail_msgid for record in current}
     trash_ids = {record.gmail_msgid for record in trash_records}
     if len(current_ids) != len(current) or len(trash_ids) != len(trash_records) or current_ids & trash_ids:
+        return False
+    if expected_nontrash_ids is not None and not expected_nontrash_ids.issubset(current_ids):
         return False
     actual = {record.gmail_msgid: record for record in [*current, *trash_records]}
     expected = {source.gmail_msgid: source for source in expected_sources}
@@ -3250,6 +3362,146 @@ def direct_context_intact(
         and actual[gmail_msgid].raw_sha256 == source.raw_sha256
         for gmail_msgid, source in expected.items()
     ) and all(record.gmail_thrid == gmail_thrid for record in actual.values())
+
+
+def direct_contexts_intact(
+    client: imaplib.IMAP4_SSL,
+    all_mailbox: str,
+    expected_by_thread: dict[str, list[ScopedSource]],
+    *,
+    allow_additive: bool,
+    expected_nontrash_by_thread: dict[str, set[str]] | None = None,
+    observed: Callable[[str], None] | None = None,
+) -> bool:
+    """Revalidate all reviewed threads through one Trash read followed by one All Mail read."""
+    if not expected_by_thread:
+        return False
+    observe = observed or final_gate_event
+    thread_ids = list(expected_by_thread)
+    select_mailbox(client, TRASH_MAILBOX, readonly=True)
+    trash_records = fetch_full_records(client, gmail_thread_uids_union(client, thread_ids))
+    observe("contexts-trash")
+    select_mailbox(client, all_mailbox, readonly=True)
+    current = fetch_full_records(client, gmail_thread_uids_union(client, thread_ids))
+    observe("contexts-all")
+    require_gmail_identities([*trash_records, *current])
+    actual_records = [*trash_records, *current]
+    actual_ids = [record.gmail_msgid for record in actual_records]
+    if len(actual_ids) != len(set(actual_ids)) or any(record.gmail_thrid not in expected_by_thread for record in actual_records):
+        return False
+    actual_by_thread = {
+        thread_id: {record.gmail_msgid: record for record in actual_records if record.gmail_thrid == thread_id}
+        for thread_id in expected_by_thread
+    }
+    current_ids_by_thread = {
+        thread_id: {record.gmail_msgid for record in current if record.gmail_thrid == thread_id}
+        for thread_id in expected_by_thread
+    }
+    for thread_id, expected_sources in expected_by_thread.items():
+        expected = {source.gmail_msgid: source for source in expected_sources}
+        actual = actual_by_thread[thread_id]
+        if len(expected) != len(expected_sources) or not set(expected).issubset(actual):
+            return False
+        if not allow_additive and set(expected) != set(actual):
+            return False
+        if expected_nontrash_by_thread is not None and not expected_nontrash_by_thread.get(thread_id, set()).issubset(current_ids_by_thread[thread_id]):
+            return False
+        if any(
+            source.gmail_thrid != thread_id
+            or actual[gmail_msgid].gmail_thrid != thread_id
+            or actual[gmail_msgid].raw_sha256 != source.raw_sha256
+            for gmail_msgid, source in expected.items()
+        ):
+            return False
+    return True
+
+
+def retained_replacements_intact(
+    client: imaplib.IMAP4_SSL,
+    expected: list[RetainedReplacement],
+) -> bool:
+    """Authenticate reviewed retained replacements in the selected INBOX."""
+    if (
+        not expected
+        or len({item.uid for item in expected}) != len(expected)
+        or len({item.gmail_msgid for item in expected}) != len(expected)
+    ):
+        return False
+    expected_by_uid = {item.uid: item for item in expected}
+    if set(inbox_subset(client, list(expected_by_uid))) != set(expected_by_uid):
+        return False
+    records = fetch_records(client, list(expected_by_uid), with_body=True, with_metadata=True)
+    if (
+        len(records) != len(expected_by_uid)
+        or {record.uid for record in records} != set(expected_by_uid)
+        or {record.gmail_msgid for record in records} != {item.gmail_msgid for item in expected}
+    ):
+        return False
+    return all(
+        record.gmail_msgid == expected_by_uid[record.uid].gmail_msgid
+        and record.gmail_thrid == expected_by_uid[record.uid].gmail_thrid
+        and record.raw_sha256 == expected_by_uid[record.uid].raw_sha256
+        and record.body_bytes == expected_by_uid[record.uid].body_bytes
+        and hashlib.sha256(record.body.encode()).hexdigest() == expected_by_uid[record.uid].body_sha256
+        for record in records
+    )
+
+
+def final_inbox_bindings_intact(
+    client: imaplib.IMAP4_SSL,
+    expected_uidvalidity: str,
+    sources: list[ScopedSource],
+    retained: list[RetainedReplacement],
+    sender_email: str,
+    recipient_email: str,
+    observed: Callable[[str], None] | None = None,
+) -> bool:
+    """Authenticate source and retained Inbox bindings in the last pre-MOVE fetch."""
+    expected_uids = [item.uid for item in [*sources, *retained]]
+    if not expected_uids or len(expected_uids) != len(set(expected_uids)):
+        return False
+    select_mailbox(client, "INBOX", readonly=True)
+    if selected_uidvalidity(client) != expected_uidvalidity:
+        return False
+    records = fetch_final_gate_records(client, expected_uids)
+    if len(records) != len(expected_uids) or {record.uid for record in records} != set(expected_uids):
+        return False
+    records_by_uid = {record.uid: record for record in records}
+    sources_by_uid = {item.uid: item for item in sources}
+    retained_by_uid = {item.uid: item for item in retained}
+    sources_intact = all(
+        is_manager_record(record, sender_email, recipient_email)
+        and (
+            record.gmail_msgid,
+            record.gmail_thrid,
+            record.raw_sha256,
+        )
+        == (
+            sources_by_uid[record.uid].gmail_msgid,
+            sources_by_uid[record.uid].gmail_thrid,
+            sources_by_uid[record.uid].raw_sha256,
+        )
+        for record in (records_by_uid[uid] for uid in sources_by_uid)
+    )
+    retained_intact = all(
+        (
+            record.gmail_msgid,
+            record.gmail_thrid,
+            record.raw_sha256,
+            record.body_bytes,
+            hashlib.sha256(record.body.encode()).hexdigest(),
+        )
+        == (
+            retained_by_uid[record.uid].gmail_msgid,
+            retained_by_uid[record.uid].gmail_thrid,
+            retained_by_uid[record.uid].raw_sha256,
+            retained_by_uid[record.uid].body_bytes,
+            retained_by_uid[record.uid].body_sha256,
+        )
+        for record in (records_by_uid[uid] for uid in retained_by_uid)
+    )
+    (observed or final_gate_event)("inbox-bindings")
+    return sources_intact and retained_intact
 
 
 def observe_explicit_sources(
@@ -3297,14 +3549,23 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
     move_outcome = "not-attempted"
     move_error = ""
     post_move_verification_error = ""
+    post_move_reconciliation_ran = False
+    post_move_reconciled = False
     trash_stage = "parse-arguments"
     pre_move_failure_summarized = False
     task_ids: list[str] = []
     replacement_ids: list[str] = []
+    retained_replacements: list[RetainedReplacement] = []
     sources: list[ScopedSource] = []
+    allow_additive_final_context = bool(getattr(args, "allow_additive_final_context", False))
+    final_context_mode = "additive-compatible" if allow_additive_final_context else "strict"
+    final_gate_passed = False
+    final_gate = FinalGateState()
     final_inbox: list[MailRecord] = []
     verified_inbox: list[MailRecord] = []
     verified_trash: list[MailRecord] = []
+    final_context_client: imaplib.IMAP4_SSL | None = None
+    active_client: imaplib.IMAP4_SSL | None = None
 
     def set_trash_stage(stage: str) -> None:
         nonlocal trash_stage
@@ -3316,13 +3577,19 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
             trash_explicit_summary(
                 task_ids,
                 replacement_ids,
+                len(retained_replacements),
                 sources,
+                final_context_mode,
+                final_gate_passed,
+                final_gate.receipt,
                 move_attempted,
                 final_inbox,
                 verified_inbox,
                 verified_trash,
                 move_outcome,
                 summary_token(trash_stage),
+                post_move_reconciliation_ran,
+                post_move_reconciled,
             )
         )
         return 1
@@ -3336,6 +3603,8 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
         task_identity = ",".join(task_ids)
         sources = [replace(parse_explicit_source(value), task_id=task_identity) for value in args.source]
         contexts = [parse_explicit_context(value) for value in args.context]
+        raw_retained_replacements = getattr(args, "retained_replacement", None)
+        retained_replacements = [parse_retained_replacement(value) for value in raw_retained_replacements or []]
         if not sources:
             raise ValueError("at least one explicit source is required")
         if len({source.uid for source in sources}) != len(sources) or len({source.gmail_msgid for source in sources}) != len(sources):
@@ -3350,6 +3619,10 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
             raise ValueError("one unique nonempty task identity is required per replacement")
         if len(set(replacement_ids)) != len(replacement_ids):
             raise ValueError("replacement identities must be unique")
+        if not replacement_not_required and len(retained_replacements) != len(replacement_ids):
+            raise ValueError("one reviewed retained replacement binding is required per replacement")
+        if replacement_not_required and retained_replacements:
+            raise ValueError("replacement-free removal does not accept a retained replacement binding")
         if replacement_not_required:
             require_source_1140_direct_removal(
                 getattr(args, "human_approval_file", None),
@@ -3410,14 +3683,15 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
     client: imaplib.IMAP4_SSL | None = None
 
     def set_pending_client(pending_client: imaplib.IMAP4_SSL) -> None:
-        nonlocal client
-        client = pending_client
+        nonlocal active_client
+        active_client = pending_client
 
     try:
         set_trash_stage("arm-pre-move-timer")
-        disarm_pre_move_timer = arm_trash_explicit_pre_move_timer(lambda: trash_stage, lambda: client)
+        disarm_pre_move_timer = arm_trash_explicit_pre_move_timer(lambda: trash_stage, lambda: active_client)
         set_trash_stage("open-mailbox")
         client, config = open_mailbox(readonly=False, connected=set_pending_client)
+        active_client = client
         set_trash_stage("mail-boundary")
         sender_email, recipient_email = mail_boundary(config)
         set_trash_stage("select-inbox")
@@ -3538,20 +3812,55 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
         set_trash_stage("uidvalidity-mutation-gate")
         if selected_uidvalidity(client) != expected_uidvalidity:
             return refuse_trash("refusing because INBOX UIDVALIDITY changed immediately before move")
+        set_trash_stage("inbox-subset-mutation-gate")
+        final_inbox_uids = [record.uid for record in final_inbox]
+        if set(inbox_subset(client, final_inbox_uids)) != set(final_inbox_uids):
+            return refuse_trash("refusing because a planned source left INBOX at the mutation gate")
+        set_trash_stage("open-final-context-mailbox")
+        final_context_client, final_context_config = open_mailbox(readonly=True, connected=set_pending_client)
+        set_trash_stage("final-context-boundary")
+        if mail_boundary(final_context_config) != (sender_email, recipient_email):
+            return refuse_trash("refusing because the final context mailbox boundary changed")
+        final_gate.observed("boundary")
+        set_trash_stage("final-context-uidvalidity")
+        select_mailbox(final_context_client, "INBOX", readonly=True)
+        if selected_uidvalidity(final_context_client) != expected_uidvalidity:
+            return refuse_trash("refusing because INBOX UIDVALIDITY changed at the final context gate")
+        final_gate.observed("uidvalidity")
+        set_trash_stage("final-context-special-use")
+        if special_use_mailboxes(final_context_client) != special_use:
+            return refuse_trash("refusing because special-use mailbox identity changed at the final context gate")
+        final_gate.observed("special-use")
+        if retained_replacements and {item.gmail_msgid for item in retained_replacements} != set(replacement_gmail_ids):
+            return refuse_trash("refusing because a reviewed retained replacement identity does not match the replacement")
+        final_inbox_ids_by_thread: dict[str, set[str]] = {}
+        for record in final_inbox:
+            final_inbox_ids_by_thread.setdefault(record.gmail_thrid, set()).add(record.gmail_msgid)
         set_trash_stage("direct-context-intact-final")
-        if any(
-            not direct_context_intact(client, special_use[r"\All"], records, allow_additive=True)
-            for records in contexts_by_thread.values()
+        if not direct_contexts_intact(
+            final_context_client,
+            special_use[r"\All"],
+            contexts_by_thread,
+            allow_additive=allow_additive_final_context,
+            expected_nontrash_by_thread=final_inbox_ids_by_thread,
+            observed=final_gate.observed,
         ):
             return refuse_trash("refusing because complete Gmail thread context changed immediately before move")
-        set_trash_stage("select-inbox-final")
-        select_mailbox(client, "INBOX", readonly=False)
-        set_trash_stage("uidvalidity-final")
-        if selected_uidvalidity(client) != expected_uidvalidity:
-            return refuse_trash("refusing because INBOX UIDVALIDITY changed at the mutation gate")
-        set_trash_stage("inbox-subset-mutation-gate")
-        if set(inbox_subset(client, [record.uid for record in final_inbox])) != {record.uid for record in final_inbox}:
-            return refuse_trash("refusing because a planned source left INBOX at the mutation gate")
+        set_trash_stage("inbox-bindings-final")
+        final_inbox_ids = {record.gmail_msgid for record in final_inbox}
+        final_inbox_sources = [source for source in sources if source.gmail_msgid in final_inbox_ids]
+        if (final_inbox_sources or retained_replacements) and not final_inbox_bindings_intact(
+            final_context_client,
+            expected_uidvalidity,
+            final_inbox_sources,
+            retained_replacements,
+            sender_email,
+            recipient_email,
+            observed=final_gate.observed,
+        ):
+            return refuse_trash("refusing because a source or retained replacement Inbox binding changed at the final mutation gate")
+        final_gate_passed = True
+        active_client = client
         disarm_pre_move_timer()
         pre_move_complete = True
         if final_inbox:
@@ -3580,8 +3889,21 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
             move_outcome = "not-needed"
         if not post_move_verification_error:
             mutation_complete = True
+            post_move_reconciliation_ran = True
             try:
                 verified_inbox, verified_trash = observe_explicit_sources(client, sources, sender_email, recipient_email)
+                if retained_replacements:
+                    select_mailbox(final_context_client, "INBOX", readonly=True)
+                    if selected_uidvalidity(final_context_client) != expected_uidvalidity or not retained_replacements_intact(final_context_client, retained_replacements):
+                        raise RuntimeError("post-MOVE retained replacement reconciliation failed")
+                if not direct_contexts_intact(
+                    final_context_client,
+                    special_use[r"\All"],
+                    contexts_by_thread,
+                    allow_additive=allow_additive_final_context,
+                ):
+                    raise RuntimeError("post-MOVE complete context reconciliation failed")
+                post_move_reconciled = True
             except (imaplib.IMAP4.error, RuntimeError) as exc:
                 verified_inbox = []
                 verified_trash = []
@@ -3600,13 +3922,19 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
             trash_explicit_summary(
                 task_ids,
                 replacement_ids,
+                len(retained_replacements),
                 sources,
+                final_context_mode,
+                final_gate_passed,
+                final_gate.receipt,
                 move_attempted,
                 final_inbox,
                 verified_inbox,
                 verified_trash,
                 move_outcome,
                 post_move_verification_error,
+                post_move_reconciliation_ran,
+                post_move_reconciled,
             )
         )
         return 1
@@ -3614,6 +3942,8 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
         if not pre_move_complete:
             disarm_pre_move_timer()
         try:
+            if final_context_client is not None:
+                logout_mailbox(final_context_client)
             if client is not None:
                 logout_mailbox(client)
         except (imaplib.IMAP4.error, RuntimeError) as exc:
@@ -3622,7 +3952,25 @@ def cmd_trash_explicit(args: argparse.Namespace) -> int:
             if not post_move_verification_error:
                 post_move_verification_error = summary_token(exc.stage if isinstance(exc, ImapOperationError) else f"logout:{exc.__class__.__name__}:{exc}")
     post_move_verified = not post_move_verification_error and not verified_inbox and len(verified_trash) == len(sources)
-    print(trash_explicit_summary(task_ids, replacement_ids, sources, move_attempted, final_inbox, verified_inbox, verified_trash, move_outcome, post_move_verification_error))
+    print(
+        trash_explicit_summary(
+            task_ids,
+            replacement_ids,
+            len(retained_replacements),
+            sources,
+            final_context_mode,
+            final_gate_passed,
+            final_gate.receipt,
+            move_attempted,
+            final_inbox,
+            verified_inbox,
+            verified_trash,
+            move_outcome,
+            post_move_verification_error,
+            post_move_reconciliation_ran,
+            post_move_reconciled,
+        )
+    )
     return 0 if post_move_verified else 1
 
 
@@ -3913,7 +4261,14 @@ This command moves the old message only from Inbox to recoverable Gmail Trash an
     replacement.add_argument("--replacement-message-id", dest="replacement_id", default="")
     replacement.add_argument("--replacement-not-required", action="store_true")
     trash.set_defaults(func=cmd_trash_superseded)
-    direct = sub.add_parser("trash-explicit", help="Move live-bound superseded manager sources to recoverable Trash without an evidence directory.")
+    direct = sub.add_parser(
+        "trash-explicit",
+        help="Move live-bound superseded manager sources to recoverable Trash without an evidence directory.",
+        description=(
+            "Run a sequential, non-atomic final read gate, MOVE only exact bound sources, then reconcile immediately. "
+            "A nonzero race remains after each observation; receipts report final_gate_atomic=0."
+        ),
+    )
     direct.add_argument(
         "--source",
         action="append",
@@ -3926,7 +4281,19 @@ This command moves the old message only from Inbox to recoverable Gmail Trash an
         action="append",
         default=[],
         metavar="GMAIL-MSGID:GMAIL-THRID:RAW-SHA256",
-        help="Exact initial thread context binding; repeat for every member present when execution starts.",
+        help="Exact frozen thread context binding; repeat for every member present when execution starts. The final pre-MOVE gate rejects additions by default.",
+    )
+    direct.add_argument(
+        "--allow-additive-final-context",
+        action="store_true",
+        help="Compatibility mode: permit only newly added thread members at the final pre-MOVE gate; removals and identity or content drift still abort.",
+    )
+    direct.add_argument(
+        "--retained-replacement",
+        action="append",
+        default=[],
+        metavar="UID:GMAIL-MSGID:GMAIL-THRID:RAW-SHA256:BODY-BYTES:BODY-SHA256",
+        help="Required reviewed retained Inbox binding; repeat once per --replacement-message-id. Omit only with --replacement-not-required. The final gate authenticates UIDVALIDITY separately.",
     )
     direct.add_argument(
         "--replacement-message-id",
