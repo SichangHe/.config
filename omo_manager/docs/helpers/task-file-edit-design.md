@@ -63,6 +63,22 @@ unchanged since it was read.
 - print a reminder that the manager must verify the item is actually done or
   cancelled, possibly by using evaluator agents
 
+Cross-state completion reconciliation:
+- an owner and manager can intentionally use different
+  `OMO_MANAGER_STATE_DIR` values, leaving the request and delivered markers in
+  separate ledgers despite one canonical completion key
+- `omo_completion_email.py --reconcile-delivered` verifies one exact owner,
+  outcome, current task digest, absolute delivered marker and marker digest,
+  plus the unique matching source claim; it sends no mail
+- the operation binds the canonical message and current task bytes to the
+  caller's target state and durably consumes the source receipt once
+- a completed consumption, changed task, wrong task, owner, outcome, message or
+  receipt, missing or duplicate claim, unsafe state path, or conflicting
+  destination fails closed
+- normal completion checks accept the target-state reconciliation only while
+  its task digest and canonical message still match; ordinary
+  `omo_task_status.py TASK done` remains the separate closure operation
+
 `pending-move --from MANAGER.md --to WORKER.md --item TEXT`
 - validate both files before writing either file
 - remove from source and add to destination

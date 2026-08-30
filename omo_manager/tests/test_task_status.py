@@ -3600,6 +3600,49 @@ resolved_task_items: []
             stop.assert_called_once()
             self.assertIn("status: done\n", task.read_text(encoding="utf-8"))
 
+    def test_manager_done_closes_from_cross_state_reconciled_receipt(self) -> None:
+        from omo_manager.omo_completion_email import build_completion_email
+        from omo_manager.omo_completion_email import claim_completion_email
+        from omo_manager.omo_completion_email import mark_completion_email_delivered
+        from omo_manager.omo_completion_email import reconcile_delivered_completion
+        from omo_manager.omo_completion_email import require_owner_completion as actual_require
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            owner_state = root / "owner-state"
+            manager_state = root / "manager-state"
+            task = root / "task.md"
+            manager = root / "manager.md"
+            original = task_frontmatter(status="blocked", blocked_on="waiting") + "body\n"
+            task.write_text(original, encoding="utf-8")
+            manager_state.mkdir(mode=0o700)
+            manager.write_text(task_frontmatter(runat="wl:1", managerat="main:0", is_manager=True), encoding="utf-8")
+            plan = build_completion_email(root, task, original, "task done")
+            assert plan is not None
+            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(owner_state)}):
+                self.assertTrue(claim_completion_email(plan))
+                mark_completion_email_delivered(plan)
+            receipt = owner_state / "completion-email-delivered" / plan.key
+            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(manager_state)}):
+                reconcile_delivered_completion(
+                    root,
+                    task,
+                    "task done",
+                    "wl:2",
+                    hashlib.sha256(original.encode()).hexdigest(),
+                    receipt,
+                    hashlib.sha256(receipt.read_bytes()).hexdigest(),
+                )
+                close_args = StopArgs("wl:2", 10.0, 2000, False, False, root, "task.md", True, 0.0)
+                with patch("omo_manager.omo_task_status.require_owner_completion", side_effect=actual_require), patch(
+                    "omo_manager.omo_completion_email.current_active_task", return_value=manager
+                ), patch("omo_manager.omo_tmux_send.send_system_to_codex") as queue, patch(
+                    "omo_manager.omo_task_status.stop_done_agent", return_value=(close_args, "session-1")
+                ), patch("omo_manager.omo_task_status.record_close"):
+                    self.assertEqual(0, run(StatusArgs(root, Path("task.md"), "done", "")))
+            queue.assert_not_called()
+            self.assertIn("status: done\n", task.read_text(encoding="utf-8"))
+
     def test_cli_done_rejects_manager_with_active_child_tasks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
