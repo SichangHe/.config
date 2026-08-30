@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import re
 import shlex
@@ -21,11 +22,11 @@ import yaml
 try:
     from omo_manager.omo_codex_status import Args as StatusArgs
     from omo_manager.omo_codex_status import current_block, exact_pane_id, inspect, is_cursor_agent_capture, report_from_lines, status, tail, tail_pane_id
-    from omo_manager.omo_task_lock import task_file_lock
+    from omo_manager.omo_task_lock import process_start_ticks, task_file_lock
 except ModuleNotFoundError:
     from omo_codex_status import Args as StatusArgs
     from omo_codex_status import current_block, exact_pane_id, inspect, is_cursor_agent_capture, report_from_lines, status, tail, tail_pane_id
-    from omo_task_lock import task_file_lock  # pyright: ignore[reportImplicitRelativeImport]
+    from omo_task_lock import process_start_ticks, task_file_lock  # pyright: ignore[reportImplicitRelativeImport]
 
 SHELL_COMMANDS = {"bash", "dash", "fish", "sh", "zsh"}
 EXIT_INTERRUPT_DELAY_S = 0.75
@@ -76,6 +77,13 @@ class Args:
     bound_close_audit_path: str = ""
     bound_close_proof_secret: str = ""
     bound_close_proof_commitment: str = ""
+    # Appended after the original proof fields so positional construction by
+    # existing lifecycle callers retains its historical argument meaning.
+    bound_pane_pid: int = 0
+    bound_pane_start_ticks: int = 0
+    # Internal lifecycle handoff: a fresh guarded `/status` response must
+    # identify this exact Codex session before the first interrupt.
+    bound_expected_session_id: str = ""
 
 
 class ParsedArgs(argparse.Namespace):
@@ -588,13 +596,13 @@ def move_todo_to_previous(root: Path, task_file: str) -> None:
             _ = todo.write_text(updated, encoding="utf-8")
 
 
-def wait_shell(target: str, deadline_s: float, tmux_guard: tuple[str, str] | None = None) -> bool:
+def wait_shell(target: str, deadline_s: float, tmux_guard: tuple[str, str] | None = None, expected_pane_pid: int = 0) -> bool:
     while time.monotonic() < deadline_s:
-        command = current_command(target) if tmux_guard is None else guarded_current_command(target, tmux_guard)
+        command = current_command(target) if tmux_guard is None else guarded_current_command(target, tmux_guard, expected_pane_pid)
         if command in SHELL_COMMANDS:
             return True
         time.sleep(0.25)
-    command = current_command(target) if tmux_guard is None else guarded_current_command(target, tmux_guard)
+    command = current_command(target) if tmux_guard is None else guarded_current_command(target, tmux_guard, expected_pane_pid)
     return command in SHELL_COMMANDS
 
 
@@ -607,7 +615,7 @@ def paste_text(target: str, text: str) -> None:
         _ = tmux(["delete-buffer", "-b", buffer_name])
 
 
-def tmux_guard_condition(symbolic_target: str, expected_pane_id: str) -> str:
+def tmux_guard_condition(symbolic_target: str, expected_pane_id: str, expected_pane_pid: int = 0) -> str:
     """Return an exact symbolic/numeric identity predicate for tmux formats."""
 
     match = re.fullmatch(r"([A-Za-z][A-Za-z0-9_-]*):(\d+)(?:\.(\d+))?", symbolic_target)
@@ -619,6 +627,10 @@ def tmux_guard_condition(symbolic_target: str, expected_pane_id: str) -> str:
         f"#{{==:#{{session_name}},{session}}}",
         f"#{{==:#{{window_index}},{window}}}",
     ]
+    if expected_pane_pid:
+        if expected_pane_pid <= 0:
+            raise RuntimeError("invalid expected pane pid for guarded tmux command")
+        predicates.append(f"#{{==:#{{pane_pid}},{expected_pane_pid}}}")
     if pane is not None:
         predicates.append(f"#{{==:#{{pane_index}},{pane}}}")
     condition = predicates[-1]
@@ -631,12 +643,13 @@ def guarded_tmux_sequence(
     symbolic_target: str,
     expected_pane_id: str,
     commands: list[list[str]],
+    expected_pane_pid: int = 0,
 ) -> str:
     """Return pane command output only from the same guarded tmux server queue."""
 
     accepted = f"OMO_GUARD_ACCEPTED_{os.getpid()}_{time.monotonic_ns()}"
     rejected = f"OMO_GUARD_REJECTED_{os.getpid()}_{time.monotonic_ns()}"
-    condition = tmux_guard_condition(symbolic_target, expected_pane_id)
+    condition = tmux_guard_condition(symbolic_target, expected_pane_id, expected_pane_pid) if expected_pane_pid else tmux_guard_condition(symbolic_target, expected_pane_id)
     guarded = " ; ".join([*(shlex.join(command) for command in commands), f"display-message -p {accepted}"])
     failure = f"display-message -p {rejected}"
     result = tmux(["if-shell", "-F", "-t", symbolic_target, condition, guarded, failure])
@@ -646,41 +659,50 @@ def guarded_tmux_sequence(
     return result.stdout[: -len(suffix)]
 
 
-def guarded_tmux_read(symbolic_target: str, expected_pane_id: str, command: list[str]) -> str:
+def guarded_tmux_read(symbolic_target: str, expected_pane_id: str, command: list[str], expected_pane_pid: int = 0) -> str:
     """Return one pane command's output from the same guarded tmux server queue."""
 
+    if expected_pane_pid:
+        return guarded_tmux_sequence(symbolic_target, expected_pane_id, [command], expected_pane_pid)
     return guarded_tmux_sequence(symbolic_target, expected_pane_id, [command])
 
 
-def guarded_tmux_command(symbolic_target: str, expected_pane_id: str, command: list[str]) -> None:
+def guarded_tmux_command(symbolic_target: str, expected_pane_id: str, command: list[str], expected_pane_pid: int = 0) -> None:
     """Run one pane-mutating command only in the matching tmux server command queue."""
 
-    if guarded_tmux_read(symbolic_target, expected_pane_id, command):
+    output = guarded_tmux_read(symbolic_target, expected_pane_id, command, expected_pane_pid) if expected_pane_pid else guarded_tmux_read(symbolic_target, expected_pane_id, command)
+    if output:
         raise RuntimeError("guarded tmux mutation produced unexpected output")
 
 
-def guarded_capture(target: str, n_lines: int, tmux_guard: tuple[str, str]) -> str:
-    return guarded_tmux_read(*tmux_guard, ["capture-pane", "-p", "-t", target, "-S", f"-{n_lines}"])
+def bound_guarded_read(symbolic_target: str, expected_pane_id: str, command: list[str], expected_pane_pid: int = 0) -> str:
+    """Preserve the legacy call shape when no process binding was requested."""
+
+    return guarded_tmux_read(symbolic_target, expected_pane_id, command, expected_pane_pid) if expected_pane_pid else guarded_tmux_read(symbolic_target, expected_pane_id, command)
 
 
-def guarded_current_command(target: str, tmux_guard: tuple[str, str]) -> str:
-    return guarded_tmux_read(
-        *tmux_guard,
-        ["display-message", "-p", "-t", target, "#{pane_current_command}"],
-    ).strip()
+def guarded_capture(target: str, n_lines: int, tmux_guard: tuple[str, str], expected_pane_pid: int = 0) -> str:
+    command = ["capture-pane", "-p", "-t", target, "-S", f"-{n_lines}"]
+    return guarded_tmux_read(*tmux_guard, command, expected_pane_pid) if expected_pane_pid else guarded_tmux_read(*tmux_guard, command)
 
 
-def guarded_paste_text(target: str, text: str, symbolic_target: str, expected_pane_id: str) -> None:
+def guarded_current_command(target: str, tmux_guard: tuple[str, str], expected_pane_pid: int = 0) -> str:
+    command = ["display-message", "-p", "-t", target, "#{pane_current_command}"]
+    output = guarded_tmux_read(*tmux_guard, command, expected_pane_pid) if expected_pane_pid else guarded_tmux_read(*tmux_guard, command)
+    return output.strip()
+
+
+def guarded_paste_text(target: str, text: str, symbolic_target: str, expected_pane_id: str, expected_pane_pid: int = 0) -> None:
     """Paste text only while tmux itself sees the bound symbolic and numeric target."""
 
     buffer_name = f"omo-codex-stop-{os.getpid()}-{time.monotonic_ns()}"
     _ = tmux(["set-buffer", "-b", buffer_name, text], check=True)
     try:
-        guarded_tmux_command(
-            symbolic_target,
-            expected_pane_id,
-            ["paste-buffer", "-b", buffer_name, "-t", target],
-        )
+        command = ["paste-buffer", "-b", buffer_name, "-t", target]
+        if expected_pane_pid:
+            guarded_tmux_command(symbolic_target, expected_pane_id, command, expected_pane_pid)
+        else:
+            guarded_tmux_command(symbolic_target, expected_pane_id, command)
     finally:
         _ = tmux(["delete-buffer", "-b", buffer_name])
 
@@ -696,26 +718,27 @@ def query_status_session_id(
     identity_is_current: Callable[[], bool] | None = None,
     tmux_guard: tuple[str, str] | None = None,
     strict_status_response: bool = False,
+    expected_pane_pid: int = 0,
 ) -> tuple[str, str]:
     """Return a status UUID, optionally only from the newly submitted `/status`."""
     if identity_is_current is not None and not identity_is_current():
         raise RuntimeError("tmux pane identity changed before status query")
-    before = capture(target, n_lines) if tmux_guard is None else guarded_capture(target, n_lines, tmux_guard)
+    before = capture(target, n_lines) if tmux_guard is None else guarded_capture(target, n_lines, tmux_guard, expected_pane_pid)
     if tmux_guard is None:
         paste_text(target, "/status")
     else:
-        guarded_paste_text(target, "/status", *tmux_guard)
+        guarded_paste_text(target, "/status", *tmux_guard, expected_pane_pid)
     if identity_is_current is not None and not identity_is_current():
         raise RuntimeError("tmux pane identity changed before status submission")
     if tmux_guard is None:
         _ = tmux(["send-keys", "-t", target, "Enter"], check=True)
     else:
-        guarded_tmux_command(*tmux_guard, ["send-keys", "-t", target, "Enter"])
+        guarded_tmux_command(*tmux_guard, ["send-keys", "-t", target, "Enter"], expected_pane_pid)
     deadline_s = time.monotonic() + wait_s
     after = before
     fallback_sent = False
     while time.monotonic() < deadline_s:
-        after = capture(target, n_lines) if tmux_guard is None else guarded_capture(target, n_lines, tmux_guard)
+        after = capture(target, n_lines) if tmux_guard is None else guarded_capture(target, n_lines, tmux_guard, expected_pane_pid)
         response = after.rsplit("/status", 1)[-1] if after.count("/status") > before.count("/status") else ""
         session_id = extract_status_session_id(response) if strict_status_response else extract_new_status_session_id(before, after)
         if session_id:
@@ -726,7 +749,7 @@ def query_status_session_id(
             if tmux_guard is None:
                 _ = tmux(["send-keys", "-t", target, "Enter"], check=True)
             else:
-                guarded_tmux_command(*tmux_guard, ["send-keys", "-t", target, "Enter"])
+                guarded_tmux_command(*tmux_guard, ["send-keys", "-t", target, "Enter"], expected_pane_pid)
             fallback_sent = True
         time.sleep(0.25)
     response = (after.rsplit("/status", 1)[-1] if after.count("/status") > before.count("/status") else "") if strict_status_response else after
@@ -737,16 +760,19 @@ def send_exit_keys(
     target: str,
     identity_is_current: Callable[[], bool] | None = None,
     tmux_guard: tuple[str, str] | None = None,
+    expected_pane_pid: int = 0,
 ) -> None:
     for _attempt in range(EXIT_INTERRUPT_ATTEMPTS):
         if identity_is_current is not None and not identity_is_current():
             raise RuntimeError("tmux pane identity changed before interrupt")
         if tmux_guard is None:
             _ = tmux(["send-keys", "-t", target, "C-c"], check=True)
+        elif expected_pane_pid:
+            guarded_tmux_command(*tmux_guard, ["send-keys", "-t", target, "C-c"], expected_pane_pid)
         else:
             guarded_tmux_command(*tmux_guard, ["send-keys", "-t", target, "C-c"])
         time.sleep(EXIT_INTERRUPT_DELAY_S)
-        command = current_command(target) if tmux_guard is None else guarded_current_command(target, tmux_guard)
+        command = current_command(target) if tmux_guard is None else guarded_current_command(target, tmux_guard, expected_pane_pid)
         if command in SHELL_COMMANDS:
             return
 
@@ -769,13 +795,14 @@ def close_bound_tmux_target(
     audit_path: str = "",
     proof_secret: str = "",
     proof_commitment: str = "",
+    expected_pane_pid: int = 0,
 ) -> None:
     """Close a non-human pane only while its symbolic and numeric identities agree."""
 
     if not identity_is_current():
         raise RuntimeError("tmux pane identity changed before bound close")
     tmux_guard = (symbolic_target, expected_pane_id)
-    if guarded_current_command(target, tmux_guard) not in SHELL_COMMANDS:
+    if guarded_current_command(target, tmux_guard, expected_pane_pid) not in SHELL_COMMANDS:
         return
     if not identity_is_current():
         raise RuntimeError("tmux pane identity changed immediately before bound close")
@@ -801,7 +828,8 @@ def close_bound_tmux_target(
             ]
         )
         commands.append(["run-shell", writer])
-    if guarded_tmux_sequence(symbolic_target, expected_pane_id, commands):
+    output = guarded_tmux_sequence(symbolic_target, expected_pane_id, commands, expected_pane_pid) if expected_pane_pid else guarded_tmux_sequence(symbolic_target, expected_pane_id, commands)
+    if output:
         raise RuntimeError("guarded tmux close produced unexpected output")
 
 
@@ -840,11 +868,75 @@ def write_bound_close_proof(path: Path, audit_path: Path, secret: str, commitmen
         or stat.S_IMODE(audit_info.st_mode) != 0o600
         or len(audit_text.encode()) > 65536
         or not isinstance(audit, dict)
-        or audit.get("operation") != "park-unlinked"
+        or audit.get("operation") not in {"park-unlinked", "manager-replace"}
         or audit.get("state") != "prepared"
         or audit.get("close_proof_commitment") != commitment
     ):
         raise RuntimeError("bound close proof audit does not authorize this exact capability")
+    if audit.get("operation") == "manager-replace":
+        replacement_path_value = audit.get("audit_path")
+        replacement_digest = audit.get("replacement_audit_sha256")
+        if not isinstance(replacement_path_value, str) or not isinstance(replacement_digest, str):
+            raise RuntimeError("manager replacement close authority is incomplete")
+        replacement_path = Path(replacement_path_value)
+        expected_authority = replacement_path.with_name(f".{replacement_path.name}.close-authority")
+        if not replacement_path.is_absolute() or audit_path != expected_authority or SHA256_RE.fullmatch(replacement_digest) is None:
+            raise RuntimeError("manager replacement close authority path is unbound")
+        replacement_fd: int | None = None
+        try:
+            replacement_fd = os.open(replacement_path, flags)
+            replacement_before = os.fstat(replacement_fd)
+            chunks: list[bytes] = []
+            remaining = 8 * 1024 * 1024 + 1
+            while remaining:
+                chunk = os.read(replacement_fd, min(64 * 1024, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            replacement_bytes = b"".join(chunks)
+            replacement_after = os.fstat(replacement_fd)
+            replacement_record = json.loads(replacement_bytes)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("manager replacement audit is unavailable or invalid") from exc
+        finally:
+            if replacement_fd is not None:
+                os.close(replacement_fd)
+        replacement_integrity = replacement_record.pop("record_sha256", None) if isinstance(replacement_record, dict) else None
+        if (
+            not stat.S_ISREG(replacement_before.st_mode)
+            or replacement_before.st_uid != os.getuid()
+            or stat.S_IMODE(replacement_before.st_mode) != 0o600
+            or (
+                replacement_before.st_dev,
+                replacement_before.st_ino,
+                replacement_before.st_size,
+                replacement_before.st_mtime_ns,
+                replacement_before.st_ctime_ns,
+            )
+            != (
+                replacement_after.st_dev,
+                replacement_after.st_ino,
+                replacement_after.st_size,
+                replacement_after.st_mtime_ns,
+                replacement_after.st_ctime_ns,
+            )
+            or len(replacement_bytes) > 8 * 1024 * 1024
+            or hashlib.sha256(replacement_bytes).hexdigest() != replacement_digest
+            or not isinstance(replacement_record, dict)
+            or replacement_integrity != hashlib.sha256(json.dumps(replacement_record, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            or replacement_record.get("operation") != "manager-replace"
+            or replacement_record.get("state") != "prepared"
+            or replacement_record.get("close_proof_commitment") != commitment
+            or replacement_record.get("old_target") != audit.get("old_target")
+            or replacement_record.get("old_pane")
+            != {
+                "id": audit.get("old_pane_id"),
+                "pid": audit.get("old_pane_pid"),
+                "start_ticks": audit.get("old_pane_start_ticks"),
+            }
+        ):
+            raise RuntimeError("manager replacement audit does not match its close authority")
     parent = path.parent
     info = parent.stat()
     if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077:
@@ -1010,7 +1102,7 @@ def stop(args: Args) -> str:
         if not args.no_feedback:
             raise RuntimeError("human-close authorization requires --no-feedback; do not send unrequested input to a human-owned pane")
     tmux_guard: tuple[str, str] | None = None
-    if args.bound_symbolic_target or args.bound_pane_id:
+    if args.bound_symbolic_target or args.bound_pane_id or args.bound_expected_session_id:
         if (
             not args.bound_symbolic_target
             or not args.bound_pane_id
@@ -1018,15 +1110,25 @@ def stop(args: Args) -> str:
             or re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?", args.bound_symbolic_target) is None
             or not re.fullmatch(r"%[0-9]+", args.bound_pane_id)
             or is_human_owned_target(args.bound_symbolic_target)
+            or bool(args.bound_pane_pid) != bool(args.bound_pane_start_ticks)
+            or args.bound_pane_pid < 0
+            or args.bound_pane_start_ticks < 0
+            or (
+                args.bound_expected_session_id
+                and re.fullmatch(UUID_RE, args.bound_expected_session_id) is None
+            )
         ):
             raise RuntimeError("bound non-human target does not resolve to the exact pinned pane")
         tmux_guard = (args.bound_symbolic_target, args.bound_pane_id)
-        initial_pane = guarded_tmux_read(
+        initial_pane = bound_guarded_read(
             *tmux_guard,
             ["display-message", "-p", "-t", args.bound_symbolic_target, "#{pane_id}"],
+            args.bound_pane_pid,
         ).strip()
         if initial_pane != args.bound_pane_id:
             raise RuntimeError("bound non-human target does not resolve to the exact pinned pane")
+        if args.bound_pane_start_ticks and process_start_ticks(args.bound_pane_pid) != args.bound_pane_start_ticks:
+            raise RuntimeError("bound non-human target process identity changed")
         target_pane = args.bound_pane_id
     else:
         target_pane = pane_id(args.target)
@@ -1050,11 +1152,12 @@ def stop(args: Args) -> str:
         resolved_session = target_session_name(target_pane)
         numeric_target = pane_target(target_pane)
     else:
-        resolved_session = guarded_tmux_read(
+        resolved_session = bound_guarded_read(
             *tmux_guard,
             ["display-message", "-p", "-t", target_pane, "#{session_name}"],
+            args.bound_pane_pid,
         ).strip()
-        numeric_target = guarded_tmux_read(
+        numeric_target = bound_guarded_read(
             *tmux_guard,
             [
                 "display-message",
@@ -1063,6 +1166,7 @@ def stop(args: Args) -> str:
                 target_pane,
                 "#{session_name}:#{window_index}.#{pane_index}",
             ],
+            args.bound_pane_pid,
         ).strip()
     if is_human_owned_target(resolved_session) and (not human_authorized or resolved_session != authorized_target.partition(":")[0]):
         raise RuntimeError(f"refusing to stop human-owned target: {args.target}")
@@ -1070,8 +1174,10 @@ def stop(args: Args) -> str:
         raise RuntimeError("human-close target no longer resolves to the exact authorized tmux pane")
     def identity_is_current() -> bool:
         if tmux_guard is not None:
+            if args.bound_pane_start_ticks and process_start_ticks(args.bound_pane_pid) != args.bound_pane_start_ticks:
+                return False
             try:
-                identity = guarded_tmux_read(
+                identity = bound_guarded_read(
                     *tmux_guard,
                     [
                         "display-message",
@@ -1080,6 +1186,7 @@ def stop(args: Args) -> str:
                         target_pane,
                         "#{pane_id}\t#{session_name}:#{window_index}.#{pane_index}",
                     ],
+                    args.bound_pane_pid,
                 ).strip()
             except RuntimeError:
                 return False
@@ -1095,7 +1202,7 @@ def stop(args: Args) -> str:
     if tmux_guard is None:
         report = inspect(StatusArgs(numeric_target, 80)) if numeric_target else None
     else:
-        initial_capture = guarded_capture(target_pane, 80, tmux_guard)
+        initial_capture = guarded_capture(target_pane, 80, tmux_guard, args.bound_pane_pid)
         lines = [line.rstrip() for line in initial_capture.splitlines()]
         while lines and not lines[-1]:
             lines.pop()
@@ -1117,7 +1224,7 @@ def stop(args: Args) -> str:
         before_close = (
             capture(resolved_args.target, resolved_args.lines)
             if tmux_guard is None
-            else guarded_capture(resolved_args.target, resolved_args.lines, tmux_guard)
+            else guarded_capture(resolved_args.target, resolved_args.lines, tmux_guard, resolved_args.bound_pane_pid)
         )
         session_id = ""
     elif identity_check is None:
@@ -1129,18 +1236,28 @@ def stop(args: Args) -> str:
             resolved_args.wait_s,
             identity_check,
             tmux_guard,
+            strict_status_response=bool(resolved_args.bound_expected_session_id),
+            expected_pane_pid=resolved_args.bound_pane_pid,
+        )
+    if (
+        resolved_args.bound_expected_session_id
+        and session_id.lower() != resolved_args.bound_expected_session_id.lower()
+    ):
+        raise RuntimeError(
+            "bound Codex session id mismatch before interrupt: "
+            f"expected {resolved_args.bound_expected_session_id.lower()}, found {session_id or '<missing>'}"
         )
     if (identity_check is not None and not identity_is_current()) or (identity_check is None and pane_id(resolved_args.target) != target_pane):
         raise RuntimeError(f"tmux target disappeared before interrupt: {args.target}")
     if identity_check is None:
         send_exit_keys(resolved_args.target)
     else:
-        send_exit_keys(resolved_args.target, identity_check, tmux_guard)
-    _ = wait_shell(resolved_args.target, time.monotonic() + resolved_args.wait_s, tmux_guard)
+        send_exit_keys(resolved_args.target, identity_check, tmux_guard, resolved_args.bound_pane_pid)
+    _ = wait_shell(resolved_args.target, time.monotonic() + resolved_args.wait_s, tmux_guard, resolved_args.bound_pane_pid)
     after = (
         capture(resolved_args.target, resolved_args.lines)
         if tmux_guard is None
-        else guarded_capture(resolved_args.target, resolved_args.lines, tmux_guard)
+        else guarded_capture(resolved_args.target, resolved_args.lines, tmux_guard, resolved_args.bound_pane_pid)
     )
     if identity_check is not None and not identity_is_current():
         raise RuntimeError("tmux pane identity changed before close")
@@ -1156,6 +1273,7 @@ def stop(args: Args) -> str:
             args.bound_close_audit_path,
             args.bound_close_proof_secret,
             args.bound_close_proof_commitment,
+            resolved_args.bound_pane_pid,
         )
     else:
         close_tmux_target(resolved_args.target)

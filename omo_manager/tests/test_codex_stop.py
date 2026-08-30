@@ -1,6 +1,7 @@
 import contextlib
 import hashlib
 import io
+import json
 import os
 import subprocess
 import tempfile
@@ -54,6 +55,35 @@ class CodexStopTests(unittest.TestCase):
         with patch.dict(os.environ, {"TMUX_PANE": "%caller"}, clear=True), patch("omo_manager.omo_codex_stop.tmux") as tmux:
             self.assertEqual("%caller", current_pane_id())
         tmux.assert_not_called()
+
+    def test_bound_process_fields_append_without_rebinding_legacy_positional_proof_fields(self) -> None:
+        args = Args(
+            "cfg:1",
+            1.0,
+            20,
+            False,
+            False,
+            Path("/tmp/root"),
+            "task.md",
+            True,
+            2.0,
+            "human.txt",
+            "human-sha",
+            "",
+            "cfg:1",
+            "%42",
+            "/tmp/proof",
+            "/tmp/audit",
+            "secret",
+            "commitment",
+        )
+        self.assertEqual("/tmp/proof", args.bound_close_proof_path)
+        self.assertEqual("/tmp/audit", args.bound_close_audit_path)
+        self.assertEqual("secret", args.bound_close_proof_secret)
+        self.assertEqual("commitment", args.bound_close_proof_commitment)
+        self.assertEqual(0, args.bound_pane_pid)
+        self.assertEqual(0, args.bound_pane_start_ticks)
+        self.assertEqual("", args.bound_expected_session_id)
 
     def test_manager_config_path_is_resolved_from_the_implementation_not_path_wrapper(self) -> None:
         self.assertEqual(Path(codex_stop.__file__).resolve().with_name("local.env"), LOCAL_ENV_PATH)
@@ -921,6 +951,41 @@ class CodexStopTests(unittest.TestCase):
         with patch("omo_manager.omo_codex_stop.tmux", side_effect=tmux_call):
             codex_stop.guarded_tmux_command("vl:2", "%42", ["send-keys", "-t", "%42", "C-c"])
 
+    def test_guarded_tmux_command_can_bind_pane_process_in_same_server_queue(self) -> None:
+        def tmux_call(argv: list[str], check: bool = False) -> subprocess.CompletedProcess[str]:
+            self.assertFalse(check)
+            self.assertIn("#{==:#{pane_id},%42}", argv[4])
+            self.assertIn("#{==:#{pane_pid},4242}", argv[4])
+            token = argv[5].rsplit("display-message -p ", 1)[1]
+            return subprocess.CompletedProcess(argv, 0, token + "\n", "")
+
+        with patch("omo_manager.omo_codex_stop.tmux", side_effect=tmux_call):
+            codex_stop.guarded_tmux_command("vl:2", "%42", ["send-keys", "-t", "%42", "C-c"], 4242)
+
+    def test_bound_stop_rejects_process_start_drift_before_any_later_access(self) -> None:
+        with (
+            patch("omo_manager.omo_codex_stop.bound_guarded_read", return_value="%42\n") as guarded,
+            patch("omo_manager.omo_codex_stop.process_start_ticks", return_value=1000),
+            patch("omo_manager.omo_codex_stop.pane_id") as raw_pane,
+            self.assertRaisesRegex(RuntimeError, "process identity changed"),
+        ):
+            stop(
+                Args(
+                    "vl:2",
+                    0.0,
+                    10,
+                    False,
+                    False,
+                    no_feedback=True,
+                    bound_symbolic_target="vl:2",
+                    bound_pane_id="%42",
+                    bound_pane_pid=4242,
+                    bound_pane_start_ticks=999,
+                )
+            )
+        guarded.assert_called_once()
+        raw_pane.assert_not_called()
+
     def test_guarded_tmux_command_rejects_stale_pane_id_without_accepting_mutation(self) -> None:
         def stale_tmux(argv: list[str], check: bool = False) -> subprocess.CompletedProcess[str]:
             self.assertFalse(check)
@@ -968,6 +1033,45 @@ class CodexStopTests(unittest.TestCase):
                     bound_pane_id="%42",
                 )
             )
+        interrupt.assert_not_called()
+        close.assert_not_called()
+
+    def test_bound_session_mismatch_never_interrupts_or_closes_pane(self) -> None:
+        expected = "019e9ed9-6262-71c0-b4b3-72ffd4182e98"
+        mismatched = "11111111-2222-3333-4444-555555555555"
+        with (
+            patch(
+                "omo_manager.omo_codex_stop.bound_guarded_read",
+                side_effect=("%42\n", "vl\n", "vl:2.0\n", "%42\tvl:2.0\n"),
+            ),
+            patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%caller"),
+            patch(
+                "omo_manager.omo_codex_stop.guarded_capture",
+                return_value="› Use /skills to list available skills\n",
+            ),
+            patch("omo_manager.omo_codex_stop.report_from_lines", return_value=Report("ready", [])),
+            patch(
+                "omo_manager.omo_codex_stop.query_status_session_id",
+                return_value=(mismatched, "fresh status response"),
+            ) as query,
+            patch("omo_manager.omo_codex_stop.send_exit_keys") as interrupt,
+            patch("omo_manager.omo_codex_stop.close_bound_tmux_target") as close,
+            self.assertRaisesRegex(RuntimeError, "session id mismatch before interrupt"),
+        ):
+            stop(
+                Args(
+                    "vl:2",
+                    0.0,
+                    10,
+                    False,
+                    False,
+                    no_feedback=True,
+                    bound_symbolic_target="vl:2",
+                    bound_pane_id="%42",
+                    bound_expected_session_id=expected,
+                )
+            )
+        self.assertTrue(query.call_args.kwargs["strict_status_response"])
         interrupt.assert_not_called()
         close.assert_not_called()
 
@@ -1031,6 +1135,51 @@ class CodexStopTests(unittest.TestCase):
             with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
                 main(["--write-bound-close-proof", str(proof), commitment])
             self.assertFalse(proof.exists())
+
+    def test_close_proof_accepts_prepared_manager_replacement_capability(self) -> None:
+        secret = "a" * 64
+        commitment = hashlib.sha256(secret.encode()).hexdigest()
+        with tempfile.TemporaryDirectory() as tmp:
+            private = Path(tmp)
+            private.chmod(0o700)
+            replacement = private / "manager-replace.json"
+            replacement_record = {
+                "operation": "manager-replace",
+                "state": "prepared",
+                "close_proof_commitment": commitment,
+                "old_target": "vl:2",
+                "old_pane": {"id": "%42", "pid": 4242, "start_ticks": 999},
+            }
+            replacement_record["record_sha256"] = hashlib.sha256(
+                json.dumps(replacement_record, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            replacement_bytes = (json.dumps(replacement_record, sort_keys=True, separators=(",", ":")) + "\n").encode()
+            replacement.write_bytes(replacement_bytes)
+            replacement.chmod(0o600)
+            audit = private / ".manager-replace.json.close-authority"
+            proof = private / "..manager-replace.json.close-authority.owner-stopped"
+            audit.write_text(
+                json.dumps(
+                    {
+                        "operation": "manager-replace",
+                        "state": "prepared",
+                        "close_proof_commitment": commitment,
+                        "audit_path": str(replacement),
+                        "replacement_audit_sha256": hashlib.sha256(replacement_bytes).hexdigest(),
+                        "old_target": "vl:2",
+                        "old_pane_id": "%42",
+                        "old_pane_pid": 4242,
+                        "old_pane_start_ticks": 999,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            audit.chmod(0o600)
+
+            self.assertEqual(0, main(["--write-bound-close-proof", str(proof), str(audit), secret, commitment]))
+
+            self.assertTrue(codex_stop.has_bound_close_proof(proof, commitment))
 
     def test_bound_rebind_rejects_capture_and_shell_poll_without_raw_pane_reads(self) -> None:
         guard = ("vl:2", "%42")
