@@ -1,9 +1,11 @@
 import contextlib
+import hashlib
 import io
 import os
 import subprocess
 import tempfile
 import unittest
+import uuid
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
@@ -14,6 +16,7 @@ from omo_manager.omo_task import (
     CODEX_LAUNCH_STARTED,
     CODEX_LAUNCH_UPDATED,
     Args,
+    CursorProcessProof,
     DEFAULT_TOOL,
     DEFAULT_WORKER_INSTRUCTIONS,
     LaunchSession,
@@ -32,6 +35,7 @@ from omo_manager.omo_task import (
     link_todo,
     main,
     new_window,
+    new_window_bound,
     parse_args,
     prompt_input,
     runat_goal_tree_error,
@@ -39,6 +43,13 @@ from omo_manager.omo_task import (
     start_codex,
     validate_inputs,
     verify_launch_window,
+    cleanup_prepared_launch_window,
+    prepared_cursor_process_proof,
+    prepared_pane_shell_argv,
+    prepared_shell_launch_command,
+    prepared_successor_launch,
+    prepared_tmux_pane_inventory,
+    tmux_for_args,
     validate_existing_target_runtime,
     validate_runat_goal_tree,
     wait_command_started,
@@ -47,6 +58,18 @@ from omo_manager.omo_task import (
     write_human_instruction_file,
 )
 from omo_manager.tests.test_task_metadata_v2 import v2_task
+from omo_manager.omo_worker_successor import Args as SuccessorArgs
+from omo_manager.omo_worker_successor import (
+    cursor_runtime_identity,
+    launch_manifest_bytes,
+    minimal_launch_environment,
+    minimal_tmux_environment,
+    pinned_shell_identity,
+    pinned_tmux_identity,
+    prepare_successor,
+    protected_digest,
+    queue_digest,
+)
 
 
 VALID_GOAL_TREE = "implement manager check\n- reject missing task goal tree\n"
@@ -85,6 +108,124 @@ CAPTURED_TRUST_POPUP = (
 
 
 class OmoTaskTests(unittest.TestCase):
+    def make_prepared_successor(
+        self,
+        base: Path,
+        session: str,
+    ) -> tuple[Path, Path, Path, Path, str, str, str, str, str]:
+        root = base / "work_logs"
+        root.mkdir()
+        project = base / "project"
+        project.mkdir()
+        prompt = base / "successor-prompt.txt"
+        prompt.write_text("Complete only this prepared successor task.\n", encoding="utf-8")
+        prompt.chmod(0o600)
+        target = f"{session}:7.0"
+        manager = f"{session}:1.0"
+        queue = ("Preserve this exact nonempty successor queue.",)
+        old = (
+            "---\n"
+            "version: v1.0.0\n"
+            "status: blocked\n"
+            "blocked_on: prepared successor test\n"
+            f"runat: {target}\n"
+            "tool: cursor\n"
+            f"managerat: {manager}\n"
+            "is_manager: false\n"
+            "pending_task_items:\n"
+            f"  - {queue[0]}\n"
+            "---\n"
+            "Preserved evidence.\n"
+        )
+        todo = (
+            "current:\n"
+            f"old_worker.md {target}\n\n"
+            "human pending:\n\n"
+            "low priority:\n\n"
+            "previous:\n"
+        )
+        old_path = root / "old_worker.md"
+        old_path.write_text(old, encoding="utf-8")
+        (root / "TODO.md").write_text(todo, encoding="utf-8")
+        journal = root / ".omo-worker-successor-0123456789abcdef.transaction"
+        launch_manifest = root / ".omo-worker-successor-launch.json"
+        launch_manifest_data = launch_manifest_bytes(
+            root=root,
+            task_file="new_worker.md",
+            target=target,
+            manager_target=manager,
+            tool="cursor",
+            workdir=project,
+            model="cursor-grok-4.6",
+            reasoning_effort="xhigh",
+        )
+        launch_manifest.write_bytes(launch_manifest_data)
+        launch_manifest.chmod(0o600)
+        protected = (f"{session}:0.0",)
+        successor_args = SuccessorArgs(
+            root,
+            "old_worker.md",
+            "new_worker.md",
+            target,
+            manager,
+            "cursor",
+            hashlib.sha256(old.encode()).hexdigest(),
+            hashlib.sha256(todo.encode()).hexdigest(),
+            queue,
+            queue_digest(queue),
+            prompt,
+            hashlib.sha256(prompt.read_bytes()).hexdigest(),
+            protected,
+            protected_digest(protected),
+            journal,
+            launch_manifest,
+            hashlib.sha256(launch_manifest_data).hexdigest(),
+        )
+        _ = prepare_successor(successor_args)
+        successor = root / "new_worker.md"
+        return (
+            root,
+            project,
+            prompt,
+            journal,
+            hashlib.sha256(journal.read_bytes()).hexdigest(),
+            hashlib.sha256(successor.read_bytes()).hexdigest(),
+            successor_args.prompt_sha256,
+            successor_args.queue_sha256,
+            successor_args.launch_manifest_sha256,
+        )
+
+    def prepared_launch_argv(
+        self,
+        root: Path,
+        project: Path,
+        prompt: Path,
+        journal: Path,
+        session: str,
+        hashes: tuple[str, str, str, str],
+    ) -> list[str]:
+        journal_sha, task_sha, prompt_sha, queue_sha, manifest_sha = hashes
+        return [
+            "--root", str(root),
+            "--task-file", "new_worker.md",
+            "--tmux-session", session,
+            "--tmux-window", "7",
+            "--tool", "cursor",
+            "--workdir", str(project),
+            "--prompt-file", str(prompt),
+            "--no-link",
+            "--model", "cursor-grok-4.6",
+            "--reasoning-effort", "xhigh",
+            "--manager-target", f"{session}:1.0",
+            "--require-existing-tmux-session",
+            "--prepared-successor-journal", str(journal),
+            "--expected-prepared-journal-sha256", journal_sha,
+            "--expected-prepared-task-sha256", task_sha,
+            "--expected-prepared-prompt-sha256", prompt_sha,
+            "--expected-prepared-queue-sha256", queue_sha,
+            "--expected-prepared-launch-manifest-sha256", manifest_sha,
+        ]
+
     def render_prompt(self, expression: str) -> bytes:
         result = subprocess.run(
             ["bash", "-c", f'set -- {expression}; printf %s "$1"'],
@@ -3835,6 +3976,884 @@ class OmoTaskTests(unittest.TestCase):
     def test_rejects_non_codex_tool(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             parse_args(["--task-file", "x.md", "--tool", "other"])
+
+    def test_prepared_successor_launch_uses_real_disposable_tmux_and_preserves_queue(self) -> None:
+        session = f"oprep{uuid.uuid4().hex[:10]}"
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root, project, prompt, journal, *hashes = self.make_prepared_successor(base, session)
+            created = subprocess.run(["tmux", "new-session", "-d", "-s", session], capture_output=True, text=True, check=False)
+            self.assertEqual(0, created.returncode, created.stderr)
+            runtime = cursor_runtime_identity()
+            proof = CursorProcessProof(91234, Path(str(runtime["node_path"])), (str(runtime["launcher_resolved"]),), "a" * 64)
+            try:
+                with (
+                    patch("omo_manager.omo_task.start_codex"),
+                    patch("omo_manager.omo_task.prepared_cursor_process_proof", return_value=proof),
+                ):
+                    result = main(self.prepared_launch_argv(root, project, prompt, journal, session, tuple(hashes)))
+                self.assertEqual(0, result)
+                metadata = parse_task_metadata((root / "new_worker.md").read_text(encoding="utf-8"), root)
+                self.assertIsNotNone(metadata)
+                assert metadata is not None
+                self.assertEqual("running", metadata.status)
+                self.assertEqual(("Preserve this exact nonempty successor queue.",), metadata.pending_task_items)
+                pane = subprocess.run(["tmux", "display-message", "-p", "-t", f"={session}:7.0", "#{pane_id}"], capture_output=True, text=True, check=False)
+                self.assertEqual(0, pane.returncode, pane.stderr)
+                receipt = journal.with_name(f".{journal.name}.launch").read_text(encoding="utf-8")
+                self.assertIn("state: committed", receipt)
+                with patch("omo_manager.omo_task.prepared_cursor_process_proof", return_value=proof):
+                    repeated = main(self.prepared_launch_argv(root, project, prompt, journal, session, tuple(hashes)))
+                self.assertEqual(0, repeated)
+                matching = subprocess.run(
+                    ["tmux", "list-panes", "-a", "-F", "#{session_name}:#{window_index}.#{pane_index}"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertEqual(1, matching.stdout.splitlines().count(f"{session}:7.0"))
+            finally:
+                _ = subprocess.run(["tmux", "kill-session", "-t", f"={session}"], capture_output=True, text=True, check=False)
+
+    def test_prepared_successor_start_failure_keeps_blocked_queue_and_removes_window(self) -> None:
+        session = f"oprep{uuid.uuid4().hex[:10]}"
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root, project, prompt, journal, *hashes = self.make_prepared_successor(base, session)
+            created = subprocess.run(["tmux", "new-session", "-d", "-s", session], capture_output=True, text=True, check=False)
+            self.assertEqual(0, created.returncode, created.stderr)
+            try:
+                with patch("omo_manager.omo_task.start_codex", side_effect=RuntimeError("injected start failure")), contextlib.redirect_stderr(io.StringIO()):
+                    result = main(self.prepared_launch_argv(root, project, prompt, journal, session, tuple(hashes)))
+                self.assertEqual(1, result)
+                metadata = parse_task_metadata((root / "new_worker.md").read_text(encoding="utf-8"), root)
+                self.assertIsNotNone(metadata)
+                assert metadata is not None
+                self.assertEqual("blocked", metadata.status)
+                self.assertEqual(("Preserve this exact nonempty successor queue.",), metadata.pending_task_items)
+                panes = subprocess.run(["tmux", "list-panes", "-a", "-F", "#{session_name}:#{window_index}.#{pane_index}"], capture_output=True, text=True, check=False)
+                self.assertNotIn(f"{session}:7.0", panes.stdout.splitlines())
+                receipt = journal.with_name(f".{journal.name}.launch").read_text(encoding="utf-8")
+                self.assertIn("state: failed", receipt)
+            finally:
+                _ = subprocess.run(["tmux", "kill-session", "-t", f"={session}"], capture_output=True, text=True, check=False)
+
+    def test_prepared_successor_parse_rejects_incomplete_binding_and_dry_run(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            _ = parse_args(
+                [
+                    "--task-file", "x.md", "--tmux-session", "cfg",
+                    "--prepared-successor-journal", "/tmp/x.transaction",
+                ]
+            )
+
+    def test_prepared_cursor_process_proof_authenticates_installed_runtime_and_exact_argv(self) -> None:
+        runtime = cursor_runtime_identity()
+        exact_prompt = b"exact descriptor-captured prompt"
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = Path(tmp)
+            for pid, ppid, argv in (
+                (111, 1, ("zsh",)),
+                (
+                    222,
+                    111,
+                    (
+                        str(runtime["launcher_resolved"]),
+                        str(runtime["index_path"]),
+                        "--force",
+                        "--sandbox",
+                        "disabled",
+                        "--trust",
+                        "--workspace",
+                        "/tmp",
+                        "--model",
+                        "cursor-grok-4.6-xhigh",
+                        exact_prompt.decode(),
+                    ),
+                ),
+            ):
+                entry = proc / str(pid)
+                entry.mkdir()
+                (entry / "stat").write_text(f"{pid} (fixture) S {ppid}\n", encoding="utf-8")
+                (entry / "cmdline").write_bytes(b"\0".join(part.encode() for part in argv) + b"\0")
+                (entry / "environ").write_bytes(b"OMO_AGENT_TMUX_TARGET=cfg:7\0")
+            (proc / "222" / "exe").symlink_to(Path(str(runtime["node_path"])))
+            args = Args(Path("/tmp"), "x.md", "cfg", "7", "cursor", Path("/tmp"), "", None, True, False, "", "xhigh", (), model="cursor-grok-4.6")
+            pane = subprocess.CompletedProcess(["tmux"], 0, "111\n", "")
+            with patch("omo_manager.omo_task.tmux", return_value=pane):
+                proof = prepared_cursor_process_proof("%99", args, runtime, exact_prompt, proc_root=proc)
+            self.assertEqual(222, proof.pid)
+            self.assertEqual(Path(str(runtime["node_path"])), proof.executable)
+
+            (proc / "222" / "cmdline").write_bytes(b"/usr/bin/sleep\0 60\0")
+            with patch("omo_manager.omo_task.tmux", return_value=pane), self.assertRaisesRegex(RuntimeError, "exactly one exact installed Cursor"):
+                _ = prepared_cursor_process_proof("%99", args, runtime, exact_prompt, proc_root=proc)
+
+            (proc / "222" / "cmdline").write_bytes(
+                b"\0".join(
+                    part.encode()
+                    for part in (
+                        str(runtime["launcher_resolved"]),
+                        str(runtime["index_path"]),
+                        "--force",
+                        "--sandbox",
+                        "disabled",
+                        "--trust",
+                        "--workspace",
+                        "/tmp",
+                        "--model",
+                        "cursor-grok-4.6-xhigh",
+                        exact_prompt.decode(),
+                    )
+                )
+                + b"\0"
+            )
+            (proc / "222" / "environ").write_bytes(b"OMO_AGENT_TMUX_TARGET=cfg:7\0NODE_OPTIONS=--require=/poison.js\0")
+            with patch("omo_manager.omo_task.tmux", return_value=pane), self.assertRaisesRegex(RuntimeError, "sanitized launch environment"):
+                _ = prepared_cursor_process_proof("%99", args, runtime, exact_prompt, proc_root=proc)
+
+    def test_new_window_wait_shell_failure_cleans_real_created_window(self) -> None:
+        session = f"oprep{uuid.uuid4().hex[:10]}"
+        with tempfile.TemporaryDirectory() as tmp:
+            created = subprocess.run(["tmux", "new-session", "-d", "-s", session], capture_output=True, text=True, check=False)
+            self.assertEqual(0, created.returncode, created.stderr)
+            args = Args(Path(tmp), "x.md", session, "7", "cursor", Path(tmp), "", None, True, False, "", "xhigh", (), model="cursor-grok-4.6", require_existing_tmux_session=True)
+            try:
+                with patch("omo_manager.omo_task.wait_shell", side_effect=RuntimeError("injected readiness failure")), self.assertRaisesRegex(RuntimeError, "readiness failure"):
+                    _ = new_window_bound(args)
+                panes = subprocess.run(["tmux", "list-panes", "-a", "-F", "#{session_name}:#{window_index}.#{pane_index}"], capture_output=True, text=True, check=False)
+                self.assertNotIn(f"{session}:7.0", panes.stdout.splitlines())
+            finally:
+                _ = subprocess.run(["tmux", "kill-session", "-t", f"={session}"], capture_output=True, text=True, check=False)
+
+    def test_cleanup_uses_inventory_when_identity_query_fails(self) -> None:
+        session = f"oprep{uuid.uuid4().hex[:10]}"
+        with tempfile.TemporaryDirectory() as tmp:
+            created = subprocess.run(["tmux", "new-session", "-d", "-s", session], capture_output=True, text=True, check=False)
+            self.assertEqual(0, created.returncode, created.stderr)
+            args = Args(Path(tmp), "x.md", session, "7", "cursor", Path(tmp), "", None, True, False, "", "xhigh", (), model="cursor-grok-4.6", require_existing_tmux_session=True)
+            try:
+                window = new_window_bound(args)
+                from omo_manager import omo_task as task_module
+
+                real_tmux = task_module.tmux
+                calls = 0
+
+                def fail_first_identity(argv: list[str], check: bool = False):
+                    nonlocal calls
+                    if argv[:2] == ["display-message", "-p"] and calls == 0:
+                        calls += 1
+                        return subprocess.CompletedProcess(["tmux"], 1, "", "injected query failure")
+                    return real_tmux(argv, check)
+
+                with patch("omo_manager.omo_task.tmux", side_effect=fail_first_identity):
+                    cleanup_prepared_launch_window(window)
+                panes = subprocess.run(["tmux", "list-panes", "-a", "-F", "#{pane_id}"], capture_output=True, text=True, check=False)
+                self.assertNotIn(window.pane_id, panes.stdout.splitlines())
+            finally:
+                _ = subprocess.run(["tmux", "kill-session", "-t", f"={session}"], capture_output=True, text=True, check=False)
+
+    def test_cleanup_does_not_treat_two_failed_identity_queries_as_absence(self) -> None:
+        window = LaunchWindow("cfg:7.0", "%999", "$999")
+        failed = subprocess.CompletedProcess(["tmux"], 1, "", "injected query failure")
+        with patch("omo_manager.omo_task.tmux", return_value=failed), self.assertRaisesRegex(RuntimeError, "could not prove"):
+            cleanup_prepared_launch_window(window)
+
+    def test_cleanup_kills_only_transaction_pane_and_preserves_concurrent_real_split(self) -> None:
+        from omo_manager import omo_task as task_module
+
+        session = f"oprep{uuid.uuid4().hex[:10]}"
+        with tempfile.TemporaryDirectory() as tmp:
+            created = subprocess.run(["tmux", "new-session", "-d", "-s", session], capture_output=True, text=True, check=False)
+            self.assertEqual(0, created.returncode, created.stderr)
+            shell_runtime = pinned_shell_identity()
+            args = Args(
+                Path(tmp),
+                "worker.md",
+                session,
+                "7",
+                "cursor",
+                Path(tmp),
+                "",
+                None,
+                True,
+                False,
+                "",
+                "xhigh",
+                (),
+                model="cursor-grok-4.6",
+                require_existing_tmux_session=True,
+                prepared_runtime_path=Path("/installed/cursor"),
+                prepared_shell_path=Path(shell_runtime["bash_path"]),
+                prepared_env_path=Path(shell_runtime["env_path"]),
+                prepared_launch_environment=tuple(sorted(minimal_launch_environment().items())),
+                prepared_tmux_path=Path(pinned_tmux_identity()["tmux_path"]),
+                prepared_tmux_environment=tuple(sorted(minimal_tmux_environment().items())),
+            )
+            real_tmux = task_module.tmux_for_args
+            foreign_identity: tuple[str, str, str] | None = None
+
+            def split_immediately_before_kill(client_args: Args | None, command: list[str], check: bool = False):
+                nonlocal foreign_identity
+                if command[:2] == ["kill-pane", "-t"] and foreign_identity is None:
+                    split = real_tmux(
+                        client_args,
+                        [
+                            "split-window",
+                            "-d",
+                            "-P",
+                            "-F",
+                            "#{session_id}\t#{window_id}\t#{pane_id}",
+                            "-t",
+                            command[2],
+                            "-c",
+                            tmp,
+                            "/usr/bin/sleep",
+                            "30",
+                        ],
+                    )
+                    self.assertEqual(0, split.returncode, split.stderr)
+                    fields = split.stdout.strip().split("\t")
+                    self.assertEqual(3, len(fields))
+                    foreign_identity = (fields[0], fields[1], fields[2])
+                return real_tmux(client_args, command, check)
+
+            try:
+                window = new_window_bound(args)
+                with patch("omo_manager.omo_task.tmux_for_args", side_effect=split_immediately_before_kill):
+                    cleanup_prepared_launch_window(window, args)
+                self.assertIsNotNone(foreign_identity)
+                assert foreign_identity is not None
+                self.assertEqual((window.session_id, window.window_id), foreign_identity[:2])
+                inventory = prepared_tmux_pane_inventory(args)
+                self.assertNotIn(window.pane_id, inventory)
+                self.assertIn(foreign_identity[2], inventory)
+                self.assertEqual(window.session_id, inventory[foreign_identity[2]].session_id)
+                self.assertEqual(window.window_id, inventory[foreign_identity[2]].window_id)
+            finally:
+                _ = subprocess.run(["tmux", "kill-session", "-t", f"={session}"], capture_output=True, text=True, check=False)
+
+    def test_prepared_new_window_malformed_swapped_output_never_kills_existing_pane(self) -> None:
+        shell_runtime = pinned_shell_identity()
+        args = Args(
+            Path("/tmp"),
+            "worker.md",
+            "cfg",
+            "7",
+            "cursor",
+            Path("/tmp"),
+            "",
+            None,
+            True,
+            False,
+            "",
+            "xhigh",
+            (),
+            model="cursor-grok-4.6",
+            require_existing_tmux_session=True,
+            prepared_runtime_path=Path("/installed/cursor"),
+            prepared_shell_path=Path(shell_runtime["bash_path"]),
+            prepared_env_path=Path(shell_runtime["env_path"]),
+            prepared_launch_environment=tuple(sorted(minimal_launch_environment().items())),
+            prepared_tmux_path=Path(pinned_tmux_identity()["tmux_path"]),
+            prepared_tmux_environment=tuple(sorted(minimal_tmux_environment().items())),
+        )
+        existing_inventory = f"$1\t@1\t%1\tcfg:0.0\t{os.getpid()}\t0\n"
+
+        def fake_tmux(_args: Args | None, argv: list[str], check: bool = False):
+            if argv[0] == "list-panes":
+                return subprocess.CompletedProcess(["tmux"], 0, existing_inventory, "")
+            if argv[0] == "new-window":
+                return subprocess.CompletedProcess(["tmux"], 0, "$1\tcfg:0\t%1\n", "")
+            self.fail(f"unexpected or destructive tmux call: {argv}")
+
+        with (
+            patch("omo_manager.omo_task.launch_session", return_value=LaunchSession("cfg", "$1", False)),
+            patch("omo_manager.omo_task.tmux_for_args", side_effect=fake_tmux) as tmux_call,
+            self.assertRaisesRegex(RuntimeError, "no existing pane was killed"),
+        ):
+            _ = new_window_bound(args)
+        self.assertFalse(any(call.args[1][0].startswith("kill-") for call in tmux_call.call_args_list))
+
+    def test_prepared_successor_launch_rejects_prompt_swap_and_duplicate_owner_before_tmux(self) -> None:
+        session = f"oprep{uuid.uuid4().hex[:10]}"
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root, project, prompt, journal, *hashes = self.make_prepared_successor(base, session)
+            prompt.write_text("swapped after preparation\n", encoding="utf-8")
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(1, main(self.prepared_launch_argv(root, project, prompt, journal, session, tuple(hashes))))
+            metadata = parse_task_metadata((root / "new_worker.md").read_text(encoding="utf-8"), root)
+            self.assertIsNotNone(metadata)
+            assert metadata is not None
+            self.assertEqual("blocked", metadata.status)
+            self.assertFalse(journal.with_name(f".{journal.name}.launch").exists())
+
+    def test_prepared_successor_rejects_every_unbound_launch_input_and_nested_root(self) -> None:
+        session = f"oprep{uuid.uuid4().hex[:10]}"
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root, project, prompt, journal, *hashes = self.make_prepared_successor(base, session)
+            base_args = parse_args(self.prepared_launch_argv(root, project, prompt, journal, session, tuple(hashes)))
+            other_workdir = base / "other-project"
+            other_workdir.mkdir()
+            prelaunch = base / "prelaunch.sh"
+            prelaunch.write_text(":\n", encoding="utf-8")
+            other_prompt = base / "other-prompt.txt"
+            other_prompt.write_text("other\n", encoding="utf-8")
+            nested = root / "nested"
+            nested.mkdir()
+            changes = {
+                "workdir": replace(base_args, workdir=other_workdir),
+                "model": replace(base_args, model="cursor-other"),
+                "reasoning": replace(base_args, reasoning_effort="medium"),
+                "flags": replace(base_args, codex_flags=("--profile", "other")),
+                "caller": replace(base_args, amh_caller_agent="other-agent"),
+                "window-name": replace(base_args, window_name="other-name"),
+                "session": replace(base_args, tmux_session="othercfg"),
+                "window": replace(base_args, tmux_window="8"),
+                "prelaunch": replace(base_args, prelaunch_source=prelaunch),
+                "tool": replace(base_args, tool="codex"),
+                "task": replace(base_args, task_file="other.md"),
+                "manager": replace(base_args, manager_target=f"{session}:2.0"),
+                "prompt": replace(base_args, prompt_file=other_prompt),
+                "root": replace(base_args, root=nested),
+                "allow-session": replace(base_args, require_existing_tmux_session=False, allow_new_tmux_session=True),
+                "no-link": replace(base_args, no_link=False),
+                "resume": replace(base_args, resume_idle=True, session_id="session-id"),
+                "human-input": replace(base_args, human_email_text="authoritative but unbound"),
+                "internal-runtime": replace(base_args, prepared_runtime_path=Path(str(cursor_runtime_identity()["launcher_resolved"]))),
+            }
+            for label, changed in changes.items():
+                with self.subTest(label=label), patch("omo_manager.omo_task.new_window_bound") as launch, self.assertRaisesRegex(RuntimeError, "launch-manifest binding"):
+                    _ = prepared_successor_launch(changed)
+                launch.assert_not_called()
+            self.assertFalse(journal.with_name(f".{journal.name}.launch").exists())
+
+    def test_prepared_successor_rejects_journal_mode_and_launch_manifest_swap(self) -> None:
+        session = f"oprep{uuid.uuid4().hex[:10]}"
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root, project, prompt, journal, *hashes = self.make_prepared_successor(base, session)
+            args = parse_args(self.prepared_launch_argv(root, project, prompt, journal, session, tuple(hashes)))
+            journal.chmod(0o644)
+            with self.assertRaisesRegex(Exception, "0600"):
+                _ = prepared_successor_launch(args)
+            self.assertFalse(journal.with_name(f".{journal.name}.launch").exists())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root, project, prompt, journal, *hashes = self.make_prepared_successor(base, session)
+            args = parse_args(self.prepared_launch_argv(root, project, prompt, journal, session, tuple(hashes)))
+            manifest = root / ".omo-worker-successor-launch.json"
+            manifest.write_bytes(manifest.read_bytes() + b" ")
+            with self.assertRaisesRegex(Exception, "swapped"):
+                _ = prepared_successor_launch(args)
+            self.assertFalse(journal.with_name(f".{journal.name}.launch").exists())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root, project, prompt, journal, *hashes = self.make_prepared_successor(base, session)
+            args = parse_args(self.prepared_launch_argv(root, project, prompt, journal, session, tuple(hashes)))
+            manifest = root / ".omo-worker-successor-launch.json"
+            manifest.chmod(0o644)
+            with self.assertRaisesRegex(Exception, "0600"):
+                _ = prepared_successor_launch(args)
+            self.assertFalse(journal.with_name(f".{journal.name}.launch").exists())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root, project, prompt, journal, *hashes = self.make_prepared_successor(base, session)
+            duplicate = (root / "new_worker.md").read_text(encoding="utf-8").replace("managerat: ", "managerat: other:1 # ")
+            (root / "duplicate.md").write_text(duplicate, encoding="utf-8")
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(1, main(self.prepared_launch_argv(root, project, prompt, journal, session, tuple(hashes))))
+            self.assertFalse(journal.with_name(f".{journal.name}.launch").exists())
+
+    def test_prepared_shell_launch_clears_poisoned_ambient_environment(self) -> None:
+        shell = pinned_shell_identity()
+        environment = minimal_launch_environment()
+        args = Args(
+            Path("/tmp"),
+            "worker.md",
+            "cfg",
+            "7",
+            "cursor",
+            Path("/tmp"),
+            "",
+            Path("/tmp/prompt"),
+            True,
+            False,
+            "",
+            "xhigh",
+            (),
+            model="cursor-grok-4.6",
+            amh_caller_agent="bound-caller",
+            prepared_runtime_path=Path("/installed/cursor"),
+            prepared_shell_path=Path(shell["bash_path"]),
+            prepared_env_path=Path(shell["env_path"]),
+            prepared_launch_environment=tuple(sorted(environment.items())),
+        )
+        poison = {
+            "PATH": "/poison/bin",
+            "BASH_ENV": "/poison/bash-env",
+            "ENV": "/poison/sh-env",
+            "NODE_OPTIONS": "--require=/poison/node.js",
+            "LD_PRELOAD": "/poison/library.so",
+            "PYTHONPATH": "/poison/python",
+            "RUSTC_WRAPPER": "/poison/rustc",
+        }
+        runtime_before = cursor_runtime_identity()
+        with patch.dict(os.environ, poison, clear=False):
+            command = prepared_shell_launch_command("/installed/cursor --flag", "cfg:7.0", args, "[marker]")
+            runtime_after = cursor_runtime_identity()
+        self.assertEqual(runtime_before, runtime_after)
+        self.assertTrue(command.startswith(f"exec {shell['env_path']} -i "))
+        self.assertIn("PATH=/usr/bin:/bin", command)
+        self.assertIn("AMH_CALLER=agent:bound-caller", command)
+        for key, value in poison.items():
+            if key != "PATH":
+                self.assertNotIn(key, command)
+            self.assertNotIn(value, command)
+
+    def test_prepared_tmux_client_uses_pinned_executable_and_sanitized_environment(self) -> None:
+        tmux_runtime = pinned_tmux_identity()
+        environment = minimal_tmux_environment()
+        args = Args(
+            Path("/tmp"),
+            "worker.md",
+            "cfg",
+            "7",
+            "cursor",
+            Path("/tmp"),
+            "",
+            Path("/tmp/prompt"),
+            True,
+            False,
+            "",
+            "xhigh",
+            (),
+            model="cursor-grok-4.6",
+            prepared_runtime_path=Path("/installed/cursor"),
+            prepared_tmux_path=Path(tmux_runtime["tmux_path"]),
+            prepared_tmux_environment=tuple(sorted(environment.items())),
+        )
+        poison = {
+            "PATH": "/poison/bin",
+            "BASH_ENV": "/poison/bash-env",
+            "NODE_OPTIONS": "--require=/poison/node.js",
+            "LD_PRELOAD": "/poison/library.so",
+            "TMUX_TMPDIR": "/poison/socket",
+        }
+        completed = subprocess.CompletedProcess(["tmux"], 0, "", "")
+        with patch.dict(os.environ, poison, clear=False), patch("omo_manager.omo_task.subprocess.run", return_value=completed) as run:
+            self.assertIs(completed, tmux_for_args(args, ["list-panes", "-a"]))
+        positional, keywords = run.call_args
+        self.assertEqual([tmux_runtime["tmux_path"], "list-panes", "-a"], positional[0])
+        self.assertEqual(environment, keywords["env"])
+        self.assertEqual(Path("/"), keywords["cwd"])
+        self.assertEqual(10, keywords["timeout"])
+        for key, value in poison.items():
+            if key != "PATH":
+                self.assertNotIn(key, keywords["env"])
+            self.assertNotIn(value, keywords["env"].values())
+
+    def test_prepared_tmux_real_client_and_pane_reject_poisoned_parent_environment(self) -> None:
+        tmux_runtime = pinned_tmux_identity()
+        tmux_environment = minimal_tmux_environment()
+        launch_environment = minimal_launch_environment()
+        shell_runtime = pinned_shell_identity()
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            socket = base / "prepared-tmux.sock"
+            session = f"oprep{uuid.uuid4().hex[:10]}"
+            creation_token = uuid.uuid4().hex
+            args = Args(
+                base,
+                "worker.md",
+                session,
+                "0",
+                "cursor",
+                base,
+                "",
+                None,
+                True,
+                False,
+                "",
+                "xhigh",
+                (),
+                model="cursor-grok-4.6",
+                require_existing_tmux_session=True,
+                prepared_runtime_path=Path("/installed/cursor"),
+                prepared_shell_path=Path(shell_runtime["bash_path"]),
+                prepared_env_path=Path(shell_runtime["env_path"]),
+                prepared_launch_environment=tuple(sorted(launch_environment.items())),
+                prepared_tmux_path=Path(tmux_runtime["tmux_path"]),
+                prepared_tmux_environment=tuple(sorted(tmux_environment.items())),
+            )
+            bash_env = base / "poison-bash-env"
+            poison_marker = base / "poison-ran"
+            bash_env.write_text(f"/usr/bin/touch {poison_marker}\n", encoding="utf-8")
+            poison = {
+                "PATH": "/poison/bin",
+                "BASH_ENV": str(bash_env),
+                "ENV": "/poison/sh-env",
+                "NODE_OPTIONS": "--require=/poison/node.js",
+                "NODE_PATH": "/poison/node-path",
+                "LD_PRELOAD": "/poison/library.so",
+                "LD_LIBRARY_PATH": "/poison/libraries",
+                "PYTHONHOME": "/poison/python-home",
+                "PYTHONPATH": "/poison/python",
+                "RUBYOPT": "-r/poison/ruby.rb",
+                "RUSTC_WRAPPER": "/poison/rustc",
+                "TMUX_TMPDIR": "/poison/socket",
+            }
+            created = False
+            try:
+                with patch.dict(os.environ, poison, clear=False):
+                    result = tmux_for_args(
+                        args,
+                        [
+                            "-S",
+                            str(socket),
+                            "-f",
+                            "/dev/null",
+                            "new-session",
+                            "-d",
+                            "-P",
+                            "-F",
+                            "#{session_id}\t#{pane_id}\t#{pane_pid}",
+                            "-s",
+                            session,
+                            "-n",
+                            "zero",
+                            "-c",
+                            str(base),
+                            "-e",
+                            f"OMO_PREPARED_WINDOW_TOKEN={creation_token}",
+                            *prepared_pane_shell_argv(args, creation_token),
+                        ],
+                    )
+                    self.assertEqual(0, result.returncode, result.stderr)
+                    created = True
+                    fields = result.stdout.strip().split("\t")
+                    self.assertEqual(3, len(fields))
+                    pane_pid = int(fields[2])
+                    server = tmux_for_args(args, ["-S", str(socket), "show-environment", "-g"])
+                    self.assertEqual(0, server.returncode, server.stderr)
+                    server_environment = dict(line.split("=", 1) for line in server.stdout.splitlines())
+                    self.assertEqual(tmux_environment, server_environment)
+                    pane_parts = Path(f"/proc/{pane_pid}/environ").read_bytes().rstrip(b"\0").split(b"\0")
+                    pane_environment = dict(part.decode().split("=", 1) for part in pane_parts)
+                    expected_pane_environment = dict(launch_environment)
+                    expected_pane_environment["OMO_PREPARED_WINDOW_TOKEN"] = creation_token
+                    self.assertEqual(expected_pane_environment, pane_environment)
+                    for key, value in poison.items():
+                        if key not in tmux_environment:
+                            self.assertNotIn(key, server_environment)
+                        if key not in expected_pane_environment:
+                            self.assertNotIn(key, pane_environment)
+                        self.assertNotIn(value, server_environment.values())
+                        self.assertNotIn(value, pane_environment.values())
+                    self.assertFalse(poison_marker.exists())
+            finally:
+                if created:
+                    stopped = tmux_for_args(args, ["-S", str(socket), "kill-server"])
+                    self.assertEqual(0, stopped.returncode, stopped.stderr)
+                socket.unlink(missing_ok=True)
+                self.assertFalse(socket.exists())
+
+    def test_prepared_new_window_timeout_after_real_server_create_cleans_exact_window(self) -> None:
+        from omo_manager import omo_task as task_module
+
+        session = f"oprep{uuid.uuid4().hex[:10]}"
+        with tempfile.TemporaryDirectory() as tmp:
+            created = subprocess.run(["tmux", "new-session", "-d", "-s", session], capture_output=True, text=True, check=False)
+            self.assertEqual(0, created.returncode, created.stderr)
+            tmux_runtime = pinned_tmux_identity()
+            shell_runtime = pinned_shell_identity()
+            args = Args(
+                Path(tmp),
+                "worker.md",
+                session,
+                "7",
+                "cursor",
+                Path(tmp),
+                "",
+                None,
+                True,
+                False,
+                "",
+                "xhigh",
+                (),
+                model="cursor-grok-4.6",
+                require_existing_tmux_session=True,
+                prepared_runtime_path=Path("/installed/cursor"),
+                prepared_shell_path=Path(shell_runtime["bash_path"]),
+                prepared_env_path=Path(shell_runtime["env_path"]),
+                prepared_launch_environment=tuple(sorted(minimal_launch_environment().items())),
+                prepared_tmux_path=Path(tmux_runtime["tmux_path"]),
+                prepared_tmux_environment=tuple(sorted(minimal_tmux_environment().items())),
+            )
+            real_tmux = task_module.tmux_for_args
+            injected = False
+
+            def create_then_timeout(client_args: Args | None, command: list[str], check: bool = False):
+                nonlocal injected
+                if command[0] == "new-window" and not injected:
+                    injected = True
+                    result = real_tmux(client_args, command, check)
+                    self.assertEqual(0, result.returncode, result.stderr)
+                    raise subprocess.TimeoutExpired(command, 10, output=result.stdout, stderr=result.stderr)
+                return real_tmux(client_args, command, check)
+
+            try:
+                with patch("omo_manager.omo_task.tmux_for_args", side_effect=create_then_timeout), self.assertRaisesRegex(RuntimeError, "tmux new-window failed"):
+                    _ = new_window_bound(args)
+                inventory = prepared_tmux_pane_inventory(args)
+                self.assertFalse(any(identity.target == f"{session}:7.0" for identity in inventory.values()))
+                self.assertTrue(any(identity.target == f"{session}:0.0" for identity in inventory.values()))
+            finally:
+                _ = subprocess.run(["tmux", "kill-session", "-t", f"={session}"], capture_output=True, text=True, check=False)
+
+    def test_prepared_new_window_timeout_with_two_new_panes_preserves_ambiguous_state(self) -> None:
+        from omo_manager import omo_task as task_module
+
+        session = f"oprep{uuid.uuid4().hex[:10]}"
+        with tempfile.TemporaryDirectory() as tmp:
+            created = subprocess.run(["tmux", "new-session", "-d", "-s", session], capture_output=True, text=True, check=False)
+            self.assertEqual(0, created.returncode, created.stderr)
+            tmux_runtime = pinned_tmux_identity()
+            shell_runtime = pinned_shell_identity()
+            args = Args(
+                Path(tmp),
+                "worker.md",
+                session,
+                "7",
+                "cursor",
+                Path(tmp),
+                "",
+                None,
+                True,
+                False,
+                "",
+                "xhigh",
+                (),
+                model="cursor-grok-4.6",
+                require_existing_tmux_session=True,
+                prepared_runtime_path=Path("/installed/cursor"),
+                prepared_shell_path=Path(shell_runtime["bash_path"]),
+                prepared_env_path=Path(shell_runtime["env_path"]),
+                prepared_launch_environment=tuple(sorted(minimal_launch_environment().items())),
+                prepared_tmux_path=Path(tmux_runtime["tmux_path"]),
+                prepared_tmux_environment=tuple(sorted(minimal_tmux_environment().items())),
+            )
+            real_tmux = task_module.tmux_for_args
+            injected = False
+
+            def create_two_then_timeout(client_args: Args | None, command: list[str], check: bool = False):
+                nonlocal injected
+                if command[0] == "new-window" and not injected:
+                    injected = True
+                    result = real_tmux(client_args, command, check)
+                    self.assertEqual(0, result.returncode, result.stderr)
+                    foreign = real_tmux(client_args, ["new-window", "-d", "-t", f"={session}:8", "-n", "foreign", "-c", tmp])
+                    self.assertEqual(0, foreign.returncode, foreign.stderr)
+                    raise subprocess.TimeoutExpired(command, 10, output=result.stdout, stderr=result.stderr)
+                return real_tmux(client_args, command, check)
+
+            try:
+                with (
+                    patch("omo_manager.omo_task.tmux_for_args", side_effect=create_two_then_timeout),
+                    self.assertRaisesRegex(RuntimeError, "reconciliation failed closed"),
+                ):
+                    _ = new_window_bound(args)
+                targets = {identity.target for identity in prepared_tmux_pane_inventory(args).values()}
+                self.assertIn(f"{session}:7.0", targets)
+                self.assertIn(f"{session}:8.0", targets)
+                self.assertIn(f"{session}:0.0", targets)
+            finally:
+                _ = subprocess.run(["tmux", "kill-session", "-t", f"={session}"], capture_output=True, text=True, check=False)
+
+    def test_prepared_successor_receipt_commit_failure_rolls_back_task_and_real_window(self) -> None:
+        session = f"oprep{uuid.uuid4().hex[:10]}"
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root, project, prompt, journal, *hashes = self.make_prepared_successor(base, session)
+            created = subprocess.run(["tmux", "new-session", "-d", "-s", session], capture_output=True, text=True, check=False)
+            self.assertEqual(0, created.returncode, created.stderr)
+            from omo_manager import omo_manager_replace as replace_module
+
+            real_replace = replace_module.replace_snapshot
+            runtime = cursor_runtime_identity()
+            proof = CursorProcessProof(91234, Path(str(runtime["node_path"])), (str(runtime["launcher_resolved"]),), "a" * 64)
+
+            def fail_committed_receipt(expected, data: bytes, label: str):
+                if label == "prepared-successor launch receipt" and b"state: committed\n" in data:
+                    raise OSError("injected receipt commit failure")
+                return real_replace(expected, data, label)
+
+            try:
+                with (
+                    patch("omo_manager.omo_task.start_codex"),
+                    patch("omo_manager.omo_task.prepared_cursor_process_proof", return_value=proof),
+                    patch.object(replace_module, "replace_snapshot", side_effect=fail_committed_receipt),
+                    contextlib.redirect_stderr(io.StringIO()),
+                ):
+                    result = main(self.prepared_launch_argv(root, project, prompt, journal, session, tuple(hashes)))
+                self.assertEqual(1, result)
+                metadata = parse_task_metadata((root / "new_worker.md").read_text(encoding="utf-8"), root)
+                self.assertIsNotNone(metadata)
+                assert metadata is not None
+                self.assertEqual("blocked", metadata.status)
+                self.assertTrue(metadata.pending_task_items)
+                panes = subprocess.run(["tmux", "list-panes", "-a", "-F", "#{session_name}:#{window_index}.#{pane_index}"], capture_output=True, text=True, check=False)
+                self.assertNotIn(f"{session}:7.0", panes.stdout.splitlines())
+                self.assertIn("state: failed", journal.with_name(f".{journal.name}.launch").read_text(encoding="utf-8"))
+            finally:
+                _ = subprocess.run(["tmux", "kill-session", "-t", f"={session}"], capture_output=True, text=True, check=False)
+
+    def test_prepared_successor_recovers_authenticated_crashes_before_and_after_task_publication(self) -> None:
+        class InjectedCrash(BaseException):
+            pass
+
+        for phase in ("cursor-started-unrecorded", "started", "task-published", "published"):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as tmp:
+                session = f"oprep{uuid.uuid4().hex[:10]}"
+                base = Path(tmp)
+                root, project, prompt, journal, *hashes = self.make_prepared_successor(base, session)
+                args = parse_args(self.prepared_launch_argv(root, project, prompt, journal, session, tuple(hashes)))
+                created = subprocess.run(["tmux", "new-session", "-d", "-s", session], capture_output=True, text=True, check=False)
+                self.assertEqual(0, created.returncode, created.stderr)
+                runtime = cursor_runtime_identity()
+                proof = CursorProcessProof(91234, Path(str(runtime["node_path"])), (str(runtime["launcher_resolved"]),), "a" * 64)
+
+                def crash_at(boundary: str) -> None:
+                    if boundary == phase:
+                        raise InjectedCrash(boundary)
+
+                try:
+                    with (
+                        patch("omo_manager.omo_task.start_codex"),
+                        patch("omo_manager.omo_task.prepared_cursor_process_proof", return_value=proof),
+                        patch("omo_manager.omo_task.maybe_crash_prepared_launch", side_effect=crash_at),
+                        self.assertRaises(InjectedCrash),
+                    ):
+                        _ = prepared_successor_launch(args)
+                    receipt = journal.with_name(f".{journal.name}.launch")
+                    self.assertNotIn("state: committed", receipt.read_text(encoding="utf-8"))
+                    with patch("omo_manager.omo_task.prepared_cursor_process_proof", return_value=proof):
+                        path, target = prepared_successor_launch(args)
+                    self.assertEqual(root / "new_worker.md", path)
+                    self.assertEqual(f"{session}:7.0", target)
+                    metadata = parse_task_metadata(path.read_text(encoding="utf-8"), root)
+                    self.assertIsNotNone(metadata)
+                    assert metadata is not None
+                    self.assertEqual("running", metadata.status)
+                    self.assertEqual(("Preserve this exact nonempty successor queue.",), metadata.pending_task_items)
+                    self.assertIn("state: committed", receipt.read_text(encoding="utf-8"))
+                finally:
+                    _ = subprocess.run(["tmux", "kill-session", "-t", f"={session}"], capture_output=True, text=True, check=False)
+
+    def test_prepared_successor_contains_window_phase_crash_without_cursor(self) -> None:
+        class InjectedCrash(BaseException):
+            pass
+
+        session = f"oprep{uuid.uuid4().hex[:10]}"
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root, project, prompt, journal, *hashes = self.make_prepared_successor(base, session)
+            args = parse_args(self.prepared_launch_argv(root, project, prompt, journal, session, tuple(hashes)))
+            created = subprocess.run(["tmux", "new-session", "-d", "-s", session], capture_output=True, text=True, check=False)
+            self.assertEqual(0, created.returncode, created.stderr)
+            try:
+                with (
+                    patch("omo_manager.omo_task.maybe_crash_prepared_launch", side_effect=lambda phase: (_ for _ in ()).throw(InjectedCrash()) if phase == "window" else None),
+                    self.assertRaises(InjectedCrash),
+                ):
+                    _ = prepared_successor_launch(args)
+                with (
+                    patch("omo_manager.omo_task.prepared_cursor_process_proof", side_effect=RuntimeError("no exact Cursor process")),
+                    self.assertRaisesRegex(RuntimeError, "contained"),
+                ):
+                    _ = prepared_successor_launch(args)
+                metadata = parse_task_metadata((root / "new_worker.md").read_text(encoding="utf-8"), root)
+                self.assertIsNotNone(metadata)
+                assert metadata is not None
+                self.assertEqual("blocked", metadata.status)
+                self.assertTrue(metadata.pending_task_items)
+                self.assertIn("state: failed", journal.with_name(f".{journal.name}.launch").read_text(encoding="utf-8"))
+                panes = subprocess.run(
+                    ["tmux", "list-panes", "-a", "-F", "#{session_name}:#{window_index}.#{pane_index}"],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                self.assertNotIn(f"{session}:7.0", panes.stdout.splitlines())
+            finally:
+                _ = subprocess.run(["tmux", "kill-session", "-t", f"={session}"], capture_output=True, text=True, check=False)
+
+    def test_prepared_successor_contains_post_publication_duplicate_or_malformed_raw_owner_race(self) -> None:
+        from omo_manager import omo_task_status as status_module
+        from omo_manager import omo_worker_successor as successor_module
+
+        for race in ("duplicate", "malformed", "authoritative-malformed"):
+            with self.subTest(race=race), tempfile.TemporaryDirectory() as tmp:
+                session = f"oprep{uuid.uuid4().hex[:10]}"
+                base = Path(tmp)
+                root, project, prompt, journal, *hashes = self.make_prepared_successor(base, session)
+                args = parse_args(self.prepared_launch_argv(root, project, prompt, journal, session, tuple(hashes)))
+                created = subprocess.run(["tmux", "new-session", "-d", "-s", session], capture_output=True, text=True, check=False)
+                self.assertEqual(0, created.returncode, created.stderr)
+                runtime = cursor_runtime_identity()
+                proof = CursorProcessProof(91234, Path(str(runtime["node_path"])), (str(runtime["launcher_resolved"]),), "a" * 64)
+                real_active_owners = successor_module.active_owners
+                real_authoritative = status_module.authoritative_active_target_task_paths
+                calls = 0
+                authoritative_calls = 0
+
+                def raced_active_owners(scan_root: Path, target: str, overrides: dict[Path, bytes]):
+                    nonlocal calls
+                    calls += 1
+                    if calls < 3:
+                        return real_active_owners(scan_root, target, overrides)
+                    if race == "malformed":
+                        raise RuntimeError("injected malformed raw ownership record")
+                    if race == "duplicate":
+                        return (root / "new_worker.md", root / "duplicate.md")
+                    return real_active_owners(scan_root, target, overrides)
+
+                def raced_authoritative(scan_root: Path, target: str):
+                    nonlocal authoritative_calls
+                    authoritative_calls += 1
+                    if race == "authoritative-malformed" and authoritative_calls >= 3:
+                        raise RuntimeError("injected malformed authoritative ownership record")
+                    return real_authoritative(scan_root, target)
+
+                try:
+                    with (
+                        patch("omo_manager.omo_task.start_codex"),
+                        patch("omo_manager.omo_task.prepared_cursor_process_proof", return_value=proof),
+                        patch.object(successor_module, "active_owners", side_effect=raced_active_owners),
+                        patch.object(status_module, "authoritative_active_target_task_paths", side_effect=raced_authoritative),
+                        self.assertRaisesRegex(RuntimeError, "dual sole-ownership proof"),
+                    ):
+                        _ = prepared_successor_launch(args)
+                    metadata = parse_task_metadata((root / "new_worker.md").read_text(encoding="utf-8"), root)
+                    self.assertIsNotNone(metadata)
+                    assert metadata is not None
+                    self.assertEqual("blocked", metadata.status)
+                    self.assertTrue(metadata.pending_task_items)
+                    self.assertIn("state: failed", journal.with_name(f".{journal.name}.launch").read_text(encoding="utf-8"))
+                    panes = subprocess.run(
+                        ["tmux", "list-panes", "-a", "-F", "#{session_name}:#{window_index}.#{pane_index}"],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    self.assertNotIn(f"{session}:7.0", panes.stdout.splitlines())
+                finally:
+                    _ = subprocess.run(["tmux", "kill-session", "-t", f"={session}"], capture_output=True, text=True, check=False)
 
 
 if __name__ == "__main__":
