@@ -42,6 +42,22 @@ def latest_visible_turn(lines: Sequence[str]) -> VisibleTurn | None:
     return VisibleTurn(turn_lines, digest)
 
 
+def recent_visible_turns(lines: Sequence[str], limit: int = 2) -> tuple[VisibleTurn, ...]:
+    """Return the latest bounded set of completed visible turns."""
+
+    turns: list[VisibleTurn] = []
+    cursor = len(lines)
+    while cursor > 0 and len(turns) < limit:
+        turn = latest_visible_turn(lines[:cursor])
+        if turn is None:
+            break
+        turns.append(turn)
+        first_line = turn.lines[0]
+        cursor = next((index for index in range(cursor - 1, -1, -1) if lines[index].rstrip() == first_line), 0)
+    turns.reverse()
+    return tuple(turns)
+
+
 def displayed_shell_commands(turn: VisibleTurn) -> tuple[str, ...]:
     """Extract only commands rendered as executed shell-tool activity."""
 
@@ -100,7 +116,7 @@ def wrapper_command_index(name: str, tokens: list[str], index: int) -> int:
     return candidate
 
 
-def command_invokes_report_helper(command: str) -> bool:
+def command_invokes_report_helper(command: str, report_helpers: frozenset[str] = frozenset(REPORT_HELPERS)) -> bool:
     """Recognize a helper in an executable position, not as quoted prose."""
 
     try:
@@ -125,16 +141,16 @@ def command_invokes_report_helper(command: str) -> bool:
             index += 1
             continue
         name = helper_name(token)
-        if name in REPORT_HELPERS:
+        if name in report_helpers:
             return True
         if name in SHELLS:
             candidate = index + 1
             while candidate < len(tokens) and tokens[candidate].startswith("-") and tokens[candidate] not in {"-c", "-lc"}:
                 candidate += 2 if tokens[candidate] in SHELL_OPTIONS_WITH_VALUE else 1
-            if candidate < len(tokens) and helper_name(tokens[candidate]) in REPORT_HELPERS:
+            if candidate < len(tokens) and helper_name(tokens[candidate]) in report_helpers:
                 return True
             script_index = next((candidate for candidate in range(index + 1, len(tokens)) if tokens[candidate] in {"-c", "-lc"}), -1)
-            if script_index >= 0 and script_index + 1 < len(tokens) and command_invokes_report_helper(tokens[script_index + 1]):
+            if script_index >= 0 and script_index + 1 < len(tokens) and command_invokes_report_helper(tokens[script_index + 1], report_helpers):
                 return True
         if name in PYTHONS or name == "uv":
             candidate = index + 1
@@ -144,17 +160,17 @@ def command_invokes_report_helper(command: str) -> bool:
                 candidate += 1
                 while candidate < len(tokens) and tokens[candidate].startswith("-"):
                     candidate += 1
-            if candidate < len(tokens) and helper_name(tokens[candidate]) in REPORT_HELPERS:
+            if candidate < len(tokens) and helper_name(tokens[candidate]) in report_helpers:
                 return True
         if name in {"xargs"}:
             candidate = index + 1
             while candidate < len(tokens) and tokens[candidate].startswith("-"):
                 candidate += 1
-            if candidate < len(tokens) and helper_name(tokens[candidate]) in REPORT_HELPERS:
+            if candidate < len(tokens) and helper_name(tokens[candidate]) in report_helpers:
                 return True
         if name in {"find"}:
             for candidate in range(index + 1, len(tokens) - 1):
-                if tokens[candidate] in {"-exec", "-execdir"} and helper_name(tokens[candidate + 1]) in REPORT_HELPERS:
+                if tokens[candidate] in {"-exec", "-execdir"} and helper_name(tokens[candidate + 1]) in report_helpers:
                     return True
         if name in PREFIX_WRAPPERS:
             index = wrapper_command_index(name, tokens, index)

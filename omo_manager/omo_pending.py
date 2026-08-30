@@ -32,6 +32,8 @@ from omo_manager.omo_task_edit import replace_if_unchanged
 from omo_manager.omo_task_lock import task_target_lock
 from omo_manager.omo_task_metadata import PendingTaskItem
 from omo_manager.omo_blocking_actor import request as blocking_request
+from omo_manager.omo_completion_email import plan_completion_email
+from omo_manager.omo_completion_email import require_owner_completion
 
 
 @dataclass(frozen=True)
@@ -44,6 +46,8 @@ class Args:
     item_id: str = ""
     outcome: str = ""
     notice_id: str = ""
+    answer_subject_file: Path | None = None
+    answer_message_file: Path | None = None
 
 
 def pending_item_state(item: PendingTaskItem) -> str:
@@ -62,11 +66,22 @@ def parse_args(argv: list[str]) -> Args:
     replace.add_argument("--old-item")
     replace.add_argument("--item-id")
     replace.add_argument("--new-item", required=True)
-    remove = sub.add_parser("remove", help="Remove verified completed or cancelled work.")
+    remove = sub.add_parser(
+        "remove",
+        help="Remove verified completed or cancelled work.",
+        description=(
+            "Remove verified completed or cancelled work. To answer a human question and remove "
+            "its pending item with one email, pass both --answer-subject-file and "
+            "--answer-message-file; do not send the answer separately with email_me.py. The answer "
+            "should keep only information the human still needs now."
+        ),
+    )
     remove.add_argument("--item", action="append")
     remove.add_argument("--item-id")
     remove.add_argument("--outcome", choices=("completed", "cancelled"))
     remove.add_argument("--evidence", required=True)
+    remove.add_argument("--answer-subject-file", type=Path, help="One-line email subject for the combined human answer.")
+    remove.add_argument("--answer-message-file", type=Path, help="Email body for the combined human answer.")
     wake_ack = sub.add_parser("wake-ack", help="Acknowledge one durable ready-item notice.")
     wake_ack.add_argument("--notice-id", required=True)
     parsed = parser.parse_args(argv)
@@ -84,11 +99,33 @@ def parse_args(argv: list[str]) -> Args:
             parser.error("remove with --item-id requires --outcome.")
         if parsed.item and parsed.outcome:
             parser.error("legacy --item removal does not accept --outcome.")
+        if bool(parsed.answer_subject_file) != bool(parsed.answer_message_file):
+            parser.error("remove requires both --answer-subject-file and --answer-message-file when either is used.")
         items = normalized_items(tuple(parsed.item or ()))
-        return Args("remove", items, evidence=normalized_comment_message(parsed.evidence), item_id=parsed.item_id or "", outcome=parsed.outcome or "")
+        return Args(
+            "remove",
+            items,
+            evidence=normalized_comment_message(parsed.evidence),
+            item_id=parsed.item_id or "",
+            outcome=parsed.outcome or "",
+            answer_subject_file=parsed.answer_subject_file,
+            answer_message_file=parsed.answer_message_file,
+        )
     if parsed.command == "wake-ack":
         return Args("wake-ack", notice_id=parsed.notice_id)
     return Args("list")
+
+
+def human_answer(args: Args) -> tuple[str, str]:
+    """Read the optional combined answer before changing the pending queue."""
+
+    if args.answer_subject_file is None or args.answer_message_file is None:
+        return "", ""
+    subject = args.answer_subject_file.read_text(encoding="utf-8").rstrip("\n")
+    body = args.answer_message_file.read_text(encoding="utf-8")
+    if not subject or not body.strip():
+        raise ValueError("combined human answer requires a non-empty subject and message")
+    return subject, body
 
 
 def run(args: Args, root: Path = DEFAULT_ROOT) -> int:
@@ -112,6 +149,7 @@ def run(args: Args, root: Path = DEFAULT_ROOT) -> int:
                 for item in current.pending_task_items:
                     print(item)
             return 0
+        answer_subject, answer_body = human_answer(args)
         if current.version == "v1.0.0" and v2_enabled(root):
             raise BlockingError("v1 pending writes are disabled after v2 enablement")
         if current.version == "v2.0.0":
@@ -139,9 +177,38 @@ def run(args: Args, root: Path = DEFAULT_ROOT) -> int:
                     _ = blocking_request(root, {"operation": "reconcile"})
                     print(f"pending item {args.item_id} was already resolved as {args.outcome}")
                     return 0
+                matching = [item for item in current.pending_items if item.id == args.item_id]
+                if len(matching) != 1:
+                    raise BlockingError("pending item was not found exactly once")
+                email = plan_completion_email(
+                    root,
+                    path,
+                    text,
+                    f"pending item {args.outcome}",
+                    items=(matching[0].text,),
+                    evidence=args.evidence,
+                    human_subject=answer_subject,
+                    human_body=answer_body,
+                )
+                if answer_subject and email is None:
+                    raise BlockingError("combined human answer is not allowed by this task's reporting policy")
+                if not require_owner_completion(
+                    root,
+                    path,
+                    text,
+                    f"pending item {args.outcome}",
+                    items=(matching[0].text,),
+                    evidence=args.evidence,
+                    human_subject=answer_subject,
+                    human_body=answer_body,
+                    owner_may_mutate_after_delivery=True,
+                ):
+                    raise BlockingError("responsible-owner completion email requested; retry removal after owner delivery")
                 resolve_item(document, args.item_id, args.outcome, args.evidence)
                 _ = blocking_request(root, {"operation": "reconcile"})
                 print(f"resolved pending item {args.item_id} as {args.outcome}")
+                if email is not None:
+                    print("Emailed the human with the exact resolved work and evidence.")
                 return 0
             if args.command == "wake-ack":
                 item_id, item_text = acknowledge(document, args.notice_id)
@@ -162,8 +229,34 @@ def run(args: Args, root: Path = DEFAULT_ROOT) -> int:
             return 0
         updated, count = remove_pending_items(text, args.items)
         updated = append_comment(updated, pending_remove_evidence_comment(count, args.evidence))
+        email = plan_completion_email(
+            root,
+            path,
+            text,
+            "pending item removed after verification",
+            items=args.items,
+            evidence=args.evidence,
+            human_subject=answer_subject,
+            human_body=answer_body,
+        )
+        if answer_subject and email is None:
+            raise BlockingError("combined human answer is not allowed by this task's reporting policy")
+        if not require_owner_completion(
+            root,
+            path,
+            text,
+            "pending item removed after verification",
+            items=args.items,
+            evidence=args.evidence,
+            human_subject=answer_subject,
+            human_body=answer_body,
+            owner_may_mutate_after_delivery=True,
+        ):
+            raise BlockingError("responsible-owner completion email requested; retry removal after owner delivery")
         replace_if_unchanged(path, updated, before)
         print(f"removed {count} pending item(s); verify each item was actually done or cancelled")
+        if email is not None:
+            print("Emailed the human with the exact removed work and evidence.")
         return 0
 
 

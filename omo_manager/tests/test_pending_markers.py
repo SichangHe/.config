@@ -10414,7 +10414,7 @@ printf 'header\\n(pending)\\nchanged\\n' > {task}
         self.assertEqual("hwl:4", send.call_args.args[0])
         self.assertEqual("guarded delivery", send.call_args.args[1])
 
-    def test_ready_report_reminder_allows_human_owned_hwl_4(self) -> None:
+    def test_ready_report_reminder_rejects_human_owned_hwl_4(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -10425,12 +10425,10 @@ printf 'header\\n(pending)\\nchanged\\n' > {task}
                 encoding="utf-8",
             )
             with patch.object(watcher, "verified_send_to_codex") as send:
-                watcher.run_ready_report_reminder(root, "hwl:4", "fingerprint")
+                args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1")
+                watcher.run_ready_report_reminder(args, "hwl:4", "fingerprint")
 
-        send.assert_called_once()
-        self.assertEqual("hwl:4", send.call_args.args[0])
-        self.assertIn(watcher.AGENT_READY_REPORT_REMINDER, send.call_args.args[1])
-        self.assertTrue(send.call_args.args[1].endswith(f"{watcher.LONG_RUNNING_BLOCKER_REMINDER}\n"))
+        send.assert_not_called()
 
     def test_capacity_human_owned_hwl_4_stops_at_resume_budget(self) -> None:
         from omo_manager import omo_pending_watch as watcher

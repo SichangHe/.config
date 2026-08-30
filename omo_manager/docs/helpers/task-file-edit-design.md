@@ -51,6 +51,15 @@ unchanged since it was read.
 `pending-remove TASK.md --item TEXT [--item TEXT ...] --evidence TEXT`
 - remove one or more existing pending items
 - append the evidence as a task comment
+- send one durable completion email containing the exact task, items, outcome,
+  and evidence only when the caller is the exact responsible task owner
+- when answering a Human question, accept paired subject/body files and combine
+  the answer with the same immutable completion context in that one email
+- require the owner-authenticated completion entry point to be a regular,
+  owner-controlled executable before mutation; never fall back to invoking the
+  mail helper directly when that contract is absent
+- let the mail helper infer the verified producer identity; suppress human-owned
+  task targets, explicit no-contact rules, and duplicate retries
 - print a reminder that the manager must verify the item is actually done or
   cancelled, possibly by using evaluator agents
 
@@ -98,6 +107,15 @@ and adding new pending items, because it already handles human acknowledgements
 and source email subjects.
 
 Keep `omo_task_status.py` for status changes.
+
+New transitions to `done` use a two-phase exact-owner policy. A manager queues
+the owner-authenticated executable callback and returns without closing or
+changing status. After the owner delivers the exact notice, the manager retries
+and the durable delivery marker permits closure. A manager cannot send a
+fallback on the task owner's behalf. Reissuing an already-done task does not
+retroactively send mail.
+Claims are persisted before mail invocation, so a retry cannot duplicate an
+uncertain delivery.
 
 `omo_pending_watch.py` sends ordinary pending blocks directly to the task agent,
 which maintains its own queue through `omo_pending.py`. A message selected by a

@@ -62,9 +62,10 @@ from omo_manager.omo_task_metadata import frontmatter_parts
 from omo_manager.omo_task_metadata import TARGET_RE
 from omo_manager.omo_task_metadata import UniqueKeyLoader
 from omo_manager.omo_blocking_actor import request as blocking_request
+from omo_manager.omo_completion_email import require_owner_completion
 
 PENDING_MARKER = "(pending)"
-DONE_REMINDER = "Status set to done. Remember to email the human."
+DONE_REMINDER = "Status set to done."
 BOOKKEEPING_FAILED_PREFIX = "done_close_bookkeeping_failed"
 CLOSE_FAILED_PREFIX = "done_close_failed"
 DONE_CLOSE_IN_PROGRESS = "done_close_in_progress: manager is closing the agent before marking done"
@@ -3801,6 +3802,27 @@ def finish_replaced_done(args: Args, path: Path, text: str, before: os.stat_resu
     return stale.runat
 
 
+def automatic_done_email_eligible(args: Args, initial_status: str | None) -> bool:
+    """Return true only for a normal, newly completed task transition."""
+
+    special_done = any(
+        (
+            args.finish_closed_done,
+            args.finish_replaced_done,
+            args.recover_exited_shell_done,
+            args.close_shared_target,
+            args.close_retired_done,
+            args.close_missing_target,
+        )
+    )
+    return args.status == "done" and not special_done and initial_status is not None and initial_status != "done"
+
+
+def require_owner_done_email(args: Args, path: Path, text: str) -> bool:
+    """Deliver as the owner or queue an owner callback before manager closure."""
+    return require_owner_completion(args.root, path, text, "task done")
+
+
 def run(args: Args) -> int:
     target = ""
     session_id = ""
@@ -3859,6 +3881,9 @@ def run(args: Args) -> int:
                 ensure_manager_has_no_active_children(args.root, path, metadata)
                 if args.closure_repository is not None:
                     ensure_repository_closure_custody(args.closure_repository, args.dirty_path_handoff)
+            if automatic_done_email_eligible(args, initial_metadata.status if initial_metadata is not None else None) and not require_owner_done_email(args, path, text):
+                print("omo_task_status.py: responsible-owner completion email requested; retry after owner delivery", file=sys.stderr)
+                return 2
             updated = update_frontmatter_status(text, args.status, args.blocked_on, args.root)
             already_done = metadata is not None and metadata.status == "done" and args.status == "done"
             target = metadata.runat if metadata is not None and args.status == "done" and not already_done else ""

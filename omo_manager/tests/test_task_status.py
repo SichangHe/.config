@@ -85,6 +85,11 @@ def task_frontmatter(
 
 
 class TaskStatusTests(unittest.TestCase):
+    def setUp(self) -> None:
+        delivered = patch("omo_manager.omo_task_status.require_owner_completion", return_value=True)
+        _ = delivered.start()
+        self.addCleanup(delivered.stop)
+
     AUTHORITY_TEXT = (
         "Subject: stop paused roles\n\n"
         "As I said previously, the human has halted all work regarding VL. Agents\n"
@@ -3526,6 +3531,74 @@ resolved_task_items: []
             self.assertEqual("session-1", close_calls[0][1])
             self.assertIn("Closed wl:2; session_id: session-1.", stdout.getvalue())
             self.assertIn(DONE_REMINDER, stdout.getvalue())
+            self.assertNotIn("email the human", stdout.getvalue().lower())
+
+    def test_automatic_done_email_excludes_recovery_and_transfer_modes(self) -> None:
+        from omo_manager.omo_task_status import automatic_done_email_eligible
+
+        base = StatusArgs(Path("/tmp/root"), Path("task.md"), "done", "")
+        self.assertTrue(automatic_done_email_eligible(base, "running"))
+        self.assertFalse(automatic_done_email_eligible(base, "done"))
+        for field in (
+            "finish_closed_done",
+            "finish_replaced_done",
+            "recover_exited_shell_done",
+            "close_shared_target",
+            "close_retired_done",
+            "close_missing_target",
+        ):
+            with self.subTest(field=field):
+                self.assertFalse(automatic_done_email_eligible(replace(base, **{field: True}), "running"))
+
+    def test_manager_done_queues_once_and_waits_for_exact_owner_delivery(self) -> None:
+        from omo_manager.omo_task_status import require_owner_done_email
+
+        args = StatusArgs(Path("/work"), Path("task.md"), "done", "")
+        with patch("omo_manager.omo_task_status.require_owner_completion", return_value=False) as require:
+            self.assertFalse(require_owner_done_email(args, Path("/work/task.md"), "task"))
+        require.assert_called_once_with(Path("/work"), Path("/work/task.md"), "task", "task done")
+
+    def test_manager_done_proceeds_only_after_delivery_marker(self) -> None:
+        from omo_manager.omo_task_status import require_owner_done_email
+
+        with patch("omo_manager.omo_task_status.require_owner_completion", return_value=True):
+            self.assertTrue(require_owner_done_email(StatusArgs(Path("/work"), Path("task.md"), "done", ""), Path("/work/task.md"), "task"))
+
+    def test_manager_done_owner_callback_then_retry_closes_with_one_email(self) -> None:
+        from omo_manager.omo_completion_email import main as completion_main
+        from omo_manager.omo_completion_email import require_owner_completion as actual_require
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            task = root / "task.md"
+            manager = root / "manager.md"
+            original = task_frontmatter() + "body\n"
+            task.write_text(original, encoding="utf-8")
+            manager.write_text(task_frontmatter(runat="wl:1", managerat="main:0", is_manager=True), encoding="utf-8")
+            close_args = StopArgs("wl:2", 10.0, 2000, False, False, root, "task.md", True, 0.0)
+            status_args = StatusArgs(root, Path("task.md"), "done", "")
+            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
+                "omo_manager.omo_task_status.require_owner_completion", side_effect=actual_require
+            ), patch("omo_manager.omo_completion_email.current_active_task", return_value=manager), patch(
+                "omo_manager.omo_tmux_send.send_system_to_codex"
+            ) as queue, patch("omo_manager.omo_task_status.stop_done_agent", return_value=(close_args, "session-1")) as stop, patch(
+                "omo_manager.omo_task_status.record_close"
+            ), redirect_stderr(io.StringIO()):
+                self.assertEqual(2, run(status_args))
+                self.assertEqual(original, task.read_text(encoding="utf-8"))
+                stop.assert_not_called()
+                owner_command = queue.call_args.args[1].splitlines()[-1]
+                self.assertIn("omo_completion_email.py", owner_command)
+                with patch("omo_manager.omo_completion_email.current_active_task", return_value=task), patch(
+                    "omo_manager.omo_completion_email.subprocess.run"
+                ) as email:
+                    self.assertEqual(0, completion_main(["--root", str(root), "--task", str(task), "--outcome", "task done"]))
+                    self.assertEqual(0, run(status_args))
+                email.assert_called_once()
+            queue.assert_called_once()
+            stop.assert_called_once()
+            self.assertIn("status: done\n", task.read_text(encoding="utf-8"))
 
     def test_cli_done_rejects_manager_with_active_child_tasks(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

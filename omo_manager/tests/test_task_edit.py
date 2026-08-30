@@ -272,13 +272,61 @@ class TaskEditTests(unittest.TestCase):
             task.write_text(task_frontmatter(pending_items=("finish review",)) + "body\n", encoding="utf-8")
             stdout = io.StringIO()
 
-            with redirect_stdout(stdout):
+            email = object()
+            with patch("omo_manager.omo_task_edit.require_owner_completion", return_value=True), patch(
+                "omo_manager.omo_task_edit.plan_completion_email", return_value=email
+            ) as plan, patch(
+                "omo_manager.omo_task_edit.send_completion_email", return_value=True
+            ) as send, redirect_stdout(stdout):
                 exit_code = run(Args(root, Path("task.md"), "pending-remove", items=("finish review",), evidence="review passed"))
 
             self.assertEqual(0, exit_code)
             self.assertEqual(task_frontmatter() + "body\n(verified removed pending item: review passed)\n", task.read_text(encoding="utf-8"))
             self.assertIn(REMOVE_REMINDER, stdout.getvalue())
             self.assertIn("evaluator agents", stdout.getvalue())
+            self.assertEqual(("finish review",), plan.call_args.kwargs["items"])
+            send.assert_called_once_with(email)
+
+    def test_manager_pending_remove_owner_callback_then_retry_mutates_once(self) -> None:
+        from omo_manager.omo_completion_email import main as completion_main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            state = root / "state"
+            task = root / "task.md"
+            manager = root / "manager.md"
+            original = task_frontmatter(pending_items=("finish review",)) + "body\n"
+            task.write_text(original, encoding="utf-8")
+            args = Args(root, Path("task.md"), "pending-remove", items=("finish review",), evidence="review passed")
+            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
+                "omo_manager.omo_completion_email.current_active_task", return_value=manager
+            ), patch("omo_manager.omo_tmux_send.send_system_to_codex") as queue, redirect_stderr(io.StringIO()):
+                self.assertEqual(2, run(args))
+                self.assertEqual(original, task.read_text(encoding="utf-8"))
+                with patch("omo_manager.omo_completion_email.current_active_task", return_value=task), patch(
+                    "omo_manager.omo_completion_email.subprocess.run"
+                ) as email:
+                    self.assertEqual(
+                        0,
+                        completion_main(
+                            [
+                                "--root",
+                                str(root),
+                                "--task",
+                                str(task),
+                                "--outcome",
+                                "pending item removed after verification",
+                                "--item",
+                                "finish review",
+                                "--evidence",
+                                "review passed",
+                            ]
+                        ),
+                    )
+                    self.assertEqual(0, run(args))
+                email.assert_called_once()
+            queue.assert_called_once()
+            self.assertIn("pending_task_items: []", task.read_text(encoding="utf-8"))
 
     def test_pending_remove_requires_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

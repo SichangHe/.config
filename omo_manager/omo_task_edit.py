@@ -22,6 +22,9 @@ from omo_manager.omo_blocking import BlockingError
 from omo_manager.omo_blocking import load_task
 from omo_manager.omo_blocking import v2_enabled
 from omo_manager.omo_blocking_actor import request as blocking_request
+from omo_manager.omo_completion_email import plan_completion_email
+from omo_manager.omo_completion_email import require_owner_completion
+from omo_manager.omo_completion_email import send_completion_email
 from omo_manager.omo_task_context import current_active_task
 from omo_manager.omo_task_status import parse_manager_child_metadata
 from omo_manager.omo_task_status import replace_if_unchanged
@@ -900,8 +903,16 @@ def run(args: Args) -> int:
             evidence = normalized_comment_message(args.evidence)
             updated, count = remove_pending_items(text, args.items)
             updated = append_comment(updated, pending_remove_evidence_comment(count, evidence))
+            if not require_owner_completion(
+                args.root, path, text, "pending item removed after verification", items=args.items, evidence=evidence
+            ):
+                raise BlockingError("responsible-owner completion email requested; retry removal after owner delivery")
+            email = plan_completion_email(args.root, path, text, "pending item removed after verification", items=args.items, evidence=evidence)
             write_if_changed(path, text, updated, before)
+            sent = send_completion_email(email)
             print(f"removed {count} pending item(s) from {path.name}; {REMOVE_REMINDER}")
+            if sent:
+                print("Emailed the human with the exact removed work and evidence.")
             return 0
         if command == "pending-marker-clear":
             email_path = task_path(args.root, args.email_file) if args.email_file is not None else None
@@ -953,7 +964,7 @@ def run(args: Args) -> int:
             print(f"appended pending message to {path.name}")
             return 0
         raise TaskFrontmatterError(f"unknown command: {command}")
-    except (OSError, TaskFrontmatterError, subprocess.CalledProcessError, argparse.ArgumentTypeError) as exc:
+    except (OSError, TaskFrontmatterError, BlockingError, subprocess.CalledProcessError, argparse.ArgumentTypeError) as exc:
         print(f"omo_task_edit.py: {exc}", file=sys.stderr)
         return 2
 

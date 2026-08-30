@@ -123,7 +123,8 @@ class DeferredExecutor:
         return future
 
 
-def task_text(*, runat: str = "agents:2", managerat: str = "agents:1", is_manager: bool = False) -> str:
+def task_text(*, runat: str = "agents:2", managerat: str = "agents:1", is_manager: bool = False, pending_items: tuple[str, ...] = ("report completed work",)) -> str:
+    pending = "pending_task_items: []" if not pending_items else "pending_task_items:\n" + "\n".join(f"  - {item}" for item in pending_items)
     return (
         "---\n"
         "version: v1.0.0\n"
@@ -132,7 +133,7 @@ def task_text(*, runat: str = "agents:2", managerat: str = "agents:1", is_manage
         "tool: codex\n"
         f"managerat: {managerat}\n"
         f"is_manager: {str(is_manager).lower()}\n"
-        "pending_task_items: []\n"
+        f"{pending}\n"
         "---\n"
     )
 
@@ -240,6 +241,51 @@ class ReadyReportDeliveryTest(unittest.TestCase):
             self.assertEqual("", filtered)
             self.assertTrue(changed)
             submit.assert_called_once()
+
+    def test_report_helper_in_preceding_nearby_turn_suppresses_reminder(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "TODO.md").write_text("current:\nworker.md agents 2\n", encoding="utf-8")
+            _ = (root / "worker.md").write_text(task_text(), encoding="utf-8")
+            pane = [
+                "› report",
+                "• Ran omo_report.sh --status done --message-file /tmp/report",
+                "─ Worked for 1s ─",
+                "› verify",
+                "• Ran git status --short",
+                "─ Worked for 1s ─",
+            ]
+            with patch.object(watcher, "codex_tail", return_value=pane), patch.object(watcher, "submit_ready_report_reminder") as submit:
+                filtered, changed = watcher.handle_ready_report_reminders(self.make_args(root), {}, self.ready_output(), 100.0)
+            self.assertEqual(self.ready_output(), filtered)
+            self.assertFalse(changed)
+            submit.assert_not_called()
+
+    def test_ready_task_without_open_pending_work_is_not_reminded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "TODO.md").write_text("current:\nworker.md agents 2\n", encoding="utf-8")
+            _ = (root / "worker.md").write_text(task_text(pending_items=()), encoding="utf-8")
+            args = self.make_args(root)
+            with patch.object(watcher, "codex_tail", side_effect=AssertionError("closed queues must not inspect a pane")):
+                filtered, changed = watcher.handle_ready_report_reminders(args, {}, self.ready_output(), 100.0)
+            self.assertEqual(self.ready_output(), filtered)
+            self.assertFalse(changed)
+
+    def test_human_owned_target_is_never_inspected_or_reminded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "TODO.md").write_text("current:\nworker.md human 2\n", encoding="utf-8")
+            _ = (root / "worker.md").write_text(task_text(runat="human:2"), encoding="utf-8")
+            args = self.make_args(root)
+            output = self.ready_output().replace("agents:2", "human:2")
+            with patch.object(watcher, "codex_tail", side_effect=AssertionError("human-owned panes must not be inspected")), patch.object(
+                watcher, "verified_send_to_codex", side_effect=AssertionError("human-owned panes must not be changed")
+            ):
+                filtered, changed = watcher.handle_ready_report_reminders(args, {}, output, 100.0)
+            self.assertEqual(output, filtered)
+            self.assertFalse(changed)
+            self.assertFalse(watcher.ready_report_target_is_eligible(args, "human:2"))
 
     def test_synthetic_main_manager_self_row_is_not_a_tracked_task_reminder(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -383,6 +429,53 @@ class ReadyReportDeliveryTest(unittest.TestCase):
             self.assertEqual("", filtered)
             self.assertFalse(changed)
             submit.assert_not_called()
+
+    def test_generic_queue_reminder_defers_to_missing_report_reminder(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "TODO.md").write_text("current:\nworker.md agents 2\n", encoding="utf-8")
+            _ = (root / "worker.md").write_text(task_text(), encoding="utf-8")
+            args = self.make_args(root)
+            turn = latest_visible_turn(self.pane())
+            assert turn is not None
+            submitted: set[str] = set()
+            with patch.object(watcher, "inspect_codex", return_value=Report("ready", [])), patch.object(
+                watcher, "ready_report_context", return_value=(turn, False)
+            ), patch.object(watcher, "try_send_delivery_text") as send:
+                self.assertFalse(watcher.push_agent_pending_item_reminders(args, {}, 100.0, submitted))
+            self.assertEqual(set(), submitted)
+            send.assert_not_called()
+
+    def test_generic_queue_reminder_remains_after_report_helper_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "TODO.md").write_text("current:\nworker.md agents 2\n", encoding="utf-8")
+            _ = (root / "worker.md").write_text(task_text(), encoding="utf-8")
+            args = self.make_args(root)
+            turn = latest_visible_turn(self.pane("• Ran omo_report.sh --status done --message-file /tmp/report"))
+            assert turn is not None
+            submitted: set[str] = set()
+            with patch.object(watcher, "inspect_codex", return_value=Report("ready", [])), patch.object(
+                watcher, "ready_report_turn", return_value=turn
+            ), patch.object(watcher, "try_send_delivery_text", return_value=watcher.DeliveryResult(0)) as send:
+                self.assertTrue(watcher.push_agent_pending_item_reminders(args, {}, 100.0, submitted))
+            self.assertEqual({"agents:2"}, submitted)
+            self.assertEqual(watcher.AGENT_PENDING_ITEMS_REMINDER.format(count=1), send.call_args.args[1])
+
+    def test_pre_paste_guard_rejects_queue_removed_after_reservation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "TODO.md").write_text("current:\nworker.md agents 2\n", encoding="utf-8")
+            task = root / "worker.md"
+            task.write_text(task_text(), encoding="utf-8")
+            args = self.make_args(root)
+            turn = latest_visible_turn(self.pane())
+            assert turn is not None
+            task.write_text(task_text(pending_items=()), encoding="utf-8")
+            with patch.object(watcher, "codex_tail", return_value=self.pane()), patch.object(
+                watcher, "inspect_codex", return_value=Report("ready", [])
+            ):
+                self.assertFalse(watcher.ready_report_guard_current(args, "agents:2", turn.fingerprint))
 
 
 if __name__ == "__main__":

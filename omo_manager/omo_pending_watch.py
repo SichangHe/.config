@@ -79,6 +79,7 @@ from omo_manager.omo_pending_digest import pending_tail_digest
 from omo_manager.omo_pending_digest import truncate_content
 from omo_manager.omo_ready_report import VisibleTurn
 from omo_manager.omo_ready_report import latest_visible_turn
+from omo_manager.omo_ready_report import recent_visible_turns
 from omo_manager.omo_ready_report import turn_invoked_report_helper
 from omo_manager.omo_tmux_send import CodexSendOptions
 from omo_manager.omo_tmux_send import DEFAULT_TMUX_ENTER_COUNT
@@ -3839,6 +3840,9 @@ def push_agent_pending_item_reminders(
             continue
         if not args.dry_run and inspect_codex(CodexStatusArgs(target, 80)).status != "ready":
             continue
+        turn, nearby_report = ready_report_context(target)
+        if turn is not None and not nearby_report:
+            continue
         reminder_text = AGENT_PENDING_ITEMS_REMINDER.format(count=count)
         if args.dry_run:
             print(reminder_text)
@@ -3991,36 +3995,66 @@ def ready_report_turn(target: str) -> VisibleTurn | None:
     return latest_visible_turn(codex_tail(target, 2000))
 
 
+def ready_report_context(target: str) -> tuple[VisibleTurn | None, bool]:
+    turns = recent_visible_turns(codex_tail(target, 2000))
+    return (turns[-1] if turns else None, any(turn_invoked_report_helper(turn) for turn in turns))
+
+
 def ready_report_task_is_agent(args: Args, line: str, target: str) -> bool:
+    if target.partition(":")[0].startswith("h"):
+        return False
     task_file = problem_line_task(line)
     if not task_file or task_file == "manager" or any_manager_self_problem_line(line):
         return False
     task_path = resolve_task_path(args.root, task_file)
     state = scan_task_state(task_path, args.root) if task_path is not None else None
+    metadata = read_task_metadata(task_path, args.root) if task_path is not None else None
     return (
         state is not None
+        and metadata is not None
         and state.status in {"running", "long_running"}
+        and bool(metadata.pending_task_items)
         and same_tmux_target(state.target, target)
     )
 
 
-def ready_report_guard_current(target: str, fingerprint: str) -> bool:
-    turn = ready_report_turn(target)
+def ready_report_target_is_eligible(args: Args, target: str) -> bool:
+    if target.partition(":")[0].startswith("h"):
+        return False
+    matches = 0
+    seen: set[str] = set()
+    for task in parse_task_lines(args.root / "TODO.md"):
+        if task.task_file == "TODO.md" or task.task_file in seen or task.section not in AGENT_PENDING_ITEM_SECTIONS:
+            continue
+        seen.add(task.task_file)
+        task_path = resolve_task_path(args.root, task.task_file)
+        metadata = read_task_metadata(task_path, args.root) if task_path is not None else None
+        if metadata is not None and metadata.status in {"running", "long_running"} and metadata.pending_task_items and same_tmux_target(metadata.runat, target):
+            matches += 1
+    return matches == 1
+
+
+def ready_report_guard_current(args: Args, target: str, fingerprint: str) -> bool:
+    turn, nearby_report = ready_report_context(target)
     return (
         turn is not None
         and turn.fingerprint == fingerprint
-        and not turn_invoked_report_helper(turn)
+        and not nearby_report
+        and ready_report_target_is_eligible(args, target)
         and inspect_codex(CodexStatusArgs(target, 80)).status == "ready"
     )
 
 
-def run_ready_report_reminder(root: Path, target: str, fingerprint: str) -> None:
+def run_ready_report_reminder(args: Args, target: str, fingerprint: str) -> None:
+    if target.partition(":")[0].startswith("h"):
+        return
+
     def before_paste() -> None:
-        if not ready_report_guard_current(target, fingerprint):
+        if not ready_report_guard_current(args, target, fingerprint):
             raise PrePasteRejected("ready turn resolved or changed before tmux paste")
 
     options = CodexSendOptions(DEFAULT_TMUX_ENTER_COUNT, 0.15, False, DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S, True)
-    message = with_long_running_blocker_reminder(root, target, AGENT_READY_REPORT_REMINDER)
+    message = with_long_running_blocker_reminder(args.root, target, AGENT_READY_REPORT_REMINDER)
     verified_send_to_codex(target, message, options, before_paste=before_paste)
 
 
@@ -4059,7 +4093,7 @@ def submit_ready_report_reminder(
         return False
     remember_seen(seen, key, now_wall_s)
     try:
-        future = send_executor().submit(run_ready_report_reminder, args.root, target, turn.fingerprint)
+        future = send_executor().submit(run_ready_report_reminder, args, target, turn.fingerprint)
     except Exception:
         _ = rollback_ready_report_key(args, target_key, key)
         seen.pop(key, None)
@@ -4095,8 +4129,8 @@ def handle_ready_report_reminders(
         if canonical in (busy_targets or set()):
             suppressed.add(line)
             continue
-        turn = ready_report_turn(target)
-        if turn is None or turn_invoked_report_helper(turn):
+        turn, nearby_report = ready_report_context(target)
+        if turn is None or nearby_report:
             continue
         suppressed.add(line)
         changed = submit_ready_report_reminder(args, seen, target, turn, now_wall_s, active_target_keys) or changed
