@@ -34,7 +34,7 @@ try:
     from omo_manager.omo_codex_status import Args as StatusArgs
     from omo_manager.omo_codex_status import CODEX_FOOTER_RE, current_block, current_input_text, exact_tail, inspect, is_stock_placeholder_input_text, report_from_lines, tail, visible_error_lines
     from omo_manager.omo_codex_status import status as classify_status
-    from omo_manager.omo_codex_stop import extract_new_status_session_id, extract_status_session_id, query_status_session_id
+    from omo_manager.omo_codex_stop import extract_new_status_session_id, query_status_session_id
     from omo_manager.omo_task_lock import task_file_lock, task_target_lock
     from omo_manager.omo_task_metadata import TARGET_RE, TASK_FRONTMATTER_STATUSES, frontmatter_parts, parse_task_metadata
     from omo_manager.omo_task_status import authoritative_active_target_task_paths, root_membership_lock
@@ -42,7 +42,7 @@ except ModuleNotFoundError:
     from omo_codex_status import Args as StatusArgs
     from omo_codex_status import CODEX_FOOTER_RE, current_block, current_input_text, exact_tail, inspect, is_stock_placeholder_input_text, report_from_lines, tail, visible_error_lines
     from omo_codex_status import status as classify_status
-    from omo_codex_stop import extract_new_status_session_id, extract_status_session_id, query_status_session_id
+    from omo_codex_stop import extract_new_status_session_id, query_status_session_id
     from omo_task_lock import task_file_lock, task_target_lock
     from omo_task_metadata import TARGET_RE, TASK_FRONTMATTER_STATUSES, frontmatter_parts, parse_task_metadata
     from omo_task_status import authoritative_active_target_task_paths, root_membership_lock  # pyright: ignore[reportImplicitRelativeImport]
@@ -71,6 +71,16 @@ Why have you not restarted hwl:3? Do it now"""
 HUMAN_RESTART_TARGET = "hwl:3.0"
 HUMAN_RESTART_ACTION = "restart"
 HUMAN_RESTART_SOURCE_MAX_BYTES = 1_000_000
+SOURCE1206_ROOT = Path("/ssd1/sichangheagent/work_logs")
+SOURCE1206_AUTHORITY_FILE = Path("manager_mail/85c5dff58359-1206.txt")
+SOURCE1206_AUTHORITY_LINES = (3, 13)
+SOURCE1206_AUTHORITY_SHA256 = "47b1830fae4f3cee23aa8c9655eff3be613dea85c2b1a842979756d33b4c9268"
+SOURCE1206_APPROVAL = "Option one is not a real option, do it agientically and override the regular rules."
+SOURCE1206_PROCEDURE = "> Option 2: approve one one-time exception: after the restart, send only /status to learn which process is answering. /status is a read-only status request; it cannot run the experiment, alter files, call a model, or spend money. The risk is that old terminal routing could send this status request to the old process. If the reply is old, missing, or ambiguous, the process will be stopped and no work instruction will be sent. An independent reviewer will approve the exact procedure before it is tried."
+SOURCE1206_SCOPE = "> Please reply with either “wait” or “allow the one-time status check.” This approval would apply only to this one replacement attempt."
+SOURCE1206_TASK_FILE = "dw1113_bedrock.md"
+SOURCE1206_TARGET = "dw5:0.0"
+SOURCE1206_AUDIT_PATH = (Path.home() / ".local/state/omo-manager/rotations/worker-rotation-source1183-1206.audit").resolve(strict=False)
 # Delivery IDs are persisted as filenames.  Keep them opaque but basename-safe
 # so a malformed CLI value can never escape the dedicated event directory.
 DELIVERY_ID_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
@@ -154,6 +164,7 @@ class Args:
     protected_targets: tuple[str, ...] = ()
     audit_output: Path | None = None
     assert_legacy_missing_session_id: bool = False
+    stop_unverified_replacement: bool = False
     expected_blocker: str | None = None
     reconcile_rotation_audit: bool = False
     rotation_audit: Path | None = None
@@ -219,6 +230,21 @@ class HumanRestartAuthority:
 
 
 @dataclass(frozen=True)
+class Source1206Authority:
+    source_path: Path
+    source_lines: tuple[int, int]
+    source_dev: int
+    source_inode: int
+    source_size: int
+    source_mtime_ns: int
+    source_sha256: str
+    target: str
+    pane_id: str
+    window_id: str
+    pane_pid: int
+
+
+@dataclass(frozen=True)
 class RotationAuditBinding:
     path: Path
     device: int
@@ -274,6 +300,11 @@ def parse_args(argv: list[str]) -> Args:
         "--assert-legacy-missing-session-id",
         action="store_true",
         help="Assert that this legacy worker's old Codex UUID is unrecoverable; valid only with --rotate-worker and --expected-blocker.",
+    )
+    _ = parser.add_argument(
+        "--stop-unverified-replacement",
+        action="store_true",
+        help="Stop the exact replacement into an empty shell if fresh UUID proof fails; valid only with --rotate-worker.",
     )
     _ = parser.add_argument("--expected-blocker", help="Exact preserved lifecycle blocker; required only with --assert-legacy-missing-session-id.")
     _ = parser.add_argument("--reconcile-rotation-audit", action="store_true", help="Record later UUID evidence without launching; the sole input is one identity-guarded `/status` query.")
@@ -366,7 +397,7 @@ def parse_args(argv: list[str]) -> Args:
                 parser.error("--expected-current-pane-pid must be positive.")
             if parsed.expected_current_command not in SUPPORTED_CODEX_PROCESS_COMMANDS:
                 parser.error("--expected-current-command must name a supported Codex process.")
-            if parsed.audit_output or parsed.assert_legacy_missing_session_id:
+            if parsed.audit_output or parsed.assert_legacy_missing_session_id or parsed.stop_unverified_replacement:
                 parser.error("rotation mutation assertions are invalid with --reconcile-rotation-audit.")
             if parsed.dry_run:
                 parser.error("--dry-run is invalid with --reconcile-rotation-audit.")
@@ -380,6 +411,7 @@ def parse_args(argv: list[str]) -> Args:
             parsed.audit_output,
             parsed.assert_legacy_missing_session_id,
             parsed.expected_blocker is not None,
+            parsed.stop_unverified_replacement,
             parsed.rotation_audit,
             parsed.expected_rotation_audit_sha256,
             parsed.reconciliation_receipt,
@@ -424,8 +456,10 @@ def parse_args(argv: list[str]) -> Args:
         if match is None or int(match.group(1)) > int(match.group(2)):
             parser.error("--human-email-lines must be an inclusive START-END range.")
         human_email_lines = int(match.group(1)), int(match.group(2))
-    if parsed.human_email_file is not None and not parsed.restart_running:
-        parser.error("human email authority is only valid with --restart-running.")
+    if parsed.human_email_file is not None and not (parsed.restart_running or parsed.stop_unverified_replacement):
+        parser.error("human email authority is only valid with --restart-running or --stop-unverified-replacement.")
+    if parsed.stop_unverified_replacement and parsed.human_email_file is None:
+        parser.error("--stop-unverified-replacement requires its exact Source-1206 human email authority.")
     if not any(modes) and bool(parsed.session_id) == bool(parsed.prompt_file):
         parser.error("provide exactly one of --session-id or --prompt-file.")
     if parsed.recovery_evidence and not (parsed.recover_non_codex or parsed.retire_recovery_evidence):
@@ -464,6 +498,7 @@ def parse_args(argv: list[str]) -> Args:
         protected_targets=tuple(parsed.protected_target),
         audit_output=parsed.audit_output.expanduser().resolve(strict=False) if parsed.audit_output else None,
         assert_legacy_missing_session_id=parsed.assert_legacy_missing_session_id,
+        stop_unverified_replacement=parsed.stop_unverified_replacement,
         expected_blocker=parsed.expected_blocker,
         reconcile_rotation_audit=parsed.reconcile_rotation_audit,
         rotation_audit=Path(os.path.abspath(parsed.rotation_audit.expanduser())) if parsed.rotation_audit else None,
@@ -717,6 +752,67 @@ def verify_human_restart_authority(args: Args, pane: Pane, expected: HumanRestar
         raise StartError("human restart authority became stale or mismatched before respawn.")
 
 
+def require_source1206_authority(args: Args, pane: Pane) -> Source1206Authority | None:
+    """Bind the one approved status-and-stop rotation to its private source."""
+
+    if not args.stop_unverified_replacement:
+        return None
+    if args.root != SOURCE1206_ROOT:
+        raise StartError("the Source-1206 exception applies only to the approved work-log root.")
+    if (args.task_file, pane.target) != (SOURCE1206_TASK_FILE, SOURCE1206_TARGET):
+        raise StartError("the Source-1206 status-and-stop exception applies only to the approved task and target.")
+    if args.audit_output != SOURCE1206_AUDIT_PATH:
+        raise StartError("the Source-1206 exception requires its exact one-use audit path.")
+    if args.human_email_file is None or args.human_email_lines != SOURCE1206_AUTHORITY_LINES:
+        raise StartError("the Source-1206 exception requires its exact human email and line range.")
+    candidate = args.human_email_file if args.human_email_file.is_absolute() else args.root / args.human_email_file
+    try:
+        path = candidate.resolve(strict=True)
+        approved = (args.root / SOURCE1206_AUTHORITY_FILE).resolve(strict=True)
+        parent = path.parent.stat()
+        with path.open("rb") as source:
+            before = os.fstat(source.fileno())
+            data = source.read(HUMAN_RESTART_SOURCE_MAX_BYTES + 1)
+            after = os.fstat(source.fileno())
+        current = path.stat()
+    except OSError as error:
+        raise StartError(f"Source-1206 authority source is unavailable: {error}") from error
+    before_identity = before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns
+    after_identity = after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns
+    current_identity = current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns
+    if path != approved or before_identity != after_identity or after_identity != current_identity:
+        raise StartError("Source-1206 authority source path or identity is not exact.")
+    if (
+        not stat.S_ISDIR(parent.st_mode)
+        or parent.st_uid != os.getuid()
+        or stat.S_IMODE(parent.st_mode) & 0o077
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_uid != os.getuid()
+        or stat.S_IMODE(before.st_mode) & 0o077
+        or len(data) > HUMAN_RESTART_SOURCE_MAX_BYTES
+        or hashlib.sha256(data).hexdigest() != SOURCE1206_AUTHORITY_SHA256
+    ):
+        raise StartError("Source-1206 authority is not the exact bounded owner-private email.")
+    try:
+        lines = data.decode("utf-8").splitlines()
+    except UnicodeDecodeError as error:
+        raise StartError("Source-1206 authority is not valid UTF-8.") from error
+    if len(lines) < SOURCE1206_AUTHORITY_LINES[1] or lines[2] != SOURCE1206_APPROVAL or lines[10] != SOURCE1206_PROCEDURE or lines[12] != SOURCE1206_SCOPE:
+        raise StartError("Source-1206 authority excerpt does not match the approved one-time procedure.")
+    return Source1206Authority(path, SOURCE1206_AUTHORITY_LINES, before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, hashlib.sha256(data).hexdigest(), pane.target, pane.pane_id, pane.window_id, pane.pane_pid)
+
+
+def verify_source1206_authority(args: Args, pane: Pane, expected: Source1206Authority | None) -> None:
+    """Recheck the one-time source and incumbent immediately before replacement."""
+
+    if expected is None:
+        return
+    current = resolve_pane(pane.target)
+    actual = require_source1206_authority(args, current)
+    if actual != expected:
+        raise StartError("Source-1206 authority or approved pane changed before replacement.")
+
+
 def verify_task_binding(args: Args, pane: Pane, expected: TaskBinding) -> None:
     """Reject task content or pending-queue drift before or after restart."""
 
@@ -761,6 +857,7 @@ def rotation_snapshot_sha256(args: Args, pane: Pane, task: TaskBinding, old_sess
         owner.relative_to(args.root.resolve()).as_posix(),
         str(args.audit_output),
         todo_sha256,
+        *((str(args.human_email_file), str(args.human_email_lines)) if args.stop_unverified_replacement else ()),
     )
     return hashlib.sha256("\0".join(fields).encode()).hexdigest()
 
@@ -1021,6 +1118,17 @@ def visible_status_card_session_id(text: str) -> str:
     return ""
 
 
+def exact_response_session_id(text: str) -> tuple[str, str]:
+    """Return one response UUID and classify absent or conflicting UUIDs."""
+
+    matches = set(re.findall(rf"Session:\s*({UUID_RE.pattern[1:-1]})", text))
+    if not matches:
+        return "", "absent"
+    if len(matches) != 1:
+        return "", "ambiguous"
+    return next(iter(matches)), "present"
+
+
 def query_exact_status_session_id(pane: Pane, n_lines: int, wait_s: float, stale_visible_session_id: str = "", evidence: dict[str, str] | None = None) -> str:
     """Submit `/status` atomically and ignore one UUID found only in prior visible history."""
     condition = "#{&&:#{==:#{pane_id},%s},#{&&:#{==:#{window_id},%s},#{&&:#{==:#{session_name}:#{window_index}.#{pane_index},%s},#{&&:#{==:#{pane_pid},%s},#{==:#{pane_current_command},%s}}}}}" % (pane.pane_id, pane.window_id, pane.target, pane.pane_pid, pane.command)
@@ -1058,10 +1166,11 @@ def query_exact_status_session_id(pane: Pane, n_lines: int, wait_s: float, stale
         after = "\n".join(after_lines)
         if stale_visible_session_id:
             response = after.rsplit("/status", 1)[-1] if after.count("/status") > before.count("/status") else ""
+            session_id, response_state = exact_response_session_id(response)
             if evidence is not None:
                 evidence["response-sha256"] = hashlib.sha256(response.encode()).hexdigest()
-                evidence["response-session-id"] = extract_status_session_id(response)
-            session_id = extract_status_session_id(response)
+                evidence["response-session-id"] = session_id
+                evidence["response-session-state"] = response_state
         else:
             session_id = extract_new_status_session_id(before, after) or visible_status_card_session_id(after)
         if session_id:
@@ -1118,6 +1227,43 @@ def respawn_codex(pane: Pane, command: str) -> None:
         detail = result.stderr.strip() or "pane/window identity changed before respawn"
         raise StartError(f"failed to respawn Codex in {pane.target}: {detail}")
     verify_same_pane(pane)
+
+
+def stop_unverified_replacement(pane: Pane, wait_s: float) -> Pane:
+    """Atomically replace the exact unverified Codex process with an empty shell."""
+
+    verify_same_process(pane)
+    replacement_pids = {pane.pane_pid, *descendant_pids(pane.pane_pid)}
+    condition = "#{&&:#{==:#{pane_id},%s},#{==:#{window_id},%s},#{==:#{session_name}:#{window_index}.#{pane_index},%s},#{==:#{pane_pid},%s},#{==:#{pane_current_command},%s}}" % (
+        pane.pane_id,
+        pane.window_id,
+        pane.target,
+        pane.pane_pid,
+        pane.command,
+    )
+    stopped = run(
+        [
+            "tmux",
+            "if-shell",
+            "-F",
+            "-t",
+            pane.pane_id,
+            condition,
+            f"respawn-pane -k -t {shlex.quote(pane.pane_id)} -c {shlex.quote(str(pane.workdir))} /bin/sh",
+            "run-shell 'exit 1'",
+        ]
+    )
+    if stopped.returncode != 0:
+        raise StartError("failed to stop the exact unverified replacement process.")
+    deadline = time.monotonic() + wait_s
+    while time.monotonic() < deadline:
+        current = resolve_pane(pane.target)
+        if current.pane_id != pane.pane_id or current.window_id != pane.window_id:
+            raise StartError("pane or window identity changed while stopping the unverified replacement.")
+        if current.pane_pid != pane.pane_pid and current.command in SHELL_COMMANDS and all(not Path(f"/proc/{pid}").exists() for pid in replacement_pids):
+            return current
+        time.sleep(0.25)
+    raise StartError("unverified replacement did not stop into an empty shell.")
 
 
 def require_restartable_codex(pane: Pane) -> None:
@@ -1230,6 +1376,7 @@ def finish_rotation_audit(
     terminal_replacement: Pane | None = None,
     captured_response_sha256: str = "",
     captured_session_id: str = "",
+    stopped_replacement: Pane | None = None,
 ) -> None:
     """Finalize only the exact owner-private rotation audit reserved by this run."""
 
@@ -1263,6 +1410,10 @@ def finish_rotation_audit(
                 suffix += f"captured-response-sha256: {response_sha256}\n"
             if captured_session_id:
                 suffix += f"captured-session-id: {captured_session_id}\n"
+            if stopped_replacement is not None:
+                suffix += "replacement-disposition: stopped-to-shell\n"
+                suffix += f"stopped-pane-pid: {stopped_replacement.pane_pid}\n"
+                suffix += f"stopped-command: {stopped_replacement.command}\n"
         finalized = prepared + suffix + f"final-result: {result}\n"
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False) as output:
             temporary = Path(output.name)
@@ -1281,11 +1432,11 @@ def finish_rotation_audit(
             os.fsync(directory_fd)
         finally:
             os.close(directory_fd)
-        if failure_kind == RECONCILABLE_ROTATION_FAILURE_KIND:
+        if failure_kind == RECONCILABLE_ROTATION_FAILURE_KIND and stopped_replacement is None:
             os.setxattr(path, ROTATION_ELIGIBILITY_XATTR, hashlib.sha256(finalized.encode()).hexdigest().encode(), follow_symlinks=False)
     except OSError as error:
         rollback_error: OSError | None = None
-        if installed and failure_kind == RECONCILABLE_ROTATION_FAILURE_KIND:
+        if installed:
             rollback_temporary: Path | None = None
             try:
                 with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.rollback.", delete=False) as output:
@@ -1311,13 +1462,13 @@ def finish_rotation_audit(
                     try:
                         path.unlink(missing_ok=True)
                     except OSError as removal_error:
-                        rollback_error.add_note(f"eligible audit removal also failed: {removal_error}")
+                        rollback_error.add_note(f"audit removal also failed: {removal_error}")
             finally:
                 if rollback_temporary is not None:
                     rollback_temporary.unlink(missing_ok=True)
         finalization_error = StartError(f"could not finalize private rotation audit: {error}")
         if rollback_error is not None:
-            finalization_error.add_note(f"eligible audit rollback also faulted; missing eligibility commit keeps the audit unreconcilable: {rollback_error}")
+            finalization_error.add_note(f"audit rollback also faulted; the audit cannot claim terminal completion: {rollback_error}")
         raise finalization_error from error
     finally:
         if temporary is not None:
@@ -2440,13 +2591,15 @@ def wait_resume_cwd_recovery(pane: Pane, session_id: str, timeout_s: float) -> s
     raise StartError("timed out waiting for Codex after choosing its resume directory.")
 
 
-def wait_started(pane: Pane, marker: str, timeout_s: float) -> str:
+def wait_started(pane: Pane, marker: str, timeout_s: float, *, allow_update_input: bool = True) -> str:
     deadline = time.monotonic() + timeout_s
     update_skipped = False
     while time.monotonic() < deadline:
         verify_same_pane(pane)
         lines = post_marker_lines(pane, marker)
         if lines is not None and not update_skipped and is_codex_update_prompt(lines):
+            if not allow_update_input:
+                raise RotationSessionCaptureFailed("Codex startup reached an update prompt before the authorized status query.", "post-respawn-status-query-not-reached")
             skip_codex_update_prompt(pane)
             update_skipped = True
             time.sleep(0.25)
@@ -2455,8 +2608,12 @@ def wait_started(pane: Pane, marker: str, timeout_s: float) -> str:
         if classification in SUCCESS_STATUSES:
             return classification
         if classification == "error":
+            if not allow_update_input:
+                raise RotationSessionCaptureFailed("Codex startup failed before the authorized status query.", "post-respawn-status-query-not-reached")
             raise StartError("Codex startup reached an error state.")
         time.sleep(0.25)
+    if not allow_update_input:
+        raise RotationSessionCaptureFailed("Codex startup timed out before the authorized status query.", "post-respawn-status-query-not-reached")
     raise StartError("timed out waiting for Codex to become running or ready.")
 
 
@@ -2486,16 +2643,26 @@ def verify_fresh_rotation(args: Args, snapshot: RotationSnapshot, replacement: P
     """Prove same-pane fresh-session startup and unchanged task boundaries."""
 
     current = verify_rotation_snapshot(args, snapshot, replacement=replacement)
-    fresh_session_id, response = query_status_session_id(current.pane_id, 240, min(10.0, args.startup_timeout_s), None, (current.target, current.pane_id), True)
-    if capture_evidence is not None:
-        capture_evidence["response-sha256"] = hashlib.sha256(response.encode()).hexdigest()
-        capture_evidence["response-session-id"] = fresh_session_id
-    # 🧑 Source-1183: "Solve this as soon as possible with anything you have"
-    if not fresh_session_id:
+    # 🧑 Source-1206: "after the restart, send only /status ... If the reply is old, missing, or ambiguous, the process will be stopped"
+    if args.stop_unverified_replacement:
         fresh_session_id = query_exact_status_session_id(current, 240, min(10.0, args.startup_timeout_s), snapshot.old_session_id, capture_evidence)
+    else:
+        fresh_session_id, response = query_status_session_id(current.pane_id, 240, min(10.0, args.startup_timeout_s), None, (current.target, current.pane_id), True)
+        if capture_evidence is not None:
+            capture_evidence["response-sha256"] = hashlib.sha256(response.encode()).hexdigest()
+            capture_evidence["response-session-id"] = fresh_session_id
+        # 🧑 Source-1183: "Solve this as soon as possible with anything you have"
+        if not fresh_session_id:
+            fresh_session_id = query_exact_status_session_id(current, 240, min(10.0, args.startup_timeout_s), snapshot.old_session_id, capture_evidence)
     if not fresh_session_id:
         retained_session_id = (capture_evidence or {}).get("retained-session-id", "")
-        failure_kind = "post-respawn-stale-unrelated-history" if retained_session_id and retained_session_id != snapshot.old_session_id else RECONCILABLE_ROTATION_FAILURE_KIND
+        response_state = (capture_evidence or {}).get("response-session-state", "")
+        if response_state == "ambiguous":
+            failure_kind = "post-respawn-ambiguous-session-id"
+        elif retained_session_id and retained_session_id != snapshot.old_session_id:
+            failure_kind = "post-respawn-stale-unrelated-history"
+        else:
+            failure_kind = RECONCILABLE_ROTATION_FAILURE_KIND
         raise RotationSessionCaptureFailed("rotated worker did not expose a new Codex session id.", failure_kind, (capture_evidence or {}).get("response-sha256", ""), (capture_evidence or {}).get("response-session-id", ""))
     if fresh_session_id == snapshot.old_session_id:
         raise RotationSessionCaptureFailed("rotated worker resumed the old Codex session instead of starting fresh.", "post-respawn-same-old-session-id", (capture_evidence or {}).get("response-sha256", ""), fresh_session_id)
@@ -2551,6 +2718,7 @@ def start(args: Args) -> str:
         raise StartError("--recover-resume-cwd-prompt requires a choice and expected saved session directory.")
     pane = resolve_pane(args.target)
     human_restart_authority = require_human_restart_authority(args, pane)
+    source1206_authority = require_source1206_authority(args, pane)
     if os.environ.get("TMUX_PANE") == pane.pane_id:
         raise StartError("run this helper from a different pane than the empty target.")
     if not any(modes):
@@ -2694,6 +2862,7 @@ def start(args: Args) -> str:
                             f"authoritative-owner-task-file: {args.task_file}",
                             f"rotation-snapshot-sha256: {rotation_snapshot.sha256}",
                             f"todo-sha256: {rotation_snapshot.todo_sha256}",
+                            *((f"one-status-authority-sha256: {source1206_authority.source_sha256}", "one-status-procedure: Source-1206") if source1206_authority is not None else ()),
                             "prompt-delivery: held-until-terminal-sole-owner-proof",
                             "is-manager: false",
                             "tool: codex",
@@ -2704,15 +2873,24 @@ def start(args: Args) -> str:
                     reserve_rotation_audit(audit_path, prepared_audit)
                     active_audit = prepared_audit
                     capture_evidence: dict[str, str] = {}
+                    replacement: Pane | None = None
                     try:
                         pane = verify_rotation_snapshot(args, rotation_snapshot)
+                        verify_source1206_authority(args, pane, source1206_authority)
                         respawn_codex(pane, command)
                         active_audit, replacement = checkpoint_rotation_replacement(audit_path, prepared_audit, rotation_snapshot, args)
-                        result = wait_started(replacement, marker, args.startup_timeout_s)
+                        result = wait_started(replacement, marker, args.startup_timeout_s, allow_update_input=False) if args.stop_unverified_replacement else wait_started(replacement, marker, args.startup_timeout_s)
                         new_session_id = verify_fresh_rotation(args, rotation_snapshot, replacement, capture_evidence)
                     except RotationSessionCaptureFailed as rotation_error:
+                        stopped_replacement: Pane | None = None
+                        if args.stop_unverified_replacement and replacement is not None:
+                            try:
+                                stopped_replacement = stop_unverified_replacement(replacement, args.startup_timeout_s)
+                            except Exception as stop_error:
+                                rotation_error.add_note(f"unverified replacement stop or proof failed; audit remains completion-unknown: {stop_error}")
+                                raise rotation_error
                         try:
-                            finish_rotation_audit(audit_path, active_audit, "failed", failure_kind=rotation_error.failure_kind, captured_response_sha256=rotation_error.response_sha256, captured_session_id=rotation_error.captured_session_id)
+                            finish_rotation_audit(audit_path, active_audit, "failed", failure_kind=rotation_error.failure_kind, captured_response_sha256=rotation_error.response_sha256, captured_session_id=rotation_error.captured_session_id, stopped_replacement=stopped_replacement)
                         except Exception as audit_error:
                             rotation_error.add_note(f"private audit finalization also failed; audit remains completion-unknown: {audit_error}")
                         raise

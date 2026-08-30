@@ -36,12 +36,14 @@ from omo_manager.omo_codex_start import (
     parse_args,
     post_marker_lines,
     prompt_text,
+    query_exact_status_session_id,
     query_reconciliation_session_id,
     reconcile_rotation_audit,
     record_recovery_evidence,
     retire_recovery_receipt,
     recovery_issuance_path,
     require_human_restart_authority,
+    require_source1206_authority,
     require_recovery_target,
     require_resume_cwd_prompt,
     require_same_shell,
@@ -53,9 +55,11 @@ from omo_manager.omo_codex_start import (
     respawn_codex,
     skip_codex_update_prompt,
     start,
+    stop_unverified_replacement,
     task_path,
     validate_task,
     verify_rotation_snapshot,
+    wait_started,
     wait_resume_cwd_recovery,
 )
 from omo_manager.omo_codex_status import Report
@@ -417,6 +421,31 @@ class CodexStartTests(unittest.TestCase):
             mismatched[index] = replacement
             with self.subTest(index=index):
                 self.assertFalse(is_codex_update_prompt(mismatched))
+
+    def test_source1206_startup_wait_never_skips_update_prompt(self) -> None:
+        pane = Pane("cfg:2.0", "%2", "@2", "bunx", Path("/tmp"), 4242)
+        with (
+            patch("omo_manager.omo_codex_start.verify_same_pane"),
+            patch("omo_manager.omo_codex_start.post_marker_lines", return_value=self.update_prompt_lines()),
+            patch("omo_manager.omo_codex_start.skip_codex_update_prompt") as skip,
+            self.assertRaisesRegex(StartError, "update prompt before the authorized status query"),
+        ):
+            wait_started(pane, "[marker]", 1.0, allow_update_input=False)
+        skip.assert_not_called()
+
+    def test_source1206_startup_error_and_timeout_are_parkable_identity_failures(self) -> None:
+        pane = Pane("cfg:2.0", "%2", "@2", "bunx", Path("/tmp"), 4242)
+        with (
+            patch("omo_manager.omo_codex_start.verify_same_pane"),
+            patch("omo_manager.omo_codex_start.post_marker_lines", return_value=["startup failed"]),
+            patch("omo_manager.omo_codex_start.classify_status", return_value="error"),
+            self.assertRaisesRegex(StartError, "before the authorized status query") as startup_error,
+        ):
+            wait_started(pane, "[marker]", 1.0, allow_update_input=False)
+        self.assertEqual("post-respawn-status-query-not-reached", getattr(startup_error.exception, "failure_kind", ""))
+        with self.assertRaisesRegex(StartError, "timed out before the authorized status query") as timeout_error:
+            wait_started(pane, "[marker]", 0.0, allow_update_input=False)
+        self.assertEqual("post-respawn-status-query-not-reached", getattr(timeout_error.exception, "failure_kind", ""))
 
     def test_update_prompt_mismatch_refuses_input(self) -> None:
         pane = Pane("cfg:2.0", "%2", "@2", "bunx", Path("/tmp"), 4242)
@@ -936,6 +965,10 @@ class CodexStartTests(unittest.TestCase):
         self.assertTrue(args.rotate_worker)
         self.assertEqual(("preserve exact queue",), args.expected_pending_items)
         self.assertEqual(("protected:9",), args.protected_targets)
+        with self.assertRaises(SystemExit):
+            parse_args([*common, "--expected-task-sha256", "a" * 64, "--expected-status", "blocked", "--expected-owner-target", "cfg:1", "--expected-pending-item", "preserve exact queue", "--protected-target", "protected:9", "--audit-output", "/tmp/rotation.audit", "--stop-unverified-replacement"])
+        source1206 = parse_args([*common, "--expected-task-sha256", "a" * 64, "--expected-status", "blocked", "--expected-owner-target", "cfg:1", "--expected-pending-item", "preserve exact queue", "--protected-target", "protected:9", "--audit-output", "/tmp/rotation.audit", "--stop-unverified-replacement", "--human-email-file", "manager_mail/source1206.txt", "--human-email-lines", "3-13"])
+        self.assertTrue(source1206.stop_unverified_replacement)
 
         legacy = parse_args(
             [
@@ -1218,6 +1251,287 @@ class CodexStartTests(unittest.TestCase):
             self.assertIn(f"captured-response-sha256: {hashlib.sha256(b'no session row').hexdigest()}\n", audit)
             with self.assertRaises(OSError):
                 os.getxattr(root / "rotation.audit", "user.omo_rotation_reconciliation_eligible_sha256")
+
+    def test_source1206_rotation_uses_one_exact_status_then_stops_missing_uuid(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root, status="blocked", pending=["preserve exact queue"])
+            initial = Pane("cfg:2.0", "%2", "@2", "bun", root, 4242)
+            replacement = replace(initial, pane_pid=5252)
+            shell = replace(initial, command="sh", pane_pid=6262)
+            rotated = False
+            stopped = False
+            captures = iter(((True, ["old screen"]), (True, ["old screen", "/status", "no session row"])))
+            last_capture = (True, ["old screen", "/status", "no session row"])
+
+            def capture_tail(*_args: object) -> tuple[bool, list[str]]:
+                nonlocal last_capture
+                try:
+                    last_capture = next(captures)
+                except StopIteration:
+                    pass
+                return last_capture
+            submitted = 0
+
+            def resolve(_target: str) -> Pane:
+                return shell if stopped else replacement if rotated else initial
+
+            def respawn(_pane: Pane, _command: str) -> None:
+                nonlocal rotated
+                rotated = True
+
+            def tmux(command: list[str], *, timeout_s: float = 10.0) -> subprocess.CompletedProcess[str]:
+                nonlocal stopped, submitted
+                del timeout_s
+                joined = " ".join(command)
+                if "OMO_STATUS_ACCEPTED_" in joined:
+                    submitted += 1
+                    accepted = next(part for part in joined.split() if part.startswith("OMO_STATUS_ACCEPTED_"))
+                    return subprocess.CompletedProcess(command, 0, accepted + "\n", "")
+                if "/bin/sh" in joined:
+                    stopped = True
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            args = self.rotation_args(root, stop_unverified_replacement=True, startup_timeout_s=0.01)
+            with (
+                patch("omo_manager.omo_codex_start.require_source1206_authority", return_value=None),
+                patch("omo_manager.omo_codex_start.resolve_pane", side_effect=resolve),
+                patch("omo_manager.omo_codex_start.inspect", return_value=Report("running", ["working"])),
+                patch("omo_manager.omo_codex_start.query_status_session_id", return_value=(self.SESSION_ID, "")) as incumbent_query,
+                patch("omo_manager.omo_codex_start.exact_tail", side_effect=capture_tail),
+                patch("omo_manager.omo_codex_start.run", side_effect=tmux),
+                patch("omo_manager.omo_codex_start.prompt_text", return_value="worker-only prompt\n"),
+                patch("omo_manager.omo_codex_start.respawn_codex", side_effect=respawn),
+                patch("omo_manager.omo_codex_start.wait_started", return_value="running"),
+                patch("omo_manager.omo_codex_start.time.sleep"),
+                patch("omo_manager.omo_codex_start.verify_same_process"),
+                patch("omo_manager.omo_codex_start.send_prompt") as deliver,
+                self.assertRaisesRegex(StartError, "did not expose"),
+            ):
+                start(args)
+
+            self.assertEqual(1, incumbent_query.call_count)
+            self.assertEqual(1, submitted)
+            self.assertTrue(stopped)
+            deliver.assert_not_called()
+            audit = (root / "rotation.audit").read_text(encoding="utf-8")
+            self.assertIn("failure-kind: post-respawn-new-session-id-capture-failed\n", audit)
+            response_digest = hashlib.sha256(b"\nno session row").hexdigest()
+            self.assertIn(f"captured-response-sha256: {response_digest}\n", audit)
+            self.assertIn("replacement-disposition: stopped-to-shell\nstopped-pane-pid: 6262\nstopped-command: sh\n", audit)
+            self.assertIn("final-result: failed\n", audit)
+            with self.assertRaises(OSError):
+                os.getxattr(root / "rotation.audit", "user.omo_rotation_reconciliation_eligible_sha256")
+
+    def test_source1206_authority_rejects_same_named_alternate_audit_path(self) -> None:
+        root = Path("/ssd1/sichangheagent/work_logs")
+        pane = Pane("dw5:0.0", "%521", "@520", "bunx", Path("/ssd1/sichangheagent/dw5"), 3805021)
+        args = self.args(
+            root,
+            task_file="dw1113_bedrock.md",
+            target="dw5:0",
+            session_id="",
+            rotate_worker=True,
+            stop_unverified_replacement=True,
+            audit_output=Path("/tmp/worker-rotation-source1183-1206.audit"),
+            human_email_file=Path("manager_mail/85c5dff58359-1206.txt"),
+            human_email_lines=(3, 13),
+        )
+        with self.assertRaisesRegex(StartError, "exact one-use audit path"):
+            require_source1206_authority(args, pane)
+
+    def test_source1206_stop_fails_closed_if_replacement_child_survives(self) -> None:
+        replacement = Pane("cfg:2.0", "%2", "@2", "bunx", Path("/tmp"), 5252)
+        shell = replace(replacement, command="sh", pane_pid=6262)
+        with (
+            patch("omo_manager.omo_codex_start.verify_same_process"),
+            patch("omo_manager.omo_codex_start.descendant_pids", return_value={5253}),
+            patch("omo_manager.omo_codex_start.run", return_value=subprocess.CompletedProcess([], 0, "", "")),
+            patch("omo_manager.omo_codex_start.resolve_pane", return_value=shell),
+            patch.object(Path, "exists", autospec=True, side_effect=lambda path: str(path) == "/proc/5253"),
+            patch("omo_manager.omo_codex_start.time.monotonic", side_effect=(0.0, 0.5, 1.5)),
+            patch("omo_manager.omo_codex_start.time.sleep"),
+            self.assertRaisesRegex(StartError, "did not stop"),
+        ):
+            stop_unverified_replacement(replacement, 1.0)
+
+    def test_source1206_ambiguous_exact_response_is_not_an_identity(self) -> None:
+        pane = Pane("cfg:2.0", "%2", "@2", "bun", Path("/tmp"), 5252)
+        old = self.SESSION_ID
+        other = "119f670b-6a2f-7463-b9be-9aa6ff0cec43"
+        captures = iter(((True, ["before"]), (True, ["before", "/status", f"Session: {old}", f"Session: {other}"])))
+        last_capture = (True, ["before", "/status", f"Session: {old}", f"Session: {other}"])
+
+        def capture_tail(*_args: object) -> tuple[bool, list[str]]:
+            nonlocal last_capture
+            try:
+                last_capture = next(captures)
+            except StopIteration:
+                pass
+            return last_capture
+        evidence: dict[str, str] = {}
+
+        def tmux(command: list[str], *, timeout_s: float = 10.0) -> subprocess.CompletedProcess[str]:
+            del timeout_s
+            joined = " ".join(command)
+            if "OMO_STATUS_ACCEPTED_" in joined:
+                accepted = next(part for part in joined.split() if part.startswith("OMO_STATUS_ACCEPTED_"))
+                return subprocess.CompletedProcess(command, 0, accepted + "\n", "")
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with (
+            patch("omo_manager.omo_codex_start.run", side_effect=tmux),
+            patch("omo_manager.omo_codex_start.exact_tail", side_effect=capture_tail),
+            patch("omo_manager.omo_codex_start.verify_same_process"),
+            patch("omo_manager.omo_codex_start.time.sleep"),
+        ):
+            self.assertEqual("", query_exact_status_session_id(pane, 240, 0.01, old, evidence))
+        self.assertEqual("ambiguous", evidence["response-session-state"])
+        self.assertEqual("", evidence["response-session-id"])
+
+    def test_source1206_old_or_ambiguous_identity_is_parked_without_delivery(self) -> None:
+        for outcome, failure_kind in (("old", "post-respawn-same-old-session-id"), ("ambiguous", "post-respawn-ambiguous-session-id")):
+            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as raw_root:
+                root = Path(raw_root)
+                self.write_task(root, status="blocked", pending=["preserve exact queue"])
+                initial = Pane("cfg:2.0", "%2", "@2", "bun", root, 4242)
+                replacement = replace(initial, pane_pid=5252)
+                shell = replace(initial, command="sh", pane_pid=6262)
+                rotated = False
+                parked = False
+
+                def resolve(_target: str) -> Pane:
+                    return shell if parked else replacement if rotated else initial
+
+                def respawn(_pane: Pane, _command: str) -> None:
+                    nonlocal rotated
+                    rotated = True
+
+                def exact(_pane: Pane, _lines: int, _wait_s: float, _old: str, evidence: dict[str, str]) -> str:
+                    evidence["response-sha256"] = hashlib.sha256(outcome.encode()).hexdigest()
+                    if outcome == "old":
+                        evidence["response-session-id"] = self.SESSION_ID
+                        return self.SESSION_ID
+                    evidence["response-session-state"] = "ambiguous"
+                    return ""
+
+                def tmux(command: list[str], *, timeout_s: float = 10.0) -> subprocess.CompletedProcess[str]:
+                    nonlocal parked
+                    del timeout_s
+                    if "/bin/sh" in " ".join(command):
+                        parked = True
+                    return subprocess.CompletedProcess(command, 0, "", "")
+
+                args = self.rotation_args(root, stop_unverified_replacement=True, startup_timeout_s=0.01)
+                with (
+                    patch("omo_manager.omo_codex_start.require_source1206_authority", return_value=None),
+                    patch("omo_manager.omo_codex_start.resolve_pane", side_effect=resolve),
+                    patch("omo_manager.omo_codex_start.inspect", return_value=Report("running", ["working"])),
+                    patch("omo_manager.omo_codex_start.query_status_session_id", return_value=(self.SESSION_ID, "")),
+                    patch("omo_manager.omo_codex_start.query_exact_status_session_id", side_effect=exact),
+                    patch("omo_manager.omo_codex_start.prompt_text", return_value="worker-only prompt\n"),
+                    patch("omo_manager.omo_codex_start.respawn_codex", side_effect=respawn),
+                    patch("omo_manager.omo_codex_start.wait_started", return_value="running"),
+                    patch("omo_manager.omo_codex_start.run", side_effect=tmux),
+                    patch("omo_manager.omo_codex_start.verify_same_process"),
+                    patch("omo_manager.omo_codex_start.send_prompt") as deliver,
+                    self.assertRaisesRegex(StartError, "old Codex session|did not expose"),
+                ):
+                    start(args)
+                deliver.assert_not_called()
+                audit = (root / "rotation.audit").read_text(encoding="utf-8")
+                self.assertIn(f"failure-kind: {failure_kind}\n", audit)
+                self.assertIn(f"captured-response-sha256: {hashlib.sha256(outcome.encode()).hexdigest()}\n", audit)
+                if outcome == "old":
+                    self.assertIn(f"captured-session-id: {self.SESSION_ID}\n", audit)
+                self.assertIn("replacement-disposition: stopped-to-shell\n", audit)
+                with self.assertRaises(OSError):
+                    os.getxattr(root / "rotation.audit", "user.omo_rotation_reconciliation_eligible_sha256")
+
+    def test_source1206_stop_or_finalization_fault_keeps_checkpoint_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            self.write_task(root, status="blocked", pending=["preserve exact queue"])
+            initial = Pane("cfg:2.0", "%2", "@2", "bun", root, 4242)
+            replacement = replace(initial, pane_pid=5252)
+            rotated = False
+
+            def resolve(_target: str) -> Pane:
+                return replacement if rotated else initial
+
+            def respawn(_pane: Pane, _command: str) -> None:
+                nonlocal rotated
+                rotated = True
+
+            evidence = {"response-sha256": hashlib.sha256(b"").hexdigest(), "response-session-id": "", "response-session-state": "absent"}
+            with (
+                patch("omo_manager.omo_codex_start.require_source1206_authority", return_value=None),
+                patch("omo_manager.omo_codex_start.resolve_pane", side_effect=resolve),
+                patch("omo_manager.omo_codex_start.inspect", return_value=Report("running", ["working"])),
+                patch("omo_manager.omo_codex_start.query_status_session_id", return_value=(self.SESSION_ID, "")),
+                patch("omo_manager.omo_codex_start.query_exact_status_session_id", side_effect=lambda *_args: (_args[-1].update(evidence), "")[1]),
+                patch("omo_manager.omo_codex_start.prompt_text", return_value="worker-only prompt\n"),
+                patch("omo_manager.omo_codex_start.respawn_codex", side_effect=respawn),
+                patch("omo_manager.omo_codex_start.wait_started", return_value="running"),
+                patch("omo_manager.omo_codex_start.stop_unverified_replacement", side_effect=StartError("stop proof failed")),
+                patch("omo_manager.omo_codex_start.send_prompt") as deliver,
+                self.assertRaisesRegex(StartError, "did not expose") as raised,
+            ):
+                start(self.rotation_args(root, stop_unverified_replacement=True))
+            deliver.assert_not_called()
+            self.assertTrue(any("completion-unknown" in note for note in getattr(raised.exception, "__notes__", ())))
+            audit = (root / "rotation.audit").read_text(encoding="utf-8")
+            self.assertIn("completion: unknown-until-finalized\n", audit)
+            self.assertNotIn("replacement-disposition:", audit)
+            self.assertNotIn("final-result:", audit)
+
+    def test_source1206_startup_error_or_timeout_parks_checkpointed_replacement(self) -> None:
+        for outcome in ("error", "timeout"):
+            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as raw_root:
+                root = Path(raw_root)
+                self.write_task(root, status="blocked", pending=["preserve exact queue"])
+                initial = Pane("cfg:2.0", "%2", "@2", "bun", root, 4242)
+                replacement = replace(initial, pane_pid=5252)
+                shell = replace(initial, command="sh", pane_pid=6262)
+                state = "initial"
+
+                def resolve(_target: str) -> Pane:
+                    return shell if state == "shell" else replacement if state == "replacement" else initial
+
+                def respawn(_pane: Pane, _command: str) -> None:
+                    nonlocal state
+                    state = "replacement"
+
+                def tmux(command: list[str], *, timeout_s: float = 10.0) -> subprocess.CompletedProcess[str]:
+                    nonlocal state
+                    del timeout_s
+                    if "/bin/sh" in " ".join(command):
+                        state = "shell"
+                    return subprocess.CompletedProcess(command, 0, "", "")
+
+                with (
+                    patch("omo_manager.omo_codex_start.require_source1206_authority", return_value=None),
+                    patch("omo_manager.omo_codex_start.resolve_pane", side_effect=resolve),
+                    patch("omo_manager.omo_codex_start.inspect", return_value=Report("running", ["working"])),
+                    patch("omo_manager.omo_codex_start.query_status_session_id", return_value=(self.SESSION_ID, "")),
+                    patch("omo_manager.omo_codex_start.prompt_text", return_value="worker-only prompt\n"),
+                    patch("omo_manager.omo_codex_start.respawn_codex", side_effect=respawn),
+                    patch("omo_manager.omo_codex_start.post_marker_lines", return_value=["startup failed"] if outcome == "error" else None),
+                    patch("omo_manager.omo_codex_start.classify_status", return_value="error"),
+                    patch("omo_manager.omo_codex_start.run", side_effect=tmux),
+                    patch("omo_manager.omo_codex_start.verify_same_process"),
+                    patch("omo_manager.omo_codex_start.time.sleep"),
+                    patch("omo_manager.omo_codex_start.query_exact_status_session_id") as status_query,
+                    patch("omo_manager.omo_codex_start.send_prompt") as deliver,
+                    self.assertRaisesRegex(StartError, "before the authorized status query"),
+                ):
+                    start(self.rotation_args(root, stop_unverified_replacement=True, startup_timeout_s=0.001))
+                self.assertEqual("shell", state)
+                status_query.assert_not_called()
+                deliver.assert_not_called()
+                audit = (root / "rotation.audit").read_text(encoding="utf-8")
+                self.assertIn("failure-kind: post-respawn-status-query-not-reached\n", audit)
+                self.assertIn("replacement-disposition: stopped-to-shell\n", audit)
 
     def test_reconcile_rotation_audit_parser_requires_all_assertions_and_is_mutually_exclusive(self) -> None:
         common = [

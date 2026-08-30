@@ -20,6 +20,15 @@
   - accepts a post-respawn UUID only from output after its exact `/status` submission; retained cards of every UUID are ineligible
   - records a response hash, captured UUID when present, and distinct absent/same-old/stale-history failure kinds; only absent-UUID failure is reconcilable
   - preserves the same checkpointed replacement and all snapshot bindings
+- Source-1206 one-time status-and-stop path
+  - requires `--stop-unverified-replacement` plus the byte-exact owner-private Source-1206 email and lines `3-13`
+  - is hard-bound to `dw1113_bedrock.md`, `dw5:0.0`, and its exact unused owner-private audit path
+  - submits exactly one guarded `/status` after checkpointing; it never runs the ordinary query or fallback query
+  - accepts only one UUID newly emitted in that exact response
+  - on old, absent, or ambiguous UUID, guards and respawns the checkpointed process to `/bin/sh`, then proves the same pane/window, changed PID, dead former PID, and shell command
+  - finalizes failure only after stop proof, recording response digest, failure kind, captured UUID when present, and stopped shell identity
+  - leaves the checkpoint audit completion-unknown on stop, proof, or finalization fault and never delivers the task prompt
+  - never marks a stopped missing-UUID audit reconciliation-eligible
 - reconciliation eligibility
   - requires the replacement checkpoint
   - requires the exact UUID-capture failure kind
