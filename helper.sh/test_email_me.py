@@ -670,7 +670,8 @@ class EmailMeTests(unittest.TestCase):
             ):
                 result = email_me.main(["--manager-human", "--message-file", str(body)])
             self.assertEqual(0, result)
-            prepare.assert_called_once_with("wl:1")
+            self.assertEqual(("wl:1",), prepare.call_args.args)
+            self.assertEqual("primary", prepare.call_args.kwargs["route_profile"].route_kind)
             self.assertEqual("Re: [wl:1] Existing topic\nbody\n", (Path(tmp) / "sent.txt").read_text(encoding="utf-8"))
 
     def test_omitted_subject_fails_when_no_thread_exists(self) -> None:
@@ -783,6 +784,180 @@ class EmailMeTests(unittest.TestCase):
         with patch.object(omo_email_subject, "find_recent_thread_matching", side_effect=select):
             self.assertEqual(matching, omo_email_subject.find_recent_thread_for_tmux_target("hcfg:1"))
 
+    def test_route_profiles_keep_guest_and_primary_thread_participants_separate(self) -> None:
+        guest = omo_email_subject.MailRouteProfile("agent@example.test", "46496337@qq.com", "guest-hees")
+        primary = omo_email_subject.MailRouteProfile("agent@example.test", "human@example.test", "primary")
+        primary_sent = omo_email_subject.RecentHeader(
+            "Agent <agent@example.test>", "Topic", None, "<primary@example.test>", "", "Human <human@example.test>"
+        )
+        guest_sent = omo_email_subject.RecentHeader(
+            "agent@example.test", "Topic", None, "<guest@example.test>", "", "46496337@qq.com"
+        )
+        guest_incoming = omo_email_subject.RecentHeader(
+            "46496337@qq.com", "Topic", None, "<incoming@example.test>", "", "agent@example.test"
+        )
+        self.assertTrue(omo_email_subject.route_matches_header(primary_sent, primary.agent_address, primary.counterparty_address))
+        self.assertFalse(omo_email_subject.route_matches_header(primary_sent, guest.agent_address, guest.counterparty_address))
+        self.assertTrue(omo_email_subject.route_matches_header(guest_sent, guest.agent_address, guest.counterparty_address))
+        self.assertFalse(omo_email_subject.route_matches_header(guest_sent, primary.agent_address, primary.counterparty_address))
+        self.assertTrue(omo_email_subject.route_matches_header(guest_incoming, guest.counterparty_address, guest.agent_address))
+
+    def test_route_match_rejects_wrong_or_multiple_recipients(self) -> None:
+        wrong = omo_email_subject.RecentHeader(
+            "agent@example.test", "Topic", None, "<wrong@example.test>", "", "other@example.test"
+        )
+        multiple = omo_email_subject.RecentHeader(
+            "agent@example.test", "Topic", None, "<multiple@example.test>", "", "46496337@qq.com, human@example.test"
+        )
+        self.assertFalse(omo_email_subject.route_matches_header(wrong, "agent@example.test", "46496337@qq.com"))
+        self.assertFalse(omo_email_subject.route_matches_header(multiple, "agent@example.test", "46496337@qq.com"))
+
+    def test_route_profile_lookup_cannot_select_same_subject_from_other_counterparty(self) -> None:
+        calls: list[tuple[object, ...]] = []
+
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+            app_password = "secret"
+
+        class FakeClient:
+            def __init__(self, host: str, timeout: float) -> None:
+                calls.append(("connect", host, timeout))
+                self.mailbox = ""
+
+            def login(self, user: str, password: str) -> None:
+                calls.append(("login", user, password))
+
+            def select(self, mailbox: str, readonly: bool) -> tuple[str, list[bytes]]:
+                calls.append(("select", mailbox, readonly))
+                self.mailbox = mailbox
+                return "OK", []
+
+            def uid(self, command: str, *args: str) -> tuple[str, list[bytes]]:
+                calls.append((command, *args))
+                return ("OK", [b"1 2"]) if command == "search" and self.mailbox == '"[Gmail]/Sent Mail"' else ("OK", [b""])
+
+            def logout(self) -> None:
+                return None
+
+        now = email_me.datetime.now().astimezone()
+        primary_header = omo_email_subject.RecentHeader(
+            "agent@example.test", "Topic", now, "<primary@example.test>", "", "human@example.test"
+        )
+        guest_header = omo_email_subject.RecentHeader(
+            "agent@example.test", "Topic", now, "<guest@example.test>", "", "46496337@qq.com"
+        )
+        guest_profile = omo_email_subject.MailRouteProfile("agent@example.test", "46496337@qq.com", "guest-hees")
+        with (
+            patch.object(omo_email_subject, "configured_agent_mail", return_value=Settings()),
+            patch.object(omo_email_subject.imaplib, "IMAP4_SSL", FakeClient),
+            patch.object(omo_email_subject, "fetch_recent_headers", return_value=[primary_header, guest_header]),
+            patch.dict(os.environ, {"OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "86400"}, clear=False),
+        ):
+            selected = omo_email_subject.find_recent_thread("topic", guest_profile, reject_ambiguous=True)
+        self.assertEqual(guest_header, selected)
+        self.assertTrue(any(call[0] == "search" and '"46496337@qq.com"' in call for call in calls))
+        self.assertFalse(any(call[0] == "search" and '"human@example.test"' in call for call in calls))
+        calls.clear()
+        primary_profile = omo_email_subject.MailRouteProfile("agent@example.test", "human@example.test", "primary")
+        with (
+            patch.object(omo_email_subject, "configured_agent_mail", return_value=Settings()),
+            patch.object(omo_email_subject.imaplib, "IMAP4_SSL", FakeClient),
+            patch.object(omo_email_subject, "fetch_recent_headers", return_value=[primary_header, guest_header]),
+            patch.dict(os.environ, {"OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "86400"}, clear=False),
+        ):
+            selected = omo_email_subject.find_recent_thread("topic", primary_profile, reject_ambiguous=True)
+        self.assertEqual(primary_header, selected)
+        self.assertTrue(any(call[0] == "search" and '"human@example.test"' in call for call in calls))
+        self.assertFalse(any(call[0] == "search" and '"46496337@qq.com"' in call for call in calls))
+
+    def test_verified_thread_selection_rejects_ambiguous_or_missing_identity(self) -> None:
+        first = omo_email_subject.RecentHeader(
+            "agent@example.test", "Topic", None, "<first@example.test>", "", "human@example.test"
+        )
+        second = omo_email_subject.RecentHeader(
+            "agent@example.test", "Topic", None, "<second@example.test>", "", "human@example.test"
+        )
+        missing = omo_email_subject.RecentHeader("agent@example.test", "Topic", None, "", "", "human@example.test")
+        with self.assertRaisesRegex(omo_email_subject.SubjectInputError, "ambiguous"):
+            omo_email_subject.select_recent_thread([first, second], reject_ambiguous=True)
+        with self.assertRaisesRegex(omo_email_subject.SubjectInputError, "missing an exact Message-ID"):
+            omo_email_subject.select_recent_thread([missing], reject_ambiguous=True)
+
+    def test_verified_reply_rejects_missing_or_failed_route_lookup(self) -> None:
+        profile = omo_email_subject.MailRouteProfile("agent@example.test", "human@example.test", "primary")
+        with patch.object(omo_email_subject, "find_recent_thread", return_value=None):
+            with self.assertRaisesRegex(omo_email_subject.SubjectInputError, "no exact email thread"):
+                omo_email_subject.prepare_subject_and_headers("Re: Topic", "wl:1", route_profile=profile)
+        with patch.object(omo_email_subject, "find_recent_thread", side_effect=RuntimeError("imap down")):
+            with self.assertRaisesRegex(omo_email_subject.SubjectInputError, "lookup failed.*imap down"):
+                omo_email_subject.prepare_subject_and_headers("Re: Topic", "wl:1", route_profile=profile)
+
+    def test_failed_verified_reply_does_not_open_smtp(self) -> None:
+        with (
+            patch.object(sys, "stdin", StringIO("body\n")),
+            patch.object(email_me, "prepare_subject_and_headers", side_effect=email_me.SubjectInputError("ambiguous route thread")),
+            patch.object(email_me.smtplib, "SMTP_SSL") as smtp,
+            patch("sys.stderr", new_callable=StringIO) as stderr,
+        ):
+            result = email_me.main(["--manager-human", "--tmux-target", "wl:1", "--subject", "Re: Topic"])
+        self.assertEqual(2, result)
+        self.assertIn("ambiguous route thread", stderr.getvalue())
+        smtp.assert_not_called()
+
+    def test_explicit_new_route_message_does_not_attach_a_thread(self) -> None:
+        profile = omo_email_subject.MailRouteProfile("agent@example.test", "46496337@qq.com", "guest-hees")
+        with patch.object(omo_email_subject, "verified_recent_thread_header") as lookup:
+            self.assertEqual(("[guest_hees:1] Topic", {}), omo_email_subject.prepare_subject_and_headers("Topic", "guest_hees:1", route_profile=profile))
+        lookup.assert_not_called()
+
+    def test_explicit_guest_target_rejects_verified_primary_producer(self) -> None:
+        current = subprocess.CompletedProcess(["tmux"], 0, stdout="wl:7.0\n", stderr="")
+        with (
+            patch.dict(os.environ, {"TMUX": "/tmp/tmux-session", "TMUX_PANE": "%42", "OMO_AGENT_TMUX_TARGET": "wl:7"}, clear=False),
+            patch.object(sys, "stdin", StringIO("body\n")),
+            patch.object(email_me.subprocess, "run", return_value=current),
+            patch.object(email_me.smtplib, "SMTP_SSL") as smtp,
+            patch("sys.stderr", new_callable=StringIO) as stderr,
+        ):
+            result = email_me.main(["--guest-hees", "--manager-human", "--tmux-target", "guest_hees:1", "--subject", "Topic"])
+        self.assertEqual(2, result)
+        self.assertIn("conflicts with verified producer route", stderr.getvalue())
+        smtp.assert_not_called()
+
+    def test_explicit_primary_target_rejects_verified_guest_producer(self) -> None:
+        current = subprocess.CompletedProcess(["tmux"], 0, stdout="guest_hees:1.0\n", stderr="")
+        with (
+            patch.dict(os.environ, {"TMUX": "/tmp/tmux-session", "TMUX_PANE": "%42", "OMO_AGENT_TMUX_TARGET": "guest_hees:1"}, clear=False),
+            patch.object(sys, "stdin", StringIO("body\n")),
+            patch.object(email_me.subprocess, "run", return_value=current),
+            patch.object(email_me.smtplib, "SMTP_SSL") as smtp,
+            patch("sys.stderr", new_callable=StringIO) as stderr,
+        ):
+            result = email_me.main(["--manager-human", "--tmux-target", "wl:1", "--subject", "Topic"])
+        self.assertEqual(2, result)
+        self.assertIn("conflicts with verified producer route", stderr.getvalue())
+        smtp.assert_not_called()
+
+    def test_primary_route_rejects_pinned_guest_recipient_configuration(self) -> None:
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "46496337@qq.com"
+            app_password = "secret"
+
+        with (
+            patch.object(sys, "stdin", StringIO("body\n")),
+            patch.object(email_me, "configured_agent_mail", return_value=Settings()),
+            patch.object(email_me, "prepare_subject_and_headers") as prepare,
+            patch.object(email_me.smtplib, "SMTP_SSL") as smtp,
+            patch("sys.stderr", new_callable=StringIO) as stderr,
+        ):
+            result = email_me.main(["--manager-human", "--tmux-target", "wl:1", "--subject", "Topic"])
+        self.assertEqual(2, result)
+        self.assertIn("primary email route must not use the pinned guest recipient", stderr.getvalue())
+        prepare.assert_not_called()
+        smtp.assert_not_called()
+
     def test_thread_lookup_deadline_covers_both_mailboxes(self) -> None:
         self.assertGreaterEqual(
             omo_email_subject.DEFAULT_THREAD_LOOKUP_DEADLINE_S,
@@ -801,7 +976,7 @@ class EmailMeTests(unittest.TestCase):
         )
         headers = omo_email_subject.fetch_recent_headers(client, ["1", "2"])
         self.assertEqual(["[wl:1] First", "[wl:1] Second"], [header.subject for header in headers])
-        client.uid.assert_called_once_with("fetch", "1,2", "(BODY.PEEK[HEADER.FIELDS (DATE FROM SUBJECT MESSAGE-ID REFERENCES)])")
+        client.uid.assert_called_once_with("fetch", "1,2", "(BODY.PEEK[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID REFERENCES)])")
 
     def test_dry_run_can_omit_pwd_footer(self) -> None:
         with patch.object(sys, "stdin", StringIO("body\n")), patch("sys.stdout", new_callable=StringIO) as stdout:
@@ -816,12 +991,13 @@ class EmailMeTests(unittest.TestCase):
         self.assertEqual(0, result)
         self.assertIn("body-bytes=5", stdout.getvalue())
 
-    def test_legacy_manager_dry_run_keeps_loop_footer(self) -> None:
-        with patch.object(sys, "stdin", StringIO("body\n")), patch.object(email_me, "configured_agent_mail", return_value=None), patch.object(email_me, "prepare_subject_and_headers", return_value=("[wl:1] hi", {})), patch.object(email_me, "append_pwd_footer", return_value="body\n\nPWD: config\n") as append_footer, patch("sys.stdout", new_callable=StringIO) as stdout:
+    def test_manager_dry_run_rejects_missing_split_configuration(self) -> None:
+        with patch.object(sys, "stdin", StringIO("body\n")), patch.object(email_me, "configured_agent_mail", return_value=None), patch.object(email_me, "prepare_subject_and_headers") as prepare, patch.object(email_me, "append_pwd_footer") as append_footer, patch("sys.stderr", new_callable=StringIO) as stderr:
             result = email_me.main(["--dry-run", "--manager-human", "--no-pwd-footer", "--tmux-target", "wl:1", "--subject", "hi"])
-        self.assertEqual(0, result)
-        self.assertIn("body-bytes=18", stdout.getvalue())
-        append_footer.assert_called_once_with("body\n", tmux_target="wl:1", require_unquoted_footer=True)
+        self.assertEqual(2, result)
+        self.assertIn("requires split email configuration", stderr.getvalue())
+        prepare.assert_not_called()
+        append_footer.assert_not_called()
 
     def test_manager_human_mode_dedupes_and_logs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -881,7 +1057,8 @@ class EmailMeTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=False), patch.object(email_me, "prepare_subject_and_headers", return_value=prepared) as prepare, patch.object(email_me, "reply_headers_for_subject") as headers:
                 result = email_me.main(["--manager-human", "--subject-file", str(subject), "--message-file", str(body)])
             self.assertEqual(0, result)
-            prepare.assert_called_once_with("manager_status_email_unification_followup_7872.md status answer", "wl:1")
+            self.assertEqual(("manager_status_email_unification_followup_7872.md status answer", "wl:1"), prepare.call_args.args)
+            self.assertEqual("primary", prepare.call_args.kwargs["route_profile"].route_kind)
             headers.assert_not_called()
             self.assertEqual("Re: [wl:1] manager_status_email_unification_followup_7872.md status answer\nbody\n", send_log.read_text(encoding="utf-8"))
             self.assertIn("Re: [wl:1] manager_status_email_unification_followup_7872.md status answer", (state_dir / "human-email-sent.tsv").read_text(encoding="utf-8"))
@@ -903,7 +1080,8 @@ class EmailMeTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=False), patch.object(email_me, "prepare_subject_and_headers", return_value=prepared) as prepare:
                 result = email_me.main(["--manager-human", "--tmux-target", "wl:7", "--subject-file", str(subject), "--message-file", str(body)])
             self.assertEqual(0, result)
-            prepare.assert_called_once_with("Topic", "wl:7")
+            self.assertEqual(("Topic", "wl:7"), prepare.call_args.args)
+            self.assertEqual("primary", prepare.call_args.kwargs["route_profile"].route_kind)
             self.assertEqual("[wl:7] Topic\nbody\n", send_log.read_text(encoding="utf-8"))
 
     def test_manager_human_mode_rejects_stale_agent_target(self) -> None:
@@ -924,7 +1102,7 @@ class EmailMeTests(unittest.TestCase):
                 "OMO_AGENT_TMUX_TARGET": "vl:2",
             }
             current = subprocess.CompletedProcess(["tmux"], 0, stdout="vl:3.0\n", stderr="")
-            with patch.dict(os.environ, env, clear=False), patch.object(email_me.subprocess, "run", return_value=current) as run:
+            with patch.dict(os.environ, env, clear=False), patch.object(email_me.subprocess, "run", return_value=current) as run, patch.object(email_me, "prepare_subject_and_headers", return_value=("Re: [vl:3] Topic", {})):
                 result = email_me.main(["--manager-human", "--subject-file", str(subject), "--message-file", str(body)])
             self.assertEqual(0, result)
             self.assertEqual("Re: [vl:3] Topic\nbody\n", send_log.read_text(encoding="utf-8"))
@@ -1002,7 +1180,7 @@ class EmailMeTests(unittest.TestCase):
                 "TMUX": "/tmp/tmux-session",
                 "OMO_AGENT_TMUX_TARGET": "pb:99",
             }
-            with patch.dict(os.environ, env, clear=False), patch.object(email_me.subprocess, "run") as run:
+            with patch.dict(os.environ, env, clear=False), patch.object(email_me.subprocess, "run") as run, patch.object(email_me, "prepare_subject_and_headers", return_value=("Re: [vl:15] Topic", {})):
                 result = email_me.main(["--manager-human", "--sender-tmux-target", "vl:15", "--subject-file", str(subject), "--message-file", str(body)])
             self.assertEqual(0, result)
             self.assertEqual("Re: [vl:15] Topic\nbody\n", send_log.read_text(encoding="utf-8"))
@@ -1049,7 +1227,7 @@ class EmailMeTests(unittest.TestCase):
             self.assertEqual(0, second)
             self.assertEqual("[wl:1] Topic\nbody\n", send_log.read_text(encoding="utf-8"))
 
-    def test_manager_human_smtp_path_uses_prepared_reply_headers(self) -> None:
+    def test_manager_human_smtp_path_rejects_missing_split_configuration(self) -> None:
         sent_messages = []
 
         class FakeSmtp:
@@ -1081,13 +1259,11 @@ class EmailMeTests(unittest.TestCase):
                 "OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "0",
                 "OMO_MANAGER_TMUX_TARGET": "wl:1.0",
             }
-            prepared = ("Re: [wl:1] Topic", {"In-Reply-To": "<prior@example.test>", "References": "<root@example.test> <prior@example.test>"})
-            with patch.dict(os.environ, env, clear=False), patch.object(email_me, "ENV_FILE_PATH", env_file), patch.object(email_me, "configured_agent_mail", return_value=None), patch.object(email_me, "prepare_subject_and_headers", return_value=prepared), patch.object(email_me.smtplib, "SMTP_SSL", FakeSmtp), patch.object(email_me.ssl, "create_default_context", return_value=None):
-                self.assertEqual(0, email_me.main(["--manager-human", "--no-pwd-footer", "--subject-file", str(subject), "--message-file", str(body)]))
-        self.assertEqual("Re: [wl:1] Topic", sent_messages[0]["Subject"])
-        self.assertEqual("<prior@example.test>", sent_messages[0]["In-Reply-To"])
-        self.assertEqual("<root@example.test> <prior@example.test>", sent_messages[0]["References"])
-        self.assertIn("PWD:", sent_messages[0].get_body(preferencelist=("plain",)).get_content())
+            with patch.dict(os.environ, env, clear=False), patch.object(email_me, "ENV_FILE_PATH", env_file), patch.object(email_me, "configured_agent_mail", return_value=None), patch.object(email_me, "prepare_subject_and_headers") as prepare, patch.object(email_me.smtplib, "SMTP_SSL", FakeSmtp), patch.object(email_me.ssl, "create_default_context", return_value=None), patch("sys.stderr", new_callable=StringIO) as stderr:
+                self.assertEqual(2, email_me.main(["--manager-human", "--no-pwd-footer", "--subject-file", str(subject), "--message-file", str(body)]))
+        self.assertEqual([], sent_messages)
+        prepare.assert_not_called()
+        self.assertIn("requires split email configuration", stderr.getvalue())
 
     def test_split_smtp_sends_from_agent_only_to_configured_human(self) -> None:
         sent_messages = []
