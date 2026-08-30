@@ -29,13 +29,14 @@ if MANAGER_DIR.is_dir():
     sys.path.insert(0, str(MANAGER_DIR))
 try:
     from omo_email_config import GUEST_HEES_ADDRESS, GUEST_HEES_MANAGER_TARGET, configured_agent_mail, guest_hees_mail
-    from omo_email_subject import SubjectInputError, canonical_tmux_target, normalized_subject_key, prepare_latest_thread_for_tmux_target, prepare_subject, prepare_subject_and_headers, reply_headers_for_subject, strip_leading_tmux_tags
+    from omo_email_subject import MailRouteProfile, SubjectInputError, canonical_tmux_target, normalized_subject_key, prepare_latest_thread_for_tmux_target, prepare_subject, prepare_subject_and_headers, reply_headers_for_subject, strip_leading_tmux_tags
     from omo_guest_images import GuestImageError, ValidatedImage, reply_attachments
 except ImportError:
     configured_agent_mail = None
     guest_hees_mail = None
     GUEST_HEES_ADDRESS = "46496337@qq.com"
     GUEST_HEES_MANAGER_TARGET = "guest_hees:0"
+    MailRouteProfile = None
     SubjectInputError = ValueError
     canonical_tmux_target = None
     normalized_subject_key = None
@@ -265,6 +266,20 @@ def guest_hees_tmux_target(target: str | None) -> bool:
         return False
     canonical = canonical_email_tmux_target(target)
     return canonical.partition(":")[0] == GUEST_HEES_MANAGER_TARGET.partition(":")[0]
+
+
+def validate_manager_route_identity(explicit_target: str | None, selected_target: str) -> None:
+    if explicit_target is None:
+        return
+    inferred_target = inferred_tmux_target(True)
+    if inferred_target is None:
+        return
+    if guest_hees_tmux_target(explicit_target) != guest_hees_tmux_target(inferred_target):
+        raise ValueError(
+            f"explicit tmux target {canonical_email_tmux_target(explicit_target)} conflicts with verified producer route {canonical_email_tmux_target(inferred_target)}"
+        )
+    if guest_hees_tmux_target(selected_target) != guest_hees_tmux_target(inferred_target):
+        raise ValueError("selected email route conflicts with verified producer identity")
 
 
 def canonical_email_tmux_target(target: str) -> str:
@@ -666,21 +681,52 @@ def main(argv: list[str]) -> int:
     args = parse_args(argv)
     try:
         subject_tmux_target = footer_tmux_target(args.tmux_target, args.manager_human)
+        if args.manager_human and subject_tmux_target is not None:
+            validate_manager_route_identity(args.tmux_target, subject_tmux_target)
         if args.manager_human and guest_hees_tmux_target(subject_tmux_target) and not args.guest_hees:
             args = dataclass_replace(args, guest_hees=True)
         if args.manager_human and subject_tmux_target is None:
             raise ValueError("manager-human email requires a tmux target.")
         if args.guest_image_references and not args.guest_hees:
             raise ValueError("--guest-image-reference requires a guest_hees producer target.")
+        try:
+            split_settings = configured_agent_mail() if configured_agent_mail is not None else None
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+        if args.manager_human and split_settings is None:
+            raise ValueError("manager-human email requires split email configuration")
+        if args.guest_hees:
+            if split_settings is None or guest_hees_mail is None:
+                raise ValueError("guest-hees email requires split email configuration")
+            split_settings = guest_hees_mail(split_settings)
+            if split_settings.human_address != GUEST_HEES_ADDRESS:
+                raise ValueError("guest-hees recipient configuration is not pinned")
+        elif args.manager_human and split_settings is not None and split_settings.human_address.casefold() == GUEST_HEES_ADDRESS.casefold():
+            raise ValueError("primary email route must not use the pinned guest recipient")
+        route_profile = None
+        if args.manager_human:
+            if MailRouteProfile is None or split_settings is None:
+                raise ValueError("manager-human route-profile validation is unavailable")
+            route_profile = MailRouteProfile(
+                agent_address=split_settings.agent_address,
+                counterparty_address=split_settings.human_address,
+                route_kind="guest-hees" if args.guest_hees else "primary",
+            )
         if args.title is None:
             if subject_tmux_target is None:
                 raise ValueError("email without a subject requires an inferred tmux target.")
             if prepare_latest_thread_for_tmux_target is None:
                 raise ValueError("email thread lookup is unavailable; pass --subject or --subject-file.")
-            subject, reply_headers = prepare_latest_thread_for_tmux_target(subject_tmux_target)
+            if route_profile is None:
+                subject, reply_headers = prepare_latest_thread_for_tmux_target(subject_tmux_target)
+            else:
+                subject, reply_headers = prepare_latest_thread_for_tmux_target(subject_tmux_target, route_profile=route_profile)
             title = subject
         elif prepare_subject_and_headers is not None:
-            subject, reply_headers = prepare_subject_and_headers(args.title, subject_tmux_target or "")
+            if route_profile is None:
+                subject, reply_headers = prepare_subject_and_headers(args.title, subject_tmux_target or "")
+            else:
+                subject, reply_headers = prepare_subject_and_headers(args.title, subject_tmux_target or "", route_profile=route_profile)
             title = args.title
         else:
             subject, reply_headers = normalize_subject(args.title, subject_tmux_target or ""), {}
@@ -699,18 +745,12 @@ def main(argv: list[str]) -> int:
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    try:
-        split_settings = configured_agent_mail() if configured_agent_mail is not None else None
-    except ValueError as exc:
-        print(str(exc), file=sys.stderr)
-        return 2
-    if args.guest_hees:
-        if split_settings is None or guest_hees_mail is None:
-            print("guest-hees email requires split email configuration", file=sys.stderr)
-            return 2
-        split_settings = guest_hees_mail(split_settings)
-        if split_settings.human_address != GUEST_HEES_ADDRESS:
-            print("guest-hees recipient configuration is not pinned", file=sys.stderr)
+    if args.manager_human and route_profile is not None:
+        if split_settings is None or (
+            split_settings.agent_address.casefold() != route_profile.agent_address.casefold()
+            or split_settings.human_address.casefold() != route_profile.counterparty_address.casefold()
+        ):
+            print("outbound email settings do not match the verified route profile", file=sys.stderr)
             return 2
     guest_images: tuple[ValidatedImage, ...] = ()
     if args.guest_image_references:

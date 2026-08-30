@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from email import policy
 from email.parser import BytesParser
-from email.utils import parseaddr, parsedate_to_datetime
+from email.utils import getaddresses, parseaddr, parsedate_to_datetime
 from pathlib import Path
 
 try:
@@ -54,6 +54,24 @@ class RecentHeader:
     date: datetime | None
     message_id: str = ""
     references: str = ""
+    recipient: str = ""
+
+
+@dataclass(frozen=True)
+class MailRouteProfile:
+    agent_address: str
+    counterparty_address: str
+    route_kind: str
+
+    def __post_init__(self) -> None:
+        if self.route_kind not in {"primary", "guest-hees"}:
+            raise ValueError("mail route kind must be primary or guest-hees")
+        for label, address in (("agent", self.agent_address), ("counterparty", self.counterparty_address)):
+            parsed = getaddresses([address])
+            if len(parsed) != 1 or parsed[0][1].casefold() != address.casefold() or "@" not in address or any(ch.isspace() for ch in address):
+                raise ValueError(f"mail route {label} address is invalid")
+        if self.agent_address.casefold() == self.counterparty_address.casefold():
+            raise ValueError("mail route agent and counterparty addresses must differ")
 
 
 def parse_env_config(path: Path) -> dict[str, str]:
@@ -204,7 +222,41 @@ def parsed_header_date(raw_date: str) -> datetime | None:
     return parsed.astimezone()
 
 
-def find_recent_thread_matching(matches: Callable[[RecentHeader], bool], subject_query: str = "") -> RecentHeader | None:
+def exact_header_address(value: str) -> str | None:
+    parsed = getaddresses([value])
+    if len(parsed) != 1 or not parsed[0][1]:
+        return None
+    return parsed[0][1].casefold()
+
+
+def route_matches_header(header: RecentHeader, sender: str, recipient: str) -> bool:
+    return exact_header_address(header.sender) == sender.casefold() and exact_header_address(header.recipient) == recipient.casefold()
+
+
+def thread_root_message_id(header: RecentHeader) -> str:
+    references = [value for value in header.references.split() if value]
+    return references[0] if references else header.message_id.strip()
+
+
+def select_recent_thread(candidates: list[RecentHeader], *, reject_ambiguous: bool) -> RecentHeader | None:
+    if not candidates:
+        return None
+    if reject_ambiguous:
+        thread_roots = {thread_root_message_id(header) for header in candidates}
+        if "" in thread_roots:
+            raise SubjectInputError("verified email thread is missing an exact Message-ID")
+        if len(thread_roots) != 1:
+            raise SubjectInputError("email thread lookup is ambiguous for the selected route")
+    return max(candidates, key=lambda header: header.date.timestamp() if header.date is not None else float("-inf"))
+
+
+def find_recent_thread_matching(
+    matches: Callable[[RecentHeader], bool],
+    subject_query: str = "",
+    *,
+    route_profile: MailRouteProfile | None = None,
+    reject_ambiguous: bool = False,
+) -> RecentHeader | None:
     lookup_s = int(os.environ.get("OMO_MANAGER_EMAIL_THREAD_LOOKUP_S", str(DEFAULT_THREAD_LOOKUP_WINDOW_S)))
     if lookup_s <= 0:
         return None
@@ -215,7 +267,13 @@ def find_recent_thread_matching(matches: Callable[[RecentHeader], bool], subject
         else parse_env_config(Path(os.environ.get("OMO_EMAIL_CONFIG_PATH", CONFIG_PATH)))
     )
     if not {"host", "user", "password"} <= set(config):
+        if route_profile is not None:
+            raise SubjectInputError("verified email thread lookup requires split email configuration")
         return None
+    if route_profile is not None and (
+        split_settings is None or split_settings.agent_address.casefold() != route_profile.agent_address.casefold()
+    ):
+        raise SubjectInputError("email thread lookup configuration does not match the selected route profile")
     cutoff = datetime.now().astimezone() - timedelta(seconds=lookup_s)
     timeout_s = float(os.environ.get("OMO_MANAGER_EMAIL_THREAD_LOOKUP_TIMEOUT_S", str(DEFAULT_THREAD_LOOKUP_OPERATION_TIMEOUT_S)))
     client = imaplib.IMAP4_SSL(config["host"], timeout=timeout_s)
@@ -224,35 +282,49 @@ def find_recent_thread_matching(matches: Callable[[RecentHeader], bool], subject
         client.login(config["user"], config["password"])
         mailbox_searches = (
             [
-                ("[Gmail]/Sent Mail", split_settings.agent_address, split_settings.human_address),
-                ("INBOX", split_settings.human_address, split_settings.agent_address),
+                (
+                    "[Gmail]/Sent Mail",
+                    split_settings.agent_address,
+                    route_profile.counterparty_address if route_profile is not None else split_settings.human_address,
+                ),
+                (
+                    "INBOX",
+                    route_profile.counterparty_address if route_profile is not None else split_settings.human_address,
+                    split_settings.agent_address,
+                ),
             ]
             if split_settings is not None
             else [("INBOX", config["user"], "")]
         )
-        best: RecentHeader | None = None
+        candidates: list[RecentHeader] = []
         for mailbox, sender, recipient in mailbox_searches:
             quoted_mailbox = '"' + mailbox.replace("\\", "\\\\").replace('"', '\\"') + '"'
             typ, _data = client.select(quoted_mailbox, readonly=True)
             if typ != "OK":
-                continue
+                raise SubjectInputError(f"email thread lookup could not select {mailbox}")
             criteria = ["SINCE", cutoff.strftime("%d-%b-%Y"), "FROM", f'"{sender}"']
             if recipient:
                 criteria.extend(["TO", f'"{recipient}"'])
             if subject_query:
                 criteria.extend(["SUBJECT", f'"{subject_query}"'])
-            typ, data = client.uid("search", None, *criteria)
-            if typ != "OK" or not data or not data[0]:
+            typ, data = client.uid("search", None, *criteria)  # pyright: ignore[reportArgumentType]
+            if typ != "OK" or not data:
+                raise SubjectInputError(f"email thread lookup failed while searching {mailbox}")
+            if not data[0]:
                 continue
             uids = [raw_uid.decode() if isinstance(raw_uid, bytes) else str(raw_uid) for raw_uid in data[0].split()]
             for header in fetch_recent_headers(client, uids):
-                if header is None or header.date is None or header.date < cutoff:
+                if header.date is None or header.date < cutoff:
                     continue
-                if parseaddr(header.sender)[1].casefold() != sender.casefold() or not matches(header):
+                if route_profile is not None:
+                    if not route_matches_header(header, sender, recipient):
+                        continue
+                elif parseaddr(header.sender)[1].casefold() != sender.casefold():
                     continue
-                if best is None or best.date is None or header.date > best.date:
-                    best = header
-        return best
+                if not matches(header):
+                    continue
+                candidates.append(header)
+        return select_recent_thread(candidates, reject_ambiguous=reject_ambiguous)
     except SubjectLookupTimeout:
         timed_out = True
         raise
@@ -266,11 +338,21 @@ def find_recent_thread_matching(matches: Callable[[RecentHeader], bool], subject
             pass
 
 
-def find_recent_thread(subject_key: str) -> RecentHeader | None:
-    return find_recent_thread_matching(lambda header: normalized_subject_key(header.subject) == subject_key)
+def find_recent_thread(subject_key: str, route_profile: MailRouteProfile | None = None, reject_ambiguous: bool = False) -> RecentHeader | None:
+    if route_profile is None and not reject_ambiguous:
+        return find_recent_thread_matching(lambda header: normalized_subject_key(header.subject) == subject_key)
+    return find_recent_thread_matching(
+        lambda header: normalized_subject_key(header.subject) == subject_key,
+        route_profile=route_profile,
+        reject_ambiguous=reject_ambiguous,
+    )
 
 
-def find_recent_thread_for_tmux_target(tmux_target: str) -> RecentHeader | None:
+def find_recent_thread_for_tmux_target(
+    tmux_target: str,
+    route_profile: MailRouteProfile | None = None,
+    reject_ambiguous: bool = False,
+) -> RecentHeader | None:
     target = canonical_tmux_target(tmux_target)
 
     def has_exact_leading_target(header: RecentHeader) -> bool:
@@ -285,21 +367,32 @@ def find_recent_thread_for_tmux_target(tmux_target: str) -> RecentHeader | None:
         leading = BRACKETED_TMUX_PREFIX_RE.match(text)
         return len(targets) == 1 and leading is not None and canonical_tmux_target(leading.group(1)) == target
 
-    return find_recent_thread_matching(has_exact_leading_target, target)
+    if route_profile is None and not reject_ambiguous:
+        return find_recent_thread_matching(has_exact_leading_target, target)
+    return find_recent_thread_matching(has_exact_leading_target, target, route_profile=route_profile, reject_ambiguous=reject_ambiguous)
 
 
 def fetch_recent_headers(client: imaplib.IMAP4_SSL, uids: list[str]) -> list[RecentHeader]:
     if not uids:
         return []
-    typ, data = client.uid("fetch", ",".join(uids), "(BODY.PEEK[HEADER.FIELDS (DATE FROM SUBJECT MESSAGE-ID REFERENCES)])")
+    typ, data = client.uid("fetch", ",".join(uids), "(BODY.PEEK[HEADER.FIELDS (DATE FROM TO SUBJECT MESSAGE-ID REFERENCES)])")
     if typ != "OK" or not data:
-        return []
+        raise SubjectInputError("email thread lookup failed while fetching candidate headers")
     headers: list[RecentHeader] = []
     for item in data:
         if not isinstance(item, tuple):
             continue
         msg = BytesParser(policy=policy.default).parsebytes(item[1])
-        headers.append(RecentHeader(str(msg.get("From", "")), str(msg.get("Subject", "")), parsed_header_date(str(msg.get("Date", ""))), str(msg.get("Message-ID", "")), str(msg.get("References", ""))))
+        headers.append(
+            RecentHeader(
+                str(msg.get("From", "")),
+                str(msg.get("Subject", "")),
+                parsed_header_date(str(msg.get("Date", ""))),
+                str(msg.get("Message-ID", "")),
+                str(msg.get("References", "")),
+                str(msg.get("To", "")),
+            )
+        )
     return headers
 
 
@@ -363,6 +456,36 @@ def recent_thread_header_for_tmux_target(tmux_target: str) -> RecentHeader | Non
         return None
 
 
+def verified_recent_thread_header(
+    *,
+    route_profile: MailRouteProfile,
+    subject_key: str | None = None,
+    tmux_target: str | None = None,
+    required: bool,
+) -> RecentHeader | None:
+    if (subject_key is None) == (tmux_target is None):
+        raise ValueError("verified thread lookup requires exactly one lookup key")
+    try:
+        deadline_s = float(os.environ.get("OMO_MANAGER_EMAIL_THREAD_LOOKUP_DEADLINE_S", str(DEFAULT_THREAD_LOOKUP_DEADLINE_S)))
+        with recent_thread_lookup_deadline(deadline_s):
+            if subject_key is not None:
+                header = find_recent_thread(subject_key, route_profile, reject_ambiguous=True)
+                description = f"subject {subject_key!r}"
+            else:
+                assert tmux_target is not None
+                header = find_recent_thread_for_tmux_target(tmux_target, route_profile, reject_ambiguous=True)
+                description = f"tmux target {canonical_tmux_target(tmux_target)}"
+    except SubjectInputError:
+        raise
+    except Exception as exc:
+        raise SubjectInputError(f"verified email thread lookup failed for route {route_profile.route_kind}: {exc}") from exc
+    if header is None and required:
+        raise SubjectInputError(f"no exact email thread found for {description} on route {route_profile.route_kind}")
+    if header is not None and not header.message_id.strip():
+        raise SubjectInputError("verified email thread is missing an exact Message-ID")
+    return header
+
+
 def reply_headers_for_subject(subject: str) -> dict[str, str]:
     header = recent_thread_header(normalized_subject_key(subject))
     return reply_headers_from_recent_header(header)
@@ -378,11 +501,25 @@ def reply_headers_from_recent_header(header: RecentHeader | None) -> dict[str, s
     return {"In-Reply-To": message_id, "References": " ".join(references)}
 
 
-def prepare_subject_and_headers(subject: str, tmux_target: str = "") -> tuple[str, dict[str, str]]:
+def prepare_subject_and_headers(
+    subject: str,
+    tmux_target: str = "",
+    route_profile: MailRouteProfile | None = None,
+) -> tuple[str, dict[str, str]]:
     validate_subject(subject)
     stripped = subject.strip()
     base = subject_base(stripped)
-    header = recent_thread_header(normalized_subject_key(stripped))
+    header = (
+        verified_recent_thread_header(
+            route_profile=route_profile,
+            subject_key=normalized_subject_key(stripped),
+            required=True,
+        )
+        if route_profile is not None and starts_w_re(stripped)
+        else recent_thread_header(normalized_subject_key(stripped))
+        if route_profile is None
+        else None
+    )
     if starts_w_re(stripped) and has_manager_tag(stripped):
         return manager_subject_w_target(subject_base(stripped), tmux_target, True), reply_headers_from_recent_header(header)
     if starts_w_re(stripped) or header is not None:
@@ -390,8 +527,15 @@ def prepare_subject_and_headers(subject: str, tmux_target: str = "") -> tuple[st
     return manager_subject_w_target(base, tmux_target), {}
 
 
-def prepare_latest_thread_for_tmux_target(tmux_target: str) -> tuple[str, dict[str, str]]:
-    header = recent_thread_header_for_tmux_target(tmux_target)
+def prepare_latest_thread_for_tmux_target(
+    tmux_target: str,
+    route_profile: MailRouteProfile | None = None,
+) -> tuple[str, dict[str, str]]:
+    header = (
+        verified_recent_thread_header(route_profile=route_profile, tmux_target=tmux_target, required=True)
+        if route_profile is not None
+        else recent_thread_header_for_tmux_target(tmux_target)
+    )
     if header is None:
         raise SubjectInputError(f"no recent email thread found for tmux target {canonical_tmux_target(tmux_target)}; pass --subject or --subject-file")
     return manager_subject_w_target(subject_base(header.subject), tmux_target, True), reply_headers_from_recent_header(header)
