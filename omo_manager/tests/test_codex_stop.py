@@ -582,6 +582,59 @@ class CodexStopTests(unittest.TestCase):
         )
         self.assertEqual("%42", close.call_args.args[0])
 
+    def test_source1240_exact_replacement_sentence_authorizes_named_human_pane(self) -> None:
+        authority = (
+            b"Subject: Re: Low-priority task decisions\n\n"
+            b"Replace the failed PCODX manager task.md at hwork:1 with one fresh plain-Codex manager inheriting all tasks and comments.\n"
+            b"Just do it\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "task.md").write_text("---\nrunat: hwork:1\n---\n", encoding="utf-8")
+            args = Args(
+                "hwork:1",
+                0.0,
+                10,
+                False,
+                False,
+                root,
+                "task.md",
+                True,
+                0.0,
+                "manager_mail/source-1240.txt",
+                "a" * 64,
+                "hwork:1",
+            )
+            with patch("omo_manager.omo_codex_stop.read_human_close_authorization", return_value=authority):
+                codex_stop.validate_human_close_authorization(args)
+
+            wrong = authority.replace(b"task.md at hwork:1", b"other.md at hwork:1")
+            with (
+                patch("omo_manager.omo_codex_stop.read_human_close_authorization", return_value=wrong),
+                self.assertRaisesRegex(RuntimeError, "one exact task- and target-bound directive"),
+            ):
+                codex_stop.validate_human_close_authorization(args)
+
+            for malformed in (
+                authority.replace(b"comments.\n", b"comments. Do not close it.\n"),
+                authority.replace(
+                    b"Just do it\n",
+                    b"Replace the failed PCODX manager task.md at hwork:1 with one fresh plain-Codex manager inheriting all tasks and comments.\n",
+                ),
+                authority.replace(b"Just do it\n", b"Do not replace that manager.\n"),
+                authority.replace(b"Just do it\n", b"Cancel the replacement.\n"),
+                authority.replace(b"Just do it\n", b"No replacement of that manager.\n"),
+                authority.replace(b"Replace the failed", b"REPLACE THE FAILED"),
+            ):
+                with (
+                    patch("omo_manager.omo_codex_stop.read_human_close_authorization", return_value=malformed),
+                    self.assertRaisesRegex(
+                        RuntimeError,
+                        "one exact task- and target-bound directive|subject does not name the exact task file",
+                    ),
+                ):
+                    codex_stop.validate_human_close_authorization(args)
+
     def test_manager_replacement_closes_exact_bound_human_pane_with_durable_proof(self) -> None:
         authority = b"Subject: close task.md\n\nclose hwork:1 and replace the failed PCODX manager\n"
         session_id = "019e9ed9-6262-71c0-b4b3-72ffd4182e98"

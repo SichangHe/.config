@@ -45,6 +45,12 @@ HUMAN_CLOSE_DIRECTIVE_RE = re.compile(
     r"(?im)^\s*close\s+([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)(?=$|[\s,.;:])"
 )
 HUMAN_CLOSE_REPLY_DIRECTIVE_RE = re.compile(r"(?im)^\s*cancel\s+this\s+task(?=$|[\s,.;:])")
+HUMAN_REPLACE_DIRECTIVE_RE = re.compile(
+    r"(?m)^Replace the failed PCODX manager (?P<task>[A-Za-z0-9_./-]+\.md) at "
+    r"(?P<target>[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?) with one fresh plain-Codex manager "
+    r"inheriting all tasks and comments\.[ \t]*$"
+)
+HUMAN_REPLACE_CANDIDATE_RE = re.compile(r"(?m)^Replace the failed PCODX manager\b.*$")
 UUID_RE = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 RESUME_RE = re.compile(rf"(?i)\bcodex\s+resume\s+(?:--[\w-]+\s+)*({UUID_RE})\b")
 EXIT_RESUME_RE = re.compile(
@@ -410,12 +416,26 @@ def validate_human_close_authorization(args: Args) -> None:
     subject_lines = [line[len("Subject:") :].strip() for line in authority_text.splitlines() if line.startswith("Subject:")]
     task_token = re.compile(rf"(?<![A-Za-z0-9_./-]){re.escape(task_reference)}(?![A-Za-z0-9_./-])")
     body = authority_text.replace("\r\n", "\n").partition("\n\n")[2]
+    replacements = [
+        match
+        for match in HUMAN_REPLACE_DIRECTIVE_RE.finditer(body)
+        if match.group("task") == task_reference and match.group("target") in target_aliases(target)
+    ]
+    replacement_candidates = HUMAN_REPLACE_CANDIDATE_RE.findall(body)
+    body_nonempty_lines = [line.strip() for line in body.splitlines() if line.strip()]
+    exact_replacement = (
+        len(replacement_candidates) == 1
+        and len(replacements) == 1
+        and body_nonempty_lines == [replacements[0].group(0).strip(), "Just do it"]
+    )
     subject_names_task = len(subject_lines) == 1 and task_token.search(subject_lines[0]) is not None
     reply_binds_task = len(subject_lines) == 1 and reply_authorizes_bound_task(subject_lines[0], body, target)
-    if not subject_names_task and not reply_binds_task:
+    if replacement_candidates and not exact_replacement:
+        raise RuntimeError("human-close replacement authority must contain one exact task- and target-bound directive")
+    if not subject_names_task and not reply_binds_task and not exact_replacement:
         raise RuntimeError("human-close authorization subject does not name the exact task file and reply does not bind it")
     directives = HUMAN_CLOSE_DIRECTIVE_RE.findall(body)
-    if subject_names_task and (directives != [target] or target_bytes not in payload):
+    if (subject_names_task or exact_replacement) and (directives != [target] or target_bytes not in payload) and not exact_replacement:
         raise RuntimeError("human-close authorization does not contain one exact direct close instruction for the target")
 
 

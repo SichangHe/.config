@@ -57,6 +57,12 @@ HUMAN_ENVELOPE_RE = re.compile(
 FAILED_MANAGER_EVIDENCE_RE = re.compile(
     r"(?is)\b(?:agent|manager)\s+(?:has\s+)?failed\b.*\b(?:did\s+not|didn't|has\s+not|hasn't)\b.*\breplace\b"
 )
+PCODX_REPLACE_EVIDENCE_RE = re.compile(
+    r"(?m)^Replace the failed PCODX manager (?P<task>[A-Za-z0-9_./-]+\.md) at "
+    r"(?P<target>[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?) with one fresh plain-Codex manager "
+    r"inheriting all tasks and comments\.[ \t]*$"
+)
+PCODX_REPLACE_DIRECTIVE_RE = re.compile(r"(?m)^Replace the failed PCODX manager\b.*$")
 MAX_AUDIT_BYTES = 8 * 1024 * 1024
 POSIX_ACL_XATTRS = {"system.posix_acl_access", "system.posix_acl_default"}
 AT_FDCWD = -100
@@ -711,7 +717,18 @@ def authority_material(args: Args, snapshot: Snapshot, envelope: Snapshot) -> tu
     selected_evidence = "\n".join(
         "\n".join(lines[line_range.start - 1 : line_range.end]) for line_range in args.successor_item_lines
     )
-    if FAILED_MANAGER_EVIDENCE_RE.search(selected_evidence) is None:
+    pcodx_replacements = list(PCODX_REPLACE_EVIDENCE_RE.finditer(selected_evidence))
+    pcodx_directives = PCODX_REPLACE_DIRECTIVE_RE.findall(selected_evidence)
+    selected_nonempty_lines = [line.strip() for line in selected_evidence.splitlines() if line.strip()]
+    pcodx_replacement = pcodx_replacements[0] if len(pcodx_replacements) == 1 else None
+    exact_pcodx_replacement = (
+        len(pcodx_directives) == 1
+        and pcodx_replacement is not None
+        and selected_nonempty_lines == [pcodx_replacement.group(0).strip(), "Just do it"]
+        and pcodx_replacement.group("task") == args.old_task
+        and canonical_target(pcodx_replacement.group("target")) == canonical_target(args.old_target)
+    )
+    if FAILED_MANAGER_EVIDENCE_RE.search(selected_evidence) is None and not exact_pcodx_replacement:
         raise ReplaceError("authenticated authority does not explicitly prove failure, non-execution, and replacement")
     if is_pcodx_replacement(args) and not all(value in selected_evidence for value in (args.old_task, args.old_target)):
         raise ReplaceError("authenticated PCODX replacement authority must name the exact old task and protected target")
@@ -723,7 +740,9 @@ def authority_material(args: Args, snapshot: Snapshot, envelope: Snapshot) -> tu
             rf"(?im)^\s*close\s+{re.escape(args.old_target)}(?=$|[\s,.;:])"
         )
         source_text = snapshot.data.decode()
-        if len(subject_token.findall(source_text)) != 1 or len(close_directive.findall(selected_evidence)) != 1:
+        if (len(subject_token.findall(source_text)) != 1 and not exact_pcodx_replacement) or (
+            len(close_directive.findall(selected_evidence)) != 1 and not exact_pcodx_replacement
+        ):
             raise ReplaceError("authenticated PCODX authority must directly close the exact named task and protected target")
     return tuple(items)
 

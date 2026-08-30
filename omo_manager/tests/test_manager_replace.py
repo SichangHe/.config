@@ -341,6 +341,98 @@ class ManagerReplaceTests(unittest.TestCase):
             self.assertEqual(4, len(manager_replace.active_child_task_refs(root, root / args.successor_task, args.new_target)))
             self.assertIn("blocked unlaunched", result)
 
+    def test_source1240_exact_replacement_sentence_is_direct_close_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, _files, pcodx = self.pcodx_fixture(Path(tmp))
+            source = (
+                "Subject: Re: Low-priority task decisions\n\n"
+                f"Replace the failed PCODX manager {args.old_task} at {args.old_target} "
+                "with one fresh plain-Codex manager inheriting all tasks and comments.\n"
+                "Just do it\n"
+            )
+            envelope = (
+                f'<human_instruction authoritative="true" source="{args.authority_file}:1-4">\n'
+                f"{source}</human_instruction>\n"
+            )
+            (root / args.authority_file).write_text(source, encoding="utf-8")
+            (root / args.authority_envelope_task).write_text(envelope, encoding="utf-8")
+            changed = replace(
+                args,
+                authority_sha256=sha(source),
+                authority_envelope_sha256=sha(envelope),
+                authority_envelope_file_sha256=sha(envelope),
+                successor_item_lines=(LineRange(3, 4),),
+            )
+            inventory, state, stopped, proof = self.pcodx_runtime(changed, pcodx)
+            with inventory, state, stopped, proof:
+                result = replace_manager(changed)
+            self.assertIn("sole ownership", result)
+            self.assertEqual("codex", parsed(root / changed.successor_task, root).tool)
+
+    def test_source1240_replacement_sentence_must_bind_exact_task_and_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, _files, pcodx = self.pcodx_fixture(Path(tmp))
+            for replacement_text in (
+                f"Replace the failed PCODX manager other.md at {args.old_target} with one fresh plain-Codex manager inheriting all tasks and comments.\n",
+                f"Replace the failed PCODX manager {args.old_task} at hwl:4 with one fresh plain-Codex manager inheriting all tasks and comments.\n",
+            ):
+                source = "Subject: Re: Low-priority task decisions\n\n" + replacement_text + "Just do it\n"
+                envelope = (
+                    f'<human_instruction authoritative="true" source="{args.authority_file}:1-4">\n'
+                    f"{source}</human_instruction>\n"
+                )
+                (root / args.authority_file).write_text(source, encoding="utf-8")
+                (root / args.authority_envelope_task).write_text(envelope, encoding="utf-8")
+                changed = replace(
+                    args,
+                    authority_sha256=sha(source),
+                    authority_envelope_sha256=sha(envelope),
+                    authority_envelope_file_sha256=sha(envelope),
+                )
+                inventory, state, stopped, proof = self.pcodx_runtime(changed, pcodx)
+                with inventory, state, stopped as stop_mock, proof, self.assertRaisesRegex(ReplaceError, "does not explicitly prove"):
+                    replace_manager(changed)
+                stop_mock.assert_not_called()
+
+    def test_source1240_replacement_sentence_rejects_suffix_and_ambiguity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, _files, pcodx = self.pcodx_fixture(Path(tmp))
+            exact = (
+                f"Replace the failed PCODX manager {args.old_task} at {args.old_target} "
+                "with one fresh plain-Codex manager inheriting all tasks and comments."
+            )
+            for selected in (
+                f"{exact} Do not close it.",
+                f"{exact}\n{exact}",
+                f"{exact}\nDo not replace that manager.",
+                f"{exact}\nCancel the replacement.",
+                f"{exact}\nNo replacement of that manager.",
+                exact.replace("Replace the failed", "REPLACE THE FAILED"),
+            ):
+                with self.subTest(selected=selected):
+                    source = f"Subject: Re: Low-priority task decisions\n\n{selected}\nJust do it\n"
+                    source_line_count = len(source.splitlines())
+                    envelope = (
+                        f'<human_instruction authoritative="true" source="{args.authority_file}:1-{source_line_count}">\n'
+                        f"{source}</human_instruction>\n"
+                    )
+                    (root / args.authority_file).write_text(source, encoding="utf-8")
+                    (root / args.authority_envelope_task).write_text(envelope, encoding="utf-8")
+                    changed = replace(
+                        args,
+                        authority_lines=LineRange(1, source_line_count),
+                        authority_sha256=sha(source),
+                        authority_envelope_sha256=sha(envelope),
+                        authority_envelope_file_sha256=sha(envelope),
+                        successor_item_lines=(LineRange(3, source_line_count - 1),),
+                    )
+                    inventory, state, stopped, proof = self.pcodx_runtime(changed, pcodx)
+                    with inventory, state, stopped as stop_mock, proof, self.assertRaisesRegex(
+                        ReplaceError, "does not explicitly prove"
+                    ):
+                        replace_manager(changed)
+                    stop_mock.assert_not_called()
+
     def test_human_owned_pcodx_rejects_every_identity_authority_and_custody_drift_before_close(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root, args, _files, pcodx = self.pcodx_fixture(Path(tmp))
