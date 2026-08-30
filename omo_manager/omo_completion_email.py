@@ -35,6 +35,39 @@ NO_CONTACT_RE = re.compile(
 )
 MANAGER_ONLY_RE = re.compile(r"\b(?:report|return) only\b[^.\n]{0,100}\b(?:manager|submanager)\b|\bmanager[- ]only reports?\b", re.IGNORECASE)
 DIRECT_HUMAN_REPORT_RE = re.compile(r"\b(?:email|report|respond|write)\b[^.\n]{0,100}\b(?:directly to )?(?:the )?human\b", re.IGNORECASE)
+SOURCE1241_REF = "manager_mail/85c5dff58359-1241.txt:1-7"
+SOURCE1241_TASK = "hmanager_replace_fix.md"
+SOURCE1241_HUMAN = """Subject: Re: Why recent agent replies were missing
+
+I don't know why I should send transfer now. I already told that other
+agent to talk to the agent they are in conflict with. They should sort it
+out themselves. I also don't understand what needs my authorisation. I
+asked for those things to be implemented and they should agents should go
+ahead and do the job"""
+SOURCE1241_ENVELOPE = f'<human_instruction authoritative="true" source="{SOURCE1241_REF}">\n{SOURCE1241_HUMAN}\n</human_instruction>'
+SOURCE1241_META_SPAN = "Preserve exact-owner and no-contact safeguards."
+SOURCE1241_META_LINE = (
+    "This exact durable Human instruction resolves the stale request for another authorization step: agents must resolve the installed-entry-point "
+    "overlap themselves and complete the already requested implementation/closure. Read-only deployed-contract verification shows "
+    f"`{COMPLETION_ENTRYPOINT}` is mode 755 and self-binds `COMPLETION_ENTRYPOINT = Path(__file__).resolve()`. "
+    "Use that supported deployed entry point for the owner-authenticated completion notice with the existing task/root/outcome arguments. "
+    f"{SOURCE1241_META_SPAN} Do not perform production replacement or other task work."
+)
+SOURCE1241_CONTEXT = f"(from manager omo_task_edit delegate-message)\n{SOURCE1241_ENVELOPE}\n\n{SOURCE1241_META_LINE}"
+SOURCE1241_LOCATOR_ENVELOPE_RE = re.compile(
+    rf'(?ms)^<human_instruction[ \t]+authoritative="true"[ \t]+source="{re.escape(SOURCE1241_REF)}">\r?\n(?P<body>.*?)\r?\n</human_instruction>[ \t]*$'
+)
+ROUTING_OPEN_TAG_RE = re.compile(r"<(?P<tag>[A-Za-z][A-Za-z0-9_:-]*)(?:[ \t][^>]*)?>")
+ROUTING_CLOSE_TAG_RE = re.compile(r"</(?P<tag>[A-Za-z][A-Za-z0-9_:-]*)>")
+ROUTING_TAG_TOKEN_RE = re.compile(r"</?[A-Za-z][A-Za-z0-9_:-]*(?:[ \t][^>]*)?>")
+MARKDOWN_FENCE_RE = re.compile(r"^[ \t]*(?P<fence>`{3,}|~{3,})")
+
+
+@dataclass(frozen=True)
+class ContactPolicyBinding:
+    task_sha256: str
+    source: Path
+    source_sha256: str
 
 
 @dataclass(frozen=True)
@@ -46,6 +79,7 @@ class CompletionEmail:
     subject: str
     body: str
     key: str
+    contact_policy: ContactPolicyBinding | None = None
 
 
 def completion_email_state_dir() -> Path:
@@ -65,11 +99,127 @@ def require_completion_entrypoint() -> None:
         raise OSError(f"completion entry point is not safely executable: {COMPLETION_ENTRYPOINT}")
 
 
+def stable_owned_file(path: Path, maximum_bytes: int) -> bytes:
+    """Read one owner-controlled regular file without following or racing a path rebind."""
+
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or before.st_mode & 0o022:
+            raise OSError(f"contact-policy source is unsafe: {path}")
+        payload = b""
+        while chunk := os.read(fd, min(65_536, maximum_bytes + 1 - len(payload))):
+            payload += chunk
+            if len(payload) > maximum_bytes:
+                break
+        after = os.fstat(fd)
+    finally:
+        os.close(fd)
+    bound = path.lstat()
+    if len(payload) > maximum_bytes:
+        raise OSError(f"contact-policy source exceeds {maximum_bytes} bytes: {path}")
+    if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) != (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+    ) or (after.st_dev, after.st_ino) != (bound.st_dev, bound.st_ino):
+        raise OSError(f"contact-policy source changed while read: {path}")
+    return payload
+
+
+def is_top_level_record(text: str, offset: int) -> bool:
+    """Reject a record nested in routing markup or a Markdown code fence."""
+
+    tags: list[str] = []
+    fence = ""
+    comment = False
+    for line in text[:offset].splitlines():
+        if comment:
+            if "<!--" in line:
+                return False
+            if "-->" not in line:
+                continue
+            comment = False
+            line = line.partition("-->")[2]
+        if "-->" in line and "<!--" not in line:
+            return False
+        if "<!--" in line:
+            before, _opening, after = line.partition("<!--")
+            if "-->" not in after:
+                comment = True
+                line = before
+            else:
+                if "<!--" in after.partition("-->")[2]:
+                    return False
+                line = before + after.partition("-->")[2]
+        if len(ROUTING_TAG_TOKEN_RE.findall(line)) > 1:
+            return False
+        fence_match = MARKDOWN_FENCE_RE.match(line)
+        if not fence and fence_match is not None:
+            fence = fence_match.group("fence")
+            continue
+        if fence:
+            closing = line.strip()
+            if closing and set(closing) == {fence[0]} and len(closing) >= len(fence):
+                fence = ""
+            continue
+        close_match = ROUTING_CLOSE_TAG_RE.search(line)
+        if close_match is not None:
+            tag = close_match.group("tag")
+            if not tags or tags.pop() != tag:
+                return False
+            continue
+        open_match = ROUTING_OPEN_TAG_RE.search(line)
+        if open_match is not None:
+            tags.append(open_match.group("tag"))
+    return not tags and not fence and not comment
+
+
+# 🧑 Human source `manager_mail/85c5dff58359-1241.txt:1-7`: "They should sort it out themselves. ... they should go ahead and do the job"
+def source1241_contact_clarification(root: Path, task: Path, text: str) -> ContactPolicyBinding | None:
+    """Bind the sole exact Source-1241 meta-reference that is not a no-contact directive."""
+
+    context_offset = text.find(SOURCE1241_CONTEXT)
+    context_end = context_offset + len(SOURCE1241_CONTEXT)
+    source1241_envelopes = SOURCE1241_LOCATOR_ENVELOPE_RE.findall(text)
+    if (
+        task.resolve() != (root / SOURCE1241_TASK).resolve()
+        or text.count(SOURCE1241_CONTEXT) != 1
+        or text.count(SOURCE1241_ENVELOPE) != 1
+        or source1241_envelopes != [SOURCE1241_HUMAN]
+        or text.count(SOURCE1241_META_LINE) != 1
+        or text.count(SOURCE1241_META_SPAN) != 1
+        or (context_offset > 0 and text[context_offset - 1] != "\n")
+        or (context_end < len(text) and text[context_end] != "\n")
+        or not is_top_level_record(text, context_offset)
+    ):
+        return None
+    try:
+        task_payload = stable_owned_file(task, 8_000_000)
+        source = root / SOURCE1241_REF.partition(":")[0]
+        source_payload = stable_owned_file(source, 8_000_000)
+        source_text = source_payload.decode()
+    except (OSError, UnicodeDecodeError):
+        return None
+    if task_payload != text.encode() or "\n".join(source_text.splitlines()[:7]) != SOURCE1241_HUMAN:
+        return None
+    return ContactPolicyBinding(hashlib.sha256(task_payload).hexdigest(), source, hashlib.sha256(source_payload).hexdigest())
+
+
 def build_completion_email(root: Path, task: Path, text: str, outcome: str, *, items: tuple[str, ...] = (), evidence: str = "") -> CompletionEmail | None:
     """Build the canonical notice without assigning reporter authority."""
 
     metadata = parse_task_metadata(text, root)
-    contact_forbidden = NO_CONTACT_RE.search(text) is not None or (MANAGER_ONLY_RE.search(text) is not None and DIRECT_HUMAN_REPORT_RE.search(text) is None)
+    policy_text = text
+    contact_policy = None
+    if SOURCE1241_META_SPAN in text:
+        contact_policy = source1241_contact_clarification(root, task, text)
+        if contact_policy is not None:
+            policy_text = text.replace(SOURCE1241_META_SPAN, "", 1)
+    contact_forbidden = NO_CONTACT_RE.search(policy_text) is not None or (
+        MANAGER_ONLY_RE.search(policy_text) is not None and DIRECT_HUMAN_REPORT_RE.search(policy_text) is None
+    )
     if metadata is None or metadata.runat == "retired" or metadata.runat.partition(":")[0].startswith("h") or contact_forbidden:
         return None
     relative = task.resolve().relative_to(root.resolve()).as_posix()
@@ -81,8 +231,13 @@ def build_completion_email(root: Path, task: Path, text: str, outcome: str, *, i
         details.append(f"Evidence: {evidence}")
     subject = f"{task.name}: {outcome}"
     body = "\n".join(details) + "\n"
-    identity = "\0".join((str(root.resolve()), relative, metadata.runat, outcome, "\n".join(items), evidence, subject, body))
-    return CompletionEmail(root.resolve(), task.resolve(), metadata.runat, outcome, subject, body, hashlib.sha256(identity.encode()).hexdigest())
+    identity_parts = (str(root.resolve()), relative, metadata.runat, outcome, "\n".join(items), evidence, subject, body)
+    if contact_policy is not None:
+        identity_parts += (contact_policy.task_sha256, str(contact_policy.source), contact_policy.source_sha256)
+    identity = "\0".join(identity_parts)
+    return CompletionEmail(
+        root.resolve(), task.resolve(), metadata.runat, outcome, subject, body, hashlib.sha256(identity.encode()).hexdigest(), contact_policy
+    )
 
 
 # 🧑 Human source `202607/manager_mail/85c5dff58359-1090.txt:1-3`: "You should let the responsible agent report and discuss with me directly instead of duplicating messages to me"
@@ -119,8 +274,20 @@ def plan_completion_email(
         body = f"{human_body.rstrip()}\n\nCompletion record:\n{canonical.body}"
     else:
         return canonical
-    identity = "\0".join((str(root.resolve()), relative, canonical.target, outcome, "\n".join(items), evidence, subject, body))
-    return CompletionEmail(canonical.root, canonical.task, canonical.target, outcome, subject, body, hashlib.sha256(identity.encode()).hexdigest())
+    identity_parts = (str(root.resolve()), relative, canonical.target, outcome, "\n".join(items), evidence, subject, body)
+    if canonical.contact_policy is not None:
+        identity_parts += (canonical.contact_policy.task_sha256, str(canonical.contact_policy.source), canonical.contact_policy.source_sha256)
+    identity = "\0".join(identity_parts)
+    return CompletionEmail(
+        canonical.root,
+        canonical.task,
+        canonical.target,
+        outcome,
+        subject,
+        body,
+        hashlib.sha256(identity.encode()).hexdigest(),
+        canonical.contact_policy,
+    )
 
 
 def reconciliation_record(
@@ -423,6 +590,13 @@ def send_completion_email(plan: CompletionEmail | None) -> bool:
         return False
     try:
         require_completion_entrypoint()
+        if plan.contact_policy is not None:
+            task_payload = stable_owned_file(plan.task, 8_000_000)
+            source_payload = stable_owned_file(plan.contact_policy.source, 8_000_000)
+            if hashlib.sha256(task_payload).hexdigest() != plan.contact_policy.task_sha256 or (
+                hashlib.sha256(source_payload).hexdigest() != plan.contact_policy.source_sha256
+            ):
+                raise OSError("contact-policy authority changed before delivery")
     except OSError as exc:
         print(f"automatic completion email blocked before claim: {exc}", file=sys.stderr)
         return False

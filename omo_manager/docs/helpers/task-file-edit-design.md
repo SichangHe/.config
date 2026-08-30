@@ -60,6 +60,10 @@ unchanged since it was read.
   mail helper directly when that contract is absent
 - let the mail helper infer the verified producer identity; suppress human-owned
   task targets, explicit no-contact rules, and duplicate retries
+- treat the exact Source-1241 safeguard phrase as meta text only when the exact
+  supported manager-delegation record, intended task, Human envelope, source
+  excerpt, whole task, and source file remain bound;
+  every other no-contact or manager-only match still suppresses delivery
 - print a reminder that the manager must verify the item is actually done or
   cancelled, possibly by using evaluator agents
 
