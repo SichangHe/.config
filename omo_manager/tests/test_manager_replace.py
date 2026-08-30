@@ -301,7 +301,7 @@ class ManagerReplaceTests(unittest.TestCase):
         result = manager_replace.subprocess.CompletedProcess(
             ["tmux", "list-panes"],
             0,
-            "mgr:1.0\t%0\t42\n",
+            "mgr:1.0\t%0\t42\t0\n",
             "",
         )
         with (
@@ -312,6 +312,38 @@ class ManagerReplaceTests(unittest.TestCase):
                 {"mgr:1.0": PaneIdentity("mgr:1.0", "%0", 42, 99)},
                 pane_inventory(),
             )
+
+    def test_pane_inventory_ignores_only_tmux_confirmed_dead_panes(self) -> None:
+        result = manager_replace.subprocess.CompletedProcess(
+            ["tmux", "list-panes"],
+            0,
+            "stale:0.0\t%1\t999\t1\n"
+            "mgr:1.0\t%42\t42\t0\n",
+            "",
+        )
+        with (
+            patch.object(manager_replace.subprocess, "run", return_value=result),
+            patch.object(manager_replace, "process_start_ticks", return_value=99) as ticks,
+        ):
+            self.assertEqual(
+                {"mgr:1.0": PaneIdentity("mgr:1.0", "%42", 42, 99)},
+                pane_inventory(),
+            )
+        ticks.assert_called_once_with(42)
+
+    def test_pane_inventory_fails_closed_for_unprovable_live_pane(self) -> None:
+        result = manager_replace.subprocess.CompletedProcess(
+            ["tmux", "list-panes"],
+            0,
+            "mgr:1.0\t%42\t42\t0\n",
+            "",
+        )
+        with (
+            patch.object(manager_replace.subprocess, "run", return_value=result),
+            patch.object(manager_replace, "process_start_ticks", return_value=None),
+            self.assertRaisesRegex(ReplaceError, "cannot prove one process identity"),
+        ):
+            pane_inventory()
 
     def test_authenticated_authority_without_failure_evidence_cannot_close_healthy_manager(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

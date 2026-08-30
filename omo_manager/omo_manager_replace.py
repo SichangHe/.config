@@ -746,7 +746,13 @@ def todo_replacement(data: bytes, root: Path, old_path: Path, successor_path: Pa
 def pane_inventory() -> dict[str, PaneIdentity]:
     try:
         result = subprocess.run(
-            ["tmux", "list-panes", "-a", "-F", "#{session_name}:#{window_index}.#{pane_index}\t#{pane_id}\t#{pane_pid}"],
+            [
+                "tmux",
+                "list-panes",
+                "-a",
+                "-F",
+                "#{session_name}:#{window_index}.#{pane_index}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}",
+            ],
             capture_output=True,
             text=True,
             timeout=5,
@@ -760,9 +766,16 @@ def pane_inventory() -> dict[str, PaneIdentity]:
     inventory: dict[str, PaneIdentity] = {}
     for row in result.stdout.splitlines():
         fields = row.split("\t")
-        if len(fields) != 3 or PANE_ID_RE.fullmatch(fields[1]) is None or not fields[2].isdigit():
+        if (
+            len(fields) != 4
+            or PANE_ID_RE.fullmatch(fields[1]) is None
+            or not fields[2].isdigit()
+            or fields[3] not in {"0", "1"}
+        ):
             raise ReplaceError("tmux pane inventory contains a malformed row")
         target = canonical_target(fields[0])
+        if fields[3] == "1":
+            continue
         pid = int(fields[2])
         ticks = process_start_ticks(pid)
         if ticks is None or target in inventory:
