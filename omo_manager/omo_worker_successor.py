@@ -303,6 +303,31 @@ def minimal_tmux_environment() -> dict[str, str]:
     return environment
 
 
+def cursor_process_environment(
+    *,
+    workdir: Path,
+    target: str,
+    amh_caller_agent: str,
+    runtime: dict[str, str],
+) -> dict[str, str]:
+    """Return the exact manifest-bound environment expected at Cursor's Node process."""
+
+    canonical_workdir = workdir.resolve(strict=True)
+    environment = minimal_launch_environment()
+    environment.update(
+        {
+            "CURSOR_INVOKED_AS": Path(runtime["launcher_resolved"]).name,
+            "NODE_COMPILE_CACHE": str(Path(environment["HOME"]) / ".cache/cursor-compile-cache"),
+            "OMO_AGENT_TMUX_TARGET": canonical_target(target),
+            "PWD": str(canonical_workdir),
+            "SHLVL": "0",
+        }
+    )
+    if amh_caller_agent:
+        environment["AMH_CALLER"] = f"agent:{amh_caller_agent}"
+    return environment
+
+
 def launch_manifest_bytes(
     *,
     root: Path,
@@ -329,6 +354,7 @@ def launch_manifest_bytes(
     if tool != "cursor":
         raise SuccessorError("prepared successor launch currently requires the pinned installed Cursor runtime")
     defaults = read_frozen_prompt(DEFAULT_WORKER_INSTRUCTIONS)
+    runtime = cursor_runtime_identity()
     value = {
         "version": LAUNCH_MANIFEST_VERSION,
         "root": str(canonical_root),
@@ -346,12 +372,18 @@ def launch_manifest_bytes(
         "amh_caller_agent": amh_caller_agent,
         "prelaunch_source": None,
         "environment": minimal_launch_environment(),
+        "cursor_process_environment": cursor_process_environment(
+            workdir=canonical_workdir,
+            target=canonical_worker,
+            amh_caller_agent=amh_caller_agent,
+            runtime=runtime,
+        ),
         "shell_runtime": pinned_shell_identity(),
         "tmux_environment": minimal_tmux_environment(),
         "tmux_runtime": pinned_tmux_identity(),
         "worker_defaults_path": str(DEFAULT_WORKER_INSTRUCTIONS.resolve(strict=True)),
         "worker_defaults_sha256": digest(defaults.data),
-        "cursor_runtime": cursor_runtime_identity(),
+        "cursor_runtime": runtime,
     }
     return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
 

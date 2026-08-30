@@ -4078,7 +4078,23 @@ class OmoTaskTests(unittest.TestCase):
                 (entry / "cmdline").write_bytes(b"\0".join(part.encode() for part in argv) + b"\0")
                 (entry / "environ").write_bytes(b"OMO_AGENT_TMUX_TARGET=cfg:7\0")
             (proc / "222" / "exe").symlink_to(Path(str(runtime["node_path"])))
-            args = Args(Path("/tmp"), "x.md", "cfg", "7", "cursor", Path("/tmp"), "", None, True, False, "", "xhigh", (), model="cursor-grok-4.6")
+            args = Args(
+                Path("/tmp"),
+                "x.md",
+                "cfg",
+                "7",
+                "cursor",
+                Path("/tmp"),
+                "",
+                None,
+                True,
+                False,
+                "",
+                "xhigh",
+                (),
+                model="cursor-grok-4.6",
+                prepared_process_environment=(("OMO_AGENT_TMUX_TARGET", "cfg:7"),),
+            )
             pane = subprocess.CompletedProcess(["tmux"], 0, "111\n", "")
             with patch("omo_manager.omo_task.tmux", return_value=pane):
                 proof = prepared_cursor_process_proof("%99", args, runtime, exact_prompt, proc_root=proc)
@@ -4109,6 +4125,10 @@ class OmoTaskTests(unittest.TestCase):
                 + b"\0"
             )
             (proc / "222" / "environ").write_bytes(b"OMO_AGENT_TMUX_TARGET=cfg:7\0NODE_OPTIONS=--require=/poison.js\0")
+            with patch("omo_manager.omo_task.tmux", return_value=pane), self.assertRaisesRegex(RuntimeError, "sanitized launch environment"):
+                _ = prepared_cursor_process_proof("%99", args, runtime, exact_prompt, proc_root=proc)
+
+            (proc / "222" / "environ").write_bytes(b"OMO_AGENT_TMUX_TARGET=cfg:7\0UNBOUND_INJECTION=accepted\0")
             with patch("omo_manager.omo_task.tmux", return_value=pane), self.assertRaisesRegex(RuntimeError, "sanitized launch environment"):
                 _ = prepared_cursor_process_proof("%99", args, runtime, exact_prompt, proc_root=proc)
 

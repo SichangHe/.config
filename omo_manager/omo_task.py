@@ -153,6 +153,7 @@ class Args:
     prepared_shell_path: Path | None = None
     prepared_env_path: Path | None = None
     prepared_launch_environment: tuple[tuple[str, str], ...] = ()
+    prepared_process_environment: tuple[tuple[str, str], ...] = ()
     prepared_tmux_path: Path | None = None
     prepared_tmux_environment: tuple[tuple[str, str], ...] = ()
 
@@ -2543,29 +2544,8 @@ def prepared_cursor_process_proof(
                 process_environment[decoded_key] = decoded_value
         except (OSError, UnicodeDecodeError) as exc:
             raise RuntimeError(f"prepared Cursor process environment cannot be authenticated: {exc}") from exc
-        expected_environment = dict(args.prepared_launch_environment)
-        expected_environment["OMO_AGENT_TMUX_TARGET"] = target(args)
-        if args.amh_caller_agent:
-            expected_environment["AMH_CALLER"] = f"agent:{args.amh_caller_agent}"
-        poisoned = {
-            "BASH_ENV",
-            "ENV",
-            "NODE_OPTIONS",
-            "NODE_PATH",
-            "LD_PRELOAD",
-            "LD_LIBRARY_PATH",
-            "DYLD_INSERT_LIBRARIES",
-            "DYLD_LIBRARY_PATH",
-            "PYTHONHOME",
-            "PYTHONPATH",
-            "PYTHONSTARTUP",
-            "PERL5LIB",
-            "PERL5OPT",
-            "RUBYOPT",
-            "RUSTC_WRAPPER",
-            "RUSTFLAGS",
-        }
-        if any(process_environment.get(key) != value for key, value in expected_environment.items()) or poisoned & process_environment.keys():
+        expected_environment = dict(args.prepared_process_environment)
+        if not expected_environment or process_environment != expected_environment:
             raise RuntimeError("prepared Cursor process did not inherit the exact sanitized launch environment")
         argv_sha256 = hashlib.sha256(b"\0".join(part.encode() for part in argv)).hexdigest()
         matches.append(CursorProcessProof(process.pid, executable, argv, argv_sha256))
@@ -2671,6 +2651,7 @@ def bound_prepared_launch_args(
     runtime: dict[str, object],
     shell_runtime: dict[str, object],
     environment: dict[str, object],
+    process_environment: dict[str, object],
     tmux_runtime: dict[str, object],
     tmux_environment: dict[str, object],
 ) -> Args:
@@ -2681,6 +2662,7 @@ def bound_prepared_launch_args(
         prepared_shell_path=Path(str(shell_runtime["bash_path"])),
         prepared_env_path=Path(str(shell_runtime["env_path"])),
         prepared_launch_environment=tuple(sorted((str(key), str(value)) for key, value in environment.items())),
+        prepared_process_environment=tuple(sorted((str(key), str(value)) for key, value in process_environment.items())),
         prepared_tmux_path=Path(str(tmux_runtime["tmux_path"])),
         prepared_tmux_environment=tuple(sorted((str(key), str(value)) for key, value in tmux_environment.items())),
     )
@@ -2703,6 +2685,7 @@ def prepared_successor_launch(args: Args) -> tuple[Path, str]:
         binding_from_committed_journal,
         canonical_target,
         cursor_runtime_identity,
+        cursor_process_environment,
         minimal_launch_environment,
         minimal_tmux_environment,
         pinned_shell_identity,
@@ -2755,6 +2738,7 @@ def prepared_successor_launch(args: Args) -> tuple[Path, str]:
         or args.prepared_shell_path is not None
         or args.prepared_env_path is not None
         or bool(args.prepared_launch_environment)
+        or bool(args.prepared_process_environment)
         or args.prepared_tmux_path is not None
         or bool(args.prepared_tmux_environment)
     ):
@@ -2768,6 +2752,19 @@ def prepared_successor_launch(args: Args) -> tuple[Path, str]:
         raise RuntimeError("prepared successor pinned shell/runtime identity changed.")
     if not isinstance(environment, dict) or minimal_launch_environment() != environment:
         raise RuntimeError("prepared successor minimal launch environment changed.")
+    process_environment = config.get("cursor_process_environment")
+    if (
+        not isinstance(process_environment, dict)
+        or args.workdir is None
+        or cursor_process_environment(
+            workdir=args.workdir,
+            target=binding.target,
+            amh_caller_agent=args.amh_caller_agent,
+            runtime=runtime,
+        )
+        != process_environment
+    ):
+        raise RuntimeError("prepared successor exact Cursor process environment changed.")
     tmux_runtime = config.get("tmux_runtime")
     tmux_environment = config.get("tmux_environment")
     if not isinstance(tmux_runtime, dict) or pinned_tmux_identity() != tmux_runtime:
@@ -2804,6 +2801,7 @@ def prepared_successor_launch(args: Args) -> tuple[Path, str]:
             runtime=runtime,
             shell_runtime=shell_runtime,
             environment=environment,
+            process_environment=process_environment,
             tmux_runtime=tmux_runtime,
             tmux_environment=tmux_environment,
         )
