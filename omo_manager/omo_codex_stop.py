@@ -84,6 +84,9 @@ class Args:
     # Internal lifecycle handoff: a fresh guarded `/status` response must
     # identify this exact Codex session before the first interrupt.
     bound_expected_session_id: str = ""
+    # Internal manager-replacement gate run after final Human authority checks
+    # and immediately before the first protected-pane input.
+    bound_pre_input_check: Callable[[], None] | None = None
 
 
 class ParsedArgs(argparse.Namespace):
@@ -719,11 +722,14 @@ def query_status_session_id(
     tmux_guard: tuple[str, str] | None = None,
     strict_status_response: bool = False,
     expected_pane_pid: int = 0,
+    pre_input_check: Callable[[], None] | None = None,
 ) -> tuple[str, str]:
     """Return a status UUID, optionally only from the newly submitted `/status`."""
     if identity_is_current is not None and not identity_is_current():
         raise RuntimeError("tmux pane identity changed before status query")
     before = capture(target, n_lines) if tmux_guard is None else guarded_capture(target, n_lines, tmux_guard, expected_pane_pid)
+    if pre_input_check is not None:
+        pre_input_check()
     if tmux_guard is None:
         paste_text(target, "/status")
     else:
@@ -1109,7 +1115,7 @@ def stop(args: Args) -> str:
             or args.target != args.bound_symbolic_target
             or re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?", args.bound_symbolic_target) is None
             or not re.fullmatch(r"%[0-9]+", args.bound_pane_id)
-            or is_human_owned_target(args.bound_symbolic_target)
+            or (is_human_owned_target(args.bound_symbolic_target) and not human_authorized)
             or bool(args.bound_pane_pid) != bool(args.bound_pane_start_ticks)
             or args.bound_pane_pid < 0
             or args.bound_pane_start_ticks < 0
@@ -1118,7 +1124,7 @@ def stop(args: Args) -> str:
                 and re.fullmatch(UUID_RE, args.bound_expected_session_id) is None
             )
         ):
-            raise RuntimeError("bound non-human target does not resolve to the exact pinned pane")
+            raise RuntimeError("bound target does not resolve to the exact pinned pane")
         tmux_guard = (args.bound_symbolic_target, args.bound_pane_id)
         initial_pane = bound_guarded_read(
             *tmux_guard,
@@ -1126,9 +1132,9 @@ def stop(args: Args) -> str:
             args.bound_pane_pid,
         ).strip()
         if initial_pane != args.bound_pane_id:
-            raise RuntimeError("bound non-human target does not resolve to the exact pinned pane")
+            raise RuntimeError("bound target does not resolve to the exact pinned pane")
         if args.bound_pane_start_ticks and process_start_ticks(args.bound_pane_pid) != args.bound_pane_start_ticks:
-            raise RuntimeError("bound non-human target process identity changed")
+            raise RuntimeError("bound target process identity changed")
         target_pane = args.bound_pane_id
     else:
         target_pane = pane_id(args.target)
@@ -1143,7 +1149,7 @@ def stop(args: Args) -> str:
     if any(proof_fields) and (not all(proof_fields) or not args.bound_symbolic_target):
         raise RuntimeError("bound close proof requires an exact target, audit, secret, and commitment")
     if tmux_guard is not None and not args.no_feedback:
-        raise RuntimeError("bound non-human stop requires --no-feedback so every pane access remains server-guarded")
+        raise RuntimeError("bound stop requires --no-feedback so every pane access remains server-guarded")
     if not args.allow_self and target_pane == current_pane_id():
         raise RuntimeError(f"refusing to stop the current pane: {args.target}")
     if args.task_file:
@@ -1219,6 +1225,8 @@ def stop(args: Args) -> str:
         # Re-read both durable authority bindings after the pane is pinned and
         # immediately before the first human-pane input.
         validate_human_close_authorization(args)
+    if args.bound_pre_input_check is not None and (not human_authorized or tmux_guard is None or not all(proof_fields)):
+        raise RuntimeError("bound pre-input check requires an authorized guarded Human close capability")
     identity_check = identity_is_current if human_authorized or args.bound_symbolic_target else None
     if task_tool(args) == "cursor":
         before_close = (
@@ -1238,6 +1246,7 @@ def stop(args: Args) -> str:
             tmux_guard,
             strict_status_response=bool(resolved_args.bound_expected_session_id),
             expected_pane_pid=resolved_args.bound_pane_pid,
+            pre_input_check=resolved_args.bound_pre_input_check,
         )
     if (
         resolved_args.bound_expected_session_id
@@ -1261,9 +1270,7 @@ def stop(args: Args) -> str:
     )
     if identity_check is not None and not identity_is_current():
         raise RuntimeError("tmux pane identity changed before close")
-    if human_authorized:
-        close_authorized_human_pane(resolved_args.target, identity_is_current)
-    elif identity_check is not None:
+    if identity_check is not None and tmux_guard is not None:
         assert tmux_guard is not None
         close_bound_tmux_target(
             resolved_args.target,
@@ -1275,6 +1282,8 @@ def stop(args: Args) -> str:
             args.bound_close_proof_commitment,
             resolved_args.bound_pane_pid,
         )
+    elif human_authorized:
+        close_authorized_human_pane(resolved_args.target, identity_is_current)
     else:
         close_tmux_target(resolved_args.target)
     return session_id or extract_exit_resume_id(before_close, after)

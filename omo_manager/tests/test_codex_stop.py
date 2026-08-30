@@ -133,6 +133,37 @@ class CodexStopTests(unittest.TestCase):
             query_status_session_id("%42", 10, 0.1, lambda: next(identity))
         self.assertEqual(["send-keys", "-t", "%42", "Enter"], tmux.call_args.args[0])
 
+    def test_status_pre_input_guard_runs_after_final_capture_and_before_paste(self) -> None:
+        captured = False
+
+        def final_capture(*_args: object) -> str:
+            nonlocal captured
+            captured = True
+            return "ready\n"
+
+        def reject_drift() -> None:
+            self.assertTrue(captured)
+            raise RuntimeError("lifecycle drift during final capture")
+
+        with (
+            patch("omo_manager.omo_codex_stop.guarded_capture", side_effect=final_capture),
+            patch("omo_manager.omo_codex_stop.guarded_paste_text") as paste,
+            patch("omo_manager.omo_codex_stop.guarded_tmux_command") as send,
+            self.assertRaisesRegex(RuntimeError, "drift during final capture"),
+        ):
+            query_status_session_id(
+                "%42",
+                10,
+                0.1,
+                lambda: True,
+                ("hwork:1", "%42"),
+                True,
+                4242,
+                reject_drift,
+            )
+        paste.assert_not_called()
+        send.assert_not_called()
+
     def test_close_exited_codex_shell_rejects_ambiguous_or_changed_state(self) -> None:
         session_id = "11111111-2222-3333-4444-555555555555"
         transcript = f'{{"accepted":true,"receipt":"accepted-report-token"}}\nConversation interrupted\nTo continue this session, run codex resume {session_id}\n$ '
@@ -550,6 +581,114 @@ class CodexStopTests(unittest.TestCase):
             [(call.args, call.kwargs) for call in read_authority.call_args_list],
         )
         self.assertEqual("%42", close.call_args.args[0])
+
+    def test_manager_replacement_closes_exact_bound_human_pane_with_durable_proof(self) -> None:
+        authority = b"Subject: close task.md\n\nclose hwork:1 and replace the failed PCODX manager\n"
+        session_id = "019e9ed9-6262-71c0-b4b3-72ffd4182e98"
+
+        def guarded(_target: str, _pane: str, command: list[str], _pid: int) -> str:
+            if command[-1] == "#{pane_id}\t#{session_name}:#{window_index}.#{pane_index}":
+                return "%42\thwork:1.0\n"
+            if command[-1] == "#{session_name}:#{window_index}.#{pane_index}":
+                return "hwork:1.0\n"
+            if command[-1] == "#{session_name}":
+                return "hwork\n"
+            return "%42\n"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "task.md").write_text("---\nrunat: hwork:1\n---\n", encoding="utf-8")
+            with (
+                patch("omo_manager.omo_codex_stop.read_human_close_authorization", return_value=authority),
+                patch("omo_manager.omo_codex_stop.bound_guarded_read", side_effect=guarded),
+                patch("omo_manager.omo_codex_stop.process_start_ticks", return_value=999),
+                patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%caller"),
+                patch("omo_manager.omo_codex_stop.guarded_capture", return_value="› ready\n"),
+                patch("omo_manager.omo_codex_stop.report_from_lines", return_value=Report("ready", [])),
+                patch("omo_manager.omo_codex_stop.query_status_session_id", return_value=(session_id, "status")),
+                patch("omo_manager.omo_codex_stop.send_exit_keys"),
+                patch("omo_manager.omo_codex_stop.wait_shell"),
+                patch("omo_manager.omo_codex_stop.close_bound_tmux_target") as close,
+            ):
+                result = stop(
+                    Args(
+                        target="hwork:1",
+                        wait_s=0.0,
+                        lines=10,
+                        dry_run=False,
+                        allow_self=False,
+                        root=root,
+                        task_file="task.md",
+                        no_feedback=True,
+                        human_close_authorization_source="manager_mail/test.txt",
+                        human_close_authorization_sha256="a" * 64,
+                        human_close_authorized_target="hwork:1",
+                        bound_symbolic_target="hwork:1",
+                        bound_pane_id="%42",
+                        bound_close_proof_path=str(root / "proof"),
+                        bound_close_audit_path=str(root / "audit"),
+                        bound_close_proof_secret="b" * 64,
+                        bound_close_proof_commitment="c" * 64,
+                        bound_pane_pid=4242,
+                        bound_pane_start_ticks=999,
+                        bound_expected_session_id=session_id,
+                    )
+                )
+        self.assertEqual(session_id, result)
+        self.assertEqual("%42", close.call_args.args[0])
+        self.assertEqual(("hwork:1", "%42"), close.call_args.args[2:4])
+
+    def test_manager_replacement_pre_input_drift_guard_blocks_every_pane_input(self) -> None:
+        authority = b"Subject: close task.md\n\nclose hwork:1 and replace the failed PCODX manager\n"
+        session_id = "019e9ed9-6262-71c0-b4b3-72ffd4182e98"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "task.md").write_text("---\nrunat: hwork:1\n---\n", encoding="utf-8")
+            with (
+                patch("omo_manager.omo_codex_stop.read_human_close_authorization", return_value=authority),
+                patch(
+                    "omo_manager.omo_codex_stop.bound_guarded_read",
+                    side_effect=("%42\n", "hwork\n", "hwork:1.0\n", "%42\thwork:1.0\n"),
+                ),
+                patch("omo_manager.omo_codex_stop.process_start_ticks", return_value=999),
+                patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%caller"),
+                patch("omo_manager.omo_codex_stop.guarded_capture", return_value="› ready\n"),
+                patch("omo_manager.omo_codex_stop.report_from_lines", return_value=Report("ready", [])),
+                patch("omo_manager.omo_codex_stop.guarded_paste_text") as paste,
+                patch("omo_manager.omo_codex_stop.guarded_tmux_command") as guarded_input,
+                patch("omo_manager.omo_codex_stop.send_exit_keys") as interrupt,
+                patch("omo_manager.omo_codex_stop.close_bound_tmux_target") as close,
+                self.assertRaisesRegex(RuntimeError, "exact lifecycle drift"),
+            ):
+                stop(
+                    Args(
+                        target="hwork:1",
+                        wait_s=0.0,
+                        lines=10,
+                        dry_run=False,
+                        allow_self=False,
+                        root=root,
+                        task_file="task.md",
+                        no_feedback=True,
+                        human_close_authorization_source="manager_mail/test.txt",
+                        human_close_authorization_sha256="a" * 64,
+                        human_close_authorized_target="hwork:1",
+                        bound_symbolic_target="hwork:1",
+                        bound_pane_id="%42",
+                        bound_close_proof_path=str(root / "proof"),
+                        bound_close_audit_path=str(root / "audit"),
+                        bound_close_proof_secret="b" * 64,
+                        bound_close_proof_commitment="c" * 64,
+                        bound_pane_pid=4242,
+                        bound_pane_start_ticks=999,
+                        bound_expected_session_id=session_id,
+                        bound_pre_input_check=lambda: (_ for _ in ()).throw(RuntimeError("exact lifecycle drift")),
+                    )
+                )
+        paste.assert_not_called()
+        guarded_input.assert_not_called()
+        interrupt.assert_not_called()
+        close.assert_not_called()
 
     def test_stop_rejects_human_authority_that_does_not_bind_exact_task_and_target_before_tmux(self) -> None:
         authority = b"Subject: task.md.old\n\nclose hwork:1\n"

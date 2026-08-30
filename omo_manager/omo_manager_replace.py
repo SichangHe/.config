@@ -25,6 +25,9 @@ if __package__ in {None, ""}:
 
 from omo_manager.omo_codex_stop import Args as StopArgs
 from omo_manager.omo_codex_stop import has_bound_close_proof, stop
+from omo_manager.omo_codex_start import PCODX_ENV_KEYS as START_PCODX_ENV_KEYS
+from omo_manager.omo_codex_start import Pane as StartPane
+from omo_manager.omo_codex_start import pcodx_state
 from omo_manager.omo_task import manager_owner_migration_text
 from omo_manager.omo_task_edit import render_pending_items
 from omo_manager.omo_task_lock import process_start_ticks, task_file_lock, task_target_lock
@@ -40,6 +43,7 @@ from omo_manager.omo_task_status import (
 AUDIT_VERSION = "v1.0.0"
 AUDIT_OPERATION = "manager-replace"
 SUCCESSOR_BLOCKER = "awaiting separate supported launch after atomic manager replacement ownership proof"
+PCODX_ENV_KEYS = ("PCODX_POC_ROOT", "PCODX_RUN_DIR", "PCODX_LEDGER_PATH", "PCODX_SESSION_ID")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 # tmux allocates pane ids from zero; `%0` is a valid first pane.
 PANE_ID_RE = re.compile(r"^%[0-9]+$")
@@ -116,6 +120,12 @@ class Args:
     audit_output: Path
     preparer: str
     reviewer: str
+    old_queue_sha256: str = ""
+    old_pcodx_state_sha256: str = ""
+    old_pcodx_ledger_sha256: str = ""
+    old_pcodx_wrapper_sha256: str = ""
+    protected_targets_sha256: str = ""
+    authority_envelope_file_sha256: str = ""
 
 
 @dataclass(frozen=True)
@@ -148,6 +158,7 @@ class Plan:
     successor_queue: tuple[str, ...]
     child_queues: tuple[tuple[str, ...], ...]
     initial_markdown_paths: tuple[Path, ...]
+    protected_identities: tuple[PaneIdentity, ...]
 
 
 @dataclass(frozen=True)
@@ -193,10 +204,24 @@ class ParsedArgs(argparse.Namespace):
     audit_output: Path = Path()
     preparer: str = ""
     reviewer: str = ""
+    old_queue_sha256: str = ""
+    old_pcodx_state_sha256: str = ""
+    old_pcodx_ledger_sha256: str = ""
+    old_pcodx_wrapper_sha256: str = ""
+    protected_targets_sha256: str = ""
+    authority_envelope_file_sha256: str = ""
 
 
 def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def json_digest(value: object) -> str:
+    return digest(json.dumps(value, sort_keys=True, separators=(",", ":")).encode())
+
+
+def is_pcodx_replacement(args: Args) -> bool:
+    return bool(args.old_pcodx_state_sha256)
 
 
 def canonical_target(target: str) -> str:
@@ -250,6 +275,12 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--audit-output", required=True, type=Path)
     _ = parser.add_argument("--preparer", required=True)
     _ = parser.add_argument("--reviewer", required=True)
+    _ = parser.add_argument("--old-queue-sha256", default="")
+    _ = parser.add_argument("--old-pcodx-state-sha256", default="")
+    _ = parser.add_argument("--old-pcodx-ledger-sha256", default="")
+    _ = parser.add_argument("--old-pcodx-wrapper-sha256", default="")
+    _ = parser.add_argument("--protected-targets-sha256", default="")
+    _ = parser.add_argument("--authority-envelope-file-sha256", default="")
     parsed = parser.parse_args(argv, namespace=ParsedArgs())
     for value, label in (
         (parsed.old_sha256, "old task"),
@@ -259,6 +290,16 @@ def parse_args(argv: list[str]) -> Args:
     ):
         if SHA256_RE.fullmatch(value) is None:
             parser.error(f"{label} SHA-256 must be 64 lowercase hexadecimal characters")
+    pcodx_digests = (
+        parsed.old_queue_sha256,
+        parsed.old_pcodx_state_sha256,
+        parsed.old_pcodx_ledger_sha256,
+        parsed.old_pcodx_wrapper_sha256,
+        parsed.protected_targets_sha256,
+        parsed.authority_envelope_file_sha256,
+    )
+    if any(pcodx_digests) and not all(SHA256_RE.fullmatch(value) for value in pcodx_digests):
+        parser.error("PCODX replacement requires all six exact lowercase SHA-256 bindings")
     if any(
         TASK_REF_RE.fullmatch(task) is None
         for task in (parsed.old_task, parsed.successor_task, parsed.authority_envelope_task)
@@ -313,6 +354,12 @@ def parse_args(argv: list[str]) -> Args:
         audit_output=parsed.audit_output.resolve(strict=False),
         preparer=parsed.preparer.strip(),
         reviewer=parsed.reviewer.strip(),
+        old_queue_sha256=parsed.old_queue_sha256,
+        old_pcodx_state_sha256=parsed.old_pcodx_state_sha256,
+        old_pcodx_ledger_sha256=parsed.old_pcodx_ledger_sha256,
+        old_pcodx_wrapper_sha256=parsed.old_pcodx_wrapper_sha256,
+        protected_targets_sha256=parsed.protected_targets_sha256,
+        authority_envelope_file_sha256=parsed.authority_envelope_file_sha256,
     )
 
 
@@ -570,7 +617,15 @@ def metadata(data: bytes, root: Path, label: str) -> TaskMetadata:
     return value
 
 
-def replace_v1_fields(text: str, *, status: str, runat: str, blocked_on: str, remove_session: bool) -> str:
+def replace_v1_fields(
+    text: str,
+    *,
+    status: str,
+    runat: str,
+    blocked_on: str,
+    remove_session: bool,
+    tool: str | None = None,
+) -> str:
     lines = text.splitlines(keepends=True)
     if not lines or lines[0].strip() != "---":
         raise ReplaceError("manager task has no frontmatter")
@@ -583,12 +638,15 @@ def replace_v1_fields(text: str, *, status: str, runat: str, blocked_on: str, re
         key, separator, _value = line.rstrip("\r\n").partition(":")
         if separator:
             indexes.setdefault(key, []).append(index)
-    for key in ("status", "runat"):
+    required_fields = ("status", "runat", "tool") if tool is not None else ("status", "runat")
+    for key in required_fields:
         if len(indexes.get(key, [])) != 1:
             raise ReplaceError(f"manager task requires exactly one {key} field")
     ending = "\r\n" if lines[0].endswith("\r\n") else "\n"
     lines[indexes["status"][0]] = f"status: {status}{ending}"
     lines[indexes["runat"][0]] = f"runat: {runat}{ending}"
+    if tool is not None:
+        lines[indexes["tool"][0]] = f"tool: {tool}{ending}"
     removed = [*indexes.get("blocked_on", []), *(indexes.get("session_id", []) if remove_session else [])]
     for index in sorted(removed, reverse=True):
         del lines[index]
@@ -616,6 +674,8 @@ def authority_material(args: Args, snapshot: Snapshot, envelope: Snapshot) -> tu
         raise ReplaceError("replacement authority source and directory must be owner-private without symlink traversal")
     if digest(snapshot.data) != args.authority_sha256:
         raise ReplaceError("authority digest changed")
+    if is_pcodx_replacement(args) and digest(envelope.data) != args.authority_envelope_file_sha256:
+        raise ReplaceError("authority envelope file bytes changed")
     try:
         lines = snapshot.data.decode().splitlines()
         envelope_text = envelope.data.decode()
@@ -653,7 +713,71 @@ def authority_material(args: Args, snapshot: Snapshot, envelope: Snapshot) -> tu
     )
     if FAILED_MANAGER_EVIDENCE_RE.search(selected_evidence) is None:
         raise ReplaceError("authenticated authority does not explicitly prove failure, non-execution, and replacement")
+    if is_pcodx_replacement(args) and not all(value in selected_evidence for value in (args.old_task, args.old_target)):
+        raise ReplaceError("authenticated PCODX replacement authority must name the exact old task and protected target")
+    if is_pcodx_replacement(args) and "pcodx" not in selected_evidence.lower():
+        raise ReplaceError("authenticated PCODX replacement authority must explicitly identify PCODX")
+    if is_pcodx_replacement(args):
+        subject_token = re.compile(rf"(?im)^Subject:.*(?<![A-Za-z0-9_./-]){re.escape(args.old_task)}(?![A-Za-z0-9_./-])")
+        close_directive = re.compile(
+            rf"(?im)^\s*close\s+{re.escape(args.old_target)}(?=$|[\s,.;:])"
+        )
+        source_text = snapshot.data.decode()
+        if len(subject_token.findall(source_text)) != 1 or len(close_directive.findall(selected_evidence)) != 1:
+            raise ReplaceError("authenticated PCODX authority must directly close the exact named task and protected target")
     return tuple(items)
+
+
+def protected_inventory(args: Args, inventory: dict[str, PaneIdentity]) -> tuple[PaneIdentity, ...]:
+    protected = tuple(canonical_target(target) for target in args.protected_targets)
+    if len(set(protected)) != len(protected):
+        raise ReplaceError("protected targets must be unique")
+    identities = tuple(inventory.get(target) for target in protected)
+    if any(identity is None for identity in identities):
+        raise ReplaceError("every protected target must retain one exact live pane/process identity")
+    return tuple(identity for identity in identities if identity is not None)
+
+
+def protected_inventory_digest(args: Args, inventory: dict[str, PaneIdentity]) -> str:
+    return json_digest(
+        [
+            {
+                "target": identity.target,
+                "pane_id": identity.pane_id,
+                "pid": identity.pid,
+                "start_ticks": identity.start_ticks,
+            }
+            for identity in protected_inventory(args, inventory)
+        ]
+    )
+
+
+def pcodx_binding(args: Args, pane: PaneIdentity) -> dict[str, str]:
+    if START_PCODX_ENV_KEYS != PCODX_ENV_KEYS:
+        raise ReplaceError("installed PCODX custody schema changed")
+    state = pcodx_state(StartPane(pane.target, pane.pane_id, "", "", Path(), pane.pid))
+    if tuple(state) != PCODX_ENV_KEYS or json_digest(state) != args.old_pcodx_state_sha256:
+        raise ReplaceError("live PCODX identity, session, or custody changed")
+    ledger = read_snapshot(Path(state["PCODX_LEDGER_PATH"]), "live PCODX ledger")
+    if digest(ledger.data) != args.old_pcodx_ledger_sha256:
+        raise ReplaceError("live PCODX ledger bytes changed")
+    wrapper = read_snapshot(Path(__file__).resolve().with_name("pcodx"), "installed PCODX wrapper")
+    if digest(wrapper.data) != args.old_pcodx_wrapper_sha256:
+        raise ReplaceError("installed PCODX wrapper bytes changed")
+    return state
+
+
+def validate_live_bindings(args: Args, inventory: dict[str, PaneIdentity]) -> None:
+    old = inventory.get(canonical_target(args.old_target))
+    expected = PaneIdentity(canonical_target(args.old_target), args.old_pane_id, args.old_pane_pid, args.old_pane_start_ticks)
+    if old != expected:
+        raise ReplaceError(f"old manager pane identity changed: expected {expected}, found {old}")
+    if canonical_target(args.new_target) in inventory:
+        raise ReplaceError("successor target is already live; launch-before-singular-proof is rejected")
+    if is_pcodx_replacement(args):
+        if protected_inventory_digest(args, inventory) != args.protected_targets_sha256:
+            raise ReplaceError("protected pane/process inventory changed")
+        _ = pcodx_binding(args, expected)
 
 
 def old_and_successor_text(
@@ -670,7 +794,14 @@ def old_and_successor_text(
         raise ReplaceError("successor queue would contain duplicate open items")
     cleared = render_pending_items(old_text, ())
     old_after = update_frontmatter_status(cleared, "done", "", root)
-    successor = replace_v1_fields(old_text, status="blocked", runat=new_target, blocked_on=SUCCESSOR_BLOCKER, remove_session=True)
+    successor = replace_v1_fields(
+        old_text,
+        status="blocked",
+        runat=new_target,
+        blocked_on=SUCCESSOR_BLOCKER,
+        remove_session=True,
+        tool="codex",
+    )
     successor = render_pending_items(successor, queue)
     successor_metadata = parse_task_metadata(successor, root)
     if successor_metadata is None or successor_metadata.pending_task_items != queue:
@@ -785,15 +916,31 @@ def pane_inventory() -> dict[str, PaneIdentity]:
 
 
 def validate_targets(args: Args) -> None:
+    pcodx_digests = (
+        args.old_queue_sha256,
+        args.old_pcodx_state_sha256,
+        args.old_pcodx_ledger_sha256,
+        args.old_pcodx_wrapper_sha256,
+        args.protected_targets_sha256,
+        args.authority_envelope_file_sha256,
+    )
+    if any(pcodx_digests) and not all(SHA256_RE.fullmatch(value) for value in pcodx_digests):
+        raise ReplaceError("PCODX replacement requires all six exact SHA-256 bindings")
     old = canonical_target(args.old_target)
     new = canonical_target(args.new_target)
     if old == new:
         raise ReplaceError("old and new manager targets must differ")
-    if target_session(old).startswith("h") or target_session(new).startswith("h"):
-        raise ReplaceError("manager replacement cannot inspect or modify human-owned h* sessions")
+    # 🧑 "Treat tmux sessions whose names begin with `h` as human-owned. Change one only when authoritative human text explicitly requests that exact action and session."
+    pcodx_human = is_pcodx_replacement(args) and target_session(old).startswith("h")
+    if target_session(new).startswith("h") or (target_session(old).startswith("h") and not pcodx_human):
+        raise ReplaceError("only an exactly bound Human-authorized PCODX old manager may use a human-owned h* target")
     protected = {canonical_target(target) for target in args.protected_targets}
-    if old in protected or new in protected:
+    if new in protected or (old in protected and not pcodx_human):
         raise ReplaceError("old or new target aliases an explicitly protected pane")
+    if pcodx_human and old not in protected:
+        raise ReplaceError("Human-owned PCODX old target must be included in the exact protected target set")
+    if is_pcodx_replacement(args) != pcodx_human:
+        raise ReplaceError("PCODX replacement bindings are accepted only for one protected human-owned old target")
 
 
 def markdown_paths(root: Path) -> tuple[Path, ...]:
@@ -832,11 +979,13 @@ def prepare(args: Args, paths: tuple[Path, ...]) -> Plan:
         or old_metadata.status != "long_running"
         or old_metadata.runat != args.old_target
         or old_metadata.managerat != args.parent_target
-        or old_metadata.tool != "codex"
+        or old_metadata.tool != ("pcodx" if is_pcodx_replacement(args) else "codex")
         or not old_metadata.is_manager
-        or old_metadata.session_id.lower() != args.old_session_id
+        or (not is_pcodx_replacement(args) and old_metadata.session_id.lower() != args.old_session_id)
     ):
         raise ReplaceError("old manager must be the exact live long-running failed-manager record bound by the invocation")
+    if json_digest(list(old_metadata.pending_task_items)) != args.old_queue_sha256 and is_pcodx_replacement(args):
+        raise ReplaceError("old manager full ordered queue changed")
     old_owners = authoritative_active_target_task_paths(args.root, args.old_target)
     if old_owners != (old_path.resolve(),):
         raise ReplaceError("old target does not have exactly one authoritative active owner")
@@ -846,6 +995,8 @@ def prepare(args: Args, paths: tuple[Path, ...]) -> Plan:
     actual_children = active_child_task_refs(args.root, old_path, args.old_target)
     if actual_children != expected_children:
         raise ReplaceError(f"active child set changed: expected {expected_children}, found {actual_children}")
+    if is_pcodx_replacement(args) and len(expected_children) != 4:
+        raise ReplaceError("Human-owned PCODX manager replacement requires the exact four-child Source-1228 set")
     pins = {child.task: child.sha256 for child in args.children}
     children: list[Snapshot] = []
     child_after: list[bytes] = []
@@ -876,6 +1027,11 @@ def prepare(args: Args, paths: tuple[Path, ...]) -> Plan:
         authority_items,
     )
     todo_after = todo_replacement(todo.data, args.root, old_path, successor_path, args.old_target, args.new_target)
+    protected_identities: tuple[PaneIdentity, ...] = ()
+    if is_pcodx_replacement(args):
+        inventory = pane_inventory()
+        validate_live_bindings(args, inventory)
+        protected_identities = protected_inventory(args, inventory)
     return Plan(
         old,
         todo,
@@ -890,6 +1046,7 @@ def prepare(args: Args, paths: tuple[Path, ...]) -> Plan:
         successor_queue,
         tuple(child_queues),
         paths,
+        protected_identities,
     )
 
 
@@ -931,7 +1088,7 @@ def audit_record(args: Args, plan: Plan, secret: str, commitment: str) -> dict[s
             "gid": plan.old.state.st_gid,
         },
     ]
-    return {
+    record: dict[str, object] = {
         "version": AUDIT_VERSION,
         "operation": AUDIT_OPERATION,
         "state": "prepared",
@@ -961,6 +1118,18 @@ def audit_record(args: Args, plan: Plan, secret: str, commitment: str) -> dict[s
         "markdown_membership": [path.relative_to(args.root).as_posix() for path in plan.initial_markdown_paths],
         "files": files,
     }
+    if is_pcodx_replacement(args):
+        record.update(pcodx_audit_binding(args))
+        record["protected_inventory"] = [
+            {
+                "target": identity.target,
+                "pane_id": identity.pane_id,
+                "pid": identity.pid,
+                "start_ticks": identity.start_ticks,
+            }
+            for identity in plan.protected_identities
+        ]
+    return record
 
 
 def serialized_audit(record: dict[str, object]) -> bytes:
@@ -1034,8 +1203,19 @@ def decoded(value: object, label: str) -> bytes:
         raise ReplaceError(f"private replacement audit {label} is not canonical base64") from exc
 
 
-def audit_binding(args: Args) -> dict[str, object]:
+def pcodx_audit_binding(args: Args) -> dict[str, object]:
     return {
+        "old_queue_sha256": args.old_queue_sha256,
+        "old_pcodx_state_sha256": args.old_pcodx_state_sha256,
+        "old_pcodx_ledger_sha256": args.old_pcodx_ledger_sha256,
+        "old_pcodx_wrapper_sha256": args.old_pcodx_wrapper_sha256,
+        "protected_targets_sha256": args.protected_targets_sha256,
+        "authority_envelope_file_sha256": args.authority_envelope_file_sha256,
+    }
+
+
+def audit_binding(args: Args) -> dict[str, object]:
+    binding: dict[str, object] = {
         "version": AUDIT_VERSION,
         "operation": AUDIT_OPERATION,
         "root": str(args.root),
@@ -1059,6 +1239,9 @@ def audit_binding(args: Args) -> dict[str, object]:
         "preparer": args.preparer,
         "reviewer": args.reviewer,
     }
+    if is_pcodx_replacement(args):
+        binding.update(pcodx_audit_binding(args))
+    return binding
 
 
 def read_audit(args: Args) -> tuple[dict[str, object], bytes, tuple[AuditEntry, ...], tuple[Path, ...]]:
@@ -1086,6 +1269,8 @@ def read_audit(args: Args) -> tuple[dict[str, object], bytes, tuple[AuditEntry, 
         "error",
         "rollback_failures",
     }
+    if is_pcodx_replacement(args):
+        allowed.add("protected_inventory")
     required = allowed - {"error", "rollback_failures"}
     if not required.issubset(record) or not set(record).issubset(allowed):
         raise ReplaceError("private replacement audit fields are incomplete or unrecognized")
@@ -1141,10 +1326,19 @@ def read_audit(args: Args) -> tuple[dict[str, object], bytes, tuple[AuditEntry, 
     for pin, entry in zip(args.children, entries[1:-2], strict=True):
         if digest(entry.before or b"") != pin.sha256:
             raise ReplaceError(f"private replacement audit child before-image changed: {pin.task}")
+    if is_pcodx_replacement(args):
+        protected_value = record.get("protected_inventory")
+        if not isinstance(protected_value, list) or json_digest(protected_value) != args.protected_targets_sha256:
+            raise ReplaceError("private replacement audit protected inventory binding changed")
     return dict(loaded), snapshot.data, tuple(entries), membership
 
 
-def recovery_plan(args: Args, entries: tuple[AuditEntry, ...], membership: tuple[Path, ...]) -> Plan:
+def recovery_plan(
+    args: Args,
+    entries: tuple[AuditEntry, ...],
+    membership: tuple[Path, ...],
+    record: dict[str, object],
+) -> Plan:
     old_entry = entries[0]
     child_entries = entries[1:-2]
     todo_entry = entries[-2]
@@ -1195,11 +1389,31 @@ def recovery_plan(args: Args, entries: tuple[AuditEntry, ...], membership: tuple
         or old_metadata.status != "long_running"
         or old_metadata.runat != args.old_target
         or old_metadata.managerat != args.parent_target
-        or old_metadata.tool != "codex"
+        or old_metadata.tool != ("pcodx" if is_pcodx_replacement(args) else "codex")
         or not old_metadata.is_manager
-        or old_metadata.session_id.lower() != args.old_session_id
+        or (not is_pcodx_replacement(args) and old_metadata.session_id.lower() != args.old_session_id)
     ):
         raise ReplaceError("private replacement audit does not describe the exact failed manager")
+    if is_pcodx_replacement(args) and json_digest(list(old_metadata.pending_task_items)) != args.old_queue_sha256:
+        raise ReplaceError("private replacement audit old manager ordered queue changed")
+    protected: list[PaneIdentity] = []
+    for value in record.get("protected_inventory", []):
+        if not isinstance(value, dict) or set(value) != {"target", "pane_id", "pid", "start_ticks"}:
+            raise ReplaceError("private replacement audit protected pane identity is malformed")
+        try:
+            identity = PaneIdentity(value["target"], value["pane_id"], value["pid"], value["start_ticks"])
+        except TypeError as exc:
+            raise ReplaceError("private replacement audit protected pane identity has invalid types") from exc
+        if (
+            canonical_target(identity.target) != identity.target
+            or PANE_ID_RE.fullmatch(identity.pane_id) is None
+            or not isinstance(identity.pid, int)
+            or not isinstance(identity.start_ticks, int)
+            or identity.pid <= 0
+            or identity.start_ticks <= 0
+        ):
+            raise ReplaceError("private replacement audit protected pane identity is invalid")
+        protected.append(identity)
     return Plan(
         old_before,
         Snapshot(todo_path, todo_entry.before, snapshots[-1].state),
@@ -1214,6 +1428,7 @@ def recovery_plan(args: Args, entries: tuple[AuditEntry, ...], membership: tuple
         successor_queue,
         tuple(child_queues),
         membership,
+        tuple(protected),
     )
 
 
@@ -1278,7 +1493,7 @@ def recover_existing(
     authority_path: Path,
 ) -> Recovery:
     record, audit_bytes, entries, membership = read_audit(args)
-    plan = recovery_plan(args, entries, membership)
+    plan = recovery_plan(args, entries, membership, record)
     states = tuple(current_entry_state(args, entry)[0] for entry in entries)
     if "unknown" in states:
         completed_value = record.get("completed_writes")
@@ -1385,7 +1600,7 @@ def recover_existing(
             raise ReplaceError("interrupted transaction could not be rolled back to its exact before state")
     if markdown_paths(args.root) != membership:
         raise ReplaceError("Markdown membership changed during crash recovery; exact before state retained")
-    restored = recovery_plan(args, entries, membership)
+    restored = recovery_plan(args, entries, membership, record)
     if authoritative_active_target_task_paths(args.root, args.old_target) != (restored.old.path.resolve(),):
         raise ReplaceError("crash recovery cannot prove the restored old manager as sole before-state owner")
     if authoritative_active_target_task_paths(args.root, args.new_target):
@@ -1404,15 +1619,54 @@ def recover_existing(
 
 def validate_panes_before_close(args: Args) -> None:
     inventory = pane_inventory()
-    old = inventory.get(canonical_target(args.old_target))
-    expected = PaneIdentity(canonical_target(args.old_target), args.old_pane_id, args.old_pane_pid, args.old_pane_start_ticks)
-    if old != expected:
-        raise ReplaceError(f"old manager pane identity changed: expected {expected}, found {old}")
-    if canonical_target(args.new_target) in inventory:
-        raise ReplaceError("successor target is already live; launch-before-singular-proof is rejected")
+    validate_live_bindings(args, inventory)
 
 
-def stop_old_manager(args: Args, proof_path: Path, authority_path: Path, secret: str, commitment: str) -> None:
+def require_preclose_eligibility(args: Args, plan: Plan) -> None:
+    """Recheck every prepared lifecycle and authority binding before pane input."""
+
+    if markdown_paths(args.root) != plan.initial_markdown_paths:
+        raise ReplaceError("Markdown membership changed before guarded manager close")
+    if plan.successor_path.exists() or plan.successor_path.is_symlink():
+        raise ReplaceError("successor appeared before guarded manager close")
+    require_snapshot(plan.old, "pre-close old manager")
+    require_snapshot(plan.todo, "pre-close TODO")
+    require_snapshot(plan.authority, "pre-close replacement authority")
+    require_snapshot(plan.authority_envelope, "pre-close replacement authority envelope")
+    for child in plan.children:
+        require_snapshot(child, f"pre-close active child {child.path.name}")
+    if authoritative_active_target_task_paths(args.root, args.old_target) != (plan.old.path.resolve(),):
+        raise ReplaceError("old target ownership changed before guarded manager close")
+    if authoritative_active_target_task_paths(args.root, args.new_target):
+        raise ReplaceError("successor target ownership appeared before guarded manager close")
+    if active_child_task_refs(args.root, plan.old.path, args.old_target) != tuple(child.task for child in args.children):
+        raise ReplaceError("active child set changed before guarded manager close")
+
+
+def stop_old_manager(
+    args: Args,
+    plan: Plan,
+    proof_path: Path,
+    authority_path: Path,
+    secret: str,
+    commitment: str,
+) -> None:
+    protected_before: tuple[PaneIdentity, ...] = ()
+    require_preclose_eligibility(args, plan)
+    if is_pcodx_replacement(args):
+        before_inventory = pane_inventory()
+        validate_live_bindings(args, before_inventory)
+        protected_before = tuple(
+            identity
+            for identity in protected_inventory(args, before_inventory)
+            if identity.target != canonical_target(args.old_target)
+        )
+    require_preclose_eligibility(args, plan)
+
+    def pre_input_check() -> None:
+        require_preclose_eligibility(args, plan)
+        validate_live_bindings(args, pane_inventory())
+
     session_id = stop(
         StopArgs(
             target=args.old_target,
@@ -1421,7 +1675,7 @@ def stop_old_manager(args: Args, proof_path: Path, authority_path: Path, secret:
             dry_run=False,
             allow_self=False,
             root=args.root,
-            task_file="",
+            task_file=args.old_task if is_pcodx_replacement(args) else "",
             no_feedback=True,
             bound_symbolic_target=args.old_target,
             bound_pane_id=args.old_pane_id,
@@ -1432,6 +1686,10 @@ def stop_old_manager(args: Args, proof_path: Path, authority_path: Path, secret:
             bound_close_audit_path=str(authority_path),
             bound_close_proof_secret=secret,
             bound_close_proof_commitment=commitment,
+            human_close_authorization_source=args.authority_file if is_pcodx_replacement(args) else "",
+            human_close_authorization_sha256=args.authority_sha256 if is_pcodx_replacement(args) else "",
+            human_close_authorized_target=args.old_target if is_pcodx_replacement(args) else "",
+            bound_pre_input_check=pre_input_check if is_pcodx_replacement(args) else None,
         )
     )
     if session_id.lower() != args.old_session_id:
@@ -1443,6 +1701,8 @@ def stop_old_manager(args: Args, proof_path: Path, authority_path: Path, secret:
         raise ReplaceError("old manager target remains live after guarded close")
     if canonical_target(args.new_target) in inventory:
         raise ReplaceError("successor target launched before singular ownership proof")
+    if is_pcodx_replacement(args) and tuple(inventory.get(identity.target) for identity in protected_before) != protected_before:
+        raise ReplaceError("non-replaced protected pane/process inventory changed during close")
 
 
 def prove_committed(args: Args, plan: Plan, old_after: Snapshot, child_after: tuple[Snapshot, ...], todo_after: Snapshot, successor: Snapshot) -> None:
@@ -1470,6 +1730,11 @@ def prove_committed(args: Args, plan: Plan, old_after: Snapshot, child_after: tu
     inventory = pane_inventory()
     if canonical_target(args.old_target) in inventory or canonical_target(args.new_target) in inventory:
         raise ReplaceError("old or successor pane is live at the singular ownership proof boundary")
+    remaining_protected = tuple(
+        identity for identity in plan.protected_identities if identity.target != canonical_target(args.old_target)
+    )
+    if tuple(inventory.get(identity.target) for identity in remaining_protected) != remaining_protected:
+        raise ReplaceError("protected pane/process inventory changed before singular ownership proof")
     expected_membership = tuple(sorted((*plan.initial_markdown_paths, plan.successor_path.resolve(strict=False)), key=str))
     if markdown_paths(args.root) != expected_membership:
         raise ReplaceError("Markdown membership changed before singular ownership proof")
@@ -1540,7 +1805,7 @@ def replace_manager(args: Args) -> str:
         if not owner_stopped:
             validate_panes_before_close(args)
             try:
-                stop_old_manager(args, proof_path, close_authority_path, secret, commitment)
+                stop_old_manager(args, plan, proof_path, close_authority_path, secret, commitment)
             except Exception as exc:
                 try:
                     record, audit_bytes = transition_audit(

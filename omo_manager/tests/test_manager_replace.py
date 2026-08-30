@@ -39,6 +39,7 @@ def task_text(
     pending: tuple[str, ...],
     session_id: str = "",
     body: str = "Preserve this delegated body.\n",
+    tool: str = "codex",
 ) -> str:
     blocker = "blocked_on: fixture blocker\n" if status == "blocked" else ""
     session = f"session_id: {session_id}\n" if session_id else ""
@@ -49,7 +50,7 @@ def task_text(
         f"status: {status}\n"
         f"{blocker}"
         f"runat: {runat}\n"
-        "tool: codex\n"
+        f"tool: {tool}\n"
         f"managerat: {managerat}\n"
         f"is_manager: {str(is_manager).lower()}\n"
         f"{queue}\n"
@@ -183,6 +184,119 @@ class ManagerReplaceTests(unittest.TestCase):
         with inventory, stopped, proof:
             return replace_manager(args)
 
+    def pcodx_fixture(self, base: Path) -> tuple[Path, Args, dict[str, str], dict[str, str]]:
+        root, args, files = self.fixture(base)
+        old_target = "hwl:3"
+        new_target = "wl:31"
+        old = task_text(
+            status="long_running",
+            runat=old_target,
+            managerat=PARENT_TARGET,
+            is_manager=True,
+            pending=OLD_QUEUE,
+            tool="pcodx",
+        )
+        files[args.old_task] = old
+        (root / args.old_task).write_text(old, encoding="utf-8")
+        for name in ("child_a.md", "child_b.md"):
+            data = files[name].replace(f"managerat: {OLD_TARGET}", f"managerat: {old_target}")
+            files[name] = data
+            (root / name).write_text(data, encoding="utf-8")
+        extra_children: list[ChildPin] = []
+        for index in (3, 4):
+            name = f"child_{index}.md"
+            data = task_text(
+                status="running",
+                runat=f"worker:{index}",
+                managerat=old_target,
+                is_manager=False,
+                pending=(f"Preserve child {index} queue.",),
+            )
+            files[name] = data
+            (root / name).write_text(data, encoding="utf-8")
+            extra_children.append(ChildPin(name, sha(data)))
+        todo = files["TODO.md"].replace(f"failed_manager.md {OLD_TARGET}", f"failed_manager.md {old_target}")
+        files["TODO.md"] = todo
+        (root / "TODO.md").write_text(todo, encoding="utf-8")
+        authority_lines = (
+            "Subject: failed_manager.md protected PCODX replacement\n",
+            "\n",
+            "The PCODX agent failed. They did not run the task. Replace them.\n",
+            f"Close {old_target}. Replace {args.old_task} with one plain Codex successor.\n",
+        )
+        authority = "".join(authority_lines)
+        authority_path = root / args.authority_file
+        authority_path.write_text(authority, encoding="utf-8")
+        envelope = (
+            f'<human_instruction authoritative="true" source="{args.authority_file}:1-4">\n'
+            f"{authority}</human_instruction>\n"
+        )
+        (root / args.authority_envelope_task).write_text(envelope, encoding="utf-8")
+        ledger = base / "pcodx-run" / "ledger.json"
+        ledger.parent.mkdir(mode=0o700)
+        ledger.write_text('{"sequence":1}\n', encoding="utf-8")
+        pcodx = {
+            "PCODX_POC_ROOT": str(base / "pcodx-poc"),
+            "PCODX_RUN_DIR": str(ledger.parent),
+            "PCODX_LEDGER_PATH": str(ledger),
+            "PCODX_SESSION_ID": "pcodx-source-1228",
+        }
+        Path(pcodx["PCODX_POC_ROOT"]).mkdir(mode=0o700)
+        identity = PaneIdentity(f"{old_target}.0", "%42", 4242, 999)
+        wrapper = Path(manager_replace.__file__).resolve().with_name("pcodx").read_bytes()
+        children = tuple(sorted((
+            ChildPin("child_a.md", sha(files["child_a.md"])),
+            ChildPin("child_b.md", sha(files["child_b.md"])),
+            *extra_children,
+        ), key=lambda child: child.task))
+        changed = replace(
+            args,
+            old_target=old_target,
+            new_target=new_target,
+            old_sha256=sha(old),
+            todo_sha256=sha(todo),
+            children=children,
+            authority_lines=LineRange(1, 4),
+            authority_sha256=sha(authority),
+            authority_envelope_sha256=sha(envelope),
+            successor_item_lines=(LineRange(3, 4),),
+            protected_targets=(old_target,),
+            old_queue_sha256=manager_replace.json_digest(list(OLD_QUEUE)),
+            old_pcodx_state_sha256=manager_replace.json_digest(pcodx),
+            old_pcodx_ledger_sha256=hashlib.sha256(ledger.read_bytes()).hexdigest(),
+            old_pcodx_wrapper_sha256=hashlib.sha256(wrapper).hexdigest(),
+            protected_targets_sha256=manager_replace.json_digest(
+                [{"target": identity.target, "pane_id": identity.pane_id, "pid": identity.pid, "start_ticks": identity.start_ticks}]
+            ),
+            authority_envelope_file_sha256=sha(envelope),
+        )
+        return root, changed, files, pcodx
+
+    def pcodx_runtime(self, args: Args, pcodx: dict[str, str]):
+        state = {"old_live": True}
+
+        def inventory() -> dict[str, PaneIdentity]:
+            if not state["old_live"]:
+                return {}
+            identity = PaneIdentity(manager_replace.canonical_target(args.old_target), args.old_pane_id, args.old_pane_pid, args.old_pane_start_ticks)
+            return {identity.target: identity}
+
+        def stopped(stop_args: object) -> str:
+            self.assertEqual(args.old_task, stop_args.task_file)
+            self.assertEqual(args.old_target, stop_args.human_close_authorized_target)
+            self.assertEqual(args.authority_sha256, stop_args.human_close_authorization_sha256)
+            self.assertIsNotNone(stop_args.bound_pre_input_check)
+            stop_args.bound_pre_input_check()
+            state["old_live"] = False
+            return args.old_session_id
+
+        return (
+            patch.object(manager_replace, "pane_inventory", side_effect=inventory),
+            patch.object(manager_replace, "pcodx_state", return_value=pcodx),
+            patch.object(manager_replace, "stop", side_effect=stopped),
+            patch.object(manager_replace, "has_bound_close_proof", side_effect=lambda *_args: not state["old_live"]),
+        )
+
     def test_success_closes_migrates_and_publishes_unlaunched_successor(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root, args, files = self.fixture(Path(tmp))
@@ -211,6 +325,125 @@ class ManagerReplaceTests(unittest.TestCase):
             self.assertEqual("committed", audit["state"])
             self.assertEqual(["failed_manager.md", "child_a.md", "child_b.md", "TODO.md", "successor_manager.md"], audit["completed_writes"])
             self.assertIn("launch remains a separate supported operation", result)
+
+    def test_human_owned_pcodx_accepts_only_exact_authority_and_publishes_plain_codex(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, _files, pcodx = self.pcodx_fixture(Path(tmp))
+            inventory, state, stopped, proof = self.pcodx_runtime(args, pcodx)
+            with inventory, state, stopped, proof:
+                result = replace_manager(args)
+            old = parsed(root / args.old_task, root)
+            successor = parsed(root / args.successor_task, root)
+            self.assertEqual("done", old.status)
+            self.assertEqual("blocked", successor.status)
+            self.assertEqual("codex", successor.tool)
+            self.assertEqual("", successor.session_id)
+            self.assertEqual(4, len(manager_replace.active_child_task_refs(root, root / args.successor_task, args.new_target)))
+            self.assertIn("blocked unlaunched", result)
+
+    def test_human_owned_pcodx_rejects_every_identity_authority_and_custody_drift_before_close(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, _files, pcodx = self.pcodx_fixture(Path(tmp))
+            cases = (
+                (replace(args, old_sha256="0" * 64), "digest changed"),
+                (replace(args, todo_sha256="0" * 64), "digest changed"),
+                (replace(args, old_queue_sha256="0" * 64), "ordered queue changed"),
+                (replace(args, old_pcodx_state_sha256="0" * 64), "identity, session, or custody changed"),
+                (replace(args, old_pcodx_ledger_sha256="0" * 64), "ledger bytes changed"),
+                (replace(args, old_pcodx_wrapper_sha256="0" * 64), "wrapper bytes changed"),
+                (replace(args, protected_targets_sha256="0" * 64), "protected pane/process inventory changed"),
+                (replace(args, protected_targets=()), "included in the exact protected"),
+                (replace(args, children=args.children[:-1]), "active child set changed"),
+                (replace(args, authority_sha256="0" * 64), "authority digest changed"),
+                (replace(args, authority_envelope_sha256="0" * 64), "envelope block digest changed"),
+                (replace(args, authority_envelope_file_sha256="0" * 64), "envelope file bytes changed"),
+            )
+            for changed, error in cases:
+                with self.subTest(error=error):
+                    inventory, state, stopped, proof = self.pcodx_runtime(changed, pcodx)
+                    with inventory, state, stopped as stop_mock, proof, self.assertRaisesRegex(ReplaceError, error):
+                        replace_manager(changed)
+                    stop_mock.assert_not_called()
+                    self.assertFalse(args.audit_output.exists())
+
+            indirect = (root / args.authority_file).read_text(encoding="utf-8").replace(
+                f"Close {args.old_target}.", f"Please consider stopping {args.old_target}."
+            )
+            (root / args.authority_file).write_text(indirect, encoding="utf-8")
+            envelope = (
+                f'<human_instruction authoritative="true" source="{args.authority_file}:1-4">\n'
+                f"{indirect}</human_instruction>\n"
+            )
+            (root / args.authority_envelope_task).write_text(envelope, encoding="utf-8")
+            indirect_args = replace(
+                args,
+                authority_sha256=sha(indirect),
+                authority_envelope_sha256=sha(envelope),
+                authority_envelope_file_sha256=sha(envelope),
+            )
+            inventory, state, stopped, proof = self.pcodx_runtime(indirect_args, pcodx)
+            with inventory, state, stopped as stop_mock, proof, self.assertRaisesRegex(ReplaceError, "directly close"):
+                replace_manager(indirect_args)
+            stop_mock.assert_not_called()
+
+    def test_pcodx_replacement_rejects_changed_pane_process_session_and_non_pcodx_old_task(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, _files, pcodx = self.pcodx_fixture(Path(tmp))
+            drifted = dict(pcodx)
+            drifted["PCODX_SESSION_ID"] = "different-session"
+            inventory, state, stopped, proof = self.pcodx_runtime(args, drifted)
+            with inventory, state, stopped as stop_mock, proof, self.assertRaisesRegex(ReplaceError, "identity, session, or custody changed"):
+                replace_manager(args)
+            stop_mock.assert_not_called()
+
+            wrong_tool = (root / args.old_task).read_text(encoding="utf-8").replace("tool: pcodx", "tool: codex")
+            (root / args.old_task).write_text(wrong_tool, encoding="utf-8")
+            changed = replace(args, old_sha256=sha(wrong_tool))
+            inventory, state, stopped, proof = self.pcodx_runtime(changed, pcodx)
+            with inventory, state, stopped as stop_mock, proof, self.assertRaisesRegex(ReplaceError, "exact live long-running"):
+                replace_manager(changed)
+            stop_mock.assert_not_called()
+
+            (root / args.old_task).write_text(wrong_tool.replace("tool: codex", "tool: pcodx"), encoding="utf-8")
+            identity = PaneIdentity(manager_replace.canonical_target(args.old_target), args.old_pane_id, args.old_pane_pid + 1, args.old_pane_start_ticks)
+            with (
+                patch.object(manager_replace, "pane_inventory", return_value={identity.target: identity}),
+                patch.object(manager_replace, "pcodx_state", return_value=pcodx),
+                patch.object(manager_replace, "stop") as stop_mock,
+                self.assertRaisesRegex(ReplaceError, "pane identity changed"),
+            ):
+                replace_manager(args)
+            stop_mock.assert_not_called()
+
+    def test_pcodx_exact_pre_input_seam_rejects_lifecycle_drift_without_closing_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, files, pcodx = self.pcodx_fixture(Path(tmp))
+            owner_live = True
+
+            def inventory() -> dict[str, PaneIdentity]:
+                if not owner_live:
+                    return {}
+                identity = PaneIdentity(manager_replace.canonical_target(args.old_target), "%42", 4242, 999)
+                return {identity.target: identity}
+
+            def drift_at_pre_input(stop_args: object) -> str:
+                nonlocal owner_live
+                (root / "child_4.md").write_text(files["child_4.md"] + "exact seam drift\n", encoding="utf-8")
+                stop_args.bound_pre_input_check()
+                owner_live = False
+                return args.old_session_id
+
+            with (
+                patch.object(manager_replace, "pane_inventory", side_effect=inventory),
+                patch.object(manager_replace, "pcodx_state", return_value=pcodx),
+                patch.object(manager_replace, "stop", side_effect=drift_at_pre_input),
+                patch.object(manager_replace, "has_bound_close_proof", return_value=False),
+                self.assertRaisesRegex(ReplaceError, "manager stop failed before lifecycle mutation: pre-close active child"),
+            ):
+                replace_manager(args)
+            self.assertTrue(owner_live)
+            self.assertEqual(files[args.old_task], (root / args.old_task).read_text(encoding="utf-8"))
+            self.assertFalse((root / args.successor_task).exists())
 
     def test_stale_task_todo_or_child_digest_rejects_before_stop(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -411,6 +644,31 @@ class ManagerReplaceTests(unittest.TestCase):
             with self.assertRaisesRegex(ReplaceError, "owned lifecycle writes rolled back"):
                 self.run_replacement(args, {"old_live": True, "stop_hook": mutate_task})
             self.assertEqual(changed, (root / "failed_manager.md").read_text(encoding="utf-8"))
+            self.assertFalse((root / args.successor_task).exists())
+
+    def test_bound_artifact_drift_after_preparation_never_closes_old_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, files = self.fixture(Path(tmp))
+            original = manager_replace.reserve_audit
+            close_authority = args.audit_output.with_name(f".{args.audit_output.name}.close-authority")
+
+            def mutate_after_preparation(path, record):
+                result = original(path, record)
+                if path == close_authority:
+                    (root / "child_a.md").write_text(files["child_a.md"] + "concurrent drift\n", encoding="utf-8")
+                return result
+
+            inventory, stopped, proof = self.runtime({"old_live": True})
+            with (
+                inventory,
+                stopped as stop_mock,
+                proof,
+                patch.object(manager_replace, "reserve_audit", side_effect=mutate_after_preparation),
+                self.assertRaisesRegex(ReplaceError, "pre-close active child"),
+            ):
+                replace_manager(args)
+            stop_mock.assert_not_called()
+            self.assertEqual(files["failed_manager.md"], (root / args.old_task).read_text(encoding="utf-8"))
             self.assertFalse((root / args.successor_task).exists())
 
     def test_partial_child_migration_rolls_back_exact_owned_bytes(self) -> None:
