@@ -2785,7 +2785,7 @@ with exclusive_watcher_root(root):
                 manager_path.write_text(manager_path.read_text(encoding="utf-8").replace("(pending)\n", "(done: consumed)\n", 1), encoding="utf-8")
                 self.assertTrue(watcher.handle_manager_mail_thresholds(object(), args))
 
-            self.assertEqual([(2, "unread-compression"), (9, "unread-compression")], calls)
+            self.assertEqual([(2, "unread-compression"), (10, "unread-compression")], calls)
             self.assertIn("unread-compression\t33\n", watcher.manager_mail_threshold_watermarks_path(args).read_text(encoding="utf-8"))
 
     def test_email_watcher_total_cleanup_retriggers_for_each_message_above_limit(self) -> None:
@@ -2827,7 +2827,7 @@ with exclusive_watcher_root(root):
                 self.assertFalse(watcher.handle_manager_mail_thresholds(object(), args))
                 self.assertTrue(watcher.handle_manager_mail_thresholds(object(), args))
 
-            self.assertEqual([(2, "total-cleanup"), (9, "total-cleanup")], calls)
+            self.assertEqual([(2, "total-cleanup"), (10, "total-cleanup")], calls)
 
     def test_email_watcher_growth_retrigger_waits_while_marker_is_pending(self) -> None:
         from omo_manager import email_idle_watcher as watcher
@@ -2867,6 +2867,115 @@ with exclusive_watcher_root(root):
 
             self.assertEqual([(2, "unread-compression")], calls)
             self.assertEqual(1, (root / "work_manager_today.md").read_text(encoding="utf-8").count(watcher.threshold_marker("unread-compression")))
+
+    def test_email_watcher_threshold_identity_ignores_unrelated_nearby_pending_marker(self) -> None:
+        from omo_manager import email_idle_watcher as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            root.mkdir()
+            state = Path(tmp) / "state"
+            manager = root / "work_manager_today.md"
+            identity = "0123456789abcdef0123456789abcdef"
+            manager.write_text(
+                "\n".join(
+                    [
+                        "(pending)",
+                        "(from agent unrelated)",
+                        "unrelated work",
+                        "(done: threshold consumed)",
+                        watcher.threshold_marker("total-cleanup"),
+                        watcher.threshold_identity_marker("total-cleanup", identity),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            record = watcher.current_threshold_record(manager, "total-cleanup", identity)
+
+            self.assertEqual(watcher.ThresholdRecord(identity, None), record)
+            self.assertIsNone(watcher.existing_current_threshold_pending_line(manager, "total-cleanup", identity))
+            args = watcher.Args(
+                root,
+                "",
+                root / "manager_mail",
+                state,
+                manager,
+                True,
+                "me@example.com",
+                0,
+                Path("/bin/false"),
+                manager_target="wl:1.0",
+                unread_compression_threshold=0,
+                recent_cleanup_threshold=0,
+            )
+            watcher.save_active_manager_mail_thresholds(watcher.manager_mail_threshold_state_path(args), {"total-cleanup"})
+            watcher.save_manager_mail_threshold_watermarks(watcher.manager_mail_threshold_watermarks_path(args), {"total-cleanup": 73})
+            calls: list[tuple[int, str]] = []
+
+            with (
+                patch.object(watcher, "manager_mail_counts", return_value=watcher.ManagerMailCounts(74, 0, 86400, 0, True)),
+                patch.object(watcher, "push_manager_mail_threshold_ref", side_effect=lambda _args, line, kind: calls.append((line, kind)) or True),
+            ):
+                self.assertTrue(watcher.handle_manager_mail_thresholds(object(), args))
+
+            self.assertEqual(1, len(calls))
+            self.assertEqual("total-cleanup", calls[0][1])
+            self.assertEqual(2, manager.read_text(encoding="utf-8").count(watcher.threshold_marker("total-cleanup")))
+            lifecycle = watcher.load_manager_mail_threshold_lifecycles(watcher.manager_mail_threshold_lifecycles_path(args))["total-cleanup"]
+            self.assertNotEqual(identity, lifecycle.identity)
+            self.assertEqual(watcher.ThresholdLifecycleState.QUEUED, lifecycle.state)
+
+    def test_email_watcher_persists_every_threshold_lifecycle_state(self) -> None:
+        from omo_manager import email_idle_watcher as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            root.mkdir()
+            state = Path(tmp) / "state"
+            args = watcher.Args(
+                root,
+                "",
+                root / "manager_mail",
+                state,
+                root / "work_manager_today.md",
+                True,
+                "me@example.com",
+                0,
+                Path("/bin/false"),
+                manager_target="wl:1.0",
+                unread_compression_threshold=0,
+                recent_cleanup_threshold=0,
+            )
+            counts = iter(
+                (
+                    watcher.ManagerMailCounts(30, 0, 86400, 0, True),
+                    watcher.ManagerMailCounts(30, 0, 86400, 0, True),
+                    watcher.ManagerMailCounts(29, 0, 86400, 0, True),
+                )
+            )
+
+            with (
+                patch.object(watcher, "manager_mail_counts", side_effect=lambda *_args, **_kwargs: next(counts)),
+                patch.object(watcher, "push_manager_mail_threshold_ref", return_value=True),
+            ):
+                self.assertTrue(watcher.handle_manager_mail_thresholds(object(), args))
+                lifecycle_path = watcher.manager_mail_threshold_lifecycles_path(args)
+                queued = watcher.load_manager_mail_threshold_lifecycles(lifecycle_path)["total-cleanup"]
+                self.assertEqual(watcher.ThresholdLifecycleState.QUEUED, queued.state)
+
+                manager = root / "work_manager_today.md"
+                manager.write_text(manager.read_text(encoding="utf-8").replace("(pending)\n", "(done: consumed)\n", 1), encoding="utf-8")
+                self.assertFalse(watcher.handle_manager_mail_thresholds(object(), args))
+                blocked = watcher.load_manager_mail_threshold_lifecycles(lifecycle_path)["total-cleanup"]
+                self.assertEqual(queued.identity, blocked.identity)
+                self.assertEqual(watcher.ThresholdLifecycleState.CONSUMED_EXECUTION_BLOCKED, blocked.state)
+
+                self.assertFalse(watcher.handle_manager_mail_thresholds(object(), args))
+                completed = watcher.load_manager_mail_threshold_lifecycles(lifecycle_path)["total-cleanup"]
+                self.assertEqual(queued.identity, completed.identity)
+                self.assertEqual(watcher.ThresholdLifecycleState.COMPLETED, completed.state)
 
     def test_email_watcher_rebases_growth_after_cleanup_reduces_above_threshold_count(self) -> None:
         from omo_manager import email_idle_watcher as watcher
@@ -2912,7 +3021,7 @@ with exclusive_watcher_root(root):
                 self.assertIn("unread-compression\t19\n", watcher.manager_mail_threshold_watermarks_path(args).read_text(encoding="utf-8"))
                 self.assertTrue(watcher.handle_manager_mail_thresholds(object(), args))
 
-            self.assertEqual([(2, "unread-compression"), (9, "unread-compression")], calls)
+            self.assertEqual([(2, "unread-compression"), (10, "unread-compression")], calls)
 
     def test_email_watcher_legacy_active_latch_rearms_after_threshold_growth(self) -> None:
         from omo_manager import email_idle_watcher as watcher
@@ -3050,7 +3159,7 @@ with exclusive_watcher_root(root):
             finally:
                 watcher.push_manager_mail_threshold_ref = old_push
             manager_text = (root / "work_manager_today.md").read_text(encoding="utf-8")
-            self.assertEqual([(2, "unread-compression"), (9, "unread-compression")], calls)
+            self.assertEqual([(2, "unread-compression"), (10, "unread-compression")], calls)
             self.assertEqual(2, manager_text.count(watcher.threshold_marker("unread-compression")))
 
     def test_email_watcher_dedupes_unresolved_legacy_threshold_marker(self) -> None:
@@ -3099,7 +3208,7 @@ with exclusive_watcher_root(root):
             text = watcher.marker_delivery_text(marker)
             self.assertIn("Do not pass `--ack-human`", text)
             self.assertNotIn("Use `--ack-human`", text)
-            self.assertIn("<snippet file=\"work_manager_today.md:2-7\">", text)
+            self.assertIn("<snippet file=\"work_manager_today.md:2-8\">", text)
             self.assertIn("manager email watcher threshold: unread manager mail 17 exceeds 16", text)
             self.assertNotIn("[omo-message-source:", text)
 

@@ -12,6 +12,8 @@ Legacy self-addressed mode retains `[a]` and `[omo_manager]` threshold checks fo
 
 Split-account manager-mail checks queue the singular compression owner when non-PB Inbox mail exceeds 29 messages. After that marker is consumed, each additional message above the limit retriggers cleanup. Independent unread-growth and 24-hour-volume triggers remain early-warning paths. These triggers only start the documented compression workflow; they do not bypass its replacement, review, or recoverable-Trash gates.
 
+Each threshold record has an immutable identity. Private watcher state tracks that identity as `queued`, `consumed-but-execution-blocked`, or `completed`: consuming the pending marker records delivery, not cleanup completion; the record completes only after the corresponding count no longer exceeds its threshold. Nearby pending blocks do not belong to a threshold record unless they immediately contain its exact identity and source marker.
+
 The processed-UID record is authoritative even after its source task is archived. Only UIDs explicitly recorded as unaccepted delivery attempts are retried. UID state is namespaced by agent inbox because Gmail UID numbers are mailbox-local.
 
 New human email pending blocks write `(record and delegate manager_mail/UID.txt)`. Legacy `(from email manager_mail/UID.txt)` and `[source: email manager_mail/UID.txt]` remain recognized for historical duplicate detection but should not be written for new email blocks.

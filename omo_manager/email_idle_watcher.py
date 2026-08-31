@@ -10,6 +10,7 @@ import logging
 import os
 import queue
 import re
+import secrets
 import select
 import shlex
 import subprocess
@@ -195,6 +196,26 @@ class ManagerMailCounts:
     recent_window_s: float
     recent_total: int
     recent_exact: bool
+
+
+# 🧑 "Do another one, and also, why was it not automatically triggered?"
+class ThresholdLifecycleState(Enum):
+    QUEUED = "queued"
+    CONSUMED_EXECUTION_BLOCKED = "consumed-but-execution-blocked"
+    COMPLETED = "completed"
+
+
+@dataclass(frozen=True)
+class ThresholdLifecycle:
+    identity: str
+    state: ThresholdLifecycleState
+    count: int
+
+
+@dataclass(frozen=True)
+class ThresholdRecord:
+    identity: str
+    pending_line: int | None
 
 
 @dataclass(frozen=True)
@@ -890,6 +911,10 @@ def manager_mail_threshold_watermarks_path(args: Args) -> Path:
     return email_uid_state_path(args, "email-manager-mail-threshold-watermarks")
 
 
+def manager_mail_threshold_lifecycles_path(args: Args) -> Path:
+    return email_uid_state_path(args, "email-manager-mail-threshold-lifecycles")
+
+
 def load_processed_uids(path: Path) -> set[str]:
     try:
         return {line.split("\t", 1)[0] for line in path.read_text(encoding="utf-8").splitlines() if line.strip()}
@@ -966,6 +991,35 @@ def load_manager_mail_threshold_watermarks(path: Path) -> dict[str, int]:
 
 def save_manager_mail_threshold_watermarks(path: Path, watermarks: dict[str, int]) -> None:
     body = "".join(f"{kind}\t{watermarks[kind]}\n" for kind in sorted(watermarks))
+    write_private_state(path, body)
+
+
+def load_manager_mail_threshold_lifecycles(path: Path) -> dict[str, ThresholdLifecycle]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {}
+    lifecycles: dict[str, ThresholdLifecycle] = {}
+    for line in lines:
+        parts = line.split("\t")
+        if len(parts) != 4:
+            continue
+        kind, identity, raw_state, raw_count = parts
+        try:
+            state = ThresholdLifecycleState(raw_state)
+            count = int(raw_count)
+        except ValueError:
+            continue
+        if identity and count >= 0:
+            lifecycles[kind] = ThresholdLifecycle(identity, state, count)
+    return lifecycles
+
+
+def save_manager_mail_threshold_lifecycles(path: Path, lifecycles: dict[str, ThresholdLifecycle]) -> None:
+    body = "".join(
+        f"{kind}\t{lifecycles[kind].identity}\t{lifecycles[kind].state.value}\t{lifecycles[kind].count}\n"
+        for kind in sorted(lifecycles)
+    )
     write_private_state(path, body)
 
 
@@ -1414,18 +1468,43 @@ def threshold_markers(kind: str) -> set[str]:
     return {threshold_marker(kind), legacy_threshold_marker(kind)}
 
 
-def existing_current_threshold_pending_line(manager_file: Path, kind: str) -> int | None:
+def threshold_identity_marker(kind: str, identity: str) -> str:
+    return f"(email_idle_watcher manager-mail-threshold-id kind={kind} id={identity})"
+
+
+def threshold_record_identity(lines: list[str], marker_idx: int, kind: str) -> tuple[str, int]:
+    identity_prefix = f"(email_idle_watcher manager-mail-threshold-id kind={kind} id="
+    if marker_idx + 1 < len(lines):
+        identity_line = lines[marker_idx + 1].strip()
+        if identity_line.startswith(identity_prefix) and identity_line.endswith(")"):
+            identity = identity_line[len(identity_prefix) : -1]
+            if re.fullmatch(r"[0-9a-f]{32}", identity):
+                return identity, marker_idx
+    stable_lines = [lines[marker_idx].strip(), *(line.strip() for line in lines[marker_idx + 1 : marker_idx + 3])]
+    identity = f"legacy-{hashlib.sha256(chr(10).join(stable_lines).encode()).hexdigest()[:24]}"
+    return identity, marker_idx
+
+
+def current_threshold_record(manager_file: Path, kind: str, identity: str = "") -> ThresholdRecord | None:
     if not manager_file.exists():
         return None
     lines = manager_file.read_text(encoding="utf-8").splitlines()
     markers = threshold_markers(kind)
+    records: list[ThresholdRecord] = []
     for idx, line in enumerate(lines):
         if line.strip() not in markers:
             continue
-        for pending_idx in range(max(0, idx - 6), idx):
-            if lines[pending_idx].strip() == "(pending)":
-                return pending_idx + 1
-    return None
+        record_identity, identity_idx = threshold_record_identity(lines, idx, kind)
+        pending_line = identity_idx if identity_idx > 0 and lines[identity_idx - 1].strip() == "(pending)" else None
+        records.append(ThresholdRecord(record_identity, pending_line))
+    if identity:
+        return next((record for record in reversed(records) if record.identity == identity), None)
+    return records[-1] if records else None
+
+
+def existing_current_threshold_pending_line(manager_file: Path, kind: str, identity: str = "") -> int | None:
+    record = current_threshold_record(manager_file, kind, identity)
+    return record.pending_line if record is not None else None
 
 
 def append_manager_mail_threshold_pending(args: Args, kind: str, counts: ManagerMailCounts, dedupe_current: bool = True) -> int:
@@ -1455,6 +1534,7 @@ def append_manager_mail_threshold_pending(args: Args, kind: str, counts: Manager
         "",
         "(pending)",
         threshold_marker(kind),
+        threshold_identity_marker(kind, secrets.token_hex(16)),
         summary,
         f"- counts: manager_total={counts.total} manager_unread={counts.unread} manager_human_recent={counts.recent_total} recent_window_s={int(counts.recent_window_s)}",
         f"- action: {route}",
@@ -1891,6 +1971,9 @@ def handle_manager_mail_thresholds(client: imaplib.IMAP4_SSL, args: Args) -> boo
     watermark_path = manager_mail_threshold_watermarks_path(args)
     watermarks = load_manager_mail_threshold_watermarks(watermark_path)
     next_watermarks = dict(watermarks)
+    lifecycle_path = manager_mail_threshold_lifecycles_path(args)
+    lifecycles = load_manager_mail_threshold_lifecycles(lifecycle_path)
+    next_lifecycles = dict(lifecycles)
     triggered = False
     state_changed = False
     checks = (
@@ -1900,7 +1983,24 @@ def handle_manager_mail_thresholds(client: imaplib.IMAP4_SSL, args: Args) -> boo
     )
     for kind, threshold, count, growth_step in checks:
         exceeded = threshold > 0 and count > threshold
-        pending_line = existing_current_threshold_pending_line(current_manager_file(args), kind)
+        lifecycle = lifecycles.get(kind)
+        latest_record = current_threshold_record(current_manager_file(args), kind)
+        if latest_record is not None and latest_record.pending_line is not None and (lifecycle is None or latest_record.identity != lifecycle.identity):
+            lifecycle = None
+            record = latest_record
+        else:
+            record = current_threshold_record(current_manager_file(args), kind, lifecycle.identity if lifecycle is not None else "")
+        pending_line = record.pending_line if record is not None else None
+        if lifecycle is None and record is not None:
+            state = ThresholdLifecycleState.QUEUED if pending_line is not None else ThresholdLifecycleState.CONSUMED_EXECUTION_BLOCKED
+            lifecycle = ThresholdLifecycle(record.identity, state, count)
+        if lifecycle is not None:
+            if pending_line is not None:
+                next_lifecycles[kind] = ThresholdLifecycle(lifecycle.identity, ThresholdLifecycleState.QUEUED, lifecycle.count)
+            elif exceeded:
+                next_lifecycles[kind] = ThresholdLifecycle(lifecycle.identity, ThresholdLifecycleState.CONSUMED_EXECUTION_BLOCKED, count)
+            else:
+                next_lifecycles[kind] = ThresholdLifecycle(lifecycle.identity, ThresholdLifecycleState.COMPLETED, count)
         growth_retrigger = (
             exceeded
             and kind in active
@@ -1914,10 +2014,15 @@ def handle_manager_mail_thresholds(client: imaplib.IMAP4_SSL, args: Args) -> boo
                 line_no, created = pending_line, False
             next_active.add(kind)
             next_watermarks[kind] = count
+            record = current_threshold_record(current_manager_file(args), kind)
+            if record is not None:
+                next_lifecycles[kind] = ThresholdLifecycle(record.identity, ThresholdLifecycleState.QUEUED, count)
             save_active_manager_mail_thresholds(threshold_state_path, next_active)
             save_manager_mail_threshold_watermarks(watermark_path, next_watermarks)
+            save_manager_mail_threshold_lifecycles(lifecycle_path, next_lifecycles)
             active = set(next_active)
             watermarks = dict(next_watermarks)
+            lifecycles = dict(next_lifecycles)
             if created:
                 push_manager_mail_threshold_ref(args, line_no, kind)
                 triggered = True
@@ -1938,6 +2043,8 @@ def handle_manager_mail_thresholds(client: imaplib.IMAP4_SSL, args: Args) -> boo
     if state_changed:
         save_active_manager_mail_thresholds(threshold_state_path, next_active)
         save_manager_mail_threshold_watermarks(watermark_path, next_watermarks)
+    if next_lifecycles != lifecycles:
+        save_manager_mail_threshold_lifecycles(lifecycle_path, next_lifecycles)
     return triggered
 
 
