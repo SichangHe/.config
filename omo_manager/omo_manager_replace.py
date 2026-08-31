@@ -1473,10 +1473,22 @@ def authenticate_closed_owner_source(
         raise ReplaceError(f"closed-owner replacement audit is invalid JSON: {exc}") from exc
     if not isinstance(loaded, dict) or SHA256_RE.fullmatch(str(loaded.get("todo_sha256", ""))) is None:
         raise ReplaceError("closed-owner replacement audit lacks its original TODO binding")
+    source_preparer = loaded.get("preparer")
+    source_reviewer = loaded.get("reviewer")
+    if (
+        not isinstance(source_preparer, str)
+        or not source_preparer.strip()
+        or not isinstance(source_reviewer, str)
+        or not source_reviewer.strip()
+        or source_preparer.strip() == source_reviewer.strip()
+    ):
+        raise ReplaceError("closed-owner replacement audit has invalid review identities")
     source_args = replace(
         args,
         todo_sha256=str(loaded["todo_sha256"]),
         audit_output=source_path,
+        preparer=source_preparer,
+        reviewer=source_reviewer,
         closed_owner_audit=None,
         closed_owner_audit_sha256="",
     )

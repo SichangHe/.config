@@ -1174,6 +1174,7 @@ class ManagerReplaceTests(unittest.TestCase):
                 args,
                 todo_sha256=sha(current_todo),
                 audit_output=args.audit_output.with_name("current-manager-replace.json"),
+                reviewer="fresh-independent-reviewer",
                 closed_owner_audit=args.audit_output,
                 closed_owner_audit_sha256=hashlib.sha256(source_bytes).hexdigest(),
             )
