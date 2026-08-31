@@ -788,6 +788,7 @@ def authority_material(args: Args, snapshot: Snapshot, envelope: Snapshot) -> tu
     if args.authority_lines.end > len(lines):
         raise ReplaceError("authority line range exceeds the bound source")
     excerpt = "\n".join(lines[args.authority_lines.start - 1 : args.authority_lines.end])
+    canonical_excerpt = "\n".join(excerpt.splitlines())
     if not excerpt.strip():
         raise ReplaceError("authority excerpt must not be empty")
     locator = f"{args.authority_file}:{args.authority_lines.start}-{args.authority_lines.end}"
@@ -797,7 +798,7 @@ def authority_material(args: Args, snapshot: Snapshot, envelope: Snapshot) -> tu
     match = matches[0]
     if digest(match.group(0).encode()) != args.authority_envelope_sha256:
         raise ReplaceError("authority envelope block digest changed")
-    if "\n".join(match.group("body").splitlines()) != excerpt:
+    if "\n".join(match.group("body").splitlines()) != canonical_excerpt:
         raise ReplaceError("authority envelope does not contain exactly the bound source excerpt")
     items: list[str] = []
     for line_range in args.successor_item_lines:

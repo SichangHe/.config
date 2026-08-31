@@ -695,6 +695,30 @@ class ManagerReplaceTests(unittest.TestCase):
             self.assertEqual(wrapped.encode(), plan.authority_envelope.data)
             self.assertIn("envelope-block-sha256", plan.successor_queue[-1])
 
+    def test_authority_range_trailing_blank_uses_envelope_body_normalization(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, _files = self.fixture(Path(tmp))
+            source = "".join(AUTHORITY_LINES) + "\n"
+            authority = root / args.authority_file
+            authority.write_text(source, encoding="utf-8")
+            body = "".join(AUTHORITY_LINES).rstrip("\n")
+            envelope = (
+                f'<human_instruction authoritative="true" source="{args.authority_file}:1-6">\n'
+                f"{body}\n"
+                "</human_instruction>\n"
+            )
+            envelope_path = root / args.authority_envelope_task
+            envelope_path.write_text(envelope, encoding="utf-8")
+            changed = replace(
+                args,
+                authority_lines=LineRange(1, 6),
+                authority_sha256=sha(source),
+                authority_envelope_sha256=sha(envelope),
+            )
+            plan = manager_replace.prepare(changed, manager_replace.markdown_paths(root))
+            self.assertEqual(source.encode(), plan.authority.data)
+            self.assertEqual(envelope.encode(), plan.authority_envelope.data)
+
     def test_parse_args_accepts_tmux_zero_pane_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
