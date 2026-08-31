@@ -1497,6 +1497,23 @@ class CodexStopTests(unittest.TestCase):
         with patch("omo_manager.omo_codex_stop.capture", side_effect=[before, after]), patch("omo_manager.omo_codex_stop.paste_text"), patch("omo_manager.omo_codex_stop.tmux"):
             self.assertEqual((new, response), query_status_session_id("cfg:1.0", 10, 0.1, strict_status_response=True))
 
+    def test_query_status_session_id_captures_once_after_deadline(self) -> None:
+        session_id = "019f670b-6a2f-7463-b9be-9aa6ff0cec43"
+        before = "ready\n"
+        response = f"\n│  Session:              {session_id}       │\n"
+        after = f"{before}/status{response}"
+        with (
+            patch("omo_manager.omo_codex_stop.capture", side_effect=[before, after]) as capture,
+            patch("omo_manager.omo_codex_stop.paste_text"),
+            patch("omo_manager.omo_codex_stop.tmux"),
+            patch("omo_manager.omo_codex_stop.time.monotonic", side_effect=[0.0, 1.0]),
+        ):
+            self.assertEqual(
+                (session_id, response),
+                query_status_session_id("cfg:1.0", 10, 0.1, strict_status_response=True),
+            )
+        self.assertEqual(2, capture.call_count)
+
     def test_send_exit_keys_retries_ctrl_c_until_shell(self) -> None:
         with (
             patch("omo_manager.omo_codex_stop.tmux") as tmux,

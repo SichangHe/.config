@@ -778,8 +778,10 @@ def query_status_session_id(
                 guarded_tmux_command(*tmux_guard, ["send-keys", "-t", target, "Enter"], expected_pane_pid)
             fallback_sent = True
         time.sleep(0.25)
+    after = capture(target, n_lines) if tmux_guard is None else guarded_capture(target, n_lines, tmux_guard, expected_pane_pid)
     response = (after.rsplit("/status", 1)[-1] if after.count("/status") > before.count("/status") else "") if strict_status_response else after
-    return "", response
+    session_id = extract_status_session_id(response) if strict_status_response else extract_new_status_session_id(before, after)
+    return session_id, response
 
 
 def send_exit_keys(
