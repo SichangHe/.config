@@ -7,8 +7,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from omo_manager.omo_shared_task_done import ALL_MAIL_UID, ALL_MAIL_UIDVALIDITY, BODY_SHA256, GMAIL_MESSAGE_ID, GMAIL_THREAD_ID, INITIAL_BLOCKER, INTERNALDATE_UNIX_MS, MESSAGE_ID, OTHER_OWNER_NAME, OUTCOME, RAW_SHA256, SCHEMA, SENT_MAIL_UID, SENT_MAIL_UIDVALIDITY, SUBJECT, TASK_NAME, TASK_TARGET, THREAD_ROOT_MESSAGE_ID, reconcile
+from omo_manager.omo_shared_task_done import ADOPTION_SCHEMA, ALL_MAIL_UID, ALL_MAIL_UIDVALIDITY, BODY_SHA256, GMAIL_MESSAGE_ID, GMAIL_THREAD_ID, INITIAL_BLOCKER, INTERNALDATE_UNIX_MS, MESSAGE_ID, OTHER_OWNER_NAME, OUTCOME, RAW_SHA256, RECOVERY_SCHEMA, SENT_MAIL_UID, SENT_MAIL_UIDVALIDITY, SUBJECT, TASK_NAME, TASK_TARGET, THREAD_ROOT_MESSAGE_ID, reconcile
 from omo_manager.omo_task_metadata import parse_task_metadata
+from omo_manager.omo_production_approval import PROBLEM_ID, SCHEMA as APPROVAL_SCHEMA
+from omo_manager import omo_production_approval as approval_helper
 
 
 ITEMS = (
@@ -46,6 +48,12 @@ def owner_text(*, status: str = "blocked", target: str = TASK_TARGET, is_manager
 
 
 class SharedTaskDoneTest(unittest.TestCase):
+    def setUp(self) -> None:
+        approval_helper.TRUSTED_APPROVAL_SHA256 = ""
+
+    def tearDown(self) -> None:
+        approval_helper.TRUSTED_APPROVAL_SHA256 = ""
+
     def fixture(self, root: Path) -> tuple[Path, Path, Path, Path]:
         task = root / TASK_NAME
         other = root / OTHER_OWNER_NAME
@@ -53,6 +61,9 @@ class SharedTaskDoneTest(unittest.TestCase):
         private = root / "private"
         private.mkdir(mode=0o700)
         receipt = private / "adoption.json"
+        recovery_dir = root / "recovery"
+        recovery_dir.mkdir(mode=0o700)
+        recovery = recovery_dir / "recovery.json"
         task_payload = task_text().encode()
         task.write_bytes(task_payload)
         other.write_text(owner_text(), encoding="utf-8")
@@ -65,7 +76,7 @@ class SharedTaskDoneTest(unittest.TestCase):
             encoding="utf-8",
         )
         value = {
-            "schema": SCHEMA,
+            "schema": ADOPTION_SCHEMA,
             "root": str(root),
             "task": TASK_NAME,
             "task_sha256": sha256(task_payload),
@@ -90,10 +101,72 @@ class SharedTaskDoneTest(unittest.TestCase):
         }
         receipt.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         receipt.chmod(0o600)
+        incident_state = receipt.stat()
+        recovery_value = {
+            "schema": RECOVERY_SCHEMA,
+            "root": str(root),
+            "task": TASK_NAME,
+            "task_sha256": sha256(task_payload),
+            "todo": "TODO.md",
+            "todo_sha256": sha256(todo.read_bytes()),
+            "protected_owner": OTHER_OWNER_NAME,
+            "protected_owner_sha256": sha256(other.read_bytes()),
+            "owner": TASK_TARGET,
+            "outcome": OUTCOME,
+            "pending_task_items": list(ITEMS),
+            "active_owner_names": sorted((TASK_NAME, OTHER_OWNER_NAME)),
+            "incident_receipt_path": str(receipt),
+            "incident_receipt_sha256": sha256(receipt.read_bytes()),
+            "incident_receipt_device": str(incident_state.st_dev),
+            "incident_receipt_inode": str(incident_state.st_ino),
+            "incident_receipt_size": str(incident_state.st_size),
+            "incident_receipt_mtime_ns": str(incident_state.st_mtime_ns),
+            "incident_receipt_mode": oct(incident_state.st_mode & 0o777),
+            "incident_receipt_uid": str(incident_state.st_uid),
+            "incident_receipt_gid": str(incident_state.st_gid),
+            "incident_message_id": MESSAGE_ID,
+            "recovery_receipt_path": str(recovery),
+            "recovery_policy": "preserve-incident-receipt-no-reuse",
+            "execution_authority": "not-contained-separate-explicit-production-approval-required",
+        }
+        recovery.write_text(json.dumps(recovery_value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        recovery.chmod(0o600)
+        approval_dir = root / "approval"
+        approval_dir.mkdir(mode=0o700)
+        approval = approval_dir / "approval.json"
+        approval_value = {
+            "schema": APPROVAL_SCHEMA,
+            "watcher_problem": PROBLEM_ID,
+            "approved_packet_sha256": "b" * 64,
+            "approved_actions": ["create-recovery-evidence", "close-shared-task"],
+            "root": str(root),
+            "task_sha256": sha256(task_payload),
+            "todo_sha256": sha256(todo.read_bytes()),
+            "protected_owner_sha256": sha256(other.read_bytes()),
+            "incident_receipt_path": str(receipt),
+            "incident_receipt_sha256": sha256(receipt.read_bytes()),
+            "recovery_receipt_path": str(recovery),
+            "recovery_receipt_sha256": sha256(recovery.read_bytes()),
+            "approval_scope": "one-recovery-and-one-closure",
+        }
+        approval.write_text(json.dumps(approval_value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        approval.chmod(0o400)
+        approval_helper.TRUSTED_APPROVAL_SHA256 = sha256(approval.read_bytes())
         return task, other, todo, receipt
 
-    def run_reconcile(self, root: Path, *, task_digest: str | None = None, todo_digest: str | None = None, owner_digest: str | None = None, receipt_digest: str | None = None) -> None:
+    def run_reconcile(
+        self,
+        root: Path,
+        *,
+        task_digest: str | None = None,
+        todo_digest: str | None = None,
+        owner_digest: str | None = None,
+        receipt_digest: str | None = None,
+        recovery_digest: str | None = None,
+    ) -> None:
         task, other, todo, receipt = root / TASK_NAME, root / OTHER_OWNER_NAME, root / "TODO.md", root / "private/adoption.json"
+        recovery = root / "recovery/recovery.json"
+        approval = root / "approval/approval.json"
         reconcile(
             root,
             task_digest or sha256(task.read_bytes()),
@@ -101,6 +174,11 @@ class SharedTaskDoneTest(unittest.TestCase):
             owner_digest or sha256(other.read_bytes()),
             receipt,
             receipt_digest or sha256(receipt.read_bytes()),
+            recovery,
+            recovery_digest or sha256(recovery.read_bytes()),
+            "b" * 64,
+            approval,
+            sha256(approval.read_bytes()),
         )
 
     def test_success_changes_only_task_and_todo_and_preserves_shared_owner(self) -> None:
@@ -109,6 +187,7 @@ class SharedTaskDoneTest(unittest.TestCase):
             task, other, todo, receipt = self.fixture(root)
             other_before = other.read_bytes()
             receipt_before = receipt.read_bytes()
+            recovery_before = (root / "recovery/recovery.json").read_bytes()
             self.run_reconcile(root)
             metadata = parse_task_metadata(task.read_text(encoding="utf-8"), root)
             assert metadata is not None
@@ -116,6 +195,7 @@ class SharedTaskDoneTest(unittest.TestCase):
             self.assertEqual((), metadata.pending_task_items)
             self.assertEqual(other_before, other.read_bytes())
             self.assertEqual(receipt_before, receipt.read_bytes())
+            self.assertEqual(recovery_before, (root / "recovery/recovery.json").read_bytes())
             todo_text = todo.read_text(encoding="utf-8")
             self.assertIn(f"current:\n{OTHER_OWNER_NAME} {TASK_TARGET}", todo_text)
             self.assertIn(f"previous:\n{TASK_NAME} {TASK_TARGET}", todo_text)
@@ -167,15 +247,29 @@ class SharedTaskDoneTest(unittest.TestCase):
                 self.assertEqual(before, (task.read_bytes(), other.read_bytes(), todo.read_bytes()))
 
     def test_rejects_task_todo_owner_receipt_and_receipt_content_binding_drift(self) -> None:
-        for case in ("task digest", "todo digest", "owner digest", "receipt digest", "receipt root", "receipt task", "receipt queue", "receipt provider", "receipt policy"):
+        for case in (
+            "task digest",
+            "todo digest",
+            "owner digest",
+            "receipt digest",
+            "recovery digest",
+            "receipt root",
+            "receipt task",
+            "receipt queue",
+            "receipt provider",
+            "receipt policy",
+            "recovery incident digest",
+            "recovery policy",
+            "recovery authority",
+        ):
             with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 task, other, todo, receipt = self.fixture(root)
                 kwargs: dict[str, str] = {}
-                if case.endswith("digest"):
+                if case in {"task digest", "todo digest", "owner digest", "receipt digest", "recovery digest"}:
                     key = case.replace(" digest", "_digest")
                     kwargs[key] = "0" * 64
-                else:
+                elif case.startswith("receipt "):
                     record = json.loads(receipt.read_text(encoding="utf-8"))
                     if case == "receipt root":
                         record["root"] = "/wrong"
@@ -188,10 +282,93 @@ class SharedTaskDoneTest(unittest.TestCase):
                     else:
                         record["mail_policy"] = "resend-allowed"
                     receipt.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+                else:
+                    recovery = root / "recovery/recovery.json"
+                    record = json.loads(recovery.read_text(encoding="utf-8"))
+                    if case == "recovery incident digest":
+                        record["incident_receipt_sha256"] = "0" * 64
+                    elif case == "recovery policy":
+                        record["recovery_policy"] = "consume-incident"
+                    else:
+                        record["execution_authority"] = "contained"
+                    recovery.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
                 before = (task.read_bytes(), other.read_bytes(), todo.read_bytes())
                 with self.assertRaises(OSError):
                     self.run_reconcile(root, **kwargs)
                 self.assertEqual(before, (task.read_bytes(), other.read_bytes(), todo.read_bytes()))
+
+    def test_rejects_direct_incident_receipt_reuse_or_same_evidence_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task, other, todo, receipt = self.fixture(root)
+            before = (task.read_bytes(), other.read_bytes(), todo.read_bytes(), receipt.read_bytes())
+            digest = sha256(receipt.read_bytes())
+            with self.assertRaisesRegex(OSError, "mechanically separate"):
+                reconcile(
+                    root,
+                    sha256(task.read_bytes()),
+                    sha256(todo.read_bytes()),
+                    sha256(other.read_bytes()),
+                    receipt,
+                    digest,
+                    receipt,
+                    digest,
+                    "b" * 64,
+                    root / "approval/approval.json",
+                    sha256((root / "approval/approval.json").read_bytes()),
+                )
+            same_parent = receipt.parent / "recovery.json"
+            same_parent.write_bytes((root / "recovery/recovery.json").read_bytes())
+            same_parent.chmod(0o600)
+            with self.assertRaisesRegex(OSError, "mechanically separate"):
+                reconcile(
+                    root,
+                    sha256(task.read_bytes()),
+                    sha256(todo.read_bytes()),
+                    sha256(other.read_bytes()),
+                    receipt,
+                    digest,
+                    same_parent,
+                    sha256(same_parent.read_bytes()),
+                    "b" * 64,
+                    root / "approval/approval.json",
+                    sha256((root / "approval/approval.json").read_bytes()),
+                )
+            self.assertEqual(before, (task.read_bytes(), other.read_bytes(), todo.read_bytes(), receipt.read_bytes()))
+
+    def test_requires_separate_exact_production_approval(self) -> None:
+        for case in ("missing", "wrong digest", "wrong packet"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                task, other, todo, receipt = self.fixture(root)
+                recovery = root / "recovery/recovery.json"
+                approval = root / "approval/approval.json"
+                if case == "missing":
+                    approval.chmod(0o600)
+                    approval_digest = sha256(approval.read_bytes())
+                    packet_digest = "b" * 64
+                elif case == "wrong digest":
+                    approval_digest = "0" * 64
+                    packet_digest = "b" * 64
+                else:
+                    approval_digest = sha256(approval.read_bytes())
+                    packet_digest = "0" * 64
+                before = (task.read_bytes(), other.read_bytes(), todo.read_bytes(), receipt.read_bytes(), recovery.read_bytes())
+                with self.assertRaises(OSError):
+                    reconcile(
+                        root,
+                        sha256(task.read_bytes()),
+                        sha256(todo.read_bytes()),
+                        sha256(other.read_bytes()),
+                        receipt,
+                        sha256(receipt.read_bytes()),
+                        recovery,
+                        sha256(recovery.read_bytes()),
+                        packet_digest,
+                        approval,
+                        approval_digest,
+                    )
+                self.assertEqual(before, (task.read_bytes(), other.read_bytes(), todo.read_bytes(), receipt.read_bytes(), recovery.read_bytes()))
 
     def test_rejects_concurrent_task_todo_owner_or_receipt_mutation_before_write(self) -> None:
         for case in ("task", "todo", "owner", "receipt"):
@@ -270,6 +447,30 @@ class SharedTaskDoneTest(unittest.TestCase):
                     return original(current_root)
 
                 with patch("omo_manager.omo_shared_task_done.task_paths", side_effect=inject), self.assertRaises(OSError):
+                    self.run_reconcile(root)
+                self.assertEqual(before, (task.read_bytes(), other.read_bytes(), todo.read_bytes()))
+
+    def test_rolls_back_own_writes_if_incident_or_recovery_evidence_drifts_after_commit(self) -> None:
+        for case, mutation_call in (("incident", 5), ("recovery", 6)):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                task, other, todo, incident = self.fixture(root)
+                recovery = root / "recovery/recovery.json"
+                before = (task.read_bytes(), other.read_bytes(), todo.read_bytes())
+                from omo_manager import omo_shared_task_done as helper
+
+                original = helper.read_private_file
+                calls = 0
+
+                def drift(path: Path, digest: str) -> bytes:
+                    nonlocal calls
+                    calls += 1
+                    if calls == mutation_call:
+                        changed = {"incident": incident, "recovery": recovery}[case]
+                        changed.write_bytes(changed.read_bytes() + b"drift\n")
+                    return original(path, digest)
+
+                with patch("omo_manager.omo_shared_task_done.read_private_file", side_effect=drift), self.assertRaises(OSError):
                     self.run_reconcile(root)
                 self.assertEqual(before, (task.read_bytes(), other.read_bytes(), todo.read_bytes()))
 

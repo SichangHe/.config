@@ -18,10 +18,12 @@ if __package__ in {None, ""}:
 
 from omo_manager.omo_task_lock import task_file_lock, task_target_lock
 from omo_manager.omo_task_metadata import TaskFrontmatterError, parse_task_metadata
+from omo_manager.omo_production_approval import read_approval, validate_approval
 
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 # 🧑 Human source `manager_mail/85c5dff58359-1270.txt:1-7`: "Find me a good transcription software ... supporting Mac OS and Linux."
-SCHEMA = "omo-completion-mail-adoption/v1"
+ADOPTION_SCHEMA = "omo-completion-mail-adoption/v1"
+RECOVERY_SCHEMA = "omo-completion-incident-recovery/v1"
 TASK_NAME = "transcription_sw.md"
 TASK_TARGET = "wl:32"
 MESSAGE_ID = "<178815460436.2815805.14149274743602497510@gmail.com>"
@@ -64,6 +66,33 @@ RECEIPT_FIELDS = {
     "raw_sha256",
     "body_sha256",
     "thread_message_ids",
+}
+RECOVERY_FIELDS = {
+    "schema",
+    "root",
+    "task",
+    "task_sha256",
+    "todo",
+    "todo_sha256",
+    "protected_owner",
+    "protected_owner_sha256",
+    "owner",
+    "outcome",
+    "pending_task_items",
+    "active_owner_names",
+    "incident_receipt_path",
+    "incident_receipt_sha256",
+    "incident_receipt_device",
+    "incident_receipt_inode",
+    "incident_receipt_size",
+    "incident_receipt_mtime_ns",
+    "incident_receipt_mode",
+    "incident_receipt_uid",
+    "incident_receipt_gid",
+    "incident_message_id",
+    "recovery_receipt_path",
+    "recovery_policy",
+    "execution_authority",
 }
 
 
@@ -113,7 +142,7 @@ def read_private_file(path: Path, expected_sha256: str) -> bytes:
     ) != (after.st_dev, after.st_ino):
         raise OSError("adoption receipt changed while read")
     if sha256(payload) != expected_sha256:
-        raise OSError("adoption receipt bytes do not match --adoption-receipt-sha256")
+        raise OSError("private receipt bytes do not match the bound SHA-256")
     return payload
 
 
@@ -135,7 +164,7 @@ def parse_receipt(payload: bytes, root: Path, task_sha256: str) -> tuple[str, ..
     items = value["pending_task_items"]
     thread_ids = value["thread_message_ids"]
     if (
-        value["schema"] != SCHEMA
+        value["schema"] != ADOPTION_SCHEMA
         or value["root"] != str(root)
         or value["task"] != TASK_NAME
         or value["task_sha256"] != task_sha256
@@ -166,6 +195,65 @@ def parse_receipt(payload: bytes, root: Path, task_sha256: str) -> tuple[str, ..
     if any(not isinstance(value[field], str) or not value[field] for field in scalar_fields):
         raise OSError("adoption receipt scalar bindings are incomplete")
     return tuple(items)
+
+
+def parse_recovery_receipt(
+    payload: bytes,
+    root: Path,
+    task_sha256: str,
+    todo_sha256: str,
+    other_sha256: str,
+    incident_path: Path,
+    incident_sha256: str,
+    incident_state: os.stat_result,
+    recovery_path: Path,
+    items: tuple[str, ...],
+) -> None:
+    def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        value: dict[str, object] = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError(f"duplicate recovery receipt field: {key}")
+            value[key] = item
+        return value
+
+    try:
+        value = json.loads(payload, object_pairs_hook=unique_object)
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise OSError("recovery receipt is not unambiguous UTF-8 JSON") from exc
+    if not isinstance(value, dict) or set(value) != RECOVERY_FIELDS:
+        raise OSError("recovery receipt has an incomplete or unknown schema")
+    if (
+        value["schema"] != RECOVERY_SCHEMA
+        or value["root"] != str(root)
+        or value["task"] != TASK_NAME
+        or value["task_sha256"] != task_sha256
+        or value["todo"] != TODO_NAME
+        or value["todo_sha256"] != todo_sha256
+        or value["protected_owner"] != OTHER_OWNER_NAME
+        or value["protected_owner_sha256"] != other_sha256
+        or value["owner"] != TASK_TARGET
+        or value["outcome"] != OUTCOME
+        or value["pending_task_items"] != list(items)
+        or value["active_owner_names"] != sorted((TASK_NAME, OTHER_OWNER_NAME))
+        or value["incident_receipt_path"] != str(incident_path)
+        or value["incident_receipt_sha256"] != incident_sha256
+        or value["incident_receipt_device"] != str(incident_state.st_dev)
+        or value["incident_receipt_inode"] != str(incident_state.st_ino)
+        or value["incident_receipt_size"] != str(incident_state.st_size)
+        or value["incident_receipt_mtime_ns"] != str(incident_state.st_mtime_ns)
+        or value["incident_receipt_mode"] != oct(stat.S_IMODE(incident_state.st_mode))
+        or value["incident_receipt_uid"] != str(incident_state.st_uid)
+        or value["incident_receipt_gid"] != str(incident_state.st_gid)
+        or value["incident_message_id"] != MESSAGE_ID
+        or value["recovery_receipt_path"] != str(recovery_path)
+        or value["recovery_policy"] != "preserve-incident-receipt-no-reuse"
+        or value["execution_authority"] != "not-contained-separate-explicit-production-approval-required"
+    ):
+        raise OSError("recovery receipt does not bind this exact incident recovery")
+    scalar_fields = RECOVERY_FIELDS - {"pending_task_items", "active_owner_names"}
+    if any(not isinstance(value[field], str) or not value[field] for field in scalar_fields):
+        raise OSError("recovery receipt scalar bindings are incomplete")
 
 
 def possibly_claims_target(text: str, target: str) -> bool:
@@ -220,7 +308,7 @@ def task_paths(root: Path) -> tuple[Path, ...]:
     return tuple(sorted(paths))
 
 
-def task_replacement(root: Path, text: str, items: tuple[str, ...], receipt_sha256: str) -> str:
+def task_replacement(root: Path, text: str, items: tuple[str, ...], incident_sha256: str, recovery_sha256: str) -> str:
     metadata = parse_task_metadata(text, root)
     if (
         metadata is None
@@ -267,7 +355,10 @@ def task_replacement(root: Path, text: str, items: tuple[str, ...], receipt_sha2
         raise OSError("transcription lifecycle fields are missing or ambiguous")
     updated.extend(lines[end:])
     cleared = "".join(updated)
-    evidence = f"adopted authenticated Gmail Sent delivery {MESSAGE_ID}; receipt sha256 {receipt_sha256}; no resend"
+    evidence = (
+        f"adopted authenticated Gmail Sent delivery {MESSAGE_ID}; incident receipt sha256 {incident_sha256}; "
+        f"recovery receipt sha256 {recovery_sha256}; no resend"
+    )
     newline = "\r\n" if "\r\n" in cleared else "\n"
     separator = "" if cleared.endswith(("\n", "\r")) else newline
     replacement = f"{cleared}{separator}(verified removed pending items: {evidence}){newline}"
@@ -309,7 +400,25 @@ def todo_replacement(text: str) -> str:
 
 
 def same_file_state(left: os.stat_result, right: os.stat_result) -> bool:
-    return (left.st_dev, left.st_ino, left.st_size, left.st_mtime_ns) == (right.st_dev, right.st_ino, right.st_size, right.st_mtime_ns)
+    return (
+        left.st_dev,
+        left.st_ino,
+        left.st_mode,
+        left.st_uid,
+        left.st_gid,
+        left.st_size,
+        left.st_mtime_ns,
+        left.st_ctime_ns,
+    ) == (
+        right.st_dev,
+        right.st_ino,
+        right.st_mode,
+        right.st_uid,
+        right.st_gid,
+        right.st_size,
+        right.st_mtime_ns,
+        right.st_ctime_ns,
+    )
 
 
 def replace_if_unchanged(path: Path, payload: bytes, before: os.stat_result) -> None:
@@ -362,7 +471,19 @@ def other_owner_is_preserved(root: Path, text: str) -> bool:
     )
 
 
-def reconcile(root: Path, task_sha256: str, todo_sha256: str, other_sha256: str, receipt_path: Path, receipt_sha256: str) -> None:
+def reconcile(
+    root: Path,
+    task_sha256: str,
+    todo_sha256: str,
+    other_sha256: str,
+    incident_path: Path,
+    incident_sha256: str,
+    recovery_path: Path,
+    recovery_sha256: str,
+    approved_packet_sha256: str,
+    approval_path: Path,
+    approval_sha256: str,
+) -> None:
     task = root / TASK_NAME
     other = root / OTHER_OWNER_NAME
     todo = root / TODO_NAME
@@ -373,8 +494,39 @@ def reconcile(root: Path, task_sha256: str, todo_sha256: str, other_sha256: str,
         with ExitStack() as locks:
             for path in paths:
                 locks.enter_context(task_file_lock(path))
-            receipt_payload = read_private_file(receipt_path, receipt_sha256)
-            items = parse_receipt(receipt_payload, root, task_sha256)
+            if recovery_path == incident_path or recovery_path.parent == incident_path.parent:
+                raise OSError("recovery receipt must be mechanically separate from incident evidence")
+            incident_state = incident_path.stat()
+            incident_payload = read_private_file(incident_path, incident_sha256)
+            items = parse_receipt(incident_payload, root, task_sha256)
+            recovery_state = recovery_path.stat()
+            recovery_payload = read_private_file(recovery_path, recovery_sha256)
+            parse_recovery_receipt(
+                recovery_payload,
+                root,
+                task_sha256,
+                todo_sha256,
+                other_sha256,
+                incident_path,
+                incident_sha256,
+                incident_state,
+                recovery_path,
+                items,
+            )
+            approval_state = approval_path.stat()
+            approval_payload = read_approval(approval_path, approval_sha256)
+            validate_approval(
+                approval_payload,
+                approved_packet_sha256=approved_packet_sha256,
+                root=root,
+                task_sha256=task_sha256,
+                todo_sha256=todo_sha256,
+                protected_owner_sha256=other_sha256,
+                incident_receipt_path=incident_path,
+                incident_receipt_sha256=incident_sha256,
+                recovery_receipt_path=recovery_path,
+                recovery_receipt_sha256=recovery_sha256,
+            )
             task_before = task.stat()
             task_payload = task.read_bytes()
             other_payload = other.read_bytes()
@@ -389,17 +541,34 @@ def reconcile(root: Path, task_sha256: str, todo_sha256: str, other_sha256: str,
                 raise OSError("shared target has missing, additional, or ambiguous active ownership")
             task_text = task_payload.decode()
             todo_text = todo_payload.decode()
-            updated_task = task_replacement(root, task_text, items, receipt_sha256)
+            updated_task = task_replacement(root, task_text, items, incident_sha256, recovery_sha256)
             updated_todo = todo_replacement(todo_text)
             if updated_todo == todo_text:
                 raise OSError("transcription TODO row did not move from current to previous")
-            if read_private_file(receipt_path, receipt_sha256) != receipt_payload:
-                raise OSError("adoption receipt changed before lifecycle mutation")
+            if (
+                read_private_file(incident_path, incident_sha256) != incident_payload
+                or not same_file_state(incident_state, incident_path.stat())
+                or read_private_file(recovery_path, recovery_sha256) != recovery_payload
+                or not same_file_state(recovery_state, recovery_path.stat())
+                or read_approval(approval_path, approval_sha256) != approval_payload
+                or not same_file_state(approval_state, approval_path.stat())
+            ):
+                raise OSError("incident or recovery receipt changed before lifecycle mutation")
             if task_paths(root) != paths or other.read_bytes() != other_payload or todo.read_bytes() != todo_payload or task.read_bytes() != task_payload:
                 raise OSError("task, TODO, or distinct owner changed before lifecycle mutation")
             finish_transaction(task, updated_task.encode(), task_before, todo, todo_payload, updated_todo.encode(), todo_before)
             try:
-                if task.read_text(encoding="utf-8") != updated_task or todo.read_text(encoding="utf-8") != updated_todo or other.read_bytes() != other_payload:
+                if (
+                    task.read_text(encoding="utf-8") != updated_task
+                    or todo.read_text(encoding="utf-8") != updated_todo
+                    or other.read_bytes() != other_payload
+                    or read_private_file(incident_path, incident_sha256) != incident_payload
+                    or not same_file_state(incident_state, incident_path.stat())
+                    or read_private_file(recovery_path, recovery_sha256) != recovery_payload
+                    or not same_file_state(recovery_state, recovery_path.stat())
+                    or read_approval(approval_path, approval_sha256) != approval_payload
+                    or not same_file_state(approval_state, approval_path.stat())
+                ):
                     raise OSError("shared-target closure did not preserve its exact committed result")
                 remaining = active_target_owners(root, TASK_TARGET, paths)
                 if task_paths(root) != paths or remaining != (other.resolve(),):
@@ -425,19 +594,44 @@ def reconcile(root: Path, task_sha256: str, todo_sha256: str, other_sha256: str,
                 raise
 
 
-def parse_args(argv: list[str]) -> tuple[Path, str, str, str, Path, str]:
+def parse_args(argv: list[str]) -> tuple[Path, str, str, str, Path, str, Path, str, str, Path, str]:
     parser = argparse.ArgumentParser(description=__doc__)
     _ = parser.add_argument("--root", type=Path, required=True)
     _ = parser.add_argument("--task-sha256", required=True)
     _ = parser.add_argument("--todo-sha256", required=True)
     _ = parser.add_argument("--other-owner-sha256", required=True)
-    _ = parser.add_argument("--adoption-receipt", type=Path, required=True)
-    _ = parser.add_argument("--adoption-receipt-sha256", required=True)
+    _ = parser.add_argument("--incident-receipt", type=Path, required=True)
+    _ = parser.add_argument("--incident-receipt-sha256", required=True)
+    _ = parser.add_argument("--recovery-receipt", type=Path, required=True)
+    _ = parser.add_argument("--recovery-receipt-sha256", required=True)
+    _ = parser.add_argument("--approved-packet-sha256", required=True)
+    _ = parser.add_argument("--production-approval", type=Path, required=True)
+    _ = parser.add_argument("--production-approval-sha256", required=True)
     parsed = parser.parse_args(argv)
-    hashes = (parsed.task_sha256, parsed.todo_sha256, parsed.other_owner_sha256, parsed.adoption_receipt_sha256)
+    hashes = (
+        parsed.task_sha256,
+        parsed.todo_sha256,
+        parsed.other_owner_sha256,
+        parsed.incident_receipt_sha256,
+        parsed.recovery_receipt_sha256,
+        parsed.approved_packet_sha256,
+        parsed.production_approval_sha256,
+    )
     if any(SHA256_RE.fullmatch(value) is None for value in hashes):
-        parser.error("task, TODO, owner, and adoption-receipt SHA-256 bindings must be lowercase hexadecimal")
-    return parsed.root.resolve(), parsed.task_sha256, parsed.todo_sha256, parsed.other_owner_sha256, parsed.adoption_receipt, parsed.adoption_receipt_sha256
+        parser.error("task, TODO, owner, incident, and recovery SHA-256 bindings must be lowercase hexadecimal")
+    return (
+        parsed.root.resolve(),
+        parsed.task_sha256,
+        parsed.todo_sha256,
+        parsed.other_owner_sha256,
+        parsed.incident_receipt,
+        parsed.incident_receipt_sha256,
+        parsed.recovery_receipt,
+        parsed.recovery_receipt_sha256,
+        parsed.approved_packet_sha256,
+        parsed.production_approval,
+        parsed.production_approval_sha256,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
