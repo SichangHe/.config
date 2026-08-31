@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import ANY, patch
 from omo_manager.omo_codex_start import Args, Pane, StartError, launch_command, query_exact_status_session_id, record_session_id
 from omo_manager.omo_task_metadata import TaskFrontmatterError, parse_task_metadata
-from omo_manager.omo_codex_session_migrate import CODEX_PANE_COMMANDS, authorized_human_targets, candidates, run as run_migration, submit_existing_input
+from omo_manager.omo_codex_session_migrate import CODEX_PANE_COMMANDS, active_target_owners, authorized_human_targets, candidates, parse_args as parse_migration_args, run as run_migration, selected_candidates, submit_existing_input
 
 
 class CodexSessionCaptureTests(unittest.TestCase):
@@ -98,6 +98,78 @@ class CodexSessionCaptureTests(unittest.TestCase):
                 self.assertEqual(0, run_migration(Namespace(root=root, apply=True)))
             record.assert_called_once()
             self.assertEqual(paths[1], record.call_args.args[0])
+
+    def test_exact_task_selector_returns_only_named_eligible_task(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = [root / "one.md", root / "nested" / "two.md"]
+            paths[1].parent.mkdir()
+            paths[1].write_text("task")
+            task_sha256 = __import__("hashlib").sha256(b"task").hexdigest()
+            metadata = __import__("omo_manager.omo_task_metadata", fromlist=["TaskMetadata"])
+            parsed = metadata.TaskMetadata("v1.0.0", "running", "w:2", "codex", "mgr:1", False, ())
+            with patch("omo_manager.omo_codex_session_migrate.task_paths", return_value=tuple(paths)), patch("omo_manager.omo_codex_session_migrate.parse_task_metadata", return_value=parsed), patch("omo_manager.omo_codex_session_migrate.active_target_owners", return_value=(paths[1].resolve(),)), patch("omo_manager.omo_codex_session_migrate.candidates", return_value=[paths[1]]) as candidate_scan:
+                self.assertEqual([paths[1]], selected_candidates(root, set(), "nested/two.md", task_sha256))
+            candidate_scan.assert_called_once_with(root, set(), (paths[1],))
+
+    def test_exact_task_selector_rejects_missing_or_non_normalized_task(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            task = root / "one.md"
+            task.write_text("task")
+            task_sha256 = __import__("hashlib").sha256(b"task").hexdigest()
+            with patch("omo_manager.omo_codex_session_migrate.task_paths", return_value=(task,)):
+                with self.assertRaisesRegex(ValueError, "not exactly one eligible"):
+                    selected_candidates(root, set(), "missing.md", task_sha256)
+                for invalid in ("/one.md", "../one.md", "nested/../one.md"):
+                    with self.assertRaisesRegex(ValueError, "normalized root-relative POSIX"):
+                        selected_candidates(root, set(), invalid, task_sha256)
+
+    def test_exact_task_selector_requires_and_revalidates_digest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            task = root / "one.md"
+            task.write_text("task")
+            with patch("omo_manager.omo_codex_session_migrate.task_paths", return_value=(task,)), patch("omo_manager.omo_codex_session_migrate.candidates") as candidate_scan:
+                with self.assertRaisesRegex(ValueError, "not exactly one eligible"):
+                    selected_candidates(root, set(), "one.md")
+                with self.assertRaisesRegex(ValueError, "digest changed"):
+                    selected_candidates(root, set(), "one.md", "0" * 64)
+            candidate_scan.assert_not_called()
+
+    def test_exact_task_selector_rejects_same_target_ambiguity_in_any_order(self):
+        text = "---\nversion: v1.0.0\nstatus: running\nrunat: {target}\ntool: codex\nmanagerat: mgr:9\nis_manager: false\npending_task_items: []\n---\n"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = [root / "a.md", root / "b.md"]
+            paths[0].write_text(text.format(target="w:1"))
+            paths[1].write_text(text.format(target="w:01.0"))
+            task_sha256 = __import__("hashlib").sha256(paths[1].read_bytes()).hexdigest()
+            for order in (tuple(paths), tuple(reversed(paths))):
+                with patch("omo_manager.omo_codex_session_migrate.task_paths", return_value=order):
+                    self.assertEqual(tuple(sorted(path.resolve() for path in paths)), active_target_owners(root, "w:1"))
+                    with self.assertRaisesRegex(ValueError, "exactly one active owner"):
+                        selected_candidates(root, set(), "b.md", task_sha256)
+
+    def test_exact_task_options_are_paired(self):
+        with self.assertRaises(SystemExit):
+            parse_migration_args(["--root", "/tmp", "--task", "one.md"])
+        with self.assertRaises(SystemExit):
+            parse_migration_args(["--root", "/tmp", "--task-sha256", "0" * 64])
+
+    def test_exact_task_selector_limits_apply_to_named_task(self):
+        text = "---\nversion: v1.0.0\nstatus: running\nrunat: {target}\ntool: codex\nmanagerat: mgr:9\nis_manager: false\npending_task_items: []\n---\n"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = [root / "one.md", root / "two.md"]
+            for index, path in enumerate(paths, start=1):
+                path.write_text(text.format(target=f"w:{index}"))
+            pane = Pane("w:2", "%2", "@2", "bunx", root, 42)
+            report = __import__("omo_manager.omo_codex_status", fromlist=["Report"]).Report("ready", [])
+            task_sha256 = __import__("hashlib").sha256(paths[1].read_bytes()).hexdigest()
+            with patch("omo_manager.omo_codex_session_migrate.selected_candidates", return_value=[paths[1]]), patch("omo_manager.omo_codex_session_migrate.active_target_owners", return_value=(paths[1].resolve(),)), patch("omo_manager.omo_codex_session_migrate.resolve_pane", return_value=pane), patch("omo_manager.omo_codex_session_migrate.inspect", return_value=report), patch("omo_manager.omo_codex_session_migrate.query_exact_status_session_id", return_value=self.UUID), patch("omo_manager.omo_codex_session_migrate.record_session_id") as record:
+                self.assertEqual(0, run_migration(Namespace(root=root, apply=True, task="two.md", task_sha256=task_sha256)))
+            record.assert_called_once_with(paths[1], self.UUID, ANY, lock_held=True)
 
     def test_running_input_is_submitted_before_query_and_record(self):
         text = "---\nversion: v1.0.0\nstatus: running\nrunat: w:1\ntool: codex\nmanagerat: mgr:9\nis_manager: false\npending_task_items: []\n---\n"

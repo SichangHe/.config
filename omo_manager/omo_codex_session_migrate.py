@@ -16,14 +16,14 @@ import stat
 import subprocess
 import sys
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from omo_manager.omo_codex_start import UUID_RE, query_exact_status_session_id, record_session_id, resolve_pane
 from omo_manager.omo_codex_status import Args as StatusArgs, current_input_text, inspect, is_stock_placeholder_input_text
-from omo_manager.omo_task_lock import task_file_lock, task_target_lock
+from omo_manager.omo_task_lock import canonical_target, task_file_lock, task_target_lock
 from omo_manager.omo_task_metadata import parse_task_metadata
 from omo_manager.omo_blocking import task_paths
 
@@ -53,6 +53,9 @@ def submit_existing_input(pane) -> None:
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True)
+    # 🧑 Source `manager_mail/85c5dff58359-1269.txt:3-9`: "Whatever the previous responsible agents were doing, they completely failed. Replace them."
+    parser.add_argument("--task", help="Bind only this exact eligible root-relative task path.")
+    parser.add_argument("--task-sha256", default="", help="Required current SHA-256 binding for --task.")
     parser.add_argument("--apply", action="store_true", help="Write captured UUIDs; otherwise print a dry-run plan.")
     parser.add_argument("--include-human-owned", action="store_true", help="Enable only the exact h* targets named by the bound human authority options.")
     parser.add_argument("--human-target", action="append", default=[], help="Exact authorized h* target; repeat as needed.")
@@ -65,13 +68,17 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         parser.error("--include-human-owned requires --apply, one or more --human-target values, and complete authority file/lines/digest.")
     if not args.include_human_owned and any(authority):
         parser.error("human target and authority options require --include-human-owned.")
+    if bool(args.task) != bool(args.task_sha256):
+        parser.error("--task and --task-sha256 are required together.")
+    if args.task_sha256 and SHA256_RE.fullmatch(args.task_sha256) is None:
+        parser.error("--task-sha256 must be one lowercase SHA-256 digest.")
     return args
 
 
 def authorized_human_targets(args: argparse.Namespace, root: Path) -> set[str]:
     if not getattr(args, "include_human_owned", False):
         return set()
-    targets = set(getattr(args, "human_target", ()))
+    targets: set[str] = {str(target) for target in getattr(args, "human_target", ())}
     if not targets or any(TARGET_RE.fullmatch(target) is None or not target.partition(":")[0].startswith("h") for target in targets):
         raise ValueError("human targets must be exact h* tmux targets")
     source_arg = getattr(args, "human_authority_file", None)
@@ -101,10 +108,10 @@ def authorized_human_targets(args: argparse.Namespace, root: Path) -> set[str]:
     return targets
 
 
-def candidates(root: Path, allowed_human_targets: set[str] | None = None) -> list[Path]:
+def candidates(root: Path, allowed_human_targets: set[str] | None = None, candidate_paths: tuple[Path, ...] | None = None) -> list[Path]:
     result = []
     targets: set[str] = set()
-    for path in task_paths(root):
+    for path in task_paths(root) if candidate_paths is None else candidate_paths:
         metadata = parse_task_metadata(path.read_text(encoding="utf-8"), root)
         if metadata is None or metadata.tool != "codex" or metadata.session_id:
             continue
@@ -126,10 +133,40 @@ def candidates(root: Path, allowed_human_targets: set[str] | None = None) -> lis
     return result
 
 
+def active_target_owners(root: Path, target: str) -> tuple[Path, ...]:
+    owners: list[Path] = []
+    canonical = canonical_target(target)
+    for path in task_paths(root):
+        metadata = parse_task_metadata(path.read_text(encoding="utf-8"), root)
+        if metadata is not None and metadata.status != "done" and canonical_target(metadata.runat) == canonical:
+            owners.append(path.resolve())
+    return tuple(sorted(owners))
+
+
+def selected_candidates(root: Path, allowed_human_targets: set[str], task: str | None, task_sha256: str = "") -> list[Path]:
+    if task is None:
+        return candidates(root, allowed_human_targets)
+    task_ref = PurePosixPath(task)
+    if not task or task_ref.is_absolute() or task_ref.as_posix() != task or any(part in {".", ".."} for part in task_ref.parts):
+        raise ValueError("--task must be one normalized root-relative POSIX task path")
+    selected = [path for path in task_paths(root) if path.relative_to(root).as_posix() == task]
+    if len(selected) != 1 or not task_sha256:
+        raise ValueError("selected task is not exactly one eligible live Codex task")
+    if hashlib.sha256(selected[0].read_bytes()).hexdigest() != task_sha256:
+        raise ValueError("selected task digest changed before eligibility inspection")
+    metadata = parse_task_metadata(selected[0].read_text(encoding="utf-8"), root)
+    if metadata is None or active_target_owners(root, metadata.runat) != (selected[0].resolve(),):
+        raise ValueError("selected task target does not have exactly one active owner")
+    eligible = candidates(root, allowed_human_targets, tuple(selected))
+    if len(eligible) != 1:
+        raise ValueError("selected task is not exactly one eligible live Codex task")
+    return eligible
+
+
 def run(args: argparse.Namespace) -> int:
     root = args.root.expanduser().resolve()
     allowed_human_targets = authorized_human_targets(args, root)
-    paths = candidates(root, allowed_human_targets)
+    paths = selected_candidates(root, allowed_human_targets, getattr(args, "task", None), getattr(args, "task_sha256", ""))
     if not args.apply:
         for path in paths:
             print(f"eligible\t{path.relative_to(root)}")
@@ -138,10 +175,14 @@ def run(args: argparse.Namespace) -> int:
     for path in paths:
         with task_file_lock(path):
             expected_sha256 = __import__("hashlib").sha256(path.read_bytes()).hexdigest()
+            if getattr(args, "task_sha256", "") and expected_sha256 != args.task_sha256:
+                raise ValueError("selected task digest changed under its task lock")
             metadata = parse_task_metadata(path.read_text(encoding="utf-8"), root)
             if metadata is None or metadata.tool != "codex" or metadata.session_id or metadata.status == "done" or metadata.runat == "retired" or (metadata.runat.partition(":")[0].startswith("h") and metadata.runat not in allowed_human_targets):
                 continue
             with task_target_lock(root, metadata.runat):
+                if getattr(args, "task", None) and active_target_owners(root, metadata.runat) != (path.resolve(),):
+                    raise ValueError("selected task target ownership changed under its target lock")
                 try:
                     pane = resolve_pane(metadata.runat)
                 except Exception as exc:
@@ -191,6 +232,8 @@ def run(args: argparse.Namespace) -> int:
                 if after is None or after.tool != "codex" or after.session_id or after.status != metadata.status or after.status == "done" or after.runat != metadata.runat or after.runat == "retired" or (after.runat.partition(":")[0].startswith("h") and after.runat not in allowed_human_targets):
                     print(f"skipped\t{path.relative_to(root)}\t{metadata.runat}\ttask eligibility changed during capture", file=sys.stderr)
                     continue
+                if getattr(args, "task", None) and active_target_owners(root, metadata.runat) != (path.resolve(),):
+                    raise ValueError("selected task target ownership changed before session UUID binding")
                 record_session_id(path, session_id, expected_sha256, lock_held=True)
                 print(f"migrated\t{path.relative_to(root)}\t{session_id}")
     return 0
