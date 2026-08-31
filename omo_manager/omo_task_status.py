@@ -120,12 +120,15 @@ class Args:
     task_sha256: str = ""
     historical_commit: str = ""
     close_shared_target: bool = False
+    cancel_shared_target: bool = False
     close_retired_done: bool = False
     normalize_retired_todo: bool = False
     normalize_low_priority_current: bool = False
     reconcile_missing_target: bool = False
     close_missing_target: bool = False
     shared_target: str = ""
+    protected_shared_task: Path | None = None
+    protected_shared_sha256: str = ""
     active_target: str = ""
     manager_target: str = ""
     source_sha256: str = ""
@@ -176,12 +179,15 @@ class ParsedArgs(argparse.Namespace):
     task_sha256: str = ""
     historical_commit: str = ""
     close_shared_target: bool = False
+    cancel_shared_target: bool = False
     close_retired_done: bool = False
     normalize_retired_todo: bool = False
     normalize_low_priority_current: bool = False
     reconcile_missing_target: bool = False
     close_missing_target: bool = False
     shared_target: str = ""
+    protected_shared_task: Path | None = None
+    protected_shared_sha256: str = ""
     active_target: str = ""
     manager_target: str = ""
     source_sha256: str = ""
@@ -257,10 +263,13 @@ shutdown.""",
     _ = parser.add_argument("--task-sha256", default="", help="Exact current task digest required with --restore-terminal-target.")
     _ = parser.add_argument("--historical-commit", default="", help="Full Git commit containing the proven prior target; required with --restore-terminal-target.")
     _ = parser.add_argument("--close-shared-target", action="store_true", help="Close one explicitly proven manager record on a shared target using metadata and TODO files only; never accesses tmux.")
+    _ = parser.add_argument("--cancel-shared-target", action="store_true", help="Cancel one Human-identified blocked manager on a shared target while preserving the other exact shared record; never accesses tmux.")
     _ = parser.add_argument("--close-retired-done", action="store_true", help="Close one already-stopped blocked/retired worker using Git-proven historical target and recorded close evidence; never accesses tmux.")
     _ = parser.add_argument("--normalize-retired-todo", action="store_true", help="Normalize the sole targetless human-pending row for one already-retired blocked worker; never accesses tmux or task bytes.")
     _ = parser.add_argument("--normalize-low-priority-current", action="store_true", help="Move the sole low-priority TODO row for one exact active v1 manager record to current; never accesses tmux.")
     _ = parser.add_argument("--shared-target", default="", help="Exact shared manager target required with --close-shared-target.")
+    _ = parser.add_argument("--protected-shared-task", type=Path, help="Other exact shared-target task that must remain byte-identical with --cancel-shared-target.")
+    _ = parser.add_argument("--protected-shared-sha256", default="", help="Exact digest of the protected shared-target task required with --cancel-shared-target.")
     _ = parser.add_argument("--active-target", default="", help="Exact active task target required with --normalize-low-priority-current.")
     _ = parser.add_argument("--manager-target", default="", help="Exact manager owner target required with --normalize-low-priority-current.")
     _ = parser.add_argument("--source-sha256", default="", help="Exact SHA-256 of the source task bytes required with --close-shared-target, --close-retired-done, or --normalize-retired-todo.")
@@ -295,8 +304,10 @@ shutdown.""",
         parser.error("--closure-repository must be an explicit absolute Git worktree root.")
     if parsed.dirty_path_handoff is not None and parsed.closure_repository is None:
         parser.error("--dirty-path-handoff requires --closure-repository.")
-    if sum((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done, parsed.park_unlinked, parsed.reattest_park_unlinked, parsed.retire_blocked_target, parsed.reconcile_missing_target, parsed.close_missing_target, parsed.reconcile_long_running_human_index, parsed.reconcile_blocked_index, parsed.restore_terminal_target, parsed.close_shared_target, parsed.close_retired_done, parsed.normalize_retired_todo, parsed.normalize_low_priority_current)) > 1:
+    if sum((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done, parsed.park_unlinked, parsed.reattest_park_unlinked, parsed.retire_blocked_target, parsed.reconcile_missing_target, parsed.close_missing_target, parsed.reconcile_long_running_human_index, parsed.reconcile_blocked_index, parsed.restore_terminal_target, parsed.close_shared_target, parsed.cancel_shared_target, parsed.close_retired_done, parsed.normalize_retired_todo, parsed.normalize_low_priority_current)) > 1:
         parser.error("finish and recovery modes are mutually exclusive.")
+    if any((parsed.protected_shared_task, parsed.protected_shared_sha256)) and not parsed.cancel_shared_target:
+        parser.error("protected shared-task assertions require --cancel-shared-target.")
     if (parsed.active_target or parsed.manager_target) and not parsed.normalize_low_priority_current:
         parser.error("--active-target and --manager-target are only valid with --normalize-low-priority-current.")
     if any(human_close_authority) and (
@@ -551,7 +562,7 @@ shutdown.""",
         )
     if parsed.missing_target:
         parser.error("--missing-target requires --reconcile-missing-target or --close-missing-target.")
-    if any((parsed.expected_task_sha256, parsed.expected_todo_sha256, parsed.expected_receipt_sha256, parsed.expected_pane_id, parsed.authority_file, parsed.authority_lines, parsed.authority_sha256, parsed.authority_envelope, parsed.authority_envelope_sha256)):
+    if any((parsed.expected_task_sha256, parsed.expected_todo_sha256, parsed.expected_receipt_sha256, parsed.expected_pane_id, parsed.authority_file, parsed.authority_lines, parsed.authority_sha256, parsed.authority_envelope, parsed.authority_envelope_sha256)) and not parsed.cancel_shared_target:
         parser.error("park-unlinked task, TODO, receipt, pane, and authority assertions require a park operation.")
     if parsed.retire_blocked_target:
         parser.error("--retire-blocked-target is disabled: preserve the historical target and resolve ownership without writing retired semantics.")
@@ -585,6 +596,50 @@ shutdown.""",
         if any(unrelated) or TARGET_RE.fullmatch(parsed.shared_target.strip()) is None or SHA256_RE.fullmatch(parsed.source_sha256.strip()) is None:
             parser.error("--close-shared-target requires exact --shared-target and lowercase --source-sha256, without lifecycle or repository evidence.")
         return Args(parsed.root.resolve(), parsed.task_file, "done", "", close_shared_target=True, shared_target=parsed.shared_target.strip(), source_sha256=parsed.source_sha256.strip())
+    if parsed.cancel_shared_target:
+        unrelated = (
+            parsed.status, parsed.blocked_on, parsed.session_id, parsed.replacement_task,
+            parsed.stale_target, parsed.replacement_target, parsed.stale_sha256,
+            parsed.replacement_sha256, parsed.replacement_status, parsed.protected_target,
+            parsed.stopped_evidence, parsed.replacement_pane_evidence, parsed.pane_id,
+            parsed.terminal_evidence, parsed.closure_repository, parsed.dirty_path_handoff,
+            parsed.historical_target, parsed.task_sha256, parsed.historical_commit,
+            parsed.active_target, parsed.manager_target, parsed.human_close_authorization_source,
+            parsed.human_close_authorization_sha256, parsed.expected_receipt_sha256,
+            parsed.expected_pane_id, parsed.missing_target,
+            parsed.expected_task_sha256,
+        )
+        if (
+            any(unrelated)
+            or TARGET_RE.fullmatch(parsed.shared_target.strip()) is None
+            or parsed.protected_shared_task is None
+            or SHA256_RE.fullmatch(parsed.protected_shared_sha256.strip()) is None
+            or SHA256_RE.fullmatch(parsed.source_sha256.strip()) is None
+            or SHA256_RE.fullmatch(parsed.expected_todo_sha256.strip()) is None
+            or parsed.authority_file is None
+            or parsed.authority_lines is None
+            or SHA256_RE.fullmatch(parsed.authority_sha256.strip()) is None
+            or parsed.authority_envelope is None
+            or SHA256_RE.fullmatch(parsed.authority_envelope_sha256.strip()) is None
+            or parsed.audit_output is None
+            or not parsed.audit_output.is_absolute()
+        ):
+            parser.error("--cancel-shared-target requires exact task/protected/TODO digests, shared target, authority source and envelope, and an absolute audit output.")
+        return Args(
+            parsed.root.resolve(), parsed.task_file, "done", "",
+            cancel_shared_target=True,
+            shared_target=parsed.shared_target.strip(),
+            protected_shared_task=parsed.protected_shared_task,
+            protected_shared_sha256=parsed.protected_shared_sha256.strip(),
+            source_sha256=parsed.source_sha256.strip(),
+            expected_todo_sha256=parsed.expected_todo_sha256.strip(),
+            authority_file=parsed.authority_file,
+            authority_lines=parsed.authority_lines,
+            authority_sha256=parsed.authority_sha256.strip(),
+            authority_envelope=parsed.authority_envelope,
+            authority_envelope_sha256=parsed.authority_envelope_sha256.strip(),
+            audit_output=parsed.audit_output.resolve(),
+        )
     if parsed.reconcile_long_running_human_index:
         if parsed.status not in {None, ""} or parsed.blocked_on:
             parser.error("--reconcile-long-running-human-index does not accept status or --blocked-on.")
@@ -3192,6 +3247,273 @@ def finish_shared_target_done(args: Args, path: Path, text: str, before: os.stat
     return args.shared_target
 
 
+def cancel_shared_target_done(args: Args, path: Path, text: str, before: os.stat_result) -> str:
+    """Cancel one blocked shared-target manager without accessing its pane."""
+
+    if args.protected_shared_task is None or args.audit_output is None:
+        raise TaskFrontmatterError("shared-target cancellation requires protected-task and audit bindings.")
+    protected = task_path(args.root, args.protected_shared_task)
+    todo = args.root / "TODO.md"
+    if protected == path or not todo.is_file() or not protected.is_file():
+        raise TaskFrontmatterError("shared-target cancellation requires distinct regular task, protected-task, and TODO files.")
+    if relative_task_ref(args.root, path) != "memory_research_mgr.md" or relative_task_ref(args.root, protected) != "transcription_sw.md":
+        raise TaskFrontmatterError("shared-target cancellation requires the exact root memory and transcription task records.")
+    authority_excerpt, authority_locator = read_park_authority(args)
+    authority_envelope = read_park_authority_envelope(args, authority_excerpt, authority_locator)
+    normalized_authority = "\n".join(line.strip() for line in authority_excerpt.splitlines() if line.strip())
+    # 🧑 “Close the ‘memory’ thing. It is so old.”
+    if (
+        args.shared_target != "wl:32"
+        or authority_locator != "manager_mail/85c5dff58359-1290.txt:3-4"
+        or normalized_authority
+        != "Close the “memory” thing. It is so old.\nWhich email report was for the transcription thing"
+    ):
+        raise TaskFrontmatterError("Human cancellation authority does not bind exact Source-1290 and the shared target.")
+    protected_text = protected.read_text(encoding="utf-8")
+    if hashlib.sha256(protected_text.encode()).hexdigest() != args.protected_shared_sha256:
+        raise TaskFrontmatterError("protected shared-target task bytes changed.")
+    protected_metadata = parse_task_metadata(protected_text, args.root)
+    if (
+        protected_metadata is None
+        or protected_metadata.version == V2_VERSION
+        or protected_metadata.status == "done"
+        or protected_metadata.runat != args.shared_target
+    ):
+        raise TaskFrontmatterError("protected shared-target task is not the exact distinct active owner.")
+    prior_audit = read_private_audit(args.audit_output)
+    already_complete = False
+    if prior_audit is None:
+        metadata = parse_task_metadata(text, args.root)
+        if (
+            metadata is None
+            or metadata.version == V2_VERSION
+            or metadata.status != "blocked"
+            or not metadata.is_manager
+            or metadata.runat != args.shared_target
+            or not metadata.pending_task_items
+            or has_pending_marker(text)
+            or hashlib.sha256(text.encode()).hexdigest() != args.source_sha256
+        ):
+            raise TaskFrontmatterError("shared-target cancellation requires one exact blocked v1 manager with a nonempty queue.")
+        todo_text = todo.read_text(encoding="utf-8")
+        if hashlib.sha256(todo_text.encode()).hexdigest() != args.expected_todo_sha256:
+            raise TaskFrontmatterError("shared-target cancellation TODO bytes changed.")
+        protected_rows: list[tuple[str, str]] = []
+        section = ""
+        for line in todo_text.splitlines():
+            if line.strip().endswith(":"):
+                section = line.strip()[:-1].casefold()
+            elif protected in todo_row_task_paths(args.root, line):
+                protected_rows.append((section, line))
+        if protected_rows != [("current", "transcription_sw.md wl:32")]:
+            raise TaskFrontmatterError("protected shared-target TODO row is missing, duplicated, malformed, or misplaced.")
+        updated_todo = reconcile_todo_text(
+            args.root, path, todo_text, args.shared_target, "previous", ("current", "human pending")
+        )
+        queue = list(metadata.pending_task_items)
+        queue_text = yaml.safe_dump(queue, sort_keys=False)
+        queue_sha256 = hashlib.sha256(queue_text.encode()).hexdigest()
+        cleared = cleared_pending_task_text(text, args.root)
+        updated_task = update_frontmatter_status(cleared, "done", "", args.root).rstrip("\n")
+        note = (
+            f"(verified cancelled pending items under Human authority {authority_locator}; "
+            f"prior queue preserved in owner-private audit {args.audit_output}; "
+            f"prior queue SHA-256: {queue_sha256}; protected shared task unchanged: "
+            f"transcription_sw.md {args.protected_shared_sha256})"
+        )
+        updated_task = f"{updated_task}\n\n{note}\n"
+        prepared_record = {
+            "version": "v1.0.0",
+            "operation": "cancel-shared-target",
+            "state": "prepared",
+            "task": "memory_research_mgr.md",
+            "task_sha256": args.source_sha256,
+            "source_task_text": text,
+            "cancelled_pending_items": queue,
+            "cancelled_pending_items_sha256": queue_sha256,
+            "prior_blocker": metadata.blocked_on,
+            "shared_target": args.shared_target,
+            "protected_task": "transcription_sw.md",
+            "protected_task_sha256": args.protected_shared_sha256,
+            "todo_sha256": args.expected_todo_sha256,
+            "source_todo_text": todo_text,
+            "authority": authority_locator,
+            "authority_sha256": args.authority_sha256,
+            "authority_envelope": authority_envelope,
+            "authority_envelope_sha256": args.authority_envelope_sha256,
+            "committed_task_sha256": hashlib.sha256(updated_task.encode()).hexdigest(),
+            "committed_task_text": updated_task,
+            "committed_todo_sha256": hashlib.sha256(updated_todo.encode()).hexdigest(),
+            "committed_todo_text": updated_todo,
+        }
+        prepared_audit = yaml.safe_dump(prepared_record, sort_keys=False)
+        reserve_private_audit(args.audit_output, prepared_audit)
+    else:
+        prepared_audit = prior_audit
+        try:
+            prepared_record = yaml.load(prepared_audit, Loader=UniqueKeyLoader)
+        except yaml.YAMLError as exc:
+            raise TaskFrontmatterError("shared-target cancellation audit is malformed.") from exc
+        final_results = re.findall(r"(?m)^final-result: ([^\r\n]+)$", prepared_audit)
+        already_complete = final_results == ["success"]
+        if final_results and not already_complete:
+            raise TaskFrontmatterError("shared-target cancellation audit has a non-success or duplicate final result.")
+        if not isinstance(prepared_record, dict):
+            raise TaskFrontmatterError("shared-target cancellation audit is not one mapping.")
+        expected_keys = {
+            "version", "operation", "state", "task", "task_sha256", "source_task_text",
+            "cancelled_pending_items", "cancelled_pending_items_sha256", "prior_blocker",
+            "shared_target", "protected_task", "protected_task_sha256", "todo_sha256",
+            "source_todo_text", "authority", "authority_sha256", "authority_envelope",
+            "authority_envelope_sha256", "committed_task_sha256", "committed_task_text",
+            "committed_todo_sha256", "committed_todo_text",
+        }
+        if already_complete:
+            expected_keys.add("final-result")
+        if set(prepared_record) != expected_keys:
+            raise TaskFrontmatterError("shared-target cancellation audit fields are missing or unexpected.")
+        required = {
+            "version": "v1.0.0",
+            "operation": "cancel-shared-target",
+            "state": "prepared",
+            "task": "memory_research_mgr.md",
+            "task_sha256": args.source_sha256,
+            "shared_target": args.shared_target,
+            "protected_task": "transcription_sw.md",
+            "protected_task_sha256": args.protected_shared_sha256,
+            "todo_sha256": args.expected_todo_sha256,
+            "authority": authority_locator,
+            "authority_sha256": args.authority_sha256,
+            "authority_envelope": authority_envelope,
+            "authority_envelope_sha256": args.authority_envelope_sha256,
+        }
+        if any(prepared_record.get(key) != value for key, value in required.items()):
+            raise TaskFrontmatterError("shared-target cancellation audit does not match the bound operation.")
+        queue = prepared_record.get("cancelled_pending_items")
+        prior_blocker = prepared_record.get("prior_blocker")
+        if (
+            not isinstance(queue, list)
+            or not queue
+            or not all(isinstance(item, str) and item for item in queue)
+            or not isinstance(prior_blocker, str)
+            or not prior_blocker
+            or hashlib.sha256(yaml.safe_dump(queue, sort_keys=False).encode()).hexdigest()
+            != prepared_record.get("cancelled_pending_items_sha256")
+        ):
+            raise TaskFrontmatterError("shared-target cancellation audit lost its queue or blocker evidence.")
+        text_fields = ("source_task_text", "source_todo_text", "committed_task_text", "committed_todo_text")
+        if not all(isinstance(prepared_record.get(key), str) for key in text_fields):
+            raise TaskFrontmatterError("shared-target cancellation audit lacks exact recovery images.")
+        text = str(prepared_record["source_task_text"])
+        todo_text = str(prepared_record["source_todo_text"])
+        updated_task = str(prepared_record["committed_task_text"])
+        updated_todo = str(prepared_record["committed_todo_text"])
+        if (
+            hashlib.sha256(text.encode()).hexdigest() != args.source_sha256
+            or hashlib.sha256(todo_text.encode()).hexdigest() != args.expected_todo_sha256
+            or hashlib.sha256(updated_task.encode()).hexdigest() != prepared_record.get("committed_task_sha256")
+            or hashlib.sha256(updated_todo.encode()).hexdigest() != prepared_record.get("committed_todo_sha256")
+        ):
+            raise TaskFrontmatterError("shared-target cancellation recovery images do not match their digests.")
+        source_metadata = parse_task_metadata(text, args.root)
+        if (
+            source_metadata is None
+            or source_metadata.version == V2_VERSION
+            or source_metadata.status != "blocked"
+            or not source_metadata.is_manager
+            or source_metadata.runat != args.shared_target
+            or not source_metadata.pending_task_items
+            or has_pending_marker(text)
+            or list(source_metadata.pending_task_items) != queue
+            or source_metadata.blocked_on != prior_blocker
+        ):
+            raise TaskFrontmatterError("shared-target cancellation audit source task is not the exact cancellable record.")
+        protected_rows: list[tuple[str, str]] = []
+        section = ""
+        for line in todo_text.splitlines():
+            if line.strip().endswith(":"):
+                section = line.strip()[:-1].casefold()
+            elif protected in todo_row_task_paths(args.root, line):
+                protected_rows.append((section, line))
+        if protected_rows != [("current", "transcription_sw.md wl:32")]:
+            raise TaskFrontmatterError("shared-target cancellation audit source TODO does not preserve the exact protected row.")
+        canonical_todo = reconcile_todo_text(
+            args.root, path, todo_text, args.shared_target, "previous", ("current", "human pending")
+        )
+        queue_sha256 = hashlib.sha256(yaml.safe_dump(queue, sort_keys=False).encode()).hexdigest()
+        canonical_task = update_frontmatter_status(
+            cleared_pending_task_text(text, args.root), "done", "", args.root
+        ).rstrip("\n")
+        canonical_note = (
+            f"(verified cancelled pending items under Human authority {authority_locator}; "
+            f"prior queue preserved in owner-private audit {args.audit_output}; "
+            f"prior queue SHA-256: {queue_sha256}; protected shared task unchanged: "
+            f"transcription_sw.md {args.protected_shared_sha256})"
+        )
+        canonical_task = f"{canonical_task}\n\n{canonical_note}\n"
+        if updated_task != canonical_task or updated_todo != canonical_todo:
+            raise TaskFrontmatterError("shared-target cancellation audit committed images are not the canonical transition.")
+    try:
+        with root_membership_lock(args.root), task_target_lock(args.root, args.shared_target):
+            with ExitStack() as locks:
+                task_files = {candidate.resolve(strict=False) for candidate in args.root.rglob("*.md")}
+                task_files.update((path, protected, todo))
+                for locked_path in sorted(task_files, key=lambda candidate: str(candidate)):
+                    locks.enter_context(task_file_lock(locked_path))
+                current_text = path.read_text(encoding="utf-8")
+                current_protected = protected.read_text(encoding="utf-8")
+                current_todo = todo.read_text(encoding="utf-8")
+                if hashlib.sha256(current_protected.encode()).hexdigest() != args.protected_shared_sha256:
+                    raise TaskFrontmatterError("protected shared-target task changed while locked.")
+                locked_excerpt, locked_locator = read_park_authority(args)
+                locked_envelope = read_park_authority_envelope(args, locked_excerpt, locked_locator)
+                if locked_excerpt != authority_excerpt or locked_locator != authority_locator or locked_envelope != authority_envelope:
+                    raise TaskFrontmatterError("shared-target cancellation authority changed while locked.")
+                state = (current_text == text, current_text == updated_task, current_todo == todo_text, current_todo == updated_todo)
+                if not ((state[0] or state[1]) and (state[2] or state[3])):
+                    raise TaskFrontmatterError("shared-target cancellation files match no exact recoverable state.")
+                owners = authoritative_active_target_task_paths(args.root, args.shared_target)
+                expected_owners = {path, protected} if state[0] else {protected}
+                if set(owners) != expected_owners or len(owners) != len(expected_owners):
+                    refs = ", ".join(relative_task_ref(args.root, owner) for owner in owners) or "none"
+                    raise TaskFrontmatterError(f"shared target has missing, additional, or ambiguous ownership: {refs}.")
+                if already_complete:
+                    if state != (False, True, False, True) or owners != (protected,):
+                        raise TaskFrontmatterError("completed shared-target cancellation state drifted.")
+                    return args.shared_target
+                if state[0]:
+                    current_metadata = parse_task_metadata(current_text, args.root)
+                    if current_metadata is None:
+                        raise TaskFrontmatterError("shared-target cancellation source metadata is invalid during recovery.")
+                    ensure_manager_has_no_active_children(args.root, path, current_metadata)
+                if state[2]:
+                    replace_if_unchanged_locked(todo, updated_todo, todo.stat())
+                    current_todo = updated_todo
+                if state[0]:
+                    try:
+                        replace_if_unchanged_locked(path, updated_task, path.stat())
+                    except Exception as task_error:
+                        if state[2]:
+                            try:
+                                replace_if_unchanged_locked(todo, todo_text, todo.stat())
+                            except Exception as rollback_error:
+                                raise TaskFrontmatterError(
+                                    f"shared-target cancellation task write failed and TODO rollback also failed: {rollback_error}"
+                                ) from task_error
+                        raise
+    except Exception:
+        raise
+    try:
+        finish_private_audit(args.audit_output, prepared_audit, "success")
+    except Exception as audit_error:
+        print(
+            "omo_task_status.py: shared-target cancellation committed; audit remains prepared "
+            f"because finalization failed: {audit_error}",
+            file=sys.stderr,
+        )
+    return args.shared_target
+
+
 def reconcile_running_index(root: Path, path: Path, text: str, before: os.stat_result) -> None:
     """Move an already-running task's sole inactive TODO row into `current`."""
     todo = root / "TODO.md"
@@ -3811,6 +4133,7 @@ def automatic_done_email_eligible(args: Args, initial_status: str | None) -> boo
             args.finish_replaced_done,
             args.recover_exited_shell_done,
             args.close_shared_target,
+            args.cancel_shared_target,
             args.close_retired_done,
             args.close_missing_target,
         )
@@ -3874,6 +4197,9 @@ def run(args: Args) -> int:
             target, session_id = finish_closed_done(args, path, text, before)
         elif args.close_shared_target:
             target = finish_shared_target_done(args, path, text, before)
+            shared_target_closure = True
+        elif args.cancel_shared_target:
+            target = cancel_shared_target_done(args, path, text, before)
             shared_target_closure = True
         else:
             metadata = parse_task_metadata(text, args.root)

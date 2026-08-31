@@ -20,6 +20,7 @@ from omo_manager.omo_task_status import DONE_REMINDER
 from omo_manager.omo_task_status import ensure_repository_closure_custody
 from omo_manager.omo_task_status import close_retired_done
 from omo_manager.omo_task_status import close_missing_target
+from omo_manager.omo_task_status import cancel_shared_target_done
 from omo_manager.omo_task_status import normalize_retired_todo
 from omo_manager.omo_task_status import normalize_low_priority_current
 from omo_manager.omo_task_status import park_audit_record
@@ -27,6 +28,7 @@ from omo_manager.omo_task_status import park_target_pane_id
 from omo_manager.omo_task_status import park_unlinked
 from omo_manager.omo_task_status import reattest_park_unlinked
 from omo_manager.omo_task_status import finish_shared_target_done
+from omo_manager.omo_task_status import finish_private_audit
 from omo_manager.omo_task_status import StopArgs
 from omo_manager.omo_task_status import parse_args
 from omo_manager.omo_task_status import reconcile_blocked_index
@@ -2212,6 +2214,309 @@ class TaskStatusTests(unittest.TestCase):
                 finish_shared_target_done(args, task, text, task.stat())
             self.assertEqual(text, task.read_text(encoding="utf-8"))
             self.assertEqual(todo_text, (root / "TODO.md").read_text(encoding="utf-8"))
+
+    def test_shared_target_cancellation_clears_only_memory_and_never_accesses_tmux(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            memory = root / "memory_research_mgr.md"
+            original = task_frontmatter(
+                status="blocked", blocked_on="paused", pending_items=("one", "two"),
+                runat="wl:32", managerat="wl:30", is_manager=True,
+            ) + "history\n"
+            memory.write_text(original, encoding="utf-8")
+            protected = root / "transcription_sw.md"
+            protected_text = task_frontmatter(
+                status="blocked", blocked_on="human", pending_items=("keep",),
+                runat="wl:32", managerat="wl:1",
+            ) + "transcription evidence\n"
+            protected.write_text(protected_text, encoding="utf-8")
+            todo = root / "TODO.md"
+            todo_text = "current:\ntranscription_sw.md wl:32\n\nhuman pending:\nmemory_research_mgr.md wl:32\n\nprevious:\n"
+            todo.write_text(todo_text, encoding="utf-8")
+            mail = root / "manager_mail"
+            mail.mkdir(mode=0o700)
+            authority_text = "Subject: Re: Authorize memory_research_mgr.md relocation\n\nClose the “memory” thing. It is so old.\nWhich email report was for the transcription thing\n"
+            authority = mail / "85c5dff58359-1290.txt"
+            authority.write_text(authority_text, encoding="utf-8")
+            authority.chmod(0o600)
+            envelope = root / "authority.md"
+            excerpt = "Close the “memory” thing. It is so old.\nWhich email report was for the transcription thing\n"
+            envelope_text = (
+                '<human_instruction authoritative="true" source="manager_mail/85c5dff58359-1290.txt:3-4">\n'
+                f"{excerpt}</human_instruction>\n"
+            )
+            envelope.write_text(envelope_text, encoding="utf-8")
+            private = root / "private"
+            private.mkdir(mode=0o700)
+            args = StatusArgs(
+                root, Path("memory_research_mgr.md"), "done", "",
+                cancel_shared_target=True,
+                shared_target="wl:32",
+                protected_shared_task=Path("transcription_sw.md"),
+                protected_shared_sha256=hashlib.sha256(protected_text.encode()).hexdigest(),
+                source_sha256=hashlib.sha256(original.encode()).hexdigest(),
+                expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest(),
+                authority_file=Path("manager_mail/85c5dff58359-1290.txt"),
+                authority_lines=(3, 4),
+                authority_sha256=hashlib.sha256(authority_text.encode()).hexdigest(),
+                authority_envelope=Path("authority.md"),
+                authority_envelope_sha256=hashlib.sha256(envelope_text.encode()).hexdigest(),
+                audit_output=private / "cancel.yaml",
+            )
+            tmux_names = (
+                "stop", "capture", "exact_pane_id", "pane_id", "close_note", "record_close",
+                "close_exited_codex_shell", "blocking_request", "tmux",
+            )
+            with patch.multiple("omo_manager.omo_task_status", **{name: DEFAULT for name in tmux_names}) as mocked:
+                self.assertEqual("wl:32", cancel_shared_target_done(args, memory, original, memory.stat()))
+                for mock in mocked.values():
+                    mock.assert_not_called()
+            result = parse_task_metadata(memory.read_text(encoding="utf-8"), root)
+            self.assertIsNotNone(result)
+            assert result is not None
+            self.assertEqual("done", result.status)
+            self.assertEqual((), result.pending_task_items)
+            self.assertEqual(protected_text, protected.read_text(encoding="utf-8"))
+            self.assertEqual(
+                "current:\ntranscription_sw.md wl:32\n\nhuman pending:\n\nprevious:\nmemory_research_mgr.md wl:32\n",
+                todo.read_text(encoding="utf-8"),
+            )
+            audit = (private / "cancel.yaml").read_text(encoding="utf-8")
+            self.assertIn("final-result: success", audit)
+            self.assertIn("- one\n- two\n", audit)
+
+    def test_shared_target_cancellation_rejects_authority_protected_and_owner_drift(self) -> None:
+        for label in ("authority", "alternate-source", "protected", "protected-row", "owner", "nested"):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                task_dir = root / "nested" if label == "nested" else root
+                task_dir.mkdir(exist_ok=True)
+                memory = task_dir / "memory_research_mgr.md"
+                original = task_frontmatter(status="blocked", blocked_on="paused", pending_items=("one",), runat="wl:32", is_manager=True)
+                memory.write_text(original, encoding="utf-8")
+                protected = task_dir / "transcription_sw.md"
+                protected_text = task_frontmatter(status="blocked", blocked_on="human", pending_items=("keep",), runat="wl:32")
+                protected.write_text(protected_text, encoding="utf-8")
+                if label == "owner":
+                    (root / "third.md").write_text(task_frontmatter(status="running", runat="wl:32"), encoding="utf-8")
+                todo = root / "TODO.md"
+                todo_text = "current:\ntranscription_sw.md wl:32\n\nhuman pending:\nmemory_research_mgr.md wl:32\n\nprevious:\n"
+                if label == "protected-row":
+                    todo_text = "current:\ntranscription_sw.md wl:32\ntranscription_sw.md wl:32\n\nhuman pending:\nmemory_research_mgr.md wl:32\n\nprevious:\n"
+                todo.write_text(todo_text, encoding="utf-8")
+                mail = root / "manager_mail"
+                mail.mkdir(mode=0o700)
+                authority_text = "Subject: Re: Authorize memory_research_mgr.md relocation\n\nClose the wrong thing.\nOther question\n" if label == "authority" else "Subject: Re: Authorize memory_research_mgr.md relocation\n\nClose the “memory” thing. It is so old.\nWhich email report was for the transcription thing\n"
+                authority_name = "alternate.txt" if label == "alternate-source" else "85c5dff58359-1290.txt"
+                authority = mail / authority_name
+                authority.write_text(authority_text, encoding="utf-8")
+                authority.chmod(0o600)
+                envelope = root / "authority.md"
+                locator = f"manager_mail/{authority_name}:3-4"
+                excerpt = "\n".join(authority_text.splitlines()[2:4]) + "\n"
+                envelope_text = f'<human_instruction authoritative="true" source="{locator}">\n' + excerpt + "</human_instruction>\n"
+                envelope.write_text(envelope_text, encoding="utf-8")
+                private = root / "private"
+                private.mkdir(mode=0o700)
+                args = StatusArgs(
+                    root, memory.relative_to(root), "done", "", cancel_shared_target=True,
+                    shared_target="wl:32", protected_shared_task=protected.relative_to(root),
+                    protected_shared_sha256=("0" * 64 if label == "protected" else hashlib.sha256(protected_text.encode()).hexdigest()),
+                    source_sha256=hashlib.sha256(original.encode()).hexdigest(),
+                    expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest(),
+                    authority_file=Path("manager_mail") / authority_name, authority_lines=(3, 4),
+                    authority_sha256=hashlib.sha256(authority_text.encode()).hexdigest(),
+                    authority_envelope=Path("authority.md"), authority_envelope_sha256=hashlib.sha256(envelope_text.encode()).hexdigest(),
+                    audit_output=private / "cancel.yaml",
+                )
+                with self.assertRaises(TaskFrontmatterError):
+                    cancel_shared_target_done(args, memory, original, memory.stat())
+                self.assertEqual(original, memory.read_text(encoding="utf-8"))
+                self.assertEqual(protected_text, protected.read_text(encoding="utf-8"))
+                self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+
+    def test_shared_target_cancellation_rejects_authority_drift_under_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            memory = root / "memory_research_mgr.md"
+            original = task_frontmatter(status="blocked", blocked_on="paused", pending_items=("one",), runat="wl:32", is_manager=True)
+            memory.write_text(original, encoding="utf-8")
+            protected = root / "transcription_sw.md"
+            protected_text = task_frontmatter(status="blocked", blocked_on="human", pending_items=("keep",), runat="wl:32")
+            protected.write_text(protected_text, encoding="utf-8")
+            todo = root / "TODO.md"
+            todo_text = "current:\ntranscription_sw.md wl:32\n\nhuman pending:\nmemory_research_mgr.md wl:32\n\nprevious:\n"
+            todo.write_text(todo_text, encoding="utf-8")
+            mail = root / "manager_mail"
+            mail.mkdir(mode=0o700)
+            authority_text = "Subject: Re: Authorize memory_research_mgr.md relocation\n\nClose the “memory” thing. It is so old.\nWhich email report was for the transcription thing\n"
+            authority = mail / "85c5dff58359-1290.txt"
+            authority.write_text(authority_text, encoding="utf-8")
+            authority.chmod(0o600)
+            envelope = root / "authority.md"
+            excerpt = "Close the “memory” thing. It is so old.\nWhich email report was for the transcription thing\n"
+            envelope_text = '<human_instruction authoritative="true" source="manager_mail/85c5dff58359-1290.txt:3-4">\n' + excerpt + "</human_instruction>\n"
+            envelope.write_text(envelope_text, encoding="utf-8")
+            private = root / "private"
+            private.mkdir(mode=0o700)
+            args = StatusArgs(
+                root, Path("memory_research_mgr.md"), "done", "", cancel_shared_target=True,
+                shared_target="wl:32", protected_shared_task=Path("transcription_sw.md"),
+                protected_shared_sha256=hashlib.sha256(protected_text.encode()).hexdigest(),
+                source_sha256=hashlib.sha256(original.encode()).hexdigest(), expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest(),
+                authority_file=Path("manager_mail/85c5dff58359-1290.txt"), authority_lines=(3, 4),
+                authority_sha256=hashlib.sha256(authority_text.encode()).hexdigest(), authority_envelope=Path("authority.md"),
+                authority_envelope_sha256=hashlib.sha256(envelope_text.encode()).hexdigest(), audit_output=private / "cancel.yaml",
+            )
+            original_reader = read_park_authority_envelope
+            calls = 0
+
+            def drift_authority(current_args: StatusArgs, excerpt: str, locator: str) -> str:
+                nonlocal calls
+                result = original_reader(current_args, excerpt, locator)
+                calls += 1
+                if calls == 1:
+                    envelope.write_text(envelope_text + "drift\n", encoding="utf-8")
+                return result
+
+            with patch("omo_manager.omo_task_status.read_park_authority_envelope", side_effect=drift_authority):
+                with self.assertRaises(TaskFrontmatterError):
+                    cancel_shared_target_done(args, memory, original, memory.stat())
+            self.assertEqual(original, memory.read_text(encoding="utf-8"))
+            self.assertEqual(protected_text, protected.read_text(encoding="utf-8"))
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+
+    def test_shared_target_cancellation_recovers_committed_prepared_audit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            memory = root / "memory_research_mgr.md"
+            original = task_frontmatter(status="blocked", blocked_on="paused", pending_items=("one",), runat="wl:32", is_manager=True)
+            memory.write_text(original, encoding="utf-8")
+            protected = root / "transcription_sw.md"
+            protected_text = task_frontmatter(status="blocked", blocked_on="human", pending_items=("keep",), runat="wl:32")
+            protected.write_text(protected_text, encoding="utf-8")
+            todo = root / "TODO.md"
+            todo_text = "current:\ntranscription_sw.md wl:32\n\nhuman pending:\nmemory_research_mgr.md wl:32\n\nprevious:\n"
+            todo.write_text(todo_text, encoding="utf-8")
+            mail = root / "manager_mail"
+            mail.mkdir(mode=0o700)
+            authority_text = "Subject: Re: Authorize memory_research_mgr.md relocation\n\nClose the “memory” thing. It is so old.\nWhich email report was for the transcription thing\n"
+            authority = mail / "85c5dff58359-1290.txt"
+            authority.write_text(authority_text, encoding="utf-8")
+            authority.chmod(0o600)
+            envelope = root / "authority.md"
+            excerpt = "Close the “memory” thing. It is so old.\nWhich email report was for the transcription thing\n"
+            envelope_text = '<human_instruction authoritative="true" source="manager_mail/85c5dff58359-1290.txt:3-4">\n' + excerpt + "</human_instruction>\n"
+            envelope.write_text(envelope_text, encoding="utf-8")
+            private = root / "private"
+            private.mkdir(mode=0o700)
+            args = StatusArgs(
+                root, Path("memory_research_mgr.md"), "done", "", cancel_shared_target=True,
+                shared_target="wl:32", protected_shared_task=Path("transcription_sw.md"), protected_shared_sha256=hashlib.sha256(protected_text.encode()).hexdigest(),
+                source_sha256=hashlib.sha256(original.encode()).hexdigest(), expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest(),
+                authority_file=Path("manager_mail/85c5dff58359-1290.txt"), authority_lines=(3, 4), authority_sha256=hashlib.sha256(authority_text.encode()).hexdigest(),
+                authority_envelope=Path("authority.md"), authority_envelope_sha256=hashlib.sha256(envelope_text.encode()).hexdigest(), audit_output=private / "cancel.yaml",
+            )
+            original_finish = finish_private_audit
+            with patch("omo_manager.omo_task_status.finish_private_audit", side_effect=OSError("injected finalization failure")):
+                self.assertEqual("wl:32", cancel_shared_target_done(args, memory, original, memory.stat()))
+            prepared = (private / "cancel.yaml").read_text(encoding="utf-8")
+            self.assertNotIn("final-result", prepared)
+            with patch("omo_manager.omo_task_status.finish_private_audit", side_effect=original_finish):
+                self.assertEqual("wl:32", cancel_shared_target_done(args, memory, original, memory.stat()))
+            complete = (private / "cancel.yaml").read_text(encoding="utf-8")
+            self.assertIn("final-result: success", complete)
+            self.assertEqual("wl:32", cancel_shared_target_done(args, memory, original, memory.stat()))
+            self.assertEqual(complete, (private / "cancel.yaml").read_text(encoding="utf-8"))
+            todo.write_text(todo.read_text(encoding="utf-8") + "drift\n", encoding="utf-8")
+            with self.assertRaises(TaskFrontmatterError):
+                cancel_shared_target_done(args, memory, original, memory.stat())
+
+    def test_shared_target_cancellation_recovers_todo_first_crash(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            memory = root / "memory_research_mgr.md"
+            original = task_frontmatter(status="blocked", blocked_on="paused", pending_items=("one",), runat="wl:32", is_manager=True)
+            memory.write_text(original, encoding="utf-8")
+            protected = root / "transcription_sw.md"
+            protected_text = task_frontmatter(status="blocked", blocked_on="human", pending_items=("keep",), runat="wl:32")
+            protected.write_text(protected_text, encoding="utf-8")
+            todo = root / "TODO.md"
+            todo_text = "current:\ntranscription_sw.md wl:32\n\nhuman pending:\nmemory_research_mgr.md wl:32\n\nprevious:\n"
+            todo.write_text(todo_text, encoding="utf-8")
+            mail = root / "manager_mail"
+            mail.mkdir(mode=0o700)
+            authority_text = "Subject: Re: Authorize memory_research_mgr.md relocation\n\nClose the “memory” thing. It is so old.\nWhich email report was for the transcription thing\n"
+            authority = mail / "85c5dff58359-1290.txt"
+            authority.write_text(authority_text, encoding="utf-8")
+            authority.chmod(0o600)
+            excerpt = "Close the “memory” thing. It is so old.\nWhich email report was for the transcription thing\n"
+            envelope_text = '<human_instruction authoritative="true" source="manager_mail/85c5dff58359-1290.txt:3-4">\n' + excerpt + "</human_instruction>\n"
+            (root / "authority.md").write_text(envelope_text, encoding="utf-8")
+            private = root / "private"
+            private.mkdir(mode=0o700)
+            args = StatusArgs(
+                root, Path("memory_research_mgr.md"), "done", "", cancel_shared_target=True,
+                shared_target="wl:32", protected_shared_task=Path("transcription_sw.md"), protected_shared_sha256=hashlib.sha256(protected_text.encode()).hexdigest(),
+                source_sha256=hashlib.sha256(original.encode()).hexdigest(), expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest(),
+                authority_file=Path("manager_mail/85c5dff58359-1290.txt"), authority_lines=(3, 4), authority_sha256=hashlib.sha256(authority_text.encode()).hexdigest(),
+                authority_envelope=Path("authority.md"), authority_envelope_sha256=hashlib.sha256(envelope_text.encode()).hexdigest(), audit_output=private / "cancel.yaml",
+            )
+            (private / "cancel.yaml").write_text("final-result: success\n", encoding="utf-8")
+            (private / "cancel.yaml").chmod(0o600)
+            with self.assertRaises(TaskFrontmatterError):
+                cancel_shared_target_done(args, memory, original, memory.stat())
+            (private / "cancel.yaml").unlink()
+            real_replace = replace_if_unchanged_locked
+
+            def fail_task_write(target: Path, replacement: str, state: os.stat_result) -> None:
+                if target == memory:
+                    raise OSError("simulated task write failure")
+                real_replace(target, replacement, state)
+
+            with patch("omo_manager.omo_task_status.replace_if_unchanged_locked", side_effect=fail_task_write):
+                with self.assertRaises(OSError):
+                    cancel_shared_target_done(args, memory, original, memory.stat())
+            self.assertEqual(original, memory.read_text(encoding="utf-8"))
+            self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+
+            def crash_after_todo(target: Path, replacement: str, state: os.stat_result) -> None:
+                if target == memory:
+                    raise SystemExit("simulated process death")
+                real_replace(target, replacement, state)
+
+            with patch("omo_manager.omo_task_status.replace_if_unchanged_locked", side_effect=crash_after_todo):
+                with self.assertRaises(SystemExit):
+                    cancel_shared_target_done(args, memory, original, memory.stat())
+            self.assertEqual(original, memory.read_text(encoding="utf-8"))
+            self.assertNotEqual(todo_text, todo.read_text(encoding="utf-8"))
+            prepared = (private / "cancel.yaml").read_text(encoding="utf-8")
+            forged = yaml.safe_load(prepared)
+            forged_todo = str(forged["committed_todo_text"]).replace("transcription_sw.md wl:32", "transcription_sw.md wl:99")
+            forged["committed_todo_text"] = forged_todo
+            forged["committed_todo_sha256"] = hashlib.sha256(forged_todo.encode()).hexdigest()
+            (private / "cancel.yaml").write_text(yaml.safe_dump(forged, sort_keys=False), encoding="utf-8")
+            with self.assertRaises(TaskFrontmatterError):
+                cancel_shared_target_done(args, memory, original, memory.stat())
+            self.assertEqual(original, memory.read_text(encoding="utf-8"))
+            (private / "cancel.yaml").write_text(prepared, encoding="utf-8")
+            forged = yaml.safe_load(prepared)
+            forged["cancelled_pending_items"] = ["different"]
+            forged["cancelled_pending_items_sha256"] = hashlib.sha256(yaml.safe_dump(["different"], sort_keys=False).encode()).hexdigest()
+            (private / "cancel.yaml").write_text(yaml.safe_dump(forged, sort_keys=False), encoding="utf-8")
+            with self.assertRaises(TaskFrontmatterError):
+                cancel_shared_target_done(args, memory, original, memory.stat())
+            self.assertEqual(original, memory.read_text(encoding="utf-8"))
+            (private / "cancel.yaml").write_text(prepared, encoding="utf-8")
+            self.assertEqual("wl:32", cancel_shared_target_done(args, memory, original, memory.stat()))
+            self.assertEqual("done", parse_task_metadata(memory.read_text(encoding="utf-8"), root).status)
+            self.assertIn("final-result: success", (private / "cancel.yaml").read_text(encoding="utf-8"))
+
+    def test_shared_target_cancellation_parser_requires_complete_mode(self) -> None:
+        with self.assertRaises(SystemExit):
+            parse_args(["--cancel-shared-target", "memory_research_mgr.md"])
+        with self.assertRaises(SystemExit):
+            parse_args(["--protected-shared-task", "transcription_sw.md", "memory_research_mgr.md"])
 
     def test_restore_terminal_target_changes_only_proven_runat_without_tmux_or_todo(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
