@@ -1077,6 +1077,89 @@ class ManagerReplaceTests(unittest.TestCase):
             self.assertIn("sole ownership", result)
             self.assertEqual("committed", json.loads(args.audit_output.read_text(encoding="utf-8"))["state"])
 
+    def test_source1269_guard_loss_reconciles_authorized_absent_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, _files = self.guest1269_fixture(Path(tmp))
+            state = {"old_live": True}
+
+            def killed_then_guard_lost(_args: object) -> str:
+                state["old_live"] = False
+                raise RuntimeError("tmux symbolic target no longer owns the exact pane at command execution")
+
+            inventory, _stopped, proof = self.runtime(state, args.old_target, args.new_target)
+            with (
+                inventory,
+                proof,
+                patch.object(manager_replace, "stop", side_effect=killed_then_guard_lost),
+                self.assertRaisesRegex(ReplaceError, "manager stop failed before lifecycle mutation"),
+            ):
+                replace_manager(args)
+            self.assertEqual("stop_failed", json.loads(args.audit_output.read_text(encoding="utf-8"))["state"])
+
+            with (
+                patch.object(manager_replace, "pane_inventory", return_value={}),
+                patch.object(manager_replace, "process_start_ticks", return_value=None),
+                patch.object(manager_replace, "has_bound_close_proof", return_value=False),
+            ):
+                result = replace_manager(args)
+            self.assertIn("sole ownership", result)
+            self.assertEqual("committed", json.loads(args.audit_output.read_text(encoding="utf-8"))["state"])
+            self.assertEqual(
+                "authorized-absence",
+                json.loads(args.audit_output.read_text(encoding="utf-8"))["owner_close_evidence"],
+            )
+            self.assertEqual("done", parsed(root / args.old_task, root).status)
+            self.assertEqual("blocked", parsed(root / args.successor_task, root).status)
+
+    def test_source1269_guard_loss_recovery_rejects_reused_pane_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, args, _files = self.guest1269_fixture(Path(tmp))
+            state = {"old_live": True}
+
+            def killed_then_guard_lost(_args: object) -> str:
+                state["old_live"] = False
+                raise RuntimeError("tmux symbolic target no longer owns the exact pane at command execution")
+
+            inventory, _stopped, proof = self.runtime(state, args.old_target, args.new_target)
+            with (
+                inventory,
+                proof,
+                patch.object(manager_replace, "stop", side_effect=killed_then_guard_lost),
+                self.assertRaises(ReplaceError),
+            ):
+                replace_manager(args)
+            reused = PaneIdentity("other:1.0", args.old_pane_id, 9999, 1000)
+            with (
+                patch.object(manager_replace, "pane_inventory", return_value={reused.target: reused}),
+                patch.object(manager_replace, "process_start_ticks", return_value=None),
+                self.assertRaisesRegex(ReplaceError, "exact closed-owner recovery state cannot be proved"),
+            ):
+                replace_manager(args)
+
+    def test_other_manager_guard_loss_cannot_use_source1269_absence_reconciliation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, args, _files = self.fixture(Path(tmp))
+            state = {"old_live": True}
+
+            def disappeared_during_guard(_args: object) -> str:
+                state["old_live"] = False
+                raise RuntimeError("tmux symbolic target no longer owns the exact pane at command execution")
+
+            inventory, _stopped, proof = self.runtime(state)
+            with (
+                inventory,
+                proof,
+                patch.object(manager_replace, "stop", side_effect=disappeared_during_guard),
+                self.assertRaises(ReplaceError),
+            ):
+                replace_manager(args)
+            with (
+                patch.object(manager_replace, "pane_inventory", return_value={}),
+                patch.object(manager_replace, "process_start_ticks", return_value=None),
+                self.assertRaisesRegex(ReplaceError, "exact closed-owner recovery state cannot be proved"),
+            ):
+                replace_manager(args)
+
     def test_crash_after_all_writes_recovers_commit_without_second_stop(self) -> None:
         class SimulatedCrash(BaseException):
             pass

@@ -1326,10 +1326,11 @@ def read_audit(args: Args) -> tuple[dict[str, object], bytes, tuple[AuditEntry, 
         "files",
         "error",
         "rollback_failures",
+        "owner_close_evidence",
     }
     if is_pcodx_replacement(args):
         allowed.add("protected_inventory")
-    required = allowed - {"error", "rollback_failures"}
+    required = allowed - {"error", "rollback_failures", "owner_close_evidence"}
     if not required.issubset(record) or not set(record).issubset(allowed):
         raise ReplaceError("private replacement audit fields are incomplete or unrecognized")
     if any(record.get(key) != value for key, value in audit_binding(args).items()):
@@ -1340,8 +1341,12 @@ def read_audit(args: Args) -> tuple[dict[str, object], bytes, tuple[AuditEntry, 
     close_secret = record.get("close_proof_secret")
     if not isinstance(state, str) or not isinstance(completed, list) or not all(isinstance(item, str) for item in completed):
         raise ReplaceError("private replacement audit state is malformed")
-    if state not in {"prepared", "owner_stopped", "mutating", "proving", "committed", "stop_failed", "rolled_back", "rollback_failed"}:
+    if state not in {"prepared", "owner_stopped", "owner_absent", "mutating", "proving", "committed", "stop_failed", "rolled_back", "rollback_failed"}:
         raise ReplaceError("private replacement audit lifecycle state is unrecognized")
+    if record.get("owner_close_evidence") not in {None, "authorized-absence"}:
+        raise ReplaceError("private replacement audit owner-close evidence is unrecognized")
+    if record.get("owner_close_evidence") == "authorized-absence" and state in {"prepared", "owner_stopped", "stop_failed"}:
+        raise ReplaceError("private replacement audit owner-close evidence contradicts its lifecycle state")
     if not isinstance(close_commitment, str) or SHA256_RE.fullmatch(close_commitment) is None:
         raise ReplaceError("private replacement audit close commitment is malformed")
     if (
@@ -1582,13 +1587,14 @@ def recover_existing(
     if new is not None:
         raise ReplaceError("successor target is live during crash recovery; launch-before-singular-proof is rejected")
     proof = has_bound_close_proof(proof_path, commitment)
+    authorized_absence = record.get("owner_close_evidence") == "authorized-absence"
     all_after = all(value == "after" for value in states)
     all_before = all(value == "before" for value in states)
     completed_value = record.get("completed_writes")
     completed = tuple(completed_value) if isinstance(completed_value, list) else ()
     if state == "committed":
-        if not all_after or old is not None or not proof:
-            raise ReplaceError("committed replacement audit no longer has its exact committed state and close proof")
+        if not all_after or old is not None or not (proof or authorized_absence):
+            raise ReplaceError("committed replacement audit no longer has its exact committed state and close outcome evidence")
         snapshots = after_snapshots(args, entries)
         prove_committed(args, plan, snapshots[0], snapshots[1:-2], snapshots[-2], snapshots[-1])
         return Recovery(
@@ -1600,7 +1606,35 @@ def recover_existing(
             f"recovered committed manager replacement; sole blocked successor ownership remains proved; audit={args.audit_output}",
         )
     if state == "stop_failed":
-        raise ReplaceError("prior guarded manager stop failed; use a freshly reviewed audit path after inspecting its durable evidence")
+        if (
+            not is_guest1269_replacement(args)
+            or record.get("error") != "tmux symbolic target no longer owns the exact pane at command execution"
+            or not all_before
+            or old is not None
+            or any(identity.pane_id == args.old_pane_id for identity in inventory.values())
+            or process_start_ticks(args.old_pane_pid) is not None
+        ):
+            raise ReplaceError("prior guarded manager stop failed; its exact closed-owner recovery state cannot be proved")
+        prepared_record = dict(record)
+        prepared_record["state"] = "prepared"
+        prepared_record["completed_writes"] = []
+        prepared_record.pop("error", None)
+        prepared_record.pop("rollback_failures", None)
+        prepared_bytes = serialized_audit(prepared_record)
+        authority = read_snapshot(authority_path, "bound close authority")
+        expected_authority = serialized_audit(close_authority_record(args, prepared_bytes, commitment))
+        if authority.data != expected_authority:
+            raise ReplaceError("failed-stop recovery close-authority record changed")
+        # 🧑 "Atomically close only exact failed `guest_hees:0` ... Verify old owner absent and exactly one successor owns all work"
+        record["owner_close_evidence"] = "authorized-absence"
+        record, audit_bytes = transition_audit(
+            args.audit_output,
+            audit_bytes,
+            record,
+            "owner_absent",
+            completed=(),
+        )
+        return Recovery(plan, record, audit_bytes, entries, True)
     if state == "prepared" and all_before and old == expected_old and not proof:
         if not authority_path.exists():
             _ = reserve_audit(authority_path, close_authority_record(args, audit_bytes, commitment))
@@ -1608,8 +1642,8 @@ def recover_existing(
         if authority.data != serialized_audit(close_authority_record(args, audit_bytes, commitment)):
             raise ReplaceError("prepared recovery close-authority record changed")
         return Recovery(plan, record, audit_bytes, entries, False)
-    if old is not None or not proof:
-        raise ReplaceError("crash recovery cannot prove that the exact old manager was durably closed")
+    if old is not None or not (proof or authorized_absence):
+        raise ReplaceError("crash recovery cannot prove the exact old-manager close outcome")
     if all_after:
         snapshots = after_snapshots(args, entries)
         try:
@@ -1667,11 +1701,12 @@ def recover_existing(
         raise ReplaceError("crash recovery found an unexpected successor owner")
     if active_child_task_refs(args.root, restored.old.path, args.old_target) != tuple(child.task for child in args.children):
         raise ReplaceError("crash recovery cannot prove the exact restored child set")
+    recovered_state = "owner_absent" if authorized_absence else "owner_stopped"
     record, audit_bytes = transition_audit(
         args.audit_output,
         audit_bytes,
         record,
-        "owner_stopped",
+        recovered_state,
         completed=(),
     )
     return Recovery(restored, record, audit_bytes, entries, True)

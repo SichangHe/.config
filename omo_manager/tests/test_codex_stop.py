@@ -1288,7 +1288,7 @@ class CodexStopTests(unittest.TestCase):
         guarded.assert_called_once_with("vl:2", "%42", [["kill-pane", "-t", "%42"]])
         window_panes.assert_not_called()
 
-    def test_bound_close_queues_capability_proof_only_after_exact_pane_kill(self) -> None:
+    def test_bound_close_uses_identity_bound_child_for_kill_and_proof(self) -> None:
         secret = "a" * 64
         commitment = hashlib.sha256(secret.encode()).hexdigest()
         with tempfile.TemporaryDirectory() as tmp:
@@ -1299,13 +1299,60 @@ class CodexStopTests(unittest.TestCase):
                 patch("omo_manager.omo_codex_stop.guarded_tmux_sequence", return_value="") as guarded,
             ):
                 codex_stop.close_bound_tmux_target(
-                    "%42", lambda: True, "vl:2", "%42", str(proof), str(audit), secret, commitment
+                    "%42", lambda: True, "vl:2", "%42", str(proof), str(audit), secret, commitment, 4242, 999
                 )
         commands = guarded.call_args.args[2]
-        self.assertEqual(["kill-pane", "-t", "%42"], commands[0])
-        self.assertEqual("run-shell", commands[1][0])
-        self.assertIn("--write-bound-close-proof", commands[1][1])
-        self.assertNotIn("kill-window", commands[1][1])
+        self.assertEqual("run-shell", commands[0][0])
+        self.assertIn("--kill-bound-and-write-close-proof", commands[0][1])
+        self.assertNotIn("kill-window", commands[0][1])
+
+    def test_bound_close_accepts_lost_guard_marker_only_with_durable_proof(self) -> None:
+        secret = "a" * 64
+        commitment = hashlib.sha256(secret.encode()).hexdigest()
+        with tempfile.TemporaryDirectory() as tmp:
+            audit = Path(tmp) / "park.yaml"
+            proof = Path(tmp) / ".park.yaml.owner-stopped"
+            with (
+                patch("omo_manager.omo_codex_stop.guarded_current_command", return_value="zsh"),
+                patch(
+                    "omo_manager.omo_codex_stop.guarded_tmux_sequence",
+                    side_effect=RuntimeError("tmux symbolic target no longer owns the exact pane at command execution"),
+                ),
+                patch("omo_manager.omo_codex_stop.process_start_ticks", return_value=999),
+                patch("omo_manager.omo_codex_stop.has_bound_close_proof", return_value=True),
+            ):
+                codex_stop.close_bound_tmux_target(
+                    "%42", lambda: True, "vl:2", "%42", str(proof), str(audit), secret, commitment, 4242, 999
+                )
+
+    def test_bound_close_rejects_lost_guard_marker_without_durable_proof(self) -> None:
+        with (
+            patch("omo_manager.omo_codex_stop.guarded_current_command", return_value="zsh"),
+            patch(
+                "omo_manager.omo_codex_stop.guarded_tmux_sequence",
+                side_effect=RuntimeError("tmux symbolic target no longer owns the exact pane at command execution"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "symbolic target no longer owns"),
+        ):
+            codex_stop.close_bound_tmux_target("%42", lambda: True, "vl:2", "%42")
+
+    def test_kill_bound_close_proof_revalidates_then_writes_after_absence(self) -> None:
+        secret = "a" * 64
+        commitment = hashlib.sha256(secret.encode()).hexdigest()
+        with tempfile.TemporaryDirectory() as tmp:
+            audit = Path(tmp) / "park.yaml"
+            proof = Path(tmp) / ".park.yaml.owner-stopped"
+            with (
+                patch("omo_manager.omo_codex_stop.pane_id", side_effect=["%42", "%42", "", ""]),
+                patch("omo_manager.omo_codex_stop.process_start_ticks", side_effect=[999, None, None]),
+                patch("omo_manager.omo_codex_stop.tmux") as tmux,
+                patch("omo_manager.omo_codex_stop.write_bound_close_proof") as writer,
+            ):
+                codex_stop.kill_bound_and_write_close_proof(
+                    "vl:2", "%42", 4242, 999, proof, audit, secret, commitment
+                )
+        tmux.assert_called_once_with(["kill-pane", "-t", "%42"], check=True)
+        writer.assert_called_once_with(proof, audit, secret, commitment)
 
     def test_close_proof_internal_mode_rejects_uncommitted_or_incomplete_capability(self) -> None:
         secret = "a" * 64

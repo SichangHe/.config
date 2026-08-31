@@ -824,6 +824,7 @@ def close_bound_tmux_target(
     proof_secret: str = "",
     proof_commitment: str = "",
     expected_pane_pid: int = 0,
+    expected_pane_start_ticks: int = 0,
 ) -> None:
     """Close a non-human pane only while its symbolic and numeric identities agree."""
 
@@ -844,19 +845,42 @@ def close_bound_tmux_target(
             or hashlib.sha256(proof_secret.encode()).hexdigest() != proof_commitment
         ):
             raise RuntimeError("bound close proof identity is invalid")
-        writer = shlex.join(
-            [
-                sys.executable,
-                str(Path(__file__).resolve()),
-                "--write-bound-close-proof",
-                proof_path,
-                audit_path,
-                proof_secret,
-                proof_commitment,
-            ]
-        )
-        commands.append(["run-shell", writer])
-    output = guarded_tmux_sequence(symbolic_target, expected_pane_id, commands, expected_pane_pid) if expected_pane_pid else guarded_tmux_sequence(symbolic_target, expected_pane_id, commands)
+        if expected_pane_pid and expected_pane_start_ticks:
+            writer = shlex.join(
+                [
+                    sys.executable,
+                    str(Path(__file__).resolve()),
+                    "--kill-bound-and-write-close-proof",
+                    symbolic_target,
+                    expected_pane_id,
+                    str(expected_pane_pid),
+                    str(expected_pane_start_ticks),
+                    proof_path,
+                    audit_path,
+                    proof_secret,
+                    proof_commitment,
+                ]
+            )
+            commands = [["run-shell", writer]]
+        else:
+            writer = shlex.join(
+                [
+                    sys.executable,
+                    str(Path(__file__).resolve()),
+                    "--write-bound-close-proof",
+                    proof_path,
+                    audit_path,
+                    proof_secret,
+                    proof_commitment,
+                ]
+            )
+            commands.append(["run-shell", writer])
+    try:
+        output = guarded_tmux_sequence(symbolic_target, expected_pane_id, commands, expected_pane_pid) if expected_pane_pid else guarded_tmux_sequence(symbolic_target, expected_pane_id, commands)
+    except RuntimeError:
+        if proof_path and has_bound_close_proof(Path(proof_path), proof_commitment):
+            return
+        raise
     if output:
         raise RuntimeError("guarded tmux close produced unexpected output")
 
@@ -979,6 +1003,36 @@ def write_bound_close_proof(path: Path, audit_path: Path, secret: str, commitmen
         os.fsync(directory_fd)
     finally:
         os.close(directory_fd)
+
+
+def kill_bound_and_write_close_proof(
+    symbolic_target: str,
+    expected_pane_id: str,
+    expected_pane_pid: int,
+    expected_pane_start_ticks: int,
+    proof_path: Path,
+    audit_path: Path,
+    secret: str,
+    commitment: str,
+) -> None:
+    """Kill one revalidated pane, then persist its prepared close capability."""
+
+    # 🧑 "Atomically close only exact failed `guest_hees:0` ... Verify old owner absent"
+    if (
+        expected_pane_pid <= 0
+        or expected_pane_start_ticks <= 0
+        or pane_id(symbolic_target) != expected_pane_id
+        or pane_id(expected_pane_id) != expected_pane_id
+        or process_start_ticks(expected_pane_pid) != expected_pane_start_ticks
+    ):
+        raise RuntimeError("bound close identity changed before exact pane kill")
+    _ = tmux(["kill-pane", "-t", expected_pane_id], check=True)
+    deadline_s = time.monotonic() + 5.0
+    while process_start_ticks(expected_pane_pid) is not None and time.monotonic() < deadline_s:
+        time.sleep(0.05)
+    if pane_id(symbolic_target) or pane_id(expected_pane_id) or process_start_ticks(expected_pane_pid) is not None:
+        raise RuntimeError("bound close could not prove exact pane and process absence")
+    write_bound_close_proof(proof_path, audit_path, secret, commitment)
 
 
 def has_bound_close_proof(path: Path, commitment: str) -> bool:
@@ -1303,6 +1357,7 @@ def stop(args: Args) -> str:
             args.bound_close_proof_secret,
             args.bound_close_proof_commitment,
             resolved_args.bound_pane_pid,
+            resolved_args.bound_pane_start_ticks,
         )
     elif human_authorized:
         close_authorized_human_pane(resolved_args.target, identity_is_current)
@@ -1312,6 +1367,22 @@ def stop(args: Args) -> str:
 
 
 def main(argv: list[str]) -> int:
+    if len(argv) == 9 and argv[0] == "--kill-bound-and-write-close-proof":
+        try:
+            kill_bound_and_write_close_proof(
+                argv[1],
+                argv[2],
+                int(argv[3]),
+                int(argv[4]),
+                Path(argv[5]),
+                Path(argv[6]),
+                argv[7],
+                argv[8],
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            print(f"omo_codex_stop.py: {exc}", file=sys.stderr)
+            return 1
+        return 0
     if len(argv) == 5 and argv[0] == "--write-bound-close-proof":
         try:
             write_bound_close_proof(Path(argv[1]), Path(argv[2]), argv[3], argv[4])
