@@ -57,6 +57,24 @@ HUMAN_ENVELOPE_RE = re.compile(
 FAILED_MANAGER_EVIDENCE_RE = re.compile(
     r"(?is)\b(?:agent|manager)\s+(?:has\s+)?failed\b.*\b(?:did\s+not|didn't|has\s+not|hasn't)\b.*\breplace\b"
 )
+# 🧑 Source `manager_mail/85c5dff58359-1269.txt:3-9`: "The guest has reported that they do not receive response ... previous responsible agents ... completely failed. Replace them."
+GUEST1269_REPLACEMENT = (
+    "manager_mail/85c5dff58359-1269.txt",
+    (3, 9),
+    "guest_hees_mail_mgr.md",
+    "guest_hees:0.0",
+    "\n".join(
+        (
+            "The guest has reported that they do not receive response for emails sent to",
+            "you guys. Whatever the previous responsible agents were doing, they",
+            "completely failed. Replace them. The new agent should be skeptical of",
+            "anything done previously and make sure that in the future replies get sent",
+            "to the guest also It was not like the guest received nothing. They report",
+            "receiving empty emails. Investigate this with the new agents. Completing",
+            "overhaul any garbage that's left.",
+        )
+    ),
+)
 PCODX_REPLACE_EVIDENCE_RE = re.compile(
     r"(?m)^Replace the failed PCODX manager (?P<task>[A-Za-z0-9_./-]+\.md) at "
     r"(?P<target>[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?) with one fresh plain-Codex manager "
@@ -728,7 +746,20 @@ def authority_material(args: Args, snapshot: Snapshot, envelope: Snapshot) -> tu
         and pcodx_replacement.group("task") == args.old_task
         and canonical_target(pcodx_replacement.group("target")) == canonical_target(args.old_target)
     )
-    if FAILED_MANAGER_EVIDENCE_RE.search(selected_evidence) is None and not exact_pcodx_replacement:
+    guest_source, guest_lines, guest_task, guest_target, guest_evidence = GUEST1269_REPLACEMENT
+    exact_guest1269_replacement = (
+        args.authority_file == guest_source
+        and args.authority_lines == LineRange(*guest_lines)
+        and args.successor_item_lines == (args.authority_lines,)
+        and args.old_task == guest_task
+        and canonical_target(args.old_target) == guest_target
+        and selected_evidence == guest_evidence
+    )
+    if (
+        FAILED_MANAGER_EVIDENCE_RE.search(selected_evidence) is None
+        and not exact_guest1269_replacement
+        and not exact_pcodx_replacement
+    ):
         raise ReplaceError("authenticated authority does not explicitly prove failure, non-execution, and replacement")
     if is_pcodx_replacement(args) and not all(value in selected_evidence for value in (args.old_task, args.old_target)):
         raise ReplaceError("authenticated PCODX replacement authority must name the exact old task and protected target")

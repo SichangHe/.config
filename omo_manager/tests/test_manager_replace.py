@@ -153,16 +153,16 @@ class ManagerReplaceTests(unittest.TestCase):
         )
         return root, args, files
 
-    def runtime(self, state: dict[str, bool]):
+    def runtime(self, state: dict[str, bool], old_target: str = OLD_TARGET, new_target: str = NEW_TARGET):
         def inventory() -> dict[str, PaneIdentity]:
             result: dict[str, PaneIdentity] = {}
             if state.get("old_live", True):
-                result[manager_replace.canonical_target(OLD_TARGET)] = PaneIdentity(
-                    manager_replace.canonical_target(OLD_TARGET), "%42", 4242, 999
+                result[manager_replace.canonical_target(old_target)] = PaneIdentity(
+                    manager_replace.canonical_target(old_target), "%42", 4242, 999
                 )
             if state.get("new_live", False):
-                result[manager_replace.canonical_target(NEW_TARGET)] = PaneIdentity(
-                    manager_replace.canonical_target(NEW_TARGET), "%77", 7777, 1001
+                result[manager_replace.canonical_target(new_target)] = PaneIdentity(
+                    manager_replace.canonical_target(new_target), "%77", 7777, 1001
                 )
             return result
 
@@ -180,9 +180,71 @@ class ManagerReplaceTests(unittest.TestCase):
         )
 
     def run_replacement(self, args: Args, state: dict[str, bool]) -> str:
-        inventory, stopped, proof = self.runtime(state)
+        inventory, stopped, proof = self.runtime(state, args.old_target, args.new_target)
         with inventory, stopped, proof:
             return replace_manager(args)
+
+    def guest1269_fixture(self, base: Path) -> tuple[Path, Args, dict[str, str]]:
+        root, args, files = self.fixture(base)
+        old_task = "guest_hees_mail_mgr.md"
+        old_target = "guest_hees:0"
+        old = task_text(
+            status="long_running",
+            runat=old_target,
+            managerat=PARENT_TARGET,
+            is_manager=True,
+            pending=OLD_QUEUE,
+            session_id=SESSION_ID,
+        )
+        (root / args.old_task).unlink()
+        files.pop(args.old_task)
+        files[old_task] = old
+        (root / old_task).write_text(old, encoding="utf-8")
+        children: list[ChildPin] = []
+        for name in ("child_a.md", "child_b.md"):
+            data = files[name].replace(f"managerat: {OLD_TARGET}", f"managerat: {old_target}")
+            files[name] = data
+            (root / name).write_text(data, encoding="utf-8")
+            children.append(ChildPin(name, sha(data)))
+        todo = files["TODO.md"].replace(f"{args.old_task} {OLD_TARGET}", f"{old_task} {old_target}")
+        files["TODO.md"] = todo
+        (root / "TODO.md").write_text(todo, encoding="utf-8")
+        authority_file = "manager_mail/85c5dff58359-1269.txt"
+        authority = (
+            "Subject: Fix guest mail handling\n"
+            "\n"
+            "The guest has reported that they do not receive response for emails sent to\n"
+            "you guys. Whatever the previous responsible agents were doing, they\n"
+            "completely failed. Replace them. The new agent should be skeptical of\n"
+            "anything done previously and make sure that in the future replies get sent\n"
+            "to the guest also It was not like the guest received nothing. They report\n"
+            "receiving empty emails. Investigate this with the new agents. Completing\n"
+            "overhaul any garbage that's left.\n"
+        )
+        authority_path = root / authority_file
+        authority_path.write_text(authority, encoding="utf-8")
+        authority_path.chmod(0o600)
+        envelope = (
+            f'<human_instruction authoritative="true" source="{authority_file}:3-9">\n'
+            f'{"".join(authority.splitlines(keepends=True)[2:9])}'
+            "</human_instruction>\n"
+        )
+        (root / args.authority_envelope_task).write_text(envelope, encoding="utf-8")
+        files[authority_file] = authority
+        files[args.authority_envelope_task] = envelope
+        return root, replace(
+            args,
+            old_task=old_task,
+            old_target=old_target,
+            old_sha256=sha(old),
+            todo_sha256=sha(todo),
+            children=tuple(children),
+            authority_file=authority_file,
+            authority_lines=LineRange(3, 9),
+            authority_sha256=sha(authority),
+            authority_envelope_sha256=sha(envelope),
+            successor_item_lines=(LineRange(3, 9),),
+        ), files
 
     def pcodx_fixture(self, base: Path) -> tuple[Path, Args, dict[str, str], dict[str, str]]:
         root, args, files = self.fixture(base)
@@ -688,11 +750,91 @@ class ManagerReplaceTests(unittest.TestCase):
             (root / args.authority_file).write_text(source, encoding="utf-8")
             (root / args.authority_envelope_task).write_text(envelope, encoding="utf-8")
             changed = replace(args, authority_sha256=sha(source), authority_envelope_sha256=sha(envelope))
-            inventory, stopped, proof = self.runtime({"old_live": True})
+            inventory, stopped, proof = self.runtime({"old_live": True}, changed.old_target, changed.new_target)
             with inventory, stopped as stop_mock, proof, self.assertRaisesRegex(ReplaceError, "does not explicitly prove"):
                 replace_manager(changed)
             stop_mock.assert_not_called()
 
+    def test_exact_source1269_guest_replacement_allows_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, _files = self.guest1269_fixture(Path(tmp))
+            self.run_replacement(args, {"old_live": True})
+            self.assertEqual("blocked", parsed(root / args.successor_task, root).status)
+
+    def test_source1269_guest_replacement_rejects_later_revocation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, files = self.guest1269_fixture(Path(tmp))
+            source = files[args.authority_file].replace("Replace them.", "Replace them. Do not replace them.")
+            excerpt = "".join(source.splitlines(keepends=True)[2:9])
+            envelope = f'<human_instruction authoritative="true" source="{args.authority_file}:3-9">\n{excerpt}</human_instruction>\n'
+            (root / args.authority_file).write_text(source, encoding="utf-8")
+            (root / args.authority_envelope_task).write_text(envelope, encoding="utf-8")
+            changed = replace(args, authority_sha256=sha(source), authority_envelope_sha256=sha(envelope))
+            inventory, stopped, proof = self.runtime({"old_live": True}, changed.old_target, changed.new_target)
+            with inventory, stopped as stop_mock, proof, self.assertRaisesRegex(ReplaceError, "does not explicitly prove"):
+                replace_manager(changed)
+            stop_mock.assert_not_called()
+
+    def test_source1269_guest_replacement_rejects_agent_quote(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, files = self.guest1269_fixture(Path(tmp))
+            source = files[args.authority_file].replace("The guest has reported", "An agent claimed: The guest has reported")
+            excerpt = "".join(source.splitlines(keepends=True)[2:9])
+            envelope = f'<human_instruction authoritative="true" source="{args.authority_file}:3-9">\n{excerpt}</human_instruction>\n'
+            (root / args.authority_file).write_text(source, encoding="utf-8")
+            (root / args.authority_envelope_task).write_text(envelope, encoding="utf-8")
+            changed = replace(args, authority_sha256=sha(source), authority_envelope_sha256=sha(envelope))
+            inventory, stopped, proof = self.runtime({"old_live": True}, changed.old_target, changed.new_target)
+            with inventory, stopped as stop_mock, proof, self.assertRaisesRegex(ReplaceError, "does not explicitly prove"):
+                replace_manager(changed)
+            stop_mock.assert_not_called()
+
+    def test_source1269_guest_replacement_rejects_other_source_or_manager(self) -> None:
+        for other_source in (True, False):
+            with self.subTest(other_source=other_source), tempfile.TemporaryDirectory() as tmp:
+                if other_source:
+                    root, guest_args, files = self.guest1269_fixture(Path(tmp))
+                    source_file = "manager_mail/85c5dff58359-other.txt"
+                    source = files[guest_args.authority_file]
+                    source_path = root / source_file
+                    source_path.write_text(source, encoding="utf-8")
+                    source_path.chmod(0o600)
+                    excerpt = "".join(source.splitlines(keepends=True)[2:9])
+                    envelope = f'<human_instruction authoritative="true" source="{source_file}:3-9">\n{excerpt}</human_instruction>\n'
+                    (root / guest_args.authority_envelope_task).write_text(envelope, encoding="utf-8")
+                    changed = replace(
+                        guest_args,
+                        authority_file=source_file,
+                        authority_sha256=sha(source),
+                        authority_envelope_sha256=sha(envelope),
+                    )
+                else:
+                    root, changed, _files = self.fixture(Path(tmp))
+                    source_file, _line_range, _task, _target, evidence = manager_replace.GUEST1269_REPLACEMENT
+                    source = f"Subject: Fix guest mail handling\n\n{evidence}\n"
+                    source_path = root / source_file
+                    source_path.write_text(source, encoding="utf-8")
+                    source_path.chmod(0o600)
+                    excerpt = "".join(source.splitlines(keepends=True)[2:9])
+                    envelope = (
+                        f'<human_instruction authoritative="true" source="{source_file}:3-9">\n'
+                        f"{excerpt}</human_instruction>\n"
+                    )
+                    (root / changed.authority_envelope_task).write_text(envelope, encoding="utf-8")
+                    changed = replace(
+                        changed,
+                        authority_file=source_file,
+                        authority_lines=LineRange(3, 9),
+                        authority_sha256=sha(source),
+                        authority_envelope_sha256=sha(envelope),
+                        successor_item_lines=(LineRange(3, 9),),
+                    )
+                inventory, stopped, proof = self.runtime({"old_live": True}, changed.old_target, changed.new_target)
+                with inventory, stopped as stop_mock, proof, self.assertRaisesRegex(ReplaceError, "does not explicitly prove"):
+                    replace_manager(changed)
+                stop_mock.assert_not_called()
+
+    def test_non_long_running_manager_cannot_be_replaced(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root, args, _files = self.fixture(Path(tmp))
             healthy = task_text(
