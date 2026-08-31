@@ -204,7 +204,11 @@ class ManagerReplaceTests(unittest.TestCase):
     def whole_tree_authority(self, args: Args) -> contextlib.ExitStack:
         stack = contextlib.ExitStack()
         stack.enter_context(
-            patch.object(manager_replace, "is_source1289_whole_tree", side_effect=lambda candidate: bool(candidate.descendants))
+            patch.object(
+                manager_replace,
+                "is_source1289_whole_tree",
+                side_effect=lambda candidate: bool(candidate.descendants or candidate.empty_tree_envelope_sha256),
+            )
         )
         stack.enter_context(patch.object(manager_replace, "SOURCE1289_SHA256", args.authority_sha256))
         stack.enter_context(
@@ -215,6 +219,41 @@ class ManagerReplaceTests(unittest.TestCase):
             )
         )
         return stack
+
+    def empty_tree_fixture(self, base: Path) -> tuple[Path, Args, dict[str, str], contextlib.ExitStack]:
+        root, args, files = self.fixture(base)
+        old = parsed(root / args.old_task, root)
+        for child in args.children:
+            path = root / child.task
+            text = manager_replace.render_pending_items(path.read_text(encoding="utf-8"), ())
+            text = manager_replace.update_frontmatter_status(text, "done", "", root)
+            path.write_text(text, encoding="utf-8")
+            files[child.task] = text
+        source1292 = "Subject: close empty tree\n\nClose either way. Directly use tmux if needed\n\n"
+        source_path = root / manager_replace.SOURCE1292_FILE
+        source_path.parent.mkdir(exist_ok=True)
+        source_path.write_text(source1292, encoding="utf-8")
+        source_path.chmod(0o600)
+        original = (root / args.authority_envelope_task).read_text(encoding="utf-8")
+        second = (
+            f'<human_instruction authoritative="true" source="{manager_replace.SOURCE1292_FILE}:1-4">\n'
+            "Subject: close empty tree\n\nClose either way. Directly use tmux if needed\n"
+            "</human_instruction>\n"
+        )
+        envelope = original + second
+        (root / args.authority_envelope_task).write_text(envelope, encoding="utf-8")
+        first_block = original
+        changed = replace(
+            args,
+            children=(),
+            descendants=(),
+            authority_envelope_sha256=sha(first_block),
+            empty_tree_envelope_sha256=sha(second),
+        )
+        stack = self.whole_tree_authority(changed)
+        stack.enter_context(patch.object(manager_replace, "SOURCE1292_SHA256", sha(source1292)))
+        self.assertEqual((), manager_replace.active_child_task_refs(root, root / args.old_task, old.runat))
+        return root, changed, files, stack
 
     def run_replacement(self, args: Args, state: dict[str, bool]) -> str:
         inventory, stopped, proof = self.runtime(state, args.old_target, args.new_target)
@@ -674,7 +713,7 @@ class ManagerReplaceTests(unittest.TestCase):
             (root / args.authority_envelope_task).write_text(malformed, encoding="utf-8")
             malformed_args = replace(args, authority_envelope_sha256=sha(malformed))
             inventory, stopped, proof = self.runtime({"old_live": True})
-            with inventory, stopped as stop_mock, proof, self.assertRaisesRegex(ReplaceError, "exactly one block"):
+            with inventory, stopped as stop_mock, proof, self.assertRaisesRegex(ReplaceError, "expected blocks"):
                 replace_manager(malformed_args)
             stop_mock.assert_not_called()
 
@@ -1043,7 +1082,7 @@ class ManagerReplaceTests(unittest.TestCase):
                 old_task=manager_replace.SOURCE1289_TASK,
                 authority_file=manager_replace.SOURCE1289_FILE,
             )
-            with self.assertRaisesRegex(ReplaceError, "complete nonempty whole-tree descendant set"):
+            with self.assertRaisesRegex(ReplaceError, "descendants or exact Source-1292"):
                 replace_manager(changed)
 
     def test_other_authority_cannot_request_descendant_closure(self) -> None:
@@ -1051,6 +1090,71 @@ class ManagerReplaceTests(unittest.TestCase):
             _root, args, _files = self.whole_tree_fixture(Path(tmp))
             with self.assertRaisesRegex(ReplaceError, "only by exact Source-1289"):
                 replace_manager(args)
+
+    def test_source1292_empty_tree_replaces_only_live_manager(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, _files, authority = self.empty_tree_fixture(Path(tmp))
+            inventory, stopped, proof = self.runtime({"old_live": True})
+            with authority, inventory, stopped, proof:
+                result = replace_manager(args)
+            self.assertIn("sole ownership", result)
+            self.assertEqual("blocked", parsed(root / args.successor_task, root).status)
+            self.assertEqual("done", parsed(root / args.old_task, root).status)
+
+    def test_source1292_empty_tree_rejects_hidden_active_child_before_close(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, _files, authority = self.empty_tree_fixture(Path(tmp))
+            hidden = root / "hidden.md"
+            hidden.write_text(
+                task_text(
+                    status="running",
+                    runat="hidden:1",
+                    managerat=args.old_target,
+                    is_manager=False,
+                    pending=("Preserve hidden work.",),
+                ),
+                encoding="utf-8",
+            )
+            inventory, stopped, proof = self.runtime({"old_live": True})
+            with (
+                authority,
+                inventory,
+                stopped as stop_mock,
+                proof,
+                self.assertRaisesRegex(ReplaceError, "active child set changed"),
+            ):
+                replace_manager(args)
+            stop_mock.assert_not_called()
+
+    def test_source1292_empty_tree_rejects_wrong_envelope_digest_before_close(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, args, _files, authority = self.empty_tree_fixture(Path(tmp))
+            changed = replace(args, empty_tree_envelope_sha256="0" * 64)
+            inventory, stopped, proof = self.runtime({"old_live": True})
+            with (
+                authority,
+                inventory,
+                stopped as stop_mock,
+                proof,
+                self.assertRaisesRegex(ReplaceError, "Source-1292 empty-tree envelope binding changed"),
+            ):
+                replace_manager(changed)
+            stop_mock.assert_not_called()
+
+    def test_source1292_empty_tree_rejects_nonprivate_source_before_close(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, _files, authority = self.empty_tree_fixture(Path(tmp))
+            (root / manager_replace.SOURCE1292_FILE).chmod(0o644)
+            inventory, stopped, proof = self.runtime({"old_live": True})
+            with (
+                authority,
+                inventory,
+                stopped as stop_mock,
+                proof,
+                self.assertRaisesRegex(ReplaceError, "Source-1292 authority source and directory must be owner-private"),
+            ):
+                replace_manager(args)
+            stop_mock.assert_not_called()
 
     def test_direct_args_cannot_add_or_omit_a_descendant_pin(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
