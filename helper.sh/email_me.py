@@ -6,18 +6,23 @@ from __future__ import annotations
 import argparse
 import fcntl
 import hashlib
+import imaplib
 import os
 import re
 import secrets
 import smtplib
 import ssl
+import stat
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, replace as dataclass_replace
 from datetime import datetime
-from email.message import EmailMessage
-from email.utils import make_msgid
+from email import policy
+from email.message import EmailMessage, Message
+from email.parser import BytesParser
+from email.utils import getaddresses, make_msgid
 from html import escape
 from pathlib import Path
 
@@ -27,27 +32,29 @@ ENV_FILE_PATH = Path.home() / ".config" / ".env"
 MANAGER_DIR = Path(__file__).resolve().parents[1] / "omo_manager"
 if MANAGER_DIR.is_dir():
     sys.path.insert(0, str(MANAGER_DIR))
-try:
-    from omo_email_config import GUEST_HEES_ADDRESS, GUEST_HEES_MANAGER_TARGET, configured_agent_mail, guest_hees_mail
-    from omo_email_subject import MailRouteProfile, SubjectInputError, canonical_tmux_target, normalized_subject_key, prepare_latest_thread_for_tmux_target, prepare_subject, prepare_subject_and_headers, reply_headers_for_subject, strip_leading_tmux_tags
-    from omo_guest_images import GuestImageError, ValidatedImage, reply_attachments
-except ImportError:
-    configured_agent_mail = None
-    guest_hees_mail = None
-    GUEST_HEES_ADDRESS = "46496337@qq.com"
-    GUEST_HEES_MANAGER_TARGET = "guest_hees:0"
-    MailRouteProfile = None
-    SubjectInputError = ValueError
-    canonical_tmux_target = None
-    normalized_subject_key = None
-    prepare_subject = None
-    prepare_subject_and_headers = None
-    prepare_latest_thread_for_tmux_target = None
-    reply_headers_for_subject = None
-    strip_leading_tmux_tags = None
-    reply_attachments = None
-    GuestImageError = ValueError
-    ValidatedImage = object
+from omo_email_config import (  # noqa: E402
+    GMAIL_IMAP_HOST,
+    GUEST_HEES_ADDRESS,
+    GUEST_HEES_SESSION,
+    AgentMailSettings,
+    configured_agent_mail,
+    fulfill_guest_hees_reply_obligation,
+    guest_hees_mail,
+    guest_hees_target,
+    open_guest_hees_reply_source,
+)
+from omo_email_subject import (  # noqa: E402
+    MailRouteProfile,
+    SubjectInputError,
+    canonical_tmux_target,
+    normalized_subject_key,
+    prepare_latest_thread_for_tmux_target,
+    prepare_subject,
+    prepare_subject_and_headers,
+    reply_headers_for_subject,
+    strip_leading_tmux_tags,
+)
+from omo_guest_images import GuestImageError, ValidatedImage, reply_attachments  # noqa: E402
 
 PWD_FOOTER_RE = re.compile(r"(?:^|\n)(?:>\s*)?PWD: [^\n]+\n?\Z")
 UNQUOTED_PWD_FOOTER_RE = re.compile(r"(?:^|\n)PWD: [^\n]+\n?\Z")
@@ -265,7 +272,218 @@ def guest_hees_tmux_target(target: str | None) -> bool:
     if target is None:
         return False
     canonical = canonical_email_tmux_target(target)
-    return canonical.partition(":")[0] == GUEST_HEES_MANAGER_TARGET.partition(":")[0]
+    return guest_hees_target(canonical) and canonical.partition(":")[0] == GUEST_HEES_SESSION
+
+
+def substantive_guest_reply(content: str) -> bool:
+    """Reject blank and canonical lifecycle-only guest mail."""
+    lines = [line.strip() for line in markdown_links_to_plain(content).splitlines() if line.strip()]
+    if not lines:
+        return False
+    labels = ("Task:", "Outcome:", "Items:", "Evidence:", "Completion record:")
+    lifecycle_shape = any(line.startswith("Task:") for line in lines) and any(line.startswith("Outcome:") for line in lines)
+    if lifecycle_shape and all(line.startswith(labels) or line.startswith(('- ', '* ')) for line in lines):
+        return False
+    normalized = " ".join(lines).casefold().rstrip(".! ")
+    return normalized not in {"done", "task done", "completed", "task completed", "pending item removed"}
+
+
+def verified_guest_reply_headers(reply_headers: dict[str, str]) -> bool:
+    """Require one exact reply parent that also appears in References."""
+    parent = reply_headers.get("In-Reply-To", "")
+    references = reply_headers.get("References", "").split()
+    return re.fullmatch(r"<[^<>\s]+>", parent) is not None and parent in references
+
+
+def sent_plain_text(message: Message) -> str:
+    if isinstance(message, EmailMessage):
+        body = message.get_body(preferencelist=("plain",))
+        return body.get_content() if body is not None else ""
+    return ""
+
+
+def sent_message_matches_guest_reply(candidate: Message, expected: EmailMessage, sender: str) -> bool:
+    """Validate exact participants, thread, identity, and substantive Sent content."""
+    recipients = [address for _name, address in getaddresses(candidate.get_all("To", []))]
+    senders = [address for _name, address in getaddresses(candidate.get_all("From", []))]
+    headers = {
+        "In-Reply-To": str(candidate.get("In-Reply-To", "")),
+        "References": str(candidate.get("References", "")),
+    }
+    return (
+        senders == [sender]
+        and recipients == [GUEST_HEES_ADDRESS]
+        and str(candidate.get("Message-ID", "")) == str(expected.get("Message-ID", ""))
+        and str(candidate.get("Subject", "")) == str(expected.get("Subject", ""))
+        and headers["In-Reply-To"] == str(expected.get("In-Reply-To", ""))
+        and headers["References"] == str(expected.get("References", ""))
+        and verified_guest_reply_headers(headers)
+        and substantive_guest_reply(sent_plain_text(candidate))
+        and sent_plain_text(candidate) == sent_plain_text(expected)
+    )
+
+
+@dataclass(frozen=True)
+class GuestSentEvidence:
+    subject_sha256: str
+    body_sha256: str
+
+
+@dataclass
+class GuestReplyClaim:
+    fd: int
+
+    def close(self) -> None:
+        if self.fd >= 0:
+            os.close(self.fd)
+            self.fd = -1
+
+
+def acquire_guest_reply_claim(state_dir: Path, source: str) -> GuestReplyClaim | None:
+    """Acquire and validate one fail-closed process lease for an exact obligation."""
+    if not source or any(character in source for character in "\r\n\0"):
+        return None
+    directory = state_dir / "guest-hees-reply-claims"
+    path = directory / f"{hashlib.sha256(source.encode()).hexdigest()}.claim"
+    expected = f"version=v1\nsource={source}\n".encode()
+    fd = -1
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(8)}")
+    try:
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        directory.chmod(0o700)
+        if not path.exists():
+            temporary_fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                offset = 0
+                while offset < len(expected):
+                    written = os.write(temporary_fd, expected[offset:])
+                    if written <= 0:
+                        raise OSError("guest reply claim write failed")
+                    offset += written
+                os.fsync(temporary_fd)
+            finally:
+                os.close(temporary_fd)
+            try:
+                os.link(temporary, path)
+            except FileExistsError:
+                pass
+            directory_fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        metadata = os.fstat(fd)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid() or metadata.st_mode & 0o077:
+            raise OSError("unsafe guest reply claim")
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if os.read(fd, len(expected) + 1) != expected:
+            raise OSError("invalid guest reply claim")
+        return GuestReplyClaim(fd)
+    except OSError:
+        if fd >= 0:
+            os.close(fd)
+        return None
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def guest_reply_attempt_path(state_dir: Path, source: str) -> Path:
+    digest = hashlib.sha256(source.encode()).hexdigest()
+    return state_dir / "guest-hees-reply-attempts" / f"{digest}.eml"
+
+
+def store_guest_reply_attempt(state_dir: Path, source: str, message: EmailMessage) -> bool:
+    """Persist the exact expected message before SMTP for safe retry reconciliation."""
+    path = guest_reply_attempt_path(state_dir, source)
+    try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        path.parent.chmod(0o700)
+        with tempfile.NamedTemporaryFile("wb", dir=path.parent, prefix=f".{path.name}.", delete=False) as handle:
+            temporary = Path(handle.name)
+            temporary.chmod(0o600)
+            _ = handle.write(message.as_bytes(policy=policy.default))
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.replace(temporary, path)
+            directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        finally:
+            temporary.unlink(missing_ok=True)
+    except OSError:
+        return False
+    return load_guest_reply_attempt(state_dir, source, str(message["In-Reply-To"]), str(message["From"])) is not None
+
+
+def load_guest_reply_attempt(state_dir: Path, source: str, inbound_message_id: str, sender: str) -> EmailMessage | None:
+    """Load only an owner-private exact-thread substantive prior attempt."""
+    path = guest_reply_attempt_path(state_dir, source)
+    try:
+        metadata = path.lstat()
+        payload = path.read_bytes()
+    except OSError:
+        return None
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or metadata.st_mode & 0o077
+        or len(payload) > 50 * 1024 * 1024
+    ):
+        return None
+    candidate = BytesParser(policy=policy.default).parsebytes(payload)
+    if not isinstance(candidate, EmailMessage):
+        return None
+    if (
+        str(candidate.get("In-Reply-To", "")) != inbound_message_id
+        or re.fullmatch(r"<[^<>\s]+>", str(candidate.get("Message-ID", ""))) is None
+        or not sent_message_matches_guest_reply(candidate, candidate, sender)
+    ):
+        return None
+    return candidate
+
+
+def verify_guest_reply_in_sent(settings: AgentMailSettings, expected: EmailMessage) -> GuestSentEvidence | None:
+    """Find one exact immutable copy in Gmail Sent Mail before reporting success."""
+    try:
+        timeout_s = max(float(os.environ.get("OMO_GUEST_HEES_SENT_VERIFY_TIMEOUT_S", "20")), 0)
+    except ValueError:
+        timeout_s = 20
+    deadline_s = time.monotonic() + timeout_s
+    while True:
+        client: imaplib.IMAP4_SSL | None = None
+        try:
+            client = imaplib.IMAP4_SSL(GMAIL_IMAP_HOST, timeout=min(max(timeout_s, 1), 30))
+            client.login(settings.agent_address, settings.app_password)
+            typ, _data = client.select('"[Gmail]/Sent Mail"', readonly=True)
+            if typ != "OK":
+                raise imaplib.IMAP4.error("cannot select Sent Mail")
+            typ, data = client.uid("search", None, "HEADER", "Message-ID", str(expected["Message-ID"]))
+            uids = b" ".join(item for item in data or [] if isinstance(item, bytes)).split() if typ == "OK" else []
+            if len(uids) == 1:
+                typ, fetched = client.uid("fetch", uids[0].decode("ascii"), "(BODY.PEEK[])")
+                payloads = [item[1] for item in fetched or [] if isinstance(item, tuple) and isinstance(item[1], bytes)]
+                if typ == "OK" and len(payloads) == 1:
+                    candidate = BytesParser(policy=policy.default).parsebytes(payloads[0])
+                    if sent_message_matches_guest_reply(candidate, expected, settings.agent_address):
+                        return GuestSentEvidence(
+                            hashlib.sha256(str(candidate["Subject"]).encode()).hexdigest(),
+                            hashlib.sha256(sent_plain_text(candidate).encode()).hexdigest(),
+                        )
+        except (OSError, ValueError, imaplib.IMAP4.error):
+            pass
+        finally:
+            if client is not None:
+                try:
+                    client.logout()
+                except (OSError, imaplib.IMAP4.error):
+                    pass
+        if time.monotonic() >= deadline_s:
+            return None
+        time.sleep(min(0.5, max(0, deadline_s - time.monotonic())))
 
 
 def validate_manager_route_identity(explicit_target: str | None, selected_target: str) -> None:
@@ -620,6 +838,10 @@ def should_send_manager_email(subject: str, content: str) -> bool:
     return should_send_manager_email_key(subject, subject, content)
 
 
+def manager_email_dedupe_digest(subject: str, content: str) -> str:
+    return hashlib.sha256(subject.encode() + b"\0" + content.encode()).hexdigest()
+
+
 def should_send_manager_email_key(dedupe_subject: str, display_subject: str, content: str, state_scope: str = "human") -> bool:
     try:
         state_dir = manager_state_dir()
@@ -628,7 +850,7 @@ def should_send_manager_email_key(dedupe_subject: str, display_subject: str, con
         dedupe_s = int(os.environ.get("OMO_MANAGER_EMAIL_DEDUPE_S", "300"))
         dedupe_file = state_dir / f"{state_scope}-email-dedupe.tsv"
         lock_file = state_dir / f"{state_scope}-email-dedupe.lock"
-        digest = hashlib.sha256(dedupe_subject.encode() + b"\0" + content.encode()).hexdigest()
+        digest = manager_email_dedupe_digest(dedupe_subject, content)
         now_s = int(time.time())
         fd = os.open(lock_file, os.O_RDWR | os.O_CREAT, 0o600)
         with os.fdopen(fd, "r+", encoding="utf-8") as lock:
@@ -679,6 +901,7 @@ def maybe_print_thread_reminder() -> None:
 
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
+    guest_reply_source = ""
     try:
         subject_tmux_target = footer_tmux_target(args.tmux_target, args.manager_human)
         if args.manager_human and subject_tmux_target is not None:
@@ -742,7 +965,13 @@ def main(argv: list[str]) -> int:
                 # target, rather than rejecting a valid acknowledgement.
                 subject = normalize_subject(subject, subject_tmux_target or "")
                 validate_manager_human_subject(subject)
-    except ValueError as exc:
+        if args.guest_hees:
+            if not substantive_guest_reply(args.content):
+                raise ValueError("guest-hees reply must contain a substantive guest-facing answer")
+            if not subject.casefold().startswith("re:") or not verified_guest_reply_headers(reply_headers):
+                raise ValueError("guest-hees reply must continue one verified guest email thread")
+            guest_reply_source = open_guest_hees_reply_source(manager_state_dir(), reply_headers["In-Reply-To"])
+    except (OSError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
     if args.manager_human and route_profile is not None:
@@ -770,10 +999,15 @@ def main(argv: list[str]) -> int:
     dedupe_subject = normalized_subject_key(title) if args.manager_human and normalized_subject_key is not None else subject
     dedupe_content = args.content + "\0" + "\0".join(args.guest_image_references)
     state_scope = "guest-hees" if args.guest_hees else "human"
-    if args.manager_human and not should_send_manager_email_key(dedupe_subject, subject, dedupe_content, state_scope):
+    if args.manager_human and not args.guest_hees and not should_send_manager_email_key(
+        dedupe_subject, subject, dedupe_content, state_scope
+    ):
         print("Skipped duplicate human email")
         return 0
     if fake_log := fake_send_log_path():
+        if args.guest_hees:
+            print("EMAIL_ME_FAKE_SEND_LOG cannot verify a guest reply", file=sys.stderr)
+            return 2
         fake_log.parent.mkdir(parents=True, exist_ok=True)
         fake_log.write_text(f"{subject}\n{args.content}", encoding="utf-8")
         if args.manager_human:
@@ -804,6 +1038,37 @@ def main(argv: list[str]) -> int:
         print("Invalid Gmail address format.", file=sys.stderr)
         return 2
 
+    guest_claim = acquire_guest_reply_claim(manager_state_dir(), guest_reply_source) if args.guest_hees else None
+    if args.guest_hees and guest_claim is None:
+        print("Guest reply obligation claim is unavailable; retry after local state recovers", file=sys.stderr)
+        return 1
+    if args.guest_hees:
+        prior_attempt = load_guest_reply_attempt(
+            manager_state_dir(), guest_reply_source, reply_headers["In-Reply-To"], sender_email
+        )
+        if guest_reply_attempt_path(manager_state_dir(), guest_reply_source).exists() and prior_attempt is None:
+            guest_claim.close()
+            print("Guest reply prior attempt is invalid; refusing SMTP", file=sys.stderr)
+            return 1
+        prior_evidence = verify_guest_reply_in_sent(split_settings, prior_attempt) if prior_attempt is not None else None
+        if prior_attempt is not None and prior_evidence is not None:
+            try:
+                source = fulfill_guest_hees_reply_obligation(
+                    manager_state_dir(),
+                    str(prior_attempt["In-Reply-To"]),
+                    str(prior_attempt["Message-ID"]),
+                    prior_evidence.subject_sha256,
+                    prior_evidence.body_sha256,
+                )
+            except OSError as exc:
+                guest_claim.close()
+                print(f"Guest reply evidence could not be recorded: {exc}", file=sys.stderr)
+                return 1
+            guest_claim.close()
+            print(f"Guest reply verified in Sent Mail for {source}")
+            return 0
+
+    smtp_uncertain = False
     try:
         msg = build_message(
             sender_email=sender_email,
@@ -820,8 +1085,14 @@ def main(argv: list[str]) -> int:
         )
         attach_guest_images(msg, guest_images)
     except ValueError as exc:
+        if args.guest_hees:
+            guest_claim.close()
         print(str(exc), file=sys.stderr)
         return 2
+    if args.guest_hees and not store_guest_reply_attempt(manager_state_dir(), guest_reply_source, msg):
+        guest_claim.close()
+        print("Guest reply attempt could not be recorded before SMTP", file=sys.stderr)
+        return 1
     try:
         ssl_context = ssl.create_default_context()
         with smtplib.SMTP_SSL(
@@ -833,6 +1104,8 @@ def main(argv: list[str]) -> int:
             _ = smtp.login(sender_email, app_password)
             _ = smtp.send_message(msg)
     except smtplib.SMTPAuthenticationError:
+        if args.guest_hees:
+            guest_claim.close()
         print(
             "Authentication failed. Ensure Gmail 2-Step Verification is enabled and use a valid app password.",
             file=sys.stderr,
@@ -841,6 +1114,29 @@ def main(argv: list[str]) -> int:
     except (OSError, smtplib.SMTPException) as exc:
         print(f"Email send failed: {exc}", file=sys.stderr)
         print(f"Delivery-uncertain Message-ID: {msg['Message-ID']}", file=sys.stderr)
+        smtp_uncertain = True
+
+    if args.guest_hees:
+        sent_evidence = verify_guest_reply_in_sent(split_settings, msg) if split_settings is not None else None
+        if sent_evidence is None:
+            guest_claim.close()
+            print(f"Guest reply delivery is unverified; Message-ID: {msg['Message-ID']}", file=sys.stderr)
+            return 1
+        try:
+            source = fulfill_guest_hees_reply_obligation(
+                manager_state_dir(),
+                str(msg["In-Reply-To"]),
+                str(msg["Message-ID"]),
+                sent_evidence.subject_sha256,
+                sent_evidence.body_sha256,
+            )
+        except OSError as exc:
+            guest_claim.close()
+            print(f"Guest reply evidence could not be recorded: {exc}", file=sys.stderr)
+            return 1
+        guest_claim.close()
+        print(f"Guest reply verified in Sent Mail for {source}")
+    elif smtp_uncertain:
         return 1
 
     if args.manager_human:

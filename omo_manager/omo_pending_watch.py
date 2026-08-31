@@ -74,6 +74,12 @@ from omo_manager.amh_problem_claim import read_claims
 from omo_manager.amh_problem_claim import read_issues
 from omo_manager.amh_problem_claim import sync_problem_issues
 from omo_manager.omo_codex_status import tail as codex_tail
+from omo_manager.omo_email_config import GUEST_HEES_MAIL_DIRNAME
+from omo_manager.omo_email_config import GuestHeesOwner
+from omo_manager.omo_email_config import active_guest_hees_owner
+from omo_manager.omo_email_config import guest_hees_intake_is_delivered
+from omo_manager.omo_email_config import guest_hees_intake_receipt_path
+from omo_manager.omo_email_config import guest_hees_owner_is_current
 from omo_manager.omo_pending_digest import PENDING_CONTENT_CHAR_LIMIT
 from omo_manager.omo_pending_digest import pending_tail_digest
 from omo_manager.omo_pending_digest import truncate_content
@@ -626,6 +632,7 @@ class PendingGuard:
     pending_line: int
     pending_digest: str
     pending_text: str
+    guest_owner: GuestHeesOwner | None = None
 
 
 @dataclass(frozen=True)
@@ -670,6 +677,8 @@ class DeliverySuccessEvent:
     durable_report_state: Path | None = None
     durable_report_keys: tuple[str, ...] = ()
     consume_on_unknown_outcome: bool = False
+    guest_owner: GuestHeesOwner | None = None
+    guest_source: str = ""
 
 
 @dataclass(frozen=True)
@@ -847,6 +856,10 @@ def run_verified_send(
             pending_guard.pending_text,
         ):
             raise PrePasteRejected("pending marker cleared before tmux paste")
+        if pending_guard is not None and pending_guard.guest_owner is not None and not guest_hees_owner_is_current(
+            pending_guard.root, pending_guard.guest_owner
+        ):
+            raise PrePasteRejected("guest owner changed before tmux paste")
         if problem_guard is not None and not agent_problem_evidence_current(problem_guard):
             raise PrePasteRejected("agent problem resolved or changed before tmux paste")
 
@@ -1080,6 +1093,11 @@ def drain_delivery_successes(args: Args, seen: dict[str, float], now_wall_s: flo
         seen_at_s = event.seen_at_s or now_wall_s
         durable_ok = True
         clear_ok = True
+        if event.guest_owner is not None and not guest_hees_owner_is_current(args.root, event.guest_owner):
+            print("omo_pending_watch: guest owner changed after delivery; retaining marker for the current owner", file=sys.stderr)
+            clear_ok = False
+        if clear_ok and event.guest_owner is not None and event.guest_source:
+            clear_ok = record_guest_hees_intake_delivery(args.state.parent, event.guest_source, event.guest_owner)
         if event.clear_root is not None and event.clear_marker is not None and event.clear_report_key:
             if event.durable_report_state != args.state or event.durable_report_keys != (event.clear_report_key,):
                 durable_ok = False
@@ -1104,7 +1122,7 @@ def drain_delivery_successes(args: Args, seen: dict[str, float], now_wall_s: flo
                     changed = True
             if not durable_ok:
                 clear_ok = False
-            elif event.clear_root is not None and event.clear_marker is not None:
+            elif clear_ok and event.clear_root is not None and event.clear_marker is not None:
                 clear_ok = clear_pending_marker_if_current(event.clear_root, event.clear_marker)
         for key in event.seen_keys:
             remember_seen(seen, key, seen_at_s)
@@ -3182,6 +3200,7 @@ def push_marker_delivery(
     failure_fallback_text: str | None = None,
     failure_success_event: DeliverySuccessEvent | None = None,
     failure_fallback_defer_if_busy: bool = False,
+    guest_owner: GuestHeesOwner | None = None,
 ) -> DeliveryResult:
     if args.dry_run:
         print(text)
@@ -3201,6 +3220,7 @@ def push_marker_delivery(
             failure_fallback_text=failure_fallback_text,
             failure_success_event=failure_success_event,
             failure_fallback_defer_if_busy=failure_fallback_defer_if_busy,
+            guest_owner=guest_owner,
         )
     return DeliveryResult(1, "missing delivery target")
 
@@ -3306,6 +3326,109 @@ def push_direct_ref(
         return status
     remember_seen(seen, direct_key, now_s)
     if args.dry_run or clear_pending_marker_if_current(args.root, marker):
+        return 0
+    return 1
+
+
+def guest_hees_email_marker(marker: Marker) -> bool:
+    """Identify dedicated guest artifacts without trusting their containing task."""
+    source = Path(marker.delegate_source)
+    return (
+        marker.origin == "human"
+        and marker.source == "email"
+        and not source.is_absolute()
+        and source.parent == Path(GUEST_HEES_MAIL_DIRNAME)
+        and source.suffix == ".txt"
+    )
+
+
+def record_guest_hees_intake_delivery(state_dir: Path, source: str, owner: GuestHeesOwner) -> bool:
+    """Publish one owner-private delivery receipt before clearing its marker."""
+    path = guest_hees_intake_receipt_path(state_dir, source)
+    if guest_hees_intake_is_delivered(state_dir, source, owner):
+        return True
+    try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        path.parent.chmod(0o700)
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(8)}")
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                _ = handle.write(f"source={source}\ntask_file={owner.task_file}\ntarget={owner.target}\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            if path.exists():
+                os.replace(temporary, path)
+            else:
+                os.link(temporary, path)
+            directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        finally:
+            temporary.unlink(missing_ok=True)
+    except FileExistsError:
+        pass
+    except OSError as exc:
+        print(f"omo_pending_watch: failed to record guest intake delivery: {exc}", file=sys.stderr)
+        return False
+    return guest_hees_intake_is_delivered(state_dir, source, owner)
+
+
+def push_guest_hees_ref(
+    args: Args,
+    seen: dict[str, float],
+    now_s: float,
+    marker: Marker,
+    attachments: Sequence[SourceAttachment],
+) -> int:
+    """Deliver guest intake only to the current guest owner, without fallback."""
+    if any(attachment.error for attachment in attachments):
+        return 1
+    try:
+        owner = active_guest_hees_owner(args.root)
+    except RuntimeError as exc:
+        print(f"omo_pending_watch: guest intake retained: {exc}", file=sys.stderr)
+        return 1
+    if guest_hees_intake_is_delivered(args.state.parent, marker.delegate_source, owner):
+        return 0 if args.dry_run or clear_pending_marker_if_current(args.root, marker) else 1
+    if not guest_hees_owner_is_current(args.root, owner):
+        print("omo_pending_watch: guest intake retained after owner changed", file=sys.stderr)
+        return 1
+    marker_key = marker_seen_key(args, marker, attachments)
+    if seen_contains(seen, marker_key, now_s):
+        return 1
+    event = DeliverySuccessEvent(
+        seen_after_clear_keys=(marker_key,),
+        failure_seen_delays_s=((marker_key, PENDING_DELIVERY_FAILURE_RETRY_S),),
+        seen_at_s=now_s,
+        clear_root=args.root,
+        clear_marker=marker,
+        guest_owner=owner,
+        guest_source=marker.delegate_source,
+    )
+    result = push_marker_delivery(
+        args,
+        marker,
+        marker_direct_text(marker, attachments),
+        owner.target,
+        event,
+        guest_owner=owner,
+    )
+    if result.status == ASYNC_DELIVERY_STARTED:
+        remember_seen(seen, marker_key, now_s)
+        return result.status
+    if result.status != 0:
+        return result.status
+    if args.dry_run:
+        return 0
+    if not guest_hees_owner_is_current(args.root, owner):
+        return 1
+    if not record_guest_hees_intake_delivery(args.state.parent, marker.delegate_source, owner):
+        return 1
+    if clear_pending_marker_if_current(args.root, marker):
+        remember_seen(seen, marker_key, now_s)
         return 0
     return 1
 
@@ -3536,6 +3659,8 @@ def push_manager_blocking_notice(args: Args, marker: Marker) -> int:
 def push_ref(args: Args, seen: dict[str, float], now_s: float, marker: Marker, attachments: Sequence[SourceAttachment]) -> int:
     """Deliver one pending marker, guarded by its current file position."""
 
+    if guest_hees_email_marker(marker):
+        return push_guest_hees_ref(args, seen, now_s, marker, attachments)
     if is_manager_blocking_marker(args, marker):
         return push_manager_blocking_notice(args, marker)
     if is_blocking_wake_marker(args, marker):
@@ -3749,11 +3874,12 @@ def try_send_delivery_text(
     problem_guard: AgentProblemGuard | None = None,
     failure_problem_guard: AgentProblemGuard | None = None,
     failure_fallback_defer_if_busy: bool = False,
+    guest_owner: GuestHeesOwner | None = None,
 ) -> DeliveryResult:
     if root is not None and pending_file is not None and not pending_marker_present(root, pending_file, pending_line, pending_digest, pending_text):
         print(f"omo_pending_watch: {name} skipped; pending marker cleared before tmux paste", file=sys.stderr)
         return DeliveryResult(1, "pending marker cleared before tmux paste")
-    pending_guard = PendingGuard(root, pending_file, pending_line, pending_digest, pending_text) if root is not None and pending_file is not None else None
+    pending_guard = PendingGuard(root, pending_file, pending_line, pending_digest, pending_text, guest_owner) if root is not None and pending_file is not None else None
     delivery_id = str(uuid.uuid4()) if root is not None else ""
     options = CodexSendOptions(
         DEFAULT_TMUX_ENTER_COUNT,

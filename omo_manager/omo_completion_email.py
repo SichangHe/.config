@@ -21,6 +21,7 @@ if __package__ in {None, ""}:
 
 from omo_manager.omo_agent_status import TaskFrontmatterError
 from omo_manager.omo_agent_status import parse_task_metadata
+from omo_manager.omo_email_config import guest_hees_target
 from omo_manager.omo_task_context import current_active_task
 from omo_manager.omo_task_lock import task_file_lock
 from omo_manager.omo_task_lock import task_file_lock_at_path
@@ -220,7 +221,13 @@ def build_completion_email(root: Path, task: Path, text: str, outcome: str, *, i
     contact_forbidden = NO_CONTACT_RE.search(policy_text) is not None or (
         MANAGER_ONLY_RE.search(policy_text) is not None and DIRECT_HUMAN_REPORT_RE.search(policy_text) is None
     )
-    if metadata is None or metadata.runat == "retired" or metadata.runat.partition(":")[0].startswith("h") or contact_forbidden:
+    if (
+        metadata is None
+        or metadata.runat == "retired"
+        or metadata.runat.partition(":")[0].startswith("h")
+        or guest_hees_target(metadata.runat)
+        or contact_forbidden
+    ):
         return None
     relative = task.resolve().relative_to(root.resolve()).as_posix()
     details = [f"Task: {relative}", f"Outcome: {outcome}"]

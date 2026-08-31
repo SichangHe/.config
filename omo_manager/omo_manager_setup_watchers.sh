@@ -654,7 +654,7 @@ if [ "$start_guest_hees_email" -eq 1 ]; then
   guest_hees_mail_dir="$root/guest_hees_manager_mail"
   mkdir -p -m 700 "$guest_hees_mail_dir"
   chmod 700 "$guest_hees_mail_dir"
-  guest_hees_email_args=(--guest-hees --root "$root" --mail-dir "$guest_hees_mail_dir" --state-dir "$state_dir" --manager-file guest_hees_mail_mgr.md --manager-target guest_hees:0)
+  guest_hees_email_args=(--guest-hees --root "$root" --mail-dir "$guest_hees_mail_dir" --state-dir "$state_dir")
   guest_hees_email_token="$(owner_token)"
   guest_hees_email_launch_pid_file="$state_dir/.guest-hees-email-supervisor.$guest_hees_email_token.pid"
   setsid bash -c '

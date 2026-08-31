@@ -20,11 +20,14 @@ from datetime import datetime, timedelta, timezone
 from email.message import Message
 from pathlib import Path
 
+try:
+    from .omo_email_config import GUEST_HEES_ADDRESS, guest_hees_target
+except ImportError:
+    from omo_email_config import GUEST_HEES_ADDRESS, guest_hees_target
+
 SCHEMA = "omo-guest-image-batch/v1"
 CLEANUP_SCHEMA = "omo-guest-image-quarantine/v1"
 AUTHENTICATION = "exact-visible-sender-and-gmail-transport-spf/v1"
-GUEST_HEES_ADDRESS = "46496337@qq.com"
-GUEST_HEES_MANAGER_TARGET = "guest_hees:0"
 REFERENCE_RE = re.compile(r"guest-image:v1:([0-9a-f]{64})\Z")
 SOURCE_ID_RE = re.compile(r"[A-Za-z0-9_.:@-]{1,255}\Z")
 BATCH_OBJECT_RE = re.compile(r"batches/[0-9a-f]{64}\.json\Z")
@@ -585,7 +588,7 @@ def _metadata_references(
         set(metadata) != expected_keys
         or metadata.get("schema") != SCHEMA
         or metadata.get("sender") != GUEST_HEES_ADDRESS
-        or metadata.get("route_target") != GUEST_HEES_MANAGER_TARGET
+        or not guest_hees_target(metadata.get("route_target") if isinstance(metadata.get("route_target"), str) else None)
         or metadata.get("authentication") != AUTHENTICATION
         or not isinstance(metadata.get("source_id"), str)
         or SOURCE_ID_RE.fullmatch(str(metadata["source_id"])) is None
@@ -645,7 +648,7 @@ def store_message_images(
 ) -> tuple[str, ...]:
     if sender != GUEST_HEES_ADDRESS:
         raise GuestImageError("guest images require the exact pinned sender")
-    if route_target != GUEST_HEES_MANAGER_TARGET:
+    if not guest_hees_target(route_target):
         raise GuestImageError("guest images require the dedicated guest manager route")
     if authentication != AUTHENTICATION:
         raise GuestImageError("guest images require the exact authenticated-intake marker")
@@ -674,7 +677,7 @@ def store_message_images(
         "source_id": source_id,
         "received_at": stamp,
         "sender": GUEST_HEES_ADDRESS,
-        "route_target": GUEST_HEES_MANAGER_TARGET,
+        "route_target": route_target,
         "authentication": AUTHENTICATION,
         "images": metadata_images,
     }
@@ -688,7 +691,7 @@ def store_message_images(
             if (
                 stored_metadata.get("source_id") != source_id
                 or stored_metadata.get("sender") != GUEST_HEES_ADDRESS
-                or stored_metadata.get("route_target") != GUEST_HEES_MANAGER_TARGET
+                or not guest_hees_target(stored_metadata.get("route_target") if isinstance(stored_metadata.get("route_target"), str) else None)
                 or stored_metadata.get("authentication") != AUTHENTICATION
                 or stored_metadata.get("images") != metadata_images
                 or _metadata_references(stored_metadata, batch_path, allowed_states=frozenset({"planned", "active"}))
@@ -828,7 +831,7 @@ def resolve_for_service(reference: str, *, service: str, root: Path | None = Non
         metadata = _read_json(receipt)
         if (
             metadata.get("sender") != GUEST_HEES_ADDRESS
-            or metadata.get("route_target") != GUEST_HEES_MANAGER_TARGET
+            or not guest_hees_target(metadata.get("route_target") if isinstance(metadata.get("route_target"), str) else None)
             or metadata.get("authentication") != AUTHENTICATION
         ):
             raise GuestImageError("guest image intake receipt trust fields are invalid")

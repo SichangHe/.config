@@ -11,6 +11,8 @@
   - read-only `snapshot` and `identity-preflight` current-view helpers
 - `email-idle-watcher.md`
   - ingest human email into durable manager pending blocks
+- `guest-hees-reply-pipeline.md`
+  - bind dedicated guest intake, owner delivery, and exact Sent reply evidence
 - `digest-and-email.md`
   - durable digest queue and manager-human email sending behavior
 - `agent-sent-mail.md`

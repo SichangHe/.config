@@ -12,11 +12,12 @@ from omo_manager import email_idle_watcher as watcher
 from omo_manager.omo_email_config import (
     AgentMailSettings,
     GUEST_HEES_ADDRESS,
-    GUEST_HEES_MANAGER_TARGET,
+    fulfill_guest_hees_reply_obligation,
     guest_hees_mail,
 )
 
 PNG = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + b"\x00" * 13 + b"\x00\x00\x00\x00IEND\x00\x00\x00\x00"
+GUEST_TARGET = "guest_hees:7"
 
 
 def guest_args(root: Path) -> watcher.Args:
@@ -25,23 +26,23 @@ def guest_args(root: Path) -> watcher.Args:
         manager_url="",
         mail_dir=root / "guest_hees_manager_mail",
         state_dir=root / "state",
-        manager_file=root / "guest_hees_mail_mgr.md",
+        manager_file=None,
         once=True,
         self_email=GUEST_HEES_ADDRESS,
         recovery_debounce_s=0,
         restart_script=root / "restart.sh",
-        manager_target=GUEST_HEES_MANAGER_TARGET,
+        manager_target="",
         guest_hees=True,
     )
 
 
-def install_guest_manager(root: Path) -> Path:
-    task = root / "guest_hees_mail_mgr.md"
+def install_guest_manager(root: Path, *, target: str = GUEST_TARGET, status: str = "long_running", name: str = "guest_current_mgr.md") -> Path:
+    task = root / name
     task.write_text(
-        """---
+        f"""---
 version: v1.0.0
-status: long_running
-runat: guest_hees:0
+status: {status}
+runat: {target}
 tool: codex
 managerat: agent_managers:1
 is_manager: true
@@ -51,7 +52,7 @@ pending_task_items:
 """,
         encoding="utf-8",
     )
-    (root / "TODO.md").write_text("current:\nguest_hees_mail_mgr.md guest_hees:0\n", encoding="utf-8")
+    (root / "TODO.md").write_text(f"current:\n{name} {target}\n", encoding="utf-8")
     return task
 
 
@@ -74,6 +75,13 @@ class Client:
 
 
 class GuestHeesEmailWatcherTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.sendable = patch("omo_manager.omo_tmux_send.require_sendable_codex_target", return_value=None)
+        self.sendable.start()
+
+    def tearDown(self) -> None:
+        self.sendable.stop()
+
     def test_profile_pins_guest_address(self) -> None:
         base = AgentMailSettings("agent@example.test", "secret", "human@example.test")
         self.assertEqual(GUEST_HEES_ADDRESS, guest_hees_mail(base).human_address)
@@ -84,31 +92,43 @@ class GuestHeesEmailWatcherTests(unittest.TestCase):
             task = install_guest_manager(root)
             route = watcher.email_route(guest_args(root), "[other:9] redirect this")
         self.assertEqual(task, route.manager_file)
-        self.assertEqual(GUEST_HEES_MANAGER_TARGET, route.manager_target)
+        self.assertEqual(GUEST_TARGET, route.manager_target)
 
     def test_guest_route_fails_closed_without_dedicated_manager(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            with self.assertRaisesRegex(RuntimeError, "guest-hees manager is unavailable"):
+            with self.assertRaisesRegex(RuntimeError, "requires exactly one"):
                 watcher.email_route(guest_args(Path(tmp)), "plain")
 
-    def test_guest_route_rejects_manager_file_outside_root(self) -> None:
+    def test_guest_route_fails_closed_for_inactive_or_duplicate_owner(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            base = Path(tmp)
-            root = base / "root"
-            root.mkdir()
-            outside = base / "outside" / "guest_hees_mail_mgr.md"
-            outside.parent.mkdir()
-            outside.write_text("runat: guest_hees:0\n", encoding="utf-8")
-            args = guest_args(root)
-            args = watcher.replace(args, manager_file=root / ".." / "outside" / "guest_hees_mail_mgr.md")
-            with self.assertRaisesRegex(RuntimeError, "guest-hees manager is unavailable"):
-                watcher.email_route(args, "plain")
+            root = Path(tmp)
+            _ = install_guest_manager(root, status="done")
+            with self.assertRaisesRegex(RuntimeError, "requires exactly one"):
+                watcher.email_route(guest_args(root), "plain")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = install_guest_manager(root)
+            second = install_guest_manager(root, target="guest_hees:8", name="second_mgr.md")
+            (root / "TODO.md").write_text(
+                f"current:\nguest_current_mgr.md {GUEST_TARGET}\n{second.name} guest_hees:8\n", encoding="utf-8"
+            )
+            with self.assertRaisesRegex(RuntimeError, "found 2"):
+                watcher.email_route(guest_args(root), "plain")
+
+    def test_guest_route_fails_closed_for_unsendable_owner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = install_guest_manager(root)
+            with patch("omo_manager.omo_tmux_send.require_sendable_codex_target", side_effect=RuntimeError("missing pane")):
+                with self.assertRaisesRegex(RuntimeError, "not sendable"):
+                    watcher.email_route(guest_args(root), "plain")
 
     def test_authenticated_guest_mail_routes_end_to_end(self) -> None:
         msg = EmailMessage()
         msg["From"] = f"Human <{GUEST_HEES_ADDRESS}>"
         msg["Return-Path"] = f"<{GUEST_HEES_ADDRESS}>"
         msg["Authentication-Results"] = f"mx.google.com; spf=pass smtp.mailfrom={GUEST_HEES_ADDRESS}"
+        msg["Message-ID"] = "<guest-request@example.test>"
         msg["Subject"] = "[other:9] do not follow this route"
         msg.set_content("guest request\n")
         with tempfile.TemporaryDirectory() as tmp:
@@ -127,21 +147,77 @@ class GuestHeesEmailWatcherTests(unittest.TestCase):
             task_text = task.read_text(encoding="utf-8")
             artifact_name = watcher.mail_artifact_name(args, "41")
             artifact_text = (args.mail_dir / artifact_name).read_text(encoding="utf-8")
+            obligation_text = next((args.state_dir / "guest-hees-reply-obligations").glob("*.state")).read_text(encoding="utf-8")
         self.assertIn(f"guest_hees_manager_mail/{artifact_name}", task_text)
         self.assertNotIn("other:9", task_text)
         self.assertIn(reference, artifact_text)
-        self.assertEqual(["41"], client.seen)
+        self.assertEqual([], client.seen)
         store.assert_called_once()
         self.assertEqual(GUEST_HEES_ADDRESS, store.call_args.kwargs["sender"])
-        self.assertEqual(GUEST_HEES_MANAGER_TARGET, store.call_args.kwargs["route_target"])
+        self.assertEqual(GUEST_TARGET, store.call_args.kwargs["route_target"])
+        self.assertIn("Message-ID: <guest-request@example.test>", artifact_text)
+        self.assertIn("status=open", obligation_text)
         self.assertEqual(watcher.GUEST_IMAGE_AUTHENTICATION, store.call_args.kwargs["authentication"])
         self.assertRegex(store.call_args.kwargs["source_id"], r"^gmail:[0-9a-f]{64}:41$")
+
+    def test_fulfilled_uid_is_seen_only_after_verified_reply(self) -> None:
+        msg = EmailMessage()
+        msg["From"] = f"Human <{GUEST_HEES_ADDRESS}>"
+        msg["Return-Path"] = f"<{GUEST_HEES_ADDRESS}>"
+        msg["Authentication-Results"] = f"mx.google.com; spf=pass smtp.mailfrom={GUEST_HEES_ADDRESS}"
+        msg["Message-ID"] = "<guest-fulfilled@example.test>"
+        msg["Subject"] = "answer me"
+        msg.set_content("substantive request\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = install_guest_manager(root)
+            args = watcher.replace(guest_args(root), inbox_identity="agent@example.test\0uidvalidity=123\0guest-hees")
+            args.mail_dir.mkdir()
+            args.state_dir.mkdir()
+            first = Client(msg.as_bytes())
+            with patch.object(watcher, "store_message_images", return_value=()):
+                self.assertTrue(watcher.handle_unseen(first, args))
+            self.assertEqual([], first.seen)
+            source = f"guest_hees_manager_mail/{watcher.mail_artifact_name(args, '41')}"
+            self.assertEqual(
+                source,
+                fulfill_guest_hees_reply_obligation(
+                    args.state_dir,
+                    "<guest-fulfilled@example.test>",
+                    "<verified-reply@example.test>",
+                    "a" * 64,
+                    "b" * 64,
+                ),
+            )
+            replay = Client(msg.as_bytes())
+            self.assertTrue(watcher.handle_unseen(replay, args))
+        self.assertEqual(["41"], replay.seen)
+
+    def test_non_guest_artifact_keeps_legacy_byte_shape(self) -> None:
+        msg = EmailMessage()
+        msg["Message-ID"] = "<primary@example.test>"
+        msg["In-Reply-To"] = "<parent@example.test>"
+        msg["References"] = "<parent@example.test>"
+        msg["Subject"] = "Primary topic"
+        msg.set_content("primary request\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = watcher.replace(
+                guest_args(root),
+                mail_dir=root / "manager_mail",
+                guest_hees=False,
+                self_email="human@example.test",
+            )
+            path = watcher.write_mail(args, "7", msg, "human@example.test", "Primary topic")
+            payload = path.read_bytes()
+        self.assertEqual(b"Subject: Primary topic\n\nprimary request\n", payload)
 
     def test_authenticated_guest_image_uses_promoted_store_contract(self) -> None:
         msg = EmailMessage()
         msg["From"] = f"Human <{GUEST_HEES_ADDRESS}>"
         msg["Return-Path"] = f"<{GUEST_HEES_ADDRESS}>"
         msg["Authentication-Results"] = f"mx.google.com; spf=pass smtp.mailfrom={GUEST_HEES_ADDRESS}"
+        msg["Message-ID"] = "<guest-image@example.test>"
         msg["Subject"] = "image"
         msg.set_content("guest request\n")
         msg.add_attachment(PNG, maintype="image", subtype="png", filename="guest.png")
@@ -169,6 +245,7 @@ class GuestHeesEmailWatcherTests(unittest.TestCase):
         msg["From"] = f"Human <{GUEST_HEES_ADDRESS}>"
         msg["Return-Path"] = f"<{GUEST_HEES_ADDRESS}>"
         msg["Authentication-Results"] = f"mx.google.com; spf=pass smtp.mailfrom={GUEST_HEES_ADDRESS}"
+        msg["Message-ID"] = "<guest-invalid-image@example.test>"
         msg["Subject"] = "image"
         msg.set_content("guest request\n")
         with tempfile.TemporaryDirectory() as tmp:
@@ -195,6 +272,7 @@ class GuestHeesEmailWatcherTests(unittest.TestCase):
                 if missing_header != "Authentication-Results":
                     msg["Authentication-Results"] = f"mx.google.com; spf=pass smtp.mailfrom={GUEST_HEES_ADDRESS}"
                 msg["Subject"] = "unauthenticated image"
+                msg["Message-ID"] = f"<guest-{missing_header.lower()}@example.test>"
                 msg.set_content("guest request\n")
                 root = Path(tmp)
                 task = install_guest_manager(root)
@@ -259,6 +337,7 @@ class GuestHeesEmailWatcherTests(unittest.TestCase):
                     msg["Return-Path"] = f"<{return_path}>"
                 msg["Authentication-Results"] = f"mx.google.com; spf=pass smtp.mailfrom={spf_address}"
                 msg["Subject"] = "case variant"
+                msg["Message-ID"] = f"<guest-{boundary.lower().replace(' ', '-')}@example.test>"
                 msg.set_content("guest request\n")
                 root = Path(tmp)
                 _ = install_guest_manager(root)
@@ -274,6 +353,66 @@ class GuestHeesEmailWatcherTests(unittest.TestCase):
         msg = EmailMessage()
         msg["From"] = "Human <human@EXAMPLE.TEST>"
         self.assertTrue(watcher.exact_human_sender(msg, "human@example.test", require_transport_identity=False))
+
+    def test_message_text_uses_readable_html_fallback_and_ignores_hidden_content(self) -> None:
+        html_only = EmailMessage()
+        html_only.set_content(
+            "<html><head><title>Hidden</title></head><body><p>Visible request</p><script>bad()</script><div>Second line</div></body></html>",
+            subtype="html",
+        )
+        self.assertEqual("Visible request\nSecond line", watcher.message_text(html_only))
+
+        alternative = EmailMessage()
+        alternative.set_content("")
+        alternative.add_alternative("<p>HTML alternative request</p>", subtype="html")
+        self.assertEqual("HTML alternative request", watcher.message_text(alternative))
+
+        attributes = EmailMessage()
+        attributes.set_content(
+            '<div hidden>hidden attribute</div><p aria-hidden="true">aria hidden</p>'
+            '<section style="display: none">display hidden</section>'
+            '<aside style="visibility:hidden !important">visibility hidden</aside><p>Visible answer</p>',
+            subtype="html",
+        )
+        self.assertEqual("Visible answer", watcher.message_text(attributes))
+
+    def test_message_text_excludes_text_attachments_and_blank_mail(self) -> None:
+        attachment_only = EmailMessage()
+        attachment_only.add_attachment(b"attachment request", maintype="text", subtype="plain", filename="request.txt")
+        self.assertEqual("", watcher.message_text(attachment_only))
+
+        blank = EmailMessage()
+        blank.set_content("  \n")
+        self.assertEqual("", watcher.message_text(blank))
+
+    def test_blank_and_attachment_only_ingress_remain_unread_without_artifacts(self) -> None:
+        blank = EmailMessage()
+        blank.set_content("  \n")
+        attachment_only = EmailMessage()
+        attachment_only.add_attachment(b"hidden request", maintype="text", subtype="plain", filename="request.txt")
+        hidden_only = EmailMessage()
+        hidden_only.set_content(
+            '<div hidden>hidden</div><p aria-hidden="true">also hidden</p><section style="display:none">still hidden</section>',
+            subtype="html",
+        )
+        for name, msg in (("blank", blank), ("attachment", attachment_only), ("hidden", hidden_only)):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                msg["From"] = f"Human <{GUEST_HEES_ADDRESS}>"
+                msg["Return-Path"] = f"<{GUEST_HEES_ADDRESS}>"
+                msg["Authentication-Results"] = f"mx.google.com; spf=pass smtp.mailfrom={GUEST_HEES_ADDRESS}"
+                msg["Message-ID"] = f"<guest-{name}@example.test>"
+                msg["Subject"] = name
+                root = Path(tmp)
+                task = install_guest_manager(root)
+                args = guest_args(root)
+                args.mail_dir.mkdir()
+                args.state_dir.mkdir()
+                client = Client(msg.as_bytes())
+                with patch.object(watcher, "store_message_images", return_value=()):
+                    self.assertFalse(watcher.handle_unseen(client, args))
+                self.assertEqual([], client.seen)
+                self.assertEqual([], list(args.mail_dir.iterdir()))
+                self.assertNotIn("guest_hees_manager_mail", task.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

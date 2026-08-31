@@ -13,7 +13,7 @@ from unittest.mock import patch
 from omo_manager import omo_guest_images as images
 
 GUEST_HEES_ADDRESS = images.GUEST_HEES_ADDRESS
-GUEST_HEES_MANAGER_TARGET = images.GUEST_HEES_MANAGER_TARGET
+GUEST_HEES_MANAGER_TARGET = "guest_hees:7"
 
 PNG = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + b"\x00" * 13 + b"\x00\x00\x00\x00IEND\x00\x00\x00\x00"
 JPEG = b"\xff\xd8\xff\xe0data\xff\xd9"

@@ -20,6 +20,7 @@ import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from email import policy
+from html.parser import HTMLParser
 from email.utils import getaddresses, parsedate_to_datetime
 from email.utils import parseaddr
 from email.message import Message
@@ -30,7 +31,7 @@ from typing import Callable
 from urllib.parse import urlparse
 
 try:
-    from .omo_email_config import AgentMailSettings, GMAIL_IMAP_HOST, GUEST_HEES_MANAGER_TARGET, GUEST_HEES_TASK_FILE, guest_hees_mail, configured_agent_mail, human_config_path
+    from .omo_email_config import AgentMailSettings, GMAIL_IMAP_HOST, active_guest_hees_owner, ensure_guest_hees_reply_obligation, guest_hees_intake_is_delivered, guest_hees_reply_is_fulfilled, guest_hees_mail, configured_agent_mail, human_config_path
     from .omo_email_subject import subject_base
     from .omo_guest_images import AUTHENTICATION as GUEST_IMAGE_AUTHENTICATION
     from .omo_guest_images import GUEST_HEES_ADDRESS as GUEST_IMAGE_SENDER
@@ -40,7 +41,7 @@ try:
     from .omo_tmux_send import CodexSendOptions, DEFAULT_TMUX_ENTER_COUNT, require_sendable_codex_target, send_system_to_codex as send_to_codex
 except ImportError:
     try:
-        from omo_email_config import AgentMailSettings, GMAIL_IMAP_HOST, GUEST_HEES_MANAGER_TARGET, GUEST_HEES_TASK_FILE, guest_hees_mail, configured_agent_mail, human_config_path
+        from omo_email_config import AgentMailSettings, GMAIL_IMAP_HOST, active_guest_hees_owner, ensure_guest_hees_reply_obligation, guest_hees_intake_is_delivered, guest_hees_reply_is_fulfilled, guest_hees_mail, configured_agent_mail, human_config_path
         from omo_email_subject import subject_base
         from omo_guest_images import AUTHENTICATION as GUEST_IMAGE_AUTHENTICATION
         from omo_guest_images import GUEST_HEES_ADDRESS as GUEST_IMAGE_SENDER
@@ -354,19 +355,89 @@ def parse_env_config(path: Path) -> dict[str, str]:
     return values
 
 
-def message_text(msg: Message) -> str:
-    if msg.is_multipart():
-        for part in msg.walk():
-            if part.get_content_type() == "text/plain" and not part.get_filename():
-                payload = part.get_payload(decode=True)
-                if isinstance(payload, bytes):
-                    return payload.decode(part.get_content_charset() or "utf-8", errors="replace")
-        return ""
-    payload = msg.get_payload(decode=True)
+class ReadableHTMLParser(HTMLParser):
+    """Extract readable text while discarding non-content HTML elements."""
+
+    BLOCKS = frozenset({"address", "article", "aside", "blockquote", "br", "div", "footer", "h1", "h2", "h3", "h4", "h5", "h6", "header", "li", "main", "p", "pre", "section", "table", "tr"})
+    HIDDEN = frozenset({"head", "script", "style", "svg", "template"})
+    VOID = frozenset({"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"})
+    HIDDEN_STYLE_RE = re.compile(r"(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*hidden)(?:\s*!important)?\s*(?:;|$)", re.IGNORECASE)
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.fragments: list[str] = []
+        self.hidden_depth = 0
+        self.elements: list[tuple[str, bool]] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = {name: value or "" for name, value in attrs}
+        hidden = (
+            tag in self.HIDDEN
+            or "hidden" in values
+            or values.get("aria-hidden", "").casefold() == "true"
+            or self.HIDDEN_STYLE_RE.search(values.get("style", "")) is not None
+        )
+        if hidden and tag not in self.VOID:
+            self.hidden_depth += 1
+        elif not hidden and not self.hidden_depth and tag in self.BLOCKS:
+            self.fragments.append("\n")
+        if tag not in self.VOID:
+            self.elements.append((tag, hidden))
+
+    def handle_endtag(self, tag: str) -> None:
+        match = next((idx for idx in range(len(self.elements) - 1, -1, -1) if self.elements[idx][0] == tag), None)
+        if match is None:
+            return
+        closed = self.elements[match:]
+        del self.elements[match:]
+        self.hidden_depth = max(0, self.hidden_depth - sum(hidden for _name, hidden in closed))
+        if not self.hidden_depth and tag in self.BLOCKS:
+            self.fragments.append("\n")
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.handle_starttag(tag, attrs)
+        if tag not in self.VOID:
+            self.handle_endtag(tag)
+
+    def handle_data(self, data: str) -> None:
+        if not self.hidden_depth:
+            self.fragments.append(data)
+
+    def text(self) -> str:
+        lines = [" ".join(line.split()) for line in "".join(self.fragments).splitlines()]
+        return "\n".join(line for line in lines if line).strip()
+
+
+def decoded_part_text(part: Message) -> str:
+    payload = part.get_payload(decode=True)
     if isinstance(payload, bytes):
-        return payload.decode(msg.get_content_charset() or "utf-8", errors="replace")
-    raw = msg.get_payload()
+        return payload.decode(part.get_content_charset() or "utf-8", errors="replace")
+    raw = part.get_payload()
     return raw if isinstance(raw, str) else ""
+
+
+def readable_html(html_text: str) -> str:
+    parser = ReadableHTMLParser()
+    parser.feed(html_text)
+    parser.close()
+    return parser.text()
+
+
+def message_text(msg: Message) -> str:
+    """Prefer nonempty plain text and safely fall back to readable HTML."""
+    plain: list[str] = []
+    html: list[str] = []
+    for part in msg.walk():
+        if part.is_multipart() or part.get_filename() or part.get_content_disposition() == "attachment":
+            continue
+        content_type = part.get_content_type()
+        if content_type == "text/plain":
+            plain.append(decoded_part_text(part))
+        elif content_type == "text/html":
+            html.append(decoded_part_text(part))
+    if text := next((value for value in plain if value.strip()), ""):
+        return text
+    return next((text for value in html if (text := readable_html(value))), "")
 
 
 def from_self(sender: str, self_email: str) -> bool:
@@ -699,15 +770,8 @@ def inactive_task_files_for_target(root: Path, tmux_target: str) -> list[Path]:
 def email_route(args: Args, subject: str, body: str = "") -> EmailRoute:
     del body
     if args.guest_hees:
-        manager_file = current_manager_file(args)
-        try:
-            manager_text = manager_file.read_text(encoding="utf-8")
-            manager_file.resolve(strict=False).relative_to(args.root.resolve(strict=False))
-        except (OSError, ValueError):
-            raise RuntimeError(f"guest-hees manager is unavailable: {GUEST_HEES_MANAGER_TARGET}")
-        if manager_file.name != GUEST_HEES_TASK_FILE or re.search(rf"(?m)^runat:\s*{re.escape(GUEST_HEES_MANAGER_TARGET)}\s*$", manager_text) is None:
-            raise RuntimeError(f"guest-hees manager is unavailable: {GUEST_HEES_MANAGER_TARGET}")
-        return EmailRoute(manager_file, GUEST_HEES_MANAGER_TARGET, pending_watcher_delivery=True)
+        owner = active_guest_hees_owner(args.root)
+        return EmailRoute(owner.task_file, owner.target, pending_watcher_delivery=True)
     tmux_target = subject_manager_target(subject)
     if not tmux_target:
         return default_email_route(args)
@@ -1163,15 +1227,18 @@ def append_pending(
     root: Path,
     txt_path: Path,
     manager_file: Path | None = None,
+    *,
+    allow_prior_consumed_source: bool = False,
 ) -> int:
     manager_file = manager_file or dated_manager_file(root)
     with task_file_lock(manager_file):
         existing_line = existing_source_pending_line(root, txt_path, manager_file)
         if existing_line is not None:
             return existing_line
-        consumed_line = existing_consumed_source_line(root, txt_path, manager_file)
-        if consumed_line is not None:
-            return consumed_line
+        if not allow_prior_consumed_source:
+            consumed_line = existing_consumed_source_line(root, txt_path, manager_file)
+            if consumed_line is not None:
+                return consumed_line
         text = manager_file.read_text(encoding="utf-8") if manager_file.exists() else ""
         pending_line = len(text.splitlines()) + 2
         from_line = email_source_lines(root, txt_path)[0]
@@ -1428,7 +1495,16 @@ def write_mail(args: Args, uid: str, msg: Message, _sender: str, subject: str, i
     args.mail_dir.chmod(0o700)
     txt_path = args.mail_dir / mail_artifact_name(args, uid)
     references = "" if not image_references else "\n\nGuest images:\n" + "".join(f"- {reference}\n" for reference in image_references)
-    body = f"Subject: {normalize_human_subject(subject)}\n\n{message_text(msg)}{references}"
+    if args.guest_hees:
+        headers = [
+            f"Message-ID: {str(msg.get('Message-ID', '')).strip()}",
+            f"In-Reply-To: {str(msg.get('In-Reply-To', '')).strip()}",
+            f"References: {str(msg.get('References', '')).strip()}",
+            f"Subject: {normalize_human_subject(subject)}",
+        ]
+        body = f"{'\n'.join(headers)}\n\n{message_text(msg)}{references}"
+    else:
+        body = f"Subject: {normalize_human_subject(subject)}\n\n{message_text(msg)}{references}"
     fd = os.open(txt_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write(body)
@@ -2916,9 +2992,35 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
         if uid in ignored_uids:
             continue
         expected_txt_path = args.mail_dir / mail_artifact_name(args, uid)
+        expected_source = str(source_ref(args.root, expected_txt_path))
+        if args.guest_hees and guest_hees_reply_is_fulfilled(args.state_dir, expected_source):
+            unaccepted_pending_uids.discard(uid)
+            unaccepted_changed = True
+            if mark_seen_after_human_intake(client, uid, args, txt_path=expected_txt_path):
+                processed_uids.add(uid)
+                processed_changed = True
+                handled = True
+            continue
+        if args.guest_hees:
+            try:
+                current_guest_owner = active_guest_hees_owner(args.root)
+            except RuntimeError as exc:
+                logging.warning("guest email owner unavailable during replay; leaving unread: uid=%s error=%s", uid, exc)
+                handled = True
+                continue
+            if guest_hees_intake_is_delivered(args.state_dir, expected_source, current_guest_owner):
+                unaccepted_pending_uids.add(uid)
+                unaccepted_changed = True
+                handled = True
+                continue
         pending_ref = existing_source_pending_path_line_in_root(args.root, expected_txt_path, manager_file) if uid in unaccepted_pending_uids else None
         if pending_ref is not None:
             pending_file, pending_line = pending_ref
+            if args.guest_hees:
+                unaccepted_pending_uids.add(uid)
+                unaccepted_changed = True
+                handled = True
+                continue
             if pending_watcher_delivery_present(args.root, pending_file, pending_line) or push_email_ref(
                 args_for_manager_file(args, pending_file, pending_line), pending_line
             ):
@@ -2932,7 +3034,7 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
                 unaccepted_pending_uids.add(uid)
                 unaccepted_changed = True
             continue
-        if uid in unaccepted_pending_uids and (
+        if not args.guest_hees and uid in unaccepted_pending_uids and (
             existing_source_line_in_root(args.root, expected_txt_path, manager_file) is not None
             or existing_consumed_source_line(args.root, expected_txt_path, manager_file) is not None
         ):
@@ -2957,6 +3059,11 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
         existing_pending = existing_source_pending_path_line_in_root(args.root, expected_txt_path, manager_file)
         if existing_pending is not None:
             pending_file, existing_pending_line = existing_pending
+            if args.guest_hees:
+                unaccepted_pending_uids.add(uid)
+                unaccepted_changed = True
+                handled = True
+                continue
             if pending_watcher_delivery_present(args.root, pending_file, existing_pending_line) or push_email_ref(
                 args_for_manager_file(args, pending_file, existing_pending_line), existing_pending_line
             ):
@@ -2970,7 +3077,7 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
                 unaccepted_pending_uids.add(uid)
                 unaccepted_changed = True
             continue
-        if existing_consumed_source_line(args.root, expected_txt_path, manager_file) is not None:
+        if not args.guest_hees and existing_consumed_source_line(args.root, expected_txt_path, manager_file) is not None:
             logging.info("email uid already has acknowledged or routed source; accepting without duplicate pending: uid=%s root=%s", uid, args.root)
             unaccepted_pending_uids.discard(uid)
             unaccepted_changed = True
@@ -3004,15 +3111,23 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
         image_references: tuple[str, ...] = ()
         if args.guest_hees:
             try:
+                owner = active_guest_hees_owner(args.root)
+            except RuntimeError as exc:
+                logging.warning("guest email owner unavailable; leaving unread: uid=%s error=%s", uid, exc)
+                continue
+            try:
                 image_references = store_message_images(
                     msg,
                     sender=GUEST_IMAGE_SENDER,
-                    route_target=GUEST_HEES_MANAGER_TARGET,
+                    route_target=owner.target,
                     authentication=GUEST_IMAGE_AUTHENTICATION,
                     source_id=f"gmail:{hashlib.sha256((args.inbox_identity or args.self_email).encode()).hexdigest()}:{uid}",
                 )
             except (GuestImageError, OSError) as exc:
                 logging.warning("guest email image batch rejected; leaving unread: uid=%s error=%s", uid, exc)
+                continue
+            if not body_text.strip() and not image_references:
+                logging.warning("guest email has no readable body or supported image; leaving unread: uid=%s", uid)
                 continue
         amh_result = AmhRouteDisposition.FALLBACK if args.guest_hees else try_route_amh_message(client, args, uid, msg, raw_mime if isinstance(raw_mime, bytes) else b"")
         if amh_result is AmhRouteDisposition.HOLD:
@@ -3032,6 +3147,14 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
             continue
         txt_path = write_mail(args, uid, msg, sender, subject, image_references)
         logging.info("email stored: uid=%s path=%s subject=%r", uid, source_ref(args.root, txt_path), subject)
+        if args.guest_hees and not ensure_guest_hees_reply_obligation(
+            args.state_dir, str(source_ref(args.root, txt_path)), str(msg.get("Message-ID", "")).strip()
+        ):
+            logging.warning("guest email reply obligation could not be recorded; leaving unread: uid=%s", uid)
+            unaccepted_pending_uids.add(uid)
+            unaccepted_changed = True
+            handled = True
+            continue
         if not args.guest_hees and is_recovery_subject(subject):
             if recovery_sender_authenticated(msg, args.self_email):
                 handle_recovery_email(args, uid, txt_path)
@@ -3042,14 +3165,26 @@ def handle_unseen(client: imaplib.IMAP4_SSL, args: Args) -> bool:
                 processed_changed = True
                 handled = True
         else:
-            route = email_route(args, subject, body_text)
+            try:
+                route = email_route(args, subject, body_text)
+            except RuntimeError as exc:
+                logging.warning("email route unavailable; leaving unread: uid=%s error=%s", uid, exc)
+                unaccepted_pending_uids.add(uid)
+                unaccepted_changed = True
+                handled = True
+                continue
             route_args = replace(args, manager_file=route.manager_file, manager_target=route.manager_target)
             pending_line = append_pending(
                 args.root,
                 txt_path,
                 route.manager_file,
+                allow_prior_consumed_source=args.guest_hees,
             )
-            if route.pending_watcher_delivery or push_email_ref(route_args, pending_line):
+            if args.guest_hees:
+                unaccepted_pending_uids.add(uid)
+                unaccepted_changed = True
+                handled = True
+            elif route.pending_watcher_delivery or push_email_ref(route_args, pending_line):
                 unaccepted_pending_uids.discard(uid)
                 unaccepted_changed = True
                 if mark_seen_after_human_intake(client, uid, args, msg):

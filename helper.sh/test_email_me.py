@@ -18,6 +18,7 @@ sys.modules[SPEC.name] = email_me
 SPEC.loader.exec_module(email_me)
 omo_email_subject = sys.modules["omo_email_subject"]
 omo_guest_images = sys.modules["omo_guest_images"]
+omo_email_config = sys.modules["omo_email_config"]
 
 SHELL_SENSITIVE_BODY = """literal $HOME
 literal $(touch /tmp/email-me-should-not-run)
@@ -494,6 +495,11 @@ class EmailMeTests(unittest.TestCase):
             args = email_me.parse_args(["--guest-hees", "--manager-human", "--tmux-target", "guest_hees:1", "--subject", "hi"])
         self.assertTrue(args.guest_hees)
 
+    def test_guest_sender_uses_real_helper_imports(self) -> None:
+        self.assertIs(email_me.configured_agent_mail, omo_email_config.configured_agent_mail)
+        self.assertIs(email_me.prepare_subject_and_headers, omo_email_subject.prepare_subject_and_headers)
+        self.assertIs(email_me.reply_attachments, omo_guest_images.reply_attachments)
+
     def test_guest_image_reference_rejects_non_guest_producer(self) -> None:
         reference = "guest-image:v1:" + "a" * 64
         with (
@@ -548,15 +554,22 @@ class EmailMeTests(unittest.TestCase):
                 sent_messages.append(msg)
 
         with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "state"
+            parent = "<guest-request@example.test>"
+            self.assertTrue(omo_email_config.ensure_guest_hees_reply_obligation(state, "guest_hees_manager_mail/request.txt", parent))
+            prepared = ("Re: [guest_hees:1] Topic", {"In-Reply-To": parent, "References": parent})
+            evidence = email_me.GuestSentEvidence("a" * 64, "b" * 64)
             with (
-                patch.dict(os.environ, {"OMO_MANAGER_STATE_DIR": str(Path(tmp) / "state")}, clear=False),
+                patch.dict(os.environ, {"OMO_MANAGER_STATE_DIR": str(state)}, clear=False),
                 patch.object(sys, "stdin", StringIO("guest reply\n")),
                 patch.object(email_me, "configured_agent_mail", return_value=Settings()),
+                patch.object(email_me, "prepare_subject_and_headers", return_value=prepared),
+                patch.object(email_me, "verify_guest_reply_in_sent", return_value=evidence),
                 patch.object(email_me.smtplib, "SMTP_SSL", FakeSmtp),
                 patch.object(email_me.ssl, "create_default_context", return_value=None),
                 patch.object(email_me, "maybe_print_thread_reminder"),
             ):
-                result = email_me.main(["--guest-hees", "--manager-human", "--tmux-target", "guest_hees:1", "--subject", "Topic"])
+                result = email_me.main(["--guest-hees", "--manager-human", "--tmux-target", "guest_hees:1", "--subject", "Re: Topic"])
         self.assertEqual(0, result)
         self.assertEqual("46496337@qq.com", sent_messages[0]["To"])
         self.assertIn("[guest_hees:1]", sent_messages[0]["Subject"])
@@ -586,15 +599,22 @@ class EmailMeTests(unittest.TestCase):
                 sent_messages.append(msg)
 
         with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "state"
+            parent = "<guest-inferred@example.test>"
+            self.assertTrue(omo_email_config.ensure_guest_hees_reply_obligation(state, "guest_hees_manager_mail/inferred.txt", parent))
+            prepared = ("Re: [guest_hees:2] Topic", {"In-Reply-To": parent, "References": parent})
+            evidence = email_me.GuestSentEvidence("a" * 64, "b" * 64)
             with (
-                patch.dict(os.environ, {"OMO_MANAGER_STATE_DIR": str(Path(tmp) / "state"), "OMO_AGENT_TMUX_TARGET": "guest_hees:2"}, clear=False),
+                patch.dict(os.environ, {"OMO_MANAGER_STATE_DIR": str(state), "OMO_AGENT_TMUX_TARGET": "guest_hees:2"}, clear=False),
                 patch.object(sys, "stdin", StringIO("guest reply\n")),
                 patch.object(email_me, "configured_agent_mail", return_value=Settings()),
+                patch.object(email_me, "prepare_subject_and_headers", return_value=prepared),
+                patch.object(email_me, "verify_guest_reply_in_sent", return_value=evidence),
                 patch.object(email_me.smtplib, "SMTP_SSL", FakeSmtp),
                 patch.object(email_me.ssl, "create_default_context", return_value=None),
                 patch.object(email_me, "maybe_print_thread_reminder"),
             ):
-                result = email_me.main(["--manager-human", "--subject", "Topic"])
+                result = email_me.main(["--manager-human", "--subject", "Re: Topic"])
         self.assertEqual(0, result)
         self.assertEqual("46496337@qq.com", sent_messages[0]["To"])
         self.assertIn("[guest_hees:2]", sent_messages[0]["Subject"])
@@ -632,26 +652,402 @@ class EmailMeTests(unittest.TestCase):
             reference = omo_guest_images.store_message_images(
                 incoming,
                 sender="46496337@qq.com",
-                route_target="guest_hees:0",
+                route_target="guest_hees:3",
                 authentication=omo_guest_images.AUTHENTICATION,
                 source_id="gmail:test:reply",
                 root=image_root,
             )[0]
+            state = Path(tmp) / "state"
+            parent = "<guest-image@example.test>"
+            self.assertTrue(omo_email_config.ensure_guest_hees_reply_obligation(state, "guest_hees_manager_mail/image.txt", parent))
+            prepared = ("Re: [guest_hees:3] Image", {"In-Reply-To": parent, "References": parent})
+            evidence = email_me.GuestSentEvidence("a" * 64, "b" * 64)
             with (
-                patch.dict(os.environ, {"OMO_MANAGER_STATE_DIR": str(Path(tmp) / "state"), "OMO_GUEST_IMAGE_ROOT": str(image_root), "OMO_AGENT_TMUX_TARGET": "guest_hees:3"}, clear=False),
+                patch.dict(os.environ, {"OMO_MANAGER_STATE_DIR": str(state), "OMO_GUEST_IMAGE_ROOT": str(image_root), "OMO_AGENT_TMUX_TARGET": "guest_hees:3"}, clear=False),
                 patch.object(sys, "stdin", StringIO("guest reply\n")),
                 patch.object(email_me, "configured_agent_mail", return_value=Settings()),
+                patch.object(email_me, "prepare_subject_and_headers", return_value=prepared),
+                patch.object(email_me, "verify_guest_reply_in_sent", return_value=evidence),
                 patch.object(email_me.smtplib, "SMTP_SSL", FakeSmtp),
                 patch.object(email_me.ssl, "create_default_context", return_value=None),
                 patch.object(email_me, "maybe_print_thread_reminder"),
             ):
-                result = email_me.main(["--guest-image-reference", reference, "--manager-human", "--subject", "Image"])
+                result = email_me.main(["--guest-image-reference", reference, "--manager-human", "--subject", "Re: Image"])
         self.assertEqual(0, result)
         self.assertEqual("46496337@qq.com", sent_messages[0]["To"])
         self.assertIn("[guest_hees:3]", sent_messages[0]["Subject"])
         attachments = list(sent_messages[0].iter_attachments())
         self.assertEqual(1, len(attachments))
         self.assertEqual(image_bytes, attachments[0].get_payload(decode=True))
+
+    def test_guest_reply_rejects_lifecycle_notice_and_missing_thread_before_smtp(self) -> None:
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+            app_password = "secret"
+
+        cases = (
+            (
+                "Task: guest.md\nOutcome: task done\n",
+                ("Re: [guest_hees:7] Topic", {"In-Reply-To": "<request@example.test>", "References": "<request@example.test>"}),
+                "substantive",
+            ),
+            ("This is the requested answer.\n", ("Re: [guest_hees:7] Topic", {}), "thread"),
+        )
+        for content, prepared, error in cases:
+            with self.subTest(error=error), tempfile.TemporaryDirectory() as tmp:
+                state = Path(tmp) / "state"
+                with (
+                    patch.dict(os.environ, {"OMO_MANAGER_STATE_DIR": str(state)}, clear=False),
+                    patch.object(sys, "stdin", StringIO(content)),
+                    patch.object(email_me, "configured_agent_mail", return_value=Settings()),
+                    patch.object(email_me, "prepare_subject_and_headers", return_value=prepared),
+                    patch.object(email_me.smtplib, "SMTP_SSL") as smtp,
+                    patch("sys.stderr", new_callable=StringIO) as stderr,
+                ):
+                    result = email_me.main(
+                        ["--guest-hees", "--manager-human", "--tmux-target", "guest_hees:7", "--subject", "Re: Topic"]
+                    )
+                self.assertEqual(2, result)
+                self.assertIn(error, stderr.getvalue())
+                smtp.assert_not_called()
+
+    def test_sent_guest_reply_rejects_same_headers_with_different_body(self) -> None:
+        headers = {"In-Reply-To": "<request@example.test>", "References": "<request@example.test>"}
+        expected = email_me.build_message(
+            "agent@example.test",
+            "Re: Topic",
+            "Expected substantive answer.\n",
+            False,
+            "Re: [guest_hees:7] Topic",
+            headers,
+            manager_human=True,
+            recipient_email="46496337@qq.com",
+        )
+        candidate = email_me.build_message(
+            "agent@example.test",
+            "Re: Topic",
+            "Different substantive answer.\n",
+            False,
+            "Re: [guest_hees:7] Topic",
+            headers,
+            manager_human=True,
+            recipient_email="46496337@qq.com",
+        )
+        candidate.replace_header("Message-ID", str(expected["Message-ID"]))
+        self.assertFalse(email_me.sent_message_matches_guest_reply(candidate, expected, "agent@example.test"))
+        exact = email_me.BytesParser(policy=email_me.policy.default).parsebytes(expected.as_bytes())
+        self.assertTrue(email_me.sent_message_matches_guest_reply(exact, expected, "agent@example.test"))
+
+    def test_guest_smtp_uncertainty_requires_sent_mail_evidence(self) -> None:
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+            app_password = "secret"
+
+        class UncertainSmtp:
+            def __init__(self, **_kwargs: object) -> None:
+                return None
+
+            def __enter__(self) -> "UncertainSmtp":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def login(self, _sender: str, _password: str) -> None:
+                return None
+
+            def send_message(self, _msg: object) -> None:
+                raise email_me.smtplib.SMTPException("connection lost after submit")
+
+        for verified in (False, True):
+            with self.subTest(verified=verified), tempfile.TemporaryDirectory() as tmp:
+                state = Path(tmp) / "state"
+                parent = f"<uncertain-{verified}@example.test>"
+                source = f"guest_hees_manager_mail/uncertain-{verified}.txt"
+                self.assertTrue(omo_email_config.ensure_guest_hees_reply_obligation(state, source, parent))
+                prepared = ("Re: [guest_hees:7] Topic", {"In-Reply-To": parent, "References": parent})
+                evidence = email_me.GuestSentEvidence("a" * 64, "b" * 64) if verified else None
+                with (
+                    patch.dict(os.environ, {"OMO_MANAGER_STATE_DIR": str(state)}, clear=False),
+                    patch.object(sys, "stdin", StringIO("Substantive answer despite uncertain SMTP.\n")),
+                    patch.object(email_me, "configured_agent_mail", return_value=Settings()),
+                    patch.object(email_me, "prepare_subject_and_headers", return_value=prepared),
+                    patch.object(email_me, "verify_guest_reply_in_sent", return_value=evidence),
+                    patch.object(email_me.smtplib, "SMTP_SSL", UncertainSmtp),
+                    patch.object(email_me.ssl, "create_default_context", return_value=None),
+                    patch.object(email_me, "maybe_print_thread_reminder"),
+                    patch("sys.stderr", new_callable=StringIO),
+                ):
+                    result = email_me.main(
+                        ["--guest-hees", "--manager-human", "--tmux-target", "guest_hees:7", "--subject", "Re: Topic"]
+                    )
+                self.assertEqual(0 if verified else 1, result)
+                obligation = omo_email_config.read_guest_hees_reply_obligation(state, source)
+                assert obligation is not None
+                self.assertEqual("fulfilled" if verified else "open", obligation.status)
+                self.assertFalse((state / "guest-hees-email-dedupe.tsv").exists())
+
+    def test_guest_uncertain_attempt_retries_same_state_then_fulfills_once(self) -> None:
+        smtp_messages: list[object] = []
+
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+            app_password = "secret"
+
+        class UncertainSmtp:
+            def __init__(self, **_kwargs: object) -> None:
+                return None
+
+            def __enter__(self) -> "UncertainSmtp":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def login(self, _sender: str, _password: str) -> None:
+                return None
+
+            def send_message(self, msg: object) -> None:
+                smtp_messages.append(msg)
+                raise email_me.smtplib.SMTPException("uncertain after submit")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "state"
+            parent = "<same-state-retry@example.test>"
+            source = "guest_hees_manager_mail/same-state-retry.txt"
+            self.assertTrue(omo_email_config.ensure_guest_hees_reply_obligation(state, source, parent))
+            prepared = ("Re: [guest_hees:7] Retry", {"In-Reply-To": parent, "References": parent})
+            evidence = email_me.GuestSentEvidence("a" * 64, "b" * 64)
+            env = {"OMO_MANAGER_STATE_DIR": str(state), "OMO_MANAGER_EMAIL_DEDUPE_S": "300"}
+            argv = ["--guest-hees", "--manager-human", "--tmux-target", "guest_hees:7", "--subject", "Re: Retry"]
+
+            sent_evidence = iter((None, None, evidence))
+
+            def invoke() -> int:
+                with (
+                    patch.dict(os.environ, env, clear=False),
+                    patch.object(sys, "stdin", StringIO("Substantive answer retried in the same state.\n")),
+                    patch.object(email_me, "configured_agent_mail", return_value=Settings()),
+                    patch.object(email_me, "prepare_subject_and_headers", return_value=prepared),
+                    patch.object(email_me, "verify_guest_reply_in_sent", side_effect=sent_evidence),
+                    patch.object(email_me.smtplib, "SMTP_SSL", UncertainSmtp),
+                    patch.object(email_me.ssl, "create_default_context", return_value=None),
+                    patch.object(email_me, "maybe_print_thread_reminder"),
+                    patch("sys.stderr", new_callable=StringIO),
+                ):
+                    return email_me.main(argv)
+
+            self.assertEqual(1, invoke())
+            first = omo_email_config.read_guest_hees_reply_obligation(state, source)
+            assert first is not None
+            self.assertEqual("open", first.status)
+            self.assertEqual(1, len(smtp_messages))
+
+            self.assertEqual(0, invoke())
+            second = omo_email_config.read_guest_hees_reply_obligation(state, source)
+            assert second is not None
+            self.assertEqual("fulfilled", second.status)
+            self.assertEqual(2, len(smtp_messages))
+
+            self.assertEqual(2, invoke())
+            self.assertEqual(2, len(smtp_messages))
+
+    def test_guest_retry_reconciles_delayed_sent_copy_before_resending(self) -> None:
+        smtp_messages: list[object] = []
+
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+            app_password = "secret"
+
+        class UncertainSmtp:
+            def __init__(self, **_kwargs: object) -> None:
+                return None
+
+            def __enter__(self) -> "UncertainSmtp":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def login(self, _sender: str, _password: str) -> None:
+                return None
+
+            def send_message(self, msg: object) -> None:
+                smtp_messages.append(msg)
+                raise email_me.smtplib.SMTPException("uncertain after submit")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "state"
+            parent = "<delayed-copy@example.test>"
+            source = "guest_hees_manager_mail/delayed-copy.txt"
+            self.assertTrue(omo_email_config.ensure_guest_hees_reply_obligation(state, source, parent))
+            prepared = ("Re: [guest_hees:7] Delayed", {"In-Reply-To": parent, "References": parent})
+            evidence = email_me.GuestSentEvidence("a" * 64, "b" * 64)
+            env = {"OMO_MANAGER_STATE_DIR": str(state), "OMO_MANAGER_EMAIL_DEDUPE_S": "300"}
+            argv = ["--guest-hees", "--manager-human", "--tmux-target", "guest_hees:7", "--subject", "Re: Delayed"]
+
+            def invoke(sent_evidence: object) -> int:
+                with (
+                    patch.dict(os.environ, env, clear=False),
+                    patch.object(sys, "stdin", StringIO("Substantive delayed-copy answer.\n")),
+                    patch.object(email_me, "configured_agent_mail", return_value=Settings()),
+                    patch.object(email_me, "prepare_subject_and_headers", return_value=prepared),
+                    patch.object(email_me, "verify_guest_reply_in_sent", return_value=sent_evidence),
+                    patch.object(email_me.smtplib, "SMTP_SSL", UncertainSmtp),
+                    patch.object(email_me.ssl, "create_default_context", return_value=None),
+                    patch.object(email_me, "maybe_print_thread_reminder"),
+                    patch("sys.stderr", new_callable=StringIO),
+                ):
+                    return email_me.main(argv)
+
+            self.assertEqual(1, invoke(None))
+            self.assertEqual(1, len(smtp_messages))
+            self.assertEqual(0, invoke(evidence))
+            self.assertEqual(1, len(smtp_messages))
+            obligation = omo_email_config.read_guest_hees_reply_obligation(state, source)
+            assert obligation is not None
+            self.assertEqual("fulfilled", obligation.status)
+
+    def test_guest_fake_send_is_rejected_without_fulfillment(self) -> None:
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+            app_password = "secret"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "state"
+            parent = "<duplicate@example.test>"
+            self.assertTrue(
+                omo_email_config.ensure_guest_hees_reply_obligation(
+                    state, "guest_hees_manager_mail/duplicate.txt", parent
+                )
+            )
+            prepared = ("Re: [guest_hees:7] Topic", {"In-Reply-To": parent, "References": parent})
+            env = {"OMO_MANAGER_STATE_DIR": str(state), "OMO_MANAGER_EMAIL_DEDUPE_S": "300"}
+            argv = ["--guest-hees", "--manager-human", "--tmux-target", "guest_hees:7", "--subject", "Re: Topic"]
+            with (
+                patch.dict(os.environ, env, clear=False),
+                patch.object(sys, "stdin", StringIO("Substantive duplicate answer.\n")),
+                patch.object(email_me, "configured_agent_mail", return_value=Settings()),
+                patch.object(email_me, "prepare_subject_and_headers", return_value=prepared),
+                patch.object(email_me, "fake_send_log_path", return_value=state / "fake-send.txt"),
+                patch("sys.stderr", new_callable=StringIO) as stderr,
+            ):
+                self.assertEqual(2, email_me.main(argv))
+            self.assertIn("cannot verify", stderr.getvalue())
+            obligation = omo_email_config.read_guest_hees_reply_obligation(state, "guest_hees_manager_mail/duplicate.txt")
+            assert obligation is not None
+            self.assertEqual("open", obligation.status)
+            self.assertFalse((state / "fake-send.txt").exists())
+
+    def test_guest_obligation_reservation_blocks_different_body_concurrently(self) -> None:
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+            app_password = "secret"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "state"
+            parent = "<concurrent@example.test>"
+            source = "guest_hees_manager_mail/concurrent.txt"
+            self.assertTrue(omo_email_config.ensure_guest_hees_reply_obligation(state, source, parent))
+            prepared = ("Re: [guest_hees:7] Topic", {"In-Reply-To": parent, "References": parent})
+            env = {"OMO_MANAGER_STATE_DIR": str(state), "OMO_MANAGER_EMAIL_DEDUPE_S": "300"}
+            with (
+                patch.dict(os.environ, env, clear=False),
+                patch.object(sys, "stdin", StringIO("A completely different substantive answer.\n")),
+                patch.object(email_me, "configured_agent_mail", return_value=Settings()),
+                patch.object(email_me, "prepare_subject_and_headers", return_value=prepared),
+                patch.object(email_me.smtplib, "SMTP_SSL") as smtp,
+                patch("sys.stderr", new_callable=StringIO) as stderr,
+            ):
+                claim = email_me.acquire_guest_reply_claim(state, source)
+                assert claim is not None
+                try:
+                    self.assertEqual(
+                        1,
+                        email_me.main(
+                            ["--guest-hees", "--manager-human", "--tmux-target", "guest_hees:7", "--subject", "Re: Topic"]
+                        ),
+                    )
+                finally:
+                    claim.close()
+            self.assertIn("claim is unavailable", stderr.getvalue())
+            smtp.assert_not_called()
+
+    def test_guest_claim_state_faults_fail_closed_and_then_retry(self) -> None:
+        smtp_messages: list[object] = []
+
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+            app_password = "secret"
+
+        class FakeSmtp:
+            def __init__(self, **_kwargs: object) -> None:
+                return None
+
+            def __enter__(self) -> "FakeSmtp":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def login(self, _sender: str, _password: str) -> None:
+                return None
+
+            def send_message(self, msg: object) -> None:
+                smtp_messages.append(msg)
+
+        faults = (
+            ("directory", lambda: patch.object(email_me.Path, "mkdir", side_effect=OSError("directory unavailable"))),
+            ("lock", lambda: patch.object(email_me.fcntl, "flock", side_effect=BlockingIOError("claim busy"))),
+            ("write", lambda: patch.object(email_me.os, "write", side_effect=OSError("write failed"))),
+        )
+        for name, fault in faults:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as tmp:
+                smtp_messages.clear()
+                state = Path(tmp) / "state"
+                source = f"guest_hees_manager_mail/claim-{name}.txt"
+                parent = f"<claim-{name}@example.test>"
+                self.assertTrue(omo_email_config.ensure_guest_hees_reply_obligation(state, source, parent))
+                prepared = ("Re: [guest_hees:7] Claim", {"In-Reply-To": parent, "References": parent})
+                env = {"OMO_MANAGER_STATE_DIR": str(state)}
+                argv = ["--guest-hees", "--manager-human", "--tmux-target", "guest_hees:7", "--subject", "Re: Claim"]
+                with (
+                    fault(),
+                    patch.dict(os.environ, env, clear=False),
+                    patch.object(sys, "stdin", StringIO("Substantive claim-recovery answer.\n")),
+                    patch.object(email_me, "configured_agent_mail", return_value=Settings()),
+                    patch.object(email_me, "prepare_subject_and_headers", return_value=prepared),
+                    patch.object(email_me.smtplib, "SMTP_SSL", FakeSmtp),
+                    patch("sys.stderr", new_callable=StringIO),
+                ):
+                    self.assertEqual(1, email_me.main(argv))
+                self.assertEqual([], smtp_messages)
+                obligation = omo_email_config.read_guest_hees_reply_obligation(state, source)
+                assert obligation is not None
+                self.assertEqual("open", obligation.status)
+
+                with (
+                    patch.dict(os.environ, env, clear=False),
+                    patch.object(sys, "stdin", StringIO("Substantive claim-recovery answer.\n")),
+                    patch.object(email_me, "configured_agent_mail", return_value=Settings()),
+                    patch.object(email_me, "prepare_subject_and_headers", return_value=prepared),
+                    patch.object(email_me, "verify_guest_reply_in_sent", return_value=email_me.GuestSentEvidence("a" * 64, "b" * 64)),
+                    patch.object(email_me.smtplib, "SMTP_SSL", FakeSmtp),
+                    patch.object(email_me.ssl, "create_default_context", return_value=None),
+                    patch.object(email_me, "maybe_print_thread_reminder"),
+                ):
+                    self.assertEqual(0, email_me.main(argv))
+                self.assertEqual(1, len(smtp_messages))
+                fulfilled = omo_email_config.read_guest_hees_reply_obligation(state, source)
+                assert fulfilled is not None
+                self.assertEqual("fulfilled", fulfilled.status)
 
     def test_omitted_subject_reuses_latest_thread_for_inferred_target(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

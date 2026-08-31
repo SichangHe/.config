@@ -1,0 +1,37 @@
+# guest hees reply pipeline
+
+- goal
+  - every authenticated request from `46496337@qq.com` reaches the one current guest manager
+  - the request stays open until Gmail Sent Mail contains the exact substantive same-thread reply to that address
+- ingress
+  - require exact visible, return-path, and trusted Gmail SPF identities
+  - prefer nonempty plain text, then visible HTML text
+  - ignore hidden HTML and attachments when deriving the body
+  - reject mail with neither readable text nor supported guest images
+  - resolve exactly one active sendable manager from current task custody
+  - add reply headers only to guest artifacts, preserving the primary-Human artifact format
+  - create one durable reply obligation keyed by the stable mail artifact
+- delivery
+  - recognize guest email from the authenticated artifact path, not its containing task
+  - deliver only to the resolved guest owner, with no primary-manager or PB fallback
+  - revalidate task identity and target immediately before paste and after delivery
+  - record task identity plus target atomically before clearing the pending marker
+  - redeliver an open request when either part of the owner identity changes
+- reply
+  - load the installed mail, subject, and image helpers directly and fail if imports break
+  - reject blank, stock completion, and lifecycle-only bodies
+  - require the original guest Message-ID in both `In-Reply-To` and `References`
+  - pin the sole recipient to `46496337@qq.com`
+  - treat SMTP exceptions as uncertain, then reconcile against readonly Gmail Sent Mail
+  - report concurrent attempts as failures and release the claim after terminal failure or Sent-verification timeout
+  - bind the concurrent-attempt claim to the exact open obligation, independent of reply wording
+  - persist the exact expected message before SMTP and reconcile it before any retry send
+  - reject the fake-send hook because it cannot produce Sent Mail evidence
+  - fulfill the obligation only when participants, thread headers, Message-ID, subject, and body equal the expected message
+  - persist hashes of the verified Sent subject and body
+- replay
+  - keep the inbound UID unread after manager delivery
+  - suppress duplicate delivery only for the same full owner identity
+  - mark the UID seen only after its reply obligation is fulfilled
+- check
+  - run `omo_manager/tests/run_guest_hees_email_checks.sh`

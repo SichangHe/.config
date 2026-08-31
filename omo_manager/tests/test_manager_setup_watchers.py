@@ -725,7 +725,7 @@ esac
     def test_setup_prepares_pinned_guest_hees_watcher(self) -> None:
         text = SETUP.read_text(encoding="utf-8")
         self.assertIn('guest_hees_email_args=(--guest-hees', text)
-        self.assertIn('--manager-file guest_hees_mail_mgr.md --manager-target guest_hees:0', text)
+        self.assertNotIn('--manager-file guest_hees_mail_mgr.md --manager-target guest_hees:0', text)
         self.assertIn('guest_hees_mail_dir="$root/guest_hees_manager_mail"', text)
         guest_block = text.split("guest_hees_email_args=", 1)[1].split("' guest-hees-email-watch-supervisor", 1)[0]
         self.assertIn('startup_grace_s="${OMO_MANAGER_EMAIL_SUPERVISOR_STARTUP_GRACE_S:-2}"', guest_block)

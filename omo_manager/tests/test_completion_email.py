@@ -60,6 +60,22 @@ class CompletionEmailTest(unittest.TestCase):
         receipt = state / "completion-email-delivered" / plan.key
         return receipt, hashlib.sha256(receipt.read_bytes()).hexdigest()
 
+    def test_guest_lifecycle_notice_is_suppressed_without_changing_primary_shape(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            primary = root / "primary.md"
+            primary_text = task_text()
+            primary.write_text(primary_text, encoding="utf-8")
+            primary_plan = build_completion_email(root, primary, primary_text, "task done")
+            assert primary_plan is not None
+            self.assertEqual("primary.md: task done", primary_plan.subject)
+            self.assertEqual("Task: primary.md\nOutcome: task done\n", primary_plan.body)
+
+            guest = root / "guest.md"
+            guest_text = primary_text.replace("runat: cfg:2", "runat: guest_hees:7")
+            guest.write_text(guest_text, encoding="utf-8")
+            self.assertIsNone(build_completion_email(root, guest, guest_text, "task done"))
+
     def test_delivery_and_request_markers_fsync_file_and_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
