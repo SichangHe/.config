@@ -743,6 +743,107 @@ class CodexStopTests(unittest.TestCase):
         interrupt.assert_not_called()
         close.assert_not_called()
 
+    def test_manager_replacement_pre_input_guard_accepts_session_bound_nonhuman_close(self) -> None:
+        session_id = "019e9ed9-6262-71c0-b4b3-72ffd4182e98"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            checked: list[bool] = []
+            with (
+                patch(
+                    "omo_manager.omo_codex_stop.bound_guarded_read",
+                    side_effect=(
+                        "%42\n",
+                        "work\n",
+                        "work:1.0\n",
+                        "%42\twork:1.0\n",
+                        "%42\twork:1.0\n",
+                        "%42\twork:1.0\n",
+                    ),
+                ),
+                patch("omo_manager.omo_codex_stop.process_start_ticks", return_value=999),
+                patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%caller"),
+                patch("omo_manager.omo_codex_stop.guarded_capture", return_value="› ready\n"),
+                patch("omo_manager.omo_codex_stop.report_from_lines", return_value=Report("ready", [])),
+                patch("omo_manager.omo_codex_stop.query_status_session_id", return_value=(session_id, "status")),
+                patch("omo_manager.omo_codex_stop.send_exit_keys"),
+                patch("omo_manager.omo_codex_stop.wait_shell"),
+                patch("omo_manager.omo_codex_stop.close_bound_tmux_target"),
+            ):
+                result = stop(
+                    Args(
+                        target="work:1",
+                        wait_s=0.0,
+                        lines=10,
+                        dry_run=False,
+                        allow_self=False,
+                        root=root,
+                        no_feedback=True,
+                        bound_symbolic_target="work:1",
+                        bound_pane_id="%42",
+                        bound_close_proof_path=str(root / "proof"),
+                        bound_close_audit_path=str(root / "audit"),
+                        bound_close_proof_secret="b" * 64,
+                        bound_close_proof_commitment="c" * 64,
+                        bound_pane_pid=4242,
+                        bound_pane_start_ticks=999,
+                        bound_expected_session_id=session_id,
+                        bound_pre_input_check=lambda: checked.append(True),
+                    )
+                )
+        self.assertEqual(session_id, result)
+
+    def test_nonhuman_lifecycle_guard_rechecks_after_status_paste_before_enter(self) -> None:
+        session_id = "019e9ed9-6262-71c0-b4b3-72ffd4182e98"
+        checks = 0
+
+        def guard() -> None:
+            nonlocal checks
+            checks += 1
+            if checks == 2:
+                raise RuntimeError("descendant reappeared")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with (
+                patch(
+                    "omo_manager.omo_codex_stop.bound_guarded_read",
+                    side_effect=("%42\n", "work\n", "work:1.0\n", *(["%42\twork:1.0\n"] * 10)),
+                ),
+                patch("omo_manager.omo_codex_stop.process_start_ticks", return_value=999),
+                patch("omo_manager.omo_codex_stop.current_pane_id", return_value="%caller"),
+                patch("omo_manager.omo_codex_stop.guarded_capture", return_value="› ready\n"),
+                patch("omo_manager.omo_codex_stop.report_from_lines", return_value=Report("ready", [])),
+                patch("omo_manager.omo_codex_stop.guarded_paste_text"),
+                patch("omo_manager.omo_codex_stop.guarded_tmux_command") as tmux_input,
+                patch("omo_manager.omo_codex_stop.send_exit_keys") as interrupt,
+                patch("omo_manager.omo_codex_stop.close_bound_tmux_target") as close,
+                self.assertRaisesRegex(RuntimeError, "descendant reappeared"),
+            ):
+                stop(
+                    Args(
+                        target="work:1",
+                        wait_s=0.0,
+                        lines=10,
+                        dry_run=False,
+                        allow_self=False,
+                        root=root,
+                        no_feedback=True,
+                        bound_symbolic_target="work:1",
+                        bound_pane_id="%42",
+                        bound_close_proof_path=str(root / "proof"),
+                        bound_close_audit_path=str(root / "audit"),
+                        bound_close_proof_secret="b" * 64,
+                        bound_close_proof_commitment="c" * 64,
+                        bound_pane_pid=4242,
+                        bound_pane_start_ticks=999,
+                        bound_expected_session_id=session_id,
+                        bound_pre_input_check=guard,
+                    )
+                )
+        tmux_input.assert_not_called()
+        interrupt.assert_not_called()
+        close.assert_not_called()
+
     def test_stop_rejects_human_authority_that_does_not_bind_exact_task_and_target_before_tmux(self) -> None:
         authority = b"Subject: task.md.old\n\nclose hwork:1\n"
         with tempfile.TemporaryDirectory() as tmp:

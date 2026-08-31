@@ -756,6 +756,8 @@ def query_status_session_id(
         guarded_paste_text(target, "/status", *tmux_guard, expected_pane_pid)
     if identity_is_current is not None and not identity_is_current():
         raise RuntimeError("tmux pane identity changed before status submission")
+    if pre_input_check is not None:
+        pre_input_check()
     if tmux_guard is None:
         _ = tmux(["send-keys", "-t", target, "Enter"], check=True)
     else:
@@ -772,6 +774,8 @@ def query_status_session_id(
         if not fallback_sent and input_has_status_prompt(after):
             if identity_is_current is not None and not identity_is_current():
                 raise RuntimeError("tmux pane identity changed before fallback status submission")
+            if pre_input_check is not None:
+                pre_input_check()
             if tmux_guard is None:
                 _ = tmux(["send-keys", "-t", target, "Enter"], check=True)
             else:
@@ -789,10 +793,13 @@ def send_exit_keys(
     identity_is_current: Callable[[], bool] | None = None,
     tmux_guard: tuple[str, str] | None = None,
     expected_pane_pid: int = 0,
+    pre_input_check: Callable[[], None] | None = None,
 ) -> None:
     for _attempt in range(EXIT_INTERRUPT_ATTEMPTS):
         if identity_is_current is not None and not identity_is_current():
             raise RuntimeError("tmux pane identity changed before interrupt")
+        if pre_input_check is not None:
+            pre_input_check()
         if tmux_guard is None:
             _ = tmux(["send-keys", "-t", target, "C-c"], check=True)
         elif expected_pane_pid:
@@ -825,6 +832,7 @@ def close_bound_tmux_target(
     proof_commitment: str = "",
     expected_pane_pid: int = 0,
     expected_pane_start_ticks: int = 0,
+    pre_input_check: Callable[[], None] | None = None,
 ) -> None:
     """Close a non-human pane only while its symbolic and numeric identities agree."""
 
@@ -835,6 +843,8 @@ def close_bound_tmux_target(
         return
     if not identity_is_current():
         raise RuntimeError("tmux pane identity changed immediately before bound close")
+    if pre_input_check is not None:
+        pre_input_check()
     commands = [["kill-pane", "-t", target]]
     if proof_path or audit_path or proof_secret or proof_commitment:
         if (
@@ -932,7 +942,7 @@ def write_bound_close_proof(path: Path, audit_path: Path, secret: str, commitmen
             raise RuntimeError("manager replacement close authority is incomplete")
         replacement_path = Path(replacement_path_value)
         expected_authority = replacement_path.with_name(f".{replacement_path.name}.close-authority")
-        if not replacement_path.is_absolute() or audit_path != expected_authority or SHA256_RE.fullmatch(replacement_digest) is None:
+        if not replacement_path.is_absolute() or SHA256_RE.fullmatch(replacement_digest) is None:
             raise RuntimeError("manager replacement close authority path is unbound")
         replacement_fd: int | None = None
         try:
@@ -979,14 +989,8 @@ def write_bound_close_proof(path: Path, audit_path: Path, secret: str, commitmen
             or replacement_integrity != hashlib.sha256(json.dumps(replacement_record, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
             or replacement_record.get("operation") != "manager-replace"
             or replacement_record.get("state") != "prepared"
-            or replacement_record.get("close_proof_commitment") != commitment
-            or replacement_record.get("old_target") != audit.get("old_target")
-            or replacement_record.get("old_pane")
-            != {
-                "id": audit.get("old_pane_id"),
-                "pid": audit.get("old_pane_pid"),
-                "start_ticks": audit.get("old_pane_start_ticks"),
-            }
+            or audit_path not in manager_replace_close_authority_paths(replacement_path, replacement_record, expected_authority)
+            or not manager_replace_close_identity_matches(replacement_record, audit, commitment)
         ):
             raise RuntimeError("manager replacement audit does not match its close authority")
     parent = path.parent
@@ -1003,6 +1007,48 @@ def write_bound_close_proof(path: Path, audit_path: Path, secret: str, commitmen
         os.fsync(directory_fd)
     finally:
         os.close(directory_fd)
+
+
+def manager_replace_close_identity_matches(
+    replacement: dict[str, object], authority: dict[str, object], commitment: str
+) -> bool:
+    expected = {
+        "id": authority.get("old_pane_id"),
+        "pid": authority.get("old_pane_pid"),
+        "start_ticks": authority.get("old_pane_start_ticks"),
+    }
+    if replacement.get("old_target") == authority.get("old_target") and replacement.get("old_pane") == expected:
+        return replacement.get("close_proof_commitment") == commitment
+    descendants = replacement.get("descendants")
+    commitments = replacement.get("descendant_close_commitments")
+    if not isinstance(descendants, list) or not isinstance(commitments, list) or len(descendants) != len(commitments):
+        return False
+    for child, child_commitment in zip(descendants, commitments, strict=True):
+        if not isinstance(child, dict):
+            return False
+        if (
+            child.get("target") == authority.get("old_target")
+            and child.get("pane_id") == expected["id"]
+            and child.get("pane_pid") == expected["pid"]
+            and child.get("pane_start_ticks") == expected["start_ticks"]
+        ):
+            return child_commitment == commitment
+    return False
+
+
+def manager_replace_close_authority_paths(
+    replacement_path: Path, replacement: dict[str, object], manager_authority: Path
+) -> set[Path]:
+    paths = {manager_authority}
+    descendants = replacement.get("descendants")
+    if not isinstance(descendants, list):
+        return paths
+    for child in descendants:
+        if not isinstance(child, dict) or not isinstance(child.get("task"), str):
+            return set()
+        token = hashlib.sha256(child["task"].encode()).hexdigest()[:16]
+        paths.add(replacement_path.with_name(f".{replacement_path.name}.descendant-{token}-close-authority"))
+    return paths
 
 
 def kill_bound_and_write_close_proof(
@@ -1301,8 +1347,12 @@ def stop(args: Args) -> str:
         # Re-read both durable authority bindings after the pane is pinned and
         # immediately before the first human-pane input.
         validate_human_close_authorization(args)
-    if args.bound_pre_input_check is not None and (not human_authorized or tmux_guard is None or not all(proof_fields)):
-        raise RuntimeError("bound pre-input check requires an authorized guarded Human close capability")
+    if args.bound_pre_input_check is not None and (
+        tmux_guard is None
+        or not all(proof_fields)
+        or (not human_authorized and not args.bound_expected_session_id)
+    ):
+        raise RuntimeError("bound pre-input check requires a session-bound guarded close capability")
     identity_check = identity_is_current if human_authorized or args.bound_symbolic_target else None
     if task_tool(args) == "cursor":
         before_close = (
@@ -1337,7 +1387,13 @@ def stop(args: Args) -> str:
     if identity_check is None:
         send_exit_keys(resolved_args.target)
     else:
-        send_exit_keys(resolved_args.target, identity_check, tmux_guard, resolved_args.bound_pane_pid)
+        send_exit_keys(
+            resolved_args.target,
+            identity_check,
+            tmux_guard,
+            resolved_args.bound_pane_pid,
+            resolved_args.bound_pre_input_check,
+        )
     _ = wait_shell(resolved_args.target, time.monotonic() + resolved_args.wait_s, tmux_guard, resolved_args.bound_pane_pid)
     after = (
         capture(resolved_args.target, resolved_args.lines)
@@ -1358,6 +1414,7 @@ def stop(args: Args) -> str:
             args.bound_close_proof_commitment,
             resolved_args.bound_pane_pid,
             resolved_args.bound_pane_start_ticks,
+            resolved_args.bound_pre_input_check,
         )
     elif human_authorized:
         close_authorized_human_pane(resolved_args.target, identity_is_current)

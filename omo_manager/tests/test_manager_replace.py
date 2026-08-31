@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import contextlib
 import tempfile
 import unittest
 from dataclasses import replace
@@ -9,7 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import omo_manager.omo_manager_replace as manager_replace
-from omo_manager.omo_manager_replace import Args, ChildPin, LineRange, PaneIdentity, ReplaceError, pane_inventory, parse_args, replace_manager
+from omo_manager.omo_manager_replace import Args, ChildPin, DescendantPin, LineRange, PaneIdentity, ReplaceError, pane_inventory, parse_args, replace_manager
 from omo_manager.omo_task_metadata import TaskMetadata, parse_task_metadata
 
 OLD_TARGET = "private_mgr:1"
@@ -178,6 +179,42 @@ class ManagerReplaceTests(unittest.TestCase):
             patch.object(manager_replace, "stop", side_effect=stopped),
             patch.object(manager_replace, "has_bound_close_proof", side_effect=lambda *_args: not state.get("old_live", True)),
         )
+
+    def whole_tree_fixture(self, base: Path) -> tuple[Path, Args, dict[str, str]]:
+        root, args, files = self.fixture(base)
+        sessions = (
+            "aaaaaaaa-2222-4333-8444-555555555555",
+            "bbbbbbbb-2222-4333-8444-555555555555",
+        )
+        targets = ("worker:1", "worker:2")
+        updated_children: list[ChildPin] = []
+        descendants: list[DescendantPin] = []
+        for index, (task, session, target) in enumerate(zip(("child_a.md", "child_b.md"), sessions, targets, strict=True), start=1):
+            text = files[task].replace("---\nPreserve", f"session_id: {session}\n---\nPreserve")
+            files[task] = text
+            (root / task).write_text(text, encoding="utf-8")
+            child_sha = sha(text)
+            updated_children.append(ChildPin(task, child_sha))
+            queue = parsed(root / task, root).pending_task_items
+            descendants.append(
+                DescendantPin(task, child_sha, target, f"%{50 + index}", 5000 + index, 900 + index, session, manager_replace.json_digest(list(queue)))
+            )
+        return root, replace(args, children=tuple(updated_children), descendants=tuple(descendants)), files
+
+    def whole_tree_authority(self, args: Args) -> contextlib.ExitStack:
+        stack = contextlib.ExitStack()
+        stack.enter_context(
+            patch.object(manager_replace, "is_source1289_whole_tree", side_effect=lambda candidate: bool(candidate.descendants))
+        )
+        stack.enter_context(patch.object(manager_replace, "SOURCE1289_SHA256", args.authority_sha256))
+        stack.enter_context(
+            patch.object(
+                manager_replace,
+                "SOURCE1289_TREE_LINES",
+                (args.successor_item_lines[0].start, args.successor_item_lines[0].end),
+            )
+        )
+        return stack
 
     def run_replacement(self, args: Args, state: dict[str, bool]) -> str:
         inventory, stopped, proof = self.runtime(state, args.old_target, args.new_target)
@@ -589,6 +626,7 @@ class ManagerReplaceTests(unittest.TestCase):
                 return args.old_session_id
 
             with (
+                self.whole_tree_authority(args),
                 patch.object(manager_replace, "pane_inventory", side_effect=inventory),
                 patch.object(manager_replace, "pcodx_state", return_value=pcodx),
                 patch.object(manager_replace, "stop", side_effect=drift_at_pre_input),
@@ -915,6 +953,281 @@ class ManagerReplaceTests(unittest.TestCase):
             self.assertEqual(files["child_b.md"], (root / "child_b.md").read_text(encoding="utf-8"))
             self.assertTrue((root / "TODO.md").read_text(encoding="utf-8").endswith("external concurrent note\n"))
             self.assertEqual("rolled_back", json.loads(args.audit_output.read_text(encoding="utf-8"))["state"])
+
+    def test_whole_tree_closes_every_pinned_descendant_before_manager_and_commits_one_successor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, _files = self.whole_tree_fixture(Path(tmp))
+            live = {manager_replace.canonical_target(args.old_target), *(manager_replace.canonical_target(item.target) for item in args.descendants)}
+            identities = {
+                manager_replace.canonical_target(args.old_target): PaneIdentity(manager_replace.canonical_target(args.old_target), "%42", 4242, 999),
+                **{
+                    manager_replace.canonical_target(item.target): PaneIdentity(
+                        manager_replace.canonical_target(item.target), item.pane_id, item.pane_pid, item.pane_start_ticks
+                    )
+                    for item in args.descendants
+                },
+            }
+            sessions = {item.target: item.session_id for item in args.descendants} | {args.old_target: args.old_session_id}
+            order: list[str] = []
+
+            def inventory() -> dict[str, PaneIdentity]:
+                return {target: identity for target, identity in identities.items() if target in live}
+
+            def stopped(stop_args) -> str:
+                order.append(stop_args.target)
+                live.remove(manager_replace.canonical_target(stop_args.target))
+                Path(stop_args.bound_close_proof_path).write_text(
+                    f"{stop_args.bound_close_proof_secret}\n", encoding="utf-8"
+                )
+                Path(stop_args.bound_close_proof_path).chmod(0o600)
+                return sessions[stop_args.target]
+
+            with (
+                self.whole_tree_authority(args),
+                patch.object(manager_replace, "pane_inventory", side_effect=inventory),
+                patch.object(manager_replace, "process_start_ticks", return_value=None),
+                patch.object(manager_replace, "stop", side_effect=stopped),
+            ):
+                result = replace_manager(args)
+            self.assertEqual([item.target for item in args.descendants] + [args.old_target], order)
+            self.assertIn("sole ownership", result)
+            self.assertEqual("blocked", parsed(root / args.successor_task, root).status)
+            self.assertEqual((), tuple(live))
+
+    def test_whole_tree_descendant_drift_fails_before_any_close(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, args, _files = self.whole_tree_fixture(Path(tmp))
+            inventory = {
+                manager_replace.canonical_target(args.old_target): PaneIdentity(
+                    manager_replace.canonical_target(args.old_target), "%42", 4242, 999
+                )
+            }
+            with (
+                self.whole_tree_authority(args),
+                patch.object(manager_replace, "pane_inventory", return_value=inventory),
+                patch.object(manager_replace, "stop") as stop_mock,
+                self.assertRaisesRegex(ReplaceError, "active descendant pane identity changed"),
+            ):
+                replace_manager(args)
+            stop_mock.assert_not_called()
+
+    def test_source1289_cannot_use_legacy_manager_only_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, args, _files = self.fixture(Path(tmp))
+            changed = replace(
+                args,
+                old_task=manager_replace.SOURCE1289_TASK,
+                authority_file=manager_replace.SOURCE1289_FILE,
+            )
+            with self.assertRaisesRegex(ReplaceError, "complete nonempty whole-tree descendant set"):
+                replace_manager(changed)
+
+    def test_other_authority_cannot_request_descendant_closure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, args, _files = self.whole_tree_fixture(Path(tmp))
+            with self.assertRaisesRegex(ReplaceError, "only by exact Source-1289"):
+                replace_manager(args)
+
+    def test_direct_args_cannot_add_or_omit_a_descendant_pin(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, args, _files = self.whole_tree_fixture(Path(tmp))
+            malformed = replace(args, descendants=args.descendants[:1])
+            with self.whole_tree_authority(malformed), self.assertRaisesRegex(
+                ReplaceError, "identical descendant pin for every child"
+            ):
+                replace_manager(malformed)
+
+    def test_whole_tree_recovers_after_first_descendant_close_without_retargeting_it(self) -> None:
+        class SimulatedCrash(BaseException):
+            pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, _files = self.whole_tree_fixture(Path(tmp))
+            identities = {
+                manager_replace.canonical_target(args.old_target): PaneIdentity(
+                    manager_replace.canonical_target(args.old_target), "%42", 4242, 999
+                ),
+                **{
+                    manager_replace.canonical_target(item.target): PaneIdentity(
+                        manager_replace.canonical_target(item.target), item.pane_id, item.pane_pid, item.pane_start_ticks
+                    )
+                    for item in args.descendants
+                },
+            }
+            live = set(identities)
+            calls: list[str] = []
+
+            def inventory() -> dict[str, PaneIdentity]:
+                return {target: identity for target, identity in identities.items() if target in live}
+
+            def stopped(stop_args) -> str:
+                calls.append(stop_args.target)
+                live.remove(manager_replace.canonical_target(stop_args.target))
+                Path(stop_args.bound_close_proof_path).write_text(
+                    f"{stop_args.bound_close_proof_secret}\n", encoding="utf-8"
+                )
+                Path(stop_args.bound_close_proof_path).chmod(0o600)
+                if len(calls) == 1:
+                    raise SimulatedCrash()
+                return next(
+                    (item.session_id for item in args.descendants if item.target == stop_args.target),
+                    args.old_session_id,
+                )
+
+            patches = (
+                patch.object(manager_replace, "pane_inventory", side_effect=inventory),
+                patch.object(manager_replace, "process_start_ticks", return_value=None),
+                patch.object(manager_replace, "stop", side_effect=stopped),
+            )
+            with self.whole_tree_authority(args), patches[0], patches[1], patches[2], self.assertRaises(SimulatedCrash):
+                replace_manager(args)
+            with (
+                self.whole_tree_authority(args),
+                patch.object(manager_replace, "pane_inventory", side_effect=inventory),
+                patch.object(manager_replace, "process_start_ticks", return_value=None),
+                patch.object(manager_replace, "stop", side_effect=stopped),
+            ):
+                result = replace_manager(args)
+            self.assertEqual(1, calls.count(args.descendants[0].target))
+            self.assertIn("sole ownership", result)
+            self.assertEqual("blocked", parsed(root / args.successor_task, root).status)
+
+    def test_whole_tree_durably_contains_close_without_proof(self) -> None:
+        class SimulatedCrash(BaseException):
+            pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, args, _files = self.whole_tree_fixture(Path(tmp))
+            identities = {
+                manager_replace.canonical_target(args.old_target): PaneIdentity(
+                    manager_replace.canonical_target(args.old_target), "%42", 4242, 999
+                ),
+                **{
+                    manager_replace.canonical_target(item.target): PaneIdentity(
+                        manager_replace.canonical_target(item.target), item.pane_id, item.pane_pid, item.pane_start_ticks
+                    )
+                    for item in args.descendants
+                },
+            }
+            live = set(identities)
+
+            def inventory() -> dict[str, PaneIdentity]:
+                return {target: identity for target, identity in identities.items() if target in live}
+
+            def crash_after_close(stop_args) -> str:
+                live.remove(manager_replace.canonical_target(stop_args.target))
+                raise SimulatedCrash()
+
+            with (
+                self.whole_tree_authority(args),
+                patch.object(manager_replace, "pane_inventory", side_effect=inventory),
+                patch.object(manager_replace, "process_start_ticks", return_value=None),
+                patch.object(manager_replace, "stop", side_effect=crash_after_close),
+                self.assertRaises(SimulatedCrash),
+            ):
+                replace_manager(args)
+            with (
+                self.whole_tree_authority(args),
+                patch.object(manager_replace, "pane_inventory", side_effect=inventory),
+                patch.object(manager_replace, "process_start_ticks", return_value=None),
+                patch.object(manager_replace, "stop") as stop_mock,
+                self.assertRaisesRegex(ReplaceError, "durably ambiguous"),
+            ):
+                replace_manager(args)
+            stop_mock.assert_not_called()
+
+    def test_whole_tree_retries_exact_live_manager_after_descendants_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, _files = self.whole_tree_fixture(Path(tmp))
+            identities = {
+                manager_replace.canonical_target(args.old_target): PaneIdentity(
+                    manager_replace.canonical_target(args.old_target), "%42", 4242, 999
+                ),
+                **{
+                    manager_replace.canonical_target(item.target): PaneIdentity(
+                        manager_replace.canonical_target(item.target), item.pane_id, item.pane_pid, item.pane_start_ticks
+                    )
+                    for item in args.descendants
+                },
+            }
+            live = set(identities)
+            manager_attempts = 0
+
+            def inventory() -> dict[str, PaneIdentity]:
+                return {target: identity for target, identity in identities.items() if target in live}
+
+            def stopped(stop_args) -> str:
+                nonlocal manager_attempts
+                if stop_args.target == args.old_target:
+                    manager_attempts += 1
+                    if manager_attempts == 1:
+                        raise RuntimeError("transient guarded stop failure")
+                    session = args.old_session_id
+                else:
+                    session = next(item.session_id for item in args.descendants if item.target == stop_args.target)
+                live.remove(manager_replace.canonical_target(stop_args.target))
+                Path(stop_args.bound_close_proof_path).write_text(
+                    f"{stop_args.bound_close_proof_secret}\n", encoding="utf-8"
+                )
+                Path(stop_args.bound_close_proof_path).chmod(0o600)
+                return session
+
+            def run() -> str:
+                with (
+                    self.whole_tree_authority(args),
+                    patch.object(manager_replace, "pane_inventory", side_effect=inventory),
+                    patch.object(manager_replace, "process_start_ticks", return_value=None),
+                    patch.object(manager_replace, "stop", side_effect=stopped),
+                ):
+                    return replace_manager(args)
+
+            with self.assertRaisesRegex(ReplaceError, "transient guarded stop failure"):
+                run()
+            result = run()
+            self.assertEqual(2, manager_attempts)
+            self.assertIn("sole ownership", result)
+            self.assertEqual("blocked", parsed(root / args.successor_task, root).status)
+
+    def test_whole_tree_reappeared_descendant_blocks_old_manager_close(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, args, _files = self.whole_tree_fixture(Path(tmp))
+            identities = {
+                manager_replace.canonical_target(args.old_target): PaneIdentity(
+                    manager_replace.canonical_target(args.old_target), "%42", 4242, 999
+                ),
+                **{
+                    manager_replace.canonical_target(item.target): PaneIdentity(
+                        manager_replace.canonical_target(item.target), item.pane_id, item.pane_pid, item.pane_start_ticks
+                    )
+                    for item in args.descendants
+                },
+            }
+            live = set(identities)
+            calls: list[str] = []
+
+            def inventory() -> dict[str, PaneIdentity]:
+                return {target: identity for target, identity in identities.items() if target in live}
+
+            def stopped(stop_args) -> str:
+                calls.append(stop_args.target)
+                live.remove(manager_replace.canonical_target(stop_args.target))
+                Path(stop_args.bound_close_proof_path).write_text(
+                    f"{stop_args.bound_close_proof_secret}\n", encoding="utf-8"
+                )
+                Path(stop_args.bound_close_proof_path).chmod(0o600)
+                if stop_args.target == args.descendants[-1].target:
+                    live.add(manager_replace.canonical_target(args.descendants[0].target))
+                return next(item.session_id for item in args.descendants if item.target == stop_args.target)
+
+            with (
+                self.whole_tree_authority(args),
+                patch.object(manager_replace, "pane_inventory", side_effect=inventory),
+                patch.object(manager_replace, "process_start_ticks", return_value=None),
+                patch.object(manager_replace, "stop", side_effect=stopped),
+                self.assertRaisesRegex(ReplaceError, "descendant closure changed before old-manager close"),
+            ):
+                replace_manager(args)
+            self.assertNotIn(args.old_target, calls)
 
     def test_concurrent_old_task_change_rejects_without_overwriting_it(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

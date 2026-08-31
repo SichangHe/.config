@@ -75,6 +75,10 @@ GUEST1269_REPLACEMENT = (
         )
     ),
 )
+SOURCE1289_FILE = "manager_mail/85c5dff58359-1289.txt"
+SOURCE1289_TASK = "vl_repo_split_mgr.md"
+SOURCE1289_SHA256 = "33829151fabb3c1502aceb87dbc837b7e2186160f8f1f34ca60bcd034c083770"
+SOURCE1289_TREE_LINES = (3, 10)
 PCODX_REPLACE_EVIDENCE_RE = re.compile(
     r"(?m)^Replace the failed PCODX manager (?P<task>[A-Za-z0-9_./-]+\.md) at "
     r"(?P<target>[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?) with one fresh plain-Codex manager "
@@ -111,6 +115,18 @@ class NamespaceMutationError(ReplaceError):
 class ChildPin:
     task: str
     sha256: str
+
+
+@dataclass(frozen=True)
+class DescendantPin:
+    task: str
+    sha256: str
+    target: str
+    pane_id: str
+    pane_pid: int
+    pane_start_ticks: int
+    session_id: str
+    queue_sha256: str
 
 
 @dataclass(frozen=True, order=True)
@@ -152,6 +168,7 @@ class Args:
     old_pcodx_wrapper_sha256: str = ""
     protected_targets_sha256: str = ""
     authority_envelope_file_sha256: str = ""
+    descendants: tuple[DescendantPin, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -185,6 +202,7 @@ class Plan:
     child_queues: tuple[tuple[str, ...], ...]
     initial_markdown_paths: tuple[Path, ...]
     protected_identities: tuple[PaneIdentity, ...]
+    descendant_identities: tuple[PaneIdentity, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -238,6 +256,7 @@ class ParsedArgs(argparse.Namespace):
     old_pcodx_wrapper_sha256: str = ""
     protected_targets_sha256: str = ""
     authority_envelope_file_sha256: str = ""
+    descendant: list[str] = []
 
 
 def digest(data: bytes) -> str:
@@ -263,6 +282,10 @@ def is_guest1269_replacement(args: Args) -> bool:
     )
 
 
+def is_source1289_whole_tree(args: Args) -> bool:
+    return args.authority_file == SOURCE1289_FILE and args.old_task == SOURCE1289_TASK
+
+
 def canonical_target(target: str) -> str:
     match = re.fullmatch(r"([A-Za-z][A-Za-z0-9_-]*):(\d+)(?:\.(\d+))?", target)
     if match is None:
@@ -280,6 +303,32 @@ def parse_child(value: str) -> ChildPin:
     if not separator or TASK_REF_RE.fullmatch(task) is None or SHA256_RE.fullmatch(sha256) is None:
         raise argparse.ArgumentTypeError("--child must be TASK.md=SHA256")
     return ChildPin(task, sha256)
+
+
+def parse_descendant(value: str) -> DescendantPin:
+    fields = value.split("=")
+    if len(fields) != 8:
+        raise argparse.ArgumentTypeError(
+            "--descendant must be TASK.md=SHA256=TARGET=PANE_ID=PANE_PID=START_TICKS=SESSION_UUID=QUEUE_SHA256"
+        )
+    task, sha256, target, pane_id, pane_pid, start_ticks, session_id, queue_sha256 = fields
+    try:
+        canonical_target(target)
+        pid = int(pane_pid)
+        ticks = int(start_ticks)
+    except (ReplaceError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+    if (
+        TASK_REF_RE.fullmatch(task) is None
+        or SHA256_RE.fullmatch(sha256) is None
+        or PANE_ID_RE.fullmatch(pane_id) is None
+        or pid <= 0
+        or ticks <= 0
+        or UUID_RE.fullmatch(session_id) is None
+        or SHA256_RE.fullmatch(queue_sha256) is None
+    ):
+        raise argparse.ArgumentTypeError("--descendant contains an invalid pinned identity")
+    return DescendantPin(task, sha256, target, pane_id, pid, ticks, session_id.lower(), queue_sha256)
 
 
 def parse_line_range(value: str) -> LineRange:
@@ -300,6 +349,7 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--old-sha256", required=True)
     _ = parser.add_argument("--todo-sha256", required=True)
     _ = parser.add_argument("--child", action="append", default=[], type=parse_child)
+    _ = parser.add_argument("--descendant", action="append", default=[], type=parse_descendant)
     _ = parser.add_argument("--old-pane-id", required=True)
     _ = parser.add_argument("--old-pane-pid", required=True, type=int)
     _ = parser.add_argument("--old-pane-start-ticks", required=True, type=int)
@@ -362,6 +412,13 @@ def parse_args(argv: list[str]) -> Args:
     children = tuple(sorted(parsed.child, key=lambda child: child.task))
     if len({child.task for child in children}) != len(children):
         parser.error("--child task references must be unique")
+    descendants = tuple(sorted(parsed.descendant, key=lambda child: child.task))
+    if len({child.task for child in descendants}) != len(descendants):
+        parser.error("--descendant task references must be unique")
+    if descendants and tuple((item.task, item.sha256) for item in descendants) != tuple(
+        (item.task, item.sha256) for item in children
+    ):
+        parser.error("whole-tree replacement requires every --child to have one identical --descendant pin")
     try:
         targets = (parsed.old_target, parsed.new_target, parsed.parent_target, *parsed.protected_target)
         _ = tuple(canonical_target(target) for target in targets)
@@ -401,6 +458,7 @@ def parse_args(argv: list[str]) -> Args:
         old_pcodx_wrapper_sha256=parsed.old_pcodx_wrapper_sha256,
         protected_targets_sha256=parsed.protected_targets_sha256,
         authority_envelope_file_sha256=parsed.authority_envelope_file_sha256,
+        descendants=descendants,
     )
     try:
         validate_targets(result)
@@ -831,13 +889,19 @@ def pcodx_binding(args: Args, pane: PaneIdentity) -> dict[str, str]:
     return state
 
 
-def validate_live_bindings(args: Args, inventory: dict[str, PaneIdentity]) -> None:
+def validate_live_bindings(
+    args: Args, inventory: dict[str, PaneIdentity], *, require_descendants: bool = True
+) -> None:
     old = inventory.get(canonical_target(args.old_target))
     expected = PaneIdentity(canonical_target(args.old_target), args.old_pane_id, args.old_pane_pid, args.old_pane_start_ticks)
     if old != expected:
         raise ReplaceError(f"old manager pane identity changed: expected {expected}, found {old}")
     if canonical_target(args.new_target) in inventory:
         raise ReplaceError("successor target is already live; launch-before-singular-proof is rejected")
+    for item in args.descendants if require_descendants else ():
+        expected_child = PaneIdentity(canonical_target(item.target), item.pane_id, item.pane_pid, item.pane_start_ticks)
+        if inventory.get(expected_child.target) != expected_child:
+            raise ReplaceError(f"active descendant pane identity changed: {item.task}")
     if is_pcodx_replacement(args):
         if protected_inventory_digest(args, inventory) != args.protected_targets_sha256:
             raise ReplaceError("protected pane/process inventory changed")
@@ -980,6 +1044,14 @@ def pane_inventory() -> dict[str, PaneIdentity]:
 
 
 def validate_targets(args: Args) -> None:
+    child_pairs = tuple((item.task, item.sha256) for item in args.children)
+    descendant_pairs = tuple((item.task, item.sha256) for item in args.descendants)
+    if len({item.task for item in args.children}) != len(args.children):
+        raise ReplaceError("child task references must be unique")
+    if len({item.task for item in args.descendants}) != len(args.descendants):
+        raise ReplaceError("whole-tree descendant task references must be unique")
+    if args.descendants and child_pairs != descendant_pairs:
+        raise ReplaceError("whole-tree replacement requires one identical descendant pin for every child")
     pcodx_digests = (
         args.old_pcodx_state_sha256,
         args.old_pcodx_ledger_sha256,
@@ -1003,6 +1075,17 @@ def validate_targets(args: Args) -> None:
             raise ReplaceError("closed-owner audit recovery is accepted only for the exact Source-1269 replacement")
         if args.closed_owner_audit == args.audit_output:
             raise ReplaceError("closed-owner evidence and the fresh replacement audit must use distinct paths")
+    if is_source1289_whole_tree(args) and not args.descendants:
+        raise ReplaceError("Source-1289 replacement requires one complete nonempty whole-tree descendant set")
+    if args.descendants and not is_source1289_whole_tree(args):
+        raise ReplaceError("whole-tree descendant closure is authorized only by exact Source-1289")
+    if is_source1289_whole_tree(args) and (
+        args.authority_sha256 != SOURCE1289_SHA256
+        or LineRange(*SOURCE1289_TREE_LINES) not in args.successor_item_lines
+        or args.authority_lines.start > SOURCE1289_TREE_LINES[0]
+        or args.authority_lines.end < SOURCE1289_TREE_LINES[1]
+    ):
+        raise ReplaceError("Source-1289 whole-tree mode requires its exact authenticated tree-replacement directive")
     old = canonical_target(args.old_target)
     new = canonical_target(args.new_target)
     if old == new:
@@ -1018,6 +1101,13 @@ def validate_targets(args: Args) -> None:
         raise ReplaceError("Human-owned PCODX old target must be included in the exact protected target set")
     if is_pcodx_replacement(args) != pcodx_human:
         raise ReplaceError("PCODX replacement bindings are accepted only for one protected human-owned old target")
+    descendant_targets = tuple(canonical_target(item.target) for item in args.descendants)
+    if len(set(descendant_targets)) != len(descendant_targets):
+        raise ReplaceError("whole-tree descendant targets must be unique")
+    if any(target_session(target).startswith("h") for target in descendant_targets):
+        raise ReplaceError("whole-tree replacement cannot close a human-owned descendant target")
+    if {old, new, canonical_target(args.parent_target)} & set(descendant_targets) or protected & set(descendant_targets):
+        raise ReplaceError("whole-tree descendant target aliases an old, successor, parent, or protected target")
 
 
 def markdown_paths(root: Path) -> tuple[Path, ...]:
@@ -1090,6 +1180,19 @@ def prepare(args: Args, paths: tuple[Path, ...]) -> Plan:
         child_metadata = metadata(snapshot.data, args.root, f"active child {task}")
         if child_metadata.status == "done" or child_metadata.managerat != args.old_target:
             raise ReplaceError(f"active child ownership changed: {task}")
+        if args.descendants:
+            runtime = next(item for item in args.descendants if item.task == task)
+            if canonical_target(child_metadata.runat) != canonical_target(runtime.target):
+                raise ReplaceError(f"active descendant run target changed: {task}")
+            if child_metadata.session_id.lower() != runtime.session_id:
+                raise ReplaceError(f"active descendant session changed: {task}")
+            if json_digest(list(child_metadata.pending_task_items)) != runtime.queue_sha256:
+                raise ReplaceError(f"active descendant queue changed: {task}")
+            nested = active_child_task_refs(args.root, path, child_metadata.runat)
+            if nested:
+                raise ReplaceError(
+                    f"whole-tree replacement does not omit nested active descendants under {task}: {nested}"
+                )
         try:
             updated = manager_owner_migration_text(snapshot.data.decode(), args.old_target, args.new_target, args.root).encode()
         except (UnicodeDecodeError, ValueError, TaskFrontmatterError) as exc:
@@ -1111,6 +1214,10 @@ def prepare(args: Args, paths: tuple[Path, ...]) -> Plan:
         inventory = pane_inventory()
         validate_live_bindings(args, inventory)
         protected_identities = protected_inventory(args, inventory)
+    descendant_identities = tuple(
+        PaneIdentity(canonical_target(item.target), item.pane_id, item.pane_pid, item.pane_start_ticks)
+        for item in args.descendants
+    )
     return Plan(
         old,
         todo,
@@ -1126,6 +1233,7 @@ def prepare(args: Args, paths: tuple[Path, ...]) -> Plan:
         tuple(child_queues),
         paths,
         protected_identities,
+        descendant_identities,
     )
 
 
@@ -1197,6 +1305,11 @@ def audit_record(args: Args, plan: Plan, secret: str, commitment: str) -> dict[s
         "markdown_membership": [path.relative_to(args.root).as_posix() for path in plan.initial_markdown_paths],
         "files": files,
     }
+    if args.descendants:
+        record["descendants"] = descendant_binding(args)
+        record["descendant_close_commitments"] = [
+            descendant_commitment(secret, child) for child in args.descendants
+        ]
     if args.closed_owner_audit is not None:
         record.update(
             {
@@ -1262,6 +1375,37 @@ def close_authority_record(args: Args, audit_bytes: bytes, commitment: str) -> d
     }
 
 
+def descendant_secret(secret: str, child: DescendantPin) -> str:
+    return digest(f"{secret}\0{child.task}\0{child.target}".encode())
+
+
+def descendant_commitment(secret: str, child: DescendantPin) -> str:
+    return digest(descendant_secret(secret, child).encode())
+
+
+def descendant_evidence_paths(audit_path: Path, child: DescendantPin) -> tuple[Path, Path]:
+    token = digest(child.task.encode())[:16]
+    authority = audit_path.with_name(f".{audit_path.name}.descendant-{token}-close-authority")
+    return authority, authority.with_name(f".{authority.name}.owner-stopped")
+
+
+def descendant_close_authority_record(
+    args: Args, child: DescendantPin, audit_bytes: bytes, commitment: str
+) -> dict[str, object]:
+    return {
+        "version": AUDIT_VERSION,
+        "operation": AUDIT_OPERATION,
+        "state": "prepared",
+        "audit_path": str(args.audit_output),
+        "replacement_audit_sha256": digest(audit_bytes),
+        "old_target": child.target,
+        "old_pane_id": child.pane_id,
+        "old_pane_pid": child.pane_pid,
+        "old_pane_start_ticks": child.pane_start_ticks,
+        "close_proof_commitment": commitment,
+    }
+
+
 def transition_audit(path: Path, expected: bytes, record: dict[str, object], state: str, *, completed: tuple[str, ...], error: str = "", rollback_failures: tuple[str, ...] = ()) -> tuple[dict[str, object], bytes]:
     current = read_snapshot(path, "private replacement audit")
     if current.data != expected or stat.S_IMODE(current.state.st_mode) != 0o600:
@@ -1300,6 +1444,22 @@ def pcodx_audit_binding(args: Args) -> dict[str, object]:
     }
 
 
+def descendant_binding(args: Args) -> list[dict[str, object]]:
+    return [
+        {
+            "task": child.task,
+            "sha256": child.sha256,
+            "target": child.target,
+            "pane_id": child.pane_id,
+            "pane_pid": child.pane_pid,
+            "pane_start_ticks": child.pane_start_ticks,
+            "session_id": child.session_id,
+            "queue_sha256": child.queue_sha256,
+        }
+        for child in args.descendants
+    ]
+
+
 def audit_binding(args: Args) -> dict[str, object]:
     binding: dict[str, object] = {
         "version": AUDIT_VERSION,
@@ -1325,6 +1485,8 @@ def audit_binding(args: Args) -> dict[str, object]:
         "preparer": args.preparer,
         "reviewer": args.reviewer,
     }
+    if args.descendants:
+        binding["descendants"] = descendant_binding(args)
     if is_pcodx_replacement(args):
         binding.update(pcodx_audit_binding(args))
     if args.closed_owner_audit is not None:
@@ -1367,6 +1529,15 @@ def read_audit(args: Args) -> tuple[dict[str, object], bytes, tuple[AuditEntry, 
     }
     if is_pcodx_replacement(args):
         allowed.add("protected_inventory")
+    if args.descendants:
+        allowed.add("descendant_close_commitments")
+        commitments = record.get("descendant_close_commitments")
+        if (
+            not isinstance(commitments, list)
+            or commitments
+            != [descendant_commitment(str(record.get("close_proof_secret", "")), child) for child in args.descendants]
+        ):
+            raise ReplaceError("private replacement audit descendant close capabilities changed")
     required = allowed - {"error", "rollback_failures", "owner_close_evidence"}
     if args.closed_owner_audit is None:
         required -= {"closed_owner_prepared_sha256", "closed_owner_authority_sha256"}
@@ -1635,6 +1806,10 @@ def recovery_plan(
         tuple(child_queues),
         membership,
         tuple(protected),
+        tuple(
+            PaneIdentity(canonical_target(item.target), item.pane_id, item.pane_pid, item.pane_start_ticks)
+            for item in args.descendants
+        ),
     )
 
 
@@ -1747,6 +1922,41 @@ def recover_existing(
             f"recovered committed manager replacement; sole blocked successor ownership remains proved; audit={args.audit_output}",
         )
     if state == "stop_failed":
+        if is_source1289_whole_tree(args):
+            secret = record.get("close_proof_secret")
+            if not isinstance(secret, str) or not all_before:
+                raise ReplaceError("Source-1289 failed-stop recovery lost its exact before state")
+            descendant_closed = all(
+                has_bound_close_proof(
+                    descendant_evidence_paths(args.audit_output, child)[1],
+                    descendant_commitment(secret, child),
+                )
+                and canonical_target(child.target) not in inventory
+                and process_start_ticks(child.pane_pid) is None
+                for child in args.descendants
+            )
+            if not descendant_closed or descendant_progress(args, audit_bytes):
+                raise ReplaceError("Source-1289 failed-stop recovery cannot prove every descendant closure")
+            if old == expected_old and not proof:
+                prepared = dict(record)
+                prepared["state"] = "prepared"
+                prepared["completed_writes"] = []
+                prepared.pop("error", None)
+                prepared.pop("rollback_failures", None)
+                prepared_bytes = serialized_audit(prepared)
+                authority = read_snapshot(authority_path, "bound close authority")
+                if authority.data != serialized_audit(close_authority_record(args, prepared_bytes, commitment)):
+                    raise ReplaceError("Source-1289 failed-stop recovery close authority changed")
+                record, audit_bytes = transition_audit(
+                    args.audit_output, audit_bytes, record, "prepared", completed=()
+                )
+                return Recovery(plan, record, audit_bytes, entries, False)
+            if old is None and proof:
+                record, audit_bytes = transition_audit(
+                    args.audit_output, audit_bytes, record, "owner_stopped", completed=()
+                )
+                return Recovery(plan, record, audit_bytes, entries, True)
+            raise ReplaceError("Source-1289 old-manager close outcome is ambiguous after descendant closure")
         if (
             not is_guest1269_replacement(args)
             or record.get("error") != "tmux symbolic target no longer owns the exact pane at command execution"
@@ -1858,6 +2068,123 @@ def validate_panes_before_close(args: Args) -> None:
     validate_live_bindings(args, inventory)
 
 
+def descendant_progress_path(audit_path: Path) -> Path:
+    return audit_path.with_name(f".{audit_path.name}.descendant-progress")
+
+
+def descendant_progress(args: Args, _audit_bytes: bytes) -> str:
+    path = descendant_progress_path(args.audit_output)
+    if not path.exists():
+        return ""
+    snapshot = read_snapshot(path, "descendant close progress")
+    try:
+        value = json.loads(snapshot.data)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ReplaceError("descendant close progress is invalid") from exc
+    if (
+        not isinstance(value, dict)
+        or value.get("operation") != "manager-replace-descendant-progress"
+        or value.get("replacement_binding_sha256") != json_digest(audit_binding(args))
+        or value.get("task") not in {"", *(child.task for child in args.descendants)}
+    ):
+        raise ReplaceError("descendant close progress changed")
+    return str(value["task"])
+
+
+def set_descendant_progress(args: Args, _audit_bytes: bytes, task: str) -> None:
+    path = descendant_progress_path(args.audit_output)
+    data = (
+        json.dumps(
+            {
+                "operation": "manager-replace-descendant-progress",
+                "replacement_binding_sha256": json_digest(audit_binding(args)),
+                "task": task,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode()
+    if path.exists():
+        current = read_snapshot(path, "descendant close progress")
+        _ = replace_snapshot(current, data, "descendant close progress")
+    else:
+        _ = create_snapshot(path, data, 0o600)
+
+
+def stop_descendants(
+    args: Args,
+    plan: Plan,
+    record: dict[str, object],
+    audit_bytes: bytes,
+    secret: str,
+) -> tuple[dict[str, object], bytes]:
+    for child, expected in zip(args.descendants, plan.descendant_identities, strict=True):
+        authority_path, proof_path = descendant_evidence_paths(args.audit_output, child)
+        child_secret = descendant_secret(secret, child)
+        commitment = descendant_commitment(secret, child)
+        inventory = pane_inventory()
+        if has_bound_close_proof(proof_path, commitment):
+            if expected.target in inventory or process_start_ticks(expected.pid) is not None:
+                raise ReplaceError(f"closed descendant identity reappeared: {child.task}")
+            if descendant_progress(args, audit_bytes) == child.task:
+                set_descendant_progress(args, audit_bytes, "")
+            continue
+        if descendant_progress(args, audit_bytes) == child.task and expected.target not in inventory:
+            raise ReplaceError(
+                f"descendant close outcome is durably ambiguous and requires exact external reconciliation: {child.task}"
+            )
+        if inventory.get(expected.target) != expected:
+            raise ReplaceError(f"active descendant pane identity changed before close: {child.task}")
+        require_preclose_eligibility(args, plan)
+        if descendant_progress(args, audit_bytes) != child.task:
+            set_descendant_progress(args, audit_bytes, child.task)
+        if not authority_path.exists():
+            _ = reserve_audit(
+                authority_path,
+                descendant_close_authority_record(args, child, audit_bytes, commitment),
+            )
+        authority = read_snapshot(authority_path, f"descendant close authority {child.task}")
+        if authority.data != serialized_audit(
+            descendant_close_authority_record(args, child, audit_bytes, commitment)
+        ):
+            raise ReplaceError(f"descendant close authority changed: {child.task}")
+        def pre_input_check() -> None:
+            require_preclose_eligibility(args, plan)
+            current = pane_inventory()
+            if current.get(expected.target) != expected:
+                raise ReplaceError(f"active descendant pane identity changed before input: {child.task}")
+
+        session_id = stop(
+            StopArgs(
+                target=child.target,
+                wait_s=30.0,
+                lines=2000,
+                dry_run=False,
+                allow_self=False,
+                root=args.root,
+                no_feedback=True,
+                bound_symbolic_target=child.target,
+                bound_pane_id=child.pane_id,
+                bound_pane_pid=child.pane_pid,
+                bound_pane_start_ticks=child.pane_start_ticks,
+                bound_expected_session_id=child.session_id,
+                bound_close_proof_path=str(proof_path),
+                bound_close_audit_path=str(authority_path),
+                bound_close_proof_secret=child_secret,
+                bound_close_proof_commitment=commitment,
+                bound_pre_input_check=pre_input_check,
+            )
+        )
+        if session_id.lower() != child.session_id or not has_bound_close_proof(proof_path, commitment):
+            raise ReplaceError(f"descendant close could not be proved: {child.task}")
+        current = pane_inventory()
+        if expected.target in current or process_start_ticks(expected.pid) is not None:
+            raise ReplaceError(f"descendant remains live after guarded close: {child.task}")
+        set_descendant_progress(args, audit_bytes, "")
+    return record, audit_bytes
+
+
 def require_preclose_eligibility(args: Args, plan: Plan) -> None:
     """Recheck every prepared lifecycle and authority binding before pane input."""
 
@@ -1877,6 +2204,10 @@ def require_preclose_eligibility(args: Args, plan: Plan) -> None:
         raise ReplaceError("successor target ownership appeared before guarded manager close")
     if active_child_task_refs(args.root, plan.old.path, args.old_target) != tuple(child.task for child in args.children):
         raise ReplaceError("active child set changed before guarded manager close")
+    for child, snapshot in zip(args.descendants, plan.children):
+        child_metadata = metadata(snapshot.data, args.root, f"pre-close active descendant {child.task}")
+        if active_child_task_refs(args.root, snapshot.path, child_metadata.runat):
+            raise ReplaceError(f"nested active descendant appeared before guarded close: {child.task}")
 
 
 def stop_old_manager(
@@ -1889,19 +2220,22 @@ def stop_old_manager(
 ) -> None:
     protected_before: tuple[PaneIdentity, ...] = ()
     require_preclose_eligibility(args, plan)
+    require_descendants_closed(args, plan, secret)
     if is_pcodx_replacement(args):
         before_inventory = pane_inventory()
-        validate_live_bindings(args, before_inventory)
+        validate_live_bindings(args, before_inventory, require_descendants=False)
         protected_before = tuple(
             identity
             for identity in protected_inventory(args, before_inventory)
             if identity.target != canonical_target(args.old_target)
         )
     require_preclose_eligibility(args, plan)
+    require_descendants_closed(args, plan, secret)
 
     def pre_input_check() -> None:
         require_preclose_eligibility(args, plan)
-        validate_live_bindings(args, pane_inventory())
+        validate_live_bindings(args, pane_inventory(), require_descendants=False)
+        require_descendants_closed(args, plan, secret)
 
     session_id = stop(
         StopArgs(
@@ -1925,7 +2259,9 @@ def stop_old_manager(
             human_close_authorization_source=args.authority_file if is_pcodx_replacement(args) else "",
             human_close_authorization_sha256=args.authority_sha256 if is_pcodx_replacement(args) else "",
             human_close_authorized_target=args.old_target if is_pcodx_replacement(args) else "",
-            bound_pre_input_check=pre_input_check if is_pcodx_replacement(args) else None,
+            bound_pre_input_check=(
+                pre_input_check if is_pcodx_replacement(args) or is_source1289_whole_tree(args) else None
+            ),
         )
     )
     if session_id.lower() != args.old_session_id:
@@ -1937,8 +2273,26 @@ def stop_old_manager(
         raise ReplaceError("old manager target remains live after guarded close")
     if canonical_target(args.new_target) in inventory:
         raise ReplaceError("successor target launched before singular ownership proof")
+    if any(identity.target in inventory or process_start_ticks(identity.pid) is not None for identity in plan.descendant_identities):
+        raise ReplaceError("a bound descendant remains live after guarded close")
     if is_pcodx_replacement(args) and tuple(inventory.get(identity.target) for identity in protected_before) != protected_before:
         raise ReplaceError("non-replaced protected pane/process inventory changed during close")
+
+
+def require_descendants_closed(args: Args, plan: Plan, secret: str) -> None:
+    if not args.descendants:
+        return
+    inventory = pane_inventory()
+    if descendant_progress(args, read_snapshot(args.audit_output, "private replacement audit").data):
+        raise ReplaceError("descendant close progress is incomplete before old-manager close")
+    for child, identity in zip(args.descendants, plan.descendant_identities, strict=True):
+        proof = descendant_evidence_paths(args.audit_output, child)[1]
+        if (
+            not has_bound_close_proof(proof, descendant_commitment(secret, child))
+            or identity.target in inventory
+            or process_start_ticks(identity.pid) is not None
+        ):
+            raise ReplaceError(f"descendant closure changed before old-manager close: {child.task}")
 
 
 def prove_committed(args: Args, plan: Plan, old_after: Snapshot, child_after: tuple[Snapshot, ...], todo_after: Snapshot, successor: Snapshot) -> None:
@@ -1969,6 +2323,18 @@ def prove_committed(args: Args, plan: Plan, old_after: Snapshot, child_after: tu
     inventory = pane_inventory()
     if canonical_target(args.old_target) in inventory or canonical_target(args.new_target) in inventory:
         raise ReplaceError("old or successor pane is live at the singular ownership proof boundary")
+    if any(identity.target in inventory or process_start_ticks(identity.pid) is not None for identity in plan.descendant_identities):
+        raise ReplaceError("a replaced-tree descendant remains live at the singular ownership proof boundary")
+    audit = read_snapshot(args.audit_output, "committed replacement audit")
+    record = json.loads(audit.data)
+    secret = record.get("close_proof_secret") if isinstance(record, dict) else None
+    if not isinstance(secret, str) or any(
+        not has_bound_close_proof(descendant_evidence_paths(args.audit_output, child)[1], descendant_commitment(secret, child))
+        for child in args.descendants
+    ):
+        raise ReplaceError("a replaced-tree descendant lacks its durable guarded-close proof")
+    if args.descendants and descendant_progress(args, audit.data) != "":
+        raise ReplaceError("descendant close progress is incomplete at the singular ownership proof boundary")
     remaining_protected = tuple(
         identity for identity in plan.protected_identities if identity.target != canonical_target(args.old_target)
     )
@@ -1992,6 +2358,9 @@ def replace_manager(args: Args) -> str:
     source_evidence_paths = (
         () if args.closed_owner_audit is None else (args.closed_owner_audit, *closed_owner_evidence_paths(args.closed_owner_audit))
     )
+    descendant_evidence = tuple(
+        path for child in args.descendants for path in descendant_evidence_paths(args.audit_output, child)
+    )
     lock_paths = tuple(
         sorted(
             {
@@ -2003,14 +2372,22 @@ def replace_manager(args: Args) -> str:
                 args.audit_output,
                 close_authority_path,
                 proof_path,
+                descendant_progress_path(args.audit_output),
                 *source_evidence_paths,
+                *descendant_evidence,
             },
             key=str,
         )
     )
     with ExitStack() as locks:
         locks.enter_context(root_membership_lock(args.root))
-        for target in sorted({canonical_target(args.old_target), canonical_target(args.new_target)}):
+        for target in sorted(
+            {
+                canonical_target(args.old_target),
+                canonical_target(args.new_target),
+                *(canonical_target(child.target) for child in args.descendants),
+            }
+        ):
             locks.enter_context(task_target_lock(args.root, target))
         for path in lock_paths:
             locks.enter_context(task_file_lock(path))
@@ -2072,7 +2449,9 @@ def replace_manager(args: Args) -> str:
         if args.closed_owner_audit is not None and owner_stopped:
             validate_closed_owner_recovery(args, record)
         if not owner_stopped:
-            validate_panes_before_close(args)
+            validate_live_bindings(args, pane_inventory(), require_descendants=False)
+            # 🧑 Source `manager_mail/85c5dff58359-1289.txt`: "replace the entire agent tree for this task. Get completing new agents to do them."
+            record, audit_bytes = stop_descendants(args, plan, record, audit_bytes, secret)
             try:
                 stop_old_manager(args, plan, proof_path, close_authority_path, secret, commitment)
             except Exception as exc:
