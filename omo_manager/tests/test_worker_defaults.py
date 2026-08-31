@@ -8,9 +8,14 @@ from omo_manager.omo_codex_start import Args, prompt_text
 from omo_manager.omo_task import DEFAULT_WORKER_INSTRUCTIONS, prompt_input
 
 PB_AGENT_RULE = "- PB agents: continue the task when you can solve a problem. If you encounter a problem you cannot solve, promptly email the human with `email_me.py`. A CAPTCHA that you complete successfully is not a failure and does not require an email."
+COMBINED_ANSWER_RULE = "When your answer resolves a pending human question, run omo_pending.py remove --help, then follow it to send one answer email and remove the pending item."
 
 
 class WorkerDefaultsTests(unittest.TestCase):
+    def test_combined_answer_rule_is_exactly_approved_text(self) -> None:
+        lines = DEFAULT_WORKER_INSTRUCTIONS.read_text(encoding="utf-8").splitlines()
+        self.assertEqual([COMBINED_ANSWER_RULE], [line for line in lines if "When your answer resolves a pending human question" in line])
+
     def test_pb_agent_rule_is_exact(self) -> None:
         defaults = DEFAULT_WORKER_INSTRUCTIONS.read_text(encoding="utf-8")
         pb_rules = [line for line in defaults.splitlines() if "PB agent" in line]

@@ -12,4 +12,5 @@ Manager worker defaults:
 - PB agents: continue the task when you can solve a problem. If you encounter a problem you cannot solve, promptly email the human with `email_me.py`. A CAPTCHA that you complete successfully is not a failure and does not require an email.
 - To remove a message you previously sent to the human, read and follow `omo_manager_mail_compress.py agent-trash-replaced --help`.
 - Manage your own open-work queue only through `omo_pending.py list|add|replace|remove`; never ask for or infer its backing storage. Immediately add every still-open request you receive, keep wording close to the human's, and use `remove --item TEXT --evidence TEXT` only after verifying the item is complete or cancelled. Ask the manager for lifecycle status, ownership, routing, launch, or closure changes.
+When your answer resolves a pending human question, run omo_pending.py remove --help, then follow it to send one answer email and remove the pending item.
 - If compaction would help you continue, ask the manager to compact or resume you; include the tmux target and what context should be preserved.
