@@ -17,7 +17,7 @@ import stat
 import subprocess
 import sys
 from contextlib import ExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 if __package__ in {None, ""}:
@@ -144,6 +144,8 @@ class Args:
     audit_output: Path
     preparer: str
     reviewer: str
+    closed_owner_audit: Path | None = None
+    closed_owner_audit_sha256: str = ""
     old_queue_sha256: str = ""
     old_pcodx_state_sha256: str = ""
     old_pcodx_ledger_sha256: str = ""
@@ -228,6 +230,8 @@ class ParsedArgs(argparse.Namespace):
     audit_output: Path = Path()
     preparer: str = ""
     reviewer: str = ""
+    closed_owner_audit: Path | None = None
+    closed_owner_audit_sha256: str = ""
     old_queue_sha256: str = ""
     old_pcodx_state_sha256: str = ""
     old_pcodx_ledger_sha256: str = ""
@@ -310,6 +314,8 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--audit-output", required=True, type=Path)
     _ = parser.add_argument("--preparer", required=True)
     _ = parser.add_argument("--reviewer", required=True)
+    _ = parser.add_argument("--closed-owner-audit", type=Path)
+    _ = parser.add_argument("--closed-owner-audit-sha256", default="")
     _ = parser.add_argument("--old-queue-sha256", default="")
     _ = parser.add_argument("--old-pcodx-state-sha256", default="")
     _ = parser.add_argument("--old-pcodx-ledger-sha256", default="")
@@ -347,6 +353,12 @@ def parse_args(argv: list[str]) -> Args:
         parser.error("--audit-output must be absolute")
     if not parsed.preparer.strip() or not parsed.reviewer.strip() or parsed.preparer.strip() == parsed.reviewer.strip():
         parser.error("preparer and independent reviewer must be distinct nonempty identities")
+    if bool(parsed.closed_owner_audit) != bool(parsed.closed_owner_audit_sha256):
+        parser.error("closed-owner audit path and SHA-256 must be supplied together")
+    if parsed.closed_owner_audit is not None and not parsed.closed_owner_audit.is_absolute():
+        parser.error("--closed-owner-audit must be absolute")
+    if parsed.closed_owner_audit_sha256 and SHA256_RE.fullmatch(parsed.closed_owner_audit_sha256) is None:
+        parser.error("closed-owner audit SHA-256 must be 64 lowercase hexadecimal characters")
     children = tuple(sorted(parsed.child, key=lambda child: child.task))
     if len({child.task for child in children}) != len(children):
         parser.error("--child task references must be unique")
@@ -379,6 +391,10 @@ def parse_args(argv: list[str]) -> Args:
         audit_output=parsed.audit_output.resolve(strict=False),
         preparer=parsed.preparer.strip(),
         reviewer=parsed.reviewer.strip(),
+        closed_owner_audit=(
+            parsed.closed_owner_audit.resolve(strict=False) if parsed.closed_owner_audit is not None else None
+        ),
+        closed_owner_audit_sha256=parsed.closed_owner_audit_sha256,
         old_queue_sha256=parsed.old_queue_sha256,
         old_pcodx_state_sha256=parsed.old_pcodx_state_sha256,
         old_pcodx_ledger_sha256=parsed.old_pcodx_ledger_sha256,
@@ -982,6 +998,11 @@ def validate_targets(args: Args) -> None:
             raise ReplaceError("Source-1269 guest replacement requires the full ordered queue SHA-256 binding")
     elif not is_pcodx_replacement(args) and args.old_queue_sha256:
         raise ReplaceError("ordered queue binding is accepted only for an exact PCODX or Source-1269 replacement")
+    if args.closed_owner_audit is not None:
+        if not is_guest1269_replacement(args):
+            raise ReplaceError("closed-owner audit recovery is accepted only for the exact Source-1269 replacement")
+        if args.closed_owner_audit == args.audit_output:
+            raise ReplaceError("closed-owner evidence and the fresh replacement audit must use distinct paths")
     old = canonical_target(args.old_target)
     new = canonical_target(args.new_target)
     if old == new:
@@ -1176,6 +1197,13 @@ def audit_record(args: Args, plan: Plan, secret: str, commitment: str) -> dict[s
         "markdown_membership": [path.relative_to(args.root).as_posix() for path in plan.initial_markdown_paths],
         "files": files,
     }
+    if args.closed_owner_audit is not None:
+        record.update(
+            {
+                "closed_owner_audit": str(args.closed_owner_audit),
+                "closed_owner_audit_sha256": args.closed_owner_audit_sha256,
+            }
+        )
     if is_pcodx_replacement(args):
         record.update(pcodx_audit_binding(args))
         record["protected_inventory"] = [
@@ -1299,6 +1327,13 @@ def audit_binding(args: Args) -> dict[str, object]:
     }
     if is_pcodx_replacement(args):
         binding.update(pcodx_audit_binding(args))
+    if args.closed_owner_audit is not None:
+        binding.update(
+            {
+                "closed_owner_audit": str(args.closed_owner_audit),
+                "closed_owner_audit_sha256": args.closed_owner_audit_sha256,
+            }
+        )
     return binding
 
 
@@ -1327,10 +1362,15 @@ def read_audit(args: Args) -> tuple[dict[str, object], bytes, tuple[AuditEntry, 
         "error",
         "rollback_failures",
         "owner_close_evidence",
+        "closed_owner_prepared_sha256",
+        "closed_owner_authority_sha256",
     }
     if is_pcodx_replacement(args):
         allowed.add("protected_inventory")
     required = allowed - {"error", "rollback_failures", "owner_close_evidence"}
+    if args.closed_owner_audit is None:
+        required -= {"closed_owner_prepared_sha256", "closed_owner_authority_sha256"}
+        allowed -= {"closed_owner_prepared_sha256", "closed_owner_authority_sha256"}
     if not required.issubset(record) or not set(record).issubset(allowed):
         raise ReplaceError("private replacement audit fields are incomplete or unrecognized")
     if any(record.get(key) != value for key, value in audit_binding(args).items()):
@@ -1347,6 +1387,11 @@ def read_audit(args: Args) -> tuple[dict[str, object], bytes, tuple[AuditEntry, 
         raise ReplaceError("private replacement audit owner-close evidence is unrecognized")
     if record.get("owner_close_evidence") == "authorized-absence" and state in {"prepared", "owner_stopped", "stop_failed"}:
         raise ReplaceError("private replacement audit owner-close evidence contradicts its lifecycle state")
+    if args.closed_owner_audit is not None and any(
+        SHA256_RE.fullmatch(str(record.get(key, ""))) is None
+        for key in ("closed_owner_prepared_sha256", "closed_owner_authority_sha256")
+    ):
+        raise ReplaceError("private replacement audit closed-owner evidence binding is malformed")
     if not isinstance(close_commitment, str) or SHA256_RE.fullmatch(close_commitment) is None:
         raise ReplaceError("private replacement audit close commitment is malformed")
     if (
@@ -1394,6 +1439,90 @@ def read_audit(args: Args) -> tuple[dict[str, object], bytes, tuple[AuditEntry, 
         if not isinstance(protected_value, list) or json_digest(protected_value) != args.protected_targets_sha256:
             raise ReplaceError("private replacement audit protected inventory binding changed")
     return dict(loaded), snapshot.data, tuple(entries), membership
+
+
+def closed_owner_evidence_paths(audit_path: Path) -> tuple[Path, Path]:
+    authority = audit_path.with_name(f".{audit_path.name}.close-authority")
+    return authority, authority.with_name(f".{authority.name}.owner-stopped")
+
+
+def validate_closed_owner_absence(args: Args) -> None:
+    inventory = pane_inventory()
+    if (
+        canonical_target(args.old_target) in inventory
+        or canonical_target(args.new_target) in inventory
+        or any(identity.pane_id == args.old_pane_id for identity in inventory.values())
+        or process_start_ticks(args.old_pane_pid) is not None
+    ):
+        raise ReplaceError("closed-owner source pane or process identity is no longer absent")
+
+
+# 🧑 "Bind the exact failed manager, current TODO ... pane/process/session identity ... and protected targets."
+def authenticate_closed_owner_source(
+    args: Args,
+) -> tuple[str, str, Args, tuple[AuditEntry, ...]]:
+    source_path = args.closed_owner_audit
+    if source_path is None:
+        raise ReplaceError("closed-owner recovery source is absent")
+    source_snapshot = read_snapshot(source_path, "closed-owner replacement audit")
+    if digest(source_snapshot.data) != args.closed_owner_audit_sha256:
+        raise ReplaceError("closed-owner replacement audit digest changed")
+    try:
+        loaded: object = json.loads(source_snapshot.data)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ReplaceError(f"closed-owner replacement audit is invalid JSON: {exc}") from exc
+    if not isinstance(loaded, dict) or SHA256_RE.fullmatch(str(loaded.get("todo_sha256", ""))) is None:
+        raise ReplaceError("closed-owner replacement audit lacks its original TODO binding")
+    source_args = replace(
+        args,
+        todo_sha256=str(loaded["todo_sha256"]),
+        audit_output=source_path,
+        closed_owner_audit=None,
+        closed_owner_audit_sha256="",
+    )
+    record, audit_bytes, entries, _membership = read_audit(source_args)
+    if audit_bytes != source_snapshot.data:
+        raise ReplaceError("closed-owner replacement audit changed during authentication")
+    if (
+        record.get("state") != "stop_failed"
+        or record.get("error") != "tmux symbolic target no longer owns the exact pane at command execution"
+        or record.get("completed_writes") != []
+        or record.get("owner_close_evidence") is not None
+    ):
+        raise ReplaceError("closed-owner source is not the exact proofless Source-1269 stop failure")
+    commitment = record.get("close_proof_commitment")
+    if not isinstance(commitment, str):
+        raise ReplaceError("closed-owner source close commitment is malformed")
+    authority_path, proof_path = closed_owner_evidence_paths(source_path)
+    if has_bound_close_proof(proof_path, commitment):
+        raise ReplaceError("closed-owner source has a bound close proof and is not the proofless Source-1269 incident")
+    prepared = dict(record)
+    prepared["state"] = "prepared"
+    prepared["completed_writes"] = []
+    prepared.pop("error", None)
+    prepared.pop("rollback_failures", None)
+    prepared_bytes = serialized_audit(prepared)
+    authority = read_snapshot(authority_path, "closed-owner close authority")
+    if authority.data != serialized_audit(close_authority_record(source_args, prepared_bytes, commitment)):
+        raise ReplaceError("closed-owner Human-bound close authority changed")
+    return digest(prepared_bytes), digest(authority.data), source_args, entries
+
+
+def validate_closed_owner_before_state(args: Args, source_args: Args, entries: tuple[AuditEntry, ...]) -> None:
+    states = tuple(current_entry_state(source_args, entry)[0] for entry in entries)
+    if any(state != "before" for state in (*states[:-2], states[-1])):
+        raise ReplaceError("closed-owner source lifecycle bytes changed outside the current TODO")
+    validate_closed_owner_absence(args)
+
+
+def validate_closed_owner_recovery(args: Args, record: dict[str, object]) -> None:
+    prepared, authority, _source_args, _entries = authenticate_closed_owner_source(args)
+    if (prepared, authority) != (
+        record.get("closed_owner_prepared_sha256"),
+        record.get("closed_owner_authority_sha256"),
+    ):
+        raise ReplaceError("closed-owner evidence changed before lifecycle recovery")
+    validate_closed_owner_absence(args)
 
 
 def recovery_plan(
@@ -1801,6 +1930,9 @@ def stop_old_manager(
 
 
 def prove_committed(args: Args, plan: Plan, old_after: Snapshot, child_after: tuple[Snapshot, ...], todo_after: Snapshot, successor: Snapshot) -> None:
+    if args.closed_owner_audit is not None:
+        _prepared, _authority, _source_args, _entries = authenticate_closed_owner_source(args)
+        validate_closed_owner_absence(args)
     require_snapshot(plan.authority, "replacement authority")
     require_snapshot(plan.authority_envelope, "replacement authority envelope")
     require_snapshot(old_after, "committed old manager")
@@ -1844,8 +1976,10 @@ def replace_manager(args: Args) -> str:
     successor_path = task_path(args.root, args.successor_task)
     authority_source_path = task_path(args.root, args.authority_file)
     authority_envelope_path = task_path(args.root, args.authority_envelope_task)
-    close_authority_path = args.audit_output.with_name(f".{args.audit_output.name}.close-authority")
-    proof_path = close_authority_path.with_name(f".{close_authority_path.name}.owner-stopped")
+    close_authority_path, proof_path = closed_owner_evidence_paths(args.audit_output)
+    source_evidence_paths = (
+        () if args.closed_owner_audit is None else (args.closed_owner_audit, *closed_owner_evidence_paths(args.closed_owner_audit))
+    )
     lock_paths = tuple(
         sorted(
             {
@@ -1857,6 +1991,7 @@ def replace_manager(args: Args) -> str:
                 args.audit_output,
                 close_authority_path,
                 proof_path,
+                *source_evidence_paths,
             },
             key=str,
         )
@@ -1871,6 +2006,9 @@ def replace_manager(args: Args) -> str:
             raise ReplaceError("Markdown membership changed while replacement locks were acquired")
         owner_stopped = False
         if args.audit_output.exists() or args.audit_output.is_symlink():
+            if args.closed_owner_audit is not None:
+                current_record, _current_bytes, _current_entries, _current_membership = read_audit(args)
+                validate_closed_owner_recovery(args, current_record)
             recovery = recover_existing(args, proof_path, close_authority_path)
             if recovery.result:
                 return recovery.result
@@ -1886,17 +2024,41 @@ def replace_manager(args: Args) -> str:
         else:
             if close_authority_path.exists() or proof_path.exists():
                 raise ReplaceError("bound close authority or proof exists without its private replacement audit")
-            validate_panes_before_close(args)
-            plan = prepare(args, initial_paths)
-            validate_panes_before_close(args)
-            secret = os.urandom(32).hex()
-            commitment = digest(secret.encode())
-            record = audit_record(args, plan, secret, commitment)
-            audit_bytes = reserve_audit(args.audit_output, record)
-            _ = reserve_audit(close_authority_path, close_authority_record(args, audit_bytes, commitment))
+            if args.closed_owner_audit is None:
+                validate_panes_before_close(args)
+                plan = prepare(args, initial_paths)
+                validate_panes_before_close(args)
+                secret = os.urandom(32).hex()
+                commitment = digest(secret.encode())
+                record = audit_record(args, plan, secret, commitment)
+                audit_bytes = reserve_audit(args.audit_output, record)
+                _ = reserve_audit(close_authority_path, close_authority_record(args, audit_bytes, commitment))
+            else:
+                prepared_sha256, authority_sha256, source_args, source_entries = authenticate_closed_owner_source(args)
+                validate_closed_owner_before_state(args, source_args, source_entries)
+                plan = prepare(args, initial_paths)
+                prepared_after, authority_after, source_args, source_entries = authenticate_closed_owner_source(args)
+                if (prepared_after, authority_after) != (prepared_sha256, authority_sha256):
+                    raise ReplaceError("closed-owner evidence changed while the fresh plan was prepared")
+                validate_closed_owner_before_state(args, source_args, source_entries)
+                secret = os.urandom(32).hex()
+                commitment = digest(secret.encode())
+                record = audit_record(args, plan, secret, commitment)
+                record.update(
+                    {
+                        "state": "owner_absent",
+                        "owner_close_evidence": "authorized-absence",
+                        "closed_owner_prepared_sha256": prepared_sha256,
+                        "closed_owner_authority_sha256": authority_sha256,
+                    }
+                )
+                audit_bytes = reserve_audit(args.audit_output, record)
+                owner_stopped = True
             record, audit_bytes, entries, membership = read_audit(args)
             if membership != plan.initial_markdown_paths:
                 raise ReplaceError("private replacement audit did not preserve prepared Markdown membership")
+        if args.closed_owner_audit is not None and owner_stopped:
+            validate_closed_owner_recovery(args, record)
         if not owner_stopped:
             validate_panes_before_close(args)
             try:

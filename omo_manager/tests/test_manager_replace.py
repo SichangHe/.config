@@ -1136,6 +1136,170 @@ class ManagerReplaceTests(unittest.TestCase):
             ):
                 replace_manager(args)
 
+    def test_source1269_closed_owner_audit_rebases_current_todo_without_reclosing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, _files = self.guest1269_fixture(Path(tmp))
+            state = {"old_live": True}
+
+            def killed_then_guard_lost(_args: object) -> str:
+                state["old_live"] = False
+                raise RuntimeError("tmux symbolic target no longer owns the exact pane at command execution")
+
+            inventory, _stopped, proof = self.runtime(state, args.old_target, args.new_target)
+            with (
+                inventory,
+                proof,
+                patch.object(manager_replace, "stop", side_effect=killed_then_guard_lost),
+                self.assertRaisesRegex(ReplaceError, "manager stop failed before lifecycle mutation"),
+            ):
+                replace_manager(args)
+            source_bytes = args.audit_output.read_bytes()
+            concurrent_task = "concurrent_lifecycle.md"
+            (root / concurrent_task).write_text(
+                task_text(
+                    status="running",
+                    runat="other:8",
+                    managerat="other:7",
+                    is_manager=False,
+                    pending=("Preserve concurrent lifecycle work.",),
+                ),
+                encoding="utf-8",
+            )
+            current_todo = (root / "TODO.md").read_text(encoding="utf-8").replace(
+                "unrelated.md other:1\n",
+                f"unrelated.md other:1\n{concurrent_task} other:8\n",
+            )
+            (root / "TODO.md").write_text(current_todo, encoding="utf-8")
+            rebased = replace(
+                args,
+                todo_sha256=sha(current_todo),
+                audit_output=args.audit_output.with_name("current-manager-replace.json"),
+                closed_owner_audit=args.audit_output,
+                closed_owner_audit_sha256=hashlib.sha256(source_bytes).hexdigest(),
+            )
+            with (
+                patch.object(manager_replace, "pane_inventory", return_value={}),
+                patch.object(manager_replace, "process_start_ticks", return_value=None),
+                patch.object(manager_replace, "has_bound_close_proof", return_value=False),
+                patch.object(manager_replace, "stop") as stop_mock,
+            ):
+                result = replace_manager(rebased)
+            stop_mock.assert_not_called()
+            self.assertIn("sole ownership", result)
+            self.assertEqual(source_bytes, args.audit_output.read_bytes())
+            record = json.loads(rebased.audit_output.read_text(encoding="utf-8"))
+            self.assertEqual("committed", record["state"])
+            self.assertEqual("authorized-absence", record["owner_close_evidence"])
+            self.assertEqual(str(args.audit_output), record["closed_owner_audit"])
+            self.assertIn(f"{concurrent_task} other:8", (root / "TODO.md").read_text(encoding="utf-8"))
+            self.assertEqual("done", parsed(root / args.old_task, root).status)
+            self.assertEqual("blocked", parsed(root / args.successor_task, root).status)
+            with (
+                patch.object(manager_replace, "pane_inventory", return_value={}),
+                patch.object(manager_replace, "has_bound_close_proof", return_value=False),
+            ):
+                self.assertIn("recovered committed", replace_manager(rebased))
+
+    def test_source1269_closed_owner_audit_rejects_lifecycle_or_pane_reuse(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, files = self.guest1269_fixture(Path(tmp))
+            state = {"old_live": True}
+
+            def killed_then_guard_lost(_args: object) -> str:
+                state["old_live"] = False
+                raise RuntimeError("tmux symbolic target no longer owns the exact pane at command execution")
+
+            inventory, _stopped, proof = self.runtime(state, args.old_target, args.new_target)
+            with inventory, proof, patch.object(manager_replace, "stop", side_effect=killed_then_guard_lost), self.assertRaises(ReplaceError):
+                replace_manager(args)
+            rebased = replace(
+                args,
+                audit_output=args.audit_output.with_name("current-manager-replace.json"),
+                closed_owner_audit=args.audit_output,
+                closed_owner_audit_sha256=hashlib.sha256(args.audit_output.read_bytes()).hexdigest(),
+            )
+            reused = PaneIdentity("other:1.0", args.old_pane_id, 9999, 1000)
+            with (
+                patch.object(manager_replace, "pane_inventory", return_value={reused.target: reused}),
+                patch.object(manager_replace, "process_start_ticks", return_value=None),
+                self.assertRaisesRegex(ReplaceError, "pane or process identity is no longer absent"),
+            ):
+                replace_manager(rebased)
+            self.assertFalse(rebased.audit_output.exists())
+            (root / args.old_task).write_text(files[args.old_task] + "concurrent lifecycle drift\n", encoding="utf-8")
+            with (
+                patch.object(manager_replace, "pane_inventory", return_value={}),
+                patch.object(manager_replace, "process_start_ticks", return_value=None),
+                patch.object(manager_replace, "has_bound_close_proof", return_value=False),
+                self.assertRaisesRegex(ReplaceError, "lifecycle bytes changed outside the current TODO"),
+            ):
+                replace_manager(rebased)
+            self.assertFalse(rebased.audit_output.exists())
+
+    def test_source1269_closed_owner_retry_reauthenticates_source_and_absence(self) -> None:
+        class SimulatedCrash(BaseException):
+            pass
+
+        for scenario in ("source", "authority", "proof", "pane", "pid"):
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as tmp:
+                _root, args, _files = self.guest1269_fixture(Path(tmp))
+                state = {"old_live": True}
+
+                def killed_then_guard_lost(_args: object) -> str:
+                    state["old_live"] = False
+                    raise RuntimeError("tmux symbolic target no longer owns the exact pane at command execution")
+
+                inventory, _stopped, proof = self.runtime(state, args.old_target, args.new_target)
+                with inventory, proof, patch.object(manager_replace, "stop", side_effect=killed_then_guard_lost), self.assertRaises(ReplaceError):
+                    replace_manager(args)
+                rebased = replace(
+                    args,
+                    audit_output=args.audit_output.with_name("current-manager-replace.json"),
+                    closed_owner_audit=args.audit_output,
+                    closed_owner_audit_sha256=hashlib.sha256(args.audit_output.read_bytes()).hexdigest(),
+                )
+                with (
+                    patch.object(manager_replace, "pane_inventory", return_value={}),
+                    patch.object(manager_replace, "process_start_ticks", return_value=None),
+                    patch.object(manager_replace, "has_bound_close_proof", return_value=False),
+                    patch.object(manager_replace, "replace_snapshot", side_effect=SimulatedCrash),
+                    self.assertRaises(SimulatedCrash),
+                ):
+                    replace_manager(rebased)
+                self.assertEqual("owner_absent", json.loads(rebased.audit_output.read_text(encoding="utf-8"))["state"])
+                authority_path, _proof_path = manager_replace.closed_owner_evidence_paths(args.audit_output)
+                if scenario == "source":
+                    args.audit_output.write_bytes(args.audit_output.read_bytes() + b"drift\n")
+                elif scenario == "authority":
+                    authority_path.write_bytes(authority_path.read_bytes() + b"drift\n")
+                inventory_value = (
+                    {"other:1.0": PaneIdentity("other:1.0", args.old_pane_id, 9999, 1000)}
+                    if scenario == "pane"
+                    else {}
+                )
+                with (
+                    patch.object(manager_replace, "pane_inventory", return_value=inventory_value),
+                    patch.object(
+                        manager_replace,
+                        "process_start_ticks",
+                        return_value=(args.old_pane_start_ticks if scenario == "pid" else None),
+                    ),
+                    patch.object(manager_replace, "has_bound_close_proof", return_value=scenario == "proof"),
+                    self.assertRaises(ReplaceError),
+                ):
+                    replace_manager(rebased)
+
+    def test_closed_owner_audit_is_rejected_for_non_source1269_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, args, _files = self.fixture(Path(tmp))
+            changed = replace(
+                args,
+                closed_owner_audit=args.audit_output.with_name("prior.json"),
+                closed_owner_audit_sha256="0" * 64,
+            )
+            with self.assertRaisesRegex(ReplaceError, "only for the exact Source-1269 replacement"):
+                manager_replace.validate_targets(changed)
+
     def test_other_manager_guard_loss_cannot_use_source1269_absence_reconciliation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             _root, args, _files = self.fixture(Path(tmp))
