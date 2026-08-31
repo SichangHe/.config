@@ -1730,7 +1730,7 @@ def stop_old_manager(
     session_id = stop(
         StopArgs(
             target=args.old_target,
-            wait_s=10.0,
+            wait_s=30.0,
             lines=2000,
             dry_run=False,
             allow_self=False,

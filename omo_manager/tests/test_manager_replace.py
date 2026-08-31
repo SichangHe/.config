@@ -792,7 +792,10 @@ class ManagerReplaceTests(unittest.TestCase):
     def test_exact_source1269_guest_replacement_allows_replacement(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root, args, _files = self.guest1269_fixture(Path(tmp))
-            self.run_replacement(args, {"old_live": True})
+            inventory, stopped, proof = self.runtime({"old_live": True}, args.old_target, args.new_target)
+            with inventory, stopped as stop_mock, proof:
+                replace_manager(args)
+            self.assertEqual(30.0, stop_mock.call_args.args[0].wait_s)
             self.assertEqual("blocked", parsed(root / args.successor_task, root).status)
 
     def test_source1269_guest_replacement_rejects_later_revocation(self) -> None:
