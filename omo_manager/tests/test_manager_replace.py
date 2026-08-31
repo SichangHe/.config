@@ -255,6 +255,25 @@ class ManagerReplaceTests(unittest.TestCase):
         self.assertEqual((), manager_replace.active_child_task_refs(root, root / args.old_task, old.runat))
         return root, changed, files, stack
 
+    def dual_descendant_fixture(self, base: Path) -> tuple[Path, Args, dict[str, str], contextlib.ExitStack]:
+        root, args, files = self.whole_tree_fixture(base)
+        source1292 = "Subject: close tree\n\nClose either way. Directly use tmux if needed\n\n"
+        source_path = root / manager_replace.SOURCE1292_FILE
+        source_path.parent.mkdir(exist_ok=True)
+        source_path.write_text(source1292, encoding="utf-8")
+        source_path.chmod(0o600)
+        original = (root / args.authority_envelope_task).read_text(encoding="utf-8")
+        second = (
+            f'<human_instruction authoritative="true" source="{manager_replace.SOURCE1292_FILE}:1-4">\n'
+            "Subject: close tree\n\nClose either way. Directly use tmux if needed\n"
+            "</human_instruction>\n"
+        )
+        (root / args.authority_envelope_task).write_text(original + second, encoding="utf-8")
+        changed = replace(args, descendant_authority_envelope_sha256=sha(second))
+        stack = self.whole_tree_authority(changed)
+        stack.enter_context(patch.object(manager_replace, "SOURCE1292_SHA256", sha(source1292)))
+        return root, changed, files, stack
+
     def run_replacement(self, args: Args, state: dict[str, bool]) -> str:
         inventory, stopped, proof = self.runtime(state, args.old_target, args.new_target)
         with inventory, stopped, proof:
@@ -1155,6 +1174,109 @@ class ManagerReplaceTests(unittest.TestCase):
             ):
                 replace_manager(args)
             stop_mock.assert_not_called()
+
+    def test_source1292_dual_authority_descendant_prepare_preserves_both_queue_items(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, _files, authority = self.dual_descendant_fixture(Path(tmp))
+            inventory, _stopped, _proof = self.runtime({"old_live": True})
+            with authority, inventory:
+                plan = manager_replace.prepare(args, manager_replace.markdown_paths(root))
+            self.assertEqual(2, len(plan.successor_queue) - len(OLD_QUEUE))
+            self.assertIn(args.authority_file, plan.successor_queue[-2])
+            self.assertIn(manager_replace.SOURCE1292_FILE, plan.successor_queue[-1])
+            self.assertIsNotNone(plan.empty_tree_authority)
+
+    def test_source1292_dual_authority_descendant_rejects_missing_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, _files, authority = self.dual_descendant_fixture(Path(tmp))
+            changed = replace(args, descendant_authority_envelope_sha256="")
+            with authority, self.assertRaisesRegex(ReplaceError, "expected blocks"):
+                manager_replace.prepare(changed, manager_replace.markdown_paths(root))
+
+    def test_source1292_dual_authority_drift_after_close_fails_before_lifecycle_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, files, authority = self.dual_descendant_fixture(Path(tmp))
+            live = {
+                manager_replace.canonical_target(args.old_target),
+                *(manager_replace.canonical_target(item.target) for item in args.descendants),
+            }
+            identities = {
+                manager_replace.canonical_target(args.old_target): PaneIdentity(
+                    manager_replace.canonical_target(args.old_target), "%42", 4242, 999
+                ),
+                **{
+                    manager_replace.canonical_target(item.target): PaneIdentity(
+                        manager_replace.canonical_target(item.target),
+                        item.pane_id,
+                        item.pane_pid,
+                        item.pane_start_ticks,
+                    )
+                    for item in args.descendants
+                },
+            }
+            sessions = {item.target: item.session_id for item in args.descendants} | {
+                args.old_target: args.old_session_id
+            }
+
+            def inventory() -> dict[str, PaneIdentity]:
+                return {target: identity for target, identity in identities.items() if target in live}
+
+            def stopped(stop_args: object) -> str:
+                target = manager_replace.canonical_target(stop_args.target)
+                live.remove(target)
+                Path(stop_args.bound_close_proof_path).write_text(
+                    f"{stop_args.bound_close_proof_secret}\n", encoding="utf-8"
+                )
+                Path(stop_args.bound_close_proof_path).chmod(0o600)
+                if target == manager_replace.canonical_target(args.old_target):
+                    source1292 = root / manager_replace.SOURCE1292_FILE
+                    source1292.write_text(
+                        source1292.read_text(encoding="utf-8") + "late drift\n", encoding="utf-8"
+                    )
+                return sessions[stop_args.target]
+
+            with (
+                authority,
+                patch.object(manager_replace, "pane_inventory", side_effect=inventory),
+                patch.object(manager_replace, "process_start_ticks", return_value=None),
+                patch.object(manager_replace, "stop", side_effect=stopped),
+                patch.object(manager_replace, "require_descendants_closed"),
+                self.assertRaisesRegex(ReplaceError, "Source-1292 replacement authority changed"),
+            ):
+                replace_manager(args)
+            self.assertEqual(files[args.old_task], (root / args.old_task).read_text(encoding="utf-8"))
+            self.assertEqual("rolled_back", json.loads(args.audit_output.read_text(encoding="utf-8"))["state"])
+
+    def test_source1292_modes_keep_distinct_recovery_binding_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "empty"
+            base.mkdir()
+            root, empty_args, _files, empty_authority = self.empty_tree_fixture(base)
+            inventory, _stopped, _proof = self.runtime({"old_live": True})
+            with empty_authority, inventory:
+                empty_plan = manager_replace.prepare(empty_args, manager_replace.markdown_paths(root))
+                empty_record = manager_replace.audit_record(empty_args, empty_plan, "a" * 64, sha("a" * 64))
+            self.assertEqual(
+                empty_args.empty_tree_envelope_sha256,
+                empty_record["empty_tree_envelope_sha256"],
+            )
+            self.assertNotIn("descendant_authority_envelope_sha256", empty_record)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "descendant"
+            base.mkdir()
+            root, descendant_args, _files, descendant_authority = self.dual_descendant_fixture(base)
+            inventory, _stopped, _proof = self.runtime({"old_live": True})
+            with descendant_authority, inventory:
+                descendant_plan = manager_replace.prepare(descendant_args, manager_replace.markdown_paths(root))
+                descendant_record = manager_replace.audit_record(
+                    descendant_args, descendant_plan, "b" * 64, sha("b" * 64)
+                )
+            self.assertEqual(
+                descendant_args.descendant_authority_envelope_sha256,
+                descendant_record["descendant_authority_envelope_sha256"],
+            )
+            self.assertNotIn("empty_tree_envelope_sha256", descendant_record)
 
     def test_direct_args_cannot_add_or_omit_a_descendant_pin(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

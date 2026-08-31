@@ -173,6 +173,7 @@ class Args:
     authority_envelope_file_sha256: str = ""
     descendants: tuple[DescendantPin, ...] = ()
     empty_tree_envelope_sha256: str = ""
+    descendant_authority_envelope_sha256: str = ""
 
 
 @dataclass(frozen=True)
@@ -263,6 +264,7 @@ class ParsedArgs(argparse.Namespace):
     authority_envelope_file_sha256: str = ""
     descendant: list[str] = []
     empty_tree_envelope_sha256: str = ""
+    descendant_authority_envelope_sha256: str = ""
 
 
 def digest(data: bytes) -> str:
@@ -295,6 +297,14 @@ def is_source1289_whole_tree(args: Args) -> bool:
 def is_source1292_empty_tree(args: Args) -> bool:
     # 🧑 Source `manager_mail/85c5dff58359-1292.txt:3`: "Close either way. Directly use tmux if needed"
     return bool(args.empty_tree_envelope_sha256)
+
+
+def is_source1292_descendant_tree(args: Args) -> bool:
+    return bool(args.descendant_authority_envelope_sha256)
+
+
+def source1292_envelope_sha256(args: Args) -> str:
+    return args.empty_tree_envelope_sha256 or args.descendant_authority_envelope_sha256
 
 
 def canonical_target(target: str) -> str:
@@ -362,6 +372,7 @@ def parse_args(argv: list[str]) -> Args:
     _ = parser.add_argument("--child", action="append", default=[], type=parse_child)
     _ = parser.add_argument("--descendant", action="append", default=[], type=parse_descendant)
     _ = parser.add_argument("--empty-tree-envelope-sha256", default="")
+    _ = parser.add_argument("--descendant-authority-envelope-sha256", default="")
     _ = parser.add_argument("--old-pane-id", required=True)
     _ = parser.add_argument("--old-pane-pid", required=True, type=int)
     _ = parser.add_argument("--old-pane-start-ticks", required=True, type=int)
@@ -472,6 +483,7 @@ def parse_args(argv: list[str]) -> Args:
         authority_envelope_file_sha256=parsed.authority_envelope_file_sha256,
         descendants=descendants,
         empty_tree_envelope_sha256=parsed.empty_tree_envelope_sha256,
+        descendant_authority_envelope_sha256=parsed.descendant_authority_envelope_sha256,
     )
     try:
         validate_targets(result)
@@ -806,7 +818,7 @@ def authority_material(args: Args, snapshot: Snapshot, envelope: Snapshot) -> tu
         raise ReplaceError("authority excerpt must not be empty")
     locator = f"{args.authority_file}:{args.authority_lines.start}-{args.authority_lines.end}"
     matches = list(HUMAN_ENVELOPE_RE.finditer(envelope_text))
-    expected_matches = 2 if is_source1292_empty_tree(args) else 1
+    expected_matches = 2 if is_source1292_empty_tree(args) or is_source1292_descendant_tree(args) else 1
     selected = [candidate for candidate in matches if candidate.group("source") == locator]
     if len(matches) != expected_matches or len(selected) != 1:
         raise ReplaceError("authority envelope must contain exactly the expected blocks and bound source locator")
@@ -892,7 +904,7 @@ def empty_tree_authority_material(args: Args, envelope: Snapshot) -> tuple[Snaps
     matches = [candidate for candidate in HUMAN_ENVELOPE_RE.finditer(envelope_text) if candidate.group("source") == locator]
     if (
         len(matches) != 1
-        or digest(matches[0].group(0).encode()) != args.empty_tree_envelope_sha256
+        or digest(matches[0].group(0).encode()) != source1292_envelope_sha256(args)
         or "\n".join(matches[0].group("body").splitlines()) != "\n".join(excerpt.splitlines())
         or "Close either way. Directly use tmux if needed" not in excerpt
     ):
@@ -900,7 +912,7 @@ def empty_tree_authority_material(args: Args, envelope: Snapshot) -> tuple[Snaps
     item = (
         "Read and execute the private authenticated Human close instruction at "
         f"{locator} (source-sha256={SOURCE1292_SHA256}; envelope={args.authority_envelope_task}; "
-        f"envelope-block-sha256={args.empty_tree_envelope_sha256})."
+        f"envelope-block-sha256={source1292_envelope_sha256(args)})."
     )
     return snapshot, item
 
@@ -1140,8 +1152,16 @@ def validate_targets(args: Args) -> None:
         or args.children
         or args.descendants
         or SHA256_RE.fullmatch(args.empty_tree_envelope_sha256) is None
+        or args.descendant_authority_envelope_sha256
     ):
         raise ReplaceError("Source-1292 empty-tree mode requires exact Source-1289 with no child or descendant pins")
+    if is_source1292_descendant_tree(args) and (
+        not is_source1289_whole_tree(args)
+        or not args.descendants
+        or bool(args.empty_tree_envelope_sha256)
+        or SHA256_RE.fullmatch(args.descendant_authority_envelope_sha256) is None
+    ):
+        raise ReplaceError("Source-1292 descendant mode requires exact Source-1289 with nonempty descendant pins")
     if is_source1289_whole_tree(args) and (
         args.authority_sha256 != SOURCE1289_SHA256
         or LineRange(*SOURCE1289_TREE_LINES) not in args.successor_item_lines
@@ -1265,7 +1285,7 @@ def prepare(args: Args, paths: tuple[Path, ...]) -> Plan:
         child_queues.append(child_metadata.pending_task_items)
     authority_items = authority_material(args, authority, authority_envelope)
     empty_tree_authority: Snapshot | None = None
-    if is_source1292_empty_tree(args):
+    if is_source1292_empty_tree(args) or is_source1292_descendant_tree(args):
         empty_tree_authority, empty_tree_item = empty_tree_authority_material(args, authority_envelope)
         authority_items = (*authority_items, empty_tree_item)
     old_after, successor_data, successor_queue = old_and_successor_text(
@@ -1380,6 +1400,8 @@ def audit_record(args: Args, plan: Plan, secret: str, commitment: str) -> dict[s
         ]
     if is_source1292_empty_tree(args):
         record["empty_tree_envelope_sha256"] = args.empty_tree_envelope_sha256
+    if is_source1292_descendant_tree(args):
+        record["descendant_authority_envelope_sha256"] = args.descendant_authority_envelope_sha256
     if args.closed_owner_audit is not None:
         record.update(
             {
@@ -1559,6 +1581,8 @@ def audit_binding(args: Args) -> dict[str, object]:
         binding["descendants"] = descendant_binding(args)
     if is_source1292_empty_tree(args):
         binding["empty_tree_envelope_sha256"] = args.empty_tree_envelope_sha256
+    if is_source1292_descendant_tree(args):
+        binding["descendant_authority_envelope_sha256"] = args.descendant_authority_envelope_sha256
     if is_pcodx_replacement(args):
         binding.update(pcodx_audit_binding(args))
     if args.closed_owner_audit is not None:
@@ -1800,7 +1824,7 @@ def recovery_plan(
     envelope = read_snapshot(task_path(args.root, args.authority_envelope_task), "recovery authority envelope")
     authority_items = authority_material(args, authority, envelope)
     empty_tree_authority: Snapshot | None = None
-    if is_source1292_empty_tree(args):
+    if is_source1292_empty_tree(args) or is_source1292_descendant_tree(args):
         empty_tree_authority, empty_tree_item = empty_tree_authority_material(args, envelope)
         authority_items = (*authority_items, empty_tree_item)
     if old_entry.before is None or todo_entry.before is None or any(entry.before is None for entry in child_entries):
@@ -2451,7 +2475,11 @@ def replace_manager(args: Args) -> str:
                 successor_path,
                 authority_source_path,
                 authority_envelope_path,
-                *( (empty_tree_authority_path,) if is_source1292_empty_tree(args) else () ),
+                *(
+                    (empty_tree_authority_path,)
+                    if is_source1292_empty_tree(args) or is_source1292_descendant_tree(args)
+                    else ()
+                ),
                 args.audit_output,
                 close_authority_path,
                 proof_path,
@@ -2555,6 +2583,8 @@ def replace_manager(args: Args) -> str:
         try:
             require_snapshot(plan.authority, "replacement authority")
             require_snapshot(plan.authority_envelope, "replacement authority envelope")
+            if plan.empty_tree_authority is not None:
+                require_snapshot(plan.empty_tree_authority, "Source-1292 replacement authority")
             record, audit_bytes = transition_audit(args.audit_output, audit_bytes, record, "mutating", completed=())
             # 🧑 "The agent failed. They did not run the experiment. Replace them. The replacement agent should finish the task."
             updated_old = replace_snapshot(plan.old, plan.old_after, "old manager")
