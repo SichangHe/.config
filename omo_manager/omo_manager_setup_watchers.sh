@@ -655,28 +655,36 @@ if [ "$start_guest_hees_email" -eq 1 ]; then
   mkdir -p -m 700 "$guest_hees_mail_dir"
   chmod 700 "$guest_hees_mail_dir"
   guest_hees_email_args=(--guest-hees --root "$root" --mail-dir "$guest_hees_mail_dir" --state-dir "$state_dir")
+  # 🧑 "make sure that in the future replies get sent to the guest also"
+  guest_hees_email_lock="$state_dir/source1269-guest-watcher.lock"
   guest_hees_email_token="$(owner_token)"
   guest_hees_email_launch_pid_file="$state_dir/.guest-hees-email-supervisor.$guest_hees_email_token.pid"
   setsid bash -c '
 launch_pid_file="$1"
 owner_token="$2"
-shift 2
+lock_file="$3"
+shift 3
+umask 077
 printf "%s\n" "$$" >"$launch_pid_file"
 startup_grace_s="${OMO_MANAGER_EMAIL_SUPERVISOR_STARTUP_GRACE_S:-2}"
 started=0
 while :; do
   start_s=$SECONDS
-  "$@"
+  flock --exclusive --nonblock --conflict-exit-code 75 "$lock_file" "$@"
   st=$?
   runtime_s=$((SECONDS - start_s))
   printf "%s guest-hees email watcher exited status=%s; restarting in 5s\n" "$(date "+%Y-%m-%d %H:%M:%S %z")" "$st" >&2
+  if [ "$st" -eq 75 ]; then
+    printf "%s guest-hees email watcher single-instance lock is held; stopping supervisor\n" "$(date "+%Y-%m-%d %H:%M:%S %z")" >&2
+    exit "$st"
+  fi
   if [ "$started" -eq 0 ] && [ "$runtime_s" -lt "$startup_grace_s" ]; then
     exit "$st"
   fi
   started=1
   sleep 5
 done
-' guest-hees-email-watch-supervisor "$guest_hees_email_launch_pid_file" "$guest_hees_email_token" "${uv_run[@]}" "$helper_dir/email_idle_watcher.py" "${guest_hees_email_args[@]}" 8>&- >>"$state_dir/guest-hees-email-watch.log" 2>&1 &
+' guest-hees-email-watch-supervisor "$guest_hees_email_launch_pid_file" "$guest_hees_email_token" "$guest_hees_email_lock" "${uv_run[@]}" "$helper_dir/email_idle_watcher.py" "${guest_hees_email_args[@]}" 8>&- >>"$state_dir/guest-hees-email-watch.log" 2>&1 &
   guest_hees_email_launcher_pid=$!
   guest_hees_email_launcher_start="$(process_start_ticks "$guest_hees_email_launcher_pid" 2>/dev/null || true)"
   guest_hees_email_pid="$(wait_launch_pid guest-hees-email "$guest_hees_email_launcher_pid" "$guest_hees_email_launcher_start" "$guest_hees_email_launch_pid_file")"
