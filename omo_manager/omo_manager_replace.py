@@ -248,6 +248,17 @@ def is_pcodx_replacement(args: Args) -> bool:
     return bool(args.old_pcodx_state_sha256)
 
 
+def is_guest1269_replacement(args: Args) -> bool:
+    source, lines, task, target, _evidence = GUEST1269_REPLACEMENT
+    return (
+        args.authority_file == source
+        and args.authority_lines == LineRange(*lines)
+        and args.successor_item_lines == (args.authority_lines,)
+        and args.old_task == task
+        and canonical_target(args.old_target) == target
+    )
+
+
 def canonical_target(target: str) -> str:
     match = re.fullmatch(r"([A-Za-z][A-Za-z0-9_-]*):(\d+)(?:\.(\d+))?", target)
     if match is None:
@@ -314,16 +325,6 @@ def parse_args(argv: list[str]) -> Args:
     ):
         if SHA256_RE.fullmatch(value) is None:
             parser.error(f"{label} SHA-256 must be 64 lowercase hexadecimal characters")
-    pcodx_digests = (
-        parsed.old_queue_sha256,
-        parsed.old_pcodx_state_sha256,
-        parsed.old_pcodx_ledger_sha256,
-        parsed.old_pcodx_wrapper_sha256,
-        parsed.protected_targets_sha256,
-        parsed.authority_envelope_file_sha256,
-    )
-    if any(pcodx_digests) and not all(SHA256_RE.fullmatch(value) for value in pcodx_digests):
-        parser.error("PCODX replacement requires all six exact lowercase SHA-256 bindings")
     if any(
         TASK_REF_RE.fullmatch(task) is None
         for task in (parsed.old_task, parsed.successor_task, parsed.authority_envelope_task)
@@ -354,7 +355,7 @@ def parse_args(argv: list[str]) -> Args:
         _ = tuple(canonical_target(target) for target in targets)
     except ReplaceError as exc:
         parser.error(str(exc))
-    return Args(
+    result = Args(
         root=parsed.root.expanduser().resolve(strict=False),
         old_task=parsed.old_task,
         successor_task=parsed.successor_task,
@@ -385,6 +386,11 @@ def parse_args(argv: list[str]) -> Args:
         protected_targets_sha256=parsed.protected_targets_sha256,
         authority_envelope_file_sha256=parsed.authority_envelope_file_sha256,
     )
+    try:
+        validate_targets(result)
+    except ReplaceError as exc:
+        parser.error(str(exc))
+    return result
 
 
 def task_path(root: Path, task: str) -> Path:
@@ -746,15 +752,7 @@ def authority_material(args: Args, snapshot: Snapshot, envelope: Snapshot) -> tu
         and pcodx_replacement.group("task") == args.old_task
         and canonical_target(pcodx_replacement.group("target")) == canonical_target(args.old_target)
     )
-    guest_source, guest_lines, guest_task, guest_target, guest_evidence = GUEST1269_REPLACEMENT
-    exact_guest1269_replacement = (
-        args.authority_file == guest_source
-        and args.authority_lines == LineRange(*guest_lines)
-        and args.successor_item_lines == (args.authority_lines,)
-        and args.old_task == guest_task
-        and canonical_target(args.old_target) == guest_target
-        and selected_evidence == guest_evidence
-    )
+    exact_guest1269_replacement = is_guest1269_replacement(args) and selected_evidence == GUEST1269_REPLACEMENT[4]
     if (
         FAILED_MANAGER_EVIDENCE_RE.search(selected_evidence) is None
         and not exact_guest1269_replacement
@@ -967,15 +965,23 @@ def pane_inventory() -> dict[str, PaneIdentity]:
 
 def validate_targets(args: Args) -> None:
     pcodx_digests = (
-        args.old_queue_sha256,
         args.old_pcodx_state_sha256,
         args.old_pcodx_ledger_sha256,
         args.old_pcodx_wrapper_sha256,
         args.protected_targets_sha256,
         args.authority_envelope_file_sha256,
     )
-    if any(pcodx_digests) and not all(SHA256_RE.fullmatch(value) for value in pcodx_digests):
+    if is_pcodx_replacement(args) and not all(
+        SHA256_RE.fullmatch(value) for value in (args.old_queue_sha256, *pcodx_digests)
+    ):
         raise ReplaceError("PCODX replacement requires all six exact SHA-256 bindings")
+    if not is_pcodx_replacement(args) and any(pcodx_digests):
+        raise ReplaceError("PCODX custody bindings are accepted only for a PCODX replacement")
+    if is_guest1269_replacement(args):
+        if SHA256_RE.fullmatch(args.old_queue_sha256) is None:
+            raise ReplaceError("Source-1269 guest replacement requires the full ordered queue SHA-256 binding")
+    elif not is_pcodx_replacement(args) and args.old_queue_sha256:
+        raise ReplaceError("ordered queue binding is accepted only for an exact PCODX or Source-1269 replacement")
     old = canonical_target(args.old_target)
     new = canonical_target(args.new_target)
     if old == new:
@@ -1034,7 +1040,9 @@ def prepare(args: Args, paths: tuple[Path, ...]) -> Plan:
         or (not is_pcodx_replacement(args) and old_metadata.session_id.lower() != args.old_session_id)
     ):
         raise ReplaceError("old manager must be the exact live long-running failed-manager record bound by the invocation")
-    if json_digest(list(old_metadata.pending_task_items)) != args.old_queue_sha256 and is_pcodx_replacement(args):
+    if (is_pcodx_replacement(args) or is_guest1269_replacement(args)) and json_digest(
+        list(old_metadata.pending_task_items)
+    ) != args.old_queue_sha256:
         raise ReplaceError("old manager full ordered queue changed")
     old_owners = authoritative_active_target_task_paths(args.root, args.old_target)
     if old_owners != (old_path.resolve(),):
@@ -1444,7 +1452,9 @@ def recovery_plan(
         or (not is_pcodx_replacement(args) and old_metadata.session_id.lower() != args.old_session_id)
     ):
         raise ReplaceError("private replacement audit does not describe the exact failed manager")
-    if is_pcodx_replacement(args) and json_digest(list(old_metadata.pending_task_items)) != args.old_queue_sha256:
+    if (is_pcodx_replacement(args) or is_guest1269_replacement(args)) and json_digest(
+        list(old_metadata.pending_task_items)
+    ) != args.old_queue_sha256:
         raise ReplaceError("private replacement audit old manager ordered queue changed")
     protected: list[PaneIdentity] = []
     for value in record.get("protected_inventory", []):

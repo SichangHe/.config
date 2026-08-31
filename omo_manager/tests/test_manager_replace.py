@@ -244,6 +244,7 @@ class ManagerReplaceTests(unittest.TestCase):
             authority_sha256=sha(authority),
             authority_envelope_sha256=sha(envelope),
             successor_item_lines=(LineRange(3, 9),),
+            old_queue_sha256=manager_replace.json_digest(list(OLD_QUEUE)),
         ), files
 
     def pcodx_fixture(self, base: Path) -> tuple[Path, Args, dict[str, str], dict[str, str]]:
@@ -684,6 +685,39 @@ class ManagerReplaceTests(unittest.TestCase):
             ]
             self.assertEqual("%0", parse_args(source).old_pane_id)
 
+    def test_parse_args_accepts_exact_source1269_queue_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, args, _files = self.guest1269_fixture(Path(tmp))
+            source = [
+                "--root", str(args.root),
+                "--old-task", args.old_task,
+                "--successor-task", args.successor_task,
+                "--old-target", args.old_target,
+                "--new-target", args.new_target,
+                "--parent-target", args.parent_target,
+                "--old-sha256", args.old_sha256,
+                "--todo-sha256", args.todo_sha256,
+                "--old-pane-id", args.old_pane_id,
+                "--old-pane-pid", str(args.old_pane_pid),
+                "--old-pane-start-ticks", str(args.old_pane_start_ticks),
+                "--old-session-id", args.old_session_id,
+                "--authority-file", args.authority_file,
+                "--authority-lines", f"{args.authority_lines.start}-{args.authority_lines.end}",
+                "--authority-sha256", args.authority_sha256,
+                "--authority-envelope-task", args.authority_envelope_task,
+                "--authority-envelope-sha256", args.authority_envelope_sha256,
+                "--successor-item-lines", f"{args.successor_item_lines[0].start}-{args.successor_item_lines[0].end}",
+                "--audit-output", str(args.audit_output),
+                "--preparer", args.preparer,
+                "--reviewer", args.reviewer,
+                "--old-queue-sha256", args.old_queue_sha256,
+            ]
+            for child in args.children:
+                source.extend(("--child", f"{child.task}={child.sha256}"))
+            parsed_args = parse_args(source)
+            self.assertEqual(args.old_queue_sha256, parsed_args.old_queue_sha256)
+            self.assertEqual(args.children, parsed_args.children)
+
     def test_pane_inventory_accepts_tmux_zero_pane_id(self) -> None:
         result = manager_replace.subprocess.CompletedProcess(
             ["tmux", "list-panes"],
@@ -775,6 +809,17 @@ class ManagerReplaceTests(unittest.TestCase):
                 replace_manager(changed)
             stop_mock.assert_not_called()
 
+    def test_source1269_guest_replacement_requires_exact_ordered_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, args, _files = self.guest1269_fixture(Path(tmp))
+            for queue_sha256, error in (("", "requires the full ordered queue"), ("0" * 64, "ordered queue changed")):
+                with self.subTest(error=error):
+                    changed = replace(args, old_queue_sha256=queue_sha256)
+                    inventory, stopped, proof = self.runtime({"old_live": True}, changed.old_target, changed.new_target)
+                    with inventory, stopped as stop_mock, proof, self.assertRaisesRegex(ReplaceError, error):
+                        replace_manager(changed)
+                    stop_mock.assert_not_called()
+
     def test_source1269_guest_replacement_rejects_agent_quote(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root, args, files = self.guest1269_fixture(Path(tmp))
@@ -807,6 +852,7 @@ class ManagerReplaceTests(unittest.TestCase):
                         authority_file=source_file,
                         authority_sha256=sha(source),
                         authority_envelope_sha256=sha(envelope),
+                        old_queue_sha256="",
                     )
                 else:
                     root, changed, _files = self.fixture(Path(tmp))
