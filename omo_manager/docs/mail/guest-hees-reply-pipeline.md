@@ -19,6 +19,8 @@
   - redeliver an open request when either part of the owner identity changes
 - reply
   - load the installed mail, subject, and image helpers directly and fail if imports break
+  - normalize QQ's observed `回复：` reply prefix before exact thread lookup and current-target tagging
+  - restrict guest parent selection to exact Message-IDs from durable open obligations
   - reject blank, stock completion, and lifecycle-only bodies
   - require the original guest Message-ID in both `In-Reply-To` and `References`
   - pin the sole recipient to `46496337@qq.com`

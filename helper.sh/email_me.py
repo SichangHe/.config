@@ -41,6 +41,7 @@ from omo_email_config import (  # noqa: E402
     fulfill_guest_hees_reply_obligation,
     guest_hees_mail,
     guest_hees_target,
+    open_guest_hees_reply_message_ids,
     open_guest_hees_reply_source,
 )
 from omo_email_subject import (  # noqa: E402
@@ -934,6 +935,7 @@ def main(argv: list[str]) -> int:
                 agent_address=split_settings.agent_address,
                 counterparty_address=split_settings.human_address,
                 route_kind="guest-hees" if args.guest_hees else "primary",
+                parent_message_ids=open_guest_hees_reply_message_ids(manager_state_dir()) if args.guest_hees else None,
             )
         if args.title is None:
             if subject_tmux_target is None:

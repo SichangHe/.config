@@ -20,5 +20,6 @@ timeout 60s "$ruff_bin" check \
   "$repo_root/omo_manager/omo_email_config.py" \
   "$repo_root/omo_manager/omo_guest_images.py" \
   "$repo_root/omo_manager/omo_pending_watch.py" \
+  "$repo_root/omo_manager/omo_email_subject.py" \
   "$repo_root/omo_manager/tests/test_guest_hees_email_watcher.py" \
   "$repo_root/omo_manager/tests/test_guest_hees_pending_delivery.py"

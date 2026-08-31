@@ -28,6 +28,8 @@ SUBJECT_TAG_RE = re.compile(r"^\s*\[(?:a|omo_manager|omo)\]\s*", re.IGNORECASE)
 MANAGER_TAG_RE = re.compile(r"^\s*(?:\[a\]|\[omo_manager\])\s*", re.IGNORECASE)
 RESERVED_AGENT_TAG_RE = re.compile(r"^(?:re:\s*)*\[omo\]\s*", re.IGNORECASE)
 RE_PREFIX_RE = re.compile(r"^\s*re:\s*", re.IGNORECASE)
+# 🧑 "make sure that in the future replies get sent to the guest also"
+GUEST_REPLY_PREFIX_RE = re.compile(r"^\s*(?:re:|回复：)\s*", re.IGNORECASE)
 TMUX_TARGET_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?$")
 TMUX_SUBJECT_TAG_RE = re.compile(r"^\s*(?:\[[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?\]|[A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)(?:\s+|$)")
 TMUX_SUBJECT_TARGET_RE = re.compile(r"^\s*(?:\[([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?)\]|([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?))(?:\s+|$)")
@@ -62,6 +64,7 @@ class MailRouteProfile:
     agent_address: str
     counterparty_address: str
     route_kind: str
+    parent_message_ids: frozenset[str] | None = None
 
     def __post_init__(self) -> None:
         if self.route_kind not in {"primary", "guest-hees"}:
@@ -72,6 +75,8 @@ class MailRouteProfile:
                 raise ValueError(f"mail route {label} address is invalid")
         if self.agent_address.casefold() == self.counterparty_address.casefold():
             raise ValueError("mail route agent and counterparty addresses must differ")
+        if self.parent_message_ids is not None and any(re.fullmatch(r"<[^<>\s]+>", value) is None for value in self.parent_message_ids):
+            raise ValueError("mail route parent Message-ID is invalid")
 
 
 def parse_env_config(path: Path) -> dict[str, str]:
@@ -102,31 +107,34 @@ def parse_env_config(path: Path) -> dict[str, str]:
     return values
 
 
-def strip_re_prefixes(subject: str) -> str:
+def strip_re_prefixes(subject: str, *, guest_hees: bool = False) -> str:
     text = subject.strip()
+    prefix_re = GUEST_REPLY_PREFIX_RE if guest_hees else RE_PREFIX_RE
     while True:
-        next_text = RE_PREFIX_RE.sub("", text, count=1)
+        next_text = prefix_re.sub("", text, count=1)
         if next_text == text:
             return text
         text = next_text.strip()
 
 
-def normalized_subject_key(subject: str) -> str:
+def normalized_subject_key(subject: str, *, guest_hees: bool = False) -> str:
     text = subject.strip()
+    prefix_re = GUEST_REPLY_PREFIX_RE if guest_hees else RE_PREFIX_RE
     while True:
         before = text
-        text = RE_PREFIX_RE.sub("", text, count=1).strip()
+        text = prefix_re.sub("", text, count=1).strip()
         text = SUBJECT_TAG_RE.sub("", text, count=1).strip()
         text = strip_leading_tmux_tags(text)
         if text == before:
             return " ".join(text.split()).casefold()
 
 
-def subject_base(subject: str) -> str:
+def subject_base(subject: str, *, guest_hees: bool = False) -> str:
     text = subject.strip()
+    prefix_re = GUEST_REPLY_PREFIX_RE if guest_hees else RE_PREFIX_RE
     while True:
         before = text
-        text = RE_PREFIX_RE.sub("", text, count=1).strip()
+        text = prefix_re.sub("", text, count=1).strip()
         text = SUBJECT_TAG_RE.sub("", text, count=1).strip()
         text = strip_leading_tmux_tags(text)
         if text == before:
@@ -159,8 +167,9 @@ def validate_subject(subject: str) -> None:
         raise SubjectInputError("agent email subject must not use deprecated [omo]")
 
 
-def starts_w_re(subject: str) -> bool:
-    return RE_PREFIX_RE.match(subject.strip()) is not None
+def starts_w_re(subject: str, *, guest_hees: bool = False) -> bool:
+    prefix_re = GUEST_REPLY_PREFIX_RE if guest_hees else RE_PREFIX_RE
+    return prefix_re.match(subject.strip()) is not None
 
 
 def manager_reply_subject(base: str) -> str:
@@ -319,11 +328,15 @@ def find_recent_thread_matching(
                 if route_profile is not None:
                     if not route_matches_header(header, sender, recipient):
                         continue
+                    if route_profile.parent_message_ids is not None and header.message_id.strip() not in route_profile.parent_message_ids:
+                        continue
                 elif parseaddr(header.sender)[1].casefold() != sender.casefold():
                     continue
                 if not matches(header):
                     continue
                 candidates.append(header)
+        if reject_ambiguous and route_profile is not None and route_profile.parent_message_ids is not None and len(candidates) > 1:
+            raise SubjectInputError(f"verified email thread lookup matched {len(candidates)} open parent messages")
         return select_recent_thread(candidates, reject_ambiguous=reject_ambiguous)
     except SubjectLookupTimeout:
         timed_out = True
@@ -339,10 +352,11 @@ def find_recent_thread_matching(
 
 
 def find_recent_thread(subject_key: str, route_profile: MailRouteProfile | None = None, reject_ambiguous: bool = False) -> RecentHeader | None:
+    guest_hees = route_profile is not None and route_profile.route_kind == "guest-hees"
     if route_profile is None and not reject_ambiguous:
         return find_recent_thread_matching(lambda header: normalized_subject_key(header.subject) == subject_key)
     return find_recent_thread_matching(
-        lambda header: normalized_subject_key(header.subject) == subject_key,
+        lambda header: normalized_subject_key(header.subject, guest_hees=guest_hees) == subject_key,
         route_profile=route_profile,
         reject_ambiguous=reject_ambiguous,
     )
@@ -354,11 +368,12 @@ def find_recent_thread_for_tmux_target(
     reject_ambiguous: bool = False,
 ) -> RecentHeader | None:
     target = canonical_tmux_target(tmux_target)
+    prefix_re = GUEST_REPLY_PREFIX_RE if route_profile is not None and route_profile.route_kind == "guest-hees" else RE_PREFIX_RE
 
     def has_exact_leading_target(header: RecentHeader) -> bool:
         text = header.subject.strip()
         while True:
-            next_text = RE_PREFIX_RE.sub("", text, count=1).strip()
+            next_text = prefix_re.sub("", text, count=1).strip()
             next_text = SUBJECT_TAG_RE.sub("", next_text, count=1).strip()
             if next_text == text:
                 break
@@ -508,21 +523,23 @@ def prepare_subject_and_headers(
 ) -> tuple[str, dict[str, str]]:
     validate_subject(subject)
     stripped = subject.strip()
-    base = subject_base(stripped)
+    guest_hees = route_profile is not None and route_profile.route_kind == "guest-hees"
+    base = subject_base(stripped, guest_hees=guest_hees)
+    is_reply = starts_w_re(stripped, guest_hees=guest_hees)
     header = (
         verified_recent_thread_header(
             route_profile=route_profile,
-            subject_key=normalized_subject_key(stripped),
+            subject_key=normalized_subject_key(stripped, guest_hees=guest_hees),
             required=True,
         )
-        if route_profile is not None and starts_w_re(stripped)
+        if route_profile is not None and is_reply
         else recent_thread_header(normalized_subject_key(stripped))
         if route_profile is None
         else None
     )
-    if starts_w_re(stripped) and has_manager_tag(stripped):
-        return manager_subject_w_target(subject_base(stripped), tmux_target, True), reply_headers_from_recent_header(header)
-    if starts_w_re(stripped) or header is not None:
+    if is_reply and has_manager_tag(stripped):
+        return manager_subject_w_target(base, tmux_target, True), reply_headers_from_recent_header(header)
+    if is_reply or header is not None:
         return manager_subject_w_target(base, tmux_target, True), reply_headers_from_recent_header(header)
     return manager_subject_w_target(base, tmux_target), {}
 
@@ -538,7 +555,8 @@ def prepare_latest_thread_for_tmux_target(
     )
     if header is None:
         raise SubjectInputError(f"no recent email thread found for tmux target {canonical_tmux_target(tmux_target)}; pass --subject or --subject-file")
-    return manager_subject_w_target(subject_base(header.subject), tmux_target, True), reply_headers_from_recent_header(header)
+    guest_hees = route_profile is not None and route_profile.route_kind == "guest-hees"
+    return manager_subject_w_target(subject_base(header.subject, guest_hees=guest_hees), tmux_target, True), reply_headers_from_recent_header(header)
 
 
 def fallback_subject(subject: str, tmux_target: str = "") -> str:

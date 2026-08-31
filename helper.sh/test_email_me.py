@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import timedelta
 from io import StringIO
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -1197,6 +1198,202 @@ class EmailMeTests(unittest.TestCase):
         self.assertTrue(omo_email_subject.route_matches_header(guest_sent, guest.agent_address, guest.counterparty_address))
         self.assertFalse(omo_email_subject.route_matches_header(guest_sent, primary.agent_address, primary.counterparty_address))
         self.assertTrue(omo_email_subject.route_matches_header(guest_incoming, guest.counterparty_address, guest.agent_address))
+
+    def test_qq_reply_prefix_resolves_exact_guest_parent(self) -> None:
+        raw_subject = "回复：[guest_hees:4] guest_hees_contain.md: task done"
+        parent = "<tencent_B0967E13E3E05719BBB66C1B8A1B897B6808@qq.com>"
+        root = "<178812140322.1211423.5011212448780635128@gmail.com>"
+        profile = omo_email_subject.MailRouteProfile(
+            "agent@example.test", "46496337@qq.com", "guest-hees", frozenset({parent})
+        )
+        complaint_time = email_me.datetime.now().astimezone() - timedelta(minutes=2)
+        sent_root = omo_email_subject.RecentHeader(
+            "agent@example.test",
+            "[guest_hees:4] guest_hees_contain.md: task done",
+            complaint_time - timedelta(minutes=1),
+            root,
+            "",
+            "46496337@qq.com",
+        )
+        complaint = omo_email_subject.RecentHeader(
+            "46496337@qq.com",
+            raw_subject,
+            complaint_time,
+            parent,
+            root,
+            "agent@example.test",
+        )
+        later_inbound = omo_email_subject.RecentHeader(
+            "46496337@qq.com",
+            raw_subject,
+            complaint_time + timedelta(seconds=30),
+            "<later-unbound-inbound@qq.com>",
+            f"{root} {parent}",
+            "agent@example.test",
+        )
+        later_sent = omo_email_subject.RecentHeader(
+            "agent@example.test",
+            "Re: [guest_hees:6] guest_hees_contain.md: task done",
+            complaint_time + timedelta(minutes=1),
+            "<later-sent@example.test>",
+            f"{root} {parent}",
+            "46496337@qq.com",
+        )
+        subject_key = omo_email_subject.normalized_subject_key(raw_subject, guest_hees=True)
+        self.assertEqual(subject_key, omo_email_subject.normalized_subject_key(later_sent.subject, guest_hees=True))
+        self.assertTrue(
+            omo_email_subject.route_matches_header(
+                later_sent, profile.agent_address, profile.counterparty_address
+            )
+        )
+        self.assertEqual(
+            later_sent,
+            omo_email_subject.select_recent_thread(
+                [sent_root, complaint, later_inbound, later_sent], reject_ambiguous=True
+            ),
+        )
+
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+            app_password = "secret"
+
+        class FakeClient:
+            def __init__(self, _host: str, timeout: float) -> None:
+                self.timeout = timeout
+
+            def login(self, _user: str, _password: str) -> None:
+                return None
+
+            def select(self, _mailbox: str, readonly: bool) -> tuple[str, list[bytes]]:
+                self.assert_readonly(readonly)
+                return "OK", []
+
+            @staticmethod
+            def assert_readonly(readonly: bool) -> None:
+                if not readonly:
+                    raise AssertionError("thread lookup must be readonly")
+
+            def uid(self, command: str, *_args: str) -> tuple[str, list[bytes]]:
+                return ("OK", [b"1 2 3 4"]) if command == "search" else ("OK", [b""])
+
+            def logout(self) -> None:
+                return None
+
+        with (
+            patch.object(omo_email_subject, "configured_agent_mail", return_value=Settings()),
+            patch.object(omo_email_subject.imaplib, "IMAP4_SSL", FakeClient),
+            patch.object(
+                omo_email_subject,
+                "fetch_recent_headers",
+                return_value=[sent_root, complaint, later_inbound, later_sent],
+            ),
+            patch.dict(os.environ, {"OMO_MANAGER_EMAIL_THREAD_LOOKUP_S": "86400"}, clear=False),
+        ):
+            prepared = omo_email_subject.prepare_subject_and_headers(raw_subject, "guest_hees:7", route_profile=profile)
+        self.assertEqual(
+            (
+                "Re: [guest_hees:7] guest_hees_contain.md: task done",
+                {"In-Reply-To": parent, "References": f"{root} {parent}"},
+            ),
+            prepared,
+        )
+        self.assertEqual(["guest_hees:7"], omo_email_subject.BRACKETED_TMUX_TAG_RE.findall(prepared[0]))
+
+    def test_qq_reply_prefix_passes_guest_sender_validation(self) -> None:
+        sent_messages = []
+        raw_subject = "回复：[guest_hees:4] guest_hees_contain.md: task done"
+        parent = "<tencent_B0967E13E3E05719BBB66C1B8A1B897B6808@qq.com>"
+        root = "<178812140322.1211423.5011212448780635128@gmail.com>"
+        complaint = omo_email_subject.RecentHeader(
+            "46496337@qq.com",
+            raw_subject,
+            email_me.datetime.now().astimezone(),
+            parent,
+            root,
+            "agent@example.test",
+        )
+
+        class Settings:
+            agent_address = "agent@example.test"
+            human_address = "human@example.test"
+            app_password = "secret"
+
+        class FakeSmtp:
+            def __init__(self, **_kwargs: object) -> None:
+                return None
+
+            def __enter__(self) -> "FakeSmtp":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def login(self, _sender: str, _password: str) -> None:
+                return None
+
+            def send_message(self, msg: object) -> None:
+                sent_messages.append(msg)
+
+        def select_open_parent(subject_key: str, route_profile: object, reject_ambiguous: bool) -> object:
+            self.assertEqual("guest_hees_contain.md: task done", subject_key)
+            self.assertIsInstance(route_profile, omo_email_subject.MailRouteProfile)
+            assert isinstance(route_profile, omo_email_subject.MailRouteProfile)
+            self.assertEqual(frozenset({parent}), route_profile.parent_message_ids)
+            self.assertTrue(reject_ambiguous)
+            return complaint
+
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "state"
+            self.assertTrue(omo_email_config.ensure_guest_hees_reply_obligation(state, "guest_hees_manager_mail/complaint.txt", parent))
+            with (
+                patch.dict(os.environ, {"OMO_MANAGER_STATE_DIR": str(state)}, clear=False),
+                patch.object(sys, "stdin", StringIO("这是对空内容投诉的正式答复。\n")),
+                patch.object(email_me, "configured_agent_mail", return_value=Settings()),
+                patch.object(omo_email_subject, "find_recent_thread", side_effect=select_open_parent),
+                patch.object(email_me, "verify_guest_reply_in_sent", return_value=email_me.GuestSentEvidence("a" * 64, "b" * 64)),
+                patch.object(email_me.smtplib, "SMTP_SSL", FakeSmtp),
+                patch.object(email_me.ssl, "create_default_context", return_value=None),
+                patch.object(email_me, "maybe_print_thread_reminder"),
+            ):
+                result = email_me.main(
+                    ["--guest-hees", "--manager-human", "--tmux-target", "guest_hees:7", "--subject", raw_subject]
+                )
+        self.assertEqual(0, result)
+        self.assertEqual(1, len(sent_messages))
+        self.assertEqual("Re: [guest_hees:7] guest_hees_contain.md: task done", sent_messages[0]["Subject"])
+        self.assertEqual(parent, sent_messages[0]["In-Reply-To"])
+        self.assertEqual(f"{root} {parent}", sent_messages[0]["References"])
+
+    def test_qq_reply_prefix_change_preserves_primary_subject_handling(self) -> None:
+        profile = omo_email_subject.MailRouteProfile("agent@example.test", "human@example.test", "primary")
+        parent = "<primary-reply@example.test>"
+        header = omo_email_subject.RecentHeader(
+            "human@example.test",
+            "Re: [wl:3] Primary topic",
+            email_me.datetime.now().astimezone(),
+            parent,
+            "<primary-root@example.test>",
+            "agent@example.test",
+        )
+        with patch.object(omo_email_subject, "find_recent_thread", return_value=header):
+            prepared = omo_email_subject.prepare_subject_and_headers(
+                "Re: [wl:3] Primary topic", "wl:7", route_profile=profile
+            )
+        self.assertEqual(
+            (
+                "Re: [wl:7] Primary topic",
+                {"In-Reply-To": parent, "References": f"<primary-root@example.test> {parent}"},
+            ),
+            prepared,
+        )
+        with patch.object(omo_email_subject, "verified_recent_thread_header") as lookup:
+            new_topic = omo_email_subject.prepare_subject_and_headers(
+                "回复：Primary new topic", "wl:7", route_profile=profile
+            )
+        self.assertEqual(("[wl:7] 回复：Primary new topic", {}), new_topic)
+        lookup.assert_not_called()
+        self.assertEqual("回复：primary new topic", omo_email_subject.normalized_subject_key("回复：Primary new topic"))
 
     def test_route_match_rejects_wrong_or_multiple_recipients(self) -> None:
         wrong = omo_email_subject.RecentHeader(

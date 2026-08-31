@@ -240,8 +240,8 @@ def guest_hees_reply_is_fulfilled(state_dir: Path, source: str) -> bool:
     return obligation is not None and obligation.status == "fulfilled"
 
 
-def open_guest_hees_reply_source(state_dir: Path, inbound_message_id: str) -> str:
-    """Resolve exactly one open request for a direct-thread reply."""
+def open_guest_hees_reply_obligations(state_dir: Path) -> tuple[GuestHeesReplyObligation, ...]:
+    """Return every valid open obligation in stable source order."""
     directory = state_dir / "guest-hees-reply-obligations"
     matches: list[GuestHeesReplyObligation] = []
     for path in directory.glob("*.state") if directory.is_dir() else ():
@@ -250,8 +250,23 @@ def open_guest_hees_reply_source(state_dir: Path, inbound_message_id: str) -> st
         except (OSError, StopIteration):
             continue
         obligation = read_guest_hees_reply_obligation(state_dir, source)
-        if obligation is not None and obligation.status == "open" and obligation.inbound_message_id == inbound_message_id:
+        if obligation is not None and obligation.status == "open":
             matches.append(obligation)
+    return tuple(sorted(matches, key=lambda obligation: obligation.source))
+
+
+def open_guest_hees_reply_message_ids(state_dir: Path) -> frozenset[str]:
+    """Return exact inbound parents that may satisfy a guest reply."""
+    return frozenset(obligation.inbound_message_id for obligation in open_guest_hees_reply_obligations(state_dir))
+
+
+def open_guest_hees_reply_source(state_dir: Path, inbound_message_id: str) -> str:
+    """Resolve exactly one open request for a direct-thread reply."""
+    matches = [
+        obligation
+        for obligation in open_guest_hees_reply_obligations(state_dir)
+        if obligation.inbound_message_id == inbound_message_id
+    ]
     if len(matches) != 1:
         raise OSError(f"verified guest reply must match exactly one open intake obligation; found {len(matches)}")
     return matches[0].source
