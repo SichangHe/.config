@@ -31,7 +31,7 @@ description: Write prose so they do not sound like LLM slop. Use when revising t
 - Strongly prefer plain, ordinary sentences and paragraphs.
     - Follow Clear Writing Principles.
     - Use mainly short sentences, but mix up some longer ones in variety.
-    - Use subjects and verbs over -ing phrases.
+    - Use subjects and verbs over -ing phrases or hyphenated words.
 - Use lazy omission ordinary humans would use and understand:
     omit subject when clear, referring things as "that", etc.
 - Keep examples simple and omit inessential details, but
