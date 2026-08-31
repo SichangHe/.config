@@ -595,6 +595,14 @@ def is_manager_record(record: MailRecord, sender_email: str, recipient_email: st
     return sender_matches and recipient_matches and subject_matches
 
 
+def is_agent_to_human_record(record: MailRecord, agent_email: str, human_email: str) -> bool:
+    """Match the configured agent sender inside the distinct Human Inbox."""
+    if agent_email.casefold() == human_email.casefold():
+        return False
+    senders = [address.casefold() for _name, address in getaddresses([record.sender]) if address]
+    return senders == [agent_email.casefold()]
+
+
 def imap_quoted(text: str) -> str:
     return '"' + text.replace("\\", "\\\\").replace('"', r"\"") + '"'
 
@@ -1891,6 +1899,105 @@ def cmd_agent_trash_replaced(args: argparse.Namespace) -> int:
             json.dumps({"schema": "omo-agent-mail-move-outcome/v1", "result": "trash", "target": target, "agent_session_id": agent_session, "source_gmail_ids": [record.gmail_msgid for record in sources]}, sort_keys=True) + "\n",
         )
         print(f"agent_trash_replaced: moved={len(sources)} permanent_deleted=0 target={target}")
+    finally:
+        logout_mailbox(client)
+    return 0
+
+
+def selected_uids(client: imaplib.IMAP4_SSL, criterion: str) -> list[str]:
+    typ, data = imap_uid(client, f"selected-{criterion.casefold()}-search", "search", None, criterion)
+    if typ != "OK":
+        raise RuntimeError(f"IMAP {criterion} search failed: {typ}")
+    uids = [raw.decode() for raw in data[0].split()] if data and data[0] else []
+    if any(not uid.isdecimal() for uid in uids) or len(uids) != len(set(uids)):
+        raise RuntimeError(f"IMAP {criterion} search returned malformed or duplicate UIDs")
+    return uids
+
+
+def selected_inbox_counts(client: imaplib.IMAP4_SSL) -> dict[str, int]:
+    """Count the selected Inbox without changing message flags."""
+    return {"total": len(selected_uids(client, "ALL")), "unread": len(selected_uids(client, "UNSEEN"))}
+
+
+def agent_to_human_headers(
+    client: imaplib.IMAP4_SSL,
+    agent_email: str,
+    human_email: str,
+) -> list[MailRecord]:
+    candidates = manager_candidate_uids(client, agent_email)
+    try:
+        headers = fetch_header_records(client, candidates)
+    except RuntimeError as exc:
+        if str(exc) != "IMAP manager header batch fetch returned incomplete or duplicate UIDs":
+            raise
+        headers = fetch_records(client, candidates, with_body=False)
+    return [record for record in headers if is_agent_to_human_record(record, agent_email, human_email)]
+
+
+# 🧑 “Get rid of any language or checks regarding safety. There's no unsafety when moving agent emails to trash.”
+def cmd_owner_trash_agent_mail(_args: argparse.Namespace) -> int:
+    """Move all exact agent-to-Human Inbox mail to Trash and print one receipt."""
+    client, config = open_mailbox(readonly=False)
+    try:
+        agent_email, human_email = mail_boundary(config)
+        if agent_email.casefold() == human_email.casefold():
+            raise RuntimeError("owner agent-mail Trash requires distinct configured agent and Human addresses")
+        if not gmail_extension_advertised(client) or not mailbox_exists(client, TRASH_MAILBOX):
+            raise RuntimeError("required Gmail identity support or Trash mailbox is unavailable")
+        before = selected_inbox_counts(client)
+        headers = agent_to_human_headers(client, agent_email, human_email)
+        source_uids = [record.uid for record in headers]
+        metadata = fetch_gmail_metadata_records_compatible(client, source_uids)
+        sources = [
+            replace(
+                record,
+                gmail_msgid=metadata[record.uid].gmail_msgid,
+                gmail_thrid=metadata[record.uid].gmail_thrid,
+                flags=metadata[record.uid].flags,
+                labels=metadata[record.uid].labels,
+            )
+            for record in headers
+        ]
+        if sources:
+            typ, _data = imap_uid(client, "move-owner-agent-mail-to-trash", "MOVE", ",".join(source_uids), imap_quoted(TRASH_MAILBOX))
+            if typ != "OK":
+                raise RuntimeError(f"Gmail MOVE failed: {typ}")
+        select_mailbox(client, "INBOX", readonly=True)
+        remaining = inbox_subset(client, source_uids)
+        after = selected_inbox_counts(client)
+        if remaining:
+            raise RuntimeError("moved agent mail remains in Inbox")
+        select_mailbox(client, TRASH_MAILBOX, readonly=True)
+        receipts: list[dict[str, str | bool]] = []
+        for source in sources:
+            trash_uids = gmail_message_uids(client, source.gmail_msgid)
+            if len(trash_uids) != 1:
+                raise RuntimeError("moved agent mail is absent or ambiguous in Trash")
+            trash_metadata = fetch_gmail_metadata_records_compatible(client, trash_uids)[trash_uids[0]]
+            if trash_metadata.gmail_msgid != source.gmail_msgid or trash_metadata.flags != source.flags:
+                raise RuntimeError("moved agent mail identity or read state changed")
+            receipts.append(
+                {
+                    "source_uid": source.uid,
+                    "gmail_msgid": source.gmail_msgid,
+                    "trash_uid": trash_uids[0],
+                    "unread": r"\Seen" not in source.flags,
+                }
+            )
+        print(
+            json.dumps(
+                {
+                    "schema": "omo-owner-agent-mail-trash/v1",
+                    "before": before,
+                    "after": after,
+                    "moved_count": len(receipts),
+                    "moved": receipts,
+                    "permanent_deleted": 0,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
     finally:
         logout_mailbox(client)
     return 0
@@ -4417,6 +4524,12 @@ This command moves the old message only from Inbox to recoverable Gmail Trash an
     agent_trash.add_argument("--replacement-message-id", required=True, help="Message-ID printed by email_me.py after sending the replacement.")
     agent_trash.add_argument("--yes", action="store_true")
     agent_trash.set_defaults(func=cmd_agent_trash_replaced)
+    owner_agent_trash = sub.add_parser(
+        "owner-trash-agent-mail",
+        help="Move every agent-to-Human Inbox message to recoverable Trash.",
+        description="""Move every Inbox message on the distinct configured agent-to-Human address boundary to Gmail Trash. Human-sent mail is excluded by that address boundary. The command accepts no per-message list, replacement, review, retention, read-state, or confirmation arguments. It never marks mail read, deletes permanently, or expunges. On success it prints one JSON receipt containing every source UID, Gmail message identity, resulting Trash UID, original unread state, and exact before/after Inbox total and unread counts.""",
+    )
+    owner_agent_trash.set_defaults(func=cmd_owner_trash_agent_mail)
     inspect_explicit = sub.add_parser("inspect-explicit", help="Print exact live bindings and bodies for selected manager UIDs without creating evidence files.")
     inspect_explicit.add_argument("--uids", required=True, help="Comma or whitespace separated current INBOX UIDs.")
     inspect_explicit.add_argument("--task-id", required=True, help="Task identity assigned to every selected source.")
