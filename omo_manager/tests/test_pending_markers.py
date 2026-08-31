@@ -8166,6 +8166,292 @@ resolved_task_items: []
                 self.assertTrue(watcher.maybe_push_dependency_transitions(args, snapshots, 1003.0))
             self.assertEqual(2, push.call_count)
 
+    def test_consumed_root_handoff_seeds_and_suppresses_unchanged_leaf_alert(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "TODO.md").write_text("current:\ncoordinator.md cfg:1\nroot.md cfg:2\nleaf.md cfg:3\n", encoding="utf-8")
+            _ = (root / "coordinator.md").write_text(
+                task_frontmatter("long_running", runat="cfg:1", managerat="main:0", is_manager=True, blocked_on="platform authority", pending_items=("Coordinate root.md, leaf.md",)),
+                encoding="utf-8",
+            )
+            _ = (root / "root.md").write_text(task_frontmatter("blocked", runat="cfg:2", managerat="cfg:1", is_manager=True, blocked_on="sealed platform authority") + "Blocks `leaf.md`.\n", encoding="utf-8")
+            _ = (root / "leaf.md").write_text(task_frontmatter("blocked", runat="cfg:3", managerat="cfg:1", blocked_on="platform review unavailable"), encoding="utf-8")
+            args = Args(root, "", root / "consumed.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="main:0")
+            result = watcher.CommandOutput(
+                "agent-problems",
+                3,
+                "agent-problems: blocked_idle=1\nblocked_idle: task=leaf.md evidence=target=cfg:3 task_status=blocked idle_status=ready reason=platform review unavailable owner_target=cfg:1\n",
+                "",
+            )
+            handoff = watcher.ConsumedBlockedHandoff(
+                "root.md",
+                "root-report-a",
+                100.0,
+                ("terminal-consumed", "authority-a"),
+                "Root handoff for platform review unavailable.",
+            )
+            with patch.object(watcher, "consumed_blocked_handoffs", return_value={"root.md": handoff}), patch.object(
+                watcher, "inspect_codex", return_value=watcher.CodexReport("ready", ["unchanged blocked evidence"])
+            ), patch.object(watcher, "blocked_custody_runtime_identity", side_effect=lambda target: f"%pane\t100\t{target}"), patch.object(
+                watcher, "push_manager_text_to_target"
+            ) as push:
+                self.assertTrue(watcher.blocked_report_snapshot_state(root, args.state)["leaf.md"][1].startswith("cascade:"))
+                self.assertFalse(watcher.handle_agent_problem_result(args, {}, result, 1000.0, {}, {}))
+                self.assertFalse(watcher.handle_agent_problem_result(args, {}, result, 1001.0, {}, watcher.read_blocked_report_ledger(args)))
+                push.assert_not_called()
+            self.assertIn("leaf.md", watcher.read_blocked_report_ledger(args))
+
+    def test_consumed_root_handoff_requires_terminal_transition_attestation(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        digest = "a" * 64
+        state = Path("/tmp/consumed-test.tsv")
+        report_key = "report-key"
+        receiver = Path("/tmp/manager.md")
+        pointer = "(from agent cfg:2 /tmp/report.md)"
+        source_path = Path(watcher.__file__).resolve().with_name("omo_task_lock.py")
+        attestation = (
+            "watcher-locked-pointer-transition-v1",
+            hashlib.sha256(str(receiver).encode()).hexdigest(),
+            hashlib.sha256(pointer.encode()).hexdigest(),
+            "b" * 64,
+            "20",
+            "c" * 64,
+            "10",
+            "watcher-consumption-authority-v1",
+            "bounded-watcher-lease",
+            "123",
+            "456",
+            hashlib.sha256(str(watcher.report_authority_lock_path(state, report_key)).encode()).hexdigest(),
+            "1",
+            "2",
+            str(source_path),
+            hashlib.sha256(source_path.read_bytes()).hexdigest(),
+            digest,
+        )
+        self.assertTrue(watcher.terminal_consumed_handoff_attestation(attestation))
+        self.assertTrue(watcher.terminal_attestation_binds_report(attestation, state, report_key, receiver, pointer))
+        self.assertFalse(watcher.terminal_attestation_binds_report(attestation, state, report_key, receiver, pointer + " changed"))
+        self.assertFalse(watcher.terminal_consumed_handoff_attestation(("not-terminal", *attestation[1:])))
+        self.assertFalse(watcher.terminal_consumed_handoff_attestation((*attestation[:4], "5", *attestation[5:6], "10", *attestation[7:])))
+
+    def test_consumed_root_handoff_cache_key_tracks_receiver_content(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            state = directory / "consumed.tsv"
+            reports = directory / "reports"
+            receiver = directory / "coordinator.md"
+            reports.mkdir()
+            _ = state.write_text("terminal state\n", encoding="utf-8")
+            _ = receiver.write_text("(from agent cfg:2 /tmp/report-a.md)\n", encoding="utf-8")
+            before = watcher.consumed_handoff_cache_key(state, reports, {"root.md": receiver})
+            _ = receiver.write_text("(from agent cfg:2 /tmp/report-b.md)\n", encoding="utf-8")
+            after = watcher.consumed_handoff_cache_key(state, reports, {"root.md": receiver})
+            self.assertIsNotNone(before)
+            self.assertIsNotNone(after)
+            self.assertNotEqual(before, after)
+
+    def test_consumed_root_handoff_cache_key_tracks_in_place_report_mutation(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            state = directory / "consumed.tsv"
+            reports = directory / "reports"
+            receiver = directory / "coordinator.md"
+            report = reports / f"agent_blocked_{'a' * 64}.md"
+            reports.mkdir()
+            _ = state.write_text("terminal state\n", encoding="utf-8")
+            _ = receiver.write_text("consumed pointer\n", encoding="utf-8")
+            _ = report.write_text("authenticated blocker A\n", encoding="utf-8")
+            report.chmod(0o600)
+            directory_stat = reports.stat()
+            before = watcher.consumed_handoff_cache_key(state, reports, {"root.md": receiver})
+            _ = report.write_text("authenticated blocker B\n", encoding="utf-8")
+            os.utime(reports, ns=(directory_stat.st_atime_ns, directory_stat.st_mtime_ns))
+            after = watcher.consumed_handoff_cache_key(state, reports, {"root.md": receiver})
+            self.assertIsNotNone(before)
+            self.assertIsNotNone(after)
+            self.assertNotEqual(before, after)
+
+    def test_consumed_root_handoff_cache_key_rejects_symlink_and_oversize_reports(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            state = directory / "consumed.tsv"
+            reports = directory / "reports"
+            receiver = directory / "coordinator.md"
+            target = directory / "outside.md"
+            symlink = reports / f"agent_blocked_{'a' * 64}.md"
+            oversize = reports / f"agent_blocked_{'b' * 64}.md"
+            reports.mkdir()
+            _ = state.write_text("terminal state\n", encoding="utf-8")
+            _ = receiver.write_text("consumed pointer\n", encoding="utf-8")
+            _ = target.write_text("must not be followed\n", encoding="utf-8")
+            symlink.symlink_to(target)
+            _ = oversize.write_bytes(b"x" * (watcher.PENDING_CONTENT_CHAR_LIMIT * 8 + 1))
+            oversize.chmod(0o600)
+            cache_key = watcher.consumed_handoff_cache_key(state, reports, {"root.md": receiver})
+            self.assertIsNotNone(cache_key)
+            report_identities = cache_key[-1]
+            self.assertIn((str(symlink), "unsafe"), report_identities)
+            self.assertIn((str(oversize), "unsafe"), report_identities)
+            with patch.object(watcher, "locked_consumed_report_entries", return_value={"unused": MagicMock()}):
+                self.assertEqual({}, watcher.consumed_blocked_handoffs(directory, state, {"root.md": receiver}, reports))
+
+    def test_consumed_root_cascade_reissues_on_material_evidence_changes(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            todo = "current:\ncoordinator.md cfg:1\nroot.md cfg:2\nleaf.md cfg:3\n"
+            originals = {
+                "coordinator.md": task_frontmatter("long_running", runat="cfg:1", managerat="main:0", is_manager=True, blocked_on="platform authority", pending_items=("Coordinate root.md, leaf.md",)),
+                "root.md": task_frontmatter("blocked", runat="cfg:2", managerat="cfg:1", is_manager=True, blocked_on="sealed platform authority") + "Blocks `leaf.md`.\n",
+                "leaf.md": task_frontmatter("blocked", runat="cfg:3", managerat="cfg:1", blocked_on="platform review unavailable"),
+            }
+            _ = (root / "TODO.md").write_text(todo, encoding="utf-8")
+            for task_file, text in originals.items():
+                _ = (root / task_file).write_text(text, encoding="utf-8")
+            handoff = {
+                "value": watcher.ConsumedBlockedHandoff(
+                    "root.md",
+                    "root-report-a",
+                    100.0,
+                    ("terminal-consumed", "authority-a"),
+                    "Root handoff for platform review unavailable.",
+                )
+            }
+            pane = {"cfg:2": watcher.CodexReport("ready", ["root evidence"]), "cfg:3": watcher.CodexReport("ready", ["leaf evidence"])}
+            runtime = {"cfg:2": "%root\t100\tcodex", "cfg:3": "%leaf\t200\tcodex"}
+            problem_output = "agent-problems: blocked_idle=1\nblocked_idle: task=leaf.md evidence=target=cfg:3 task_status=blocked idle_status=ready reason=platform review unavailable owner_target=cfg:1\n"
+            args = Args(root, "", root / "consumed.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="main:0")
+
+            def snapshot() -> str:
+                return watcher.blocked_report_snapshot_state(root, args.state)["leaf.md"][1]
+
+            with patch.object(watcher, "consumed_blocked_handoffs", side_effect=lambda *_args: {"root.md": handoff["value"]}), patch.object(
+                watcher, "inspect_codex", side_effect=lambda status_args: pane.get(status_args.target, watcher.CodexReport("ready", ["other evidence"]))
+            ), patch.object(watcher, "blocked_custody_runtime_identity", side_effect=lambda target: runtime.get(target, f"%{target}\t1\tcodex")):
+                baseline = snapshot()
+                self.assertTrue(baseline.startswith("cascade:"))
+                _ = (root / "root.md").write_text(
+                    task_frontmatter("blocked", runat="cfg:2", managerat="cfg:1", is_manager=True, blocked_on="platform authority")
+                    + "Historical note: `leaf.md` once waited here.\n",
+                    encoding="utf-8",
+                )
+                _ = (root / "leaf.md").write_text(
+                    originals["leaf.md"].replace("platform review unavailable", "unrelated platform outage"),
+                    encoding="utf-8",
+                )
+                self.assertFalse(
+                    snapshot().startswith("cascade:"),
+                    "historical body prose and one shared word must not establish a current dependency",
+                )
+                _ = (root / "TODO.md").write_text(todo + "sibling.md cfg:4\n", encoding="utf-8")
+                _ = (root / "coordinator.md").write_text(
+                    originals["coordinator.md"].replace("root.md, leaf.md", "root.md, leaf.md, sibling.md"),
+                    encoding="utf-8",
+                )
+                _ = (root / "leaf.md").write_text(originals["leaf.md"], encoding="utf-8")
+                _ = (root / "sibling.md").write_text(
+                    task_frontmatter("blocked", runat="cfg:4", managerat="cfg:1", blocked_on="platform review unavailable elsewhere"),
+                    encoding="utf-8",
+                )
+                pane["cfg:4"] = watcher.CodexReport("ready", ["sibling evidence"])
+                runtime["cfg:4"] = "%sibling\t300\tcodex"
+                self.assertFalse(snapshot().startswith("cascade:"), "a common handoff phrase shared by siblings is ambiguous")
+                _ = (root / "TODO.md").write_text(todo, encoding="utf-8")
+                _ = (root / "coordinator.md").write_text(originals["coordinator.md"], encoding="utf-8")
+                changes = (
+                    ("root blocker", lambda: (root / "root.md").write_text(originals["root.md"].replace("sealed platform authority", "stronger platform authority"), encoding="utf-8")),
+                    (
+                        "authority handoff",
+                        lambda: handoff.__setitem__(
+                            "value",
+                            watcher.ConsumedBlockedHandoff(
+                                "root.md",
+                                "root-report-b",
+                                101.0,
+                                ("terminal-consumed", "authority-b"),
+                                "Root handoff for platform review unavailable.",
+                            ),
+                        ),
+                    ),
+                    ("leaf blocker", lambda: (root / "leaf.md").write_text(originals["leaf.md"].replace("platform review unavailable", "revised platform unavailable"), encoding="utf-8")),
+                    ("custody", lambda: (root / "leaf.md").write_text(originals["leaf.md"].replace("managerat: cfg:1", "managerat: main:0"), encoding="utf-8")),
+                    ("pane identity", lambda: runtime.__setitem__("cfg:3", "%leaf\t201\tcodex")),
+                    ("pane evidence", lambda: pane.__setitem__("cfg:3", watcher.CodexReport("ready", ["changed actionable evidence"]))),
+                    ("root pane identity", lambda: runtime.__setitem__("cfg:2", "%root\t101\tcodex")),
+                    ("root pane evidence", lambda: pane.__setitem__("cfg:2", watcher.CodexReport("ready", ["changed root evidence"]))),
+                    ("root identity", lambda: (root / "root.md").write_text(originals["root.md"].replace("runat: cfg:2", "runat: cfg:9"), encoding="utf-8")),
+                    ("root index identity", lambda: (root / "TODO.md").write_text(todo.replace("root.md cfg:2", "root.md cfg:22"), encoding="utf-8")),
+                    (
+                        "coordinator index identity",
+                        lambda: (root / "TODO.md").write_text(todo.replace("coordinator.md cfg:1", "coordinator.md cfg:11"), encoding="utf-8"),
+                    ),
+                )
+                for name, change in changes:
+                    with self.subTest(name=name):
+                        _ = (root / "TODO.md").write_text(todo, encoding="utf-8")
+                        for task_file, text in originals.items():
+                            _ = (root / task_file).write_text(text, encoding="utf-8")
+                        handoff["value"] = watcher.ConsumedBlockedHandoff(
+                            "root.md",
+                            "root-report-a",
+                            100.0,
+                            ("terminal-consumed", "authority-a"),
+                            "Root handoff for platform review unavailable.",
+                        )
+                        pane["cfg:3"] = watcher.CodexReport("ready", ["leaf evidence"])
+                        pane["cfg:2"] = watcher.CodexReport("ready", ["root evidence"])
+                        runtime["cfg:3"] = "%leaf\t200\tcodex"
+                        runtime["cfg:2"] = "%root\t100\tcodex"
+                        change()
+                        self.assertNotEqual(baseline, snapshot())
+                        stale_report = {"leaf.md": baseline}
+                        watcher.prune_dependency_reported_snapshots(root, stale_report, report_state=args.state)
+                        self.assertEqual({"leaf.md": baseline}, stale_report)
+                        self.assertEqual(problem_output, watcher.filter_unchanged_dependency_blocked_idle_output(args, problem_output, stale_report))
+
+                _ = (root / "root.md").write_text(originals["root.md"], encoding="utf-8")
+                pane["cfg:2"] = watcher.CodexReport("missing", ["root pane missing"])
+                self.assertFalse(snapshot().startswith("cascade:"))
+                stale_report = {"leaf.md": baseline}
+                watcher.prune_dependency_reported_snapshots(root, stale_report, report_state=args.state)
+                self.assertEqual(problem_output, watcher.filter_unchanged_dependency_blocked_idle_output(args, problem_output, stale_report))
+
+                pane["cfg:3"] = watcher.CodexReport("ready", ["inspect_target cfg:3: absent", "tmux inventory cfg:3 pane %42 bunx"])
+                self.assertFalse(snapshot().startswith("cascade:"))
+                self.assertEqual(problem_output, watcher.filter_unchanged_dependency_blocked_idle_output(args, problem_output, {"leaf.md": baseline}))
+
+                _ = (root / "TODO.md").write_text(todo + "root2.md cfg:5\n", encoding="utf-8")
+                _ = (root / "coordinator.md").write_text(
+                    originals["coordinator.md"].replace("root.md, leaf.md", "root.md, root2.md, leaf.md"),
+                    encoding="utf-8",
+                )
+                _ = (root / "root2.md").write_text(
+                    task_frontmatter("blocked", runat="cfg:5", managerat="cfg:1", is_manager=True, blocked_on="second platform authority") + "Blocks `leaf.md`.\n",
+                    encoding="utf-8",
+                )
+                pane["cfg:2"] = watcher.CodexReport("ready", ["root evidence"])
+                pane["cfg:3"] = watcher.CodexReport("ready", ["leaf evidence"])
+                pane["cfg:5"] = watcher.CodexReport("missing", ["second root missing"])
+                handoff2 = watcher.ConsumedBlockedHandoff(
+                    "root2.md",
+                    "root-report-2",
+                    102.0,
+                    ("terminal-consumed", "authority-2"),
+                    "Second root handoff for platform review unavailable.",
+                )
+                with patch.object(watcher, "consumed_blocked_handoffs", return_value={"root.md": handoff["value"], "root2.md": handoff2}):
+                    self.assertFalse(snapshot().startswith("cascade:"))
+
     def test_agent_problem_check_keeps_missing_human_wait_actionable_across_changes(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 

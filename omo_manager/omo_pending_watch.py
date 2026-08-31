@@ -42,6 +42,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from omo_manager.omo_agent_status import TaskLine
+from omo_manager.omo_agent_status import TaskState
 from omo_manager.omo_agent_status import blocked_status_dependency_snapshot
 from omo_manager.omo_agent_status import effective_owner_target
 from omo_manager.omo_agent_status import is_main_manager_task_file
@@ -101,6 +102,8 @@ from omo_manager.omo_task_lock import watcher_report_authority_is_live
 from omo_manager.omo_task_lock import watcher_report_manager_temporary
 from omo_manager.omo_task_lock import watcher_report_state_maintenance_temporary
 from omo_manager.omo_task_lock import watcher_report_state_temporary
+from omo_manager.omo_task_metadata import TaskBlocker
+from omo_manager.omo_task_metadata import TaskMetadata
 
 
 def default_state_dir() -> Path:
@@ -400,6 +403,24 @@ class AuthenticatedAgentReport:
     target: str
     path: Path
     header_lines: tuple[str, ...]
+    source_task: str = ""
+    receiver: str = ""
+    message_sha256: str = ""
+    commitment_path: Path | None = None
+    routing_source_bindings: tuple[tuple[str, str], ...] = ()
+    message_text: str = ""
+
+
+@dataclass(frozen=True)
+class ConsumedBlockedHandoff:
+    task_file: str
+    report_key: str
+    consumed_at_s: float
+    attestation: tuple[str, ...]
+    message_text: str = ""
+
+
+CONSUMED_BLOCKED_HANDOFF_CACHE: tuple[tuple[object, ...], dict[str, ConsumedBlockedHandoff]] | None = None
 
 
 @dataclass(frozen=True)
@@ -642,8 +663,10 @@ class AgentProblemGuard:
     command: tuple[str, ...]
     problem_lines: tuple[str, ...]
     root: Path | None = None
+    report_state: Path | None = None
     dependency_task_file: str = ""
     dependency_snapshot: str = ""
+    dependency_snapshots: tuple[tuple[str, str], ...] = ()
     ready_target: str = ""
     problem_id: str = ""
     problem_owner_target: str = ""
@@ -666,6 +689,7 @@ class DeliverySuccessEvent:
     dependency_replacements: tuple[tuple[str, str], ...] = ()
     dependency_removals: tuple[str, ...] = ()
     dependency_guarded_replacements: tuple[tuple[str, str | None, str], ...] = ()
+    dependency_require_current: bool = False
     dependency_guarded_removals: tuple[tuple[str, str], ...] = ()
     failure_dependency_replacements: tuple[tuple[str, str, str], ...] = ()
     failure_dependency_removals: tuple[tuple[str, str], ...] = ()
@@ -808,9 +832,12 @@ def send_executor() -> ThreadPoolExecutor:
 
 
 def agent_problem_evidence_current(guard: AgentProblemGuard) -> bool:
+    if guard.root is not None and guard.dependency_snapshots:
+        current_snapshots = blocked_report_snapshot_state(guard.root, guard.report_state or DEFAULT_STATE)
+        return all((current := current_snapshots.get(task_file)) is not None and current[1] == snapshot for task_file, snapshot in guard.dependency_snapshots)
     if guard.root is not None and guard.dependency_task_file:
-        if guard.dependency_snapshot.startswith("human:"):
-            current = blocked_report_snapshot_state(guard.root).get(guard.dependency_task_file)
+        if guard.dependency_snapshot.startswith(("human:", "custody:", "cascade:")):
+            current = blocked_report_snapshot_state(guard.root, guard.report_state or DEFAULT_STATE).get(guard.dependency_task_file)
             current = current is not None and current[1] == guard.dependency_snapshot
         else:
             task = TaskLine(guard.dependency_task_file, "dependency-guard", "", "", None)
@@ -1156,6 +1183,7 @@ def drain_delivery_successes(args: Args, seen: dict[str, float], now_wall_s: flo
             remember_blocked_idle_report(args, seen, owner_target, line, seen_at_s)
             changed = True
         if event.dependency_state is not None:
+            current_snapshots = blocked_report_snapshot_state(args.root, args.state) if event.dependency_require_current else {}
             for task_file in event.dependency_removals:
                 event.dependency_state.pop(task_file, None)
                 changed = True
@@ -1163,7 +1191,9 @@ def drain_delivery_successes(args: Args, seen: dict[str, float], now_wall_s: flo
                 event.dependency_state[task_file] = snapshot
                 changed = True
             for task_file, expected_snapshot, snapshot in event.dependency_guarded_replacements:
-                if event.dependency_state.get(task_file) == expected_snapshot:
+                current = current_snapshots.get(task_file)
+                current_ok = not event.dependency_require_current or (current is not None and current[1] == snapshot)
+                if event.dependency_state.get(task_file) == expected_snapshot and current_ok:
                     event.dependency_state[task_file] = snapshot
                     changed = True
             for task_file, expected_snapshot in event.dependency_guarded_removals:
@@ -1483,7 +1513,7 @@ def authenticated_agent_report(source_line: str) -> AuthenticatedAgentReport | N
         return None
     try:
         header_lines = header.decode("utf-8").splitlines()
-        _ = message.decode("utf-8")
+        decoded_message = message.decode("utf-8")
     except UnicodeDecodeError:
         return None
     if len(header_lines) not in {2, 3, 4, 5, 6}:
@@ -1492,6 +1522,10 @@ def authenticated_agent_report(source_line: str) -> AuthenticatedAgentReport | N
     hash_match = AGENT_REPORT_HASH_RE.fullmatch(header_lines[1])
     if sent_match is None or sent_match.group(1) != match.group(1) or hash_match is None:
         return None
+    source_task = ""
+    receiver = ""
+    authenticated_commitment_path: Path | None = None
+    authenticated_routing_sources: tuple[tuple[str, str], ...] = ()
     warning_index = 2
     if len(header_lines) >= 3 and AGENT_REPORT_OWNER_RE.fullmatch(header_lines[2]) is not None:
         warning_index = 3
@@ -1586,6 +1620,17 @@ def authenticated_agent_report(source_line: str) -> AuthenticatedAgentReport | N
                 }
             ):
                 return None
+            source_task = str(authority["source_task"])
+            receiver = str(transfer["receiver"])
+            authenticated_commitment_path = commitment_path
+            authenticated_routing_sources = tuple(
+                (str(source["path"]), str(source["sha256"]))
+                for source in commitment.get("preflight", {}).get("routing_sources", ())
+                if isinstance(source, dict)
+                and source.get("exists") is True
+                and isinstance(source.get("path"), str)
+                and re.fullmatch(r"[0-9a-f]{64}", str(source.get("sha256", ""))) is not None
+            )
             warning_index += 1
     if len(header_lines) not in {warning_index, warning_index + 2}:
         return None
@@ -1593,7 +1638,17 @@ def authenticated_agent_report(source_line: str) -> AuthenticatedAgentReport | N
         return None
     if hashlib.sha256(message).hexdigest() != hash_match.group(1):
         return None
-    return AuthenticatedAgentReport(match.group(1), path, tuple(header_lines))
+    return AuthenticatedAgentReport(
+        match.group(1),
+        path,
+        tuple(header_lines),
+        source_task,
+        receiver,
+        hash_match.group(1),
+        authenticated_commitment_path,
+        authenticated_routing_sources,
+        decoded_message,
+    )
 
 
 def valid_agent_report_artifact(source_line: str) -> bool:
@@ -5522,9 +5577,448 @@ def recorded_blocked_custody_snapshot(
     return f"custody:{hashlib.sha256(identity + bytes(1) + task_evidence).hexdigest()}"
 
 
+def consumed_report_key_for_artifact(root: Path, report: AuthenticatedAgentReport) -> str:
+    """Rebuild the durable report key from its authenticated immutable envelope."""
+
+    hash_line = f"[message-sha256: {report.message_sha256}]"
+    payload = f"{report.path}\0{report.path}\0{hash_line}"
+    return f"{root}:agent-report:{hashlib.sha256(payload.encode('utf-8')).hexdigest()}"
+
+
+def report_commitment_binds_task(report: AuthenticatedAgentReport, task_path: Path) -> bool:
+    """Require the consumed handoff preflight to bind the named root task."""
+
+    return any(path == str(task_path) for path, _digest in report.routing_source_bindings)
+
+
+def terminal_consumed_handoff_attestation(transition: tuple[str, ...]) -> bool:
+    """Validate the durable terminal transition without requiring its expired lease."""
+
+    if len(transition) != 17:
+        return False
+    (
+        protocol,
+        manager_digest,
+        pointer_digest,
+        before_digest,
+        before_size,
+        after_digest,
+        after_size,
+        authority_protocol,
+        authority_role,
+        pid,
+        start,
+        lock_digest,
+        lock_dev,
+        lock_inode,
+        source_path,
+        source_digest,
+        token_digest,
+    ) = transition
+    digests = (manager_digest, pointer_digest, before_digest, after_digest, lock_digest, source_digest, token_digest)
+    try:
+        numeric = tuple(int(value) for value in (before_size, after_size, pid, start, lock_dev, lock_inode))
+    except ValueError:
+        return False
+    return (
+        protocol == "watcher-locked-pointer-transition-v1"
+        and authority_protocol == "watcher-consumption-authority-v1"
+        and authority_role == "bounded-watcher-lease"
+        and all(re.fullmatch(r"[0-9a-f]{64}", digest) is not None for digest in digests)
+        and before_digest != after_digest
+        and numeric[0] > numeric[1] >= 0
+        and all(value >= 0 for value in numeric[2:])
+        and Path(source_path).resolve(strict=False) == Path(__file__).resolve().with_name("omo_task_lock.py")
+    )
+
+
+def terminal_attestation_binds_report(
+    transition: tuple[str, ...],
+    state_path: Path,
+    report_key: str,
+    receiver: Path,
+    pointer: str,
+) -> bool:
+    """Bind the syntactically valid terminal transition to this exact report."""
+
+    if not terminal_consumed_handoff_attestation(transition):
+        return False
+    source_path = Path(__file__).resolve().with_name("omo_task_lock.py")
+    try:
+        source_digest = hashlib.sha256(source_path.read_bytes()).hexdigest()
+    except OSError:
+        return False
+    return (
+        transition[1] == hashlib.sha256(str(receiver).encode()).hexdigest()
+        and transition[2] == hashlib.sha256(pointer.encode()).hexdigest()
+        and transition[11] == hashlib.sha256(str(report_authority_lock_path(state_path, report_key)).encode()).hexdigest()
+        and Path(transition[14]).resolve(strict=False) == source_path
+        and transition[15] == source_digest
+    )
+
+
+def safe_consumed_report_payload(report_path: Path) -> tuple[os.stat_result, bytes] | None:
+    """Read one candidate report through the authentication safety boundary."""
+
+    try:
+        report_fd = os.open(report_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(report_fd, "rb") as report_handle:
+            report_stat = os.fstat(report_handle.fileno())
+            report_bytes = report_handle.read(PENDING_CONTENT_CHAR_LIMIT * 8 + 1)
+            report_after = os.fstat(report_handle.fileno())
+    except OSError:
+        return None
+    if (
+        not stat.S_ISREG(report_stat.st_mode)
+        or report_stat.st_uid != os.getuid()
+        or stat.S_IMODE(report_stat.st_mode) & 0o077
+        or len(report_bytes) > PENDING_CONTENT_CHAR_LIMIT * 8
+        or (report_stat.st_dev, report_stat.st_ino, report_stat.st_size, report_stat.st_mtime_ns)
+        != (report_after.st_dev, report_after.st_ino, report_after.st_size, report_after.st_mtime_ns)
+    ):
+        return None
+    return report_stat, report_bytes
+
+
+def consumed_handoff_cache_key(
+    state_path: Path,
+    report_dir: Path,
+    expected_receivers: dict[str, Path],
+) -> tuple[object, ...] | None:
+    """Fingerprint every mutable record used to discover consumed handoffs."""
+
+    try:
+        state_stat = state_path.stat()
+        report_dir_stat = report_dir.stat()
+    except OSError:
+        return None
+    receiver_identities: list[tuple[str, int, int, str]] = []
+    for receiver_path in expected_receivers.values():
+        try:
+            receiver_bytes = receiver_path.read_bytes()
+            receiver_stat = receiver_path.stat()
+        except OSError:
+            receiver_identities.append((str(receiver_path), -1, -1, "unreadable"))
+            continue
+        receiver_identities.append(
+            (
+                str(receiver_path),
+                receiver_stat.st_mtime_ns,
+                receiver_stat.st_size,
+                hashlib.sha256(receiver_bytes).hexdigest(),
+            )
+        )
+    report_identities: list[tuple[object, ...]] = []
+    for report_path in report_dir.glob("agent_blocked_*.md"):
+        safe_payload = safe_consumed_report_payload(report_path)
+        if safe_payload is None:
+            report_identities.append((str(report_path), "unsafe"))
+            continue
+        report_stat, report_bytes = safe_payload
+        report_identities.append(
+            (
+                str(report_path),
+                report_stat.st_dev,
+                report_stat.st_ino,
+                report_stat.st_mtime_ns,
+                report_stat.st_size,
+                hashlib.sha256(report_bytes).hexdigest(),
+            )
+        )
+    return (
+        state_path.resolve(strict=False),
+        state_stat.st_mtime_ns,
+        state_stat.st_size,
+        report_dir_stat.st_mtime_ns,
+        tuple(sorted((task, str(receiver)) for task, receiver in expected_receivers.items())),
+        tuple(sorted(receiver_identities)),
+        tuple(sorted(report_identities)),
+    )
+
+
+def consumed_blocked_handoffs(
+    root: Path,
+    state_path: Path,
+    expected_receivers: dict[str, Path],
+    report_dir: Path | None = None,
+) -> dict[str, ConsumedBlockedHandoff]:
+    """Return each named blocked root's newest terminally consumed report."""
+
+    global CONSUMED_BLOCKED_HANDOFF_CACHE
+    entries = locked_consumed_report_entries(state_path, time.time())
+    if not entries or not expected_receivers:
+        return {}
+    report_dir = report_dir or Path("/tmp") / f"omo-agent-messages-{os.getuid()}"
+    cache_key = consumed_handoff_cache_key(state_path, report_dir, expected_receivers)
+    if cache_key is None:
+        return {}
+    if CONSUMED_BLOCKED_HANDOFF_CACHE is not None and CONSUMED_BLOCKED_HANDOFF_CACHE[0] == cache_key:
+        return dict(CONSUMED_BLOCKED_HANDOFF_CACHE[1])
+    newest: dict[str, tuple[tuple[int, str], ConsumedBlockedHandoff | None]] = {}
+    source_lines: set[str] = set()
+    for receiver_path in expected_receivers.values():
+        try:
+            receiver_text = receiver_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        for source_line in receiver_text.splitlines():
+            pointer = AGENT_POINTER_WITH_TARGET_RE.fullmatch(source_line)
+            if pointer is not None and re.fullmatch(r"agent_blocked_[0-9a-f]{64}\.md", Path(pointer.group(2)).name) is not None:
+                source_lines.add(source_line)
+    for path in report_dir.glob("agent_blocked_*.md"):
+        safe_payload = safe_consumed_report_payload(path)
+        if safe_payload is None:
+            continue
+        try:
+            first_line = safe_payload[1].split(b"\n", 1)[0].decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        sent = re.fullmatch(
+            r"\(sent from [A-Za-z0-9_.-]+ via omo_report\.sh tmux=([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?) "
+            r"time=\S+ task-file=([A-Za-z0-9_.-]+)\)",
+            first_line,
+        )
+        if sent is not None and sent.group(2) in expected_receivers:
+            source_lines.add(f"(from agent {sent.group(1)} {path})")
+    for source_line in source_lines:
+        report = authenticated_agent_report(source_line)
+        if report is None:
+            continue
+        task_file = Path(report.source_task).name
+        if task_file not in expected_receivers:
+            continue
+        task_path = (root / task_file).resolve(strict=False)
+        if (
+            Path(report.source_task).resolve(strict=False) != task_path
+            or Path(report.receiver).resolve(strict=False) != expected_receivers[task_file]
+            or not report_commitment_binds_task(report, task_path)
+        ):
+            continue
+        report_key = consumed_report_key_for_artifact(root, report)
+        consumed = entries.get(report_key)
+        transition = () if consumed is None else consumed.transition
+        terminally_bound = (
+            terminal_attestation_binds_report(
+                transition,
+                state_path,
+                report_key,
+                expected_receivers[task_file],
+                source_line,
+            )
+        )
+        handoff = (
+            ConsumedBlockedHandoff(task_file, report_key, consumed.timestamp_s, transition, report.message_text)
+            if consumed is not None and terminally_bound
+            else None
+        )
+        try:
+            identity = report.path.stat().st_mtime_ns, str(report.path)
+        except OSError:
+            continue
+        prior = newest.get(task_file)
+        if prior is None or identity > prior[0]:
+            newest[task_file] = identity, handoff
+    handoffs = {task_file: handoff for task_file, (_identity, handoff) in newest.items() if handoff is not None}
+    CONSUMED_BLOCKED_HANDOFF_CACHE = cache_key, dict(handoffs)
+    return handoffs
+
+
+def task_record_references(metadata: TaskMetadata, state: TaskState) -> set[str]:
+    """Read exact task-file links from authoritative blockers and open goals."""
+
+    texts = [state.reason, *(str(item) for item in metadata.pending_task_items)]
+    references = {match.group(1) for text in texts for match in FILE_REF_RE.finditer(text)}
+    references.update(blocker.task for blocker in metadata.blockers if isinstance(blocker, TaskBlocker))
+    return references
+
+
+def task_graph_path(edges: dict[str, set[str]], start: str, goal: str) -> tuple[str, ...]:
+    pending: list[tuple[str, tuple[str, ...]]] = [(start, (start,))]
+    seen = {start}
+    while pending:
+        node, path = pending.pop(0)
+        if node == goal:
+            return path
+        for child in sorted(edges.get(node, ())):
+            if child not in seen:
+                seen.add(child)
+                pending.append((child, (*path, child)))
+    return ()
+
+
+def has_conflicting_custody_evidence(report: CodexReport, target: str) -> bool:
+    """Recognize an absent-helper/live-inventory contradiction."""
+
+    evidence = "\n".join(report.lines).lower()
+    aliases = target_aliases(canonical_target(target))
+    target_is_named = any(alias.lower() in evidence for alias in aliases)
+    absent = target_is_named and re.search(r"inspect_target[^\n]{0,120}\babsent\b", evidence) is not None
+    live_inventory = target_is_named and re.search(r"tmux[^\n]{0,120}(?:inventory|pane)[^\n]{0,120}(?:%\d+|\bbunx\b|\bcodex\b)", evidence) is not None
+    return absent and live_inventory
+
+
+def explicit_custody_conflict_blocker(blocker: str) -> bool:
+    normalized = blocker.lower()
+    return "inspect_target" in normalized and "absent" in normalized and "tmux" in normalized
+
+
+def consumed_handoff_blocker_phrases(handoff: ConsumedBlockedHandoff, blocker: str) -> frozenset[tuple[str, ...]]:
+    """Return current authenticated multiword phrases binding a blocker."""
+
+    handoff_tokens = re.findall(r"[a-z0-9]+", handoff.message_text.lower())
+    blocker_tokens = re.findall(r"[a-z0-9]+", blocker.lower())
+    if len(handoff_tokens) < 2 or len(blocker_tokens) < 2:
+        return frozenset()
+    handoff_phrases = {
+        tuple(handoff_tokens[index : index + width])
+        for width in (2, 3, 4)
+        for index in range(len(handoff_tokens) - width + 1)
+    }
+    return frozenset(
+            tuple(blocker_tokens[index : index + width])
+            for width in (4, 3, 2)
+            for index in range(len(blocker_tokens) - width + 1)
+            if tuple(blocker_tokens[index : index + width]) in handoff_phrases
+    )
+
+
+# 🧑 "Close all opsmail0802 and agent_managers agents." — manager_mail/85c5dff58359-1261.txt:3-11
+def consumed_root_cascade_snapshots(
+    root: Path,
+    state_path: Path,
+    tasks: dict[str, TaskLine],
+    states: dict[str, TaskState],
+    metadata_by_task: dict[str, TaskMetadata],
+    base_snapshots: dict[str, tuple[TaskLine, str, str]],
+) -> dict[str, str]:
+    """Bind downstream blocked rows to terminally consumed named-root handoffs."""
+
+    active = set(tasks)
+    edges = {task_file: task_record_references(metadata_by_task[task_file], states[task_file]) & active for task_file in active}
+    blocker_roots = {
+        referenced
+        for references in edges.values()
+        for referenced in references
+        if states[referenced].status == "blocked"
+    }
+    manager_by_target: dict[str, str] = {}
+    ambiguous_targets: set[str] = set()
+    for task_file, state in states.items():
+        target = canonical_target(state.target)
+        if not state.is_manager or not target:
+            continue
+        if target in manager_by_target:
+            ambiguous_targets.add(target)
+        manager_by_target[target] = task_file
+    for target in ambiguous_targets:
+        manager_by_target.pop(target, None)
+    expected_receivers: dict[str, Path] = {}
+    for task_file in blocker_roots:
+        manager_file = manager_by_target.get(canonical_target(states[task_file].manager_target))
+        if manager_file is not None:
+            expected_receivers[task_file] = (root / manager_file).resolve(strict=False)
+    handoffs = consumed_blocked_handoffs(root, state_path, expected_receivers)
+    if not handoffs:
+        return {}
+
+    cascades: dict[str, str] = {}
+    for leaf_file, (_leaf, base_snapshot, _owner) in base_snapshots.items():
+        if not base_snapshot.startswith("custody:") or leaf_file in handoffs:
+            continue
+        owner_file = manager_by_target.get(canonical_target(states[leaf_file].manager_target))
+        ancestors: list[str] = []
+        while owner_file is not None and owner_file not in ancestors:
+            ancestors.append(owner_file)
+            owner_file = manager_by_target.get(canonical_target(states[owner_file].manager_target))
+        matches: list[tuple[str, tuple[str, ...], tuple[str, ...]]] = []
+        for coordinator in ancestors:
+            leaf_path = task_graph_path(edges, coordinator, leaf_file)
+            if not leaf_path:
+                continue
+            for root_file in handoffs:
+                phrases = consumed_handoff_blocker_phrases(handoffs[root_file], states[leaf_file].reason)
+                if not phrases:
+                    continue
+                sibling_phrases = [
+                    consumed_handoff_blocker_phrases(handoffs[root_file], states[sibling_file].reason)
+                    for sibling_file, (_task, sibling_snapshot, _owner) in base_snapshots.items()
+                    if sibling_file != leaf_file
+                    and sibling_snapshot.startswith("custody:")
+                    and task_graph_path(edges, coordinator, sibling_file)
+                ]
+                if any(phrases & sibling for sibling in sibling_phrases):
+                    continue
+                root_path = task_graph_path(edges, coordinator, root_file)
+                if root_path:
+                    matches.append((root_file, leaf_path, root_path))
+        roots = {match[0] for match in matches}
+        roots = {root_file for root_file in roots if not any(other != root_file and task_graph_path(edges, other, root_file) for other in roots)}
+        leaf_paths = {match[1] for match in matches}
+        if not roots or len(leaf_paths) != 1:
+            continue
+        leaf_path = leaf_paths.pop()
+        leaf_report = inspect_codex(CodexStatusArgs(states[leaf_file].target, 80))
+        conflict_is_root_blocker = any(explicit_custody_conflict_blocker(states[root_file].reason) for root_file in roots)
+        if has_conflicting_custody_evidence(leaf_report, states[leaf_file].target) and not conflict_is_root_blocker:
+            continue
+        root_evidence: dict[str, object] = {}
+        involved = set(leaf_path)
+        for root_file in sorted(roots):
+            root_path = next(match[2] for match in matches if match[0] == root_file)
+            root_state = states[root_file]
+            root_report = inspect_codex(CodexStatusArgs(root_state.target, 80))
+            if root_report.status != "ready" or (
+                has_conflicting_custody_evidence(root_report, root_state.target) and not explicit_custody_conflict_blocker(root_state.reason)
+            ):
+                break
+            root_pane = blocked_custody_pane_evidence(root_state.target, root_report)
+            if not root_pane:
+                break
+            involved.update(root_path)
+            handoff = handoffs[root_file]
+            root_evidence[root_file] = {
+                "path": root_path,
+                "state": [root_state.status, root_state.target, root_state.manager_target, root_state.reason],
+                "pane": root_pane,
+                "handoff": [handoff.report_key, handoff.consumed_at_s, handoff.attestation],
+            }
+        if len(root_evidence) != len(roots):
+            continue
+        try:
+            task_bytes = {task_file: hashlib.sha256((root / task_file).read_bytes()).hexdigest() for task_file in involved}
+        except OSError:
+            continue
+        task_index = {
+            task_file: [
+                tasks[task_file].section,
+                tasks[task_file].line,
+                tasks[task_file].target,
+                tasks[task_file].port,
+                tasks[task_file].status,
+                tasks[task_file].persistent_role,
+            ]
+            for task_file in involved
+        }
+        evidence = json.dumps(
+            {
+                "leaf": leaf_file,
+                "leaf_snapshot": base_snapshot,
+                "leaf_path": leaf_path,
+                "roots": root_evidence,
+                "task_bytes": task_bytes,
+                "task_index": task_index,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        cascades[leaf_file] = f"cascade:{hashlib.sha256(evidence.encode('utf-8')).hexdigest()}"
+    return cascades
+
+
 def line_matches_blocked_report_snapshot(root: Path, line: str, task: TaskLine, snapshot: str, owner_target: str) -> bool:
     status = problem_line_status(line)
-    if not snapshot.startswith(("human:", "custody:")):
+    if not snapshot.startswith(("human:", "custody:", "cascade:")):
         return status == "blocked_idle"
     if status != "blocked_idle" or problem_line_value(line, "idle_status") != "ready":
         return False
@@ -5555,7 +6049,7 @@ def filter_unchanged_dependency_blocked_idle_output(args: Args, output: str, sna
     lines = output.splitlines()
     if not lines or not lines[0].startswith("agent-problems:"):
         return output
-    current = blocked_report_snapshot_state(args.root)
+    current = blocked_report_snapshot_state(args.root, args.state)
     if not current:
         return output
     kept: list[str] = []
@@ -5571,17 +6065,61 @@ def filter_unchanged_dependency_blocked_idle_output(args: Args, output: str, sna
     return filtered_problem_output(kept, suppress_message="omo_pending_watch: suppressed unchanged blocked dependency report")
 
 
-def prune_dependency_reported_snapshots(root: Path, snapshots: dict[str, str], preserve_task_files: set[str] | None = None) -> None:
-    current = blocked_report_snapshot_state(root)
+def seed_consumed_root_cascade_snapshots(
+    args: Args,
+    output: str,
+    snapshots: dict[str, str],
+    previously_reported: dict[str, str],
+) -> bool:
+    """Treat one consumed root handoff as the initial downstream classification."""
+
+    lines = output.splitlines()[1:]
+    if not any(problem_line_status(line) == "blocked_idle" for line in lines):
+        return False
+    current = blocked_report_snapshot_state(args.root, args.state)
+    changed = False
+    for line in lines:
+        task_file = problem_line_task(line)
+        snapshot = current.get(task_file)
+        prior = previously_reported.get(task_file)
+        if (
+            not task_file
+            or task_file in snapshots
+            or prior is not None
+            or snapshot is None
+            or not snapshot[1].startswith("cascade:")
+            or not line_matches_blocked_report_snapshot(args.root, line, *snapshot)
+        ):
+            continue
+        snapshots[task_file] = snapshot[1]
+        changed = True
+    return changed
+
+
+def prune_dependency_reported_snapshots(
+    root: Path,
+    snapshots: dict[str, str],
+    preserve_task_files: set[str] | None = None,
+    report_state: Path = DEFAULT_STATE,
+) -> None:
+    if not snapshots:
+        return
+    current = blocked_report_snapshot_state(root, report_state)
     preserved = preserve_task_files or set()
     for task_file in tuple(snapshots):
         current_snapshot = current.get(task_file)
-        if task_file not in preserved and (current_snapshot is None or current_snapshot[1] != snapshots[task_file]):
+        previous = snapshots[task_file]
+        changed_consumed_cascade = previous.startswith("cascade:") and current_snapshot is not None and current_snapshot[1] != previous
+        if task_file not in preserved and not changed_consumed_cascade and (current_snapshot is None or current_snapshot[1] != previous):
             snapshots.pop(task_file, None)
 
 
-def dependency_snapshot_replacements_for_problem_lines(root: Path, lines: tuple[str, ...]) -> tuple[tuple[str, str], ...]:
-    current = blocked_report_snapshot_state(root)
+def dependency_snapshot_replacements_for_problem_lines(
+    root: Path,
+    lines: tuple[str, ...],
+    report_state: Path = DEFAULT_STATE,
+) -> tuple[tuple[str, str], ...]:
+    current = blocked_report_snapshot_state(root, report_state)
     replacements: list[tuple[str, str]] = []
     seen_tasks: set[str] = set()
     for line in lines:
@@ -5598,8 +6136,13 @@ def dependency_snapshot_replacements_for_problem_lines(root: Path, lines: tuple[
     return tuple(replacements)
 
 
-def dependency_snapshot_removals_for_problem_lines(root: Path, lines: tuple[str, ...], snapshots: dict[str, str]) -> tuple[tuple[str, str], ...]:
-    current = blocked_report_snapshot_state(root)
+def dependency_snapshot_removals_for_problem_lines(
+    root: Path,
+    lines: tuple[str, ...],
+    snapshots: dict[str, str],
+    report_state: Path = DEFAULT_STATE,
+) -> tuple[tuple[str, str], ...]:
+    current = blocked_report_snapshot_state(root, report_state)
     removals: list[tuple[str, str]] = []
     seen_tasks: set[str] = set()
     for line in lines:
@@ -5612,8 +6155,13 @@ def dependency_snapshot_removals_for_problem_lines(root: Path, lines: tuple[str,
     return tuple(removals)
 
 
-def blocked_report_bypasses_target_repeat(root: Path, lines: tuple[str, ...], snapshots: dict[str, str]) -> bool:
-    current = blocked_report_snapshot_state(root)
+def blocked_report_bypasses_target_repeat(
+    root: Path,
+    lines: tuple[str, ...],
+    snapshots: dict[str, str],
+    report_state: Path = DEFAULT_STATE,
+) -> bool:
+    current = blocked_report_snapshot_state(root, report_state)
     for line in lines:
         task_file = problem_line_task(line)
         previous = snapshots.get(task_file)
@@ -5814,18 +6362,32 @@ def dependency_snapshot_state(root: Path) -> dict[str, tuple[TaskLine, str, str]
     return snapshots
 
 
-def blocked_report_snapshot_state(root: Path) -> dict[str, tuple[TaskLine, str, str]]:
+def blocked_report_snapshot_state(root: Path, report_state: Path = DEFAULT_STATE) -> dict[str, tuple[TaskLine, str, str]]:
     """Return stable snapshots for dependency and recorded-human blocked rows."""
 
     snapshots = dependency_snapshot_state(root)
     seen_files = set(snapshots)
-    for task in parse_task_lines(root / "TODO.md"):
+    tasks: dict[str, TaskLine] = {}
+    states: dict[str, TaskState] = {}
+    metadata_by_task: dict[str, TaskMetadata] = {}
+    task_lines = parse_task_lines(root / "TODO.md")
+    for task in task_lines:
+        if task.task_file == "TODO.md" or task.task_file in tasks or task.section not in MANAGER_TASK_STATE_LIVE_SECTIONS:
+            continue
+        task_path = resolve_task_path(root, task.task_file)
+        state = scan_task_state(task_path, root) if task_path is not None else None
+        metadata = read_task_metadata(task_path, root)
+        if task_path is not None and state is not None and metadata is not None:
+            tasks[task.task_file] = task
+            states[task.task_file] = state
+            metadata_by_task[task.task_file] = metadata
+    for task in task_lines:
         if task.task_file == "TODO.md" or task.task_file in seen_files or task.section not in MANAGER_TASK_STATE_LIVE_SECTIONS:
             continue
         seen_files.add(task.task_file)
         task_path = resolve_task_path(root, task.task_file)
-        state = scan_task_state(task_path, root) if task_path is not None else None
-        metadata = read_task_metadata(task_path, root)
+        state = states.get(task.task_file)
+        metadata = metadata_by_task.get(task.task_file)
         if task_path is None or state is None or metadata is None or state.status != "blocked" or not state.target or not state.manager_target or task_has_pending_marker(task_path):
             continue
         report = inspect_codex(CodexStatusArgs(state.target, 80))
@@ -5849,6 +6411,9 @@ def blocked_report_snapshot_state(root: Path) -> dict[str, tuple[TaskLine, str, 
         if not snapshot:
             continue
         snapshots[task.task_file] = (task, snapshot, owner_target)
+    for task_file, snapshot in consumed_root_cascade_snapshots(root, report_state, tasks, states, metadata_by_task, snapshots).items():
+        task, _base_snapshot, owner_target = snapshots[task_file]
+        snapshots[task_file] = (task, snapshot, owner_target)
     return snapshots
 
 
@@ -5862,7 +6427,7 @@ def maybe_push_dependency_transitions(
 
     changed = False
     delivery_seen = seen if seen is not None else {}
-    current = blocked_report_snapshot_state(args.root)
+    current = blocked_report_snapshot_state(args.root, args.state)
     for task_file in tuple(snapshots):
         if task_file not in current:
             snapshots.pop(task_file, None)
@@ -5906,6 +6471,7 @@ def maybe_push_dependency_transitions(
             (),
             (),
             root=args.root,
+            report_state=args.state,
             dependency_task_file=task_file,
             dependency_snapshot=snapshot,
             ready_target=target,
@@ -5939,10 +6505,11 @@ def handle_agent_problem_result(
         return reminders_changed
     dependency_state = dependency_snapshots if dependency_snapshots is not None else {}
     dependency_reported_state = dependency_reported_snapshots if dependency_reported_snapshots is not None else read_blocked_report_ledger(args)
+    previously_reported_state = dict(dependency_reported_state)
     persisted_reported_state = dict(dependency_reported_state)
     dependency_changed = False if visibility_only else maybe_push_dependency_transitions(args, dependency_state, now_wall_s, seen)
     if result.returncode == 0:
-        prune_dependency_reported_snapshots(args.root, dependency_reported_state)
+        prune_dependency_reported_snapshots(args.root, dependency_reported_state, report_state=args.state)
         if not args.dry_run and dependency_reported_state != persisted_reported_state:
             write_blocked_report_ledger(args, dependency_reported_state)
         sync_problem_issues(problem_claim_path(args), {}, now_wall_s)
@@ -5956,9 +6523,13 @@ def handle_agent_problem_result(
     if not output:
         return dependency_changed or reminders_changed
     active_problem_task_files = {task_file for line in output.splitlines()[1:] if (task_file := problem_line_task(line))}
-    prune_dependency_reported_snapshots(args.root, dependency_reported_state, active_problem_task_files)
+    prune_dependency_reported_snapshots(args.root, dependency_reported_state, active_problem_task_files, args.state)
     if not args.dry_run and dependency_reported_state != persisted_reported_state:
         write_blocked_report_ledger(args, dependency_reported_state)
+        persisted_reported_state = dict(dependency_reported_state)
+    if seed_consumed_root_cascade_snapshots(args, output, dependency_reported_state, previously_reported_state):
+        if not args.dry_run:
+            write_blocked_report_ledger(args, dependency_reported_state)
         persisted_reported_state = dict(dependency_reported_state)
     previous_dependency_reported_state = dict(dependency_reported_state)
     raw_groups = authoritative_problem_groups(args, output)
@@ -6015,12 +6586,22 @@ def handle_agent_problem_result(
             continue
         text = with_manager_policy_reminder(args, f"{dispatch.text}\n\n{problem_claim_instructions(problem_id, expired_claim)}")
         target = owner_target or args.manager_target
-        bypass_target_repeat = blocked_report_bypasses_target_repeat(args.root, dispatch.problem_lines, previous_dependency_reported_state)
+        bypass_target_repeat = blocked_report_bypasses_target_repeat(
+            args.root,
+            dispatch.problem_lines,
+            previous_dependency_reported_state,
+            args.state,
+        )
         if (not target and not args.dry_run) or not agent_problem_target_is_ready(args, seen, target, now_wall_s, bypass_repeat=bypass_target_repeat):
             continue
         issue_problem(claim_path, problem_id, claim_owner_target, dispatch.problem_lines, now_wall_s)
-        dependency_reported_replacements = dependency_snapshot_replacements_for_problem_lines(args.root, dispatch.problem_lines)
-        dependency_reported_removals = dependency_snapshot_removals_for_problem_lines(args.root, dispatch.problem_lines, dependency_reported_state)
+        dependency_reported_replacements = dependency_snapshot_replacements_for_problem_lines(args.root, dispatch.problem_lines, args.state)
+        dependency_reported_removals = dependency_snapshot_removals_for_problem_lines(
+            args.root,
+            dispatch.problem_lines,
+            dependency_reported_state,
+            args.state,
+        )
         guarded_dependency_replacements = tuple(
             (task_file, dependency_reported_state.get(task_file), snapshot) for task_file, snapshot in dependency_reported_replacements
         )
@@ -6031,6 +6612,7 @@ def handle_agent_problem_result(
             failure_seen_delays_s=((attempt_key, PENDING_DELIVERY_FAILURE_RETRY_S),),
             blocked_idle_lines=dispatch.blocked_idle_lines,
             dependency_guarded_replacements=guarded_dependency_replacements,
+            dependency_require_current=True,
             dependency_guarded_removals=dependency_reported_removals,
             dependency_state=dependency_reported_state if guarded_dependency_replacements or dependency_reported_removals else None,
             dependency_ledger_args=args if not args.dry_run and (guarded_dependency_replacements or dependency_reported_removals) else None,
@@ -6039,6 +6621,9 @@ def handle_agent_problem_result(
         guard = AgentProblemGuard(
             tuple([*status_command(args, True), "--no-auto-unstick"]),
             dispatch.problem_lines,
+            root=args.root if dependency_reported_replacements else None,
+            report_state=args.state if dependency_reported_replacements else None,
+            dependency_snapshots=dependency_reported_replacements,
             ready_target=target,
             problem_id=problem_id,
             problem_owner_target=claim_owner_target,
