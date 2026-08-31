@@ -7961,6 +7961,103 @@ with exclusive_watcher_root(root):
             self.assertEqual(1, out.getvalue().count("worker.md cfg:2 <blocked_on>waiting on human approval</blocked_on>"))
             self.assertIn("suppressed unchanged blocked dependency report", out.getvalue())
 
+    def test_blocked_custody_classification_survives_restart_and_new_problem_id(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "TODO.md").write_text("current:\nworker.md cfg:2\n", encoding="utf-8")
+            task_path = root / "worker.md"
+            _ = task_path.write_text(
+                task_frontmatter(
+                    "blocked",
+                    runat="cfg:2",
+                    managerat="wl:1",
+                    blocked_on="separate release authority",
+                    pending_items=("Apply the reviewed release.",),
+                )
+                + "\n<manager_delegation>Prepare but do not release.</manager_delegation>\n",
+                encoding="utf-8",
+            )
+            args = Args(
+                root,
+                "",
+                root / "seen.tsv",
+                1.0,
+                1.0,
+                30.0,
+                Path("/status.py"),
+                False,
+                False,
+                manager_target="wl:1",
+                reminder_random=lambda: 1.0,
+            )
+
+            def result(output: str) -> watcher.CommandOutput:
+                return watcher.CommandOutput(
+                    "agent-problems",
+                    3,
+                    "agent-problems: blocked_idle=1\n"
+                    "manager-action: blocked_idle>0 inspect blocked agents, unblock if possible, or route the exact blocker\n"
+                    f"blocked_idle: task=worker.md evidence=target=cfg:2 task_status=blocked output={output} idle_status=ready reason=separate release authority owner_target=wl:1\n",
+                    "",
+                )
+
+            pane = {"report": watcher.CodexReport("ready", ["problem-id: 0123456789abcdef"])}
+            runtime = {"identity": "%42\t1000\tcodex"}
+            with patch.object(watcher, "inspect_codex", side_effect=lambda _args: pane["report"]), patch.object(
+                watcher, "blocked_custody_runtime_identity", side_effect=lambda _target: runtime["identity"]
+            ), patch.object(
+                watcher, "agent_problem_target_is_ready", return_value=True
+            ), patch.object(watcher, "push_manager_text_to_target", return_value=0):
+                self.assertIn("worker.md", watcher.blocked_report_snapshot_state(root))
+                self.assertEqual(1, len(watcher.dependency_snapshot_replacements_for_problem_lines(root, tuple(result("first").stdout.splitlines()[2:]))))
+                first = StringIO()
+                with redirect_stdout(first):
+                    self.assertTrue(watcher.handle_agent_problem_result(args, {}, result("first"), 1000.0))
+                self.assertIn("worker.md", watcher.read_blocked_report_ledger(args))
+
+                pane["report"] = watcher.CodexReport("ready", ["problem-id: fedcba9876543210"])
+                restarted = StringIO()
+                with redirect_stdout(restarted):
+                    _ = watcher.handle_agent_problem_result(args, {}, result("new-id-evidence"), 2000.0)
+                self.assertIn("suppressed unchanged blocked dependency report", restarted.getvalue())
+                self.assertNotIn("blocked agents are ready", restarted.getvalue())
+
+                pane["report"] = watcher.CodexReport("ready", ["artifact digest 0123456789abcdef"])
+                changed_pane = StringIO()
+                with redirect_stdout(changed_pane):
+                    self.assertTrue(watcher.handle_agent_problem_result(args, {}, result("new-id-evidence"), 2500.0))
+                self.assertNotIn("suppressed unchanged blocked dependency report", changed_pane.getvalue())
+
+                pane["report"] = watcher.CodexReport("ready", ["artifact digest fedcba9876543210"])
+                changed_digest = StringIO()
+                with redirect_stdout(changed_digest):
+                    self.assertTrue(watcher.handle_agent_problem_result(args, {}, result("new-id-evidence"), 2600.0))
+                self.assertNotIn("suppressed unchanged blocked dependency report", changed_digest.getvalue())
+
+                runtime["identity"] = "%42\t2000\tcodex"
+                replaced_agent = StringIO()
+                with redirect_stdout(replaced_agent):
+                    self.assertTrue(watcher.handle_agent_problem_result(args, {}, result("new-id-evidence"), 2750.0))
+                self.assertNotIn("suppressed unchanged blocked dependency report", replaced_agent.getvalue())
+
+                _ = task_path.write_text(
+                    task_frontmatter(
+                        "blocked",
+                        runat="cfg:2",
+                        managerat="wl:1",
+                        blocked_on="separate release authority",
+                        pending_items=("Apply the reviewed release.", "Verify the changed packet."),
+                    )
+                    + "\n<manager_delegation>Prepare but do not release.</manager_delegation>\n",
+                    encoding="utf-8",
+                )
+                changed = StringIO()
+                with redirect_stdout(changed):
+                    self.assertTrue(watcher.handle_agent_problem_result(args, {}, result("new-id-evidence"), 3000.0))
+                self.assertNotIn("suppressed unchanged blocked dependency report", changed.getvalue())
+
     def test_human_pending_snapshot_preserves_structured_blocker_and_notice_changes(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 

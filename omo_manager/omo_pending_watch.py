@@ -51,6 +51,7 @@ from omo_manager.omo_agent_status import parse_task_lines
 from omo_manager.omo_agent_status import read_task_metadata
 from omo_manager.omo_agent_status import resolve_task_path
 from omo_manager.omo_agent_status import scan_task_state
+from omo_manager.omo_agent_status import task_has_pending_marker
 from omo_manager.omo_blocking import BlockingError
 from omo_manager.omo_blocking import ENABLE_FILE
 from omo_manager.omo_blocking import WAKE_SOURCE_PREFIX
@@ -63,6 +64,7 @@ from omo_manager.omo_blocking_actor import request as blocking_request
 from omo_manager.omo_codex_status import Args as CodexStatusArgs
 from omo_manager.omo_codex_status import Report as CodexReport
 from omo_manager.omo_codex_status import SELECTED_MODEL_CAPACITY_RE
+from omo_manager.omo_codex_status import exact_pane_id
 from omo_manager.omo_codex_status import inspect as inspect_codex
 from omo_manager.omo_codex_status import exact_tail as exact_codex_tail
 from omo_manager.omo_codex_status import report_from_lines as report_codex_lines
@@ -668,6 +670,7 @@ class DeliverySuccessEvent:
     failure_dependency_replacements: tuple[tuple[str, str, str], ...] = ()
     failure_dependency_removals: tuple[tuple[str, str], ...] = ()
     dependency_state: dict[str, str] | None = None
+    dependency_ledger_args: Args | None = None
     seen_at_s: float = 0.0
     clear_root: Path | None = None
     clear_marker: Marker | None = None
@@ -993,6 +996,7 @@ def queue_delivery_failure_event(success_event: DeliverySuccessEvent | None) -> 
             seen_removals=success_event.failure_seen_removals,
             seen_values=(*success_event.failure_seen_values, *now_values, *delayed_values, *deadline_values),
             dependency_state=success_event.dependency_state,
+            dependency_ledger_args=success_event.dependency_ledger_args,
             dependency_guarded_replacements=success_event.failure_dependency_replacements,
             dependency_guarded_removals=success_event.failure_dependency_removals,
             seen_at_s=success_event.seen_at_s,
@@ -1166,6 +1170,8 @@ def drain_delivery_successes(args: Args, seen: dict[str, float], now_wall_s: flo
                 if event.dependency_state.get(task_file) == expected_snapshot:
                     event.dependency_state.pop(task_file, None)
                     changed = True
+            if event.dependency_ledger_args is not None:
+                write_blocked_report_ledger(event.dependency_ledger_args, event.dependency_state)
 
 
 def pending_send_snapshot() -> tuple[Future[None], ...]:
@@ -3998,6 +4004,10 @@ def ready_report_ledger_path(args: Args) -> Path:
     return args.state.with_name(f"{args.state.name}.ready-report-reminders")
 
 
+def blocked_report_ledger_path(args: Args) -> Path:
+    return args.state.with_name(f"{args.state.name}.blocked-report-classifications")
+
+
 def ready_report_root_prefix(args: Args) -> str:
     root_key = hashlib.sha256(str(args.root).encode("utf-8")).hexdigest()[:16]
     return f"{root_key}:"
@@ -4018,6 +4028,48 @@ def read_ready_report_ledger(args: Args) -> dict[str, str]:
 
 def ready_report_target_key(args: Args, target: str) -> str:
     return f"{ready_report_root_prefix(args)}{canonical_target(target)}"
+
+
+def read_blocked_report_ledger(args: Args) -> dict[str, str]:
+    try:
+        rows = blocked_report_ledger_path(args).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {}
+    root_prefix = ready_report_root_prefix(args)
+    snapshots: dict[str, str] = {}
+    for row in rows:
+        root_key, task_file, snapshot = row.split("\t", 2) if row.count("\t") == 2 else ("", "", "")
+        if root_key == root_prefix and task_file and snapshot:
+            snapshots[task_file] = snapshot
+    return snapshots
+
+
+def write_blocked_report_ledger(args: Args, snapshots: dict[str, str]) -> None:
+    path = blocked_report_ledger_path(args)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    lock_path = path.with_name(f"{path.name}.lock")
+    lock_fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600)
+    with os.fdopen(lock_fd, "w", encoding="utf-8") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        root_prefix = ready_report_root_prefix(args)
+        retained = [row for row in path.read_text(encoding="utf-8").splitlines() if not row.startswith(root_prefix + "\t")] if path.exists() else []
+        rows = [*retained, *(f"{root_prefix}\t{task_file}\t{snapshot}" for task_file, snapshot in sorted(snapshots.items()))]
+        temp_path = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp")
+        try:
+            fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                if rows:
+                    _ = handle.write("\n".join(rows) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_path, path)
+            directory_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        finally:
+            temp_path.unlink(missing_ok=True)
 
 
 @contextmanager
@@ -4608,7 +4660,7 @@ def problem_line_unstick(line: str) -> str:
 
 
 def problem_line_value(line: str, key: str) -> str:
-    match = re.search(rf"\b{re.escape(key)}=(.*?)(?=\s+(?:output_tail|role|persistent_role|task_status|idle_status|reason|pending_item|interrupt|unstick|owner_target|route_owner_target)=|$)", line)
+    match = re.search(rf"\b{re.escape(key)}=(.*?)(?=\s+(?:output|output_tail|input|role|persistent_role|task_status|idle_status|reason|pending_item|interrupt|unstick|owner_target|route_owner_target)=|$)", line)
     return match.group(1).strip() if match is not None else ""
 
 
@@ -5383,6 +5435,54 @@ def ready_report_evidence(report: CodexReport) -> str:
     )
 
 
+def blocked_custody_runtime_identity(target: str) -> str:
+    """Bind custody to the exact tmux pane process, including respawns."""
+
+    try:
+        result = subprocess.run(
+            ["tmux", "display-message", "-p", "-t", target, "#{pane_id}\t#{pane_pid}\t#{pane_start_command}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    fields = result.stdout.rstrip("\n").split("\t")
+    return result.stdout.rstrip("\n") if result.returncode == 0 and len(fields) == 3 and fields[0] == exact_pane_id(target) and fields[1].isdigit() else ""
+
+
+def normalized_blocked_custody_lines(lines: list[str]) -> list[str]:
+    """Keep visible semantic evidence while ignoring ephemeral watcher IDs."""
+
+    normalized: list[str] = []
+    for line in lines:
+        line = re.sub(r"(?<=problem-id: )[0-9a-f]{16}(?![0-9a-f])", "<problem-id>", line)
+        normalized.append(re.sub(r"(?<=amh_problem\.py claim )[0-9a-f]{16}(?![0-9a-f])", "<problem-id>", line))
+    return normalized
+
+
+def blocked_custody_pane_evidence(target: str, report: CodexReport) -> str:
+    """Describe exact runtime custody and normalized visible evidence."""
+
+    runtime_identity = blocked_custody_runtime_identity(target)
+    if not runtime_identity:
+        return ""
+
+    return json.dumps(
+        {
+            "runtime_identity": runtime_identity,
+            "status": report.status,
+            "lines": normalized_blocked_custody_lines(report.lines),
+            "input_text": report.input_text,
+            "can_submit_input": report.can_submit_input,
+            "input_blocker": report.input_blocker,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
 def recorded_human_wait_snapshot(
     task_path: Path,
     task: TaskLine,
@@ -5403,9 +5503,28 @@ def recorded_human_wait_snapshot(
     return f"human:{digest}"
 
 
+def recorded_blocked_custody_snapshot(
+    task_path: Path,
+    task: TaskLine,
+    status: str,
+    target: str,
+    owner_target: str,
+    reason: str,
+    pane_evidence: str,
+) -> str:
+    """Fingerprint one delivered blocked-task classification by stable task identity."""
+
+    try:
+        task_evidence = task_path.read_bytes()
+    except OSError:
+        return ""
+    identity = "\0".join((task.section, task.line, status, target, owner_target, reason, pane_evidence)).encode("utf-8")
+    return f"custody:{hashlib.sha256(identity + bytes(1) + task_evidence).hexdigest()}"
+
+
 def line_matches_blocked_report_snapshot(root: Path, line: str, task: TaskLine, snapshot: str, owner_target: str) -> bool:
     status = problem_line_status(line)
-    if not snapshot.startswith("human:"):
+    if not snapshot.startswith(("human:", "custody:")):
         return status == "blocked_idle"
     if status != "blocked_idle" or problem_line_value(line, "idle_status") != "ready":
         return False
@@ -5707,20 +5826,25 @@ def blocked_report_snapshot_state(root: Path) -> dict[str, tuple[TaskLine, str, 
         task_path = resolve_task_path(root, task.task_file)
         state = scan_task_state(task_path, root) if task_path is not None else None
         metadata = read_task_metadata(task_path, root)
-        if state is None or metadata is None or not is_authoritative_human_blocked_ready_task(root, task, state):
+        if task_path is None or state is None or metadata is None or state.status != "blocked" or not state.target or not state.manager_target or task_has_pending_marker(task_path):
             continue
         report = inspect_codex(CodexStatusArgs(state.target, 80))
         if report.status != "ready":
             continue
         owner_target = effective_owner_target(root, task, task_path)
-        snapshot = recorded_human_wait_snapshot(
+        human_wait = is_authoritative_human_blocked_ready_task(root, task, state)
+        snapshot_builder = recorded_human_wait_snapshot if human_wait else recorded_blocked_custody_snapshot
+        pane_evidence = ready_report_evidence(report) if human_wait else blocked_custody_pane_evidence(state.target, report)
+        if not pane_evidence:
+            continue
+        snapshot = snapshot_builder(
             task_path,
             task,
             state.status,
             state.target,
             owner_target,
             state.reason,
-            ready_report_evidence(report),
+            pane_evidence,
         )
         if not snapshot:
             continue
@@ -5814,10 +5938,13 @@ def handle_agent_problem_result(
         print("omo_pending_watch: agent problem check timed out", file=sys.stderr)
         return reminders_changed
     dependency_state = dependency_snapshots if dependency_snapshots is not None else {}
-    dependency_reported_state = dependency_reported_snapshots if dependency_reported_snapshots is not None else {}
+    dependency_reported_state = dependency_reported_snapshots if dependency_reported_snapshots is not None else read_blocked_report_ledger(args)
+    persisted_reported_state = dict(dependency_reported_state)
     dependency_changed = False if visibility_only else maybe_push_dependency_transitions(args, dependency_state, now_wall_s, seen)
     if result.returncode == 0:
         prune_dependency_reported_snapshots(args.root, dependency_reported_state)
+        if not args.dry_run and dependency_reported_state != persisted_reported_state:
+            write_blocked_report_ledger(args, dependency_reported_state)
         sync_problem_issues(problem_claim_path(args), {}, now_wall_s)
         enter_changed = clear_all_enter_attempts(args, seen)
         capacity_changed = clear_resolved_capacity_state(args, seen, set())
@@ -5830,6 +5957,9 @@ def handle_agent_problem_result(
         return dependency_changed or reminders_changed
     active_problem_task_files = {task_file for line in output.splitlines()[1:] if (task_file := problem_line_task(line))}
     prune_dependency_reported_snapshots(args.root, dependency_reported_state, active_problem_task_files)
+    if not args.dry_run and dependency_reported_state != persisted_reported_state:
+        write_blocked_report_ledger(args, dependency_reported_state)
+        persisted_reported_state = dict(dependency_reported_state)
     previous_dependency_reported_state = dict(dependency_reported_state)
     raw_groups = authoritative_problem_groups(args, output)
     active_problems = {
@@ -5903,6 +6033,7 @@ def handle_agent_problem_result(
             dependency_guarded_replacements=guarded_dependency_replacements,
             dependency_guarded_removals=dependency_reported_removals,
             dependency_state=dependency_reported_state if guarded_dependency_replacements or dependency_reported_removals else None,
+            dependency_ledger_args=args if not args.dry_run and (guarded_dependency_replacements or dependency_reported_removals) else None,
             seen_at_s=now_wall_s,
         )
         guard = AgentProblemGuard(
@@ -5927,6 +6058,8 @@ def handle_agent_problem_result(
             for task_file, expected_snapshot in dependency_reported_removals:
                 if dependency_reported_state.get(task_file) == expected_snapshot:
                     dependency_reported_state.pop(task_file, None)
+            if not args.dry_run and (guarded_dependency_replacements or dependency_reported_removals):
+                write_blocked_report_ledger(args, dependency_reported_state)
             remember_seen(seen, key, now_wall_s)
         changed = True
     return changed
@@ -6101,7 +6234,7 @@ def markdown_line_count(path: Path) -> int:
 def run(args: Args, actor_controller: BlockingActorController) -> int:
     seen = new_seen_cache()
     dependency_snapshots: dict[str, str] = {}
-    dependency_reported_snapshots: dict[str, str] = {}
+    dependency_reported_snapshots = read_blocked_report_ledger(args)
     if args.once:
         _ = scan_once(args, seen, markdown_files(args.root), actor_controller)
         _ = wait_for_delivery_successes(args, seen, max(10.0, DEFAULT_TMUX_SUBMIT_VERIFY_TIMEOUT_S + 5.0))
