@@ -349,6 +349,7 @@ class Args:
     reminder_random: Callable[[], float] | None = None
     reminder_choice: Callable[[Sequence[str]], str] = random.choice
     classify_done_ready: str = ""
+    classify_blocked_ready: str = ""
 
 
 @dataclass
@@ -1350,6 +1351,7 @@ class ParsedArgs(argparse.Namespace):
     digest_script: Path | None = None
     digest_idle_after_s: float = DEFAULT_DIGEST_IDLE_AFTER_S
     classify_done_ready: str = ""
+    classify_blocked_ready: str = ""
 
 
 SeenCache = dict[str, float]
@@ -1376,6 +1378,12 @@ def parse_args(argv: list[str]) -> Args:
         help="Durably suppress one reverified done/previous/empty-queue ready pane without changing task or tmux state.",
     )
     _ = parser.add_argument(
+        "--classify-blocked-ready",
+        metavar="TASK_FILE",
+        default="",
+        help="Durably suppress one reverified blocked ready pane until its task, queue, TODO custody, owner, runtime, or pane evidence changes.",
+    )
+    _ = parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Inspect pending markers and frontmatter routing without notifying targets; normally combine with --once.",
@@ -1391,8 +1399,10 @@ def parse_args(argv: list[str]) -> Args:
         parser.error("--digest-idle-after-s must be positive.")
     if parsed.poll_backstop_interval_s <= 0:
         parser.error("--poll-backstop-interval-s must be positive.")
-    if parsed.dry_run and parsed.classify_done_ready:
-        parser.error("--dry-run cannot be combined with --classify-done-ready.")
+    if parsed.classify_done_ready and parsed.classify_blocked_ready:
+        parser.error("--classify-done-ready and --classify-blocked-ready are mutually exclusive.")
+    if parsed.dry_run and (parsed.classify_done_ready or parsed.classify_blocked_ready):
+        parser.error("--dry-run cannot be combined with a classification command.")
     root = parsed.root.resolve()
     return Args(
         root,
@@ -1414,6 +1424,7 @@ def parse_args(argv: list[str]) -> Args:
         random.random,
         random.choice,
         parsed.classify_done_ready,
+        parsed.classify_blocked_ready,
     )
 
 
@@ -4121,10 +4132,15 @@ def write_blocked_report_ledger(args: Args, snapshots: dict[str, str]) -> None:
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
         current = read_blocked_report_ledger(args)
         stable = blocked_report_snapshot_state(args.root, args.state)
+        snapshots = {
+            task_file: snapshot
+            for task_file, snapshot in snapshots.items()
+            if (current_snapshot := stable.get(task_file)) is not None and current_snapshot[1] == snapshot
+        }
         for task_file, snapshot in current.items():
             current_snapshot = stable.get(task_file)
-            if snapshot.startswith("done:") and current_snapshot is not None and current_snapshot[1] == snapshot:
-                snapshots.setdefault(task_file, snapshot)
+            if current_snapshot is not None and current_snapshot[1] == snapshot:
+                snapshots[task_file] = snapshot
         replace_blocked_report_ledger_locked(args, snapshots)
 
 
@@ -6213,6 +6229,16 @@ def dependency_snapshot_removals_for_problem_lines(
     return tuple(removals)
 
 
+def merge_current_blocked_report_ledger(args: Args, snapshots: dict[str, str]) -> None:
+    """Import externally classified rows only while their exact evidence is current."""
+
+    current = blocked_report_snapshot_state(args.root, args.state)
+    for task_file, snapshot in read_blocked_report_ledger(args).items():
+        current_snapshot = current.get(task_file)
+        if current_snapshot is not None and current_snapshot[1] == snapshot:
+            snapshots[task_file] = snapshot
+
+
 def seed_claimed_done_ready_snapshots(
     args: Args,
     groups: dict[str, tuple[str, ...]],
@@ -6555,11 +6581,43 @@ def classify_done_ready(args: Args, task_file: str) -> bool:
     lock_fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600)
     with os.fdopen(lock_fd, "w", encoding="utf-8") as lock_handle:
         fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
-        first = blocked_report_snapshot_state(args.root, args.state).get(task_file)
-        second = blocked_report_snapshot_state(args.root, args.state).get(task_file)
+        first_state = blocked_report_snapshot_state(args.root, args.state)
+        second_state = blocked_report_snapshot_state(args.root, args.state)
+        first = first_state.get(task_file)
+        second = second_state.get(task_file)
         if first is None or second is None or first != second or not second[1].startswith("done:"):
             return False
-        snapshots = read_blocked_report_ledger(args)
+        snapshots = {
+            stored_task: snapshot
+            for stored_task, snapshot in read_blocked_report_ledger(args).items()
+            if (current := second_state.get(stored_task)) is not None and current[1] == snapshot
+        }
+        snapshots[task_file] = second[1]
+        replace_blocked_report_ledger_locked(args, snapshots)
+        return True
+
+
+# 🧑 "classifies and suppresses only these evidence-stable blocked-ready states until their authenticated state changes"
+def classify_blocked_ready(args: Args, task_file: str) -> bool:
+    """Persist one exact blocked ready-pane snapshot after fresh validation."""
+
+    path = blocked_report_ledger_path(args)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    lock_path = path.with_name(f"{path.name}.lock")
+    lock_fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600)
+    with os.fdopen(lock_fd, "w", encoding="utf-8") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        first_state = blocked_report_snapshot_state(args.root, args.state)
+        second_state = blocked_report_snapshot_state(args.root, args.state)
+        first = first_state.get(task_file)
+        second = second_state.get(task_file)
+        if first is None or second is None or first != second or not second[1].startswith(("custody:", "human:", "cascade:")):
+            return False
+        snapshots = {
+            stored_task: snapshot
+            for stored_task, snapshot in read_blocked_report_ledger(args).items()
+            if (current := second_state.get(stored_task)) is not None and current[1] == snapshot
+        }
         snapshots[task_file] = second[1]
         replace_blocked_report_ledger_locked(args, snapshots)
         return True
@@ -6656,6 +6714,8 @@ def handle_agent_problem_result(
         return reminders_changed
     dependency_state = dependency_snapshots if dependency_snapshots is not None else {}
     dependency_reported_state = dependency_reported_snapshots if dependency_reported_snapshots is not None else read_blocked_report_ledger(args)
+    if dependency_reported_snapshots is not None:
+        merge_current_blocked_report_ledger(args, dependency_reported_state)
     previously_reported_state = dict(dependency_reported_state)
     persisted_reported_state = dict(dependency_reported_state)
     dependency_changed = False if visibility_only else maybe_push_dependency_transitions(args, dependency_state, now_wall_s, seen)
@@ -7101,6 +7161,12 @@ def main(argv: list[str]) -> int:
             print("omo_pending_watch: task is not uniquely done in TODO previous with an empty queue and exact ready Codex pane", file=sys.stderr)
             return 1
         print(f"omo_pending_watch: classified stable done ready pane for {args.classify_done_ready}")
+        return 0
+    if args.classify_blocked_ready:
+        if not classify_blocked_ready(args, args.classify_blocked_ready):
+            print("omo_pending_watch: task is not uniquely blocked with an exact stable ready Codex pane", file=sys.stderr)
+            return 1
+        print(f"omo_pending_watch: classified stable blocked ready pane for {args.classify_blocked_ready}")
         return 0
     if args.once and args.dry_run:
         actor_controller = BlockingActorController(args.root, allow_existing=True)
