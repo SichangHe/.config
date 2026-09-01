@@ -12,7 +12,7 @@ import stat
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -667,12 +667,23 @@ def guarded_tmux_sequence(
     expected_pane_id: str,
     commands: list[list[str]],
     expected_pane_pid: int = 0,
+    *,
+    required_pane_commands: Collection[str] = (),
 ) -> str:
     """Return pane command output only from the same guarded tmux server queue."""
 
     accepted = f"OMO_GUARD_ACCEPTED_{os.getpid()}_{time.monotonic_ns()}"
     rejected = f"OMO_GUARD_REJECTED_{os.getpid()}_{time.monotonic_ns()}"
     condition = tmux_guard_condition(symbolic_target, expected_pane_id, expected_pane_pid) if expected_pane_pid else tmux_guard_condition(symbolic_target, expected_pane_id)
+    pane_commands = tuple(sorted(set(required_pane_commands)))
+    if pane_commands:
+        if any(re.fullmatch(r"[A-Za-z][A-Za-z0-9_.+-]*", command) is None for command in pane_commands):
+            raise RuntimeError("invalid pane command for guarded tmux command")
+        command_predicates = [f"#{{==:#{{pane_current_command}},{command}}}" for command in pane_commands]
+        command_condition = command_predicates[-1]
+        for predicate in reversed(command_predicates[:-1]):
+            command_condition = f"#{{||:{predicate},{command_condition}}}"
+        condition = f"#{{&&:{condition},{command_condition}}}"
     guarded = " ; ".join([*(shlex.join(command) for command in commands), f"display-message -p {accepted}"])
     failure = f"display-message -p {rejected}"
     result = tmux(["if-shell", "-F", "-t", symbolic_target, condition, guarded, failure])
@@ -696,6 +707,19 @@ def guarded_tmux_command(symbolic_target: str, expected_pane_id: str, command: l
     output = guarded_tmux_read(symbolic_target, expected_pane_id, command, expected_pane_pid) if expected_pane_pid else guarded_tmux_read(symbolic_target, expected_pane_id, command)
     if output:
         raise RuntimeError("guarded tmux mutation produced unexpected output")
+
+
+def guarded_tmux_shell_close(symbolic_target: str, expected_pane_id: str) -> None:
+    """Close a pane only while tmux sees both its exact identity and an ordinary shell."""
+
+    output = guarded_tmux_sequence(
+        symbolic_target,
+        expected_pane_id,
+        [["kill-pane", "-t", expected_pane_id]],
+        required_pane_commands=SHELL_COMMANDS,
+    )
+    if output:
+        raise RuntimeError("guarded tmux shell close produced unexpected output")
 
 
 def bound_guarded_read(symbolic_target: str, expected_pane_id: str, command: list[str], expected_pane_pid: int = 0) -> str:
@@ -1130,8 +1154,8 @@ def close_authorized_human_pane(target: str, identity_is_current: Callable[[], b
     _ = tmux(["kill-pane", "-t", target], check=True)
 
 
-def close_exited_codex_shell(target: str, expected_pane_id: str, session_id: str, terminal_evidence: str, n_lines: int = 2000) -> None:
-    """Close one unchanged shell pane that retains exact terminal Codex evidence."""
+def validate_exited_codex_shell(target: str, expected_pane_id: str, session_id: str, terminal_evidence: str, n_lines: int = 2000) -> str:
+    """Authenticate one unchanged shell pane and return its exact capture digest."""
 
     if not re.fullmatch(r"%[0-9]+", expected_pane_id):
         raise RuntimeError("expected pane id must be an exact numeric tmux pane id")
@@ -1172,7 +1196,26 @@ def close_exited_codex_shell(target: str, expected_pane_id: str, session_id: str
         or capture(expected_pane_id, n_lines) != before
     ):
         raise RuntimeError("pane identity or shell evidence changed during recovery; retry")
-    close_tmux_target(expected_pane_id)
+    return hashlib.sha256(before.encode()).hexdigest()
+
+
+def close_exited_codex_shell(
+    target: str,
+    expected_pane_id: str,
+    session_id: str,
+    terminal_evidence: str,
+    n_lines: int = 2000,
+    expected_capture_sha256: str = "",
+    evidence_is_current: Callable[[], bool] | None = None,
+) -> None:
+    """Close one unchanged shell pane that retains exact terminal Codex evidence."""
+
+    capture_sha256 = validate_exited_codex_shell(target, expected_pane_id, session_id, terminal_evidence, n_lines)
+    if expected_capture_sha256 and capture_sha256 != expected_capture_sha256:
+        raise RuntimeError("terminal shell capture changed after its durable close intent")
+    if evidence_is_current is not None and not evidence_is_current():
+        raise RuntimeError("bound lifecycle evidence changed before guarded shell close")
+    guarded_tmux_shell_close(target, expected_pane_id)
     if pane_id(expected_pane_id):
         raise RuntimeError(f"exact stale shell pane remained live after close: {expected_pane_id}")
 

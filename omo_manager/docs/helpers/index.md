@@ -12,6 +12,7 @@ This directory is non-authoritative helper documentation. Manager operating inst
 - `omo_task_edit.py` manager-only task-file edits: `summary`, `pending-list`, `pending-add`, `pending-replace`, `pending-remove`, `pending-move`, `pending-marker-clear`, `comment-add`, and `delegate-message`
 - `omo_task_status.py` updates task frontmatter `status`; reissuing unchanged `running`, human-blocked, or done state safely reconciles one stale TODO row
 - `transcription-shared-closure.md` exact no-resend Sent adoption, incident recovery evidence, and shared-`wl:32` task closure
+- `memory-shared-cancellation.md` exact Source-1290 shared-target cancellation and interrupted authority-carrier closure
 - `tmux-send.md` safe tmux paste and async delivery through `omo_tmux_send.py`
 - `../routing/supported-delivery.md` shared Codex and live Cursor Agent delivery
 - `cursor-agent-pilot.md` Cursor Agent one-shot helper and default managed-worker launch
