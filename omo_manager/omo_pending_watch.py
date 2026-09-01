@@ -4697,14 +4697,14 @@ def status_command(args: Args, problems_only: bool = False) -> list[str]:
 
 
 def agent_problem_count_line(lines: list[str]) -> str:
-    counts = {"malformed_task": 0, "missing": 0, "not_codex": 0, "blocked_idle": 0, "error": 0, "manager_compaction": 0, "manager_waiting_subagent": 0, "ready": 0, "stuck_input": 0, "untracked_agent": 0, "done-registry-stale": 0}
+    counts = {"malformed_task": 0, "missing": 0, "not_codex": 0, "blocked_idle": 0, "error": 0, "human_request": 0, "manager_compaction": 0, "manager_waiting_subagent": 0, "ready": 0, "stuck_input": 0, "untracked_agent": 0, "done-registry-stale": 0}
     for line in lines:
-        problem_match = re.match(r"^(malformed_task|missing|not_codex|blocked_idle|error|manager_compaction|manager_waiting_subagent|ready|stuck_input|untracked_agent): ", line)
+        problem_match = re.match(r"^(malformed_task|missing|not_codex|blocked_idle|error|human_request|manager_compaction|manager_waiting_subagent|ready|stuck_input|untracked_agent): ", line)
         if problem_match is not None:
             counts[problem_match.group(1)] += 1
         elif line.startswith("done-stale: "):
             counts["done-registry-stale"] += 1
-    parts = [f"{status}={counts[status]}" for status in ("malformed_task", "missing", "not_codex", "blocked_idle", "error", "manager_compaction", "manager_waiting_subagent", "ready", "stuck_input", "untracked_agent") if counts[status]]
+    parts = [f"{status}={counts[status]}" for status in ("malformed_task", "missing", "not_codex", "blocked_idle", "error", "human_request", "manager_compaction", "manager_waiting_subagent", "ready", "stuck_input", "untracked_agent") if counts[status]]
     if counts["done-registry-stale"]:
         parts.append(f"done-registry-stale={counts['done-registry-stale']}")
     return f"agent-problems: {' '.join(parts)}" if parts else ""
@@ -6117,7 +6117,7 @@ def unchanged_dependency_blocked_idle_line(root: Path, line: str, current: dict[
     return current_snapshot is not None and line_matches_blocked_report_snapshot(root, line, *current_snapshot) and snapshots.get(task_file) == current_snapshot[1]
 
 
-def filter_unchanged_dependency_blocked_idle_output(args: Args, output: str, snapshots: dict[str, str]) -> str | None:
+def filter_unchanged_dependency_blocked_idle_output(args: Args, output: str, snapshots: dict[str, str], *, log_suppression: bool = True) -> str | None:
     lines = output.splitlines()
     if not lines or not lines[0].startswith("agent-problems:"):
         return output
@@ -6134,7 +6134,15 @@ def filter_unchanged_dependency_blocked_idle_output(args: Args, output: str, sna
             kept.append(line)
     if not suppressed:
         return output
-    return filtered_problem_output(kept, suppress_message="omo_pending_watch: suppressed unchanged blocked dependency report")
+    message = "omo_pending_watch: suppressed unchanged blocked dependency report" if log_suppression else ""
+    return filtered_problem_output(kept, suppress_message=message)
+
+
+def filter_classified_problem_output(root: Path, output: str, report_state: Path | None = None) -> str:
+    """Apply durable blocked-ready classifications to independent status output."""
+
+    args = Args(root, "", report_state or DEFAULT_STATE, 1.0, 1.0, 1.0, Path(__file__).with_name("omo_agent_status.py"), True, True)
+    return filter_unchanged_dependency_blocked_idle_output(args, output, read_blocked_report_ledger(args), log_suppression=False) or ""
 
 
 def seed_consumed_root_cascade_snapshots(

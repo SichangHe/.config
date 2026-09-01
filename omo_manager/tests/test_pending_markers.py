@@ -8292,6 +8292,45 @@ with exclusive_watcher_root(root):
                 self.assertFalse(watcher.classify_blocked_ready(args, "worker.md"))
             self.assertNotIn("worker.md", watcher.read_blocked_report_ledger(args))
 
+    def test_independent_problem_scan_filters_classified_blocked_ready_and_realerts_on_drift(self) -> None:
+        from omo_manager import omo_agent_status as status
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = root / "sessions.json"
+            _ = registry.write_text('{"sessions":[]}', encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nworker.md cfg:2\n", encoding="utf-8")
+            task_path = root / "worker.md"
+            task = task_frontmatter("blocked", runat="cfg:2", managerat="wl:1", blocked_on="authenticated authority absent")
+            _ = task_path.write_text(task, encoding="utf-8")
+            args = Args(root, "", root / "ledger.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, False)
+            ready = watcher.CodexReport("ready", ["stable blocker evidence"])
+            argv = ["--root", str(root), "--registry", str(registry), "--problems-only", "--no-auto-unstick"]
+            with patch.object(watcher, "DEFAULT_STATE", args.state), patch.object(watcher, "inspect_codex", return_value=ready), patch.object(
+                watcher, "blocked_custody_runtime_identity", return_value="%2\t1000\tcodex"
+            ), patch.object(status, "inspect", return_value=status.Report("ready", ["stable blocker evidence"])), patch.object(
+                status, "tmux_list_panes", return_value=[]
+            ):
+                self.assertTrue(watcher.classify_blocked_ready(args, "worker.md"))
+                quiet = StringIO()
+                with redirect_stdout(quiet):
+                    self.assertEqual(0, status.main(argv))
+                self.assertEqual("", quiet.getvalue())
+
+                human = status.StatusRow("human.md", "human_request", "target=cfg:9 role=human_request", target="cfg:9")
+                mixed = StringIO()
+                with patch.object(status, "pending_task_item_rows", return_value=[human]), redirect_stdout(mixed):
+                    self.assertEqual(3, status.main(argv))
+                self.assertNotIn("worker.md", mixed.getvalue())
+                self.assertIn("human_request: task=human.md", mixed.getvalue())
+
+                _ = task_path.write_text(task + "\ntrusted production approval digest: present\n", encoding="utf-8")
+                changed = StringIO()
+                with redirect_stdout(changed):
+                    self.assertEqual(3, status.main(argv))
+                self.assertIn("blocked_idle: task=worker.md", changed.getvalue())
+
     def test_retained_claim_seeds_done_ready_when_same_owner_gets_another_problem(self) -> None:
         from omo_manager import omo_pending_watch as watcher
         from omo_manager.amh_problem_claim import claim_problem

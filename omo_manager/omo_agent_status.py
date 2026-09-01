@@ -1992,6 +1992,14 @@ def format_problem_summary(rows: list[StatusRow], completed_stale: set[str] | di
     return "\n".join(lines)
 
 
+def filter_classified_blocked_ready(root: Path, output: str) -> str:
+    """Apply the watcher's exact durable classifications to a standalone scan."""
+
+    from omo_manager.omo_pending_watch import filter_classified_problem_output
+
+    return filter_classified_problem_output(root, output)
+
+
 def main(argv: list[str]) -> int:
     try:
         args = parse_args(argv)
@@ -2079,6 +2087,7 @@ def main(argv: list[str]) -> int:
         pruned_count = registry_prune(args, completed_stale) if args.prune_completed else 0
         if args.problems_only:
             text = format_problem_summary(rows, completed_stale_evidence(args.root, completed_stale))
+            text = filter_classified_blocked_ready(args.root, text)
             if not text:
                 return 0
             print(text)
