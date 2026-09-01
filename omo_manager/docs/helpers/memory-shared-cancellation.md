@@ -28,7 +28,7 @@ interrupted carrier closure
 
 - `omo_source1290_done_reconcile.py`
   - handles only the non-manager task named by the completed cancellation audit as its authority envelope
-  - requires exact carrier, TODO, completed-audit, mailbox-source, numeric-pane, Codex-session, and terminal-report evidence
+  - requires exact carrier, TODO, completed-audit, mailbox-source, numeric-pane, Codex-session, terminal-report evidence, and sole target ownership before and after shell authentication and at the final finish gate
   - binds the completed audit's authority-envelope digest to the carrier through only its canonical `running` or `long_running` to done-close status transition
   - initially requires exact `done_close_in_progress`; an intent retry requires its canonical `done_close_failed`; both require an empty queue, one `current` row, sole target ownership, and one unchanged Source-1290 Human envelope
   - locks root membership, every Markdown record, TODO, the carrier target, mailbox source, and completed audit

@@ -634,6 +634,90 @@ class Source1290DoneReconcileTests(unittest.TestCase):
                 close.assert_not_called()
                 self.assertNotIn(b"done_close_failed", carrier.read_bytes())
 
+    def test_rejects_duplicate_owner_drift_during_shell_authentication_without_handoff(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args, carrier, todo, authority, audit = self.fixture(Path(tmp))
+            duplicate = args.root / "duplicate_carrier.md"
+            carrier_before = carrier.read_bytes()
+            todo_before = todo.read_bytes()
+            authority_before = authority.read_bytes()
+            audit_before = audit.read_bytes()
+
+            def add_duplicate_owner(*_args: object) -> str:
+                duplicate.write_text(
+                    duplicate.read_text(encoding="utf-8").replace("runat: cfg:9", "runat: cfg:1"),
+                    encoding="utf-8",
+                )
+                return CAPTURE_SHA256
+
+            with (
+                patch("omo_manager.omo_source1290_done_reconcile.exact_pane_id", return_value=PANE_ID),
+                patch(
+                    "omo_manager.omo_source1290_done_reconcile.validate_exited_codex_shell",
+                    side_effect=add_duplicate_owner,
+                ),
+                patch("omo_manager.omo_source1290_done_reconcile.close_exited_codex_shell") as close,
+                patch("omo_manager.omo_task_status.require_owner_completion") as completion_gate,
+                patch("omo_manager.omo_completion_email.send_completion_email") as email,
+                self.assertRaisesRegex(OSError, "after shell authentication"),
+            ):
+                reconcile(args)
+            close.assert_not_called()
+            completion_gate.assert_not_called()
+            email.assert_not_called()
+            self.assertEqual(carrier_before, carrier.read_bytes())
+            self.assertEqual(todo_before, todo.read_bytes())
+            self.assertEqual(authority_before, authority.read_bytes())
+            self.assertEqual(audit_before, audit.read_bytes())
+            self.assertFalse(audit.with_name(f"{audit.name}.source1290-carrier-close-intent").exists())
+            metadata = parse_task_metadata(carrier.read_text(encoding="utf-8"), args.root)
+            self.assertIsNotNone(metadata)
+            assert metadata is not None
+            self.assertEqual("done_close_in_progress: manager is closing the agent before marking done", metadata.blocked_on)
+
+    def test_final_pre_close_gate_rejects_duplicate_owner_drift_before_pane_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args, carrier, todo, authority, audit = self.fixture(Path(tmp))
+            duplicate = args.root / "duplicate_carrier.md"
+            todo_before = todo.read_bytes()
+            authority_before = authority.read_bytes()
+            audit_before = audit.read_bytes()
+
+            def reject_owner_drift(
+                _target: str,
+                _pane: str,
+                _session: str,
+                _evidence: str,
+                **kwargs: object,
+            ) -> None:
+                duplicate.write_text(
+                    duplicate.read_text(encoding="utf-8").replace("runat: cfg:9", "runat: cfg:1"),
+                    encoding="utf-8",
+                )
+                evidence_is_current = kwargs["evidence_is_current"]
+                assert callable(evidence_is_current)
+                self.assertFalse(evidence_is_current())
+                raise RuntimeError("final evidence gate rejected owner drift")
+
+            with (
+                patch("omo_manager.omo_source1290_done_reconcile.exact_pane_id", return_value=PANE_ID),
+                patch(
+                    "omo_manager.omo_source1290_done_reconcile.validate_exited_codex_shell",
+                    return_value=CAPTURE_SHA256,
+                ),
+                patch(
+                    "omo_manager.omo_source1290_done_reconcile.close_exited_codex_shell",
+                    side_effect=reject_owner_drift,
+                ),
+                self.assertRaisesRegex(TaskFrontmatterError, "existing done_close_failed recovery state"),
+            ):
+                reconcile(args)
+            self.assertIn("status: blocked\nblocked_on: done_close_failed:", carrier.read_text(encoding="utf-8"))
+            self.assertEqual(todo_before, todo.read_bytes())
+            self.assertEqual(authority_before, authority.read_bytes())
+            self.assertEqual(audit_before, audit.read_bytes())
+            self.assertTrue(audit.with_name(f"{audit.name}.source1290-carrier-close-intent").is_file())
+
     def test_parse_requires_complete_exact_evidence(self) -> None:
         with self.assertRaises(SystemExit):
             parse_args(["--root", "/tmp/work"])

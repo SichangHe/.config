@@ -605,10 +605,11 @@ def reconcile(args: Args) -> None:
                 or memory.read_text(encoding="utf-8") != memory_text
                 or transcription.read_text(encoding="utf-8") != transcription_text
                 or task_paths(root) != paths
+                or authoritative_active_target_task_paths(root, target) != (path,)
                 or exact_pane_id(target) != resolved_pane
                 or read_private_audit(close_intent_path) != recovery_text
             ):
-                raise OSError("task, audit, membership, or pane identity drifted after shell authentication")
+                raise OSError("task, audit, membership, ownership, or pane identity drifted after shell authentication")
             if authority_blocks(failed_text) != (expected_authority,):
                 raise OSError("failed-close handoff would lose Source-1290 authority custody")
             if recovery is None:
@@ -652,6 +653,7 @@ def reconcile(args: Args) -> None:
                         and memory.read_text(encoding="utf-8") == memory_text
                         and transcription.read_text(encoding="utf-8") == transcription_text
                         and task_paths(root) == paths
+                        and authoritative_active_target_task_paths(root, target) == (path,)
                     )
                 except (OSError, TaskFrontmatterError):
                     return False
