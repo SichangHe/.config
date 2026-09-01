@@ -25,6 +25,46 @@ AUTHORITY_LINES = (
     "The agent failed. They did not run the experiment. Replace them.\n",
     "The replacement agent should finish the task.\n",
 )
+SOURCE1289_AUTHORITY = "".join(
+    (
+        "Subject: Re: vl_b2_xform_repair.md: pending item removed after verification\n",
+        "\n",
+        "For a manager, replace the entire agent tree for this task. Get completing\r\n",
+        "new agents to do them. Previous agents completely failed. It has been days\r\n",
+        "and the repository has not been split. Find my original instructions and\r\n",
+        "follow them and actually split the repository. There are no actual\r\n",
+        "blockers. If any agent reports a blocker, they are probably wrong. If\r\n",
+        "another agent also verifies that the blocker does exist, report to the\r\n",
+        "human immediately and clearly explain the blocker using the avoid something\r\n",
+        "like LM skill\r\n",
+        "\r\n",
+        "On Mon, Aug 31, 2026 at 14:05 <sichangheagent@gmail.com> wrote:\r\n",
+        "\r\n",
+        "> This agent is preparing one safety handoff for Batch 2 of the Midas\r\n",
+        "> Lex/VeruLaw split. It is not changing either repository.\r\n",
+        ">\r\n",
+        "> The immediate task is to examine 510 historical files that the split plan\r\n",
+        "> says must be rewritten. It must determine whether the exact new file\r\n",
+        "> contents can be reproduced from the sealed evidence or whether the plan\r\n",
+        "> only describes the intended meaning. This matters because an agent must not\r\n",
+        "> invent historical file contents and then treat them as authentic.\r\n",
+        ">\r\n",
+        "> The current finding is that the evidence names each source file and the\r\n",
+        "> intended destination, but does not specify the exact edits. The agent is\r\n",
+        "> therefore recording those 510 files as precise blockers and building a\r\n",
+        "> verifier so a fresh independent reviewer can confirm that conclusion.\r\n",
+        ">\r\n",
+        "> The agent has not changed repositories, branches, remotes, or hosted\r\n",
+        "> projects. I have bounded it to this one evidence packet. After the\r\n",
+        "> independent review, it must stop and hand the result back to the Batch 2\r\n",
+        "> working agent so the parts that do not depend on these 510 rewrites can be\r\n",
+        "> handled safely.\r\n",
+        ">\r\n",
+        "> The earlier automated email was too technical and gave no useful context.\r\n",
+        "> That was the problem, not a new completed milestone.\r\n",
+        ">\r\n",
+    )
+)
 
 
 def sha(data: str) -> str:
@@ -214,11 +254,88 @@ class ManagerReplaceTests(unittest.TestCase):
         stack.enter_context(
             patch.object(
                 manager_replace,
+                "SOURCE1289_CARRIER_LINES",
+                (args.authority_lines.start, args.authority_lines.end),
+            )
+        )
+        stack.enter_context(
+            patch.object(
+                manager_replace,
                 "SOURCE1289_TREE_LINES",
                 (args.successor_item_lines[0].start, args.successor_item_lines[0].end),
             )
         )
         return stack
+
+    def source1289_authority_fixture(self, base: Path) -> tuple[Path, Args]:
+        root, args, files = self.whole_tree_fixture(base)
+        old_path = root / args.old_task
+        source1289_path = root / manager_replace.SOURCE1289_TASK
+        old_path.rename(source1289_path)
+        todo = files["TODO.md"].replace(args.old_task, manager_replace.SOURCE1289_TASK)
+        (root / "TODO.md").write_text(todo, encoding="utf-8")
+        source_path = root / manager_replace.SOURCE1289_FILE
+        source_path.write_bytes(SOURCE1289_AUTHORITY.encode())
+        source_path.chmod(0o600)
+        source_lines = SOURCE1289_AUTHORITY.splitlines()
+        carrier = "\n".join(source_lines[:13])
+        envelope = (
+            f'<human_instruction authoritative="true" source="{manager_replace.SOURCE1289_FILE}:1-13">\n'
+            f"{carrier}\n"
+            "</human_instruction>\n"
+        )
+        envelope_path = root / args.authority_envelope_task
+        envelope_path.write_text(envelope, encoding="utf-8")
+        changed = replace(
+            args,
+            old_task=manager_replace.SOURCE1289_TASK,
+            todo_sha256=sha(todo),
+            authority_file=manager_replace.SOURCE1289_FILE,
+            authority_lines=LineRange(1, 13),
+            authority_sha256=manager_replace.SOURCE1289_SHA256,
+            authority_envelope_sha256=sha(envelope),
+            successor_item_lines=(LineRange(3, 10),),
+        )
+        return root, changed
+
+    def source1289_runtime(self, args: Args) -> tuple[contextlib.ExitStack, list[str]]:
+        live = {
+            manager_replace.canonical_target(args.old_target),
+            *(manager_replace.canonical_target(item.target) for item in args.descendants),
+        }
+        identities = {
+            manager_replace.canonical_target(args.old_target): PaneIdentity(
+                manager_replace.canonical_target(args.old_target), "%42", 4242, 999
+            ),
+            **{
+                manager_replace.canonical_target(item.target): PaneIdentity(
+                    manager_replace.canonical_target(item.target), item.pane_id, item.pane_pid, item.pane_start_ticks
+                )
+                for item in args.descendants
+            },
+        }
+        sessions = {item.target: item.session_id for item in args.descendants} | {
+            args.old_target: args.old_session_id
+        }
+        stopped_targets: list[str] = []
+
+        def inventory() -> dict[str, PaneIdentity]:
+            return {target: identity for target, identity in identities.items() if target in live}
+
+        def stopped(stop_args) -> str:
+            stopped_targets.append(stop_args.target)
+            live.remove(manager_replace.canonical_target(stop_args.target))
+            Path(stop_args.bound_close_proof_path).write_text(
+                f"{stop_args.bound_close_proof_secret}\n", encoding="utf-8"
+            )
+            Path(stop_args.bound_close_proof_path).chmod(0o600)
+            return sessions[stop_args.target]
+
+        stack = contextlib.ExitStack()
+        stack.enter_context(patch.object(manager_replace, "pane_inventory", side_effect=inventory))
+        stack.enter_context(patch.object(manager_replace, "process_start_ticks", return_value=None))
+        stack.enter_context(patch.object(manager_replace, "stop", side_effect=stopped))
+        return stack, stopped_targets
 
     def empty_tree_fixture(self, base: Path) -> tuple[Path, Args, dict[str, str], contextlib.ExitStack]:
         root, args, files = self.fixture(base)
@@ -1132,6 +1249,40 @@ class ManagerReplaceTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ReplaceError, "descendants or exact Source-1292"):
                 replace_manager(changed)
+
+    def test_source1289_literal_authenticated_wording_is_semantic_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args = self.source1289_authority_fixture(Path(tmp))
+            selected = "\n".join(SOURCE1289_AUTHORITY.splitlines()[2:10])
+            self.assertIsNone(manager_replace.FAILED_MANAGER_EVIDENCE_RE.search(selected))
+            self.assertLess(selected.index("replace the entire agent tree"), selected.index("completely failed"))
+            self.assertIn("new agents", selected)
+            self.assertIn("agents completely failed", selected)
+            self.assertIn("repository has not been split", selected)
+            runtime, stopped_targets = self.source1289_runtime(args)
+            with runtime:
+                result = replace_manager(args)
+            self.assertIn("sole ownership", result)
+            self.assertEqual([item.target for item in args.descendants] + [args.old_target], stopped_targets)
+            self.assertEqual("blocked", parsed(root / args.successor_task, root).status)
+
+    def test_source1289_semantic_authority_rejects_every_reuse_dimension(self) -> None:
+        variants = (
+            ("task", {"old_task": "other.md"}),
+            ("source", {"authority_file": "manager_mail/other.txt"}),
+            ("digest", {"authority_sha256": "0" * 64}),
+            ("carrier", {"authority_lines": LineRange(1, 12)}),
+            ("selection", {"successor_item_lines": (LineRange(3, 9),)}),
+            ("extra-selection", {"successor_item_lines": (LineRange(3, 10), LineRange(12, 12))}),
+        )
+        for label, changes in variants:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                _root, args = self.source1289_authority_fixture(Path(tmp))
+                variant = replace(args, **changes)
+                runtime, stopped_targets = self.source1289_runtime(variant)
+                with runtime, self.assertRaises(ReplaceError):
+                    replace_manager(variant)
+                self.assertEqual([], stopped_targets)
 
     def test_other_authority_cannot_request_descendant_closure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
