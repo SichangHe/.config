@@ -8058,6 +8058,176 @@ with exclusive_watcher_root(root):
                     self.assertTrue(watcher.handle_agent_problem_result(args, {}, result("new-id-evidence"), 3000.0))
                 self.assertNotIn("suppressed unchanged blocked dependency report", changed.getvalue())
 
+    def test_done_ready_classification_survives_restart_and_invalidates_on_evidence_change(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "TODO.md").write_text("previous:\ncompleted.md cfg:2\n", encoding="utf-8")
+            task_path = root / "completed.md"
+            _ = task_path.write_text(task_frontmatter("done", runat="cfg:2", managerat="wl:1"), encoding="utf-8")
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1")
+
+            def result(output: str) -> watcher.CommandOutput:
+                return watcher.CommandOutput(
+                    "agent-problems",
+                    3,
+                    "agent-problems: ready=1\n"
+                    f"ready: task=completed.md evidence=target=cfg:2 role=todo_unmanaged task_status=done output={output} owner_target=wl:1\n",
+                    "",
+                )
+
+            pane = {"report": watcher.CodexReport("ready", ["problem-id: 0123456789abcdef"])}
+            runtime = {"identity": "%42\t1000\tcodex"}
+            with patch.object(watcher, "inspect_codex", side_effect=lambda _args: pane["report"]), patch.object(
+                watcher, "blocked_custody_runtime_identity", side_effect=lambda _target: runtime["identity"]
+            ), patch.object(watcher, "agent_problem_target_is_ready", return_value=True), patch.object(
+                watcher, "push_manager_text_to_target", return_value=0
+            ), patch.object(
+                watcher, "handle_ready_report_reminders", side_effect=lambda _args, _seen, output, _now, _targets: (output, False)
+            ):
+                first = StringIO()
+                with redirect_stdout(first):
+                    self.assertTrue(watcher.handle_agent_problem_result(args, {}, result("stale output"), 10000.0))
+                self.assertTrue(watcher.read_blocked_report_ledger(args)["completed.md"].startswith("done:"))
+
+                pane["report"] = watcher.CodexReport("ready", ["problem-id: fedcba9876543210"])
+                restarted = StringIO()
+                with redirect_stdout(restarted):
+                    _ = watcher.handle_agent_problem_result(args, {}, result("stale output"), 20000.0)
+                self.assertIn("suppressed unchanged blocked dependency report", restarted.getvalue())
+                self.assertNotIn("ready and not blocked", restarted.getvalue())
+
+                pane["report"] = watcher.CodexReport("ready", ["new actionable output"])
+                changed_pane = StringIO()
+                with redirect_stdout(changed_pane):
+                    self.assertTrue(watcher.handle_agent_problem_result(args, {}, result("new actionable output"), 30000.0))
+                self.assertNotIn("suppressed unchanged blocked dependency report", changed_pane.getvalue())
+
+                _ = task_path.write_text(task_frontmatter("done", runat="cfg:2", managerat="wl:1") + "\nnew evidence\n", encoding="utf-8")
+                changed_task = StringIO()
+                with redirect_stdout(changed_task):
+                    self.assertTrue(watcher.handle_agent_problem_result(args, {}, result("new actionable output"), 40000.0))
+                self.assertNotIn("suppressed unchanged blocked dependency report", changed_task.getvalue())
+
+                runtime["identity"] = "%42\t2000\tcodex"
+                changed_runtime = StringIO()
+                with redirect_stdout(changed_runtime):
+                    self.assertTrue(watcher.handle_agent_problem_result(args, {}, result("new actionable output"), 50000.0))
+                self.assertNotIn("suppressed unchanged blocked dependency report", changed_runtime.getvalue())
+
+                _ = (root / "TODO.md").write_text("current:\ncompleted.md cfg:2\n", encoding="utf-8")
+                self.assertEqual({}, watcher.blocked_report_snapshot_state(root))
+
+                _ = (root / "TODO.md").write_text("current:\ncompleted.md cfg:2\n\nprevious:\ncompleted.md cfg:2\n", encoding="utf-8")
+                self.assertEqual({}, watcher.blocked_report_snapshot_state(root))
+
+    def test_active_claim_seeds_done_ready_classification_without_redelivery(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+        from omo_manager.amh_problem_claim import claim_problem
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "TODO.md").write_text("previous:\ncompleted.md cfg:2\n", encoding="utf-8")
+            _ = (root / "completed.md").write_text(task_frontmatter("done", runat="cfg:2", managerat="wl:1"), encoding="utf-8")
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1")
+            ready = "ready: task=completed.md evidence=target=cfg:2 role=todo_unmanaged task_status=done output=stale owner_target=wl:1"
+            stale = "done-stale: task=completed.md evidence=session registry still has a completed task owner_target=wl:1"
+            result = watcher.CommandOutput("agent-problems", 3, f"agent-problems: ready=1 done-registry-stale=1\n{ready}\n{stale}\n", "")
+            problem_id = watcher.problem_claim_id("wl:1", (ready, stale))
+            watcher.issue_problem(watcher.problem_claim_path(args), problem_id, "wl:1", (ready, stale), 9500.0)
+            _ = claim_problem(watcher.problem_claim_path(args), problem_id, "wl:1", "classify completed pane", 9500.0)
+
+            with patch.object(watcher, "inspect_codex", return_value=watcher.CodexReport("ready", ["stale output"])), patch.object(
+                watcher, "blocked_custody_runtime_identity", return_value="%42\t1000\tcodex"
+            ), patch.object(watcher, "push_manager_text_to_target") as push:
+                out = StringIO()
+                with redirect_stdout(out):
+                    self.assertFalse(watcher.handle_agent_problem_result(args, {}, result, 10000.0))
+                self.assertTrue(watcher.read_blocked_report_ledger(args)["completed.md"].startswith("done:"))
+                self.assertIn("suppressed unchanged blocked dependency report", out.getvalue())
+                push.assert_not_called()
+
+    def test_classify_done_ready_command_revalidates_before_writing(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task_path = root / "completed.md"
+            _ = (root / "TODO.md").write_text("previous:\ncompleted.md cfg:2\n", encoding="utf-8")
+            _ = task_path.write_text(task_frontmatter("done", runat="cfg:2", managerat="wl:1"), encoding="utf-8")
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1")
+
+            with patch.object(watcher, "inspect_codex", return_value=watcher.CodexReport("ready", ["stale output"])), patch.object(
+                watcher, "blocked_custody_runtime_identity", return_value="%42\t1000\tcodex"
+            ):
+                self.assertTrue(watcher.classify_done_ready(args, "completed.md"))
+                self.assertTrue(watcher.read_blocked_report_ledger(args)["completed.md"].startswith("done:"))
+
+            _ = (root / "TODO.md").write_text("current:\ncompleted.md cfg:2\n", encoding="utf-8")
+            self.assertFalse(watcher.classify_done_ready(args, "completed.md"))
+            _ = (root / "TODO.md").write_text("previous:\ncompleted.md cfg:2\n", encoding="utf-8")
+            _ = task_path.write_text(task_frontmatter("done", runat="cfg:2", managerat="wl:1", pending_items=("unfinished",)), encoding="utf-8")
+            self.assertFalse(watcher.classify_done_ready(args, "completed.md"))
+
+            _ = task_path.write_text(task_frontmatter("done", runat="cfg:2", managerat="wl:1"), encoding="utf-8")
+            _ = (root / "active.md").write_text(task_frontmatter("running", runat="cfg:2", managerat="wl:1"), encoding="utf-8")
+            _ = (root / "TODO.md").write_text("current:\nactive.md cfg:2\n\nprevious:\ncompleted.md cfg:2\n", encoding="utf-8")
+            self.assertFalse(watcher.classify_done_ready(args, "completed.md"))
+
+            _ = (root / "active.md").unlink()
+            _ = (root / "TODO.md").write_text("previous:\ncompleted.md cfg:9\n", encoding="utf-8")
+            self.assertFalse(watcher.classify_done_ready(args, "completed.md"))
+
+    def test_classify_done_ready_preserves_concurrent_seed_and_rejects_dry_run(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, False)
+            _ = (root / "TODO.md").write_text("previous:\ncompleted.md cfg:2\n", encoding="utf-8")
+            _ = (root / "completed.md").write_text(task_frontmatter("done", runat="cfg:2", managerat="wl:1"), encoding="utf-8")
+            with patch.object(watcher, "inspect_codex", return_value=watcher.CodexReport("ready", ["stale output"])), patch.object(
+                watcher, "blocked_custody_runtime_identity", return_value="%42\t1000\tcodex"
+            ):
+                snapshot = watcher.blocked_report_snapshot_state(root)["completed.md"][1]
+                watcher.write_blocked_report_ledger(args, {"completed.md": snapshot})
+                stale_writer_state = {"blocked.md": "custody:other"}
+                watcher.write_blocked_report_ledger(args, stale_writer_state)
+                self.assertEqual(
+                    {"blocked.md": "custody:other", "completed.md": snapshot},
+                    watcher.read_blocked_report_ledger(args),
+                )
+            with self.assertRaises(SystemExit):
+                _ = watcher.parse_args(["--root", str(root), "--dry-run", "--classify-done-ready", "completed.md"])
+
+    def test_retained_claim_seeds_done_ready_when_same_owner_gets_another_problem(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+        from omo_manager.amh_problem_claim import claim_problem
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _ = (root / "TODO.md").write_text("previous:\ncompleted.md cfg:2\n", encoding="utf-8")
+            _ = (root / "completed.md").write_text(task_frontmatter("done", runat="cfg:2", managerat="wl:1"), encoding="utf-8")
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, False, manager_target="wl:1")
+            ready = "ready: task=completed.md evidence=target=cfg:2 role=todo_unmanaged task_status=done output=stale owner_target=wl:1"
+            problem_id = watcher.problem_claim_id("wl:1", (ready,))
+            watcher.issue_problem(watcher.problem_claim_path(args), problem_id, "wl:1", (ready,), 9500.0)
+            _ = claim_problem(watcher.problem_claim_path(args), problem_id, "wl:1", "classify completed pane", 9500.0)
+            error = "error: task=other.md evidence=target=cfg:3 task_status=running output=failed owner_target=wl:1"
+            result = watcher.CommandOutput("agent-problems", 3, f"agent-problems: ready=1 error=1\n{ready}\n{error}\n", "")
+
+            with patch.object(watcher, "inspect_codex", return_value=watcher.CodexReport("ready", ["stale output"])), patch.object(
+                watcher, "blocked_custody_runtime_identity", return_value="%42\t1000\tcodex"
+            ), patch.object(watcher, "agent_problem_target_is_ready", return_value=True), patch.object(
+                watcher, "push_manager_text_to_target", return_value=0
+            ) as push:
+                self.assertTrue(watcher.handle_agent_problem_result(args, {}, result, 10000.0))
+                self.assertTrue(watcher.read_blocked_report_ledger(args)["completed.md"].startswith("done:"))
+                self.assertEqual(1, push.call_count)
+                self.assertNotIn("completed.md", push.call_args.args[1])
+                self.assertIn("other.md", push.call_args.args[1])
+
     def test_human_pending_snapshot_preserves_structured_blocker_and_notice_changes(self) -> None:
         from omo_manager import omo_pending_watch as watcher
 
