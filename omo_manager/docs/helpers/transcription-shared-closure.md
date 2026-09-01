@@ -35,6 +35,21 @@ shared-target closure
   - requires the research manager to remain the sole active `wl:32` owner
   - never reads, signals, sends input to, or stops the pane
 
+post-cancellation closure
+
+- `omo_transcription_post_cancel_done.py`
+  - is separate from incident recovery and the earlier two-active-owner closure
+  - binds authenticated Human Source-1297 and its exact immutable digest
+  - binds the current blocked transcription bytes and complete four-item queue
+  - validates the original Gmail Sent adoption receipt and exact Message-ID
+  - requires the memory manager to be done, empty, and already in TODO `previous`
+  - requires transcription to be the sole active `wl:32` record
+  - changes only transcription and TODO
+    - marks transcription done and clears its queue
+    - moves its exact TODO row from `current` to `previous`
+  - preserves memory history, authority, adoption evidence, and `wl:32`
+  - has no mail, research, or tmux action path
+
 failure policy
 
 - reject missing or ambiguous Sent evidence
@@ -67,3 +82,4 @@ operation
 - verify both immutable receipt digests
 - run shared-target closure only after the same approval explicitly covers it
 - create fresh bindings after any rejection
+- after memory cancellation and authenticated Source-1297 approval, use only the post-cancellation helper with fresh task, TODO, memory, authority, and adoption bindings
