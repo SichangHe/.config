@@ -41,7 +41,9 @@ post-cancellation closure
   - is separate from incident recovery and the earlier two-active-owner closure
   - binds authenticated Human Source-1297 and its exact immutable digest
   - binds the current blocked transcription bytes and complete four-item queue
+  - binds its own reviewed executable bytes and exact Markdown membership
   - validates the original Gmail Sent adoption receipt and exact Message-ID
+  - binds the authority and adoption files' device, inode, size, modification time, mode, user, and group
   - requires the memory manager to be done, empty, and already in TODO `previous`
   - requires transcription to be the sole active `wl:32` record
   - changes only transcription and TODO

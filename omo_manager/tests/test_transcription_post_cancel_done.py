@@ -5,6 +5,7 @@ import json
 import os
 import tempfile
 import unittest
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import patch
 
@@ -38,6 +39,11 @@ AUTHORITY = (
 
 def sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
+
+
+def file_binding(path: Path) -> helper.FileBinding:
+    state = path.stat()
+    return helper.FileBinding(state.st_dev, state.st_ino, state.st_size, state.st_mtime_ns, state.st_mode & 0o777, state.st_uid, state.st_gid)
 
 
 def task_text(
@@ -132,6 +138,10 @@ class PostCancelDoneTest(unittest.TestCase):
         adoption_digest: str | None = None,
         authority_digest: str | None = None,
         authority_path: Path | None = None,
+        helper_digest: str | None = None,
+        membership_digest: str | None = None,
+        adoption_binding: helper.FileBinding | None = None,
+        authority_binding: helper.FileBinding | None = None,
     ) -> None:
         task = root / helper.TASK_NAME
         memory = root / helper.MEMORY_NAME
@@ -141,14 +151,20 @@ class PostCancelDoneTest(unittest.TestCase):
         digest = sha256(AUTHORITY)
         with patch.object(helper, "AUTHORITY_SHA256", digest):
             helper.reconcile(
-                root,
-                task_digest or sha256(task.read_bytes()),
-                todo_digest or sha256(todo.read_bytes()),
-                memory_digest or sha256(memory.read_bytes()),
-                adoption,
-                adoption_digest or sha256(adoption.read_bytes()),
-                authority_path or authority,
-                authority_digest or digest,
+                helper.Args(
+                    root,
+                    helper_digest or sha256(Path(helper.__file__).read_bytes()),
+                    membership_digest or helper.membership_sha256(shared.task_paths(root)),
+                    task_digest or sha256(task.read_bytes()),
+                    todo_digest or sha256(todo.read_bytes()),
+                    memory_digest or sha256(memory.read_bytes()),
+                    adoption,
+                    adoption_digest or sha256(adoption.read_bytes()),
+                    adoption_binding or file_binding(adoption),
+                    authority_path or authority,
+                    authority_digest or digest,
+                    authority_binding or file_binding(authority),
+                )
             )
 
     def assert_unchanged(self, before: tuple[bytes, ...], paths: tuple[Path, ...]) -> None:
@@ -194,6 +210,37 @@ class PostCancelDoneTest(unittest.TestCase):
                 before = tuple(path.read_bytes() for path in paths)
                 with self.assertRaises(OSError):
                     self.run_reconcile(root, authority_path=authority_path_override, authority_digest=authority_digest_override)
+                self.assert_unchanged(before, paths)
+
+    def test_rejects_helper_membership_and_evidence_identity_binding_drift(self) -> None:
+        for case in ("helper", "membership", "adoption identity", "authority identity"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                task, memory, todo, adoption, authority = self.fixture(root)
+                helper_digest: str | None = None
+                membership_digest: str | None = None
+                adoption_binding: helper.FileBinding | None = None
+                authority_binding: helper.FileBinding | None = None
+                if case == "helper":
+                    helper_digest = "0" * 64
+                elif case == "membership":
+                    membership_digest = "0" * 64
+                elif case == "adoption identity":
+                    binding = file_binding(adoption)
+                    adoption_binding = helper.FileBinding(binding.device, binding.inode + 1, binding.size, binding.mtime_ns, binding.mode, binding.uid, binding.gid)
+                else:
+                    binding = file_binding(authority)
+                    authority_binding = helper.FileBinding(binding.device, binding.inode + 1, binding.size, binding.mtime_ns, binding.mode, binding.uid, binding.gid)
+                paths = (task, memory, todo, adoption, authority)
+                before = tuple(path.read_bytes() for path in paths)
+                with self.assertRaises(OSError):
+                    self.run_reconcile(
+                        root,
+                        helper_digest=helper_digest,
+                        membership_digest=membership_digest,
+                        adoption_binding=adoption_binding,
+                        authority_binding=authority_binding,
+                    )
                 self.assert_unchanged(before, paths)
 
     def test_rejects_task_queue_target_type_status_manager_and_blocker_drift(self) -> None:
@@ -321,6 +368,34 @@ class PostCancelDoneTest(unittest.TestCase):
             self.assertIn(b"drift", memory.read_bytes())
             self.assertIn(f"current:\n{helper.TASK_NAME}".encode(), todo.read_bytes())
 
+    def test_rejects_authority_or_adoption_mutation_before_commit(self) -> None:
+        for case in ("authority", "adoption"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                task, memory, todo, adoption, authority = self.fixture(root)
+                task_before = task.read_bytes()
+                todo_before = todo.read_bytes()
+                protected_before = memory.read_bytes()
+                target = authority if case == "authority" else adoption
+                original = helper.task_replacement
+
+                def mutate_during_plan(
+                    plan_root: Path,
+                    text: str,
+                    adoption_sha256: str,
+                    target_path: Path = target,
+                    original_func: Callable[[Path, str, str], str] = original,
+                ) -> str:
+                    target_path.write_bytes(target_path.read_bytes() + b"drift\n")
+                    return original_func(plan_root, text, adoption_sha256)
+
+                with patch.object(helper, "task_replacement", side_effect=mutate_during_plan), self.assertRaises(OSError):
+                    self.run_reconcile(root)
+                self.assertEqual(task_before, task.read_bytes())
+                self.assertEqual(todo_before, todo.read_bytes())
+                self.assertEqual(protected_before, memory.read_bytes())
+                self.assertTrue(target.read_bytes().endswith(b"drift\n"))
+
     def test_rejects_unrelated_task_concurrent_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -371,6 +446,29 @@ class PostCancelDoneTest(unittest.TestCase):
             self.assertEqual(todo_before, todo.read_bytes())
             self.assertTrue(memory.read_bytes().endswith(b"concurrent\n"))
             self.assertTrue(adoption.exists())
+
+    def test_rollback_never_overwrites_concurrent_task_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            todo = root / "TODO.md"
+            task.write_bytes(b"updated task\n")
+            todo.write_bytes(b"updated todo\n")
+            original = shared.same_file_state
+            calls = 0
+
+            def replace_before_state_check(left: os.stat_result, right: os.stat_result) -> bool:
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    task.write_bytes(b"foreign replacement task\n")
+                    right = task.stat()
+                return original(left, right)
+
+            with patch.object(shared, "same_file_state", side_effect=replace_before_state_check), self.assertRaisesRegex(OSError, "rollback was incomplete"):
+                helper.rollback_own_writes(task, b"old task\n", b"updated task\n", todo, b"old todo\n", b"updated todo\n")
+            self.assertEqual(b"foreign replacement task\n", task.read_bytes())
+            self.assertEqual(b"old todo\n", todo.read_bytes())
 
     def test_module_has_no_mail_or_tmux_action_dependency(self) -> None:
         source = Path(helper.__file__).read_text(encoding="utf-8")

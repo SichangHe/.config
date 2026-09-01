@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
+import stat
 import sys
 from contextlib import ExitStack
+from dataclasses import dataclass
 from pathlib import Path
 
 if __package__ in {None, ""}:
@@ -35,6 +38,49 @@ CURRENT_ITEMS = (
     *DELIVERED_ITEMS,
     "Reconcile the already delivered completion email using owner-authenticated evidence. Do not resend any Human email. Verify delivery through the supported mail/delivery helpers, remove the completed pending items with exact evidence, and report privately. If complete, the manager will close the task through the supported lifecycle helper.",
 )
+
+
+@dataclass(frozen=True)
+class FileBinding:
+    device: int
+    inode: int
+    size: int
+    mtime_ns: int
+    mode: int
+    uid: int
+    gid: int
+
+
+@dataclass(frozen=True)
+class Args:
+    root: Path
+    helper_sha256: str
+    membership_sha256: str
+    task_sha256: str
+    todo_sha256: str
+    memory_sha256: str
+    adoption_path: Path
+    adoption_sha256: str
+    adoption_binding: FileBinding
+    authority_path: Path
+    authority_sha256: str
+    authority_binding: FileBinding
+
+
+def membership_sha256(paths: tuple[Path, ...]) -> str:
+    return shared.sha256(b"\0".join(str(path).encode() for path in paths))
+
+
+def same_binding(binding: FileBinding, state: os.stat_result) -> bool:
+    return binding == FileBinding(
+        state.st_dev,
+        state.st_ino,
+        state.st_size,
+        state.st_mtime_ns,
+        stat.S_IMODE(state.st_mode),
+        state.st_uid,
+        state.st_gid,
+    )
 
 
 def validate_authority(payload: bytes) -> None:
@@ -156,16 +202,18 @@ def task_replacement(root: Path, text: str, adoption_sha256: str) -> str:
 
 def rollback_own_writes(task: Path, task_payload: bytes, updated_task: bytes, todo: Path, todo_payload: bytes, updated_todo: bytes) -> None:
     errors: list[str] = []
-    if task.read_bytes() == updated_task:
+    task_state = task.stat()
+    if task.read_bytes() == updated_task and shared.same_file_state(task_state, task.stat()):
         try:
-            shared.replace_if_unchanged(task, task_payload, task.stat())
+            shared.replace_if_unchanged(task, task_payload, task_state)
         except OSError as exc:
             errors.append(f"task: {exc}")
     else:
         errors.append("task committed bytes drifted")
-    if todo.read_bytes() == updated_todo:
+    todo_state = todo.stat()
+    if todo.read_bytes() == updated_todo and shared.same_file_state(todo_state, todo.stat()):
         try:
-            shared.replace_if_unchanged(todo, todo_payload, todo.stat())
+            shared.replace_if_unchanged(todo, todo_payload, todo_state)
         except OSError as exc:
             errors.append(f"TODO: {exc}")
     else:
@@ -175,34 +223,35 @@ def rollback_own_writes(task: Path, task_payload: bytes, updated_task: bytes, to
 
 
 # 🧑 Human source `manager_mail/85c5dff58359-1297.txt:3`: "approve"
-def reconcile(
-    root: Path,
-    task_sha256: str,
-    todo_sha256: str,
-    memory_sha256: str,
-    adoption_path: Path,
-    adoption_sha256: str,
-    authority_path: Path,
-    authority_sha256: str,
-) -> None:
+def reconcile(args: Args) -> None:
+    root = args.root
     task = root / TASK_NAME
     memory = root / MEMORY_NAME
     todo = root / TODO_NAME
     expected_authority = root / AUTHORITY_NAME
-    if authority_path != expected_authority or authority_sha256 != AUTHORITY_SHA256:
+    helper_path = Path(__file__).resolve()
+    if shared.sha256(helper_path.read_bytes()) != args.helper_sha256:
+        raise OSError("closure helper bytes drifted from the reviewed binding")
+    if args.authority_path != expected_authority or args.authority_sha256 != AUTHORITY_SHA256:
         raise OSError("closure requires the exact reviewed Source-1297 authority binding")
     with shared.root_membership_lock(root), task_target_lock(root, TARGET):
         paths = shared.task_paths(root)
         if not {task, memory, todo}.issubset(paths):
             raise OSError("required transcription lifecycle records are missing")
+        if membership_sha256(paths) != args.membership_sha256:
+            raise OSError("work-log Markdown membership drifted from the reviewed binding")
         with ExitStack() as locks:
             for path in paths:
                 locks.enter_context(task_file_lock(path))
-            authority_state = authority_path.stat()
-            authority_payload = shared.read_private_file(authority_path, authority_sha256)
+            authority_state = args.authority_path.stat()
+            if not same_binding(args.authority_binding, authority_state):
+                raise OSError("Source-1297 authority identity drifted from the reviewed binding")
+            authority_payload = shared.read_private_file(args.authority_path, args.authority_sha256)
             validate_authority(authority_payload)
-            adoption_state = adoption_path.stat()
-            adoption_payload = shared.read_private_file(adoption_path, adoption_sha256)
+            adoption_state = args.adoption_path.stat()
+            if not same_binding(args.adoption_binding, adoption_state):
+                raise OSError("adoption evidence identity drifted from the reviewed binding")
+            adoption_payload = shared.read_private_file(args.adoption_path, args.adoption_sha256)
             delivered_items = shared.parse_receipt(adoption_payload, root, ADOPTED_TASK_SHA256)
             if delivered_items != DELIVERED_ITEMS:
                 raise OSError("adoption receipt does not bind the three completed research items")
@@ -213,9 +262,9 @@ def reconcile(
             todo_before = todo.stat()
             todo_payload = todo.read_bytes()
             if (
-                shared.sha256(task_payload) != task_sha256
-                or shared.sha256(memory_payload) != memory_sha256
-                or shared.sha256(todo_payload) != todo_sha256
+                shared.sha256(task_payload) != args.task_sha256
+                or shared.sha256(memory_payload) != args.memory_sha256
+                or shared.sha256(todo_payload) != args.todo_sha256
             ):
                 raise OSError("task, TODO, or done memory bytes drifted from the closure binding")
             task_text = task_payload.decode()
@@ -227,15 +276,17 @@ def reconcile(
                 raise OSError("transcription or done memory TODO custody drifted")
             if shared.active_target_owners(root, TARGET, paths) != (task.resolve(),):
                 raise OSError("transcription is not the sole active wl:32 owner")
-            updated_task = task_replacement(root, task_text, adoption_sha256).encode()
+            updated_task = task_replacement(root, task_text, args.adoption_sha256).encode()
             updated_todo = shared.todo_replacement(todo_text).encode()
             if todo_section(updated_todo.decode(), TASK_NAME) != "previous" or todo_section(updated_todo.decode(), MEMORY_NAME) != "previous":
                 raise OSError("post-closure TODO custody is not exact previous history")
             if (
-                shared.read_private_file(authority_path, authority_sha256) != authority_payload
-                or not shared.same_file_state(authority_state, authority_path.stat())
-                or shared.read_private_file(adoption_path, adoption_sha256) != adoption_payload
-                or not shared.same_file_state(adoption_state, adoption_path.stat())
+                shared.sha256(helper_path.read_bytes()) != args.helper_sha256
+                or membership_sha256(shared.task_paths(root)) != args.membership_sha256
+                or shared.read_private_file(args.authority_path, args.authority_sha256) != authority_payload
+                or not shared.same_file_state(authority_state, args.authority_path.stat())
+                or shared.read_private_file(args.adoption_path, args.adoption_sha256) != adoption_payload
+                or not shared.same_file_state(adoption_state, args.adoption_path.stat())
                 or task.read_bytes() != task_payload
                 or todo.read_bytes() != todo_payload
                 or any(path.read_bytes() != payload for path, payload in protected_payloads.items())
@@ -249,10 +300,12 @@ def reconcile(
                     task.read_bytes() != updated_task
                     or todo.read_bytes() != updated_todo
                     or any(path.read_bytes() != payload for path, payload in protected_payloads.items())
-                    or shared.read_private_file(authority_path, authority_sha256) != authority_payload
-                    or not shared.same_file_state(authority_state, authority_path.stat())
-                    or shared.read_private_file(adoption_path, adoption_sha256) != adoption_payload
-                    or not shared.same_file_state(adoption_state, adoption_path.stat())
+                    or shared.sha256(helper_path.read_bytes()) != args.helper_sha256
+                    or membership_sha256(shared.task_paths(root)) != args.membership_sha256
+                    or shared.read_private_file(args.authority_path, args.authority_sha256) != authority_payload
+                    or not shared.same_file_state(authority_state, args.authority_path.stat())
+                    or shared.read_private_file(args.adoption_path, args.adoption_sha256) != adoption_payload
+                    or not shared.same_file_state(adoption_state, args.adoption_path.stat())
                     or shared.task_paths(root) != paths
                     or shared.active_target_owners(root, TARGET, paths)
                 ):
@@ -262,9 +315,15 @@ def reconcile(
                 raise
 
 
-def parse_args(argv: list[str]) -> tuple[Path, str, str, str, Path, str, Path, str]:
+def file_binding(parsed: argparse.Namespace, prefix: str) -> FileBinding:
+    return FileBinding(*(getattr(parsed, f"{prefix}_{field}") for field in ("device", "inode", "size", "mtime_ns", "mode", "uid", "gid")))
+
+
+def parse_args(argv: list[str]) -> Args:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True)
+    parser.add_argument("--helper-sha256", required=True)
+    parser.add_argument("--membership-sha256", required=True)
     parser.add_argument("--task-sha256", required=True)
     parser.add_argument("--todo-sha256", required=True)
     parser.add_argument("--memory-sha256", required=True)
@@ -272,19 +331,35 @@ def parse_args(argv: list[str]) -> tuple[Path, str, str, str, Path, str, Path, s
     parser.add_argument("--adoption-receipt-sha256", required=True)
     parser.add_argument("--authority-file", type=Path, required=True)
     parser.add_argument("--authority-sha256", required=True)
+    for prefix in ("adoption", "authority"):
+        for field in ("device", "inode", "size", "mtime-ns", "mode", "uid", "gid"):
+            parser.add_argument(f"--{prefix}-{field}", type=int, required=True)
     parsed = parser.parse_args(argv)
-    digests = (parsed.task_sha256, parsed.todo_sha256, parsed.memory_sha256, parsed.adoption_receipt_sha256, parsed.authority_sha256)
+    digests = (parsed.helper_sha256, parsed.membership_sha256, parsed.task_sha256, parsed.todo_sha256, parsed.memory_sha256, parsed.adoption_receipt_sha256, parsed.authority_sha256)
     if any(SHA256_RE.fullmatch(value) is None for value in digests):
         parser.error("all SHA-256 bindings must be lowercase hexadecimal")
     root = parsed.root.expanduser().resolve()
     adoption = parsed.adoption_receipt.expanduser().resolve()
     authority = parsed.authority_file.expanduser().resolve()
-    return root, parsed.task_sha256, parsed.todo_sha256, parsed.memory_sha256, adoption, parsed.adoption_receipt_sha256, authority, parsed.authority_sha256
+    return Args(
+        root,
+        parsed.helper_sha256,
+        parsed.membership_sha256,
+        parsed.task_sha256,
+        parsed.todo_sha256,
+        parsed.memory_sha256,
+        adoption,
+        parsed.adoption_receipt_sha256,
+        file_binding(parsed, "adoption"),
+        authority,
+        parsed.authority_sha256,
+        file_binding(parsed, "authority"),
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
     try:
-        reconcile(*parse_args(sys.argv[1:] if argv is None else argv))
+        reconcile(parse_args(sys.argv[1:] if argv is None else argv))
     except (OSError, UnicodeDecodeError, TaskFrontmatterError, ValueError) as exc:
         print(f"omo_transcription_post_cancel_done: {exc}", file=sys.stderr)
         return 2
