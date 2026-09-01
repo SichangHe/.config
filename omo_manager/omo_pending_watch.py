@@ -6609,6 +6609,13 @@ def classify_done_ready(args: Args, task_file: str) -> bool:
 def classify_blocked_ready(args: Args, task_file: str) -> bool:
     """Persist one exact blocked ready-pane snapshot after fresh validation."""
 
+    task_path = resolve_task_path(args.root, task_file)
+    if task_path is None:
+        return False
+    try:
+        task_file = str(task_path.relative_to(args.root))
+    except ValueError:
+        return False
     path = blocked_report_ledger_path(args)
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     lock_path = path.with_name(f"{path.name}.lock")

@@ -8292,6 +8292,43 @@ with exclusive_watcher_root(root):
                 self.assertFalse(watcher.classify_blocked_ready(args, "worker.md"))
             self.assertNotIn("worker.md", watcher.read_blocked_report_ledger(args))
 
+    def test_classify_blocked_ready_accepts_absolute_task_after_archived_leaf_drift(self) -> None:
+        from omo_manager import omo_pending_watch as watcher
+
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as outside_tmp:
+            root = Path(tmp)
+            archived = root / "202608"
+            archived.mkdir()
+            task_path = root / "worker.md"
+            leaf = task_frontmatter("done", runat="cfg:3", managerat="cfg:2")
+            task = task_frontmatter("blocked", runat="cfg:2", managerat="wl:1", blocked_on="authenticated authority absent")
+            args = Args(root, "", root / "seen.tsv", 1.0, 1.0, 30.0, Path("/status.py"), False, False)
+            _ = (root / "TODO.md").write_text("current:\nworker.md cfg:2\nprevious:\nleaf.md cfg:3\n", encoding="utf-8")
+            _ = task_path.write_text(f"{task}\nblocked leaf: leaf.md\n", encoding="utf-8")
+            _ = (root / "leaf.md").write_text(leaf, encoding="utf-8")
+            report = watcher.CodexReport("ready", ["stable authority blocker"])
+            problem = "agent-problems: blocked_idle=1\nblocked_idle: task=worker.md evidence=target=cfg:2 task_status=blocked idle_status=ready reason=authenticated authority absent owner_target=wl:1\n"
+            with patch.object(watcher, "inspect_codex", return_value=report), patch.object(
+                watcher, "blocked_custody_runtime_identity", return_value="%2\t1000\tcodex"
+            ):
+                self.assertTrue(watcher.classify_blocked_ready(args, "worker.md"))
+                old_snapshot = watcher.read_blocked_report_ledger(args)["worker.md"]
+                (root / "leaf.md").rename(archived / "leaf.md")
+                _ = (root / "TODO.md").write_text("current:\nworker.md cfg:2\nprevious:\n202608/leaf.md cfg:3\n", encoding="utf-8")
+                _ = task_path.write_text(f"{task}\nblocked leaf: 202608/leaf.md\n", encoding="utf-8")
+                self.assertEqual(problem, watcher.filter_unchanged_dependency_blocked_idle_output(args, problem, {"worker.md": old_snapshot}))
+                self.assertTrue(watcher.classify_blocked_ready(args, str(task_path)))
+                current_snapshot = watcher.read_blocked_report_ledger(args)["worker.md"]
+                self.assertNotEqual(old_snapshot, current_snapshot)
+                self.assertIsNone(watcher.filter_unchanged_dependency_blocked_idle_output(args, problem, {"worker.md": current_snapshot}))
+                _ = task_path.write_text(f"{task}\nblocked leaf: 202609/leaf.md\n", encoding="utf-8")
+                self.assertEqual(problem, watcher.filter_unchanged_dependency_blocked_idle_output(args, problem, {"worker.md": current_snapshot}))
+                outside = Path(outside_tmp) / "worker.md"
+                _ = outside.write_text(task, encoding="utf-8")
+                self.assertFalse(watcher.classify_blocked_ready(args, str(outside)))
+                self.assertFalse(watcher.classify_blocked_ready(args, str(root / "missing.md")))
+                self.assertFalse(watcher.classify_blocked_ready(args, str(root)))
+
     def test_independent_problem_scan_filters_classified_blocked_ready_and_realerts_on_drift(self) -> None:
         from omo_manager import omo_agent_status as status
         from omo_manager import omo_pending_watch as watcher
