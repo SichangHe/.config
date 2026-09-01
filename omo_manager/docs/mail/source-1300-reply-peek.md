@@ -1,0 +1,22 @@
+# Source-1300 reply lookup
+
+- purpose
+  - return one exact authenticated Human reply to the fixed Source-1300 decision message
+  - provide reply identity and plain-text body for a caller to classify `Pause summaries` or `Keep summaries`
+- fixed boundary
+  - account `sichangheagent@gmail.com`
+  - Human `stevensichanghe@gmail.com`
+  - parent `<178825768376.3726979.9266916304748627918@gmail.com>`
+  - Gmail All Mail selected read-only
+- proof
+  - require one parent and one direct transport-authenticated Human reply in one Gmail thread
+  - bind UIDVALIDITY, UID, Gmail message and thread IDs, RFC Message-IDs, sender and recipient envelopes
+  - use metadata and `BODY.PEEK[HEADER.FIELDS (...)]` for thread members
+  - use `BODY.PEEK[]` only for the authenticated Human reply
+  - compare exact identities, content, thread membership, and FLAGS before and after body reads
+  - fail closed on missing, ambiguous, malformed, unauthenticated, or drifting evidence
+- run
+  - change to the repository root
+  - source `omo_manager/.venv/bin/activate`
+  - `uv run --offline --project omo_manager --python 3.13 python omo_manager/omo_source1300_reply_peek.py`
+  - the helper does not classify the decision or change mailbox state
