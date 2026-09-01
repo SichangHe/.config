@@ -274,6 +274,28 @@ class ManagerReplaceTests(unittest.TestCase):
         stack.enter_context(patch.object(manager_replace, "SOURCE1292_SHA256", sha(source1292)))
         return root, changed, files, stack
 
+    def dual_descendant_alias_fixture(self, base: Path) -> tuple[Path, Args, dict[str, str], contextlib.ExitStack]:
+        root, args, files, authority = self.dual_descendant_fixture(base)
+        carrier = args.children[0].task
+        envelope = (root / args.authority_envelope_task).read_text(encoding="utf-8")
+        carrier_text = (root / carrier).read_text(encoding="utf-8") + envelope
+        (root / carrier).write_text(carrier_text, encoding="utf-8")
+        files[carrier] = carrier_text
+        children = tuple(
+            ChildPin(child.task, sha(carrier_text) if child.task == carrier else child.sha256)
+            for child in args.children
+        )
+        descendants = tuple(
+            replace(item, sha256=sha(carrier_text)) if item.task == carrier else item
+            for item in args.descendants
+        )
+        return root, replace(
+            args,
+            children=children,
+            descendants=descendants,
+            authority_envelope_task=carrier,
+        ), files, authority
+
     def run_replacement(self, args: Args, state: dict[str, bool]) -> str:
         inventory, stopped, proof = self.runtime(state, args.old_target, args.new_target)
         with inventory, stopped, proof:
@@ -735,6 +757,13 @@ class ManagerReplaceTests(unittest.TestCase):
             with inventory, stopped as stop_mock, proof, self.assertRaisesRegex(ReplaceError, "expected blocks"):
                 replace_manager(malformed_args)
             stop_mock.assert_not_called()
+
+    def test_authority_envelope_child_alias_is_rejected_outside_source1292_descendant_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            _root, args, _files = self.fixture(Path(tmp))
+            changed = replace(args, authority_envelope_task=args.children[0].task)
+            with self.assertRaisesRegex(ReplaceError, "alias is restricted"):
+                replace_manager(changed)
 
     def test_authority_block_digest_ignores_unrelated_outer_envelope_text(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1246,6 +1275,114 @@ class ManagerReplaceTests(unittest.TestCase):
                 replace_manager(args)
             self.assertEqual(files[args.old_task], (root / args.old_task).read_text(encoding="utf-8"))
             self.assertEqual("rolled_back", json.loads(args.audit_output.read_text(encoding="utf-8"))["state"])
+
+    def test_source1292_dual_authority_child_alias_commits_and_reauthenticates_migrated_carrier(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, _files, authority = self.dual_descendant_alias_fixture(Path(tmp))
+            live = {
+                manager_replace.canonical_target(args.old_target),
+                *(manager_replace.canonical_target(item.target) for item in args.descendants),
+            }
+            identities = {
+                manager_replace.canonical_target(args.old_target): PaneIdentity(
+                    manager_replace.canonical_target(args.old_target), "%42", 4242, 999
+                ),
+                **{
+                    manager_replace.canonical_target(item.target): PaneIdentity(
+                        manager_replace.canonical_target(item.target),
+                        item.pane_id,
+                        item.pane_pid,
+                        item.pane_start_ticks,
+                    )
+                    for item in args.descendants
+                },
+            }
+            sessions = {item.target: item.session_id for item in args.descendants} | {
+                args.old_target: args.old_session_id
+            }
+
+            def inventory() -> dict[str, PaneIdentity]:
+                return {target: identity for target, identity in identities.items() if target in live}
+
+            def stopped(stop_args: object) -> str:
+                live.remove(manager_replace.canonical_target(stop_args.target))
+                Path(stop_args.bound_close_proof_path).write_text(
+                    f"{stop_args.bound_close_proof_secret}\n", encoding="utf-8"
+                )
+                Path(stop_args.bound_close_proof_path).chmod(0o600)
+                return sessions[stop_args.target]
+
+            with (
+                authority,
+                patch.object(manager_replace, "pane_inventory", side_effect=inventory),
+                patch.object(manager_replace, "process_start_ticks", return_value=None),
+                patch.object(manager_replace, "stop", side_effect=stopped),
+            ):
+                result = replace_manager(args)
+                recovered = replace_manager(args)
+            self.assertIn("sole ownership", result)
+            self.assertIn("recovered committed", recovered)
+            carrier = parsed(root / args.authority_envelope_task, root)
+            self.assertEqual(args.new_target, carrier.managerat)
+            self.assertEqual("committed", json.loads(args.audit_output.read_text(encoding="utf-8"))["state"])
+
+    def test_source1292_dual_authority_child_alias_extra_committed_byte_rolls_back(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root, args, files, authority = self.dual_descendant_alias_fixture(Path(tmp))
+            original_replace = manager_replace.replace_snapshot
+
+            def replace_then_drift(snapshot: object, data: bytes, label: str) -> manager_replace.Snapshot:
+                result = original_replace(snapshot, data, label)
+                if label == f"active child {args.authority_envelope_task}":
+                    result.path.write_bytes(result.data + b"unexpected byte\n")
+                return result
+
+            live = {
+                manager_replace.canonical_target(args.old_target),
+                *(manager_replace.canonical_target(item.target) for item in args.descendants),
+            }
+            identities = {
+                manager_replace.canonical_target(args.old_target): PaneIdentity(
+                    manager_replace.canonical_target(args.old_target), "%42", 4242, 999
+                ),
+                **{
+                    manager_replace.canonical_target(item.target): PaneIdentity(
+                        manager_replace.canonical_target(item.target),
+                        item.pane_id,
+                        item.pane_pid,
+                        item.pane_start_ticks,
+                    )
+                    for item in args.descendants
+                },
+            }
+            sessions = {item.target: item.session_id for item in args.descendants} | {
+                args.old_target: args.old_session_id
+            }
+
+            def inventory() -> dict[str, PaneIdentity]:
+                return {target: identity for target, identity in identities.items() if target in live}
+
+            def stopped(stop_args: object) -> str:
+                live.remove(manager_replace.canonical_target(stop_args.target))
+                Path(stop_args.bound_close_proof_path).write_text(
+                    f"{stop_args.bound_close_proof_secret}\n", encoding="utf-8"
+                )
+                Path(stop_args.bound_close_proof_path).chmod(0o600)
+                return sessions[stop_args.target]
+
+            with (
+                authority,
+                patch.object(manager_replace, "pane_inventory", side_effect=inventory),
+                patch.object(manager_replace, "process_start_ticks", return_value=None),
+                patch.object(manager_replace, "stop", side_effect=stopped),
+                patch.object(manager_replace, "replace_snapshot", side_effect=replace_then_drift),
+                self.assertRaisesRegex(ReplaceError, "replacement failed"),
+            ):
+                replace_manager(args)
+            carrier_bytes = (root / args.authority_envelope_task).read_bytes()
+            self.assertTrue(carrier_bytes.endswith(b"unexpected byte\n"))
+            self.assertNotEqual(files[args.authority_envelope_task].encode(), carrier_bytes)
+            self.assertEqual("rollback_failed", json.loads(args.audit_output.read_text(encoding="utf-8"))["state"])
 
     def test_source1292_modes_keep_distinct_recovery_binding_keys(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

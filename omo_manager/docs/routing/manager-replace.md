@@ -36,6 +36,8 @@ When the complete locked tree has no active child, the exact Source-1289 program
 
 If the exact Source-1289 tree still has active descendants and its carrier also contains Source-1292, use `--descendant-authority-envelope-sha256 SHA256` with the complete identical `--child`/`--descendant` sets. This dual-authority descendant mode requires exactly the Source-1289 and Source-1292 envelope locators and block hashes, binds and rechecks the private Source-1292 snapshot through preparation, locking, pre-close, audit, recovery, commit, and final proof, and adds both authenticated instructions to the successor queue. It is mutually exclusive with `--empty-tree-envelope-sha256`; omitting the dual-authority flag from a two-block carrier or adding a third block fails closed. All ordinary descendant closure, identity, queue, membership, protected-target, recovery, and singular-owner gates remain unchanged.
 
+If that authority-envelope task is itself a migrated child, authentication uses its immutable audited before-image until lifecycle mutation. Commit and recovery then reauthenticate both authority blocks from the exact canonical migrated child image; other child, queue, session, pane, membership, rollback, and sole-owner checks remain unchanged.
+
 For the protected-`h*` PCODX exception, also pass `--old-queue-sha256`, `--old-pcodx-state-sha256`, `--old-pcodx-ledger-sha256`, `--old-pcodx-wrapper-sha256`, `--protected-targets-sha256`, and `--authority-envelope-file-sha256`. `--protected-target` order is part of the inventory digest. The mode is unavailable unless all six bindings are present and exact.
 
 Focused verification:

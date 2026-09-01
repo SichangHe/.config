@@ -1162,6 +1162,8 @@ def validate_targets(args: Args) -> None:
         or SHA256_RE.fullmatch(args.descendant_authority_envelope_sha256) is None
     ):
         raise ReplaceError("Source-1292 descendant mode requires exact Source-1289 with nonempty descendant pins")
+    if any(child.task == args.authority_envelope_task for child in args.children) and not is_source1292_descendant_tree(args):
+        raise ReplaceError("authority-envelope child alias is restricted to exact Source-1292 descendant mode")
     if is_source1289_whole_tree(args) and (
         args.authority_sha256 != SOURCE1289_SHA256
         or LineRange(*SOURCE1289_TREE_LINES) not in args.successor_item_lines
@@ -1323,6 +1325,32 @@ def prepare(args: Args, paths: tuple[Path, ...]) -> Plan:
         descendant_identities,
         empty_tree_authority,
     )
+
+
+def authority_envelope_child_index(args: Args) -> int | None:
+    """Return the migrated child index when the authority carrier is that child."""
+
+    return next(
+        (index for index, child in enumerate(args.children) if child.task == args.authority_envelope_task),
+        None,
+    )
+
+
+def authenticate_committed_authority_envelope(
+    args: Args,
+    plan: Plan,
+    child_after: tuple[Snapshot, ...],
+) -> None:
+    """Authenticate unchanged authority blocks in a migrated child carrier."""
+
+    index = authority_envelope_child_index(args)
+    if index is None:
+        require_snapshot(plan.authority_envelope, "replacement authority envelope")
+        return
+    envelope = child_after[index]
+    _ = authority_material(args, plan.authority, envelope)
+    if is_source1292_empty_tree(args) or is_source1292_descendant_tree(args):
+        _ = empty_tree_authority_material(args, envelope)
 
 
 def encoded(data: bytes) -> str:
@@ -1822,6 +1850,12 @@ def recovery_plan(
         raise ReplaceError("recovery found changed lifecycle file mode or group")
     authority = read_snapshot(task_path(args.root, args.authority_file), "recovery replacement authority")
     envelope = read_snapshot(task_path(args.root, args.authority_envelope_task), "recovery authority envelope")
+    envelope_child_index = authority_envelope_child_index(args)
+    if envelope_child_index is not None:
+        envelope_entry = child_entries[envelope_child_index]
+        if envelope_entry.before is None:
+            raise ReplaceError("private replacement audit lost the authority-envelope child before image")
+        envelope = Snapshot(envelope.path, envelope_entry.before, envelope.state)
     authority_items = authority_material(args, authority, envelope)
     empty_tree_authority: Snapshot | None = None
     if is_source1292_empty_tree(args) or is_source1292_descendant_tree(args):
@@ -2403,7 +2437,7 @@ def prove_committed(args: Args, plan: Plan, old_after: Snapshot, child_after: tu
         _prepared, _authority, _source_args, _entries = authenticate_closed_owner_source(args)
         validate_closed_owner_absence(args)
     require_snapshot(plan.authority, "replacement authority")
-    require_snapshot(plan.authority_envelope, "replacement authority envelope")
+    authenticate_committed_authority_envelope(args, plan, child_after)
     if plan.empty_tree_authority is not None:
         require_snapshot(plan.empty_tree_authority, "Source-1292 empty-tree authority")
     require_snapshot(old_after, "committed old manager")
