@@ -640,10 +640,10 @@ def reconcile(args: Args) -> None:
                     audit,
                 )
 
-            def evidence_is_current() -> bool:
+            def evidence_is_current(expected_pane_id: str) -> bool:
                 try:
                     return (
-                        exact_pane_id(target) == args.pane_id
+                        exact_pane_id(target) == expected_pane_id
                         and path.read_text(encoding="utf-8") == failed_text
                         and todo.read_text(encoding="utf-8") == current_todo
                         and read_private_audit(close_intent_path) == recovery_text
@@ -664,12 +664,16 @@ def reconcile(args: Args) -> None:
                         args.session_id,
                         args.terminal_evidence,
                         expected_capture_sha256=capture_sha256,
-                        evidence_is_current=evidence_is_current,
+                        evidence_is_current=lambda: evidence_is_current(args.pane_id),
                     )
                 except Exception as exc:
                     raise TaskFrontmatterError("ordinary-shell close did not complete; carrier is now in the existing done_close_failed recovery state") from exc
                 if exact_pane_id(target):
                     raise TaskFrontmatterError("ordinary-shell close returned while the authority-carrier target remained live")
+            elif exact_pane_id(target):
+                raise OSError("authority-carrier target reappeared during evidence-bound absent-pane finish")
+            elif not evidence_is_current(""):
+                raise OSError("bound lifecycle evidence changed before evidence-bound absent-pane finish")
             noted_text = failed_text.rstrip("\n") + close_note(target, args.session_id)
             if authority_blocks(noted_text) != (expected_authority,):
                 raise OSError("close bookkeeping would lose Source-1290 authority custody")

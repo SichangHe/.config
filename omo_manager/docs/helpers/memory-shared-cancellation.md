@@ -36,7 +36,8 @@ interrupted carrier closure
   - records the canonical `done_close_failed: ... status=not_codex` blocker, fsyncs its bound carrier directory, then durably prepares an adjacent owner-private close intent before pane mutation
   - binds that intent to the authenticated terminal-capture digest, carrier, TODO, completed audit, Source-1290 authority, session, and terminal evidence before closing the exact numeric pane
     - the pane kill and the accepted ordinary-shell command set share one tmux-server identity predicate, so a post-authentication command change cannot close the pane
-    - a process interruption before the kill leaves the exact pane live for reauthentication; an interruption after the kill leaves the intent needed to finish without inferring closure from bare absence
+    - a process interruption before the kill leaves the exact pane live for reauthentication; a successful close followed by a pre-note interruption leaves the intent needed to finish without inferring closure from bare absence
+    - an absent-pane finish rechecks all bound evidence and that the symbolic target did not reappear before close-note bookkeeping
     - an ordinary close failure remains in the existing live-pane `done_close_failed` recovery contract
   - on a successful exact-pane close, records the close UUID, moves only the carrier row to `previous`, and sets only the carrier `done`
   - never calls completion-mail or mailbox APIs and never mutates the completed audit, Human source, memory record, transcription record, or other authority carrier

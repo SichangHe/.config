@@ -336,7 +336,7 @@ class Source1290DoneReconcileTests(unittest.TestCase):
             self.assertEqual(authority_before, authority.read_bytes())
             self.assertEqual(audit_before, audit.read_bytes())
 
-    def test_retry_finishes_from_durable_intent_after_process_dies_post_kill(self) -> None:
+    def test_retry_finishes_after_successful_close_then_pre_note_crash(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             args, carrier, todo, authority, audit = self.fixture(Path(tmp))
             authority_before = authority.read_bytes()
@@ -346,7 +346,7 @@ class Source1290DoneReconcileTests(unittest.TestCase):
             def pane(_target: str) -> str:
                 return PANE_ID if live else ""
 
-            def killed_then_interrupted(
+            def successful_close(
                 _target: str,
                 _pane: str,
                 _session: str,
@@ -358,7 +358,6 @@ class Source1290DoneReconcileTests(unittest.TestCase):
                 assert callable(identity)
                 self.assertTrue(identity())
                 live = False
-                raise KeyboardInterrupt("process died after guarded pane close")
 
             with (
                 patch("omo_manager.omo_source1290_done_reconcile.exact_pane_id", side_effect=pane),
@@ -368,9 +367,13 @@ class Source1290DoneReconcileTests(unittest.TestCase):
                 ),
                 patch(
                     "omo_manager.omo_source1290_done_reconcile.close_exited_codex_shell",
-                    side_effect=killed_then_interrupted,
+                    side_effect=successful_close,
                 ),
-                self.assertRaisesRegex(KeyboardInterrupt, "process died"),
+                patch(
+                    "omo_manager.omo_source1290_done_reconcile.close_note",
+                    side_effect=KeyboardInterrupt("process died before close note"),
+                ),
+                self.assertRaisesRegex(KeyboardInterrupt, "before close note"),
             ):
                 reconcile(args)
 
@@ -379,27 +382,121 @@ class Source1290DoneReconcileTests(unittest.TestCase):
             recovery = audit.with_name(f"{audit.name}.source1290-carrier-close-intent")
             self.assertTrue(recovery.is_file())
             self.assertEqual(0o600, recovery.stat().st_mode & 0o777)
+            recovery_before = recovery.read_bytes()
 
             retry = replace(args, task_sha256=sha256(carrier.read_bytes()))
             with (
                 patch("omo_manager.omo_source1290_done_reconcile.exact_pane_id", side_effect=pane),
+                patch(
+                    "omo_manager.omo_source1290_done_reconcile.close_note",
+                    side_effect=KeyboardInterrupt("retry died before close note"),
+                ),
+                self.assertRaisesRegex(KeyboardInterrupt, "retry died"),
+            ):
+                reconcile(retry)
+            self.assertEqual(interrupted, carrier.read_text(encoding="utf-8"))
+            self.assertEqual(recovery_before, recovery.read_bytes())
+
+            with (
+                patch("omo_manager.omo_source1290_done_reconcile.exact_pane_id", side_effect=pane),
                 patch("omo_manager.omo_source1290_done_reconcile.validate_exited_codex_shell") as validate,
                 patch("omo_manager.omo_source1290_done_reconcile.close_exited_codex_shell") as close,
+                patch("omo_manager.omo_task_status.require_owner_completion") as completion_gate,
+                patch("omo_manager.omo_completion_email.send_completion_email") as email,
             ):
                 reconcile(retry)
             validate.assert_not_called()
             close.assert_not_called()
+            completion_gate.assert_not_called()
+            email.assert_not_called()
             metadata = parse_task_metadata(carrier.read_text(encoding="utf-8"), args.root)
             self.assertIsNotNone(metadata)
             assert metadata is not None
             self.assertEqual("done", metadata.status)
             self.assertEqual(authority_before, authority.read_bytes())
             self.assertEqual(audit_before, audit.read_bytes())
+            self.assertEqual(recovery_before, recovery.read_bytes())
             self.assertEqual(
                 "current:\ntranscription_sw.md wl:32\nduplicate_carrier.md cfg:9\n\nhuman pending:\n\nprevious:\nsource1290_carrier.md cfg:1\nmemory_research_mgr.md wl:32\n",
                 todo.read_text(encoding="utf-8"),
             )
             self.assertIn(f"session_id: `{SESSION_ID}`", carrier.read_text(encoding="utf-8"))
+
+    def test_absent_pane_finish_rejects_target_reappearance_before_close_note(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args, carrier, todo, _authority, audit = self.fixture(Path(tmp))
+            with (
+                patch("omo_manager.omo_source1290_done_reconcile.exact_pane_id", return_value=PANE_ID),
+                patch(
+                    "omo_manager.omo_source1290_done_reconcile.validate_exited_codex_shell",
+                    return_value=CAPTURE_SHA256,
+                ),
+                patch(
+                    "omo_manager.omo_source1290_done_reconcile.close_exited_codex_shell",
+                    side_effect=RuntimeError("close rejected after intent"),
+                ),
+                self.assertRaisesRegex(TaskFrontmatterError, "existing done_close_failed recovery state"),
+            ):
+                reconcile(args)
+            failed = carrier.read_bytes()
+            todo_before = todo.read_bytes()
+            retry = replace(args, task_sha256=sha256(failed))
+            with (
+                patch("omo_manager.omo_source1290_done_reconcile.exact_pane_id", side_effect=("", "", PANE_ID)),
+                patch("omo_manager.omo_source1290_done_reconcile.validate_exited_codex_shell") as validate,
+                patch("omo_manager.omo_source1290_done_reconcile.close_exited_codex_shell") as close,
+                patch("omo_manager.omo_source1290_done_reconcile.close_note") as note,
+                self.assertRaisesRegex(OSError, "target reappeared"),
+            ):
+                reconcile(retry)
+            validate.assert_not_called()
+            close.assert_not_called()
+            note.assert_not_called()
+            self.assertEqual(failed, carrier.read_bytes())
+            self.assertEqual(todo_before, todo.read_bytes())
+            self.assertTrue(audit.with_name(f"{audit.name}.source1290-carrier-close-intent").is_file())
+
+    def test_absent_pane_finish_rechecks_bound_evidence_before_close_note(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            args, carrier, todo, _authority, audit = self.fixture(Path(tmp))
+            with (
+                patch("omo_manager.omo_source1290_done_reconcile.exact_pane_id", return_value=PANE_ID),
+                patch(
+                    "omo_manager.omo_source1290_done_reconcile.validate_exited_codex_shell",
+                    return_value=CAPTURE_SHA256,
+                ),
+                patch(
+                    "omo_manager.omo_source1290_done_reconcile.close_exited_codex_shell",
+                    side_effect=RuntimeError("close rejected after intent"),
+                ),
+                self.assertRaisesRegex(TaskFrontmatterError, "existing done_close_failed recovery state"),
+            ):
+                reconcile(args)
+            failed = carrier.read_bytes()
+            todo_before = todo.read_bytes()
+            retry = replace(args, task_sha256=sha256(failed))
+            pane_checks = 0
+
+            def absent_then_audit_drift(_target: str) -> str:
+                nonlocal pane_checks
+                pane_checks += 1
+                if pane_checks == 3:
+                    audit.write_bytes(audit.read_bytes() + b"drift: true\n")
+                return ""
+
+            with (
+                patch("omo_manager.omo_source1290_done_reconcile.exact_pane_id", side_effect=absent_then_audit_drift),
+                patch("omo_manager.omo_source1290_done_reconcile.validate_exited_codex_shell") as validate,
+                patch("omo_manager.omo_source1290_done_reconcile.close_exited_codex_shell") as close,
+                patch("omo_manager.omo_source1290_done_reconcile.close_note") as note,
+                self.assertRaisesRegex(OSError, "bound lifecycle evidence changed"),
+            ):
+                reconcile(retry)
+            validate.assert_not_called()
+            close.assert_not_called()
+            note.assert_not_called()
+            self.assertEqual(failed, carrier.read_bytes())
+            self.assertEqual(todo_before, todo.read_bytes())
 
     def test_retry_does_not_infer_close_from_an_absent_pane_without_intent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
