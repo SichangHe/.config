@@ -1575,6 +1575,7 @@ def write_mail(args: Args, uid: str, msg: Message, _sender: str, subject: str, i
     args.mail_dir.chmod(0o700)
     txt_path = args.mail_dir / mail_artifact_name(args, uid)
     references = "" if not image_references else "\n\nGuest images:\n" + "".join(f"- {reference}\n" for reference in image_references)
+    # 🧑 "make sure that in the future replies get sent to the guest also"
     if args.guest_hees:
         headers = [
             f"Message-ID: {str(msg.get('Message-ID', '')).strip()}",
@@ -1582,7 +1583,8 @@ def write_mail(args: Args, uid: str, msg: Message, _sender: str, subject: str, i
             f"References: {str(msg.get('References', '')).strip()}",
             f"Subject: {normalize_human_subject(subject)}",
         ]
-        body = f"{'\n'.join(headers)}\n\n{message_text(msg)}{references}"
+        header_text = "\n".join(headers)
+        body = f"{header_text}\n\n{message_text(msg)}{references}"
     else:
         body = f"Subject: {normalize_human_subject(subject)}\n\n{message_text(msg)}{references}"
     fd = os.open(txt_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)

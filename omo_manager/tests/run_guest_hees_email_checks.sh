@@ -5,6 +5,10 @@ repo_root="$(cd -- "$(dirname -- "$0")/../.." && pwd)"
 python_bin="$repo_root/omo_manager/.venv/bin/python"
 ruff_bin="$repo_root/omo_manager/.venv/bin/ruff"
 
+timeout 30s env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$repo_root" /usr/bin/python3 -c \
+  'import ast, sys; from pathlib import Path; path = Path(sys.argv[1]); source = path.read_text(encoding="utf-8"); compile(source, str(path), "exec"); ast.parse(source, str(path), feature_version=(3, 10)); import omo_manager.email_idle_watcher' \
+  "$repo_root/omo_manager/email_idle_watcher.py"
+
 timeout 120s "$python_bin" -m unittest \
   omo_manager.tests.test_guest_hees_email_watcher \
   omo_manager.tests.test_guest_images \

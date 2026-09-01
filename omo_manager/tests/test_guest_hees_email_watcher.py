@@ -160,6 +160,38 @@ class GuestHeesEmailWatcherTests(unittest.TestCase):
         self.assertEqual(watcher.GUEST_IMAGE_AUTHENTICATION, store.call_args.kwargs["authentication"])
         self.assertRegex(store.call_args.kwargs["source_id"], r"^gmail:[0-9a-f]{64}:41$")
 
+    def test_guest_artifact_preserves_exact_header_body_bytes(self) -> None:
+        msg = EmailMessage()
+        msg["Message-ID"] = "<guest-request@example.test>"
+        msg["In-Reply-To"] = "<guest-parent@example.test>"
+        msg["References"] = "<guest-root@example.test> <guest-parent@example.test>"
+        msg["Subject"] = "Guest topic"
+        msg.set_content("guest request\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            args = guest_args(root)
+            path = watcher.write_mail(
+                args,
+                "7",
+                msg,
+                GUEST_HEES_ADDRESS,
+                "Guest topic",
+                ("guest-image:v1:" + "a" * 64,),
+            )
+            payload = path.read_bytes()
+        expected = b"""Message-ID: <guest-request@example.test>
+In-Reply-To: <guest-parent@example.test>
+References: <guest-root@example.test> <guest-parent@example.test>
+Subject: Guest topic
+
+guest request
+
+
+Guest images:
+- guest-image:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+"""
+        self.assertEqual(expected, payload)
+
     def test_fulfilled_uid_is_seen_only_after_verified_reply(self) -> None:
         msg = EmailMessage()
         msg["From"] = f"Human <{GUEST_HEES_ADDRESS}>"
