@@ -11,6 +11,8 @@
 - proof
   - require one parent and one direct transport-authenticated Human reply in one Gmail thread
   - bind UIDVALIDITY, UID, Gmail message and thread IDs, RFC Message-IDs, sender and recipient envelopes
+  - obtain current UIDVALIDITY with read-only `STATUS` and require equality with any one-shot selected-mailbox response
+  - reject missing, malformed, ambiguous, out-of-range, wrong-mailbox, or conflicting UIDVALIDITY evidence before search or fetch
   - use metadata and `BODY.PEEK[HEADER.FIELDS (...)]` for thread members
   - use `BODY.PEEK[]` only for the authenticated Human reply
   - compare exact identities, content, thread membership, and FLAGS before and after body reads

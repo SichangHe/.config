@@ -19,7 +19,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from omo_manager.omo_email_config import GMAIL_IMAP_HOST, AgentMailSettings, configured_agent_mail
-from omo_manager.omo_manager_mail_compress import imap_fetch_attributes, imap_quoted, imap_response_text, imap_uid, logout_mailbox, select_mailbox, selected_uidvalidity
+from omo_manager.omo_manager_mail_compress import imap_fetch_attributes, imap_mailbox_name, imap_operation, imap_quoted, imap_response_text, imap_uid, logout_mailbox, select_mailbox
 
 ACCOUNT = "sichangheagent@gmail.com"
 HUMAN = "stevensichanghe@gmail.com"
@@ -31,6 +31,9 @@ HEADER_RESPONSE = "BODY[HEADER.FIELDS (MESSAGE-ID IN-REPLY-TO REFERENCES FROM SE
 # 🧑 "Should not happen. ... leave all the other ones as is"
 MESSAGE_FETCH = "(UID FLAGS X-GM-MSGID X-GM-THRID BODY.PEEK[])"
 MESSAGE_ID_RE = re.compile(r"<[^<>\s]+>")
+STATUS_UIDVALIDITY_RE = re.compile(r'(?P<mailbox>"(?:[^"\\]|\\.)*"|[^\s()]+)\s+\(UIDVALIDITY\s+(?P<uidvalidity>[1-9]\d*)\)\Z', re.IGNORECASE)
+RESPONSE_UIDVALIDITY_RE = re.compile(r"(?:\[UIDVALIDITY\s+)?(?P<uidvalidity>[1-9]\d*)(?:\](?:\s+.*)?)?\Z", re.IGNORECASE)
+MAX_UIDVALIDITY = 2**32 - 1
 
 
 @dataclass(frozen=True)
@@ -178,6 +181,49 @@ def _search(client: imaplib.IMAP4_SSL, *criteria: str) -> tuple[str, ...]:
     return values
 
 
+def _response_uidvalidity(name: str, data: list[bytes | None] | None) -> str | None:
+    if name.upper() != "UIDVALIDITY":
+        raise _Rejected("IMAP selected-mailbox UIDVALIDITY response type is invalid")
+    if data == [None]:
+        return None
+    if data is None or len(data) != 1 or not isinstance(data[0], bytes):
+        raise _Rejected("IMAP selected-mailbox UIDVALIDITY response is ambiguous")
+    try:
+        text = data[0].decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise _Rejected("IMAP selected-mailbox UIDVALIDITY response is malformed") from exc
+    match = RESPONSE_UIDVALIDITY_RE.fullmatch(text)
+    if match is None or int(match.group("uidvalidity")) > MAX_UIDVALIDITY:
+        raise _Rejected("IMAP selected-mailbox UIDVALIDITY response is malformed")
+    return match.group("uidvalidity")
+
+
+def _status_uidvalidity(typ: str, data: list[bytes | None]) -> str:
+    if typ != "OK":
+        raise _Rejected("IMAP mailbox STATUS UIDVALIDITY failed")
+    if len(data) != 1 or not isinstance(data[0], bytes):
+        raise _Rejected("IMAP mailbox STATUS UIDVALIDITY is missing or ambiguous")
+    try:
+        text = data[0].decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise _Rejected("IMAP mailbox STATUS UIDVALIDITY is malformed") from exc
+    match = STATUS_UIDVALIDITY_RE.fullmatch(text)
+    if match is None or int(match.group("uidvalidity")) > MAX_UIDVALIDITY or imap_mailbox_name(match.group("mailbox")) != MAILBOX:
+        raise _Rejected("IMAP mailbox STATUS UIDVALIDITY is malformed or for another mailbox")
+    return match.group("uidvalidity")
+
+
+def _current_uidvalidity(client: imaplib.IMAP4_SSL) -> str:
+    """Read one current mailbox epoch without relying on IMAP4.response's one-shot cache."""
+    response_name, response_data = imap_operation(client, "source-1300 selected UIDVALIDITY", lambda: client.response("UIDVALIDITY"))
+    selected = _response_uidvalidity(response_name, response_data)
+    typ, status_data = imap_operation(client, "source-1300 STATUS UIDVALIDITY", lambda: client.status(imap_quoted(MAILBOX), "(UIDVALIDITY)"))
+    current = _status_uidvalidity(typ, status_data)
+    if selected is not None and selected != current:
+        raise _Rejected("selected-mailbox and STATUS UIDVALIDITY values conflict")
+    return current
+
+
 def _body(message: Message) -> str:
     parts = [part for part in message.walk() if not part.is_multipart() and not part.get_filename() and part.get_content_type() == "text/plain"]
     if len(parts) != 1:
@@ -238,7 +284,7 @@ def _header_binding(message: Message) -> tuple[tuple[str, tuple[str, ...]], ...]
 
 def _lookup(client: imaplib.IMAP4_SSL, settings: AgentMailSettings) -> ReplyEvidence:
     select_mailbox(client, MAILBOX, readonly=True)
-    uidvalidity_before = selected_uidvalidity(client)
+    uidvalidity_before = _current_uidvalidity(client)
     parent_uids_before = _search(client, "HEADER", "Message-ID", imap_quoted(PARENT_MESSAGE_ID))
     if len(parent_uids_before) != 1:
         raise _Rejected("exact parent Message-ID is missing or ambiguous")
@@ -254,7 +300,7 @@ def _lookup(client: imaplib.IMAP4_SSL, settings: AgentMailSettings) -> ReplyEvid
     metadata_after_headers = tuple(_fetch(client, uid, "metadata") for uid in thread_uids_before)
     parent_uids_after_headers = _search(client, "HEADER", "Message-ID", imap_quoted(PARENT_MESSAGE_ID))
     thread_uids_after_headers = _search(client, "X-GM-THRID", parent_metadata.gmail_thread_id)
-    uidvalidity_after_headers = selected_uidvalidity(client)
+    uidvalidity_after_headers = _current_uidvalidity(client)
     identities_before = tuple((record.uid, record.gmail_message_id, record.gmail_thread_id, record.flags) for record in metadata_before)
     identities_first_headers = tuple((record.uid, record.gmail_message_id, record.gmail_thread_id, record.flags) for record in first_headers)
     identities_second_headers = tuple((record.uid, record.gmail_message_id, record.gmail_thread_id, record.flags) for record in second_headers)
@@ -290,7 +336,7 @@ def _lookup(client: imaplib.IMAP4_SSL, settings: AgentMailSettings) -> ReplyEvid
     metadata_after_reply = tuple(_fetch(client, uid, "metadata") for uid in thread_uids_before)
     parent_uids_after_reply = _search(client, "HEADER", "Message-ID", imap_quoted(PARENT_MESSAGE_ID))
     thread_uids_after_reply = _search(client, "X-GM-THRID", parent_metadata.gmail_thread_id)
-    uidvalidity_after_reply = selected_uidvalidity(client)
+    uidvalidity_after_reply = _current_uidvalidity(client)
     reply_identity = (reply_header_record.uid, reply_header_record.gmail_message_id, reply_header_record.gmail_thread_id, reply_header_record.flags)
     reply_metadata_before_identity = (reply_metadata_before.uid, reply_metadata_before.gmail_message_id, reply_metadata_before.gmail_thread_id, reply_metadata_before.flags)
     first_reply_identity = (first_reply.uid, first_reply.gmail_message_id, first_reply.gmail_thread_id, first_reply.flags)

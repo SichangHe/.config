@@ -21,6 +21,7 @@ from omo_manager.omo_source1300_reply_peek import (
     ReplyEvidence,
     _attributes,  # pyright: ignore[reportPrivateUsage]
     _body,  # pyright: ignore[reportPrivateUsage]
+    _current_uidvalidity,  # pyright: ignore[reportPrivateUsage]
     _flags,  # pyright: ignore[reportPrivateUsage]
     lookup_reply,
 )
@@ -63,7 +64,8 @@ def duplicate_header(raw: bytes, name: str, value: str) -> bytes:
 
 class FakeClient:
     def __init__(self) -> None:
-        self.uidvalidities: list[bytes] = [b"12", b"12", b"12"]
+        self.uidvalidities: list[bytes | None] = [b"12", None, None]
+        self.status_uidvalidities: list[bytes | None] = [b'"[Gmail]/All Mail" (UIDVALIDITY 12)'] * 3
         self.parent_searches: list[bytes] = [b"7", b"7", b"7"]
         self.thread_searches: list[bytes] = [b"7 8", b"7 8", b"7 8"]
         self.raw_by_uid: dict[str, bytes] = {"7": PARENT_RAW, "8": REPLY_RAW}
@@ -83,9 +85,13 @@ class FakeClient:
         self.selected.append((mailbox, readonly))
         return "OK", [b""]
 
-    def response(self, name: str) -> tuple[str, list[bytes]]:
+    def response(self, name: str) -> tuple[str, list[bytes | None]]:
         self.calls.append(("response", (name,)))
         return "UIDVALIDITY", [self.uidvalidities.pop(0)]
+
+    def status(self, mailbox: str, names: str) -> tuple[str, list[bytes | None]]:
+        self.calls.append(("status", (mailbox, names)))
+        return "OK", [self.status_uidvalidities.pop(0)]
 
     def uid(self, command: str, *args: str | None) -> tuple[str, list[bytes | tuple[bytes, bytes]]]:
         self.calls.append((command, args))
@@ -209,7 +215,7 @@ class Source1300ReplyPeekTest(unittest.TestCase):
 
     def test_rejects_uidvalidity_and_flags_drift(self) -> None:
         client = FakeClient()
-        client.uidvalidities[1] = b"13"
+        client.status_uidvalidities[1] = b'"[Gmail]/All Mail" (UIDVALIDITY 13)'
         self.assert_failure(client, "UIDVALIDITY")
 
         class FlagsDriftClient(FakeClient):
@@ -229,6 +235,79 @@ class Source1300ReplyPeekTest(unittest.TestCase):
                 return super().uid(command, *args)
 
         self.assert_failure(UnrelatedFlagsDriftClient(), "FLAGS")
+
+    def test_uidvalidity_accepts_observed_one_shot_selection_cache_via_exact_status(self) -> None:
+        client = FakeClient()
+        result = self.lookup(client)
+        self.assertIsInstance(result, ReplyEvidence)
+        self.assertEqual([], client.uidvalidities)
+        self.assertEqual(3, sum(command == "response" for command, _args in client.calls))
+        self.assertEqual(3, sum(command == "status" for command, _args in client.calls))
+
+    def test_uidvalidity_accepts_exact_status_when_selection_cache_is_already_empty(self) -> None:
+        client = FakeClient()
+        client.uidvalidities = [None, None, None]
+        self.assertIsInstance(self.lookup(client), ReplyEvidence)
+
+    def test_uidvalidity_accepts_supported_selected_response_forms(self) -> None:
+        for selected in (b"12", b"[UIDVALIDITY 12]", b"[UIDVALIDITY 12] UIDs valid"):
+            with self.subTest(selected=selected):
+                client = FakeClient()
+                client.uidvalidities = [selected, selected, selected]
+                self.assertIsInstance(self.lookup(client), ReplyEvidence)
+
+    def test_uidvalidity_rejects_missing_ambiguous_malformed_and_conflicting_values_before_fetch(self) -> None:
+        cases: tuple[tuple[list[bytes | None], list[bytes | None], str], ...] = (
+            ([None], [None], "missing or ambiguous"),
+            ([None, b"12"], [b'"[Gmail]/All Mail" (UIDVALIDITY 12)'], "ambiguous"),
+            ([None], [None, b'"[Gmail]/All Mail" (UIDVALIDITY 12)'], "ambiguous"),
+            ([], [b'"[Gmail]/All Mail" (UIDVALIDITY 12)'], "ambiguous"),
+            ([b"12", b"12"], [b'"[Gmail]/All Mail" (UIDVALIDITY 12)'], "ambiguous"),
+            ([b"invalid"], [b'"[Gmail]/All Mail" (UIDVALIDITY 12)'], "malformed"),
+            ([b"0"], [b'"[Gmail]/All Mail" (UIDVALIDITY 12)'], "malformed"),
+            ([b"4294967296"], [b'"[Gmail]/All Mail" (UIDVALIDITY 12)'], "malformed"),
+            ([b"12"], [b'"[Gmail]/All Mail" (UIDVALIDITY 13)'], "conflict"),
+            ([None], [b'"other" (UIDVALIDITY 12)'], "another mailbox"),
+            ([None], [b'"[Gmail]/All Mail" (UIDVALIDITY 12) extra'], "malformed"),
+            ([None], [b'"[Gmail]/All Mail" (UIDVALIDITY 12)', b'"[Gmail]/All Mail" (UIDVALIDITY 12)'], "ambiguous"),
+        )
+        for selected, status, expected in cases:
+            with self.subTest(expected=expected):
+
+                class UidvalidityClient(FakeClient):
+                    @override
+                    def response(self, name: str) -> tuple[str, list[bytes | None]]:
+                        self.calls.append(("response", (name,)))
+                        return "UIDVALIDITY", selected
+
+                    @override
+                    def status(self, mailbox: str, names: str) -> tuple[str, list[bytes | None]]:
+                        self.calls.append(("status", (mailbox, names)))
+                        return "OK", status
+
+                client = UidvalidityClient()
+                self.assert_failure(client, expected)
+                self.assertFalse(any(command in {"search", "fetch", "store"} for command, _args in client.calls))
+
+    def test_uidvalidity_parser_rejects_invalid_response_type_and_status_failure(self) -> None:
+        class ResponseTypeFailureClient(FakeClient):
+            @override
+            def response(self, name: str) -> tuple[str, list[bytes | None]]:
+                _ = name
+                return "OTHER", [b"12"]
+
+        with self.assertRaisesRegex(RuntimeError, "response type"):
+            _ = _current_uidvalidity(ResponseTypeFailureClient())  # pyright: ignore[reportArgumentType]
+
+        class StatusFailureClient(FakeClient):
+            @override
+            def status(self, mailbox: str, names: str) -> tuple[str, list[bytes | None]]:
+                _ = (mailbox, names)
+                return "NO", []
+
+        client = StatusFailureClient()
+        self.assert_failure(client, "STATUS UIDVALIDITY failed")
+        self.assertFalse(any(command in {"search", "fetch", "store"} for command, _args in client.calls))
 
     def test_rejects_content_envelope_parent_and_authentication_drift(self) -> None:
         variants = (
