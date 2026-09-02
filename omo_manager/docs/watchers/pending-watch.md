@@ -36,6 +36,8 @@
   - maintenance command output remains small enough for captured pipes
 
 - pending ref semantics
+  - a task file may have at most one live `(pending)` marker; it is temporary intake, not a backlog
+  - the receiving agent consumes it as soon as possible by routing the request to its sole owner or recording the open request in `pending_task_items`; only the supported record/clear or verified-delivery path removes it
   - scans Markdown for literal `(pending)` markers outside fenced code
   - treats the unquoted, unindented line immediately after `(pending)` only as an origin candidate; source-like payload, quoted lines, and free-form lookalikes remain human
   - normal manager deliveries start by telling the manager to run `omo_record_pending.py`

@@ -253,6 +253,9 @@ MANAGER_EMAIL_POLICY_REMINDERS = (
     *MANAGER_POLICY_REMINDERS,
     "Reminder: acknowledge human email first, then delegate.",
 )
+PENDING_CONSUMPTION_INSTRUCTION = (
+    "A task file may have at most one live `(pending)` marker. Consume it as soon as possible: reroute it or record its open work in `pending_task_items`."
+)
 IGNORED_PENDING_NOTE_PREFIXES = ("(email_idle_watcher manager-mail-threshold-push-failed ",)
 IGNORED_PENDING_NOTE_DETAIL_PREFIXES = ("manager mail threshold tmux poke failed:",)
 IGNORE_PARTS = {".git", ".venv", "__pycache__"}
@@ -2744,7 +2747,7 @@ def manager_pending_instruction(marker: Marker, after_recording: str = "Then dis
         flag_note = "Do not pass `--ack-human`; agent-origin reports do not need a human acknowledgement."
         fallback_note = "If there is no pending task item to add, use `omo_task_edit.py pending-marker-clear` with `--comment`; for existing pending-item edits, use `omo_task_edit.py pending-replace` or `omo_task_edit.py pending-remove --evidence TEXT`."
     return (
-        "Normally record pending items and remove the consumed `(pending)` marker by running:\n"
+        f"{PENDING_CONSUMPTION_INSTRUCTION} Normally record pending items and remove the consumed `(pending)` marker by running:\n"
         f"`{command}`\n"
         f"{quote_note} {flag_note} {fallback_note} {after_recording}"
     )
@@ -2894,6 +2897,7 @@ def marker_direct_text(marker: Marker, attachments: Sequence[SourceAttachment]) 
     message = html.escape(direct_message_text(marker, attachments), quote=False)
     return "\n".join(
         (
+            PENDING_CONSUMPTION_INSTRUCTION,
             "Immediately record every pending task with `omo_pending.py add`:",
             "<human_instruction>",
             message,
@@ -2909,7 +2913,7 @@ def marker_agent_report_text(marker: Marker, attachments: Sequence[SourceAttachm
     excerpt = truncate_content(payload, PENDING_CONTENT_CHAR_LIMIT)
     pointer = display_pending_tail(adjacent_source_metadata(marker.block_text.splitlines()))
     message = html.escape("\n\n".join(filter(None, (excerpt, pointer))), quote=False)
-    return "\n".join(("Agent report received; review it and handle any follow-up:", "<agent_report>", message, "</agent_report>"))
+    return "\n".join((PENDING_CONSUMPTION_INSTRUCTION, "Agent report received; review it and handle any follow-up:", "<agent_report>", message, "</agent_report>"))
 
 
 def marker_agent_source_target(marker: Marker) -> str:
@@ -2940,6 +2944,7 @@ def marker_manager_delegation_text(marker: Marker, attachments: Sequence[SourceA
     message = html.escape(direct_message_text(marker, attachments), quote=False)
     return "\n".join(
         (
+            PENDING_CONSUMPTION_INSTRUCTION,
             "Manager delegation received; carry out the delegated work and report through the normal task channel:",
             "<manager_delegation>",
             message,

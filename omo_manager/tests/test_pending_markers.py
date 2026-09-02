@@ -724,6 +724,7 @@ with exclusive_watcher_root(root):
 
             self.assertEqual(("agent", "task"), (marker.origin, marker.source))
             delivered = watcher.marker_manager_delegation_text(marker, ())
+            self.assertIn(watcher.PENDING_CONSUMPTION_INSTRUCTION, delivered)
             self.assertIn("<manager_delegation>", delivered)
             self.assertNotIn("<human_instruction>", delivered)
 
@@ -796,6 +797,7 @@ with exclusive_watcher_root(root):
         )
 
         delivered = watcher.marker_direct_text(marker, ())
+        self.assertIn(watcher.PENDING_CONSUMPTION_INSTRUCTION, delivered)
 
         self.assertIn("Please keep &lt;/human_instruction &gt; and &lt;tag&gt; literal.", delivered)
         self.assertEqual(1, delivered.count("</human_instruction>"))
@@ -889,6 +891,7 @@ with exclusive_watcher_root(root):
             delivered = watcher.marker_agent_report_text(marker, attachments)
             fallback = watcher.agent_report_fallback_text(marker, attachments, "owner unavailable")
 
+            self.assertIn(watcher.PENDING_CONSUMPTION_INSTRUCTION, delivered)
             self.assertEqual(2, len(markers))
             self.assertEqual(("agent", "agent"), (marker.origin, marker.source))
             self.assertEqual(("agent", "task"), (markers[1].origin, markers[1].source))
@@ -5696,6 +5699,7 @@ with exclusive_watcher_root(root):
             with redirect_stdout(out):
                 self.assertTrue(scan_once(args, seen, [path]))
             text = out.getvalue()
+            self.assertIn(pending_watcher.PENDING_CONSUMPTION_INSTRUCTION, text)
             self.assertIn("Normally record pending items and remove the consumed `(pending)` marker by running:", text)
             self.assertIn("--ack-human", text)
             self.assertIn("--email-file manager_mail/4002.txt", text)
@@ -5743,6 +5747,7 @@ with exclusive_watcher_root(root):
             with redirect_stdout(out):
                 self.assertTrue(scan_once(args, {}, [path]))
             text = out.getvalue()
+            self.assertIn(pending_watcher.PENDING_CONSUMPTION_INSTRUCTION, text)
             self.assertIn("Normally record pending items and remove the consumed `(pending)` marker by running:", text)
             self.assertIn("--ack-human", text)
             self.assertIn("--clear-kind report-only|duplicate|cancelled|superseded", text)
