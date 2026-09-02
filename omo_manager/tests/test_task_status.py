@@ -27,6 +27,7 @@ from omo_manager.omo_task_status import park_audit_record
 from omo_manager.omo_task_status import park_target_pane_id
 from omo_manager.omo_task_status import park_unlinked
 from omo_manager.omo_task_status import reattest_park_unlinked
+from omo_manager.omo_task_status import finish_done_transaction
 from omo_manager.omo_task_status import finish_shared_target_done
 from omo_manager.omo_task_status import finish_private_audit
 from omo_manager.omo_task_status import StopArgs
@@ -1714,6 +1715,241 @@ class TaskStatusTests(unittest.TestCase):
         )
         self.assertEqual("manager_mail/authority.txt", args.human_close_authorization_source)
         self.assertEqual("a" * 64, args.human_close_authorization_sha256)
+
+    def test_live_no_mail_parser_requires_exact_cas_evidence(self) -> None:
+        complete = [
+            "--root", "/tmp/work_logs", "--complete-live-no-mail",
+            "--active-target", "wl:2",
+            "--manager-target", "wl:1",
+            "--expected-task-sha256", "a" * 64,
+            "--expected-todo-sha256", "b" * 64,
+            "--expected-pane-id", "%42",
+            "task.md",
+        ]
+        args = parse_args(complete)
+        self.assertTrue(args.complete_live_no_mail)
+        self.assertEqual("done", args.status)
+        self.assertEqual("wl:2", args.active_target)
+        self.assertEqual("wl:1", args.manager_target)
+        self.assertEqual("%42", args.expected_pane_id)
+        for option in ("--active-target", "--manager-target", "--expected-task-sha256", "--expected-todo-sha256", "--expected-pane-id"):
+            candidate = complete.copy()
+            index = candidate.index(option)
+            del candidate[index : index + 2]
+            with self.subTest(option=option), self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+                parse_args(candidate)
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            parse_args([*complete, "done"])
+        human_manager = complete.copy()
+        human_manager[human_manager.index("--manager-target") + 1] = "hmanager:1"
+        with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+            parse_args(human_manager)
+
+    def test_live_no_mail_completion_changes_only_task_and_todo_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            text = task_frontmatter(status="running", runat="wl:2") + "body\n"
+            task.write_text(text, encoding="utf-8")
+            todo = root / "TODO.md"
+            todo_text = "current:\ntask.md wl:2\n\nlow priority:\n\nhuman pending:\n\nprevious:\n"
+            todo.write_text(todo_text, encoding="utf-8")
+            unrelated = root / "notes.txt"
+            unrelated.write_text("preserve\n", encoding="utf-8")
+            args = StatusArgs(
+                root,
+                Path("task.md"),
+                "done",
+                "",
+                complete_live_no_mail=True,
+                active_target="wl:2",
+                manager_target="wl:1",
+                expected_task_sha256=hashlib.sha256(text.encode()).hexdigest(),
+                expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest(),
+                expected_pane_id="%42",
+            )
+            output = io.StringIO()
+            with (
+                patch("omo_manager.omo_task_status.exact_pane_id", return_value="%42") as pane,
+                patch("omo_manager.omo_task_status.require_owner_completion") as email,
+                patch("omo_manager.omo_task_status.stop_done_agent") as stop,
+                patch("omo_manager.omo_task_status.record_close") as record,
+                patch("omo_manager.omo_task_status.blocking_request") as blocking,
+                redirect_stdout(output),
+            ):
+                self.assertEqual(0, run(args))
+            metadata = parse_task_metadata(task.read_text(encoding="utf-8"), root)
+            self.assertIsNotNone(metadata)
+            assert metadata is not None
+            self.assertEqual("done", metadata.status)
+            self.assertEqual((), metadata.pending_task_items)
+            self.assertTrue(task.read_text(encoding="utf-8").endswith("body\n"))
+            self.assertEqual(
+                "current:\n\nlow priority:\n\nhuman pending:\n\nprevious:\ntask.md wl:2\n",
+                todo.read_text(encoding="utf-8"),
+            )
+            self.assertEqual("preserve\n", unrelated.read_text(encoding="utf-8"))
+            self.assertIn("without email or pane mutation", output.getvalue())
+            self.assertEqual(2, pane.call_count)
+            pane.assert_called_with("wl:2")
+            email.assert_not_called()
+            stop.assert_not_called()
+            record.assert_not_called()
+            blocking.assert_not_called()
+
+    def test_live_no_mail_completion_rejects_nonmatching_task_and_todo_state(self) -> None:
+        cases = (
+            ("blocked", task_frontmatter(status="blocked", blocked_on="wait", runat="wl:2") + "body\n", "current:\ntask.md wl:2\n\nprevious:\n"),
+            ("queue", task_frontmatter(status="running", runat="wl:2", pending_items=("work",)) + "body\n", "current:\ntask.md wl:2\n\nprevious:\n"),
+            ("manager", task_frontmatter(status="running", runat="wl:2", is_manager=True) + "body\n", "current:\ntask.md wl:2\n\nprevious:\n"),
+            ("wrong manager", task_frontmatter(status="running", runat="wl:2", managerat="wl:9") + "body\n", "current:\ntask.md wl:2\n\nprevious:\n"),
+            ("human manager", task_frontmatter(status="running", runat="wl:2", managerat="hmanager:1") + "body\n", "current:\ntask.md wl:2\n\nprevious:\n"),
+            ("wrong section", task_frontmatter(status="running", runat="wl:2") + "body\n", "current:\n\nlow priority:\ntask.md wl:2\n\nprevious:\n"),
+            ("wrong target", task_frontmatter(status="running", runat="wl:2") + "body\n", "current:\ntask.md wl:3\n\nprevious:\n"),
+            ("duplicate row", task_frontmatter(status="running", runat="wl:2") + "body\n", "current:\ntask.md wl:2\ntask.md wl:2\n\nprevious:\n"),
+            ("aliased row", task_frontmatter(status="running", runat="wl:2") + "body\n", "current:\n`task.md` wl:2\n\nprevious:\n"),
+            ("annotated row", task_frontmatter(status="running", runat="wl:2") + "body\n", "current:\ntask.md wl:2 note\n\nprevious:\n"),
+        )
+        for label, text, todo_text in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                task = root / "task.md"
+                task.write_text(text, encoding="utf-8")
+                todo = root / "TODO.md"
+                todo.write_text(todo_text, encoding="utf-8")
+                args = StatusArgs(
+                    root,
+                    Path("task.md"),
+                    "done",
+                    "",
+                    complete_live_no_mail=True,
+                    active_target="wl:2",
+                    manager_target="hmanager:1" if label == "human manager" else "wl:1",
+                    expected_task_sha256=hashlib.sha256(text.encode()).hexdigest(),
+                    expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest(),
+                    expected_pane_id="%42",
+                )
+                with patch("omo_manager.omo_task_status.exact_pane_id", return_value="%42"), redirect_stderr(io.StringIO()):
+                    self.assertEqual(2, run(args))
+                self.assertEqual(text, task.read_text(encoding="utf-8"))
+                self.assertEqual(todo_text, todo.read_text(encoding="utf-8"))
+
+    def test_live_no_mail_completion_rejects_digest_owner_pane_and_write_races(self) -> None:
+        for case in ("task digest", "todo digest", "duplicate owner", "pane", "task race", "todo race", "task write"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                task = root / "task.md"
+                text = task_frontmatter(status="running", runat="wl:2") + "body\n"
+                task.write_text(text, encoding="utf-8")
+                todo = root / "TODO.md"
+                todo_text = "current:\ntask.md wl:2\n\nprevious:\n"
+                todo.write_text(todo_text, encoding="utf-8")
+                if case == "duplicate owner":
+                    (root / "other.md").write_text(task_frontmatter(status="running", runat="wl:2") + "body\n", encoding="utf-8")
+                args = StatusArgs(
+                    root,
+                    Path("task.md"),
+                    "done",
+                    "",
+                    complete_live_no_mail=True,
+                    active_target="wl:2",
+                    manager_target="wl:1",
+                    expected_task_sha256="0" * 64 if case == "task digest" else hashlib.sha256(text.encode()).hexdigest(),
+                    expected_todo_sha256="0" * 64 if case == "todo digest" else hashlib.sha256(todo_text.encode()).hexdigest(),
+                    expected_pane_id="%42",
+                )
+                original_task = task.read_text(encoding="utf-8")
+                original_todo = todo.read_text(encoding="utf-8")
+                pane_values = ["%41"] if case == "pane" else ["%42", "%42"]
+                if case == "todo race":
+                    def pane_with_todo_race(_target: str) -> str:
+                        value = pane_values.pop(0)
+                        if not pane_values:
+                            todo.write_text(f"{todo_text}\nconcurrent\n", encoding="utf-8")
+                        return value
+
+                    pane_patch = patch("omo_manager.omo_task_status.exact_pane_id", side_effect=pane_with_todo_race)
+                else:
+                    pane_patch = patch("omo_manager.omo_task_status.exact_pane_id", side_effect=pane_values)
+                ownership_patch = nullcontext()
+                if case == "task race":
+                    def owner_with_task_race(_root: Path, _target: str) -> tuple[Path, ...]:
+                        task.write_text(f"{text}concurrent\n", encoding="utf-8")
+                        return (task,)
+
+                    ownership_patch = patch("omo_manager.omo_task_status.authoritative_active_target_task_paths", side_effect=owner_with_task_race)
+                replace_patch = nullcontext()
+                if case == "task write":
+                    def fail_task_write(path: Path, payload: str, before: os.stat_result) -> None:
+                        if path == task:
+                            raise OSError("task write failed")
+                        replace_if_unchanged_locked(path, payload, before)
+
+                    replace_patch = patch("omo_manager.omo_task_status.replace_if_unchanged_locked", side_effect=fail_task_write)
+                with pane_patch, ownership_patch, replace_patch, redirect_stderr(io.StringIO()):
+                    self.assertEqual(2, run(args))
+                expected_task = f"{text}concurrent\n" if case == "task race" else original_task
+                expected_todo = f"{todo_text}\nconcurrent\n" if case == "todo race" else original_todo
+                self.assertEqual(expected_task, task.read_text(encoding="utf-8"))
+                self.assertEqual(expected_todo, todo.read_text(encoding="utf-8"))
+
+    def test_live_no_mail_rejects_todo_removed_before_strict_transaction(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            task = root / "task.md"
+            original_task = task_frontmatter(status="running", runat="wl:2") + "body\n"
+            updated_task = update_frontmatter_status(original_task, "done", "", root)
+            task.write_text(original_task, encoding="utf-8")
+            todo = root / "TODO.md"
+            todo_text = "current:\ntask.md wl:2\n\nprevious:\n"
+            todo.write_text(todo_text, encoding="utf-8")
+            args = StatusArgs(
+                root,
+                Path("task.md"),
+                "done",
+                "",
+                complete_live_no_mail=True,
+                active_target="wl:2",
+                manager_target="wl:1",
+                expected_task_sha256=hashlib.sha256(original_task.encode()).hexdigest(),
+                expected_todo_sha256=hashlib.sha256(todo_text.encode()).hexdigest(),
+                expected_pane_id="%42",
+            )
+
+            def remove_todo_then_finish(
+                transaction_root: Path,
+                transaction_task: Path,
+                transaction_text: str,
+                transaction_before: os.stat_result,
+                *,
+                locked: bool = False,
+                todo_text: str | None = None,
+                prepared_todo: str | None = None,
+                todo_before: os.stat_result | None = None,
+            ) -> None:
+                todo.unlink()
+                finish_done_transaction(
+                    transaction_root,
+                    transaction_task,
+                    transaction_text,
+                    transaction_before,
+                    locked=locked,
+                    todo_text=todo_text,
+                    prepared_todo=prepared_todo,
+                    todo_before=todo_before,
+                )
+
+            with (
+                patch("omo_manager.omo_task_status.exact_pane_id", return_value="%42"),
+                patch("omo_manager.omo_task_status.finish_done_transaction", side_effect=remove_todo_then_finish),
+                redirect_stderr(io.StringIO()),
+            ):
+                self.assertEqual(2, run(args))
+            self.assertEqual(original_task, task.read_text(encoding="utf-8"))
+            self.assertFalse(todo.exists())
+
+            finish_done_transaction(root, task, updated_task, task.stat())
+            self.assertEqual(updated_task, task.read_text(encoding="utf-8"))
 
     def test_normal_done_refuses_human_target_before_state_or_tmux_change_without_compatible_close_helper(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

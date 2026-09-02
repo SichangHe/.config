@@ -126,6 +126,7 @@ class Args:
     normalize_low_priority_current: bool = False
     reconcile_missing_target: bool = False
     close_missing_target: bool = False
+    complete_live_no_mail: bool = False
     shared_target: str = ""
     protected_shared_task: Path | None = None
     protected_shared_sha256: str = ""
@@ -185,6 +186,7 @@ class ParsedArgs(argparse.Namespace):
     normalize_low_priority_current: bool = False
     reconcile_missing_target: bool = False
     close_missing_target: bool = False
+    complete_live_no_mail: bool = False
     shared_target: str = ""
     protected_shared_task: Path | None = None
     protected_shared_sha256: str = ""
@@ -240,6 +242,7 @@ shutdown.""",
     _ = parser.add_argument("--retire-blocked-target", action="store_true", help="Atomically retire one blocked human-pending worker target that conflicts with one live lifecycle owner; performs no tmux action.")
     _ = parser.add_argument("--reconcile-missing-target", action="store_true", help="Atomically mark one authority-approved absent blocked target historical and remove it from its sole human-pending TODO row; never starts or stops tmux.")
     _ = parser.add_argument("--close-missing-target", action="store_true", help="Atomically close one authority-approved absent blocked record from its sole canonical TODO row; never starts or stops tmux.")
+    _ = parser.add_argument("--complete-live-no-mail", action="store_true", help="Mark one exact queue-empty live non-manager done without email or pane mutation.")
     _ = parser.add_argument("--missing-target", default="", help="Exact absent target required with --reconcile-missing-target or --close-missing-target.")
     _ = parser.add_argument("--reconcile-long-running-human-index", action="store_true", help="Move one unchanged long_running task with exact human blocker from TODO current to human pending without changing task or pane state.")
     _ = parser.add_argument("--reconcile-blocked-index", action="store_true", help="Move one digest-bound v1 blocked worker with an open queue from TODO previous or low priority to human pending without changing task or pane state.")
@@ -304,12 +307,14 @@ shutdown.""",
         parser.error("--closure-repository must be an explicit absolute Git worktree root.")
     if parsed.dirty_path_handoff is not None and parsed.closure_repository is None:
         parser.error("--dirty-path-handoff requires --closure-repository.")
-    if sum((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done, parsed.park_unlinked, parsed.reattest_park_unlinked, parsed.retire_blocked_target, parsed.reconcile_missing_target, parsed.close_missing_target, parsed.reconcile_long_running_human_index, parsed.reconcile_blocked_index, parsed.restore_terminal_target, parsed.close_shared_target, parsed.cancel_shared_target, parsed.close_retired_done, parsed.normalize_retired_todo, parsed.normalize_low_priority_current)) > 1:
+    if sum((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done, parsed.park_unlinked, parsed.reattest_park_unlinked, parsed.retire_blocked_target, parsed.reconcile_missing_target, parsed.close_missing_target, parsed.complete_live_no_mail, parsed.reconcile_long_running_human_index, parsed.reconcile_blocked_index, parsed.restore_terminal_target, parsed.close_shared_target, parsed.cancel_shared_target, parsed.close_retired_done, parsed.normalize_retired_todo, parsed.normalize_low_priority_current)) > 1:
         parser.error("finish and recovery modes are mutually exclusive.")
     if any((parsed.protected_shared_task, parsed.protected_shared_sha256)) and not parsed.cancel_shared_target:
         parser.error("protected shared-task assertions require --cancel-shared-target.")
-    if (parsed.active_target or parsed.manager_target) and not parsed.normalize_low_priority_current:
-        parser.error("--active-target and --manager-target are only valid with --normalize-low-priority-current.")
+    if parsed.active_target and not (parsed.normalize_low_priority_current or parsed.complete_live_no_mail):
+        parser.error("--active-target is only valid with --normalize-low-priority-current or --complete-live-no-mail.")
+    if parsed.manager_target and not (parsed.normalize_low_priority_current or parsed.complete_live_no_mail):
+        parser.error("--manager-target is only valid with --normalize-low-priority-current or --complete-live-no-mail.")
     if any(human_close_authority) and (
         parsed.status != "done"
         or any((parsed.finish_closed_done, parsed.finish_replaced_done, parsed.recover_exited_shell_done, parsed.park_unlinked, parsed.retire_blocked_target, parsed.reconcile_long_running_human_index, parsed.reconcile_blocked_index, parsed.restore_terminal_target, parsed.close_shared_target, parsed.close_retired_done, parsed.normalize_retired_todo, parsed.normalize_low_priority_current))
@@ -562,7 +567,7 @@ shutdown.""",
         )
     if parsed.missing_target:
         parser.error("--missing-target requires --reconcile-missing-target or --close-missing-target.")
-    if any((parsed.expected_task_sha256, parsed.expected_todo_sha256, parsed.expected_receipt_sha256, parsed.expected_pane_id, parsed.authority_file, parsed.authority_lines, parsed.authority_sha256, parsed.authority_envelope, parsed.authority_envelope_sha256)) and not parsed.cancel_shared_target:
+    if any((parsed.expected_task_sha256, parsed.expected_todo_sha256, parsed.expected_receipt_sha256, parsed.expected_pane_id, parsed.authority_file, parsed.authority_lines, parsed.authority_sha256, parsed.authority_envelope, parsed.authority_envelope_sha256)) and not (parsed.cancel_shared_target or parsed.complete_live_no_mail):
         parser.error("park-unlinked task, TODO, receipt, pane, and authority assertions require a park operation.")
     if parsed.retire_blocked_target:
         parser.error("--retire-blocked-target is disabled: preserve the historical target and resolve ownership without writing retired semantics.")
@@ -591,6 +596,43 @@ shutdown.""",
         if active_target.partition(":")[0].startswith("h") or manager_target.partition(":")[0].startswith("h"):
             parser.error("--normalize-low-priority-current cannot modify a human-owned `h*` target.")
         return Args(parsed.root.resolve(), parsed.task_file, "", "", normalize_low_priority_current=True, active_target=active_target, manager_target=manager_target, source_sha256=parsed.source_sha256.strip())
+    if parsed.complete_live_no_mail:
+        unrelated = (
+            parsed.status, parsed.blocked_on, parsed.session_id, parsed.replacement_task,
+            parsed.stale_target, parsed.replacement_target, parsed.stale_sha256,
+            parsed.replacement_sha256, parsed.replacement_status, parsed.protected_target,
+            parsed.stopped_evidence, parsed.replacement_pane_evidence, parsed.audit_output,
+            parsed.pane_id, parsed.terminal_evidence, parsed.closure_repository,
+            parsed.dirty_path_handoff, parsed.historical_target, parsed.task_sha256,
+            parsed.historical_commit, parsed.shared_target,
+            parsed.source_sha256, parsed.human_close_authorization_source,
+            parsed.human_close_authorization_sha256, parsed.expected_receipt_sha256,
+            parsed.authority_file, parsed.authority_lines, parsed.authority_sha256,
+            parsed.authority_envelope, parsed.authority_envelope_sha256,
+            parsed.missing_target,
+        )
+        active_target = parsed.active_target.strip()
+        manager_target = parsed.manager_target.strip()
+        if (
+            any(unrelated)
+            or TARGET_RE.fullmatch(active_target) is None
+            or TARGET_RE.fullmatch(manager_target) is None
+            or active_target.partition(":")[0].startswith("h")
+            or manager_target.partition(":")[0].startswith("h")
+            or SHA256_RE.fullmatch(parsed.expected_task_sha256.strip()) is None
+            or SHA256_RE.fullmatch(parsed.expected_todo_sha256.strip()) is None
+            or re.fullmatch(r"%[0-9]+", parsed.expected_pane_id.strip()) is None
+        ):
+            parser.error("--complete-live-no-mail requires exact non-human owner/manager targets, task/TODO digests, and --expected-pane-id, without unrelated lifecycle evidence.")
+        return Args(
+            parsed.root.resolve(), parsed.task_file, "done", "",
+            complete_live_no_mail=True,
+            active_target=active_target,
+            manager_target=manager_target,
+            expected_task_sha256=parsed.expected_task_sha256.strip(),
+            expected_todo_sha256=parsed.expected_todo_sha256.strip(),
+            expected_pane_id=parsed.expected_pane_id.strip(),
+        )
     if parsed.close_shared_target:
         unrelated = (parsed.status, parsed.blocked_on, parsed.session_id, parsed.replacement_task, parsed.stale_target, parsed.replacement_target, parsed.stale_sha256, parsed.replacement_sha256, parsed.replacement_status, parsed.protected_target, parsed.stopped_evidence, parsed.replacement_pane_evidence, parsed.audit_output, parsed.pane_id, parsed.terminal_evidence, parsed.closure_repository, parsed.dirty_path_handoff, parsed.historical_target, parsed.task_sha256, parsed.historical_commit)
         if any(unrelated) or TARGET_RE.fullmatch(parsed.shared_target.strip()) is None or SHA256_RE.fullmatch(parsed.source_sha256.strip()) is None:
@@ -3162,6 +3204,126 @@ def reconcile_done_todo_text(root: Path, path: Path, text: str, runat: str) -> s
     return reconcile_todo_text(root, path, text, runat, "previous", ("current", "human pending", "low priority"))
 
 
+# 🧑 "Tell every agent to commit their changes in work_logs ... Make it clean"
+def complete_live_no_mail(args: Args, path: Path, text: str, before: os.stat_result) -> str:
+    """Complete one exact live worker through task/TODO metadata only."""
+
+    other_modes = (
+        args.finish_closed_done,
+        args.finish_replaced_done,
+        args.recover_exited_shell_done,
+        args.park_unlinked,
+        args.reattest_park_unlinked,
+        args.retire_blocked_target,
+        args.reconcile_missing_target,
+        args.close_missing_target,
+        args.reconcile_long_running_human_index,
+        args.reconcile_blocked_index,
+        args.restore_terminal_target,
+        args.close_shared_target,
+        args.cancel_shared_target,
+        args.close_retired_done,
+        args.normalize_retired_todo,
+        args.normalize_low_priority_current,
+    )
+    if (
+        args.status != "done"
+        or args.blocked_on
+        or any(other_modes)
+        or TARGET_RE.fullmatch(args.active_target) is None
+        or TARGET_RE.fullmatch(args.manager_target) is None
+        or args.active_target.partition(":")[0].startswith("h")
+        or args.manager_target.partition(":")[0].startswith("h")
+        or SHA256_RE.fullmatch(args.expected_task_sha256) is None
+        or SHA256_RE.fullmatch(args.expected_todo_sha256) is None
+        or re.fullmatch(r"%[0-9]+", args.expected_pane_id) is None
+    ):
+        raise TaskFrontmatterError("live no-mail completion arguments do not satisfy the exact non-human CAS contract.")
+    todo = args.root / "TODO.md"
+    if path == todo or not todo.is_file():
+        raise TaskFrontmatterError("live no-mail completion requires a task file distinct from a regular TODO.md.")
+    metadata = parse_task_metadata(text, args.root)
+    if (
+        metadata is None
+        or metadata.version == V2_VERSION
+        or metadata.status != "running"
+        or metadata.is_manager
+        or metadata.pending_task_items
+        or has_pending_marker(text)
+        or metadata.runat != args.active_target
+        or metadata.managerat != args.manager_target
+        or metadata.runat.partition(":")[0].startswith("h")
+    ):
+        raise TaskFrontmatterError("live no-mail completion requires one v1 running non-human worker with an empty queue and no pending marker.")
+    if hashlib.sha256(text.encode()).hexdigest() != args.expected_task_sha256:
+        raise TaskFrontmatterError("live no-mail completion task bytes do not match --expected-task-sha256.")
+    with root_membership_lock(args.root), task_target_lock(args.root, metadata.runat):
+        with ExitStack() as locks:
+            for locked_path in sorted({path, todo}, key=str):
+                locks.enter_context(task_file_lock(locked_path))
+            current_before = path.stat()
+            current_text = path.read_text(encoding="utf-8")
+            current_metadata = parse_task_metadata(current_text, args.root)
+            if (
+                not same_file_state(before, current_before)
+                or current_text != text
+                or current_metadata != metadata
+                or hashlib.sha256(current_text.encode()).hexdigest() != args.expected_task_sha256
+            ):
+                raise TaskFrontmatterError("live no-mail completion task changed while the operation was being prepared; retry.")
+            owners = authoritative_active_target_task_paths(args.root, metadata.runat)
+            if owners != (path,):
+                refs = ", ".join(relative_task_ref(args.root, owner) for owner in owners) or "none"
+                raise TaskFrontmatterError(f"live no-mail completion requires the task to be the sole authoritative owner of `{metadata.runat}`: {refs}.")
+            if current_target_task_paths(args.root, metadata.runat) != (path,):
+                raise TaskFrontmatterError("live no-mail completion requires one sole current TODO owner for the target.")
+            if exact_pane_id(metadata.runat) != args.expected_pane_id:
+                raise TaskFrontmatterError("live no-mail completion target does not match --expected-pane-id.")
+            todo_before = todo.stat()
+            todo_text = todo.read_text(encoding="utf-8")
+            if hashlib.sha256(todo_text.encode()).hexdigest() != args.expected_todo_sha256:
+                raise TaskFrontmatterError("live no-mail completion TODO bytes do not match --expected-todo-sha256.")
+            section = ""
+            current_headers = 0
+            rows: list[tuple[str, str]] = []
+            for line in todo_text.splitlines():
+                stripped = line.strip()
+                if stripped.endswith(":"):
+                    section = stripped[:-1].casefold()
+                    if stripped == "current:":
+                        current_headers += 1
+                    continue
+                if path in todo_row_task_paths(args.root, line):
+                    rows.append((section, line))
+            canonical_row = f"{relative_task_ref(args.root, path)} {metadata.runat}"
+            if current_headers != 1 or rows != [("current", canonical_row)]:
+                raise TaskFrontmatterError("live no-mail completion requires one exact canonical current TODO row.")
+            updated_todo = reconcile_todo_text(args.root, path, todo_text, metadata.runat, "previous", ("current",))
+            if updated_todo == todo_text:
+                raise TaskFrontmatterError("live no-mail completion requires the canonical TODO row to move from current to previous.")
+            updated_task = update_frontmatter_status(current_text, "done", "", args.root)
+            if exact_pane_id(metadata.runat) != args.expected_pane_id:
+                raise TaskFrontmatterError("live no-mail completion target changed while the operation was being prepared; retry.")
+            if (
+                path.read_text(encoding="utf-8") != current_text
+                or not same_file_state(current_before, path.stat())
+                or todo.read_text(encoding="utf-8") != todo_text
+                or not same_file_state(todo_before, todo.stat())
+            ):
+                raise TaskFrontmatterError("live no-mail completion task or TODO changed while the operation was being prepared; retry.")
+            finish_done_transaction(
+                args.root,
+                path,
+                updated_task,
+                current_before,
+                locked=True,
+                todo_text=todo_text,
+                prepared_todo=updated_todo,
+                todo_before=todo_before,
+            )
+    return metadata.runat
+
+
 def reconcile_shared_done_todo_text(root: Path, path: Path, text: str, shared_target: str) -> str:
     """Move one exact current TODO row for a shared-target manager into `previous`."""
     lines = text.splitlines(keepends=True)
@@ -3749,7 +3911,10 @@ def finish_done_transaction(root: Path, path: Path, text: str, before: os.stat_r
     """Atomically replace each bookkeeping file and roll back `TODO.md` if the task replacement fails."""
     replace_file = replace_if_unchanged_locked if locked else replace_if_unchanged
     todo = root / "TODO.md"
+    strict_todo = any(value is not None for value in (todo_text, prepared_todo, todo_before))
     if not todo.exists():
+        if strict_todo:
+            raise TaskFrontmatterError("TODO disappeared after strict shared-target validation; retry.")
         replace_file(path, text, before)
         return
     current_todo_before = todo.stat()
@@ -4136,6 +4301,7 @@ def automatic_done_email_eligible(args: Args, initial_status: str | None) -> boo
             args.cancel_shared_target,
             args.close_retired_done,
             args.close_missing_target,
+            args.complete_live_no_mail,
         )
     )
     return args.status == "done" and not special_done and initial_status is not None and initial_status != "done"
@@ -4154,6 +4320,7 @@ def run(args: Args) -> int:
     parked_unlinked = False
     reattested_park = False
     closed_missing = False
+    completed_live_no_mail = False
     try:
         path = task_path(args.root, args.task_file)
         before = path.stat()
@@ -4163,7 +4330,10 @@ def run(args: Args) -> int:
             raise BlockingError("v2 task writes are disabled until reviewed migration enablement")
         if initial_metadata is not None and initial_metadata.version != V2_VERSION and v2_enabled(args.root):
             raise BlockingError("v1 task writes are disabled after v2 enablement")
-        if args.restore_terminal_target:
+        if args.complete_live_no_mail:
+            target = complete_live_no_mail(args, path, text, before)
+            completed_live_no_mail = True
+        elif args.restore_terminal_target:
             restore_terminal_target(args, path, text, before)
         elif args.close_retired_done:
             target = close_retired_done(args, path, text, before)
@@ -4276,7 +4446,9 @@ def run(args: Args) -> int:
         print(f"omo_task_status.py: failed to close done agent: {exc}", file=sys.stderr)
         return 2
     if args.status == "done":
-        if preserved_replacement:
+        if completed_live_no_mail:
+            print(f"Completed live worker metadata for {target} without email or pane mutation.")
+        elif preserved_replacement:
             print(f"Finalized stopped stale task {target} without signaling it or the live successor pane.")
         elif args.close_retired_done:
             print(f"Finalized retired task metadata with historical target {target}; no pane was signalled.")
