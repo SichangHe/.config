@@ -72,10 +72,13 @@ Cross-state completion reconciliation:
   `OMO_MANAGER_STATE_DIR` values, leaving the request and delivered markers in
   separate ledgers despite one canonical completion key
 - `omo_completion_email.py --reconcile-delivered` verifies one exact owner,
-  outcome, current task digest, absolute delivered marker and marker digest,
-  plus the unique matching source claim; it sends no mail
+  outcome, ordered pending items, evidence, current task digest, absolute
+  delivered marker and marker digest, plus the unique matching source claim;
+  it sends no mail and does not message the owner pane
 - the operation binds the canonical message and current task bytes to the
-  caller's target state and durably consumes the source receipt once
+  caller's target state and durably consumes the source receipt once; the
+  canonical key and source claim bind the exact source manager target and task
+  digest recorded at delivery
 - a completed consumption, changed task, wrong task, owner, outcome, message or
   receipt, missing or duplicate claim, unsafe state path, or conflicting
   destination fails closed

@@ -76,6 +76,8 @@ class CompletionEmail:
     root: Path
     task: Path
     target: str
+    manager_target: str
+    task_sha256: str
     outcome: str
     subject: str
     body: str
@@ -238,12 +240,33 @@ def build_completion_email(root: Path, task: Path, text: str, outcome: str, *, i
         details.append(f"Evidence: {evidence}")
     subject = f"{task.name}: {outcome}"
     body = "\n".join(details) + "\n"
-    identity_parts = (str(root.resolve()), relative, metadata.runat, outcome, "\n".join(items), evidence, subject, body)
+    task_sha256 = hashlib.sha256(text.encode()).hexdigest()
+    identity_parts = (
+        str(root.resolve()),
+        relative,
+        metadata.runat,
+        metadata.managerat,
+        task_sha256,
+        outcome,
+        "\n".join(items),
+        evidence,
+        subject,
+        body,
+    )
     if contact_policy is not None:
         identity_parts += (contact_policy.task_sha256, str(contact_policy.source), contact_policy.source_sha256)
     identity = "\0".join(identity_parts)
     return CompletionEmail(
-        root.resolve(), task.resolve(), metadata.runat, outcome, subject, body, hashlib.sha256(identity.encode()).hexdigest(), contact_policy
+        root.resolve(),
+        task.resolve(),
+        metadata.runat,
+        metadata.managerat,
+        task_sha256,
+        outcome,
+        subject,
+        body,
+        hashlib.sha256(identity.encode()).hexdigest(),
+        contact_policy,
     )
 
 
@@ -281,7 +304,18 @@ def plan_completion_email(
         body = f"{human_body.rstrip()}\n\nCompletion record:\n{canonical.body}"
     else:
         return canonical
-    identity_parts = (str(root.resolve()), relative, canonical.target, outcome, "\n".join(items), evidence, subject, body)
+    identity_parts = (
+        str(root.resolve()),
+        relative,
+        canonical.target,
+        canonical.manager_target,
+        canonical.task_sha256,
+        outcome,
+        "\n".join(items),
+        evidence,
+        subject,
+        body,
+    )
     if canonical.contact_policy is not None:
         identity_parts += (canonical.contact_policy.task_sha256, str(canonical.contact_policy.source), canonical.contact_policy.source_sha256)
     identity = "\0".join(identity_parts)
@@ -289,6 +323,8 @@ def plan_completion_email(
         canonical.root,
         canonical.task,
         canonical.target,
+        canonical.manager_target,
+        canonical.task_sha256,
         outcome,
         subject,
         body,
@@ -454,6 +490,9 @@ def reconcile_delivered_completion(
     task_sha256: str,
     receipt: Path,
     receipt_sha256: str,
+    *,
+    items: tuple[str, ...] = (),
+    evidence: str = "",
 ) -> None:
     """Consume one exact cross-state delivery receipt into the caller's state."""
 
@@ -476,8 +515,8 @@ def reconcile_delivered_completion(
         if hashlib.sha256(task_payload).hexdigest() != task_sha256:
             raise OSError("task bytes do not match --task-sha256")
         text = task_payload.decode()
-        plan = build_completion_email(root, task, text, outcome)
-        if plan is None or plan.target != owner:
+        plan = build_completion_email(root, task, text, outcome, items=items, evidence=evidence)
+        if plan is None or plan.target != owner or plan.task_sha256 != task_sha256:
             raise OSError("task, owner, or completion outcome does not match the receipt")
         if receipt.name != plan.key:
             raise OSError("completion receipt does not match the canonical completion message")
@@ -505,7 +544,7 @@ def reconcile_delivered_completion(
                 raise OSError("completion receipt task or owner is wrong")
             claims = owned_private_file(source_state / "completion-email-claims.tsv", "completion claims ledger", 8_000_000).decode()
             matching_claims = [line for line in claims.splitlines() if line.split("\t", 1)[0] == plan.key]
-            if matching_claims != [f"{plan.key}\t{owner}\t{task.name}"]:
+            if matching_claims != [f"{plan.key}\t{owner}\t{task.name}\t{plan.manager_target}\t{task_sha256}"]:
                 raise OSError("completion receipt has missing or ambiguous claim evidence")
             if hashlib.sha256(task.read_bytes()).hexdigest() != task_sha256:
                 raise OSError("task bytes changed during completion reconciliation")
@@ -582,7 +621,7 @@ def claim_completion_email(plan: CompletionEmail) -> bool:
         temporary = ledger.with_name(f".{ledger.name}.{os.getpid()}.tmp")
         temporary_fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(temporary_fd, "w", encoding="utf-8") as handle:
-            _ = handle.write(f"{previous}{plan.key}\t{plan.target}\t{plan.task.name}\n")
+            _ = handle.write(f"{previous}{plan.key}\t{plan.target}\t{plan.task.name}\t{plan.manager_target}\t{plan.task_sha256}\n")
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, ledger)
@@ -597,8 +636,10 @@ def send_completion_email(plan: CompletionEmail | None) -> bool:
         return False
     try:
         require_completion_entrypoint()
+        task_payload = stable_owned_file(plan.task, 8_000_000)
+        if hashlib.sha256(task_payload).hexdigest() != plan.task_sha256:
+            raise OSError("task bytes changed before delivery")
         if plan.contact_policy is not None:
-            task_payload = stable_owned_file(plan.task, 8_000_000)
             source_payload = stable_owned_file(plan.contact_policy.source, 8_000_000)
             if hashlib.sha256(task_payload).hexdigest() != plan.contact_policy.task_sha256 or (
                 hashlib.sha256(source_payload).hexdigest() != plan.contact_policy.source_sha256
@@ -701,8 +742,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         reconciliation_values = (parsed.owner, parsed.task_sha256, parsed.receipt, parsed.receipt_sha256)
         if parsed.reconcile_delivered:
-            if parsed.item or parsed.evidence or not all(reconciliation_values):
-                parser.error("--reconcile-delivered requires owner, task digest, receipt, and receipt digest without item or evidence.")
+            if not all(reconciliation_values):
+                parser.error("--reconcile-delivered requires owner, task digest, receipt, and receipt digest.")
             reconcile_delivered_completion(
                 root,
                 task,
@@ -711,6 +752,8 @@ def main(argv: list[str] | None = None) -> int:
                 parsed.task_sha256,
                 parsed.receipt,
                 parsed.receipt_sha256,
+                items=tuple(parsed.item),
+                evidence=parsed.evidence,
             )
             print(f"Reconciled delivered completion receipt for {task.name} into {completion_email_state_dir()}.")
             return 0

@@ -51,8 +51,17 @@ def source1241_task(root: Path, *, body_suffix: str = "", source_text: str = SOU
 
 
 class CompletionEmailTest(unittest.TestCase):
-    def delivered_receipt(self, state: Path, root: Path, task: Path, text: str) -> tuple[Path, str]:
-        plan = build_completion_email(root, task, text, "task done")
+    def delivered_receipt(
+        self,
+        state: Path,
+        root: Path,
+        task: Path,
+        text: str,
+        *,
+        items: tuple[str, ...] = (),
+        evidence: str = "",
+    ) -> tuple[Path, str]:
+        plan = build_completion_email(root, task, text, "task done", items=items, evidence=evidence)
         assert plan is not None
         with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}):
             self.assertTrue(claim_completion_email(plan))
@@ -119,6 +128,93 @@ class CompletionEmailTest(unittest.TestCase):
             self.assertIn("--item 'finish review'", message)
             self.assertIn("--evidence passed", message)
 
+    def test_evidence_bound_receipt_reconciles_without_pane_or_task_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_state = root / "owner-state"
+            manager_state = root / "manager-state"
+            task = root / "task.md"
+            manager = root / "manager.md"
+            text = task_text("blocked_on: physical Mac evidence")
+            task.write_text(text, encoding="utf-8")
+            manager.write_text(task_text().replace("runat: cfg:2", "runat: cfg:1"), encoding="utf-8")
+            manager_state.mkdir(mode=0o700)
+            items = ("finish review", "preserve physical Mac blocker")
+            evidence = "scoped review PASS"
+            receipt, receipt_sha256 = self.delivered_receipt(
+                source_state,
+                root,
+                task,
+                text,
+                items=items,
+                evidence=evidence,
+            )
+            argv = [
+                "--root",
+                str(root),
+                "--task",
+                str(task),
+                "--outcome",
+                "task done",
+                "--item",
+                items[0],
+                "--item",
+                items[1],
+                "--evidence",
+                evidence,
+                "--reconcile-delivered",
+                "--owner",
+                "cfg:2",
+                "--task-sha256",
+                hashlib.sha256(text.encode()).hexdigest(),
+                "--receipt",
+                str(receipt),
+                "--receipt-sha256",
+                receipt_sha256,
+            ]
+            with (
+                patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(manager_state)}),
+                patch("omo_manager.omo_completion_email.current_active_task", return_value=manager),
+                patch("omo_manager.omo_tmux_send.send_system_to_codex") as pane,
+            ):
+                self.assertEqual(0, main(argv))
+                self.assertTrue(require_owner_completion(root, task, text, "task done", items=items, evidence=evidence))
+            pane.assert_not_called()
+            self.assertEqual(text.encode(), task.read_bytes())
+            self.assertEqual(1, len(tuple((manager_state / "completion-email-reconciled").iterdir())))
+
+    def test_reconciliation_rejects_recomputed_digest_after_source_identity_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_state = root / "owner-state"
+            manager_state = root / "manager-state"
+            task = root / "task.md"
+            text = task_text()
+            task.write_text(text, encoding="utf-8")
+            manager_state.mkdir(mode=0o700)
+            receipt, receipt_sha256 = self.delivered_receipt(source_state, root, task, text)
+            original_sha256 = hashlib.sha256(text.encode()).hexdigest()
+            claim = (source_state / "completion-email-claims.tsv").read_text(encoding="utf-8")
+            self.assertEqual(f"{receipt.name}\tcfg:2\t{task.name}\tcfg:1\t{original_sha256}\n", claim)
+            changed = text.replace("managerat: cfg:1", "managerat: cfg:1.0") + "blocked_on: physical Mac evidence\n"
+            task.write_text(changed, encoding="utf-8")
+            changed_plan = build_completion_email(root, task, changed, "task done")
+            assert changed_plan is not None
+            self.assertNotEqual(receipt.name, changed_plan.key)
+            with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(manager_state)}), self.assertRaisesRegex(
+                OSError, "canonical completion message"
+            ):
+                reconcile_delivered_completion(
+                    root,
+                    task,
+                    "task done",
+                    "cfg:2",
+                    hashlib.sha256(changed.encode()).hexdigest(),
+                    receipt,
+                    receipt_sha256,
+                )
+            self.assertFalse((manager_state / "completion-email-reconciled").exists())
+
     def test_cross_state_receipt_reconciliation_survives_ready_running_churn(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -184,7 +280,19 @@ class CompletionEmailTest(unittest.TestCase):
                     reconcile_delivered_completion(*values)
 
     def test_receipt_reconciliation_rejects_wrong_bindings_and_ambiguity(self) -> None:
-        for case in ("task", "owner", "outcome", "receipt", "changed bytes", "ambiguous claim"):
+        for case in (
+            "task",
+            "owner",
+            "outcome",
+            "receipt",
+            "changed bytes",
+            "missing item",
+            "altered item",
+            "reordered items",
+            "altered evidence",
+            "missing claim",
+            "ambiguous claim",
+        ):
             with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 source_state = root / "owner-state"
@@ -193,7 +301,16 @@ class CompletionEmailTest(unittest.TestCase):
                 text = task_text()
                 task.write_text(text, encoding="utf-8")
                 manager_state.mkdir(mode=0o700)
-                receipt, receipt_sha256 = self.delivered_receipt(source_state, root, task, text)
+                items = ("finish review", "preserve blocker")
+                evidence = "scoped review PASS"
+                receipt, receipt_sha256 = self.delivered_receipt(
+                    source_state,
+                    root,
+                    task,
+                    text,
+                    items=items,
+                    evidence=evidence,
+                )
                 owner = "cfg:2"
                 outcome = "task done"
                 task_sha256 = hashlib.sha256(text.encode()).hexdigest()
@@ -207,11 +324,31 @@ class CompletionEmailTest(unittest.TestCase):
                     receipt_sha256 = "0" * 64
                 elif case == "changed bytes":
                     task.write_text(text + "changed\n", encoding="utf-8")
-                else:
+                elif case == "missing item":
+                    items = items[:1]
+                elif case == "altered item":
+                    items = ("finish review", "changed blocker")
+                elif case == "reordered items":
+                    items = tuple(reversed(items))
+                elif case == "altered evidence":
+                    evidence = "different evidence"
+                elif case == "missing claim":
+                    (source_state / "completion-email-claims.tsv").unlink()
+                elif case == "ambiguous claim":
                     with (source_state / "completion-email-claims.tsv").open("a", encoding="utf-8") as handle:
                         handle.write(f"{receipt.name}\t{owner}\t{task.name}\n")
                 with patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(manager_state)}), self.assertRaises(OSError):
-                    reconcile_delivered_completion(root, task, outcome, owner, task_sha256, receipt, receipt_sha256)
+                    reconcile_delivered_completion(
+                        root,
+                        task,
+                        outcome,
+                        owner,
+                        task_sha256,
+                        receipt,
+                        receipt_sha256,
+                        items=items,
+                        evidence=evidence,
+                    )
                 self.assertFalse((manager_state / "completion-email-reconciled").exists())
 
     def test_executable_entrypoint_delivers_once_end_to_end(self) -> None:
@@ -317,6 +454,7 @@ class CompletionEmailTest(unittest.TestCase):
             state = root / "state"
             task = root / "task.md"
             text = task_text()
+            task.write_text(text, encoding="utf-8")
             with patch("omo_manager.omo_completion_email.current_active_task", return_value=task), patch.dict("os.environ", {"OMO_MANAGER_STATE_DIR": str(state)}), patch(
                 "omo_manager.omo_completion_email.subprocess.run", side_effect=OSError("uncertain")
             ) as run:
