@@ -34,6 +34,7 @@ from omo_manager.omo_codex_status import is_stock_placeholder_input_text
 from omo_manager.omo_codex_status import submit_stuck_input_if_present
 from omo_manager.omo_codex_status import visible_error_lines
 from omo_manager.omo_external_task_register import resolve_registered_external_task
+from omo_manager.omo_external_task_register import registered_external_tasks
 from omo_manager.omo_manager_env import CONFIGURED_ENV
 from omo_manager.omo_manager_env import external_task_registry_dir
 from omo_manager.omo_manager_env import load_local_env as load_manager_local_env
@@ -1211,9 +1212,18 @@ def parse_task_text(text: str) -> list[TaskLine]:
 
 def parse_task_lines(path: Path) -> list[TaskLine]:
     try:
-        return parse_task_text(path.read_text(encoding="utf-8"))
+        tasks = parse_task_text(path.read_text(encoding="utf-8"))
     except OSError:
         return []
+    if path.name != "TODO.md":
+        return tasks
+    try:
+        root = path.parent.resolve(strict=False)
+    except OSError:
+        return tasks
+    registry = external_task_registry_dir(LOCAL_ENV)
+    tasks.extend(TaskLine(item.task, item.section, item.line, item.target, None) for item in registered_external_tasks(root, registry))
+    return tasks
 
 
 def resolve_task_path(root: Path, task_file: str) -> Path | None:

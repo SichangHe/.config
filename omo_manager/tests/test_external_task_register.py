@@ -44,10 +44,10 @@ class ExternalTaskRegistrationTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         base = Path(self.temporary.name)
         self.root = base / "work_logs"
-        self.external = base / "external"
+        self.source_root = base / "external"
         self.registry = base / "state" / "external-task-registrations"
         self.packet = base / "packet"
-        for directory in (self.root, self.external, self.registry, self.packet):
+        for directory in (self.root, self.source_root, self.registry, self.packet):
             directory.mkdir(parents=True, mode=0o700)
             directory.chmod(0o700)
         environment = patch.dict(os.environ, {"OMO_EXTERNAL_TASK_REGISTRY": str(self.registry)})
@@ -56,11 +56,12 @@ class ExternalTaskRegistrationTests(unittest.TestCase):
         configured = patch.dict(manager_env.CONFIGURED_ENV, {"OMO_EXTERNAL_TASK_REGISTRY": str(self.registry)})
         configured.start()
         self.addCleanup(configured.stop)
-        self.task = self.external / "task.md"
-        self.task_ref = "../external/task.md"
-        self.todo = self.root / "TODO.md"
+        self.task = self.source_root / "task.md"
+        self.task_ref = "task.md"
+        self.todo = self.source_root / "TODO.md"
         self.task.write_text(task_text(), encoding="utf-8")
         self.todo.write_text(f"current:\n- `{self.task_ref}` mac_stt:3\n", encoding="utf-8")
+        (self.root / "TODO.md").write_text("current:\n", encoding="utf-8")
         self.task.chmod(0o600)
         self.todo.chmod(0o600)
         self.plan_path = self.packet / "registration-plan.json"
@@ -96,11 +97,12 @@ class ExternalTaskRegistrationTests(unittest.TestCase):
         with patch.dict(manager_env.CONFIGURED_ENV, loaded, clear=True):
             self.assertEqual(self.registry, registration.default_registry_dir())
             self.applied()
-            self.assertEqual(self.task, status.resolve_task_path(self.root, self.task_ref))
+            self.assertEqual(self.task, status.resolve_task_path(self.root, str(self.task)))
 
     def plan(self) -> registration.RegistrationPlan:
         return registration.build_plan(
             self.root,
+            self.source_root,
             self.task,
             self.task_ref,
             "mac_stt:3",
@@ -133,7 +135,48 @@ class ExternalTaskRegistrationTests(unittest.TestCase):
         self.assertEqual(original_task, self.task.read_bytes())
         self.assertEqual(original_todo, self.todo.read_bytes())
         self.assertEqual(self.task, registration.resolve_registered_external_task(self.root, self.task_ref, self.task, self.registry))
+        self.assertEqual((str(self.task),), tuple(item.task for item in registration.registered_external_tasks(self.root, self.registry)))
         self.assertEqual(plan.key, registration.parse_receipt(first_receipt).key)
+
+    def test_parent_source_root_membership_is_discovered_without_local_duplication(self) -> None:
+        source_root = Path(self.temporary.name) / "project-root"
+        watcher_root = source_root / "work_logs"
+        watcher_root.mkdir(parents=True, mode=0o700)
+        task = source_root / "mac_stt_accept.md"
+        task.write_text(task_text(), encoding="utf-8")
+        task.chmod(0o600)
+        source_todo = source_root / "TODO.md"
+        source_todo.write_text("current:\nmac_stt_accept.md mac_stt:3\n", encoding="utf-8")
+        source_todo.chmod(0o600)
+        watcher_todo = watcher_root / "TODO.md"
+        watcher_todo.write_text("current:\nmanager.md mac_stt:0\n", encoding="utf-8")
+        watcher_todo.chmod(0o600)
+        manager = watcher_root / "manager.md"
+        manager.write_text(task_text(runat="mac_stt:0", managerat="top:0", status_value="long_running", blocked_on="persistent manager role"), encoding="utf-8")
+        manager.chmod(0o600)
+        task_before = task.read_bytes()
+        source_todo_before = source_todo.read_bytes()
+        plan = registration.build_plan(
+            watcher_root,
+            source_root,
+            task,
+            "mac_stt_accept.md",
+            "mac_stt:3",
+            "mac_stt:0",
+            sha256(task),
+            sha256(source_todo),
+            self.registry,
+        )
+        packet = self.packet / "nested-plan.json"
+        registration.write_plan(packet, plan)
+        registration.apply_plan(packet, sha256(packet))
+
+        self.assertEqual(task_before, task.read_bytes())
+        self.assertEqual(source_todo_before, source_todo.read_bytes())
+        self.assertNotIn("mac_stt_accept.md", watcher_todo.read_text(encoding="utf-8"))
+        parsed = status.parse_task_lines(watcher_todo)
+        self.assertIn(str(task), [item.task_file for item in parsed])
+        self.assertEqual(task, status.resolve_task_path(watcher_root, str(task)))
 
     def test_dry_run_only_emits_plan_and_does_not_mutate(self) -> None:
         before = self.tree_snapshot()
@@ -143,6 +186,8 @@ class ExternalTaskRegistrationTests(unittest.TestCase):
                     "dry-run",
                     "--root",
                     str(self.root),
+                    "--source-root",
+                    str(self.source_root),
                     "--task",
                     str(self.task),
                     "--task-ref",
@@ -165,9 +210,9 @@ class ExternalTaskRegistrationTests(unittest.TestCase):
 
     def test_prepare_rejects_task_todo_and_lifecycle_mismatch(self) -> None:
         with self.assertRaisesRegex(registration.RegistrationError, "expected digest"):
-            registration.build_plan(self.root, self.task, self.task_ref, "mac_stt:3", "mac_stt:0", "0" * 64, sha256(self.todo), self.registry)
+            registration.build_plan(self.root, self.source_root, self.task, self.task_ref, "mac_stt:3", "mac_stt:0", "0" * 64, sha256(self.todo), self.registry)
         with self.assertRaisesRegex(registration.RegistrationError, "expected digest"):
-            registration.build_plan(self.root, self.task, self.task_ref, "mac_stt:3", "mac_stt:0", sha256(self.task), "0" * 64, self.registry)
+            registration.build_plan(self.root, self.source_root, self.task, self.task_ref, "mac_stt:3", "mac_stt:0", sha256(self.task), "0" * 64, self.registry)
         for replacement in (
             task_text(managerat="other:0"),
             task_text(runat="other:3"),
@@ -189,7 +234,8 @@ class ExternalTaskRegistrationTests(unittest.TestCase):
         owner = self.root / "duplicate.md"
         owner.write_text(task_text(), encoding="utf-8")
         owner.chmod(0o600)
-        with self.assertRaisesRegex(registration.RegistrationError, "already owns"):
+        (self.root / "TODO.md").write_text("current:\n- `duplicate.md` mac_stt:3\n", encoding="utf-8")
+        with self.assertRaisesRegex(registration.RegistrationError, "exactly one active task owner"):
             self.plan()
 
     def test_prepare_rejects_prose_nonentry_wrong_target_and_previous_membership(self) -> None:
@@ -205,7 +251,7 @@ class ExternalTaskRegistrationTests(unittest.TestCase):
                     self.plan()
 
     def test_rejects_symlink_task_and_path_substitution(self) -> None:
-        real = self.external / "real.md"
+        real = self.source_root / "real.md"
         self.task.rename(real)
         self.task.symlink_to(real)
         with self.assertRaises(OSError):
@@ -213,7 +259,7 @@ class ExternalTaskRegistrationTests(unittest.TestCase):
         self.task.unlink()
         real.rename(self.task)
         plan, digest = self.prepared()
-        replacement = self.external / "replacement.md"
+        replacement = self.source_root / "replacement.md"
         replacement.write_text(task_text(), encoding="utf-8")
         replacement.chmod(0o600)
         self.task.unlink()
@@ -244,7 +290,7 @@ class ExternalTaskRegistrationTests(unittest.TestCase):
 
     def test_apply_rejects_recomputed_plan_bound_to_lookalike_todo(self) -> None:
         plan = self.plan()
-        lookalike = self.external / "TODO.md"
+        lookalike = self.root / "lookalike-TODO.md"
         lookalike.write_bytes(self.todo.read_bytes())
         lookalike.chmod(0o600)
         forged = asdict(plan)
@@ -269,21 +315,25 @@ class ExternalTaskRegistrationTests(unittest.TestCase):
         second_todo.write_text(f"current:\n- `{self.task_ref}` mac_stt:3\n", encoding="utf-8")
         second_todo.chmod(0o600)
         with self.assertRaisesRegex(registration.RegistrationError, "conflicts"):
-            registration.build_plan(second_root, self.task, self.task_ref, "mac_stt:3", "mac_stt:0", sha256(self.task), sha256(second_todo), self.registry)
+            registration.build_plan(second_root, self.source_root, self.task, self.task_ref, "mac_stt:3", "mac_stt:0", sha256(self.task), sha256(self.todo), self.registry)
 
-        other_task = self.external / "other-task.md"
+        other_source_root = Path(self.temporary.name) / "other-external"
+        other_source_root.mkdir(mode=0o700)
+        other_task = other_source_root / "other-task.md"
         other_task.write_text(task_text(), encoding="utf-8")
         other_task.chmod(0o600)
-        other_ref = "../external/other-task.md"
-        second_todo.write_text(f"current:\n- `{other_ref}` mac_stt:3\n", encoding="utf-8")
+        other_ref = "other-task.md"
+        other_todo = other_source_root / "TODO.md"
+        other_todo.write_text(f"current:\n- `{other_ref}` mac_stt:3\n", encoding="utf-8")
+        other_todo.chmod(0o600)
         with self.assertRaisesRegex(registration.RegistrationError, "conflicts"):
-            registration.build_plan(second_root, other_task, other_ref, "mac_stt:3", "mac_stt:0", sha256(other_task), sha256(second_todo), self.registry)
+            registration.build_plan(second_root, other_source_root, other_task, other_ref, "mac_stt:3", "mac_stt:0", sha256(other_task), sha256(other_todo), self.registry)
 
         second_registry = Path(self.temporary.name) / "state" / "second-registry"
         second_registry.mkdir(mode=0o700)
         second_registry.chmod(0o700)
         with self.assertRaisesRegex(registration.RegistrationError, "authoritative ledger"):
-            registration.build_plan(second_root, other_task, other_ref, "mac_stt:3", "mac_stt:0", sha256(other_task), sha256(second_todo), second_registry)
+            registration.build_plan(second_root, other_source_root, other_task, other_ref, "mac_stt:3", "mac_stt:0", sha256(other_task), sha256(other_todo), second_registry)
 
     def test_two_concurrent_applies_commit_exactly_one_registration(self) -> None:
         plan, digest = self.prepared()
@@ -346,6 +396,7 @@ class ExternalTaskRegistrationTests(unittest.TestCase):
         self.assertIsNone(registration.resolve_registered_external_task(self.root, self.task_ref, self.task, self.registry))
         replacement = registration.build_plan(
             self.root,
+            self.source_root,
             self.task,
             self.task_ref,
             "mac_stt:3",
@@ -466,12 +517,12 @@ class ExternalTaskRegistrationTests(unittest.TestCase):
 
         self.applied()
         with patch.dict(os.environ, {"OMO_EXTERNAL_TASK_REGISTRY": str(self.registry)}):
-            self.assertEqual(self.task, status.resolve_task_path(root_link, self.task_ref))
+            self.assertEqual(self.task, status.resolve_task_path(root_link, str(self.task)))
 
     def test_watcher_discovers_registered_owner_and_does_not_report_tmux_unmanaged(self) -> None:
         args = status.Args(self.root, self.root / "sessions.json", False, False, True, "mac_stt:0", False)
         with patch.dict(os.environ, {"OMO_EXTERNAL_TASK_REGISTRY": str(self.registry)}):
-            self.assertIsNone(status.resolve_task_path(self.root, self.task_ref))
+            self.assertIsNone(status.resolve_task_path(self.root, str(self.task)))
             with (
                 patch.object(status, "tmux_list_panes", return_value=["mac_stt:3"]),
                 patch.object(status, "classify_target", return_value=status.StatusRow("tmux:mac_stt:3", "running", "", target="mac_stt:3")),
@@ -480,7 +531,9 @@ class ExternalTaskRegistrationTests(unittest.TestCase):
             self.assertEqual(1, len(before))
 
             self.applied()
-            self.assertEqual(self.task, status.resolve_task_path(self.root, self.task_ref))
+            parsed = status.parse_task_lines(self.root / "TODO.md")
+            self.assertEqual([str(self.task)], [item.task_file for item in parsed])
+            self.assertEqual(self.task, status.resolve_task_path(self.root, str(self.task)))
             owners = status.active_task_targets(self.root, include_pending_delivery=True)
             self.assertEqual({"mac_stt:3"}, owners)
             with (

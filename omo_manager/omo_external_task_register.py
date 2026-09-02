@@ -27,8 +27,8 @@ from omo_manager.omo_task_metadata import parse_task_metadata
 from omo_manager.omo_manager_env import external_task_registry_dir
 from omo_manager.omo_manager_env import manager_state_dir
 
-PLAN_SCHEMA = "omo-external-task-registration-plan/v1"
-RECEIPT_SCHEMA = "omo-external-task-registration/v1"
+PLAN_SCHEMA = "omo-external-task-registration-plan/v2"
+RECEIPT_SCHEMA = "omo-external-task-registration/v2"
 ROLLBACK_SCHEMA = "omo-external-task-registration-rollback/v1"
 INVALIDATION_SCHEMA = "omo-external-task-registration-invalidation/v1"
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
@@ -60,6 +60,9 @@ class RegistrationPlan:
     root: str
     root_device: int
     root_inode: int
+    source_root: str
+    source_root_device: int
+    source_root_inode: int
     task_ref: str
     task: str
     task_device: int
@@ -90,6 +93,9 @@ class ExternalTaskRegistration:
     root: str
     root_device: int
     root_inode: int
+    source_root: str
+    source_root_device: int
+    source_root_inode: int
     task_ref: str
     task: str
     task_device: int
@@ -128,6 +134,14 @@ class RegistrationInvalidation:
     receipt: str
     receipt_sha256: str
     reason: str
+
+
+@dataclass(frozen=True)
+class RegisteredExternalTask:
+    task: str
+    section: str
+    line: str
+    target: str
 
 
 def default_state_dir() -> Path:
@@ -288,6 +302,7 @@ def invalidation_fields() -> set[str]:
 PLAN_STRING_FIELDS = {
     "schema",
     "root",
+    "source_root",
     "task_ref",
     "task",
     "task_sha256",
@@ -305,6 +320,8 @@ PLAN_STRING_FIELDS = {
 PLAN_INTEGER_FIELDS = {
     "root_device",
     "root_inode",
+    "source_root_device",
+    "source_root_inode",
     "task_device",
     "task_inode",
     "task_parent_device",
@@ -336,7 +353,13 @@ def parse_plan(data: bytes) -> RegistrationPlan:
         or any(SHA256_RE.fullmatch(value) is None for value in (plan.task_sha256, plan.todo_sha256, plan.owner_set_sha256, plan.registry_sha256))
     ):
         raise RegistrationError("registration plan schema or key is invalid")
-    for value, label in ((plan.root, "work-log root"), (plan.task, "external task"), (plan.todo, "work-log TODO"), (plan.registry, "external task registry")):
+    for value, label in (
+        (plan.root, "watcher root"),
+        (plan.source_root, "external source root"),
+        (plan.task, "external task"),
+        (plan.todo, "external source TODO"),
+        (plan.registry, "external task registry"),
+    ):
         absolute_normal_path(Path(value), label)
     validate_plan_structure(plan)
     expected_key = hashlib.sha256(canonical_bytes({key: value for key, value in asdict(plan).items() if key != "key"})).hexdigest()
@@ -349,12 +372,15 @@ def parse_plan(data: bytes) -> RegistrationPlan:
 
 def validate_plan_structure(plan: RegistrationPlan) -> None:
     root = Path(plan.root)
+    source_root = Path(plan.source_root)
     task = Path(plan.task)
     if (
-        normalized_task_path(root, plan.task_ref) != task
+        normalized_task_path(source_root, plan.task_ref) != task
         or root == task
         or root in task.parents
-        or Path(plan.todo) != root / "TODO.md"
+        or source_root == root
+        or source_root not in task.parents
+        or Path(plan.todo) != source_root / "TODO.md"
         or canonical_target(plan.runat) == canonical_target(plan.managerat)
     ):
         raise RegistrationError("registration plan path, TODO, or target structure is invalid")
@@ -462,14 +488,39 @@ def active_runat_claim(data: bytes, root: Path, target: str) -> bool:
     return metadata is not None and metadata.status != "done" and canonical_target(metadata.runat) == canonical_target(target)
 
 
-def owner_set_sha256(root: Path, target: str) -> str:
+def owner_claims(roots: tuple[Path, ...], target: str) -> list[tuple[str, str]]:
     claims: list[tuple[str, str]] = []
-    for candidate in sorted(root.rglob("*.md")):
-        if candidate.is_symlink():
-            raise RegistrationError("work-log task scan contains a symlink")
-        snapshot = read_file(candidate, "work-log task candidate")
-        if active_runat_claim(snapshot.data, root, target):
-            claims.append((candidate.relative_to(root).as_posix(), snapshot.sha256))
+    seen: set[Path] = set()
+    for root in roots:
+        todo = read_file(root / "TODO.md", "task ownership TODO")
+        try:
+            text = todo.data.decode()
+        except UnicodeDecodeError as exc:
+            raise RegistrationError("task ownership TODO is not UTF-8") from exc
+        from omo_manager.omo_agent_status import parse_task_text
+
+        for task in parse_task_text(text):
+            if task.section not in {"todo:current", "todo:human pending", "todo:low priority"}:
+                continue
+            candidate = normalized_task_path(root, task.task_file)
+            if root != candidate and root not in candidate.parents:
+                continue
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            if candidate.is_symlink():
+                raise RegistrationError("task ownership scan contains a symlink")
+            try:
+                snapshot = read_file(candidate, "task ownership candidate")
+            except FileNotFoundError:
+                continue
+            if active_runat_claim(snapshot.data, root, target):
+                claims.append((str(candidate), snapshot.sha256))
+    return sorted(claims)
+
+
+def owner_set_sha256(roots: tuple[Path, ...], target: str) -> str:
+    claims = owner_claims(roots, target)
     return hashlib.sha256(canonical_bytes(claims)).hexdigest()
 
 
@@ -540,6 +591,7 @@ def assert_no_registration_conflict(registry: Path, root: Path, task: Path, task
 
 def build_plan(
     root: Path,
+    source_root: Path,
     task: Path,
     task_ref: str,
     runat: str,
@@ -548,37 +600,45 @@ def build_plan(
     todo_sha256: str,
     registry: Path,
 ) -> RegistrationPlan:
-    root = absolute_normal_path(root, "work-log root")
+    root = absolute_normal_path(root, "watcher root")
+    source_root = absolute_normal_path(source_root, "external source root")
     task = absolute_normal_path(task, "external task")
     registry = absolute_normal_path(registry, "external task registry")
     assert_authoritative_registry(registry)
-    if normalized_task_path(root, task_ref) != task or root == task or root in task.parents:
-        raise RegistrationError("task reference must resolve lexically to the external task")
+    if normalized_task_path(source_root, task_ref) != task or root == source_root or root == task or root in task.parents or source_root not in task.parents:
+        raise RegistrationError("source task reference must resolve outside the watcher root")
     if canonical_target(runat) == canonical_target(managerat):
         raise RegistrationError("external task owner and manager must differ")
     if SHA256_RE.fullmatch(task_sha256) is None or SHA256_RE.fullmatch(todo_sha256) is None:
         raise RegistrationError("task and TODO SHA-256 values must be lowercase hexadecimal")
-    root_fd, root_info = open_directory(root, "work-log root")
+    root_fd, root_info = open_directory(root, "watcher root")
     os.close(root_fd)
+    source_root_fd, source_root_info = open_directory(source_root, "external source root")
+    os.close(source_root_fd)
     registry_fd, registry_info = open_directory(registry, "external task registry", private=True)
     os.close(registry_fd)
     task_snapshot = read_file(task, "external task")
-    todo_snapshot = read_file(root / "TODO.md", "work-log TODO")
+    todo_snapshot = read_file(source_root / "TODO.md", "external source TODO")
     if task_snapshot.sha256 != task_sha256 or todo_snapshot.sha256 != todo_sha256:
         raise RegistrationError("external task or TODO bytes do not match the expected digest")
-    task_metadata(task_snapshot, root, runat, managerat)
+    task_metadata(task_snapshot, source_root, runat, managerat)
     membership = todo_membership(todo_snapshot, task_ref, runat)
     if membership is None:
         raise RegistrationError("TODO must contain exactly one active external task entry with the exact owner target")
-    owner_digest = owner_set_sha256(root, runat)
-    if owner_digest != hashlib.sha256(canonical_bytes([])).hexdigest():
-        raise RegistrationError("another work-log task already owns the external target")
+    ownership_roots = tuple(dict.fromkeys((source_root, root)))
+    claims = owner_claims(ownership_roots, runat)
+    if claims != [(str(task), task_snapshot.sha256)]:
+        raise RegistrationError("external target does not have exactly one active task owner")
+    owner_digest = hashlib.sha256(canonical_bytes(claims)).hexdigest()
     assert_no_registration_conflict(registry, root, task, task_ref, runat)
     values = {
         "schema": PLAN_SCHEMA,
         "root": str(root),
         "root_device": root_info.st_dev,
         "root_inode": root_info.st_ino,
+        "source_root": str(source_root),
+        "source_root_device": source_root_info.st_dev,
+        "source_root_inode": source_root_info.st_ino,
         "task_ref": task_ref,
         "task": str(task),
         "task_device": task_snapshot.device,
@@ -586,7 +646,7 @@ def build_plan(
         "task_parent_device": task_snapshot.parent_device,
         "task_parent_inode": task_snapshot.parent_inode,
         "task_sha256": task_snapshot.sha256,
-        "todo": str(root / "TODO.md"),
+        "todo": str(source_root / "TODO.md"),
         "todo_device": todo_snapshot.device,
         "todo_inode": todo_snapshot.inode,
         "todo_sha256": todo_snapshot.sha256,
@@ -606,16 +666,20 @@ def build_plan(
 
 def assert_plan_current(plan: RegistrationPlan) -> tuple[Snapshot, Snapshot]:
     root = Path(plan.root)
+    source_root = Path(plan.source_root)
     task = Path(plan.task)
     registry = Path(plan.registry)
-    root_fd, root_info = open_directory(root, "work-log root")
+    root_fd, root_info = open_directory(root, "watcher root")
     os.close(root_fd)
+    source_root_fd, source_root_info = open_directory(source_root, "external source root")
+    os.close(source_root_fd)
     registry_fd, registry_info = open_directory(registry, "external task registry", private=True)
     os.close(registry_fd)
     task_snapshot = read_file(task, "external task")
     todo_snapshot = read_file(Path(plan.todo), "work-log TODO")
     identities = (
         (root_info.st_dev, root_info.st_ino, plan.root_device, plan.root_inode),
+        (source_root_info.st_dev, source_root_info.st_ino, plan.source_root_device, plan.source_root_inode),
         (registry_info.st_dev, registry_info.st_ino, plan.registry_device, plan.registry_inode),
         (task_snapshot.device, task_snapshot.inode, plan.task_device, plan.task_inode),
         (task_snapshot.parent_device, task_snapshot.parent_inode, plan.task_parent_device, plan.task_parent_inode),
@@ -625,8 +689,13 @@ def assert_plan_current(plan: RegistrationPlan) -> tuple[Snapshot, Snapshot]:
         raise RegistrationError("registration path identity changed after prepare")
     if task_snapshot.sha256 != plan.task_sha256 or todo_snapshot.sha256 != plan.todo_sha256:
         raise RegistrationError("external task or TODO bytes changed after prepare")
-    task_metadata(task_snapshot, root, plan.runat, plan.managerat)
-    if todo_membership(todo_snapshot, plan.task_ref, plan.runat) != (plan.todo_section, plan.todo_line) or owner_set_sha256(root, plan.runat) != plan.owner_set_sha256:
+    task_metadata(task_snapshot, source_root, plan.runat, plan.managerat)
+    ownership_roots = tuple(dict.fromkeys((source_root, root)))
+    if (
+        todo_membership(todo_snapshot, plan.task_ref, plan.runat) != (plan.todo_section, plan.todo_line)
+        or owner_set_sha256(ownership_roots, plan.runat) != plan.owner_set_sha256
+        or owner_claims(ownership_roots, plan.runat) != [(str(task), task_snapshot.sha256)]
+    ):
         raise RegistrationError("TODO membership or active target ownership changed after prepare")
     return task_snapshot, todo_snapshot
 
@@ -709,8 +778,9 @@ def receipt_for_plan(plan: RegistrationPlan, plan_sha256: str) -> ExternalTaskRe
 def registration_lock(plan: RegistrationPlan) -> ExitStack:
     stack = ExitStack()
     try:
-        stack.enter_context(task_file_lock(Path(plan.root) / ".omo-task-membership.lock"))
-        stack.enter_context(task_target_lock(Path(plan.root), plan.runat))
+        for root in sorted({Path(plan.root), Path(plan.source_root)}, key=str):
+            stack.enter_context(task_file_lock(root / ".omo-task-membership.lock"))
+            stack.enter_context(task_target_lock(root, plan.runat))
         stack.enter_context(task_file_lock(Path(plan.task)))
         stack.enter_context(task_file_lock_at_path(Path(plan.registry) / ".lock"))
         return stack
@@ -818,7 +888,7 @@ def resolve_registered_external_task(root: Path, task_ref: str, candidate: Path,
         if len(active_targets) != len(set(active_targets)) or len(active_tasks) != len(set(active_tasks)):
             return None
         for receipt in active:
-            if receipt.root != str(root) or receipt.task_ref != task_ref or receipt.task != str(candidate):
+            if receipt.root != str(root) or task_ref not in {receipt.task_ref, receipt.task} or receipt.task != str(candidate):
                 continue
             if (root_info.st_dev, root_info.st_ino) != (receipt.root_device, receipt.root_inode):
                 continue
@@ -833,13 +903,37 @@ def resolve_registered_external_task(root: Path, task_ref: str, candidate: Path,
                 or todo_membership(todo, receipt.task_ref, receipt.runat) != (receipt.todo_section, receipt.todo_line)
             ):
                 continue
-            task_metadata(snapshot, root, receipt.runat, receipt.managerat)
-            if owner_set_sha256(root, receipt.runat) != receipt.owner_set_sha256:
+            source_root = Path(receipt.source_root)
+            task_metadata(snapshot, source_root, receipt.runat, receipt.managerat)
+            if owner_set_sha256(tuple(dict.fromkeys((source_root, root))), receipt.runat) != receipt.owner_set_sha256:
                 continue
             matches.append(receipt)
         return candidate if len(matches) == 1 else None
     except (OSError, RegistrationError):
         return None
+
+
+# 🧑 Human: "Continue working and complete them"
+def registered_external_tasks(root: Path, registry: Path | None = None) -> tuple[RegisteredExternalTask, ...]:
+    """Return current external-root memberships registered to one watcher root."""
+
+    registry = registry or default_registry_dir()
+    try:
+        assert_authoritative_registry(registry)
+        root_fd, root_info = open_directory(root, "watcher root")
+        os.close(root_fd)
+        active = [receipt for receipt in active_receipts(registry) if receipt_is_current(receipt)]
+        targets = [canonical_target(receipt.runat) for receipt in active]
+        tasks = [receipt.task for receipt in active]
+        if len(targets) != len(set(targets)) or len(tasks) != len(set(tasks)):
+            return ()
+        return tuple(
+            RegisteredExternalTask(receipt.task, receipt.todo_section, receipt.todo_line, receipt.runat)
+            for receipt in active
+            if receipt.root == str(root) and (receipt.root_device, receipt.root_inode) == (root_info.st_dev, root_info.st_ino)
+        )
+    except (OSError, RegistrationError):
+        return ()
 
 
 def write_plan(path: Path, plan: RegistrationPlan) -> None:
@@ -860,6 +954,7 @@ def main(argv: list[str] | None = None) -> int:
     for command in ("dry-run", "prepare"):
         operation = subparsers.add_parser(command)
         _ = operation.add_argument("--root", type=Path, required=True)
+        _ = operation.add_argument("--source-root", type=Path, required=True)
         _ = operation.add_argument("--task", type=Path, required=True)
         _ = operation.add_argument("--task-ref", required=True)
         _ = operation.add_argument("--runat", required=True)
@@ -881,7 +976,7 @@ def main(argv: list[str] | None = None) -> int:
             print(initialize_registry(args.registry))
             return 0
         if args.command in {"dry-run", "prepare"}:
-            plan = build_plan(args.root, args.task, args.task_ref, args.runat, args.managerat, args.task_sha256, args.todo_sha256, args.registry)
+            plan = build_plan(args.root, args.source_root, args.task, args.task_ref, args.runat, args.managerat, args.task_sha256, args.todo_sha256, args.registry)
             if args.command == "dry-run":
                 print(canonical_bytes(asdict(plan)).decode(), end="")
             else:
