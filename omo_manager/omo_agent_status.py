@@ -33,6 +33,11 @@ from omo_manager.omo_codex_status import interrupt_waiting_subagent_if_present
 from omo_manager.omo_codex_status import is_stock_placeholder_input_text
 from omo_manager.omo_codex_status import submit_stuck_input_if_present
 from omo_manager.omo_codex_status import visible_error_lines
+from omo_manager.omo_external_task_register import resolve_registered_external_task
+from omo_manager.omo_manager_env import CONFIGURED_ENV
+from omo_manager.omo_manager_env import external_task_registry_dir
+from omo_manager.omo_manager_env import load_local_env as load_manager_local_env
+from omo_manager.omo_manager_env import manager_state_dir
 from omo_manager.omo_task_metadata import RETIRED_RUNAT
 from omo_manager.omo_task_metadata import TASK_FRONTMATTER_STATUSES  # noqa: F401
 from omo_manager.omo_task_metadata import TARGET_RE
@@ -46,7 +51,7 @@ from omo_manager.omo_task_metadata import parse_task_metadata
 
 def default_state_dir() -> Path:
     env = globals().get("LOCAL_ENV", os.environ)
-    return Path(env.get("OMO_MANAGER_STATE_DIR", Path(env.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "omo-manager"))
+    return manager_state_dir(env)
 
 
 def read_json(path: Path, fallback: dict[str, object]) -> dict[str, object]:
@@ -68,24 +73,10 @@ def write_json_private(path: Path, data: dict[str, object]) -> None:
 
 
 def load_local_env() -> dict[str, str]:
-    env = dict(os.environ)
-    local_env = Path(env.get("OMO_MANAGER_LOCAL_ENV", Path.home() / ".config" / "omo_manager" / "local.env"))
-    if not local_env.is_file():
-        return env
-    loaded = subprocess.run(["bash", "-c", 'set -a; source "$1"; env -0', "bash", str(local_env)], capture_output=True, timeout=10, check=False)
-    if loaded.returncode != 0:
-        return env
-    for item in loaded.stdout.split(b"\0"):
-        if not item or b"=" not in item:
-            continue
-        raw_key, raw_value = item.split(b"=", 1)
-        key = raw_key.decode(errors="ignore")
-        if key and key not in os.environ:
-            env[key] = raw_value.decode(errors="surrogateescape")
-    return env
+    return load_manager_local_env()
 
 
-LOCAL_ENV = load_local_env()
+LOCAL_ENV = CONFIGURED_ENV
 DEFAULT_ROOT = Path(LOCAL_ENV.get("OMO_WORK_LOGS_ROOT", str(Path.home() / "work_logs")))
 DEFAULT_REGISTRY = Path(LOCAL_ENV.get("OMO_MANAGER_SESSION_REGISTRY", str(default_state_dir() / "sessions.json")))
 DEFAULT_MANAGER_TARGET = ""
@@ -1168,11 +1159,10 @@ def read_task_metadata(path: Path | None, work_log_root: Path | None = None) -> 
         return None
 
 
-def parse_task_lines(path: Path) -> list[TaskLine]:
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
-        return []
+def parse_task_text(text: str) -> list[TaskLine]:
+    """Parse TODO task entries from already authenticated text bytes."""
+
+    lines = text.splitlines()
     section = ""
     tasks: list[TaskLine] = []
     for line in lines:
@@ -1219,18 +1209,31 @@ def parse_task_lines(path: Path) -> list[TaskLine]:
     return tasks
 
 
+def parse_task_lines(path: Path) -> list[TaskLine]:
+    try:
+        return parse_task_text(path.read_text(encoding="utf-8"))
+    except OSError:
+        return []
+
+
 def resolve_task_path(root: Path, task_file: str) -> Path | None:
+    root_lexical = Path(os.path.normpath(str(root.expanduser())))
     path = Path(task_file).expanduser()
     if not path.is_absolute():
-        path = root / path
-    try:
-        resolved = path.resolve(strict=False)
-    except OSError:
-        return None
+        path = root_lexical / path
+    lexical = Path(os.path.normpath(str(path)))
     try:
         root_resolved = root.resolve(strict=False)
     except OSError:
         root_resolved = root
+    if lexical != root_lexical and root_lexical not in lexical.parents:
+        external_registry = external_task_registry_dir(LOCAL_ENV)
+        external_candidate = lexical if Path(task_file).expanduser().is_absolute() else Path(os.path.normpath(str(root_resolved / Path(task_file))))
+        return resolve_registered_external_task(root_resolved, task_file, external_candidate, external_registry)
+    try:
+        resolved = path.resolve(strict=False)
+    except OSError:
+        return None
     if resolved != root_resolved and root_resolved not in resolved.parents:
         return None
     return resolved if resolved.is_file() else None
