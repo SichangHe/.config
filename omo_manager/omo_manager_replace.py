@@ -78,6 +78,7 @@ GUEST1269_REPLACEMENT = (
 SOURCE1289_FILE = "manager_mail/85c5dff58359-1289.txt"
 SOURCE1289_TASK = "vl_repo_split_mgr.md"
 SOURCE1289_SHA256 = "33829151fabb3c1502aceb87dbc837b7e2186160f8f1f34ca60bcd034c083770"
+SOURCE1289_CARRIER_LINES = (1, 13)
 SOURCE1289_TREE_LINES = (3, 10)
 SOURCE1292_FILE = "manager_mail/85c5dff58359-1292.txt"
 SOURCE1292_SHA256 = "508a7f94ec934e3dda36712201d9d3260a1fe673efc51b24c6c1d51fc34e6669"
@@ -292,6 +293,17 @@ def is_guest1269_replacement(args: Args) -> bool:
 
 def is_source1289_whole_tree(args: Args) -> bool:
     return args.authority_file == SOURCE1289_FILE and args.old_task == SOURCE1289_TASK
+
+
+# 🧑 Source `manager_mail/85c5dff58359-1289.txt:3-10`: "replace the entire agent tree for this task ... Previous agents completely failed ... repository has not been split"
+def is_source1289_semantic_exception(args: Args) -> bool:
+    return (
+        args.old_task == SOURCE1289_TASK
+        and args.authority_file == SOURCE1289_FILE
+        and args.authority_sha256 == SOURCE1289_SHA256
+        and args.authority_lines == LineRange(*SOURCE1289_CARRIER_LINES)
+        and args.successor_item_lines == (LineRange(*SOURCE1289_TREE_LINES),)
+    )
 
 
 def is_source1292_empty_tree(args: Args) -> bool:
@@ -859,6 +871,7 @@ def authority_material(args: Args, snapshot: Snapshot, envelope: Snapshot) -> tu
         FAILED_MANAGER_EVIDENCE_RE.search(selected_evidence) is None
         and not exact_guest1269_replacement
         and not exact_pcodx_replacement
+        and not is_source1289_semantic_exception(args)
     ):
         raise ReplaceError("authenticated authority does not explicitly prove failure, non-execution, and replacement")
     if is_pcodx_replacement(args) and not all(value in selected_evidence for value in (args.old_task, args.old_target)):
@@ -1166,9 +1179,8 @@ def validate_targets(args: Args) -> None:
         raise ReplaceError("authority-envelope child alias is restricted to exact Source-1292 descendant mode")
     if is_source1289_whole_tree(args) and (
         args.authority_sha256 != SOURCE1289_SHA256
-        or LineRange(*SOURCE1289_TREE_LINES) not in args.successor_item_lines
-        or args.authority_lines.start > SOURCE1289_TREE_LINES[0]
-        or args.authority_lines.end < SOURCE1289_TREE_LINES[1]
+        or args.authority_lines != LineRange(*SOURCE1289_CARRIER_LINES)
+        or args.successor_item_lines != (LineRange(*SOURCE1289_TREE_LINES),)
     ):
         raise ReplaceError("Source-1289 whole-tree mode requires its exact authenticated tree-replacement directive")
     old = canonical_target(args.old_target)
