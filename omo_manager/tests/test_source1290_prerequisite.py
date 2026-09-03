@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import ExitStack
@@ -107,6 +108,7 @@ class Fixture:
     def __init__(self, directory: Path) -> None:
         self.root = directory / "logs"
         self.root.mkdir()
+        self.root.chmod(0o2775)
         state = directory / "state"
         state.mkdir(mode=0o700)
         application = state / "omo-manager"
@@ -119,6 +121,7 @@ class Fixture:
         self.manager = self.root / "manager.md"
         self.archive = self.root / "202608"
         self.archive.mkdir()
+        self.archive.chmod(0o2755)
         self.archive_todo = self.root / prerequisite.ARCHIVE_TODO
         self.archived_memory = self.root / prerequisite.ARCHIVED_MEMORY
         self.archived_transcription = self.root / prerequisite.ARCHIVED_TRANSCRIPTION
@@ -127,6 +130,7 @@ class Fixture:
         self.audit = self.private / "completed-audit.yaml"
         self.report = self.private / "report.md"
         self.acceptance = self.private / "acceptance.json"
+        self.ownership_manifest = self.private / "ownership-manifest.json"
         self.terminal_receipt = self.private / "terminal.json"
         self.task.write_text(task_text(target=prerequisite.TARGET), encoding="utf-8")
         self.duplicate.write_text(
@@ -171,6 +175,7 @@ class Fixture:
         self.report.write_bytes(b"Source-1290 terminal prerequisite is ready\n")
         for path in (self.audit, self.report):
             path.chmod(0o600)
+        self.refresh_ownership_manifest()
         self.report_status = "in-progress"
         self.replay_id = digest(b"source1290-report-replay")
         self.refresh_report_artifacts()
@@ -196,6 +201,8 @@ class Fixture:
             digest(self.acceptance.read_bytes()),
             self.audit.resolve(),
             digest(self.audit.read_bytes()),
+            self.ownership_manifest.resolve(),
+            digest(self.ownership_manifest.read_bytes()),
             SOURCE_ROOT,
             head,
             self.terminal_receipt.resolve(),
@@ -214,6 +221,18 @@ class Fixture:
     @property
     def commitment(self) -> Path:
         return self.private / f"{self.replay_id}.commitment"
+
+    def refresh_ownership_manifest(self) -> None:
+        self.ownership_manifest.write_bytes(prerequisite.ownership_preflight(self.root.resolve(), digest(self.todo.read_bytes())))
+        self.ownership_manifest.chmod(0o600)
+
+    def current_ownership_args(self) -> prerequisite.Args:
+        self.refresh_ownership_manifest()
+        return replace(
+            self.args,
+            todo_sha256=digest(self.todo.read_bytes()),
+            ownership_manifest_sha256=digest(self.ownership_manifest.read_bytes()),
+        )
 
     def refresh_report_artifacts(self) -> None:
         evidence = [route_state(path.resolve()) for path in sorted((self.task, self.todo, self.manager))]
@@ -435,6 +454,88 @@ class Source1290PrerequisiteTests(unittest.TestCase):
         exit_codex.assert_called_once()
         authenticate.assert_called_once()
 
+    def test_bounded_manifest_ignores_780_shared_mode_historical_records_and_allocates_receipt(self) -> None:
+        temporary, case = self.fixture()
+        self.addCleanup(temporary.cleanup)
+        history = case.root / "202604"
+        history.mkdir()
+        for index in range(780):
+            record = history / f"{index:03d}_historical.md"
+            record.write_text("preserved historical record\n", encoding="utf-8")
+            record.chmod(0o2664)
+        command = {"value": "bunx"}
+
+        def terminalize(*args: object, **_kwargs: object) -> codex_stop.ExitedCodexShell:
+            callback = args[6]
+            assert callable(callback)
+            callback()
+            command["value"] = "zsh"
+            return codex_stop.ExitedCodexShell(SESSION_ID, CAPTURE_SHA256)
+
+        with (
+            case.patches(command),
+            patch.object(prerequisite, "terminalize_bound_codex_to_shell", side_effect=terminalize),
+            patch.object(prerequisite, "validate_exited_codex_shell", return_value=CAPTURE_SHA256),
+        ):
+            output = prerequisite.reconcile(case.args)
+
+        completed = json.loads(output)
+        indexed = completed["binding"]["ownership_manifest"]["index"]["tasks"]
+        self.assertEqual(5, len(indexed))
+        self.assertEqual("completed", completed["phase"])
+        self.assertTrue(case.terminal_receipt.exists())
+
+    def test_ownership_preflight_cli_emits_the_canonical_bounded_index(self) -> None:
+        temporary, case = self.fixture()
+        self.addCleanup(temporary.cleanup)
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                str(SOURCE_ROOT / "omo_manager/omo_source1290_prerequisite.py"),
+                "ownership-preflight",
+                "--root",
+                str(case.root),
+                "--todo-sha256",
+                digest(case.todo.read_bytes()),
+            ],
+            cwd=SOURCE_ROOT,
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+        self.assertEqual(0, result.returncode, result.stderr.decode())
+        manifest = json.loads(result.stdout)
+        self.assertEqual(result.stdout, canonical_json(manifest))
+        self.assertEqual(
+            ["202608/mem1290_eval.md", "202608/mem1290_fix.md", "manager.md", "mem1290_auth.md", "memory_auth_1290.md"],
+            [item["path"] for item in manifest["tasks"]],
+        )
+
+    def test_manifest_cannot_exclude_an_indexed_active_owner(self) -> None:
+        temporary, case = self.fixture()
+        self.addCleanup(temporary.cleanup)
+        second = case.root / "second-owner.md"
+        second.write_text(task_text(target=prerequisite.TARGET), encoding="utf-8")
+        case.todo.write_text(
+            case.todo.read_text(encoding="utf-8").replace("manager.md vldr:0\n", "manager.md vldr:0\nsecond-owner.md vlcontext_recovery:2\n"),
+            encoding="utf-8",
+        )
+        args = case.current_ownership_args()
+        manifest = json.loads(case.ownership_manifest.read_bytes())
+        manifest["tasks"] = [item for item in manifest["tasks"] if item["path"] != "second-owner.md"]
+        case.ownership_manifest.write_bytes(canonical_json(manifest))
+        args = replace(args, ownership_manifest_sha256=digest(case.ownership_manifest.read_bytes()))
+        command = {"value": "bunx"}
+        with (
+            case.patches(command),
+            patch.object(prerequisite, "terminalize_bound_codex_to_shell") as terminalize,
+            self.assertRaisesRegex(prerequisite.PrerequisiteError, "manifest drifted from the authoritative TODO task index"),
+        ):
+            prerequisite.reconcile(args)
+        terminalize.assert_not_called()
+        self.assertFalse(case.terminal_receipt.exists())
+
     def test_accepted_false_refuses_before_intent_or_terminal_input(self) -> None:
         temporary, case = self.fixture()
         self.addCleanup(temporary.cleanup)
@@ -453,6 +554,109 @@ class Source1290PrerequisiteTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         case.receipt.unlink()
         with patch.object(prerequisite, "terminalize_bound_codex_to_shell") as terminalize, self.assertRaisesRegex(prerequisite.PrerequisiteError, "cannot open durable report receipt"):
+            prerequisite.reconcile(case.args)
+        terminalize.assert_not_called()
+        self.assertFalse(case.terminal_receipt.exists())
+
+    def test_added_or_removed_indexed_task_invalidates_manifest(self) -> None:
+        for change in ("added", "removed"):
+            with self.subTest(change=change):
+                temporary, case = self.fixture()
+                self.addCleanup(temporary.cleanup)
+                if change == "added":
+                    (case.root / "added.md").write_text(finished_task_text("spare:1"), encoding="utf-8")
+                    todo_text = case.todo.read_text(encoding="utf-8").replace("manager.md vldr:0\n", "manager.md vldr:0\nadded.md spare:1\n")
+                else:
+                    todo_text = case.todo.read_text(encoding="utf-8").replace("manager.md vldr:0\n", "")
+                case.todo.write_text(todo_text, encoding="utf-8")
+                args = replace(case.args, todo_sha256=digest(case.todo.read_bytes()))
+                command = {"value": "bunx"}
+                with (
+                    case.patches(command),
+                    patch.object(prerequisite, "terminalize_bound_codex_to_shell") as terminalize,
+                    self.assertRaisesRegex(prerequisite.PrerequisiteError, "manifest drifted from the authoritative TODO task index"),
+                ):
+                    prerequisite.reconcile(args)
+                terminalize.assert_not_called()
+                self.assertFalse(case.terminal_receipt.exists())
+
+    def test_duplicate_target_alias_is_an_unexpected_active_owner(self) -> None:
+        temporary, case = self.fixture()
+        self.addCleanup(temporary.cleanup)
+        second = case.root / "second-owner.md"
+        second.write_text(task_text(target=f"{prerequisite.TARGET}.0"), encoding="utf-8")
+        case.todo.write_text(
+            case.todo.read_text(encoding="utf-8").replace("manager.md vldr:0\n", "manager.md vldr:0\nsecond-owner.md vlcontext_recovery:2.0\n"),
+            encoding="utf-8",
+        )
+        args = case.current_ownership_args()
+        command = {"value": "bunx"}
+        with (
+            case.patches(command),
+            patch.object(prerequisite, "terminalize_bound_codex_to_shell") as terminalize,
+            self.assertRaisesRegex(prerequisite.PrerequisiteError, "canonical Source-1290 carrier is not the sole target owner"),
+        ):
+            prerequisite.reconcile(args)
+        terminalize.assert_not_called()
+        self.assertFalse(case.terminal_receipt.exists())
+
+    def test_manifest_digest_or_membership_duplication_is_refused(self) -> None:
+        for change in ("digest", "duplicate"):
+            with self.subTest(change=change):
+                temporary, case = self.fixture()
+                self.addCleanup(temporary.cleanup)
+                if change == "digest":
+                    case.ownership_manifest.write_bytes(case.ownership_manifest.read_bytes() + b" ")
+                    args = case.args
+                    message = "ownership manifest bytes do not match the supplied digest"
+                else:
+                    manifest = json.loads(case.ownership_manifest.read_bytes())
+                    manifest["tasks"].append(dict(manifest["tasks"][0]))
+                    case.ownership_manifest.write_bytes(canonical_json(manifest))
+                    args = replace(case.args, ownership_manifest_sha256=digest(case.ownership_manifest.read_bytes()))
+                    message = "ownership manifest task set is omitted, duplicated, or unordered"
+                with (
+                    patch.object(prerequisite, "terminalize_bound_codex_to_shell") as terminalize,
+                    self.assertRaisesRegex(prerequisite.PrerequisiteError, message),
+                ):
+                    prerequisite.reconcile(args)
+                terminalize.assert_not_called()
+                self.assertFalse(case.terminal_receipt.exists())
+
+    def test_indexed_task_symlink_type_or_mode_drift_is_refused(self) -> None:
+        for change in ("symlink", "type", "mode"):
+            with self.subTest(change=change):
+                temporary, case = self.fixture()
+                self.addCleanup(temporary.cleanup)
+                if change == "symlink":
+                    case.manager.unlink()
+                    case.manager.symlink_to(case.duplicate)
+                elif change == "type":
+                    case.manager.unlink()
+                    case.manager.mkdir()
+                else:
+                    case.manager.chmod(0o664)
+                command = {"value": "bunx"}
+                with (
+                    case.patches(command),
+                    patch.object(prerequisite, "terminalize_bound_codex_to_shell") as terminalize,
+                    self.assertRaises((prerequisite.PrerequisiteError, OSError)),
+                ):
+                    prerequisite.reconcile(case.args)
+                terminalize.assert_not_called()
+                self.assertFalse(case.terminal_receipt.exists())
+
+    def test_indexed_task_parent_mode_drift_is_refused(self) -> None:
+        temporary, case = self.fixture()
+        self.addCleanup(temporary.cleanup)
+        self.assertEqual(0o2775, case.root.stat().st_mode & 0o7777)
+        case.root.chmod(0o2755)
+        command = {"value": "bunx"}
+        with (
+            case.patches(command),
+            patch.object(prerequisite, "terminalize_bound_codex_to_shell") as terminalize,
+            self.assertRaisesRegex(prerequisite.PrerequisiteError, "manifest drifted from the authoritative TODO task index"),
+        ):
             prerequisite.reconcile(case.args)
         terminalize.assert_not_called()
         self.assertFalse(case.terminal_receipt.exists())
@@ -651,6 +855,10 @@ class Source1290PrerequisiteTests(unittest.TestCase):
 
         def terminalize(*args: object, **_kwargs: object) -> codex_stop.ExitedCodexShell:
             (case.root / "second-owner.md").write_text(task_text(target=prerequisite.TARGET), encoding="utf-8")
+            case.todo.write_text(
+                case.todo.read_text(encoding="utf-8").replace("manager.md vldr:0\n", "manager.md vldr:0\nsecond-owner.md vlcontext_recovery:2.0\n"),
+                encoding="utf-8",
+            )
             callback = args[6]
             assert callable(callback)
             callback()

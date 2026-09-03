@@ -88,12 +88,16 @@ POST_ARCHIVE_FILES = (
     ARCHIVED_INTERRUPTED_FIX,
     ARCHIVE_TODO,
 )
-STATE_SCHEMA = "omo-source1290-lifecycle-prerequisite/v1"
+STATE_SCHEMA = "omo-source1290-lifecycle-prerequisite/v2"
+OWNERSHIP_MANIFEST_SCHEMA = "omo-source1290-ownership-manifest/v1"
+TODO_SECTIONS = ("current", "human pending", "low priority", "previous")
+MAX_INDEXED_TASKS = 512
 MAX_FILE_BYTES = 64 * 1024 * 1024
 HASH_RE = re.compile(r"[0-9a-f]{64}\Z")
 COMMIT_RE = re.compile(r"[0-9a-f]{40}\Z")
 PANE_RE = re.compile(r"%[0-9]+\Z")
 UUID_RE = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}\Z")
+TODO_ROW_RE = re.compile(r"([A-Za-z0-9_./-]+\.md)(?:[ \t]+([A-Za-z][A-Za-z0-9_-]*:\d+(?:\.\d+)?|retired))?\Z")
 AUTHORITY_RE = re.compile(
     r'<human_instruction[ \t]+authoritative="true"[ \t]+source="([^"\r\n]+)">\r?\n(.*?)</human_instruction>',
     re.DOTALL,
@@ -129,6 +133,8 @@ class Args:
     acceptance_sha256: str
     completed_audit: Path
     completed_audit_sha256: str
+    ownership_manifest: Path
+    ownership_manifest_sha256: str
     source_root: Path
     source_head: str
     terminal_receipt: Path
@@ -137,9 +143,19 @@ class Args:
 
 
 @dataclass(frozen=True)
+class OwnershipPreflightArgs:
+    root: Path
+    todo_sha256: str
+
+
+@dataclass(frozen=True)
 class Snapshot:
     path: Path
     payload: bytes
+    parent_device: int
+    parent_inode: int
+    parent_mode: int
+    parent_uid: int
     device: int
     inode: int
     mode: int
@@ -160,6 +176,13 @@ class Snapshot:
             "mode": f"{self.mode:04o}",
             "mtime_ns": self.mtime_ns,
             "path": str(self.path),
+            "parent": {
+                "device": self.parent_device,
+                "inode": self.parent_inode,
+                "mode": f"{self.parent_mode:04o}",
+                "path": str(self.path.parent),
+                "uid": self.parent_uid,
+            },
             "sha256": self.sha256,
             "size": self.size,
             "uid": self.uid,
@@ -174,6 +197,22 @@ class ReportPaths:
     route_evidence: tuple[Path, ...]
 
 
+@dataclass(frozen=True)
+class TodoTask:
+    path: Path
+    relative: str
+    section: str
+    target: str
+
+
+@dataclass(frozen=True)
+class IndexedTask:
+    todo: TodoTask
+    snapshot: Snapshot
+    status: str
+    target: str
+
+
 def stable_owned_read(
     path: Path,
     *,
@@ -181,21 +220,33 @@ def stable_owned_read(
     exact_mode: int | None = None,
     private_parent: bool = False,
 ) -> Snapshot:
-    """Read one unchanged owner-controlled regular file without following its leaf."""
+    """Read one unchanged owner-controlled regular file and bind its parent."""
+
+    def parent_identity(value: os.stat_result) -> tuple[int, int, int, int]:
+        return value.st_dev, value.st_ino, value.st_mode, value.st_uid
 
     try:
-        parent = path.parent.lstat()
+        parent_before = path.parent.lstat()
     except OSError as exc:
         raise PrerequisiteError(f"cannot inspect {label} parent") from exc
-    if not stat.S_ISDIR(parent.st_mode) or parent.st_uid != os.getuid() or (private_parent and stat.S_IMODE(parent.st_mode) != 0o700):
+    if not stat.S_ISDIR(parent_before.st_mode) or parent_before.st_uid != os.getuid() or (private_parent and stat.S_IMODE(parent_before.st_mode) != 0o700):
         raise PrerequisiteError(f"{label} parent custody is unsafe")
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     try:
         fd = os.open(path, flags)
     except OSError as exc:
         raise PrerequisiteError(f"cannot open {label}") from exc
     try:
         before = os.fstat(fd)
+        before_mode = stat.S_IMODE(before.st_mode)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_uid != os.getuid()
+            or (private_parent and before.st_nlink != 1)
+            or (exact_mode is not None and before_mode != exact_mode)
+            or (exact_mode is None and before_mode & 0o022)
+        ):
+            raise PrerequisiteError(f"{label} identity, ownership, mode, or bytes changed")
         chunks: list[bytes] = []
         size = 0
         while chunk := os.read(fd, 1024 * 1024):
@@ -208,8 +259,9 @@ def stable_owned_read(
         os.close(fd)
     try:
         named = path.lstat()
+        parent_after = path.parent.lstat()
     except OSError as exc:
-        raise PrerequisiteError(f"{label} disappeared while being read") from exc
+        raise PrerequisiteError(f"{label} or its parent disappeared while being read") from exc
 
     def identity(value: os.stat_result) -> tuple[int, int, int, int, int, int, int]:
         return (
@@ -224,7 +276,8 @@ def stable_owned_read(
 
     mode = stat.S_IMODE(before.st_mode)
     if (
-        identity(before) != identity(after)
+        parent_identity(parent_before) != parent_identity(parent_after)
+        or identity(before) != identity(after)
         or identity(before) != identity(named)
         or not stat.S_ISREG(before.st_mode)
         or before.st_uid != os.getuid()
@@ -236,7 +289,21 @@ def stable_owned_read(
     payload = b"".join(chunks)
     if len(payload) != before.st_size:
         raise PrerequisiteError(f"{label} size changed while being read")
-    return Snapshot(path, payload, before.st_dev, before.st_ino, mode, before.st_uid, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+    return Snapshot(
+        path,
+        payload,
+        parent_before.st_dev,
+        parent_before.st_ino,
+        stat.S_IMODE(parent_before.st_mode),
+        parent_before.st_uid,
+        before.st_dev,
+        before.st_ino,
+        mode,
+        before.st_uid,
+        before.st_size,
+        before.st_mtime_ns,
+        before.st_ctime_ns,
+    )
 
 
 def json_snapshot(
@@ -257,20 +324,132 @@ def json_snapshot(
     return value, snapshot
 
 
-def task_paths(root: Path) -> tuple[Path, ...]:
+def todo_tasks(root: Path, todo: Snapshot) -> tuple[TodoTask, ...]:
+    """Return the complete canonical task index from authenticated TODO bytes."""
+
+    try:
+        text = todo.payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise PrerequisiteError("work-log TODO is not UTF-8") from exc
+    section = ""
+    tasks: list[TodoTask] = []
+    seen: set[str] = set()
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped in {f"{name}:" for name in TODO_SECTIONS}:
+            section = stripped[:-1]
+            continue
+        if not stripped:
+            continue
+        if stripped.endswith(":"):
+            raise PrerequisiteError("work-log TODO contains an unknown task section")
+        if not section:
+            continue
+        match = TODO_ROW_RE.fullmatch(stripped)
+        if match is None:
+            raise PrerequisiteError(f"work-log TODO contains a malformed {section} task row")
+        raw_path, target = match.groups()
+        relative = Path(raw_path)
+        if relative.is_absolute() or relative.as_posix() != raw_path or any(part in {"", ".", ".."} for part in relative.parts) or relative == Path("TODO.md"):
+            raise PrerequisiteError("work-log TODO contains an unsafe task path")
+        path = root / relative
+        if path.resolve(strict=False) != path:
+            raise PrerequisiteError(f"indexed task path is aliased or escapes the work-log root: {raw_path}")
+        if raw_path in seen:
+            raise PrerequisiteError(f"work-log TODO contains duplicate task membership: {raw_path}")
+        seen.add(raw_path)
+        tasks.append(TodoTask(path, raw_path, section, target or ""))
+        if len(tasks) > MAX_INDEXED_TASKS:
+            raise PrerequisiteError("work-log TODO task index exceeds the bounded manifest size")
+    if not tasks:
+        raise PrerequisiteError("work-log TODO has no authoritative task index")
+    return tuple(sorted(tasks, key=lambda task: task.relative))
+
+
+def indexed_task(todo_task: TodoTask, root: Path) -> IndexedTask:
+    snapshot = stable_owned_read(todo_task.path, label=f"indexed task {todo_task.relative}")
+    try:
+        text = snapshot.payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise PrerequisiteError(f"indexed task is not UTF-8: {todo_task.relative}") from exc
+    try:
+        metadata = parse_task_metadata(text, root)
+    except TaskFrontmatterError as exc:
+        raise PrerequisiteError(f"indexed task has invalid frontmatter: {todo_task.relative}") from exc
+    if metadata is None:
+        raise PrerequisiteError(f"indexed TODO member is not a task: {todo_task.relative}")
+    if todo_task.target and canonical_target(todo_task.target) != canonical_target(metadata.runat):
+        raise PrerequisiteError(f"indexed task target differs between TODO and frontmatter: {todo_task.relative}")
+    return IndexedTask(todo_task, snapshot, metadata.status, metadata.runat)
+
+
+def ownership_manifest_value(root: Path, todo: Snapshot) -> tuple[dict[str, object], tuple[IndexedTask, ...]]:
+    indexed = tuple(indexed_task(task, root) for task in todo_tasks(root, todo))
+    identities: set[tuple[int, int]] = set()
+    for item in indexed:
+        identity = (item.snapshot.device, item.snapshot.inode)
+        if identity in identities:
+            raise PrerequisiteError("indexed task membership contains filesystem aliases")
+        identities.add(identity)
+    tasks = [
+        {
+            "path": item.todo.relative,
+            "section": item.todo.section,
+            "snapshot": item.snapshot.record(),
+            "status": item.status,
+            "target": item.target,
+            "todo_target": item.todo.target,
+        }
+        for item in indexed
+    ]
+    return {
+        "root": str(root),
+        "schema": OWNERSHIP_MANIFEST_SCHEMA,
+        "tasks": tasks,
+        "todo": todo.record(),
+    }, indexed
+
+
+def ownership_preflight(root: Path, todo_sha256: str) -> bytes:
+    """Build one canonical bounded ownership manifest without writing files."""
+
+    todo = stable_owned_read(root / "TODO.md", label="work-log TODO")
+    if todo.sha256 != todo_sha256:
+        raise PrerequisiteError("work-log TODO bytes do not match the ownership preflight digest")
+    value, _ = ownership_manifest_value(root, todo)
+    return canonical_json(value)
+
+
+def manifest_paths(args: Args) -> tuple[Path, ...]:
+    value, _ = json_snapshot(args.ownership_manifest, label="ownership manifest", expected_sha256=args.ownership_manifest_sha256)
+    if set(value) != {"root", "schema", "tasks", "todo"} or value.get("schema") != OWNERSHIP_MANIFEST_SCHEMA or value.get("root") != str(args.root):
+        raise PrerequisiteError("ownership manifest identity is invalid")
+    raw_tasks = value.get("tasks")
+    if not isinstance(raw_tasks, list) or not raw_tasks or len(raw_tasks) > MAX_INDEXED_TASKS:
+        raise PrerequisiteError("ownership manifest task set is invalid")
     paths: list[Path] = []
-    for candidate in root.rglob("*.md"):
-        if candidate.is_symlink() or not candidate.is_file():
-            raise PrerequisiteError(f"work-log membership contains an unsafe Markdown entry: {candidate}")
-        resolved = candidate.resolve(strict=True)
-        try:
-            _ = resolved.relative_to(root)
-        except ValueError as exc:
-            raise PrerequisiteError("work-log Markdown membership escapes its root") from exc
-        paths.append(resolved)
-    if len(paths) != len(set(paths)):
-        raise PrerequisiteError("work-log Markdown membership contains aliases")
-    return tuple(sorted(paths))
+    names: list[str] = []
+    for item in raw_tasks:
+        raw_path = item.get("path") if isinstance(item, dict) else None
+        if not isinstance(raw_path, str):
+            raise PrerequisiteError("ownership manifest task path is malformed")
+        relative = Path(raw_path)
+        path = args.root / relative
+        if relative.is_absolute() or relative.as_posix() != raw_path or any(part in {"", ".", ".."} for part in relative.parts) or path.resolve(strict=False) != path:
+            raise PrerequisiteError("ownership manifest task path is unsafe")
+        names.append(raw_path)
+        paths.append(path)
+    if names != sorted(names) or len(names) != len(set(names)):
+        raise PrerequisiteError("ownership manifest task set is omitted, duplicated, or unordered")
+    return tuple(paths)
+
+
+def validate_ownership_manifest(args: Args, todo: Snapshot) -> tuple[dict[str, object], tuple[IndexedTask, ...]]:
+    supplied, snapshot = json_snapshot(args.ownership_manifest, label="ownership manifest", expected_sha256=args.ownership_manifest_sha256)
+    expected, indexed = ownership_manifest_value(args.root, todo)
+    if supplied != expected:
+        raise PrerequisiteError("ownership manifest drifted from the authoritative TODO task index")
+    return {"artifact": snapshot.record(), "index": expected}, indexed
 
 
 def todo_rows(text: str, name: str) -> tuple[tuple[str, str], ...]:
@@ -334,11 +513,7 @@ def validate_task_and_todo(args: Args, task: Snapshot, todo: Snapshot) -> None:
 
 def validate_post_archive_state(
     args: Args,
-    membership: tuple[Path, ...],
 ) -> dict[str, object]:
-    required = {args.root / relative for relative in POST_ARCHIVE_FILES}
-    if not required.issubset(membership):
-        raise PrerequisiteError("Source-1290 post-archive records are missing from work-log membership")
     snapshots = {relative: stable_owned_read(args.root / relative, label=f"Source-1290 post-archive record {relative}") for relative in POST_ARCHIVE_FILES}
     archive_todo = snapshots[ARCHIVE_TODO]
     if archive_todo.sha256 != args.archive_todo_sha256:
@@ -400,29 +575,11 @@ def validate_post_archive_state(
 
 
 def active_target_owners(
-    root: Path,
-    paths: tuple[Path, ...],
+    indexed: tuple[IndexedTask, ...],
     target: str = TARGET,
 ) -> tuple[str, ...]:
-    owners: list[str] = []
-    for path in paths:
-        snapshot = stable_owned_read(path, label=f"work-log record {path.name}")
-        try:
-            text = snapshot.payload.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise PrerequisiteError(f"work-log record is not UTF-8: {path.name}") from exc
-        raw_claim = any(
-            key.strip() == "runat" and separator and canonical_target(value.strip()) == canonical_target(target) for key, separator, value in (line.partition(":") for line in text.splitlines())
-        )
-        try:
-            metadata = parse_task_metadata(text, root)
-        except TaskFrontmatterError as exc:
-            if raw_claim:
-                raise PrerequisiteError(f"target owner has invalid frontmatter: {path.name}") from exc
-            continue
-        if metadata is not None and metadata.status != "done" and canonical_target(metadata.runat) == canonical_target(target):
-            owners.append(path.relative_to(root).as_posix())
-    return tuple(owners)
+    canonical = canonical_target(target)
+    return tuple(item.todo.relative for item in indexed if item.status != "done" and canonical_target(item.target) == canonical)
 
 
 def git_head(root: Path) -> str:
@@ -949,21 +1106,21 @@ def validate_report(args: Args, paths: ReportPaths, task: Snapshot, todo: Snapsh
     }
 
 
-def membership_record(root: Path, paths: tuple[Path, ...]) -> dict[str, object]:
-    names = [path.relative_to(root).as_posix() for path in paths]
+def membership_record(indexed: tuple[IndexedTask, ...]) -> dict[str, object]:
+    names = [item.todo.relative for item in indexed]
     return {"paths": names, "sha256": hashlib.sha256(canonical_json(names).rstrip(b"\n")).hexdigest()}
 
 
 def build_binding(args: Args, paths: ReportPaths) -> dict[str, object]:
-    membership = task_paths(args.root)
     task = stable_owned_read(args.root / CANONICAL_CARRIER, label="canonical Source-1290 carrier")
     todo = stable_owned_read(args.root / "TODO.md", label="work-log TODO")
     validate_task_and_todo(args, task, todo)
-    post_archive = validate_post_archive_state(args, membership)
-    owners = active_target_owners(args.root, membership)
+    post_archive = validate_post_archive_state(args)
+    ownership_manifest, indexed = validate_ownership_manifest(args, todo)
+    owners = active_target_owners(indexed)
     if owners != (CANONICAL_CARRIER.as_posix(),):
         raise PrerequisiteError(f"canonical Source-1290 carrier is not the sole target owner: {owners or ('none',)}")
-    interrupted_owners = {target: list(active_target_owners(args.root, membership, target)) for target in INTERRUPTED_TARGETS.values()}
+    interrupted_owners = {target: list(active_target_owners(indexed, target)) for target in INTERRUPTED_TARGETS.values()}
     if any(interrupted_owners.values()):
         raise PrerequisiteError("Source-1290 archived helper targets regained active ownership")
     audit = stable_owned_read(args.completed_audit, label="completed Source-1290 audit", exact_mode=0o600, private_parent=True)
@@ -972,7 +1129,8 @@ def build_binding(args: Args, paths: ReportPaths) -> dict[str, object]:
     return {
         "audit": audit.record(),
         "carrier": task.record(),
-        "membership": membership_record(args.root, membership),
+        "membership": membership_record(indexed),
+        "ownership_manifest": ownership_manifest,
         "ownership": {"owners": list(owners), "target": TARGET},
         "pane": {
             "id": args.pane_id,
@@ -1122,30 +1280,33 @@ def reconcile(args: Args) -> bytes:
 
     task = args.root / CANONICAL_CARRIER
     todo = args.root / "TODO.md"
-    if task.parent != args.root or args.terminal_receipt.is_relative_to(args.root):
+    private_inputs = (args.report_file, args.acceptance_file, args.completed_audit, args.ownership_manifest, args.terminal_receipt)
+    if task.parent != args.root or args.terminal_receipt.is_relative_to(args.root) or args.ownership_manifest.is_relative_to(args.root) or len(set(private_inputs)) != len(private_inputs):
         raise PrerequisiteError("terminal prerequisite paths violate the work-log boundary")
     paths = report_paths(args)
+    indexed_paths = manifest_paths(args)
     with task_file_lock(args.root / ".omo-task-membership.lock"), task_target_lock(args.root, TARGET):
-        membership = task_paths(args.root)
         lock_paths = {
-            *membership,
+            *indexed_paths,
             task,
             todo,
             args.completed_audit,
+            args.ownership_manifest,
             args.report_file,
             args.acceptance_file,
             paths.receipt,
             paths.publication,
             paths.commitment,
             args.terminal_receipt,
+            *(args.root / relative for relative in POST_ARCHIVE_FILES),
             *(args.source_root / relative for relative in SOURCE_FILES),
             *paths.route_evidence,
         }
         with ExitStack() as locks:
             for path in sorted(lock_paths):
                 locks.enter_context(task_file_lock(path))
-            if task_paths(args.root) != membership:
-                raise PrerequisiteError("work-log membership changed before locked preparation")
+            if manifest_paths(args) != indexed_paths:
+                raise PrerequisiteError("ownership manifest changed before locked preparation")
             binding = build_binding(args, paths)
             require_pane_identity(args)
             current = optional_state(args.terminal_receipt)
@@ -1229,6 +1390,8 @@ def parse_args(argv: list[str] | None = None) -> Args:
     _ = parser.add_argument("--acceptance-sha256", required=True)
     _ = parser.add_argument("--completed-audit", type=Path, required=True)
     _ = parser.add_argument("--completed-audit-sha256", required=True)
+    _ = parser.add_argument("--ownership-manifest", type=Path, required=True)
+    _ = parser.add_argument("--ownership-manifest-sha256", required=True)
     _ = parser.add_argument("--source-root", type=Path, required=True)
     _ = parser.add_argument("--source-head", required=True)
     _ = parser.add_argument("--terminal-receipt", type=Path, required=True)
@@ -1242,6 +1405,7 @@ def parse_args(argv: list[str] | None = None) -> Args:
         parsed.report_sha256,
         parsed.acceptance_sha256,
         parsed.completed_audit_sha256,
+        parsed.ownership_manifest_sha256,
     )
     if any(HASH_RE.fullmatch(value) is None for value in hashes):
         parser.error("all artifact digests must be lowercase SHA-256 values")
@@ -1253,7 +1417,7 @@ def parse_args(argv: list[str] | None = None) -> Args:
         parser.error("--completed-audit-sha256 must identify the immutable Source-1290 audit")
     if parsed.wait_s < 0 or parsed.lines <= 0:
         parser.error("terminalization bounds are invalid")
-    paths = tuple(path.expanduser().resolve(strict=False) for path in (parsed.report_file, parsed.acceptance_file, parsed.completed_audit, parsed.terminal_receipt))
+    paths = tuple(path.expanduser().resolve(strict=False) for path in (parsed.report_file, parsed.acceptance_file, parsed.completed_audit, parsed.ownership_manifest, parsed.terminal_receipt))
     if any(not path.is_absolute() for path in paths):
         parser.error("artifact paths must be absolute")
     return Args(
@@ -1272,17 +1436,34 @@ def parse_args(argv: list[str] | None = None) -> Args:
         parsed.acceptance_sha256,
         paths[2],
         parsed.completed_audit_sha256,
+        paths[3],
+        parsed.ownership_manifest_sha256,
         parsed.source_root.expanduser().resolve(),
         parsed.source_head,
-        paths[3],
+        paths[4],
         parsed.wait_s,
         parsed.lines,
     )
 
 
+def parse_ownership_preflight_args(argv: list[str]) -> OwnershipPreflightArgs:
+    parser = argparse.ArgumentParser(description="Emit a bounded Source-1290 ownership manifest to stdout.")
+    _ = parser.add_argument("--root", type=Path, required=True)
+    _ = parser.add_argument("--todo-sha256", required=True)
+    parsed = parser.parse_args(argv)
+    if HASH_RE.fullmatch(parsed.todo_sha256) is None:
+        parser.error("--todo-sha256 must be one lowercase SHA-256 value")
+    return OwnershipPreflightArgs(parsed.root.expanduser().resolve(), parsed.todo_sha256)
+
+
 def main(argv: list[str] | None = None) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
     try:
-        output = reconcile(parse_args(argv))
+        if arguments[:1] == ["ownership-preflight"]:
+            preflight = parse_ownership_preflight_args(arguments[1:])
+            output = ownership_preflight(preflight.root, preflight.todo_sha256)
+        else:
+            output = reconcile(parse_args(arguments))
     except (OSError, RuntimeError, TaskFrontmatterError, subprocess.SubprocessError, ValueError) as exc:
         print(f"omo_source1290_prerequisite.py: {exc}", file=sys.stderr)
         return 2
