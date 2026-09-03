@@ -92,6 +92,33 @@ Cross-state completion reconciliation:
 - reject done destination
 - do not print the completion verification reminder, because the work remains
   open and has only moved to another queue
+- use only for initial routing, never to drain an established owner for closure
+
+`pending-closure-transfer --from AMH.md --to MANAGER.md --source-sha256 SHA256 --destination-sha256 SHA256 --authority-file FILE --authority-sha256 SHA256`
+- closure-only transfer of the source's complete established v1 queue
+- require exact original source and destination byte digests plus an
+  owner-private, digest-bound `manager_mail` source containing the exact
+  Source-1376 shutdown instruction on one unique line
+- require the AMH source to be blocked with a recorded blocker before handoff
+- require active TODO custody, one active owner for each target, an `amh*`
+  source, and a surviving non-AMH, non-human manager destination
+- lock membership, TODO, every Markdown record under the root, the authority,
+  and the recovery record before validation; unlinked active task records are
+  included in owner and duplicate checks
+- append the source queue after the destination queue without changing item text
+  or source order; reject any transferred text already owned by another active
+  queue, including duplicates in the source
+- record sent/received provenance in both task bodies, including both input
+  digests and the source's exact status and blocker
+- durably publish one owner-private recovery record containing the exact before
+  and after bytes before either replacement; a retry completes an interrupted
+  transfer only when each file still equals its recorded before or after state
+- write the destination then the drained source, verify both queues, TODO,
+  authority, and every other locked record, and remove the recovery record only
+  after both task directories are synced; caught failures rollback only exact
+  bytes this operation wrote and sync those restorations before journal cleanup
+- never change TODO, status, mailbox, tmux, or PCODX state; close the drained
+  source separately through the normal lifecycle helper
 
 `comment-add TASK.md --message TEXT`
 - append one parenthesized comment line

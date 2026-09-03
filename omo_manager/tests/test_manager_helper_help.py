@@ -30,6 +30,12 @@ class ManagerHelperHelpTests(unittest.TestCase):
         self.assertIn("initial owner", move_help)
         self.assertIn("initial routing", move_help)
 
+        transfer_help = helper_help("omo_task_edit.py", "pending-closure-transfer")
+        self.assertIn("Closure-only atomic transfer", transfer_help)
+        self.assertIn("complete ordered pending queue and custody", transfer_help)
+        self.assertIn("Lowercase SHA-256 of the exact source task bytes", transfer_help)
+        self.assertIn("exact authoritative Human shutdown instruction", transfer_help)
+
     def test_launch_and_lifecycle_help_owns_operating_details(self) -> None:
         launch_help = helper_help("omo_task.py")
         self.assertIn("Every new launch requires --model and --reasoning-effort", launch_help)

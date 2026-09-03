@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
+import re
+import stat
 import subprocess
 import sys
 import tempfile
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,6 +25,7 @@ from omo_manager.omo_agent_status import parse_task_metadata
 from omo_manager.omo_agent_status import same_tmux_target
 from omo_manager.omo_blocking import BlockingError
 from omo_manager.omo_blocking import load_task
+from omo_manager.omo_blocking import task_paths
 from omo_manager.omo_blocking import v2_enabled
 from omo_manager.omo_blocking_actor import request as blocking_request
 from omo_manager.omo_completion_email import plan_completion_email
@@ -27,8 +33,13 @@ from omo_manager.omo_completion_email import require_owner_completion
 from omo_manager.omo_completion_email import send_completion_email
 from omo_manager.omo_task_context import current_active_task
 from omo_manager.omo_task_status import parse_manager_child_metadata
+from omo_manager.omo_task_status import relative_task_ref
 from omo_manager.omo_task_status import replace_if_unchanged
+from omo_manager.omo_task_status import replace_if_unchanged_locked
+from omo_manager.omo_task_status import root_membership_lock
+from omo_manager.omo_task_status import same_file_state
 from omo_manager.omo_task_status import task_path
+from omo_manager.omo_task_lock import task_file_lock
 from omo_manager.omo_task_metadata import TASK_FRONTMATTER_V1
 from omo_manager.omo_task_metadata import frontmatter_parts
 
@@ -39,6 +50,9 @@ CLEAR_KINDS = {"cancelled", "duplicate", "existing-owner-item", "report-only", "
 EMAIL_SOURCE_PREFIXES = ("(record and delegate ", "(from email ", "[source: email ")
 AGENT_SOURCE_PREFIXES = ("[omo-message-source: origin=agent ", "(from agent ")
 MANAGER_SOURCE_PREFIXES = ("(from manager ",)
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+AMH_SHUTDOWN_AUTHORITY = "tell those agents to document anything worth keeping long-term, move out their pending task items, then close them all"
+AMH_SHUTDOWN_AUTHORITY_PATH_RE = re.compile(r"^(?:[0-9]{6}/)?manager_mail/[^/\r\n]+\.txt$")
 
 COMMAND_ALIASES = {
     "list": "pending-list",
@@ -75,6 +89,10 @@ class Args:
     task_files: tuple[Path, ...] = ()
     source_ref: str = ""
     preserve_live_source: bool = False
+    source_sha256: str = ""
+    destination_sha256: str = ""
+    authority_file: Path | None = None
+    authority_sha256: str = ""
 
 
 @dataclass(frozen=True)
@@ -108,6 +126,10 @@ class ParsedArgs(argparse.Namespace):
     on_item_id: str = ""
     source_ref: str = ""
     preserve_live_source: bool = False
+    source_sha256: str = ""
+    destination_sha256: str = ""
+    authority_file: Path | None = None
+    authority_sha256: str = ""
 
 
 def parse_args(argv: list[str]) -> Args:
@@ -149,6 +171,19 @@ def parse_args(argv: list[str]) -> Args:
     _ = move_parser.add_argument("--from", dest="from_file", type=Path, required=True, help="Source task file containing the pending item.")
     _ = move_parser.add_argument("--to", dest="to_file", type=Path, required=True, help="Destination task file that should receive the pending item.")
     _ = move_parser.add_argument("--item", required=True, help="Pending task item to move.")
+
+    closure_transfer_parser = subparsers.add_parser(
+        "pending-closure-transfer",
+        help="Transfer an AMH task's complete pending queue to a surviving non-AMH manager before closure.",
+        description="Closure-only atomic transfer of one AMH task's complete ordered pending queue and custody.",
+    )
+    closure_transfer_parser.set_defaults(command="pending-closure-transfer")
+    _ = closure_transfer_parser.add_argument("--from", dest="from_file", type=Path, required=True, help="Active AMH source task file to drain before closure.")
+    _ = closure_transfer_parser.add_argument("--to", dest="to_file", type=Path, required=True, help="Active surviving non-AMH manager task file that assumes custody.")
+    _ = closure_transfer_parser.add_argument("--source-sha256", required=True, help="Lowercase SHA-256 of the exact source task bytes.")
+    _ = closure_transfer_parser.add_argument("--destination-sha256", required=True, help="Lowercase SHA-256 of the exact destination task bytes.")
+    _ = closure_transfer_parser.add_argument("--authority-file", type=Path, required=True, help="Owner-private manager_mail source containing the exact authoritative Human shutdown instruction.")
+    _ = closure_transfer_parser.add_argument("--authority-sha256", required=True, help="Lowercase SHA-256 of the exact Human-authority file bytes.")
 
     marker_clear_parser = subparsers.add_parser(
         "pending-marker-clear",
@@ -249,6 +284,27 @@ def parse_args(argv: list[str]) -> Args:
             if not isinstance(parsed.item, str):
                 parser.error("pending-move requires --item.")
             return Args(root, None, command, items=(normalized_item(parsed.item),), source_file=parsed.from_file, target_file=parsed.to_file)
+        if command == "pending-closure-transfer":
+            if parsed.from_file is None or parsed.to_file is None:
+                parser.error("pending-closure-transfer requires --from and --to.")
+            if (
+                SHA256_RE.fullmatch(parsed.source_sha256) is None
+                or SHA256_RE.fullmatch(parsed.destination_sha256) is None
+                or parsed.authority_file is None
+                or SHA256_RE.fullmatch(parsed.authority_sha256) is None
+            ):
+                parser.error("pending-closure-transfer requires lowercase SHA-256 source, destination, and Human-authority digests.")
+            return Args(
+                root,
+                None,
+                command,
+                source_file=parsed.from_file,
+                target_file=parsed.to_file,
+                source_sha256=parsed.source_sha256,
+                destination_sha256=parsed.destination_sha256,
+                authority_file=parsed.authority_file,
+                authority_sha256=parsed.authority_sha256,
+            )
         if command == "pending-marker-clear":
             if parsed.line < 1:
                 parser.error("--line must be positive.")
@@ -794,6 +850,402 @@ def move_pending_item(source_text: str, target_text: str, item: str) -> tuple[st
     return updated_source, updated_target, removed_count, added_count
 
 
+def task_bytes(path: Path) -> bytes:
+    payload = path.read_bytes()
+    try:
+        _ = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise TaskFrontmatterError(f"task file is not UTF-8: {path.name}") from exc
+    return payload
+
+
+def task_snapshot(path: Path) -> tuple[os.stat_result, bytes]:
+    before = path.stat()
+    payload = task_bytes(path)
+    if not same_file_state(before, path.stat()):
+        raise TaskFrontmatterError(f"task file changed while being read: {path.name}")
+    return before, payload
+
+
+def sha256(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+def amh_target(target: str) -> bool:
+    return target.partition(":")[0].casefold().startswith("amh")
+
+
+def human_target(target: str) -> bool:
+    return target.partition(":")[0].casefold().startswith("h")
+
+
+def closure_transfer_record(
+    direction: str,
+    root: Path,
+    source_path: Path,
+    target_path: Path,
+    source_sha256: str,
+    destination_sha256: str,
+    source_metadata: TaskMetadata,
+    authority_ref: str,
+    authority_sha256: str,
+) -> str:
+    record = {
+        "direction": direction,
+        "source": relative_task_ref(root, source_path),
+        "destination": relative_task_ref(root, target_path),
+        "source_sha256": source_sha256,
+        "destination_before_sha256": destination_sha256,
+        "source_status": source_metadata.status,
+        "source_blocked_on": source_metadata.blocked_on,
+        "authority": authority_ref,
+        "authority_sha256": authority_sha256,
+    }
+    return f"pending closure transfer {json.dumps(record, ensure_ascii=True, separators=(',', ':'), sort_keys=True)}"
+
+
+def restore_own_write(path: Path, expected: bytes, original: str) -> None:
+    current = task_bytes(path)
+    if current != expected:
+        raise TaskFrontmatterError(f"{path.name} changed after transfer write; refusing unsafe rollback.")
+    replace_if_unchanged_locked(path, original, path.stat())
+
+
+def closure_transfer_transaction_path(root: Path) -> Path:
+    return root / ".omo-pending-closure-transfer.json"
+
+
+def canonical_json(value: dict[str, object]) -> bytes:
+    return (json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True) + "\n").encode()
+
+
+def read_closure_transfer_transaction(path: Path) -> tuple[dict[str, object], bytes] | None:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) & 0o077:
+        raise TaskFrontmatterError("pending-closure-transfer recovery record is unsafe.")
+    payload = path.read_bytes()
+    if not same_file_state(info, path.lstat()):
+        raise TaskFrontmatterError("pending-closure-transfer recovery record changed while being read.")
+    if len(payload) > 8 * 1024 * 1024:
+        raise TaskFrontmatterError("pending-closure-transfer recovery record is oversized.")
+    try:
+        value = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TaskFrontmatterError("pending-closure-transfer recovery record is malformed.") from exc
+    keys = {
+        "schema",
+        "source",
+        "destination",
+        "source_sha256",
+        "destination_sha256",
+        "authority",
+        "authority_sha256",
+        "source_before",
+        "destination_before",
+        "source_after",
+        "destination_after",
+    }
+    if not isinstance(value, dict) or set(value) != keys or any(not isinstance(value[key], str) for key in keys):
+        raise TaskFrontmatterError("pending-closure-transfer recovery record has invalid fields.")
+    if value["schema"] != "omo-pending-closure-transfer/v1" or payload != canonical_json(value):
+        raise TaskFrontmatterError("pending-closure-transfer recovery record is not canonical.")
+    return value, payload
+
+
+def publish_closure_transfer_transaction(path: Path, record: dict[str, object]) -> bytes:
+    payload = canonical_json(record)
+    if len(payload) > 8 * 1024 * 1024:
+        raise TaskFrontmatterError("pending-closure-transfer recovery record would be oversized.")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
+    try:
+        written = 0
+        while written < len(payload):
+            count = os.write(fd, payload[written:])
+            if count == 0:
+                raise OSError("pending-closure-transfer recovery record write made no progress")
+            written += count
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+    return payload
+
+
+def remove_closure_transfer_transaction(path: Path, expected: bytes) -> None:
+    if path.read_bytes() != expected:
+        raise TaskFrontmatterError("pending-closure-transfer recovery record changed before cleanup.")
+    path.unlink()
+    directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def validate_closure_authority(root: Path, path: Path, expected_sha256: str) -> tuple[bytes, str]:
+    authority_path = relative_task_ref(root, path)
+    if AMH_SHUTDOWN_AUTHORITY_PATH_RE.fullmatch(authority_path) is None:
+        raise TaskFrontmatterError("Human shutdown authority must be one permitted manager_mail source.")
+    before = path.lstat()
+    if before.st_size > 1_000_000:
+        raise TaskFrontmatterError("Human shutdown authority is oversized.")
+    payload = path.read_bytes()
+    after = path.lstat()
+    if (
+        not same_file_state(before, after)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_uid != os.getuid()
+        or stat.S_IMODE(before.st_mode) & 0o077
+        or sha256(payload) != expected_sha256
+    ):
+        raise TaskFrontmatterError("Human shutdown authority is unsafe or does not match its digest.")
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise TaskFrontmatterError("Human shutdown authority is not UTF-8.") from exc
+    matching_lines = [line_number for line_number, line in enumerate(text.replace("\r\n", "\n").splitlines(), start=1) if line == AMH_SHUTDOWN_AUTHORITY]
+    if len(matching_lines) != 1:
+        raise TaskFrontmatterError("authority file must contain exactly the Source-1376 Human shutdown instruction.")
+    return payload, f"{authority_path}:{matching_lines[0]}-{matching_lines[0]}"
+
+
+def markdown_paths(root: Path) -> tuple[Path, ...]:
+    paths: set[Path] = set()
+    for candidate in root.rglob("*.md"):
+        resolved = candidate.resolve(strict=False)
+        if resolved != root and root not in resolved.parents:
+            raise TaskFrontmatterError(f"Markdown path escapes the task root: {candidate.relative_to(root)}")
+        paths.add(resolved)
+    return tuple(sorted(paths))
+
+
+def fsync_task_directories(*paths: Path) -> None:
+    for directory in sorted({path.parent for path in paths}):
+        descriptor = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+
+def raw_target_claims(text: str, target: str) -> bool:
+    return any(
+        key.strip() == "runat" and separator and same_tmux_target(value.strip(), target)
+        for key, separator, value in (line.partition(":") for line in text.splitlines())
+    )
+
+
+# 🧑 Human, Source-1376: “tell those agents to document anything worth keeping long-term, move out their pending task items, then close them all”.
+def transfer_pending_items_for_closure(
+    root: Path,
+    source_path: Path,
+    target_path: Path,
+    expected_source_sha256: str,
+    expected_destination_sha256: str,
+    authority_path: Path,
+    expected_authority_sha256: str,
+) -> int:
+    if source_path == target_path:
+        raise TaskFrontmatterError("source and destination task files must be different.")
+    if v2_enabled(root):
+        raise TaskFrontmatterError("pending-closure-transfer supports established v1 queues only; v2 task writes are enabled.")
+    transaction_path = closure_transfer_transaction_path(root)
+    with root_membership_lock(root):
+        initial_markdown_paths = markdown_paths(root)
+        locked_paths = tuple(sorted({*initial_markdown_paths, (root / "TODO.md").resolve(), transaction_path.resolve(), authority_path}))
+        with ExitStack() as locks:
+            for path in locked_paths:
+                locks.enter_context(task_file_lock(path))
+            todo_state = (root / "TODO.md").stat()
+            todo_before = task_bytes(root / "TODO.md")
+            linked_paths = task_paths(root)
+            if source_path not in linked_paths or target_path not in linked_paths:
+                raise TaskFrontmatterError("source and destination must each have active TODO custody.")
+            if (
+                not same_file_state(todo_state, (root / "TODO.md").stat())
+                or task_bytes(root / "TODO.md") != todo_before
+                or task_paths(root) != linked_paths
+                or markdown_paths(root) != initial_markdown_paths
+            ):
+                raise TaskFrontmatterError("active task custody changed while transfer was being prepared; retry.")
+            authority_payload, authority_ref = validate_closure_authority(root, authority_path, expected_authority_sha256)
+            snapshots = {path: task_snapshot(path) for path in initial_markdown_paths}
+            payloads = {path: snapshot[1] for path, snapshot in snapshots.items()}
+            texts = {path: payload.decode("utf-8") for path, payload in payloads.items()}
+            parsed: dict[Path, TaskMetadata] = {}
+            malformed: dict[Path, str] = {}
+            for path, text in texts.items():
+                try:
+                    value = parse_task_metadata(text, root)
+                except TaskFrontmatterError:
+                    malformed[path] = text
+                    continue
+                if value is not None and value.status != "done":
+                    parsed[path] = value
+            existing_transaction = read_closure_transfer_transaction(transaction_path)
+            transaction_payload: bytes | None = None
+            transaction: dict[str, object] | None = None
+            if existing_transaction is not None:
+                transaction, transaction_payload = existing_transaction
+                expected_binding = {
+                    "source": relative_task_ref(root, source_path),
+                    "destination": relative_task_ref(root, target_path),
+                    "source_sha256": expected_source_sha256,
+                    "destination_sha256": expected_destination_sha256,
+                    "authority": relative_task_ref(root, authority_path),
+                    "authority_sha256": expected_authority_sha256,
+                }
+                if any(transaction[key] != value for key, value in expected_binding.items()):
+                    raise TaskFrontmatterError("another pending-closure-transfer recovery record already exists.")
+                source_original = str(transaction["source_before"])
+                target_original = str(transaction["destination_before"])
+            else:
+                source_original = texts[source_path]
+                target_original = texts[target_path]
+            if sha256(source_original.encode()) != expected_source_sha256 or sha256(target_original.encode()) != expected_destination_sha256:
+                raise TaskFrontmatterError("source or destination digest does not match the bound original task bytes.")
+            source_metadata = require_v1_metadata(source_original)
+            target_metadata = require_v1_metadata(target_original)
+            if source_metadata.status != "blocked" or not source_metadata.blocked_on or target_metadata.status == "done":
+                raise TaskFrontmatterError("pending-closure-transfer requires a Human-authorized blocked source and an active destination.")
+            if not amh_target(source_metadata.runat):
+                raise TaskFrontmatterError("pending-closure-transfer source must be an AMH task record.")
+            if amh_target(target_metadata.runat) or human_target(target_metadata.runat):
+                raise TaskFrontmatterError("pending-closure-transfer destination must be a non-AMH, non-human task record.")
+            if not target_metadata.is_manager:
+                raise TaskFrontmatterError("pending-closure-transfer destination must be a surviving manager task record.")
+            for path, text in malformed.items():
+                if raw_target_claims(text, source_metadata.runat) or raw_target_claims(text, target_metadata.runat):
+                    raise TaskFrontmatterError(f"cannot verify ownership because {relative_task_ref(root, path)} has malformed claiming frontmatter.")
+            source_owners = [path for path, value in parsed.items() if same_tmux_target(value.runat, source_metadata.runat)]
+            target_owners = [path for path, value in parsed.items() if same_tmux_target(value.runat, target_metadata.runat)]
+            if source_owners != [source_path] or target_owners != [target_path]:
+                raise TaskFrontmatterError("source and destination must each be the sole active owner of their target.")
+            moving = source_metadata.pending_task_items
+            if not moving:
+                raise TaskFrontmatterError("AMH source pending queue is empty; there is no custody to transfer.")
+            for item in moving:
+                owners = [path for path, value in parsed.items() for candidate in value.pending_task_items if candidate == item]
+                valid_recovery_owners = transaction is not None and len(owners) == len(set(owners)) and set(owners).issubset({source_path, target_path})
+                if owners != [source_path] and not valid_recovery_owners:
+                    raise TaskFrontmatterError(f"pending item does not have exactly one source owner: {item}")
+            updated_source = render_pending_items(source_original, ())
+            updated_target = render_pending_items(target_original, (*target_metadata.pending_task_items, *moving))
+            updated_source = append_comment(
+                updated_source,
+                closure_transfer_record(
+                    "sent", root, source_path, target_path, expected_source_sha256, expected_destination_sha256, source_metadata, authority_ref, expected_authority_sha256
+                ),
+            )
+            updated_target = append_comment(
+                updated_target,
+                closure_transfer_record(
+                    "received", root, source_path, target_path, expected_source_sha256, expected_destination_sha256, source_metadata, authority_ref, expected_authority_sha256
+                ),
+            )
+            updated_source_payload = updated_source.encode("utf-8")
+            updated_target_payload = updated_target.encode("utf-8")
+            if transaction is not None:
+                if transaction["source_after"] != updated_source or transaction["destination_after"] != updated_target:
+                    raise TaskFrontmatterError("pending-closure-transfer recovery record does not match the derived transfer.")
+            else:
+                transaction = {
+                    "schema": "omo-pending-closure-transfer/v1",
+                    "source": relative_task_ref(root, source_path),
+                    "destination": relative_task_ref(root, target_path),
+                    "source_sha256": expected_source_sha256,
+                    "destination_sha256": expected_destination_sha256,
+                    "authority": relative_task_ref(root, authority_path),
+                    "authority_sha256": expected_authority_sha256,
+                    "source_before": source_original,
+                    "destination_before": target_original,
+                    "source_after": updated_source,
+                    "destination_after": updated_target,
+                }
+                transaction_payload = publish_closure_transfer_transaction(transaction_path, transaction)
+            if transaction_payload is None:
+                raise RuntimeError("pending-closure-transfer recovery state was not initialized")
+            try:
+                source_current_state, source_current = task_snapshot(source_path)
+                target_current_state, target_current = task_snapshot(target_path)
+                if source_current not in {source_original.encode(), updated_source_payload} or target_current not in {
+                    target_original.encode(),
+                    updated_target_payload,
+                }:
+                    raise TaskFrontmatterError("task bytes conflict with the pending-closure-transfer recovery record.")
+                if target_current == target_original.encode():
+                    replace_if_unchanged_locked(target_path, updated_target, target_current_state)
+                if source_current == source_original.encode():
+                    replace_if_unchanged_locked(source_path, updated_source, source_current_state)
+            except (OSError, TaskFrontmatterError) as exc:
+                rollback_errors: list[str] = []
+                try:
+                    if task_bytes(target_path) == updated_target_payload:
+                        restore_own_write(target_path, updated_target_payload, target_original)
+                except (OSError, TaskFrontmatterError) as rollback_exc:
+                    rollback_errors.append(f"{target_path.name}: {rollback_exc}")
+                try:
+                    if task_bytes(source_path) == updated_source_payload:
+                        restore_own_write(source_path, updated_source_payload, source_original)
+                except (OSError, TaskFrontmatterError) as rollback_exc:
+                    rollback_errors.append(f"{source_path.name}: {rollback_exc}")
+                for path, original in ((target_path, target_original), (source_path, source_original)):
+                    try:
+                        if task_bytes(path) != original.encode():
+                            rollback_errors.append(f"{path.name}: current bytes are not the recorded original")
+                    except OSError as rollback_exc:
+                        rollback_errors.append(f"{path.name}: {rollback_exc}")
+                if not rollback_errors:
+                    fsync_task_directories(source_path, target_path)
+                    remove_closure_transfer_transaction(transaction_path, transaction_payload)
+                else:
+                    raise TaskFrontmatterError(f"transfer failed and rollback was incomplete: {'; '.join(rollback_errors)}") from exc
+                raise
+            try:
+                final_source = task_bytes(source_path)
+                final_target = task_bytes(target_path)
+                final_source_metadata = require_v1_metadata(final_source.decode("utf-8"))
+                final_target_metadata = require_v1_metadata(final_target.decode("utf-8"))
+                if (
+                    final_source != updated_source_payload
+                    or final_target != updated_target_payload
+                    or final_source_metadata.pending_task_items
+                    or final_target_metadata.pending_task_items != (*target_metadata.pending_task_items, *moving)
+                    or task_bytes(root / "TODO.md") != todo_before
+                    or task_paths(root) != linked_paths
+                    or markdown_paths(root) != initial_markdown_paths
+                    or validate_closure_authority(root, authority_path, expected_authority_sha256)[0] != authority_payload
+                    or any(task_bytes(path) != payloads[path] for path in initial_markdown_paths if path not in {source_path, target_path})
+                ):
+                    raise TaskFrontmatterError("post-transfer ownership validation failed.")
+            except (OSError, TaskFrontmatterError) as exc:
+                rollback_errors: list[str] = []
+                for path, expected, original in (
+                    (target_path, updated_target_payload, target_original),
+                    (source_path, updated_source_payload, source_original),
+                ):
+                    try:
+                        restore_own_write(path, expected, original)
+                    except (OSError, TaskFrontmatterError) as rollback_exc:
+                        rollback_errors.append(f"{path.name}: {rollback_exc}")
+                if rollback_errors:
+                    raise TaskFrontmatterError(f"post-transfer validation failed and rollback was incomplete: {'; '.join(rollback_errors)}") from exc
+                fsync_task_directories(source_path, target_path)
+                remove_closure_transfer_transaction(transaction_path, transaction_payload)
+                raise
+            fsync_task_directories(source_path, target_path)
+            remove_closure_transfer_transaction(transaction_path, transaction_payload)
+            return len(moving)
+
+
 def append_delegate_message(text: str, message: str) -> str:
     metadata = require_v1_metadata(text)
     if metadata.status == "done":
@@ -836,6 +1288,30 @@ def run(args: Args) -> int:
             _ = blocking_request(args.root, payload)
             action = "added" if command == "dependency-add" else "removed"
             print(f"{action} dependency {'to' if command == 'dependency-add' else 'from'} item {args.item_id}")
+            return 0
+        if command == "pending-closure-transfer":
+            if args.source_file is None or args.target_file is None:
+                raise TaskFrontmatterError("pending-closure-transfer requires source and destination task files.")
+            source_path = task_path(args.root, args.source_file)
+            target_path = task_path(args.root, args.target_file)
+            if (
+                SHA256_RE.fullmatch(args.source_sha256) is None
+                or SHA256_RE.fullmatch(args.destination_sha256) is None
+                or args.authority_file is None
+                or SHA256_RE.fullmatch(args.authority_sha256) is None
+            ):
+                raise TaskFrontmatterError("pending-closure-transfer requires lowercase SHA-256 source, destination, and Human-authority digests.")
+            authority_path = task_path(args.root, args.authority_file)
+            count = transfer_pending_items_for_closure(
+                args.root,
+                source_path,
+                target_path,
+                args.source_sha256,
+                args.destination_sha256,
+                authority_path,
+                args.authority_sha256,
+            )
+            print(f"transferred {count} pending item(s) from {source_path.name} to {target_path.name} for source closure")
             return 0
         if command == "pending-move":
             if args.source_file is None or args.target_file is None:
