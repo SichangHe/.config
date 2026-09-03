@@ -16,6 +16,7 @@ import os
 import shutil
 import stat
 import sys
+import tempfile
 from pathlib import Path
 
 MAX_HELPER_BYTES = 4 * 1024 * 1024
@@ -48,6 +49,40 @@ finally:
 bash = shutil.which("bash")
 if bash is None:
     raise RuntimeError("bash is required")
+
+snapshot_dir = Path(tempfile.mkdtemp(prefix="omo-report-exec-", dir="/tmp"))
+snapshot_path = snapshot_dir / "snapshot"
+write_fd = -1
+snapshot_fd = -1
+try:
+    write_fd = os.open(snapshot_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    offset = 0
+    while offset < len(payload):
+        written = os.write(write_fd, payload[offset:])
+        if written <= 0:
+            raise RuntimeError("could not create the immutable report-helper execution snapshot")
+        offset += written
+    os.fsync(write_fd)
+    os.close(write_fd)
+    write_fd = -1
+    snapshot_fd = os.open(snapshot_path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0))
+    snapshot_stat = os.fstat(snapshot_fd)
+    if not stat.S_ISREG(snapshot_stat.st_mode) or snapshot_stat.st_uid != os.getuid() or snapshot_stat.st_size != len(payload):
+        raise RuntimeError("immutable report-helper execution snapshot is invalid")
+    os.unlink(snapshot_path)
+    snapshot_dir.rmdir()
+    os.set_inheritable(snapshot_fd, True)
+except BaseException:
+    if write_fd >= 0:
+        os.close(write_fd)
+    if snapshot_fd >= 0:
+        os.close(snapshot_fd)
+    try:
+        snapshot_path.unlink(missing_ok=True)
+        snapshot_dir.rmdir()
+    except OSError:
+        pass
+    raise
 environment = dict(os.environ)
 environment.update(
     {
@@ -72,41 +107,21 @@ def wait_for(pid: int) -> int:
             continue
 
 def run_snapshot(attempt: int) -> tuple[int, bool]:
-    read_fd, write_fd = os.pipe()
-    os.set_inheritable(read_fd, True)
-    writer = os.fork()
-    if writer == 0:
-        os.close(read_fd)
-        try:
-            offset = 0
-            while offset < len(payload):
-                written = os.write(write_fd, payload[offset:])
-                if written <= 0:
-                    os._exit(2)
-                offset += written
-        except OSError:
-            os._exit(2)
-        finally:
-            os.close(write_fd)
-        os._exit(0)
-    os.close(write_fd)
+    os.lseek(snapshot_fd, 0, os.SEEK_SET)
     retry_read_fd, retry_write_fd = os.pipe()
     os.set_inheritable(retry_write_fd, True)
     try:
         shell = os.fork()
     except OSError:
-        os.close(read_fd)
         os.close(retry_read_fd)
         os.close(retry_write_fd)
-        wait_for(writer)
         raise
     if shell == 0:
         os.close(retry_read_fd)
         child_environment = dict(environment)
         child_environment["OMO_REPORT_DESCRIPTION_ROUTE_ATTEMPT"] = str(attempt)
         child_environment["OMO_REPORT_DESCRIPTION_ROUTE_RETRY_FD"] = str(retry_write_fd)
-        os.execve(bash, [bash, f"/proc/self/fd/{read_fd}", *sys.argv[2:]], child_environment)
-    os.close(read_fd)
+        os.execve(bash, [bash, f"/proc/self/fd/{snapshot_fd}", *sys.argv[2:]], child_environment)
     os.close(retry_write_fd)
     shell_status = wait_for(shell)
     os.set_blocking(retry_read_fd, False)
@@ -117,17 +132,17 @@ def run_snapshot(attempt: int) -> tuple[int, bool]:
             retry_marker = b""
     finally:
         os.close(retry_read_fd)
-    writer_status = wait_for(writer)
-    if shell_status == 0 and writer_status != 0:
-        raise RuntimeError("could not provide the immutable report-helper execution snapshot")
     return shell_status, retry_marker == b"omo-report-description-route-retry-v1\n"
 
-for description_route_attempt in range(8):
-    status, retry_description = run_snapshot(description_route_attempt)
-    if status != 75 or not retry_description:
-        raise SystemExit(status)
-print("report route did not stabilize during description", file=sys.stderr)
-raise SystemExit(2)
+try:
+    for description_route_attempt in range(8):
+        status, retry_description = run_snapshot(description_route_attempt)
+        if status != 75 or not retry_description:
+            raise SystemExit(status)
+    print("report route did not stabilize during description", file=sys.stderr)
+    raise SystemExit(2)
+finally:
+    os.close(snapshot_fd)
 PY
     ;;
 esac

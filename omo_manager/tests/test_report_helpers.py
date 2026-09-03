@@ -43,6 +43,44 @@ def write_fake_tmux(bin_dir: Path, *, session: str = "cfg", window: str = "7", p
 
 
 class ReportHelperTests(unittest.TestCase):
+    def test_omo_report_large_snapshot_survives_successful_early_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "logs"
+            root.mkdir()
+            bin_dir = tmp_path / "bin"
+            bin_dir.mkdir()
+            write_fake_tmux(bin_dir)
+            local_env = tmp_path / "local.env"
+            local_env.write_text(f"OMO_WORK_LOGS_ROOT={root}\n", encoding="utf-8")
+            (root / "TODO.md").write_text("current:\ntask.md cfg:7\n", encoding="utf-8")
+            (root / "task.md").write_text(task_frontmatter(), encoding="utf-8")
+            helper = tmp_path / "omo_report.sh"
+            helper.write_bytes((OMO_DIR / "omo_report.sh").read_bytes() + b"\n" + b"# padding\n" * 200_000)
+            helper.chmod(0o700)
+
+            result = subprocess.run(
+                [str(helper), "--alloc-message-file"],
+                cwd=tmp,
+                env={
+                    **os.environ,
+                    "OMO_MANAGER_LOCAL_ENV": str(local_env),
+                    "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                    "TMUX_PANE": "%1701",
+                    "XDG_STATE_HOME": str(tmp_path / "state"),
+                },
+                text=True,
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual("", result.stderr)
+            report_file = Path(result.stdout.strip())
+            self.assertTrue(report_file.name.startswith("task."))
+            report_file.unlink()
+
     def test_omo_report_infers_root_and_task_from_worker_tmux_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
