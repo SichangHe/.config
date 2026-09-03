@@ -53,6 +53,8 @@ from omo_manager.omo_codex_start import (
     require_resume_cwd_prompt,
     require_same_shell,
     require_update_prompt,
+    verify_restart_continuity,
+    verify_task_binding,
     reserve_reconciliation_receipt,
     reserve_rotation_audit,
     resolve_pane,
@@ -3553,7 +3555,19 @@ class CodexStartTests(unittest.TestCase):
             with patch("omo_manager.omo_codex_start.resolve_pane", return_value=pane):
                 with self.assertRaisesRegex(StartError, "TODO `current`"):
                     validate_task(args, pane)
-                self.assertEqual("hcfg:1", validate_task(args, pane, allow_human_pending=True).runat)
+                binding = validate_task(args, pane, allow_human_pending=True)
+                self.assertEqual("hcfg:1", binding.runat)
+                with self.assertRaisesRegex(StartError, "TODO `current`"):
+                    verify_task_binding(args, pane, binding)
+                verify_task_binding(args, pane, binding, allow_human_pending=True)
+            replacement = replace(pane, pane_pid=4243)
+            with (
+                patch("omo_manager.omo_codex_start.resolve_pane", return_value=replacement),
+                patch("omo_manager.omo_codex_start.query_status_session_id", return_value=(self.SESSION_ID, "")),
+            ):
+                with self.assertRaisesRegex(StartError, "TODO `current`"):
+                    verify_restart_continuity(args, pane, self.SESSION_ID, binding, None)
+                verify_restart_continuity(args, pane, self.SESSION_ID, binding, None, allow_human_pending=True)
 
     def test_human_restart_authority_rejects_other_h_target_and_paraphrase(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:

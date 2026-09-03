@@ -858,11 +858,11 @@ def verify_source1206_authority(args: Args, pane: Pane, expected: Source1206Auth
         raise StartError("Source-1206 authority or approved pane changed before replacement.")
 
 
-def verify_task_binding(args: Args, pane: Pane, expected: TaskBinding) -> None:
+def verify_task_binding(args: Args, pane: Pane, expected: TaskBinding, *, allow_human_pending: bool = False) -> None:
     """Reject task content or pending-queue drift before or after restart."""
 
     try:
-        actual = validate_task(args, pane)
+        actual = validate_task(args, pane, allow_human_pending=allow_human_pending)
     except (OSError, UnicodeError, StartError, ValueError) as error:
         raise StartError(f"task or pending queue no longer has its captured binding: {error}") from error
     if actual != expected:
@@ -2668,6 +2668,8 @@ def verify_restart_continuity(
     session_id: str,
     task: TaskBinding,
     pcodx: Mapping[str, str] | None,
+    *,
+    allow_human_pending: bool = False,
 ) -> None:
     """Prove same-pane, resumed-session, task, queue, and PCODX continuity."""
 
@@ -2676,7 +2678,7 @@ def verify_restart_continuity(
         raise StartError("tmux pane or window identity changed after restart.")
     if current.pane_pid == original.pane_pid:
         raise StartError("Codex pane process identity did not change during restart.")
-    verify_task_binding(args, current, task)
+    verify_task_binding(args, current, task, allow_human_pending=allow_human_pending)
     if pcodx is not None and pcodx_state(current) != dict(pcodx):
         raise StartError("live PCODX state did not retain its original session custody after restart.")
     resumed_session, _ = query_status_session_id(current.pane_id, 240, min(10.0, args.startup_timeout_s))
@@ -2876,7 +2878,12 @@ def start(args: Args) -> str:
                     require_recovery_target(pane, args.recovery_evidence, args.root, args.task_file, task_binding)
                     consume_recovery_receipt(args.root, args.recovery_evidence)
                 if args.restart_running:
-                    verify_task_binding(args, pane, task_binding)
+                    verify_task_binding(
+                        args,
+                        pane,
+                        task_binding,
+                        allow_human_pending=human_restart_authority is not None and human_restart_authority.target == HCFG_RESTART_TARGET,
+                    )
                     if task_binding.tool == "pcodx" and pcodx_state(pane) != live_pcodx_state:
                         raise StartError("live PCODX state changed before respawn; the pane was not replaced.")
                     verify_human_restart_authority(args, pane, human_restart_authority)
@@ -2991,7 +2998,14 @@ def start(args: Args) -> str:
                     raise StartError("task prompt was not prepared; no prompt was sent.")
                 send_prompt(current, prompt_path)
             if args.restart_running:
-                verify_restart_continuity(effective_args, pane, effective_args.session_id, task_binding, live_pcodx_state)
+                verify_restart_continuity(
+                    effective_args,
+                    pane,
+                    effective_args.session_id,
+                    task_binding,
+                    live_pcodx_state,
+                    allow_human_pending=human_restart_authority is not None and human_restart_authority.target == HCFG_RESTART_TARGET,
+                )
             if args.recover_non_codex:
                 retire_recovery_receipt(args.root, args.recovery_evidence)
             return result
